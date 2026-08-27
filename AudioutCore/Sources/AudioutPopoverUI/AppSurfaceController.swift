@@ -155,6 +155,23 @@ public final class AppSurfaceController {
     /// metering/monitors only run while a user can see the panel.
     public private(set) var isShown = false
 
+    /// Whether the Mixer was put to sleep because its pixels stopped being
+    /// visible — the surface fully covered by another window, or the app
+    /// hidden. A PINNED surface is an ordinary window the user can leave open
+    /// for days behind a browser, and "open" was the only question anyone
+    /// asked: metering, monitors and repaints all ran full tilt against a
+    /// surface nobody could see.
+    ///
+    /// A LATCH, not a mirror of the occlusion state: `surfaceDidHide()` /
+    /// `surfaceDidShow()` are edge calls (they drop transient state and re-run
+    /// the open ritual), so firing them per notification would tear the panel
+    /// down repeatedly. It also keeps the ordinary close/tab-switch paths from
+    /// hiding a Mixer that is already asleep.
+    private var surfaceCoveredHidden = false
+
+    /// The occlusion/app-hide observers, kept only so they can be dropped.
+    private var pixelVisibilityObservers: [NSObjectProtocol] = []
+
     /// Fired after the shell window really closes (✕ / Esc / `performClose`).
     public var onClose: (() -> Void)?
 
@@ -185,10 +202,15 @@ public final class AppSurfaceController {
     /// Wider than discovery's between-device gap so a device-at-a-time stream
     /// does not read as "settled" in a lull mid-stream.
     static let revealQuietWindow: TimeInterval = 0.5
-    /// The backstop: a network that never quiets still reveals the surface by
-    /// here. Above `revealQuietWindow` + a full cold discovery, so the settle —
-    /// not this — normally drives the reveal, at the moment the fleet is done.
-    static let revealCeiling: TimeInterval = 3.0
+    /// The backstop, and a bound on how long a menu-bar click can appear to do
+    /// NOTHING. It is above `revealQuietWindow` (0.5 s), so a warm open still
+    /// settles first and fronts at the settled size exactly as before. A COLD
+    /// open now reveals here rather than waiting out a whole discovery: the
+    /// splash covers the content churn, and whatever frame growth still arrives
+    /// late is bounded and brief — strictly better than a click that shows
+    /// nothing for three seconds. A repeat click cuts the wait short on demand
+    /// (`show(anchorRect:)`).
+    static let revealCeiling: TimeInterval = 0.6
 
     public init(popoverController: PopoverController,
                 settings: AppSettings = AppSettings(),
@@ -240,6 +262,27 @@ public final class AppSurfaceController {
         }
         syncToolbar()
 
+        // Pixel visibility (perf P2-12): a covered or hidden surface is idle.
+        // AppKit answers both halves — the window's own occlusion state, and
+        // the app being hidden (⌘H / Hide Others), which occlusion alone does
+        // not report.
+        let center = NotificationCenter.default
+        var observers: [NSObjectProtocol] = []
+        if let window = shell.window {
+            observers.append(center.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification,
+                object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reassessPixelVisibility() }
+            })
+        }
+        for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
+            observers.append(center.addObserver(
+                forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reassessPixelVisibility() }
+            })
+        }
+        pixelVisibilityObservers = observers
+
         // ⌘1/⌘2/⌘3 (the retired header buttons' key equivalents): the shell
         // panel consults this before stock dispatch while the surface is key.
         shell.keyEquivalentHandler = { [weak self] event in
@@ -249,6 +292,45 @@ public final class AppSurfaceController {
             else { return false }
             self?.select(screen)
             return true
+        }
+    }
+
+    deinit {
+        for observer in pixelVisibilityObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    // MARK: Pixel visibility (perf P2-12)
+
+    /// Ask AppKit whether any of the surface's pixels are actually on screen,
+    /// and hand the answer to the latch. Never runs headless — neither
+    /// notification fires with no window server — which is why the seam below
+    /// exists.
+    private func reassessPixelVisibility() {
+        let visible = (shell.window?.occlusionState.contains(.visible) ?? true)
+            && !(NSApp?.isHidden ?? false)
+        applyPixelVisibility(visible)
+    }
+
+    /// Put the Mixer to sleep while its pixels are gone, and wake it properly
+    /// when they come back. Waking is the full Mixer open ritual the folder's
+    /// rules require of ANY re-entry — the panel is stale by design while it is
+    /// hidden, so re-showing it without `rebuildForOpen()` would put a stale
+    /// list back on screen.
+    ///
+    /// Only the Mixer sleeps: Groups and Settings run no metering and no
+    /// monitors, and a reveal-pending surface is not on screen yet.
+    private func applyPixelVisibility(_ visible: Bool) {
+        guard isShown, selectedScreen == .mixer, !isRevealPending else { return }
+        if !visible, !surfaceCoveredHidden {
+            surfaceCoveredHidden = true
+            popoverController.surfaceDidHide()
+        } else if visible, surfaceCoveredHidden {
+            surfaceCoveredHidden = false
+            popoverController.rebuildForOpen()
+            popoverController.surfaceDidShow()
+            mixerPanel?.panelContentDidChangeHeight(animated: false)
         }
     }
 
@@ -265,11 +347,21 @@ public final class AppSurfaceController {
     /// user's mid-open collapse toggles for no reason (it is the same open
     /// session).
     public func show(anchorRect: NSRect?) {
-        // A repeat click DURING a first-open reveal wait must not start a second
-        // wait (or front the window early at the not-yet-settled size).
-        guard !isRevealPending else { return }
+        // A repeat click DURING a first-open reveal wait is the user asking for
+        // the surface NOW — the wait has visibly done nothing, so clicking again
+        // must not be swallowed (it used to `return`, and every further click
+        // vanished until the ceiling fired). Reveal at the size measured so far:
+        // `revealFirstOpen` disarms the backstop, fronts once, and lays the
+        // splash over whatever is in place, and its own `guard isRevealPending`
+        // makes this call safe.
+        if isRevealPending {
+            revealFirstOpen()
+            return
+        }
         let wasShown = isShown
         if !wasShown {
+            // A fresh show starts awake, whatever a previous session latched.
+            surfaceCoveredHidden = false
             overflowReported = false
             sessionContentSize = measureSessionContentSize()
             mount(selectedScreen)
@@ -379,9 +471,12 @@ public final class AppSurfaceController {
     }
 
     private func handleShellClosed() {
-        if isShown, selectedScreen == .mixer {
+        // A Mixer already asleep behind the latch has had its `surfaceDidHide()`;
+        // a second one would run the teardown twice.
+        if isShown, selectedScreen == .mixer, !surfaceCoveredHidden {
             popoverController.surfaceDidHide()
         }
+        surfaceCoveredHidden = false
         isShown = false
         // The settle wait belongs to this open's first-reveal; a close ends it.
         cancelPendingReveal()
@@ -445,12 +540,16 @@ public final class AppSurfaceController {
     /// size. Selecting the current screen is a no-op.
     public func select(_ screen: SurfaceScreen) {
         guard screen != selectedScreen else { return }
-        if selectedScreen == .mixer, isShown {
+        if selectedScreen == .mixer, isShown, !surfaceCoveredHidden {
             // The panel is leaving the window: drop what must not outlive a
             // session (transient selection, stale meter bars) and stop paying
-            // for RMS while no meter is visible.
+            // for RMS while no meter is visible. A Mixer already asleep behind
+            // the occlusion latch has had exactly this call already.
             popoverController.surfaceDidHide()
         }
+        // Whichever direction this switch goes, the latch is spent: leaving the
+        // Mixer hides it anyway, and arriving at it below shows it awake.
+        surfaceCoveredHidden = false
         selectedScreen = screen
         syncToolbar()
         if screen == .mixer {
@@ -691,6 +790,11 @@ public final class AppSurfaceController {
     func test_settleDiscovery() { settleTracker?.test_settleNow() }
     /// Fire the first-open reveal backstop exactly as its ceiling timer would.
     func test_fireRevealCeiling() { revealFirstOpen() }
+    /// Drive the pixel-visibility latch exactly as an occlusion change would —
+    /// the live read never runs headless (no window server, no notification).
+    func test_notePixelVisibility(_ visible: Bool) { applyPixelVisibility(visible) }
+    /// Whether the Mixer is currently asleep behind the occlusion latch.
+    var test_surfaceCoveredHidden: Bool { surfaceCoveredHidden }
 }
 
 // MARK: - SurfaceScreenViewController

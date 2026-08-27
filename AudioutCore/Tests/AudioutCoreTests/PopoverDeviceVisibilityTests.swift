@@ -235,8 +235,8 @@ import AppKit
         #expect(popover.test_renderedDeviceIDs() == ["mac", "bt-live:output"])
         #expect(popover.test_bluetoothRowOrder() == ["bt-live:output"])
         #expect(popover.test_subsectionTitles()
-                == ["This Mac", bluetoothTitle],
-                "the Bluetooth header still renders for the one listed row")
+                == ["This Mac", airPlayTitle, bluetoothTitle],
+                "the Bluetooth header still renders for the one listed row, and AirPlay's now carries its own search state (P1-1)")
     }
 
     /// When the connected-only list has nothing to show, the subsection's
@@ -247,6 +247,12 @@ import AppKit
         popover.update(devices: [local(), airplay()])
         #expect(popover.test_bluetoothConnectRowShown())
         #expect(popover.test_subsectionTitles() == ["This Mac", airPlayTitle, bluetoothTitle])
+
+        // It has to LOOK actionable, not like a greyed-out placeholder line:
+        // a leading "+" glyph is the half a headless run can see (the pointing
+        // hand cursor is Alec's to check live).
+        #expect(popover.test_bluetoothConnectRowHasGlyph,
+                "the Connect row carries its leading glyph")
 
         var pairTaps = 0
         popover.onPairBluetoothSpeaker = { pairTaps += 1 }
@@ -345,14 +351,17 @@ import AppKit
         #expect(!controller.selectedDeviceIDs.contains("bt-new:output"), "selection is untouched")
     }
 
-    @Test func theEmptyFleetShowsOnlyTheBluetoothConnectAffordance() {
-        // No separate "Looking for devices…" placeholder (removed 2026-08-08 —
-        // it contradicted the always-rendered Bluetooth Connect affordance
-        // directly below it). The Connect row IS the empty-state message.
+    @Test func theEmptyFleetPairsTheSearchLineWithTheBluetoothAffordance() {
+        // Still no GENERIC "Looking for devices…" placeholder (removed
+        // 2026-08-08 — it contradicted the always-rendered Bluetooth Connect
+        // affordance directly below it). What P1-1 added instead lives INSIDE
+        // the AirPlay subsection, under the header that names what is being
+        // looked for, so the two lines are about different sections and cannot
+        // contradict each other.
         let (popover, _) = makePopover()
         popover.update(devices: [])
-        #expect(popover.test_subsectionTitles() == ["Bluetooth Devices"],
-                "an empty fleet renders only the always-on Bluetooth subsection")
+        #expect(popover.test_subsectionTitles() == [airPlayTitle, bluetoothTitle],
+                "the AirPlay search state and the always-on Bluetooth subsection")
         #expect(popover.test_bluetoothConnectRowShown(),
                 "the Bluetooth section's own Connect affordance still renders")
     }

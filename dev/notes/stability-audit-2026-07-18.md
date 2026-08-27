@@ -119,11 +119,12 @@ carries N live monitors doing the same job — not about the pattern choice.
 Word any fix so it reduces churn (e.g. one shared monitor dispatching to
 rows) without reverting to `NSTrackingArea`.
 
-**Structural rebuild mid-drag detaches the tracked slider:**
-- `AudioutCore/Sources/AudioutPopoverUI/PopoverController.swift:343`
-  — when `deviceSetChanged` is true, the full `rebuild()` path runs even if
-  a slider drag is in progress, replacing the row (and its slider) the user
-  has the mouse down on.
+**Structural rebuild mid-drag detaches the tracked slider:** FIXED
+(controller-side defer, 2026-08-27). `update(devices:)` now records the live
+drag from the three volume delegate callbacks (a self-expiring deadline, not a
+flag) and, while one is live, takes the repaint path and remembers the debt;
+the next backend echo after the grace runs the rebuild. The row-side stuck-flag
+sub-item below is a SEPARATE fix and stays open.
 
 **Fix sketch (all sub-items):** persistence — hop `save` calls off main
 (existing `store` types are already narrow enough to wrap in an async

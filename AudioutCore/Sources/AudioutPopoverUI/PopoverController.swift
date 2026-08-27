@@ -612,14 +612,6 @@ public final class PopoverController: NSObject {
     private var castVolumePendingIDs: Set<String> = []
     private var castVolumePendingTimers: [String: Timer] = [:]
 
-    /// The mounted in-place refusal-note row per BLOCKED device id (spec §4.6):
-    /// a body-click on a local-mix-blocked row toggles a one-line note carrying
-    /// `GroupController.localMixRefusalReason` directly under it — the reachable
-    /// trigger the disabled checkbox + tooltip alone lacked (§8.5). Transient
-    /// (cleared by every `rebuild()`, like the hover/selection state), so it never
-    /// resurrects after a repaint.
-    private var blockedNoteByID: [String: NSView] = [:]
-
     /// The Applications card's `AppRowView`s, keyed by bundle id (stable identity —
     /// `AppRoute.bundleID`). Populated by `rebuild()` in `appRoutes` order (T-8,
     /// PLAN §C). Lets `test_` hooks look a row up by bundle id.
@@ -754,6 +746,53 @@ public final class PopoverController: NSObject {
         rebuild()
     }
 
+    // MARK: Live slider drag (STABILITY D4, controller half)
+
+    /// When the current volume drag stops counting as live. A structural
+    /// `rebuild()` tears out and recreates every row, so one landing mid-drag
+    /// detaches the very slider the mouse is tracking and the fader dies under
+    /// the cursor. The rows report every drag step through the three volume
+    /// delegate methods, so the controller can see a drag WITHOUT reading the
+    /// row's own (private) flag — and a DEADLINE rather than a boolean is what
+    /// makes the state self-healing: an Esc-cancelled drag, a row that never
+    /// sends its mouse-up, a device that vanishes mid-gesture all expire on
+    /// their own within the grace, so no stuck flag can freeze the panel.
+    private var liveSliderDragUntil: CFTimeInterval = 0
+
+    /// How long after the last drag step a rebuild still counts as mid-drag.
+    private static let sliderDragGraceSeconds: TimeInterval = 0.3
+
+    /// A structural rebuild that was refused mid-drag and still owes itself.
+    /// A drag always produces further backend echoes, so the debt is paid by
+    /// the next `update(devices:)` once the grace lapses — no timer needed.
+    private var structuralRebuildDeferred = false
+
+    /// Record what the CURRENT event says about the user's mouse, from inside a
+    /// volume delegate callback. `NSApp` is optional-chained deliberately: it is
+    /// nil under filtered test runs (see `DeviceRowView`), and a nil or
+    /// uninteresting event must leave the deadline exactly as it was.
+    private func noteSliderGesture() {
+        switch NSApp?.currentEvent?.type {
+        case .leftMouseDragged, .leftMouseDown:
+            liveSliderDragUntil = CACurrentMediaTime() + Self.sliderDragGraceSeconds
+        case .leftMouseUp:
+            liveSliderDragUntil = 0
+        default:
+            break
+        }
+    }
+
+    /// Whether a volume drag is live right now.
+    private var isSliderDragLive: Bool { CACurrentMediaTime() < liveSliderDragUntil }
+
+    /// Test-only: pin (or release) the drag deadline without a real event.
+    public func test_setLiveSliderDrag(_ active: Bool) {
+        liveSliderDragUntil = active ? .greatestFiniteMagnitude : 0
+    }
+
+    /// Test-only: whether a structural rebuild is currently owed.
+    public var test_structuralRebuildDeferred: Bool { structuralRebuildDeferred }
+
     // MARK: Injection from the app
 
     public func configure(groupController: GroupController) {
@@ -881,24 +920,34 @@ public final class PopoverController: NSObject {
         // "Offline" entry injected). Before R5 that flip always came with a route
         // reset, so `routesChanged` covered it; now it has to be its own trigger or
         // the menus go stale until the next reopen.
-        // STABILITY(D4): this full rebuild can run mid-slider-drag and detach the row under the cursor — skip or defer while any row's drag flag is live; see dev/notes/stability-audit-2026-07-18.md
-        // Compared against what SHOULD render, not against every known device:
-        // an unlisted Bluetooth device (or one in a collapsed subsection)
-        // deliberately has no row, and comparing the whole fleet would read
-        // that as a permanent structural change and rebuild on every backend
-        // event. Headers are structure too: a COLLAPSED subsection contributes
-        // no rows to the compare, but its header must still appear the moment
-        // its type gains a first device, and go when the last one does — and
-        // Bluetooth's header is ALWAYS expected (`rendersHeader`), never only
-        // when it has rows.
-        let expectedSubsections = deviceSections().filter { rendersHeader($0) }.map(\.title)
-        let deviceSetChanged = Set(renderedDeviceOrder().map(\.id)) != Set(deviceRowsByID.keys)
-            || expectedSubsections != renderedSubsectionTitles
         if isEffectivelyShown {
-            if routesChanged || deviceSetChanged || validTargetsChanged || mainOutMembersChanged {
+            // Compared against what SHOULD render, not against every known device:
+            // an unlisted Bluetooth device (or one in a collapsed subsection)
+            // deliberately has no row, and comparing the whole fleet would read
+            // that as a permanent structural change and rebuild on every backend
+            // event. Headers are structure too: a COLLAPSED subsection contributes
+            // no rows to the compare, but its header must still appear the moment
+            // its type gains a first device, and go when the last one does — and
+            // Bluetooth's header is ALWAYS expected (`rendersHeader`), never only
+            // when it has rows.
+            //
+            // Both reads walk the whole fleet and rebuild the section list, and
+            // nothing outside this gate consumes them — a hidden surface used to
+            // pay for a diff no one read, on every backend event.
+            let expectedSubsections = deviceSections().filter { rendersHeader($0) }.map(\.title)
+            let deviceSetChanged = Set(renderedDeviceOrder().map(\.id)) != Set(deviceRowsByID.keys)
+                || expectedSubsections != renderedSubsectionTitles
+            let wantsStructuralRebuild = routesChanged || deviceSetChanged
+                || validTargetsChanged || mainOutMembersChanged
+            if (wantsStructuralRebuild || structuralRebuildDeferred) && !isSliderDragLive {
                 rebuild()
                 panel.panelContentDidChangeHeight(animated: true)
             } else {
+                // Mid-drag (or nothing structural to do): take the repaint path
+                // instead. A rebuild here would detach the slider the mouse is
+                // tracking — the debt is recorded and paid by the next echo the
+                // drag itself produces, once the grace lapses.
+                if wantsStructuralRebuild { structuralRebuildDeferred = true }
                 // A failure auto-deselect (handleConnectionTransitions above) can
                 // change the checked set under a group target, flipping the
                 // Devices card's dormancy note (S5) — the reconciling repaint
@@ -988,15 +1037,45 @@ public final class PopoverController: NSObject {
         if isEffectivelyShown {
             // Update the banner in place and re-fit; not a full rebuild — the cards are
             // unchanged, only the pinned banner appears/disappears.
-            panel.setBanner(active ? Self.localFallbackBannerText : nil)
+            panel.setBanner(active ? Self.localFallbackBannerText : nil,
+                            action: active ? localFallbackRetryAction : nil)
             panel.panelContentDidChangeHeight(animated: true)
         }
         // When not shown, the next `rebuildForOpen()` re-applies it from
         // `localFallbackActive` (see the tail of `rebuild()`).
     }
 
+    /// The banner's one way out. Without it "Speakers unreachable" states a
+    /// problem and offers nothing — the user's only recourse is re-toggling
+    /// rows one at a time.
+    private var localFallbackRetryAction: SilenceFallbackBannerView.Action {
+        SilenceFallbackBannerView.Action(
+            title: "Try again",
+            accessibilityLabel: "Try reconnecting to the unreachable speakers",
+            handler: { [weak self] in self?.retryUnreachableMembers() })
+    }
+
+    /// Re-kick every Main-Out member that isn't up. N DELIBERATE per-device
+    /// attempts through `requestReconnect` — the sanctioned single-device path —
+    /// never a broad routing re-apply, which is what caused the 2026-08-06 retry
+    /// storm. `.connecting` members are left alone: an attempt is already in
+    /// flight for them.
+    private func retryUnreachableMembers() {
+        guard let controller = groupController else { return }
+        for device in devicesByID.values
+        where controller.isMainOutMember(device.id)
+            && device.connectionState != .connected
+            && device.connectionState != .connecting {
+            controller.requestReconnect(for: device.id)
+        }
+    }
+
     /// Test-only: whether the fallback banner is currently reflected in the panel.
     var test_localFallbackBannerText: String? { panel.test_bannerText }
+    /// Test-only: whether the fallback banner currently offers its retry action.
+    var test_bannerHasActionButton: Bool { panel.test_bannerHasActionButton }
+    /// Test-only: simulate a click on the fallback banner's action button.
+    func test_tapBannerAction() { panel.test_tapBannerAction() }
 
     // MARK: System-AirPlay guard note (Wave 3 W3-T3) + takeover status strip (T6)
     //        + routing-blocked-needs-default warning (T-UI)
@@ -1259,6 +1338,10 @@ public final class PopoverController: NSObject {
     func rebuildForOpen() {
         isRebuildingForOpen = true
         transientCollapsed.removeAll()
+        // Every open starts the search story over: an empty AirPlay section
+        // reads as "looking" again rather than inheriting a previous session's
+        // verdict. Armed BEFORE the rebuild so the first render sees the state.
+        armSpeakerSearchGrace()
         rebuild()
         isRebuildingForOpen = false
     }
@@ -1267,6 +1350,9 @@ public final class PopoverController: NSObject {
 
     public func rebuild() {
         test_rebuildCount += 1
+        // Any rebuild satisfies a deferred one (D4) — including `rebuildForOpen()`
+        // and the delegate paths, which reach here too.
+        structuralRebuildDeferred = false
         deviceRowsByID.removeAll()
         // The mounted panel views die with their rows; the open-panel INTENT
         // (`openDiagnosisIDs`) survives and is re-applied below (brief §7.3 —
@@ -1300,7 +1386,6 @@ public final class PopoverController: NSObject {
             syncDrawer.removeFromSuperview()
             mountedSyncDrawerID = nil
         }
-        blockedNoteByID.removeAll()
         appRowsByBundleID.removeAll()
         panel.clearRows()
 
@@ -1349,6 +1434,7 @@ public final class PopoverController: NSObject {
         renderedBluetoothOrder = []
         renderedBTConnectShown = false
         renderedSyncColumnTitles = []
+        renderedSpeakerSearchText = nil
         bluetoothConnectButton = nil
         // Combined header row: "Output Devices" title on the left. The
         // membership "Selected" column MOVED to the left spine
@@ -1477,7 +1563,8 @@ public final class PopoverController: NSObject {
         // Re-pin the silence-fallback banner (R11) above the cards: `clearRows()`
         // above dropped it with everything else, so a rebuild that happens WHILE the
         // fallback is active (e.g. a device set change) must restore it.
-        panel.setBanner(localFallbackActive ? Self.localFallbackBannerText : nil)
+        panel.setBanner(localFallbackActive ? Self.localFallbackBannerText : nil,
+                        action: localFallbackActive ? localFallbackRetryAction : nil)
         // Re-pin the note slot (T-UI routing-blocked / T6 takeover strip / W3-T3
         // double-path guard) the same way — resolved through the same PRECEDENCE
         // `applyNoteSlot()` uses, so a rebuild mid-condition restores the right one.
@@ -1508,10 +1595,184 @@ public final class PopoverController: NSObject {
     }
 
     /// Bluetooth renders its header even with nothing listed — its empty
-    /// state IS content (the Connect affordance). The other two stay
+    /// state IS content (the Connect affordance). AirPlay does the same while a
+    /// search state is active: the state line needs the "AirPlay Devices"
+    /// grouping label above it to say WHAT was not found. The rest stay
     /// hidden-when-empty.
     private func rendersHeader(_ section: DeviceSection) -> Bool {
-        !section.devices.isEmpty || section.title == Self.bluetoothSubsectionTitle
+        if !section.devices.isEmpty { return true }
+        if section.title == Self.bluetoothSubsectionTitle { return true }
+        return section.title == Self.airPlaySubsectionTitle && speakerSearchState() != nil
+    }
+
+    // MARK: Speaker search / empty / permission state (P1-1)
+
+    /// What the AirPlay subsection should SAY when it has nothing in it.
+    private enum SpeakerSearchState {
+        case searching
+        case noneFound
+        case permissionDenied
+    }
+
+    /// Host seam: whether macOS has denied this app permission to see devices on
+    /// the local network. `nil` or `false` means "not known denied" — the popover
+    /// has no way to ask on its own (the signal lives in the app layer's
+    /// `SetupModel`), so the permission variant stays dormant until a host wires
+    /// this up.
+    public var localNetworkDeniedProvider: (() -> Bool)?
+
+    /// How long an empty AirPlay section reads as "still looking" before it
+    /// admits it found nothing.
+    static let speakerSearchGraceSeconds: TimeInterval = 3.0
+
+    /// Whether this open's search grace has elapsed, and the one-shot timer that
+    /// sets it. Re-armed on every open (`rebuildForOpen`), dropped when the
+    /// surface goes away.
+    private var speakerSearchGraceElapsed = false
+    private var speakerSearchGraceTimer: Timer?
+
+    /// The state line the LAST `rebuild()` actually rendered, or `nil` when it
+    /// rendered none — recorded rather than re-derived, so the test surface can
+    /// never drift from what was mounted (the `renderedSubsectionTitles` idiom).
+    private var renderedSpeakerSearchText: String?
+
+    /// The AirPlay section's empty-state story, or `nil` when there is nothing
+    /// to tell. Cast counts too: a browsed receiver means the network is
+    /// visibly working, so "no speakers found" would be a lie.
+    private func speakerSearchState() -> SpeakerSearchState? {
+        let sections = deviceSections()
+        let hasNetworkSpeaker = sections.contains {
+            ($0.title == Self.airPlaySubsectionTitle || $0.title == Self.castSubsectionTitle)
+                && !$0.devices.isEmpty
+        }
+        if hasNetworkSpeaker { return nil }
+        if localNetworkDeniedProvider?() == true { return .permissionDenied }
+        return speakerSearchGraceElapsed ? .noneFound : .searching
+    }
+
+    /// Arm (or drop) this open's search grace. Only armed when there is actually
+    /// a state to age — a fleet with speakers in it needs no timer.
+    private func armSpeakerSearchGrace() {
+        speakerSearchGraceTimer?.invalidate()
+        speakerSearchGraceTimer = nil
+        speakerSearchGraceElapsed = false
+        guard speakerSearchState() != nil else { return }
+        speakerSearchGraceTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.speakerSearchGraceSeconds,
+            repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.fireSpeakerSearchGrace() }
+        }
+    }
+
+    private func cancelSpeakerSearchGrace() {
+        speakerSearchGraceTimer?.invalidate()
+        speakerSearchGraceTimer = nil
+    }
+
+    /// The grace elapsed: "Looking for speakers…" becomes "none found". Only
+    /// the SEARCHING line needs the explicit rebuild — every other flip rides a
+    /// device arrival/departure, which is already a structural change.
+    private func fireSpeakerSearchGrace() {
+        speakerSearchGraceTimer = nil
+        guard !speakerSearchGraceElapsed else { return }
+        let wasSearching = renderedSpeakerSearchText == Self.speakerSearchingText
+        speakerSearchGraceElapsed = true
+        guard isEffectivelyShown, wasSearching else { return }
+        rebuild()
+        panel.panelContentDidChangeHeight(animated: true)
+    }
+
+    static let speakerSearchingText = "Looking for speakers…"
+    static let speakerNoneFoundText = "No AirPlay speakers found on this network."
+    static let speakerNoneFoundHintText =
+        "Make sure your speakers are awake and on the same Wi-Fi network as this Mac."
+    static let speakerPermissionDeniedText =
+        "Audiout doesn\u{2019}t have permission to see devices on this network."
+    static let speakerPermissionDeniedHintText =
+        "Allow Local Network for Audiout in System Settings \u{203A} Privacy & Security."
+
+    /// The AirPlay subsection's empty body, built the same way the Bluetooth
+    /// Connect row is: a wrapper on the name column whose CONTENT is the empty
+    /// state. Secondary, never tertiary — this is live state text explaining why
+    /// the list is empty, and dimming the explanation of the dimming reads as
+    /// broken (folder rule).
+    private func makeSpeakerSearchStateRow(_ state: SpeakerSearchState) -> NSView {
+        let message: String
+        let hint: String?
+        switch state {
+        case .searching:
+            message = Self.speakerSearchingText
+            hint = nil
+        case .noneFound:
+            message = Self.speakerNoneFoundText
+            hint = Self.speakerNoneFoundHintText
+        case .permissionDenied:
+            message = Self.speakerPermissionDeniedText
+            hint = Self.speakerPermissionDeniedHintText
+        }
+        renderedSpeakerSearchText = message
+
+        let label = NSTextField(labelWithString: message)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = Tokens.Font.menuItem
+        label.textColor = Tokens.Color.secondaryLabel
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+
+        let wrapper = NSView()
+        wrapper.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(label)
+        let nameColumnLeading = PopoverColumnGrid.nameColumnLeading
+        let trailingInset = -PopoverColumnGrid.leadingInset
+        var constraints: [NSLayoutConstraint] = [
+            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
+                                            constant: trailingInset),
+        ]
+
+        if let hint {
+            // Two stacked labels: the wrapper GROWS to fit rather than being
+            // pinned to `rowHeight`, or the hint would be clipped out of a row
+            // sized for one line.
+            let hintLabel = NSTextField(wrappingLabelWithString: hint)
+            hintLabel.translatesAutoresizingMaskIntoConstraints = false
+            hintLabel.font = Tokens.Font.captionMedium
+            hintLabel.textColor = Tokens.Color.secondaryLabel
+            hintLabel.isSelectable = false
+            hintLabel.preferredMaxLayoutWidth =
+                SurfaceLayout.width - nameColumnLeading - PopoverColumnGrid.leadingInset
+            wrapper.addSubview(hintLabel)
+            constraints += [
+                label.topAnchor.constraint(equalTo: wrapper.topAnchor, constant: 8),
+                hintLabel.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 2),
+                hintLabel.leadingAnchor.constraint(equalTo: label.leadingAnchor),
+                hintLabel.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
+                                                    constant: trailingInset),
+                hintLabel.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -8),
+            ]
+        } else {
+            // One line: a spinner beside it, so "looking" is visibly a process
+            // and not a stuck string. Reduce Motion gets the words alone.
+            constraints += [
+                wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
+                label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
+            ]
+            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                let spinner = NSProgressIndicator()
+                spinner.translatesAutoresizingMaskIntoConstraints = false
+                spinner.style = .spinning
+                spinner.controlSize = .small
+                spinner.isIndeterminate = true
+                wrapper.addSubview(spinner)
+                spinner.startAnimation(nil)
+                constraints += [
+                    spinner.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 8),
+                    spinner.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
+                ]
+            }
+        }
+        NSLayoutConstraint.activate(constraints)
+        return wrapper
     }
 
     /// The four subsections in RENDER order — the one place the order and the
@@ -1605,6 +1866,15 @@ public final class PopoverController: NSObject {
                 renderedBTConnectShown = true
                 return
             }
+        }
+        // The AirPlay section's empty body is its own content too (P1-1): the
+        // searching / nothing-found / permission-denied line, the exact shape of
+        // the Bluetooth branch above. Scoped to AirPlay by copy AND by its own
+        // header, so it can never contradict the Bluetooth Connect affordance.
+        if section.title == Self.airPlaySubsectionTitle, section.devices.isEmpty,
+           let state = speakerSearchState() {
+            panel.addRow(makeSpeakerSearchStateRow(state))
+            return
         }
         for device in section.devices { panel.addRow(makeDeviceRow(device, indented: false)) }
     }
@@ -2236,16 +2506,6 @@ public final class PopoverController: NSObject {
         // Out sends nothing to — does not. Master mute is folded in so it drains
         // every device dot.
         let inActiveTarget = controller.isMainOutMember(device.id)
-        // Live diagnosis (2026-08-23): the raise fires but the pixels never
-        // move — log what the render actually hands the row.
-        if device.isCast, castVolumePendingIDs.contains(device.id) {
-            Telemetry.log(.cast, "cast_pending_render", [
-                "device": device.id,
-                "lag": device.castVolumeLagSeconds.map(String.init) ?? "nil",
-                "state": String(describing: device.connectionState),
-                "armedInputs": "\(inActiveTarget)/\(controller.isMainOutMember(device.id))",
-            ])
-        }
         row.apply(device,
                   selected: selected,
                   controllable: controller.isMainOutMember(device.id) || isRedirectTarget(device.id),
@@ -2623,12 +2883,20 @@ public final class PopoverController: NSObject {
     /// spoken for here — it means "in the mix" — and a gold link in a device list
     /// would claim a membership it doesn't have.
     private func makeBluetoothConnectRow() -> NSView {
-        let button = NSButton(title: "Connect a Bluetooth device…",
-                              target: self, action: #selector(bluetoothConnectRowClicked(_:)))
+        let button = PointingHandButton(title: "Connect a Bluetooth device…",
+                                        target: self, action: #selector(bluetoothConnectRowClicked(_:)))
         button.translatesAutoresizingMaskIntoConstraints = false
         button.bezelStyle = .accessoryBar
         button.isBordered = false
         button.controlSize = .small
+        // A leading "+" glyph so the row reads as an ACTION rather than a
+        // greyed-out placeholder line. `contentTintColor` reliably tints a
+        // button's template IMAGE (the comment below covers why the TITLE takes
+        // a different route), so the glyph carries the same neutral secondary
+        // tone the title does.
+        button.image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil)
+        button.imagePosition = .imageLeading
+        button.contentTintColor = Tokens.Color.secondaryLabel
         // The title's colour is set through `attributedTitle`, not
         // `contentTintColor` — that property reliably tints a button's template
         // IMAGE, but its effect on a title varies by bezel style. The dynamic
@@ -2652,59 +2920,6 @@ public final class PopoverController: NSObject {
     }
 
     @objc private func bluetoothConnectRowClicked(_ sender: Any?) { onPairBluetoothSpeaker?() }
-
-    // MARK: Blocked local-mix refusal note (spec §4.6)
-
-    /// Toggle the in-place refusal note under the blocked device row `id`: mount
-    /// it directly beneath the row when absent, remove it when a second body-click
-    /// asks again. No-op if the row isn't currently mounted.
-    /// The re-fit is the row primitives' own job now (`insertRow`/`removeRow`) —
-    /// this used to re-fit here, which measured the note BEFORE `removeRow`'s
-    /// deferred detach actually took it out of the tree and left the popover a row
-    /// too tall. Same latent bug the diagnosis panel hit; one fix covers both.
-    private func toggleBlockedNote(for id: String, reason: String) {
-        if let existing = blockedNoteByID.removeValue(forKey: id) {
-            panel.removeRow(existing, animated: true)
-            return
-        }
-        guard let row = deviceRowsByID[id] else { return }
-        let note = makeRefusalNoteRow(text: reason)
-        blockedNoteByID[id] = note
-        panel.insertRow(note, after: row, animated: true)
-    }
-
-    /// A one-line refusal-note row (spec §4.6): an `info` glyph + `reason` in
-    /// tertiary text, indented to the name column so it reads as annotating the
-    /// row above it. Non-interactive.
-    private func makeRefusalNoteRow(text: String) -> NSView {
-        let wrapper = NSView()
-        wrapper.translatesAutoresizingMaskIntoConstraints = false
-        let icon = NSImageView()
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .regular))
-        icon.contentTintColor = Tokens.Color.tertiaryLabel
-        icon.setContentHuggingPriority(.required, for: .horizontal)
-        let label = NSTextField(labelWithString: text)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = Tokens.Font.caption
-        label.textColor = Tokens.Color.tertiaryLabel
-        label.lineBreakMode = .byTruncatingTail
-        label.maximumNumberOfLines = 1
-        wrapper.addSubview(icon)
-        wrapper.addSubview(label)
-        let nameColumnLeading = PopoverColumnGrid.nameColumnLeading
-        NSLayoutConstraint.activate([
-            wrapper.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.applicationsFooterRowHeight),
-            icon.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
-            icon.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
-            label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
-                                            constant: -PopoverColumnGrid.leadingInset),
-        ])
-        return wrapper
-    }
 
     // MARK: Connection failures + diagnosis panels (brief §7.3)
     //
@@ -3192,11 +3407,37 @@ public final class PopoverController: NSObject {
         return controller.group(matchingMemberSet: controller.selectedDeviceIDs) == nil
     }
 
+    /// Whether the last "Save Selected Devices as group" failed to persist —
+    /// the headless-observable half of the alert below (hardening 11).
+    public private(set) var test_saveGroupFailureReported = false
+
+    /// Save the Selected Devices set as a fresh group, REPORTING a persistence
+    /// failure instead of swallowing it (the same "UI never lies" contract
+    /// `GroupEditorViewController.saveOrReport` established). The rebuild runs
+    /// either way, so on a failure the card goes back to showing the true —
+    /// unsaved — state rather than a group that isn't there.
     private func saveCurrentSetup() {
         guard let controller = groupController else { return }
         let name = "Group \(controller.groups.count + 1)"
-        _ = try? controller.saveCurrentSetupAsGroup(name: name)
+        do {
+            _ = try controller.saveCurrentSetupAsGroup(name: name)
+            test_saveGroupFailureReported = false
+        } catch {
+            test_saveGroupFailureReported = true
+            presentSaveGroupFailureAlert()
+        }
         rebuild()
+    }
+
+    /// A sheet when a window hosts the panel, skipped entirely headless (every
+    /// test run — the `test_` flag above observes the failure instead).
+    private func presentSaveGroupFailureAlert() {
+        guard let window = panel.view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Couldn\u{2019}t save the group."
+        alert.informativeText = "The group\u{2019}s saved settings couldn\u{2019}t be written. Try again."
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: window)
     }
 
     // MARK: Running-app picker (T-7, PLAN decision 6)
@@ -3465,11 +3706,6 @@ public final class PopoverController: NSObject {
     public func test_deviceRowSelectionDimmed(id: String) -> Bool? {
         deviceRowsByID[id]?.test_isSelectionDimmed
     }
-    /// Whether a blocked-row in-place refusal note (spec §4.6, S4) is currently
-    /// mounted under device row `id`.
-    public func test_isBlockedNoteShown(id: String) -> Bool {
-        blockedNoteByID[id] != nil
-    }
     /// Whether device row `id` is mid attention-flash (A4). `nil` if no such row.
     public func test_deviceRowFlashing(id: String) -> Bool? {
         deviceRowsByID[id]?.test_isFlashing
@@ -3648,6 +3884,17 @@ public final class PopoverController: NSObject {
     /// target/action dispatch (never a bypass seam).
     public func test_fireBluetoothConnectClick() { bluetoothConnectButton?.performClick(nil) }
 
+    /// Whether the mounted Connect row carries its leading glyph — the half of
+    /// "reads as clickable" a headless run can actually see.
+    public var test_bluetoothConnectRowHasGlyph: Bool { bluetoothConnectButton?.image != nil }
+
+    /// The AirPlay empty-state line the last rebuild rendered, `nil` when it
+    /// rendered none.
+    public var test_speakerSearchStateText: String? { renderedSpeakerSearchText }
+
+    /// Fire the search grace exactly as its timer would.
+    public func test_fireSpeakerSearchGrace() { fireSpeakerSearchGrace() }
+
     /// Simulate flipping a device row's membership switch through its delegate.
     /// Returns the model's `SelectionResult` so tests can assert refusal/auto-swap.
     @discardableResult
@@ -3726,6 +3973,7 @@ public final class PopoverController: NSObject {
 extension PopoverController: DeviceRowView.Delegate {
 
     public func deviceRow(_ row: DeviceRowView, didSetVolume volume: Int, for id: String) {
+        noteSliderGesture()
         groupController?.setMemberVolume(volume, for: id)
         refreshMainOutRow()
         raiseCastVolumePending(for: id)
@@ -3767,17 +4015,6 @@ extension PopoverController: DeviceRowView.Delegate {
         let id = row.device.id
         clearRemovalUndo()
         deviceRow(row, didToggleEnabled: true, for: id)
-    }
-
-    /// The blocked local-mix row's body-click (spec §4.6): surface the refusal
-    /// reason as an in-place one-line note under the row (toggled — a second click
-    /// dismisses it), reusing `GroupController.localMixRefusalReason`. This is the
-    /// reachable trigger the disabled checkbox + tooltip alone lacked (§8.5).
-    public func deviceRowDidRequestBlockedExplanation(_ row: DeviceRowView) {
-        let reason = GroupController.localMixRefusalReason
-        test_lastRefusalReason = reason
-        presentRefusal(reason)
-        toggleBlockedNote(for: row.device.id, reason: reason)
     }
 
     /// A greyed Bluetooth row's click (BT-UI "click connects"): a
@@ -4371,6 +4608,7 @@ extension PopoverController: MainOutRowView.Delegate {
     }
 
     public func mainOutRow(_ row: MainOutRowView, didSetMaster volume: Int) {
+        noteSliderGesture()
         groupController?.setMainOutMasterVolume(volume)
         refreshDeviceRows()
     }
@@ -4399,6 +4637,7 @@ extension PopoverController: MainOutRowView.Delegate {
 extension PopoverController: AppRowView.Delegate {
 
     public func appRow(_ row: AppRowView, didSetVolume volume: Int, for appID: String) {
+        noteSliderGesture()
         // Drive `.currentDevice` local stream immediately (low-latency path).
         // `appRouting.setVolume` fires `onRoutesDidChange` which re-pushes volumes
         // to the mixer/engine — no rebuild needed here; a rebuild would replace
@@ -4546,6 +4785,8 @@ extension PopoverController: AppRowView.Delegate {
         // sticky and never clears for a paired device, so keeping these would
         // leave a permanent dead row on the next open.
         btConnectAttemptIDs.removeAll()
+        // The search grace belongs to an open, like everything else here.
+        cancelSpeakerSearchGrace()
     }
 
     // MARK: - Live level dispatch (task T5)
@@ -4656,5 +4897,19 @@ extension PopoverController: AppRowView.Delegate {
     /// `nil` if no such row exists in the Applications card.
     public func test_isAppRowOffline(bundleID: String) -> Bool? {
         appRowsByBundleID[bundleID]?.test_isOfflineBadgeVisible
+    }
+}
+
+// MARK: - PointingHandButton
+
+/// A borderless button that says so with the cursor: the same
+/// `resetCursorRects` idiom `MainOutRowView` uses over its icon door. Without
+/// it the Bluetooth Connect row keeps the arrow cursor over quiet secondary
+/// text and reads as a disabled label rather than the one thing in an empty
+/// section the user can click.
+private final class PointingHandButton: NSButton {
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .pointingHand)
     }
 }

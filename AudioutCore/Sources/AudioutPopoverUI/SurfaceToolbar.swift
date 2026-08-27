@@ -197,8 +197,12 @@ final class SurfaceToolbarController: NSObject {
 extension SurfaceToolbarController: NSToolbarDelegate {
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        // A fixed `.space` between Pin and Quit: they sat one pixel apart, so a
+        // click aimed at Pin could quit the app instead. Least-destructive
+        // separation — Quit stays in the toolbar, it just stops being Pin's
+        // neighbour.
         [Self.tabsItemIdentifier, .flexibleSpace, Self.titleItemIdentifier,
-         .flexibleSpace, Self.pinItemIdentifier, Self.quitItemIdentifier]
+         .flexibleSpace, Self.pinItemIdentifier, .space, Self.quitItemIdentifier]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -280,7 +284,10 @@ extension SurfaceToolbarController: NSToolbarDelegate {
                 mark.heightAnchor.constraint(equalToConstant: Self.markSide),
             ])
             item.view = lockup
-            item.label = ""
+            // The item's own NAME, for the customization sheet and the
+            // overflow menu — the lockup is a view, and an unnamed item shows
+            // up as a blank entry there.
+            item.label = "Audiout"
             titleLabel = label
             markView = mark
             return item
@@ -297,10 +304,15 @@ extension SurfaceToolbarController: NSToolbarDelegate {
         case Self.quitItemIdentifier:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.isBordered = true
-            item.image = Self.resolveSymbol("power", fallbacks: [],
+            // An EXIT shape, not a speaker-power shape: `power` on a panel full
+            // of speakers reads as "turn the audio off", which is the one thing
+            // this button does not do. (SF Symbols 3 — safe on the macOS 14
+            // floor; `power` stays as the fallback.)
+            item.image = Self.resolveSymbol("rectangle.portrait.and.arrow.right",
+                                            fallbacks: ["power"],
                                             accessibilityDescription: "Quit")
             item.label = "Quit"
-            item.toolTip = "Quit"
+            item.toolTip = "Quit Audiout"
             item.target = self
             item.action = #selector(quitTapped(_:))
             return item

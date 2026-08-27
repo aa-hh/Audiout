@@ -1035,6 +1035,76 @@ import AppKit
         }
     }
 
+    /// P0-1: the wait used to SWALLOW every further menu-bar click, so a user
+    /// who saw nothing happen and clicked again got nothing again, for up to
+    /// three seconds. A second click is the user asking for the surface NOW —
+    /// it cuts the wait short and fronts at the size measured so far, with the
+    /// splash over it.
+    @Test func aSecondClickCancelsTheRevealWaitAndFrontsAtOnce() throws {
+        try asAFirstRealLaunch {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            #expect(surface.test_isRevealPending, "the first click starts the wait")
+
+            surface.show(anchorRect: nil)
+            #expect(!surface.test_isRevealPending, "the second click ends it")
+            #expect(surface.test_splash != nil, "and the surface is on screen with its hold")
+        }
+    }
+
+    /// The backstop is now a bound on how long a click can appear to do
+    /// nothing, so it must stay above the settle's own quiet window — a ceiling
+    /// at or below it would pre-empt the settled reveal on every warm open.
+    @Test func theRevealCeilingStaysAboveTheSettleQuietWindow() {
+        #expect(AppSurfaceController.revealCeiling > AppSurfaceController.revealQuietWindow)
+        #expect(AppSurfaceController.revealCeiling <= 1.0,
+                "a click must not look dead for longer than this")
+    }
+
+    // MARK: Occlusion gating (perf P2-12)
+
+    /// A PINNED surface can sit fully covered by another window for days, and
+    /// "is it open" was the only question anyone asked — so metering and the
+    /// Mixer's monitors ran full tilt against pixels nobody could see. Covering
+    /// it now puts the Mixer to sleep; uncovering runs the full open ritual.
+    /// The latch is what keeps a stream of occlusion notifications from tearing
+    /// the panel down over and over.
+    @Test func aCoveredSurfacePutsTheMixerToSleepAndWakesItOnce() {
+        let (surface, popover, _, _) = makeSurface()
+        var meteringTransitions: [Bool] = []
+        popover.onMeteringActiveChange = { meteringTransitions.append($0) }
+        surface.show(anchorRect: nil)
+        #expect(meteringTransitions == [true], "showing the Mixer turns metering on")
+
+        surface.test_notePixelVisibility(false)
+        #expect(surface.test_surfaceCoveredHidden)
+        #expect(meteringTransitions == [true, false], "covered ⇒ metering off")
+
+        surface.test_notePixelVisibility(false)
+        #expect(meteringTransitions == [true, false], "the latch swallows a repeat")
+
+        let rebuildsBefore = popover.test_rebuildCount
+        surface.test_notePixelVisibility(true)
+        #expect(!surface.test_surfaceCoveredHidden)
+        #expect(meteringTransitions == [true, false, true], "uncovered ⇒ metering back on")
+        #expect(popover.test_rebuildCount > rebuildsBefore,
+                "waking runs the Mixer open ritual — hidden means stale")
+
+        surface.test_notePixelVisibility(true)
+        #expect(meteringTransitions == [true, false, true],
+                "and a repeat wake is a no-op too")
+    }
+
+    /// A surface that is not on screen has no pixels to lose.
+    @Test func occlusionIsIgnoredWhileTheSurfaceIsClosed() {
+        let (surface, popover, _, _) = makeSurface()
+        var meteringTransitions: [Bool] = []
+        popover.onMeteringActiveChange = { meteringTransitions.append($0) }
+        surface.test_notePixelVisibility(false)
+        #expect(!surface.test_surfaceCoveredHidden)
+        #expect(meteringTransitions.isEmpty)
+    }
+
     @Test func aSecondSurfaceInTheSameProcessGetsNoSplash() throws {
         try asAFirstRealLaunch {
             let (first, _, _, _) = makeSurface()

@@ -3149,7 +3149,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // stick at its last reading after the Mac (or the last AirPlay
                 // device) leaves the mix. Turning ON gets its first real
                 // reading a whole tap-buffer-interval sooner than waiting for
-                // the next `emitLevel` callback. Unconditional (not metering-
+                // the next `onLevel` drain. Unconditional (not metering-
                 // gated), matching that same precedent.
                 self.emitCombinedLevel(forDevice: Self.localDeviceID)
             }

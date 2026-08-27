@@ -12,8 +12,15 @@ import Testing
 /// question ("anything counts," not just Main Out).
 @Suite final class MenuBarStatusTests: IsolatedSuite {
 
-    private func device(id: String = "dev-1", connectionState: ConnectionState = .off) -> Device {
-        Device(id: id, name: "Test Speaker", kind: .generic, connectionState: connectionState)
+    private func device(id: String = "dev-1",
+                        connectionState: ConnectionState = .off,
+                        isSelected: Bool = false) -> Device {
+        Device(id: id, name: "Test Speaker", kind: .generic,
+               isSelected: isSelected, connectionState: connectionState)
+    }
+
+    private var failure: ConnectionState {
+        .failed(ConnectionFailure(cause: .notResponding))
     }
 
     // MARK: Idle state
@@ -45,7 +52,7 @@ import Testing
     }
 
     @Test func symbolName_outline_whenIdle() {
-        #expect(MenuBarStatus.symbolName(isStreaming: false) == "speaker.wave.3")
+        #expect(MenuBarStatus.symbolName(for: .idle) == "speaker.wave.3")
     }
 
     // MARK: Streaming via Main Out (whole-system output set)
@@ -81,6 +88,93 @@ import Testing
     }
 
     @Test func symbolName_filled_whenStreaming() {
-        #expect(MenuBarStatus.symbolName(isStreaming: true) == "speaker.wave.3.fill")
+        #expect(MenuBarStatus.symbolName(for: .streaming) == "speaker.wave.3.fill")
+    }
+
+    @Test func symbolName_badged_whenFailure() {
+        #expect(MenuBarStatus.symbolName(for: .failure) == "speaker.badge.exclamationmark")
+    }
+
+    // MARK: The three-state decision
+
+    @Test func state_idle_whenNothingIsHappening() {
+        #expect(MenuBarStatus.state(devices: [], liveRoutedAppNames: [:]) == .idle)
+    }
+
+    @Test func state_streaming_whenADeviceIsConnected() {
+        let devices = [device(connectionState: .connected)]
+        #expect(MenuBarStatus.state(devices: devices, liveRoutedAppNames: [:]) == .streaming)
+    }
+
+    @Test func state_failure_whenASelectedDeviceFailed() {
+        let devices = [device(connectionState: failure, isSelected: true)]
+        #expect(MenuBarStatus.state(devices: devices, liveRoutedAppNames: [:]) == .failure)
+    }
+
+    @Test func state_failure_outranksStreaming() {
+        // A broken speaker must never look like a paused one: the badge wins
+        // even while another device is happily streaming.
+        let devices = [
+            device(id: "dev-1", connectionState: .connected),
+            device(id: "dev-2", connectionState: failure, isSelected: true),
+        ]
+        #expect(MenuBarStatus.state(devices: devices, liveRoutedAppNames: [:]) == .failure)
+    }
+
+    @Test func state_notFailure_whenTheFailedDeviceIsNotSelected() {
+        // Deselecting a broken speaker clears the badge — an unselected failure
+        // is no longer something the user asked for.
+        let devices = [device(connectionState: failure, isSelected: false)]
+        #expect(MenuBarStatus.state(devices: devices, liveRoutedAppNames: [:]) == .idle)
+    }
+
+    @Test func state_streaming_whenAnUnselectedFailureSitsBesideALiveRoute() {
+        let devices = [device(connectionState: failure, isSelected: false)]
+        #expect(
+            MenuBarStatus.state(devices: devices, liveRoutedAppNames: ["dev-2": ["Music"]])
+                == .streaming
+        )
+    }
+
+    // MARK: Spoken description
+
+    @Test func accessibilityDescription_failure_ignoresLevelAndMute() {
+        #expect(
+            MenuBarStatus.accessibilityDescription(
+                state: .failure, masterVolumePercent: 80, isMuted: true)
+                == "Audiout — speaker connection failed"
+        )
+    }
+
+    @Test func accessibilityDescription_muted_whileStreaming() {
+        #expect(
+            MenuBarStatus.accessibilityDescription(
+                state: .streaming, masterVolumePercent: 80, isMuted: true)
+                == "Audiout — muted, streaming"
+        )
+    }
+
+    @Test func accessibilityDescription_muted_whileIdle() {
+        #expect(
+            MenuBarStatus.accessibilityDescription(
+                state: .idle, masterVolumePercent: 80, isMuted: true)
+                == "Audiout — muted"
+        )
+    }
+
+    @Test func accessibilityDescription_level_whileStreaming() {
+        #expect(
+            MenuBarStatus.accessibilityDescription(
+                state: .streaming, masterVolumePercent: 80, isMuted: false)
+                == "Audiout — 80%, streaming"
+        )
+    }
+
+    @Test func accessibilityDescription_level_whileIdle() {
+        #expect(
+            MenuBarStatus.accessibilityDescription(
+                state: .idle, masterVolumePercent: 80, isMuted: false)
+                == "Audiout — 80%"
+        )
     }
 }

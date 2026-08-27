@@ -41,6 +41,10 @@ final class VolumeKeyInterceptor {
 
     private var runLoopSource: CFRunLoopSource?
 
+    /// Whether we are currently supposed to be holding a tap — the main-actor
+    /// mirror of `state`'s own copy, which only the callback thread reads.
+    private var ownsVolume = false
+
     /// Called on the main actor with what an intercepted key should do. Set by
     /// `AppDelegate`; the interceptor itself knows nothing about `GroupController`.
     var onAction: (@MainActor (VolumeKeyAction) -> Void)?
@@ -68,8 +72,22 @@ final class VolumeKeyInterceptor {
     /// when we take ownership and tears it down when we lose it, so we hold an
     /// event tap only while it is actually doing something.
     func setOwnsVolume(_ owns: Bool) {
+        ownsVolume = owns
         state.setOwnsVolume(owns)
         if owns { installIfNeeded() } else { uninstall() }
+    }
+
+    /// Re-arm the tap if we are supposed to have one. Sleep and a fast user
+    /// switch can leave the tap installed but DISABLED, or gone entirely, and
+    /// the callback's own recovery cannot fire for a tap that is delivering
+    /// nothing — so the keys just go quietly dead until the next ownership
+    /// change. Called from wake and app-activate; a no-op when we do not own
+    /// the volume, and `installIfNeeded` handles both the disabled and the
+    /// missing case. A repeat Accessibility miss is already one-shot-guarded
+    /// by the caller's `didSurfaceAccessibilityGap`.
+    func reassertIfOwned() {
+        guard ownsVolume else { return }
+        installIfNeeded()
     }
 
     /// Keep the volume the decision core steps FROM in sync. Pushed rather than

@@ -26,6 +26,7 @@ public final class GeneralSettingsViewController: NSViewController {
     private let settings: AppSettings
     private let launchSwitch = NSSwitch()
     private let reconnectSwitch = NSSwitch()
+    private let touchBarSwitch = NSSwitch()
     private let reconnectHint = SettingsForm.hintLabel()
     private let licenseStatusHint = SettingsForm.hintLabel()
     private let enterLicenseButton = NSButton()
@@ -176,9 +177,22 @@ public final class GeneralSettingsViewController: NSViewController {
         strip.spacing = 8
         strip.translatesAutoresizingMaskIntoConstraints = false
 
-        view = SettingsForm.paneView(rows: [launchRow, reconnectRow, reconnectHint,
-                                             licenseKeyRow, licenseStatusHint,
-                                             hairline, strip])
+        // Touch Bar opt-out — offered ONLY on a Mac that has one, since on
+        // every other Mac the setting would name a thing the user cannot see.
+        var rows: [NSView] = [launchRow, reconnectRow, reconnectHint]
+        if TouchBarHardware.isPresent {
+            touchBarSwitch.target = self
+            touchBarSwitch.action = #selector(touchBarToggled)
+            touchBarSwitch.state = settings.touchBarControlsEnabled ? .on : .off
+            touchBarSwitch.setAccessibilityLabel("Use Audiout's Touch Bar controls")
+            rows.append(SettingsForm.row(
+                title: "Use Audiout's Touch Bar controls",
+                subtitle: "While Audiout is playing to speakers, show Touch Bar volume controls that work.",
+                control: touchBarSwitch))
+        }
+        rows.append(contentsOf: [licenseKeyRow, licenseStatusHint, hairline, strip])
+
+        view = SettingsForm.paneView(rows: rows)
 
         refreshLicenseStatus()
     }
@@ -260,6 +274,10 @@ public final class GeneralSettingsViewController: NSViewController {
         let enabled = reconnectSwitch.state == .on
         settings.reconnectAtLaunch = enabled
         reconnectHint.stringValue = Self.reconnectHintLine(enabled)
+    }
+
+    @objc private func touchBarToggled() {
+        settings.touchBarControlsEnabled = touchBarSwitch.state == .on
     }
 
     public override func viewDidLoad() {

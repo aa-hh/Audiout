@@ -37,7 +37,25 @@ MIN_MACOS="${MIN_MACOS:-14.2}"
 # without editing this script:
 #   APP_VERSION=0.2.0 BUILD_NUMBER=7 scripts/make-app.sh
 APP_VERSION="${APP_VERSION:-0.1.0}"
+# Captured BEFORE the default is applied — once BUILD_NUMBER is set to 1 there is
+# no way left to tell "the caller asked for 1" from "the caller said nothing".
+BUILD_NUMBER_WAS_SET="${BUILD_NUMBER+set}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
+# Shown in Finder's Get Info and the About window. Required for a GPL app that
+# is being sold: the copyright line and the licence are what the user is owed.
+HUMAN_COPYRIGHT="© 2026 Alec Henderson. Licensed under GPL-2.0-or-later."
+# Fail fast, BEFORE any compile: a bad invocation must die in a second, not after
+# a full build. Both guards below are about releases that look fine at build time
+# and only break in the wild.
+# https, not http: the appcast request carries "Authorization: Bearer <licence
+# key>", and the download it names is what Sparkle will install. Plaintext leaks
+# the key and lets anyone on the path serve the update.
+case "${SPARKLE_FEED_URL:-}" in "") ;; https://*) ;; *) echo "ERROR: SPARKLE_FEED_URL must be https:// — the appcast request carries the licence key as a bearer token and names the update to install; plaintext leaks the key and lets the path serve its own build (got: $SPARKLE_FEED_URL)" >&2; exit 1;; esac
+case "${AUDIOUT_LICENSE_URL:-}" in "") ;; https://*) ;; *) echo "ERROR: AUDIOUT_LICENSE_URL must be https:// — the licence key travels to this server on every check, and the Sparkle feed is derived from it (got: $AUDIOUT_LICENSE_URL)" >&2; exit 1;; esac
+# A Sparkle release built on the default CFBundleVersion=1 is an update the
+# updater will never offer: the appcast compares build numbers, so a release
+# that didn't bump one is invisible to every existing install.
+if [ -n "${SPARKLE_FEED_URL:-}" ] || [ -n "${SPARKLE_ED_PUBLIC_KEY:-}" ]; then [ -n "$BUILD_NUMBER_WAS_SET" ] || { echo "ERROR: a Sparkle release needs an explicit BUILD_NUMBER — the default CFBundleVersion=1 is an update the updater can never offer, since the appcast compares build numbers against what is already installed" >&2; exit 1; }; fi
 # Shown verbatim inside the macOS system-audio permission dialog. Written in the
 # user's mental model ("send my audio to speakers"), not the OS's ("record"),
 # and states the limit explicitly — this is the only text they get before
@@ -643,6 +661,12 @@ plutil -insert NSAudioCaptureUsageDescription -string "$AUDIO_CAPTURE_USAGE" "$P
 # Assert it actually landed: this key failing silently is the exact bug above,
 # and a missing permission rationale is not something to discover in the wild.
 plutil -extract NSAudioCaptureUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSAudioCaptureUsageDescription missing from Info.plist" >&2; exit 1; }
+
+# Copyright + licence, shown in Finder's Get Info. plutil, not PlistBuddy, for
+# the same reason as the string above: the value carries punctuation (©, a
+# period-separated licence clause) that PlistBuddy re-parses and then exits 0 on.
+plutil -insert NSHumanReadableCopyright -string "$HUMAN_COPYRIGHT" "$PLIST"
+plutil -extract NSHumanReadableCopyright raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSHumanReadableCopyright missing from Info.plist" >&2; exit 1; }
 
 # Local Network: the app browses Bonjour to discover AirPlay speakers, which macOS
 # gates behind the Local Network permission (a separate prompt from audio). Two

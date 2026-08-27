@@ -1299,8 +1299,13 @@ public final class PopoverController: NSObject {
 
     /// The master volume (0…1) the status symbol should reflect: the Main Out
     /// master of the current target (SPEC §9b — status icon reflects Main Out).
+    ///
+    /// Master-mute reports 0, which DRAINS the menu-bar arc, so the
+    /// closed-panel glance never lies "80% and broadcasting" while the mix is
+    /// silent (mirrors the row meter-drain rule).
     public var statusMasterVolume: Double {
         guard let controller = groupController else { return 0 }
+        guard !controller.isMainOutMuted else { return 0 }
         return Double(controller.mainOutMasterVolume) / 100.0
     }
 

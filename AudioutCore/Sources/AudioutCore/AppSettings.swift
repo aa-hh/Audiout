@@ -97,6 +97,7 @@ public struct AppSettings {
         static let licenseMaxMajor = "license.maxMajor"
         static let telemetryOptIn = "telemetry.optIn"
         static let telemetryAsked = "telemetry.asked"
+        static let touchBarControls = "general.touchBarControls"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -421,5 +422,21 @@ public struct AppSettings {
                 ?? licenseServerURL?.appending(path: "v1/checkin")
         }
         nonmutating set { defaults.set(newValue?.absoluteString, forKey: Keys.licenseCheckInURL) }
+    }
+
+    /// Whether Audiout may replace the Touch Bar with its own controls while
+    /// it is playing to speakers (Settings › General, "Use Audiout's Touch Bar
+    /// controls"). ON unless the user turned it off — taking the whole bar is
+    /// a big enough intrusion that it needs a visible way out. Only meaningful
+    /// on Touch Bar hardware; the Settings row hides itself everywhere else.
+    /// Unset resolves to `true` (distinguished from a stored `false` via
+    /// `object(forKey:)`, the same discipline the other default-true settings
+    /// use).
+    public var touchBarControlsEnabled: Bool {
+        get {
+            guard defaults.object(forKey: Keys.touchBarControls) != nil else { return true }
+            return defaults.bool(forKey: Keys.touchBarControls)
+        }
+        nonmutating set { defaults.set(newValue, forKey: Keys.touchBarControls) }
     }
 }

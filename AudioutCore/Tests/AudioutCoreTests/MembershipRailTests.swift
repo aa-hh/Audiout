@@ -211,6 +211,22 @@ import AppKit
         }
     }
 
+    /// The checkbox's VERB follows the toggle. It used to be written once, at
+    /// build/refresh time, so a row toggled in place kept offering to "Add" a
+    /// device it had just added.
+    @Test func checkboxLabelFollowsTheToggle() {
+        let row = makeRow(.warmPane, checked: false)
+        #expect(row.test_checkboxAccessibilityLabel == "Add Office to group")
+
+        row.test_toggle()
+        #expect(row.test_checkboxAccessibilityLabel == "Remove Office from group",
+                "a user toggle re-announces the verb")
+
+        row.isChecked = false
+        #expect(row.test_checkboxAccessibilityLabel == "Add Office to group",
+                "…and so does a host-driven refresh")
+    }
+
     @Test func unavailableRowSpeaksTheSameOnBothSurfaces() {
         let offline = makeDevice(id: "office", name: "Office", available: false)
         let warm = MembershipRowView(device: offline, checked: true, surface: .warmPane)
@@ -352,10 +368,20 @@ import AppKit
                 "the ACTIVE group's hook goes gold, like its icon well's ring")
     }
 
+    /// Mark `ids` as being in the backend's current output set — the echo that
+    /// says "audio is going here right now".
+    private func routed(_ devices: [Device], _ ids: Set<String>) -> [Device] {
+        devices.map { device in
+            var copy = device
+            copy.isSelected = ids.contains(device.id)
+            return copy
+        }
+    }
+
     @Test func activeGroupDrivesTheNodeToneToo() throws {
-        // Gold means LIVE: an INACTIVE group's editor renders its member discs
-        // in the quiet ember idle tone (same truth as the hook/wire), and only
-        // the active group's editor goes gold end to end.
+        // Gold means LIVE, and for a member disc "live" is the ROUTED truth,
+        // per row: an inactive group's editor arms nothing at all, and the
+        // active group's arms the rows the backend is actually sending to.
         let (editor, controller, devices) = try makeEditor()
         for id in editor.test_candidateDeviceIDs {
             #expect(editor.test_isRailArmed(for: id) == false,
@@ -364,11 +390,43 @@ import AppKit
 
         let group = try #require(controller.groups.first)
         controller.activateGroup(id: group.id)
-        editor.show(groupID: group.id, devices: devices)
-        for id in editor.test_candidateDeviceIDs {
+        editor.show(groupID: group.id, devices: routed(devices, ["office", "mixer"]))
+        for id in ["office", "mixer"] {
             #expect(editor.test_isRailArmed(for: id) == true,
-                    "the ACTIVE group's \(id) node goes gold with the rest of the spine")
+                    "\(id) is a member AND routed, so its node goes gold")
         }
+        for id in ["a", "c", "e"] {
+            #expect(editor.test_isRailArmed(for: id) == false,
+                    "\(id) is receiving nothing, so it stays idle even in the active group")
+        }
+    }
+
+    /// The lie this fixed: a saved member the backend is NOT sending to filled
+    /// gold, claiming audio that wasn't moving. Saving membership is a pure
+    /// model op — it never re-routes — so a checked, unrouted row reads idle.
+    @Test func aSavedMemberThatIsNotRoutedReadsIdle() throws {
+        let (editor, controller, devices) = try makeEditor()
+        let group = try #require(controller.groups.first)
+        controller.activateGroup(id: group.id)
+        editor.show(groupID: group.id, devices: routed(devices, ["mixer"]))
+
+        #expect(editor.test_checkedDeviceIDs.contains("office"), "office is still a saved member")
+        #expect(editor.test_isRailArmed(for: "office") == false,
+                "…but nothing is being sent to it, so its node must not claim gold")
+        #expect(editor.test_isRailArmed(for: "mixer") == true)
+    }
+
+    /// The mirror case: a speaker still receiving the feed while no longer
+    /// saved into the group reads armed, hollow — still live, no longer a member.
+    @Test func aRoutedNonMemberReadsArmed() throws {
+        let (editor, controller, devices) = try makeEditor()
+        let group = try #require(controller.groups.first)
+        controller.activateGroup(id: group.id)
+        editor.show(groupID: group.id, devices: routed(devices, ["a"]))
+
+        #expect(!editor.test_checkedDeviceIDs.contains("a"), "a is not a member")
+        #expect(editor.test_isRailArmed(for: "a") == true,
+                "it is still receiving the feed, and gold means exactly that")
     }
 
     @Test func aRowClickInTheEditorPersistsLikeACheckboxClick() throws {

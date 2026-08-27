@@ -71,16 +71,23 @@ public final class GroupEditorViewController: NSViewController {
     public var onDidEditGroup: (() -> Void)?
     /// Called after the group was deleted (pop back to the mixer).
     public var onDidDeleteGroup: (() -> Void)?
+    /// Called when Escape abandoned a rename, so the host can put keyboard
+    /// focus somewhere real (the sidebar's outline view) instead of leaving
+    /// the window as its own first responder — see ``cancelRename()``.
+    public var onDidCancelRename: (() -> Void)?
 
     /// The group currently being edited, nil before `show`.
     public private(set) var editingGroupID: String?
 
-    /// Whether the edited group is the active Main Out group. Drives the rail's
-    /// armed/idle tone end to end: gold means LIVE everywhere in Audiout, so
-    /// an inactive group's editor renders its whole spine — hook, wire, AND
-    /// member discs — in the quiet `ember` idle tone (the hook and wire already
-    /// followed this truth via `railHookAnchor`; the rows follow it through
-    /// ``MembershipRowView/railArmed``).
+    /// Whether the edited group is the active Main Out group. Gold means LIVE
+    /// everywhere in Audiout, so an inactive group's editor renders its whole
+    /// spine — hook, wire, AND member discs — in the quiet `ember` idle tone.
+    ///
+    /// The hook and wire follow THIS flag (`railHookAnchor`). The member discs
+    /// go one step further and follow the ROUTED truth PER ROW
+    /// (``railArmed(for:memberSet:isActiveGroup:)``): saving a speaker into
+    /// the active group does not start sending to it, so a row that is checked
+    /// but not in the backend's output set fills ember, not gold.
     private var isActiveGroup = false
 
     private let iconWell = DeviceIconWellView()
@@ -539,13 +546,33 @@ public final class GroupEditorViewController: NSViewController {
     /// `devices` (every known device is a candidate for an available row; an
     /// unavailable device is offered only while it remains a member — see
     /// ``rebuildCandidates(devices:)``). No-op if the group no longer exists.
+    ///
+    /// GATED on what the pane actually draws. The host calls this on EVERY
+    /// backend event while the screen is visible, and a re-render tears down
+    /// and rebuilds every membership row — which threw away clicks, hover and
+    /// keyboard focus several times a second during discovery. An unchanged
+    /// ``EditorProjection`` means there is nothing to repaint.
     public func show(groupID: String, devices: [Device]) {
         guard let group = groupController.groups.first(where: { $0.id == groupID }) else { return }
-        editingGroupID = groupID
+        guard editorProjection(for: group, devices: devices) != lastRenderedProjection else { return }
+        render(group: group, devices: devices)
+    }
+
+    /// Paint the pane from `group` + `devices`, unconditionally. The single
+    /// writer of ``lastRenderedProjection`` (recomputed at the end, so a
+    /// failure re-render always re-syncs the gate).
+    private func render(group: Group, devices: [Device]) {
+        editingGroupID = group.id
         allDevices = devices
 
-        nameField.stringValue = group.name
-        updateNameFieldWidth()
+        // NEVER overwrite a name being typed. The host's refresh arrives on
+        // every backend event, and writing `stringValue` while the field
+        // editor is up replaced the user's half-typed name mid-keystroke.
+        // Everything else below still runs.
+        if nameField.currentEditor() == nil {
+            nameField.stringValue = group.name
+            updateNameFieldWidth()
+        }
         refreshIconWell(group: group)
         // Warm Signal §5.3: the ACTIVE Main Out group's icon well carries the
         // thin gold ring (drawing-only; pure model state from
@@ -553,7 +580,7 @@ public final class GroupEditorViewController: NSViewController {
         // VoiceOver equivalent: the well's accessibilityValue mirrors the
         // ring so the state isn't color-only (flagged for the C2 sweep to
         // harmonize wording with the popover's LIVE vocabulary).
-        let isActive = groupController.activeGroupID == groupID
+        let isActive = groupController.activeGroupID == group.id
         isActiveGroup = isActive
         iconWell.isActiveGroup = isActive
         iconWell.setAccessibilityValue(isActive ? "Active group" : "")
@@ -567,6 +594,73 @@ public final class GroupEditorViewController: NSViewController {
         // gold ring does (`railHookAnchor`), so repaint the rail with it.
         railOverlay.needsDisplay = true
         rebuildCandidates(memberSet: Set(group.memberIDs))
+        lastRenderedProjection = editorProjection(for: group, devices: devices)
+        test_renderCount += 1
+    }
+
+    /// Exactly what this pane draws, as one Equatable value — the gate
+    /// ``show(groupID:devices:)`` compares. Not a diffing framework: one
+    /// struct, one equality check (the same shape `MixerWindowController`
+    /// already uses for the sidebar). It may only err toward RENDERING: a
+    /// stale projection costs a repaint, a too-clever one drops a real change.
+    private struct EditorProjection: Equatable {
+        struct Row: Equatable {
+            let id: String
+            let name: String
+            let isAvailable: Bool
+            let symbolName: String
+            let isMember: Bool
+            let railArmed: Bool
+        }
+        let groupID: String
+        let groupName: String
+        let iconSymbolName: String
+        let isActive: Bool
+        let rows: [Row]
+    }
+
+    /// The projection the pane's current contents were rendered from.
+    private var lastRenderedProjection: EditorProjection?
+
+    private func editorProjection(for group: Group, devices: [Device]) -> EditorProjection {
+        let memberSet = Set(group.memberIDs)
+        let isActive = groupController.activeGroupID == group.id
+        // The same candidate rule `rebuildCandidates(memberSet:)` uses.
+        let candidates = devices.filter { $0.isAvailable || memberSet.contains($0.id) }
+        return EditorProjection(
+            groupID: group.id,
+            groupName: group.name,
+            iconSymbolName: DeviceIcon.resolve(group.iconSymbolName,
+                                               default: Group.defaultIconSymbolName),
+            isActive: isActive,
+            rows: candidates.map { device in
+                EditorProjection.Row(
+                    id: device.id,
+                    name: device.name,
+                    isAvailable: device.isAvailable,
+                    symbolName: deviceIconController?.symbolName(for: device)
+                        ?? device.kind.symbolName,
+                    isMember: memberSet.contains(device.id),
+                    railArmed: railArmed(for: device, memberSet: memberSet,
+                                         isActiveGroup: isActive))
+            })
+    }
+
+    /// Whether this row's node renders ARMED — "this speaker is receiving the
+    /// Main Out feed right now", per row rather than per pane.
+    ///
+    /// Gold means LIVE, so the truth has to be the ROUTED one: for an
+    /// AirPlay/Bluetooth/Cast row that is the backend's own echo
+    /// (`Device.isSelected` — in the current output set), and for the Mac's
+    /// local sink it is saved Main-Out membership, which for the ACTIVE group
+    /// is exactly `memberSet` (`GroupController.isMainOutMember(_:)`). An
+    /// inactive group's editor is never armed at all. Editing membership does
+    /// not re-route (`saveGroup` is a pure model op), which is why a checked
+    /// row can legitimately read idle: saved, not live.
+    private func railArmed(for device: Device, memberSet: Set<String>,
+                           isActiveGroup: Bool) -> Bool {
+        guard isActiveGroup else { return false }
+        return device.isLocalDevice ? memberSet.contains(device.id) : device.isSelected
     }
 
     /// Refresh the header icon's image from `group.iconSymbolName`, resolved
@@ -585,9 +679,43 @@ public final class GroupEditorViewController: NSViewController {
     /// plus any unavailable device still in `memberSet` — and rebuild the
     /// membership rows from that list. Called on `show` and after every
     /// membership toggle, so an unchecked unavailable member disappears.
+    ///
+    /// REUSES the existing rows whenever the candidate ID SEQUENCE is
+    /// unchanged — only the list's membership/labels moved, so refreshing each
+    /// row in place keeps the very view instances the pointer, the keyboard
+    /// focus and any in-flight click are attached to. A changed sequence (a
+    /// device appeared or an unchecked unavailable member dropped out) still
+    /// falls through to the full rebuild.
     private func rebuildCandidates(memberSet: Set<String>) {
-        candidateDevices = allDevices.filter { $0.isAvailable || memberSet.contains($0.id) }
-        buildRows(memberSet: memberSet)
+        let newCandidates = allDevices.filter { $0.isAvailable || memberSet.contains($0.id) }
+        guard newCandidates.map(\.id) == candidateDevices.map(\.id), !rowsByID.isEmpty else {
+            candidateDevices = newCandidates
+            buildRows(memberSet: memberSet)
+            return
+        }
+        candidateDevices = newCandidates
+        for device in newCandidates {
+            guard let row = rowsByID[device.id] else { continue }
+            row.apply(device: device,
+                      checked: memberSet.contains(device.id),
+                      iconSymbolName: deviceIconController?.symbolName(for: device))
+            row.railArmed = railArmed(for: device, memberSet: memberSet,
+                                      isActiveGroup: isActiveGroup)
+        }
+        // `apply` re-enables the checkbox (visibility policy is the host's
+        // job), so the pinning has to run AFTER it, exactly as in `buildRows`.
+        pinSoleMember(memberSet: memberSet)
+        membershipWell.rows = candidateDevices.compactMap { rowsByID[$0.id] }
+        updateRail()
+    }
+
+    /// Pin the sole remaining member: a group needs at least one device, so
+    /// its last member can't be unchecked here (delete the group instead).
+    /// Only one member → that row's checkbox is disabled with an explanation.
+    private func pinSoleMember(memberSet: Set<String>) {
+        guard memberSet.count == 1, let onlyMemberID = memberSet.first else { return }
+        rowsByID[onlyMemberID]?.setCheckboxEnabled(
+            false, tooltip: "A group needs at least one device. Use \u{201C}Delete Group\u{2026}\u{201D} to remove it.")
     }
 
     /// (Re)build the membership row list, checking members of `memberSet`.
@@ -600,7 +728,8 @@ public final class GroupEditorViewController: NSViewController {
                 checked: memberSet.contains(device.id),
                 iconSymbolName: deviceIconController?.symbolName(for: device),
                 surface: .warmPane)
-            row.railArmed = isActiveGroup
+            row.railArmed = railArmed(for: device, memberSet: memberSet,
+                                      isActiveGroup: isActiveGroup)
             row.onToggle = { [weak self] deviceID, isChecked in
                 self?.membershipToggled(deviceID: deviceID, isChecked: isChecked)
             }
@@ -613,13 +742,7 @@ public final class GroupEditorViewController: NSViewController {
             // narrow strip inside a wide box.
             row.widthAnchor.constraint(equalTo: membershipStack.widthAnchor).isActive = true
         }
-        // Pin the sole remaining member: a group needs at least one device, so
-        // its last member can't be unchecked here (delete the group instead).
-        // Only one member → that row's checkbox is disabled with an explanation.
-        if memberSet.count == 1, let onlyMemberID = memberSet.first {
-            rowsByID[onlyMemberID]?.setCheckboxEnabled(
-                false, tooltip: "A group needs at least one device. Use \u{201C}Delete Group\u{2026}\u{201D} to remove it.")
-        }
+        pinSoleMember(memberSet: memberSet)
         // T5: re-point the well at the CURRENT rows so its hairlines land
         // between whatever's actually in the stack now (a rebuild can add or
         // drop rows — an unchecked unavailable device disappears).
@@ -666,6 +789,17 @@ public final class GroupEditorViewController: NSViewController {
         let trimmed = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return restoreNameField() }
         guard trimmed != group.name else { return restoreNameField() }
+        // TAKEN: two groups with the same name are two rows the sidebar can't
+        // tell apart. Refused with an explanation rather than silently
+        // suffixed — the same honesty the empty-name refusal above follows.
+        // Case-insensitive, but excluding THIS group, so re-casing its own
+        // name stays a legal rename.
+        guard !isNameTaken(trimmed, excluding: group.id) else {
+            restoreNameField()
+            test_duplicateNameRefused = true
+            presentDuplicateNameAlert(name: trimmed)
+            return
+        }
         group.name = trimmed
         guard saveOrReport(group) else { return }
         nameField.stringValue = trimmed
@@ -685,10 +819,35 @@ public final class GroupEditorViewController: NSViewController {
             return true
         } catch {
             test_saveFailureReported = true
-            if let editingGroupID { show(groupID: editingGroupID, devices: allDevices) }
+            // `render` DIRECTLY, not `show`: the projection gate would compare
+            // equal (nothing in the model changed — that is the whole point of
+            // a failed save) and skip the repaint that puts the controls back
+            // to the truth.
+            if let group = editingGroup { render(group: group, devices: allDevices) }
             presentPersistFailureAlert(message: "Couldn\u{2019}t save the change.")
             return false
         }
+    }
+
+    /// Whether another group already carries `name` (case-insensitively).
+    /// `excluding` is the group being renamed, so re-casing its own name is
+    /// never a collision with itself.
+    private func isNameTaken(_ name: String, excluding id: String?) -> Bool {
+        groupController.groups.contains {
+            $0.id != id && $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }
+    }
+
+    /// The refusal for a name another group already has — same window-guarded
+    /// shape as ``presentPersistFailureAlert(message:)``.
+    private func presentDuplicateNameAlert(name: String) {
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "That name is already taken."
+        alert.informativeText =
+            "Another group is named \u{201C}\(name)\u{201D}. Choose a different name."
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: window)
     }
 
     /// The failure alert both `saveOrReport` and the delete path present — a
@@ -715,10 +874,16 @@ public final class GroupEditorViewController: NSViewController {
     /// Finder rename. `abortEditing()` is what drops the field editor's pending
     /// text; the restore then guarantees the visible string matches the model
     /// even if the field was showing a half-typed name.
+    ///
+    /// Focus goes SOMEWHERE REAL. It used to go to `makeFirstResponder(nil)`,
+    /// which is the exact dead-Tab state A11Y-GROUPS fixed: the window becomes
+    /// its own first responder and Tab has nothing to advance from. The host
+    /// wires ``onDidCancelRename`` to the sidebar's outline view, the one
+    /// control present whatever pane is showing.
     private func cancelRename() {
         nameField.abortEditing()
         restoreNameField()
-        nameField.window?.makeFirstResponder(nil)
+        onDidCancelRename?()
     }
 
     /// Re-measure the rename field around its current text. An editable
@@ -837,24 +1002,47 @@ public final class GroupEditorViewController: NSViewController {
     }
 
     @objc private func deleteTapped(_ sender: NSButton) {
-        guard let editingGroupID else { return }
-        // Confirm before deleting (HIG — destructive action). In a headless
-        // test there's no window to host the sheet, so the test hook bypasses
-        // this and calls `test_confirmDelete()` directly.
+        guard let group = editingGroup else { return }
+        guard let window = view.window else {
+            // Headless: no window means no confirmation, and deleting the
+            // user's group without one is exactly the thing the sheet is
+            // there to prevent. `test_confirmDelete()` is the headless path.
+            return
+        }
+        makeDeleteAlert(for: group).beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.performDelete(id: group.id)
+        }
+    }
+
+    /// The delete confirmation (HIG — destructive action). Two sentences,
+    /// depending on what deleting this group actually DOES:
+    ///
+    /// - the ACTIVE group is the Main Out target, so deleting it sends
+    ///   playback back to Selected Devices (`GroupController.deleteGroup`
+    ///   calls `setMainOut(.selectedDevices)`): a speaker that is also in
+    ///   Selected Devices keeps playing, one that is only in this group stops.
+    ///   "Deleting a group doesn't change which speakers are playing" is a
+    ///   plain lie in that case, and it was the sentence on screen.
+    /// - any OTHER group is pure configuration, and the old sentence is true.
+    ///
+    /// Delete stays the FIRST button (the `.alertFirstButtonReturn` mapping
+    /// depends on it) but loses the Return key to Cancel: an accidental Return
+    /// on a destructive sheet must not be the destructive answer.
+    private func makeDeleteAlert(for group: Group) -> NSAlert {
         let alert = NSAlert()
-        alert.messageText = "Delete this group?"
-        alert.informativeText = "Deleting a group doesn't change which speakers are playing."
+        alert.messageText = "Delete \u{201C}\(group.name)\u{201D}?"
+        alert.informativeText = groupController.activeGroupID == group.id
+            ? "This group is playing now. Deleting it switches playback to Selected Devices; "
+              + "speakers that are only in this group will stop."
+            : "Deleting a group doesn't change which speakers are playing."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
-        let performDelete = { self.performDelete(id: editingGroupID) }
-        if let window = view.window {
-            alert.beginSheetModal(for: window) { response in
-                if response == .alertFirstButtonReturn { performDelete() }
-            }
-        } else {
-            performDelete()
-        }
+        alert.buttons[0].hasDestructiveAction = true
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
+        return alert
     }
 
     // MARK: Test-support hooks
@@ -1023,6 +1211,29 @@ public final class GroupEditorViewController: NSViewController {
     /// the user instead of swallowed. Headless seam for the failure paths,
     /// which present no sheet without a window.
     public private(set) var test_saveFailureReported = false
+
+    /// True once a rename was refused because another group already had that
+    /// name. Headless seam — the explanation is a window-guarded sheet.
+    public private(set) var test_duplicateNameRefused = false
+
+    /// The confirmation the "Delete Group…" button would put up right now, or
+    /// nil when nothing is being edited. Built through the real
+    /// ``makeDeleteAlert(for:)``, so the copy and the button roles under test
+    /// are the ones the user sees.
+    public func test_makeDeleteAlert() -> NSAlert? {
+        editingGroup.map(makeDeleteAlert(for:))
+    }
+
+    /// How many times the pane has actually repainted — proves the projection
+    /// gate in ``show(groupID:devices:)``: a backend event that changes
+    /// nothing this pane draws must leave it unchanged.
+    public private(set) var test_renderCount = 0
+
+    /// A membership row view by device id, so a test can prove a refresh
+    /// REUSED the instance rather than rebuilding it.
+    public func test_membershipRow(for deviceID: String) -> NSView? {
+        rowsByID[deviceID]
+    }
 
     /// The rail geometry the overlay would draw from its CURRENT live frames.
     public func test_railPlan() -> RailPlan? {

@@ -246,6 +246,12 @@ public final class MixerWindowController {
         editorViewController.onDidEditGroup = { [weak self] in
             self?.refreshSidebar()
         }
+        // Escape out of a rename hands keyboard focus to the sidebar's row
+        // list — the one control present whatever pane is showing. Anywhere
+        // else (including nowhere) leaves Tab with nothing to advance from.
+        editorViewController.onDidCancelRename = { [weak self] in
+            self?.sidebarViewController.claimKeyboardFocus()
+        }
         // An icon override picked in any pane repaints every surface. Chain onto
         // any existing observer rather than clobbering it — the controller is
         // shared and another owner may already be listening.
@@ -853,7 +859,11 @@ public final class GroupsEmptyStateViewController: NSViewController {
 
     public override func loadView() {
         messageLabel.font = Tokens.Font.titleLarge
-        messageLabel.textColor = Tokens.Color.secondaryLabel
+        // The HEADLINE reads as primary text; the subtitle under it stays
+        // tertiary. Both at secondary flattened the pair into one grey block
+        // with no hierarchy at all. Stock `.labelColor` — the frozen-text rule
+        // holds (`AGENTS.md`).
+        messageLabel.textColor = Tokens.Color.label
         messageLabel.alignment = .center
 
         subtitleLabel.font = Tokens.Font.subtitleLarge

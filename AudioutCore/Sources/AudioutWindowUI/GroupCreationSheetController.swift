@@ -277,10 +277,31 @@ public final class GroupCreationSheetController: NSViewController {
         updateCreateEnabled()
     }
 
+    /// The copy an EMPTY checklist carries. Zero available speakers used to
+    /// render as an empty box beside a disabled Create button, which reads as
+    /// a broken sheet rather than "nothing has been found yet".
+    private static let emptyChecklistText =
+        "No speakers found yet. Speakers appear here once they\u{2019}re reachable on your network."
+
+    /// The empty-state label while it is mounted, else nil.
+    private var emptyChecklistLabel: NSTextField?
+
     /// (Re)build the membership checklist rows from `candidateDevices`.
     private func buildRows() {
         for v in stackView.arrangedSubviews { stackView.removeArrangedSubview(v); v.removeFromSuperview() }
         rowsByID.removeAll()
+        emptyChecklistLabel = nil
+        guard !candidateDevices.isEmpty else {
+            let label = NSTextField(wrappingLabelWithString: Self.emptyChecklistText)
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.font = Tokens.Font.body
+            label.textColor = Tokens.Color.secondaryLabel
+            stackView.addArrangedSubview(label)
+            label.leadingAnchor.constraint(equalTo: stackView.leadingAnchor).isActive = true
+            label.trailingAnchor.constraint(equalTo: stackView.trailingAnchor).isActive = true
+            emptyChecklistLabel = label
+            return
+        }
         for device in candidateDevices {
             // `.systemSheet` (Alec, Q6): this is a STOCK AppKit sheet on the
             // system's own white/grey, where `ember` measures ~2.34–2.48:1 and
@@ -373,15 +394,81 @@ public final class GroupCreationSheetController: NSViewController {
         guard isCreateEnabled else { return }
         let trimmed = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = trimmed.isEmpty ? "New Group" : trimmed
+        // TAKEN NAME first: refusing the name wins over resolving the member
+        // set, so the user fixes one thing at a time. Case-insensitive, and
+        // against every group — nothing here is being renamed.
+        guard !isNameTaken(name) else {
+            test_duplicateNameRefused = true
+            presentSheetAlert(
+                messageText: "That name is already taken.",
+                informativeText:
+                    "Another group is named \u{201C}\(name)\u{201D}. Choose a different name.")
+            return
+        }
         let memberIDs = candidateDevices.map(\.id).filter { checkedIDs.contains($0) }
         let memberVolumes = Dictionary(uniqueKeysWithValues: memberIDs.compactMap { id -> (String, Int)? in
             candidateDevices.first(where: { $0.id == id }).map { (id, $0.volume) }
         })
-        guard let result = try? groupController.createGroup(
-            name: name, memberIDs: memberIDs, memberVolumes: memberVolumes,
-            iconSymbolName: selectedIconSymbolName
-        ) else { return }
+        let result: GroupController.CreateResult
+        do {
+            result = try groupController.createGroup(
+                name: name, memberIDs: memberIDs, memberVolumes: memberVolumes,
+                iconSymbolName: selectedIconSymbolName)
+        } catch {
+            // REPORTED, never swallowed (the editor's `saveOrReport` contract,
+            // one surface over): the sheet used to `try?` this and simply do
+            // nothing, so a failed write looked exactly like a dead button.
+            // The form stays intact and Create stays enabled — try again.
+            test_saveFailureReported = true
+            presentSheetAlert(
+                messageText: "Couldn\u{2019}t create the group.",
+                informativeText: "The group couldn\u{2019}t be saved. Try again.")
+            return
+        }
+        // DEDUP SAID OUT LOUD: `createGroup` resolves an identical member set
+        // onto the existing group rather than making a copy, and silently
+        // landing the user in some other group's editor reads as a bug.
+        if result.alreadyExisted, let window = view.window {
+            presentAlreadyExistsAlert(result: result, on: window)
+            return
+        }
         finish((group: result.group, alreadyExisted: result.alreadyExisted))
+    }
+
+    /// Whether any saved group already carries `name` (case-insensitively).
+    private func isNameTaken(_ name: String) -> Bool {
+        groupController.groups.contains {
+            $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }
+    }
+
+    /// A window-guarded warning sheet on this sheet's own window — mirrors
+    /// `GroupEditorViewController.presentPersistFailureAlert`. Headless runs
+    /// have no window; the `test_*` seams observe the outcome instead.
+    private func presentSheetAlert(messageText: String, informativeText: String) {
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = messageText
+        alert.informativeText = informativeText
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: window)
+    }
+
+    /// "These speakers are already a group" — a CHOICE, not a redirect: open
+    /// the group that already holds them, or go back to the form (untouched)
+    /// and change the selection.
+    private func presentAlreadyExistsAlert(result: GroupController.CreateResult,
+                                           on window: NSWindow) {
+        let alert = NSAlert()
+        alert.messageText =
+            "Those speakers are already saved as \u{201C}\(result.group.name)\u{201D}."
+        alert.informativeText = "You can open that group, or go back and change the selection."
+        alert.addButton(withTitle: "Open \u{201C}\(result.group.name)\u{201D}")
+        alert.addButton(withTitle: "Go Back")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.finish((group: result.group, alreadyExisted: result.alreadyExisted))
+        }
     }
 
     private func cancel() {
@@ -469,6 +556,20 @@ public final class GroupCreationSheetController: NSViewController {
         loadViewIfNeeded()
         return titleLabel.stringValue
     }
+
+    /// The empty checklist's explanation while it is mounted, else nil (the
+    /// checklist has real rows).
+    public var test_emptyChecklistText: String? {
+        emptyChecklistLabel?.stringValue
+    }
+
+    /// True once a failed save was REPORTED rather than swallowed. Headless
+    /// seam — the alert is a window-guarded sheet.
+    public private(set) var test_saveFailureReported = false
+
+    /// True once a commit was refused because another group already had that
+    /// name. Headless seam, same reason as ``test_saveFailureReported``.
+    public private(set) var test_duplicateNameRefused = false
 
     /// True while the icon well's corner pencil badge is mounted — the
     /// "bordered + pencil = editable" cue this sheet's icon well otherwise

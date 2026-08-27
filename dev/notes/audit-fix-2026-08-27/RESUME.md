@@ -71,3 +71,4 @@ finished. If the coordinating session died mid-flight, some worktrees may hold U
 - T1 backend-failures: EXECUTED — 49ae524e on origin, full suite 2862/168 green (Guard 4, mule). Fable review running.
 - T1 backend-failures: APPROVED (fable review, 0 findings; race audit clean) — 49ae524e on origin. READY TO MERGE pending Alec.
 - T8 perf-anim: EXECUTED — bd20fbba on origin, full suite green (flake arbitration documented). Fable review running. WRAP-UP +3: NativeBackend:~3130 'emitLevel'→'onLevel drain' comment (T1 region); stale emitLevel comments NativeBackendTests:4133/:7096; T3a handoff PanelVC:772-774 replacement sentence recorded in T8 executor report. NOTE: git remotes still point at old Audiouter.git URL (redirect works) — wrap-up candidate: update remote URLs.
+- T3b popover-rows: EXECUTED — 414adcb4 on origin, full suite 2854/168 green; relay executor finished edits 8-9 + fixed a real tooltip-teardown ordering bug. Fable review running.

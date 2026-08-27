@@ -36,6 +36,10 @@ name only what earns it. Over budget means you are describing code.
 Corollary for readers: **docs orient, code decides.** If an AGENTS.md names a
 symbol you cannot find in source, believe the source and fix the doc.
 
+Every folder's `CLAUDE.md` is a **symlink to its `AGENTS.md`** so the harness
+auto-loads the nearest one into any agent that reads a file there. Never replace
+a symlink with a real file; a new folder AGENTS.md gets the same symlink beside it.
+
 ## Folder Map
 
 - [AudioutCore/](AudioutCore/AGENTS.md) — the Swift package:

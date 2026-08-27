@@ -76,3 +76,4 @@ finished. If the coordinating session died mid-flight, some worktrees may hold U
 - T7 shell: EXECUTED — ceff5db0+e2b02cd9 on origin, all 20 steps, full suite 2872/169 green (serial retry). Fable review running. Live-check items owed to Alec listed in executor report (Touch Bar gating on real hardware, HUD RM/RT, reopen/translocation/retry paths).
 - WRAP-UP +1: run-tests.sh remote leg parses unquoted --filter pipes as shell pipes (quote $@ into the remote command) — found by T7.
 - MACHINE NOTE: Data volume 96% full, 8.9GB free; project caches total 50MB so housekeeping can't help — the space is in simulator runtime (protected), DVTDownloads, ~/Music, ~/Library/Caches. Freeing it is ALEC's call (user data). Builds still pass at this level; contention flake risk stays elevated until freed.
+- T3b popover-rows: APPROVED (fable review, 0 defects; tooltip bugfix verified complete; VO composition intact) — 414adcb4 READY TO MERGE pending Alec.

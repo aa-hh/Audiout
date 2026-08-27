@@ -554,7 +554,20 @@ public final class GroupEditorViewController: NSViewController {
     /// ``EditorProjection`` means there is nothing to repaint.
     public func show(groupID: String, devices: [Device]) {
         guard let group = groupController.groups.first(where: { $0.id == groupID }) else { return }
-        guard editorProjection(for: group, devices: devices) != lastRenderedProjection else { return }
+        guard editorProjection(for: group, devices: devices) != lastRenderedProjection else {
+            // Nothing to repaint, but a later membership toggle
+            // (`membershipToggled`) reads `allDevices`/`candidateDevices` to
+            // persist a device's CURRENT volume — a volume-only change is
+            // correctly invisible to `EditorProjection` (nothing this pane
+            // draws shows a volume), but leaving those two stale here let a
+            // subsequent check-in persist a volume from before this event.
+            // Re-derive them from the fresh snapshot without touching the
+            // rows: only the render path may rebuild those.
+            allDevices = devices
+            let memberSet = Set(group.memberIDs)
+            candidateDevices = devices.filter { $0.isAvailable || memberSet.contains($0.id) }
+            return
+        }
         render(group: group, devices: devices)
     }
 
@@ -701,6 +714,13 @@ public final class GroupEditorViewController: NSViewController {
                       iconSymbolName: deviceIconController?.symbolName(for: device))
             row.railArmed = railArmed(for: device, memberSet: memberSet,
                                       isActiveGroup: isActiveGroup)
+            // `apply` re-enables the checkbox but doesn't know about the sole-
+            // member pin, so a formerly-pinned row that gained company here
+            // (still `apply`'s job, not this loop's) kept its stale "A group
+            // needs at least one device…" tooltip/VoiceOver help forever.
+            // Clear it for every row; `pinSoleMember` below re-pins the
+            // current sole member, if there still is one.
+            row.setCheckboxEnabled(true, tooltip: nil)
         }
         // `apply` re-enables the checkbox (visibility policy is the host's
         // job), so the pinning has to run AFTER it, exactly as in `buildRows`.

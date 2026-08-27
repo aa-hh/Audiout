@@ -467,6 +467,31 @@ import AppKit
         #expect(window.test_editor.test_checkedDeviceIDs.contains("sonos-move"), "the reverted checkbox shows the member still belongs")
     }
 
+    /// Fable review fix: `rebuildCandidates`'s REUSE path (`apply` re-enables
+    /// the checkbox but never clears the tooltip/VoiceOver help `pinSoleMember`
+    /// set earlier) used to leave a formerly-pinned row stuck announcing "A
+    /// group needs at least one device…" even after it stopped being the sole
+    /// member.
+    @Test func gainingASecondMemberClearsTheFormerSoleMembersStalePin() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try controller.createGroup(name: "Solo", memberIDs: ["office"]).group
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+
+        #expect(!(window.test_editor.test_isMembershipRowEnabled(for: "office")), "the sole member starts pinned")
+        let officeRow = try #require(window.test_editor.test_membershipRow(for: "office") as? MembershipRowView)
+        #expect(officeRow.test_checkboxAccessibilityHelp != nil, "the pin explanation is set")
+
+        // Every demo-fleet device is already available, so this takes the
+        // REUSE path (the candidate ID sequence is unchanged), not a full
+        // rebuild that would have fresh rows anyway.
+        window.test_editor.test_setMembership(true, for: "sonos-move")
+
+        #expect(window.test_editor.test_isMembershipRowEnabled(for: "office"), "no longer the sole member — its checkbox must re-enable")
+        #expect(officeRow.test_checkboxAccessibilityHelp == nil, "the reuse path must clear the stale pin explanation, not just re-enable the checkbox")
+    }
+
     @Test func deleteInEditorCallsDeleteGroupAndReturnsToMixer() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
@@ -596,6 +621,37 @@ import AppKit
         #expect(!editor.test_candidateDeviceIDs.contains("homepod-bed"))
         #expect(editor.test_membershipRow(for: "office") !== row,
                 "a changed candidate sequence falls through to the full rebuild")
+    }
+
+    /// Fable review fix: the projection gate in `show(groupID:devices:)` used
+    /// to return early on a volume-only change (correctly — nothing this pane
+    /// draws shows a volume) WITHOUT refreshing `allDevices`/`candidateDevices`,
+    /// so a check-in right after persisted the volume from BEFORE that event
+    /// instead of the fresh one. The render count must stay untouched either
+    /// way — this is a model-write fix, not a rendering one.
+    @Test func aVolumeOnlyRefreshBeforeACheckInPersistsTheFreshVolume() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)   // sonos-move, office
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+        let editor = window.test_editor
+        let baseline = editor.test_renderCount
+
+        // Through `window.update(devices:)`, exactly like a real backend echo
+        // arrives — it re-sorts into `orderedDevices()` before handing the
+        // editor its snapshot, so this isn't a second, independently-ordered
+        // fetch of `backend.devices` (which doesn't promise a stable order).
+        var volumeOnly = backend.devices
+        let index = try #require(volumeOnly.firstIndex { $0.id == "homepod-bed" })
+        volumeOnly[index].volume = 77
+        window.update(devices: volumeOnly)
+        #expect(editor.test_renderCount == baseline, "a volume-only change draws nothing this pane shows")
+
+        editor.test_setMembership(true, for: "homepod-bed")
+
+        #expect(controller.groups.first { $0.id == saved.id }?.memberVolumes["homepod-bed"] == 77,
+                "the persisted volume must come from the FRESH snapshot, not the stale one from before the gated refresh")
     }
 
     // MARK: Duplicate names are refused (P2-5)

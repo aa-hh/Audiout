@@ -736,12 +736,25 @@ public final class EQEditorView: NSView {
         return balance < 0 ? "L \(percent)%" : "R \(percent)%"
     }
 
+    /// razor: local duplicate of the locale-number idiom
+    /// (`AudioSettingsViewController.msFormatter`) — pending consolidation with
+    /// the shared locale helper at wrap-up.
+    private static let percentFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        return formatter
+    }()
+
     /// The spoken (accessibility-value) form — a full sentence rather than
-    /// the printed readout's short form.
+    /// the printed readout's short form. The digits go through a
+    /// `NumberFormatter` so a screen reader hears the listener's own grouping,
+    /// not a raw interpolation.
     static func balanceText(_ balance: Double) -> String {
         let percent = Int((abs(balance) * 100).rounded())
         if percent == 0 { return "center" }
-        return balance < 0 ? "left \(percent) percent" : "right \(percent) percent"
+        let digits = percentFormatter.string(from: NSNumber(value: percent)) ?? String(percent)
+        return balance < 0 ? "left \(digits) percent" : "right \(digits) percent"
     }
 
     // MARK: The Advanced fold (Settings-Advanced precedent, one clock)

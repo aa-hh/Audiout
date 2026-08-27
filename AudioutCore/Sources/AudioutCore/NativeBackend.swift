@@ -2034,7 +2034,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //    `reconcileCaptureGate()` off `setOutputSet`, i.e. only while a
             //    real AP2 output is actually selected. `onLevel` is harmless to
             //    wire early: it only fires while the tap is running.
-            self.captureCoordinator?.onLevel = { [weak self] rms in self?.emitLevel(rms) }
+            //    `noteSystemRMS` is a try-store into a slot the `stateQueue`
+            //    drain reads at the display cadence — this closure runs on the
+            //    tap's IOProc delivery thread and must not enqueue per buffer.
+            self.captureCoordinator?.onLevel = { [weak self] rms in self?.noteSystemRMS(rms) }
 
             // WIRE the whole-system tap's state machine (T16, E10) so a
             // `.failed` (TCC lost, the aggregate device torn out from under it,
@@ -8755,15 +8758,47 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Display cadence for level emission (D3) — ~25 Hz, above the perception
     /// threshold for a VU meter but far below the ~86/s raw capture-buffer rate.
     private let levelEmitIntervalNanos: UInt64 = 40_000_000
-    /// Per-device leading-edge timestamp (`DispatchTime.now().uptimeNanoseconds`)
-    /// of the last emitted `.level` event.
-    private var lastLevelEmitNanos: [String: UInt64] = [:]
-    /// Per-device latest value seen while inside the coalescing window, delivered
+
+    /// What one coalesced meter event is FOR — a device row (`.level`) or an app
+    /// row (`.appLevel`). An enum rather than a bare `String` so a bundle id can
+    /// never collide with a device id in the shared maps below.
+    private enum LevelKey: Hashable {
+        case device(String)
+        case app(String)
+    }
+
+    /// Per-key leading-edge timestamp (`DispatchTime.now().uptimeNanoseconds`)
+    /// of the last emitted meter event.
+    private var lastLevelEmitNanos: [LevelKey: UInt64] = [:]
+    /// Per-key latest value seen while inside the coalescing window, delivered
     /// by the trailing flush.
-    private var pendingLevel: [String: Float] = [:]
-    /// Ids with a trailing flush already scheduled, so a burst schedules at most
-    /// one `asyncAfter` per device.
-    private var levelFlushScheduled: Set<String> = []
+    private var pendingLevel: [LevelKey: Float] = [:]
+    /// Keys with a trailing flush already scheduled, so a burst schedules at most
+    /// one `asyncAfter` per key.
+    private var levelFlushScheduled: Set<LevelKey> = []
+
+    /// The tap's IOProc delivery thread must not enqueue per buffer — a
+    /// `stateQueue.async` allocates a block and takes the queue's lock on a
+    /// real-time thread. It try-stores into this slot instead (the
+    /// `EQProcessor.mailbox` shape: a contended `try()` skips, never blocks),
+    /// and `drainSystemRMS` reads it on `stateQueue` at the D3 cadence.
+    private let systemRMSLock = NSLock()
+    private var systemRMSSlot: Float = 0      // systemRMSLock
+    private var systemRMSDirty = false        // systemRMSLock
+    /// Whether a drain is already armed, so the chain stays single-flight.
+    private var levelDrainScheduled = false   // stateQueue
+
+    /// Record one whole-system-tap RMS sample. Runs on the tap's IOProc delivery
+    /// thread, so it does exactly three things and none of them may block: no
+    /// allocation, no unbounded lock, no dispatch enqueue. A contended `try()`
+    /// DROPS the sample — the next buffer (~8 ms) refreshes it, and the meter
+    /// reads at 25 Hz anyway, so a dropped sample is invisible.
+    private func noteSystemRMS(_ rms: Float) {   // IOProc delivery thread
+        guard systemRMSLock.try() else { return }
+        systemRMSSlot = rms
+        systemRMSDirty = true
+        systemRMSLock.unlock()
+    }
 
     /// Flip the popover-visibility metering gate. Forwards to ALL THREE RMS
     /// sources — the whole-system `captureCoordinator`, the `routeMixer`
@@ -8780,6 +8815,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         localPlaybackEngine?.setMeteringActive(active)
         let diff: (start: Set<String>, stop: Set<String>) = stateQueue.sync {
             self.meteringActive = active
+            if active {
+                // A sample stored while the popover was closed is stale — it must
+                // not replay as the first frame on reopen.
+                self.systemRMSLock.lock()
+                self.systemRMSDirty = false
+                self.systemRMSLock.unlock()
+                self.scheduleSystemRMSDrainLocked()
+            }
+            // When inactive the drain chain stops itself on its next fire.
             return self.meteringTapDiffLocked()
         }
         applyMeteringTapDiff(diff)
@@ -8849,7 +8893,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     // MARK: Level emission (T3 — combined per-device MAX)
 
     /// Whether `device` is genuinely streaming the whole-system mix right now,
-    /// for METERING purposes — the fact `emitLevel`/`emitCombinedLevel` need to
+    /// for METERING purposes — the fact `drainSystemRMS`/`emitCombinedLevel` need to
     /// decide whether `latestSystemRMS` belongs in this device's bar. For every
     /// AirPlay device this is exactly `Device.isSelected` (a live engine
     /// session — see `applyEngineState`/`convergeDevice`). The LOCAL device is
@@ -8871,19 +8915,37 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         device.isLocalDevice ? syncedLocalSinkEnabled : device.isSelected
     }
 
-    /// A whole-system-tap RMS sample (stream_id 0). Store it and re-emit the
-    /// combined `.level` for every device currently streaming it (``isMeterable``)
-    /// and unmuted (its system contribution just changed). On `stateQueue`; gated
-    /// on metering (belt-and-suspenders — the coordinator already only fires
-    /// `onLevel` while active).
-    private func emitLevel(_ rms: Float) {
-        stateQueue.async {
-            guard self.meteringActive else { return }
-            self.latestSystemRMS = rms
-            for id in self.order {
-                guard let device = self.known[id], self.isMeterable(device), !device.isMuted else { continue }
-                self.emitCombinedLevel(forDevice: id)
+    /// Read whatever `noteSystemRMS` last stored (stream_id 0) and, if it is
+    /// new, re-emit the combined `.level` for every device currently streaming it
+    /// (``isMeterable``) and unmuted — its system contribution just changed.
+    /// Re-arms itself, so the chain runs at `levelEmitIntervalNanos` for as long
+    /// as metering is on and stops itself on the first fire after it goes off.
+    /// On `stateQueue`.
+    private func drainSystemRMS() {   // on stateQueue
+        levelDrainScheduled = false
+        guard meteringActive else { return }
+        systemRMSLock.lock()
+        let dirty = systemRMSDirty
+        let rms = systemRMSSlot
+        systemRMSDirty = false
+        systemRMSLock.unlock()
+        if dirty {
+            latestSystemRMS = rms
+            for id in order {
+                guard let device = known[id], isMeterable(device), !device.isMuted else { continue }
+                emitCombinedLevel(forDevice: id)
             }
+        }
+        scheduleSystemRMSDrainLocked()
+    }
+
+    /// Arm the next drain, single-flight and only while metering is on.
+    /// On `stateQueue`.
+    private func scheduleSystemRMSDrainLocked() {   // on stateQueue
+        guard meteringActive, !levelDrainScheduled else { return }
+        levelDrainScheduled = true
+        stateQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(levelEmitIntervalNanos))) { [weak self] in
+            self?.drainSystemRMS()
         }
     }
 
@@ -8892,13 +8954,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// meter of the device it feeds (a redirect target's contribution is the
     /// loudest source routed to it; see `emitCombinedLevel`). Gated on metering.
     /// Callable from any source thread (mixer queue, tap delivery, engine); hops
-    /// to `stateQueue`. (The `.appLevel` itself is emitted directly, not through the
-    /// D3 coalescer, which is per-device `.level` only — app-level coalescing is a
-    /// tracked follow-up.)
+    /// to `stateQueue`. The `.appLevel` rides the SAME D3 sampler the per-device
+    /// `.level` does, keyed by bundle id, so an app row is rate-limited to the
+    /// display cadence exactly like a device row.
     private func emitAppLevel(bundleID: String, rms: Float) {
         stateQueue.async {
             guard self.meteringActive else { return }
-            self.emit(.appLevel(bundleID: bundleID, rms: rms))
+            self.scheduleLevelEmit(key: .app(bundleID), rms: rms,
+                                   now: DispatchTime.now().uptimeNanoseconds)
             self.latestAppLevel[bundleID] = rms
             // The device this app feeds tracks the loudest source routed to it, so
             // re-emit its combined `.level` now that this source level changed.
@@ -8935,38 +8998,46 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 sourceContribution = max(sourceContribution, level)
             }
         }
-        scheduleLevelEmit(id: id, rms: max(systemContribution, sourceContribution),
+        scheduleLevelEmit(key: .device(id), rms: max(systemContribution, sourceContribution),
                           now: DispatchTime.now().uptimeNanoseconds)
     }
 
+    /// The event one coalescer key delivers.
+    private func levelEvent(for key: LevelKey, rms: Float) -> BackendEvent {
+        switch key {
+        case .device(let id): return .level(id: id, rms: rms)
+        case .app(let bundleID): return .appLevel(bundleID: bundleID, rms: rms)
+        }
+    }
+
     /// Leading-edge/trailing-edge sampler (D3): emits immediately if at least
-    /// `levelEmitIntervalNanos` has passed since this device's last emit;
+    /// `levelEmitIntervalNanos` has passed since this key's last emit;
     /// otherwise remembers the latest value and lets an already-scheduled trailing
     /// flush deliver it, so a burst's final value always lands and the meter never
     /// freezes on a stale pre-quiet value. On `stateQueue`.
-    private func scheduleLevelEmit(id: String, rms: Float, now: UInt64) {   // on stateQueue
-        if let last = lastLevelEmitNanos[id], now - last < levelEmitIntervalNanos {
-            pendingLevel[id] = rms
-            guard levelFlushScheduled.insert(id).inserted else { return }
+    private func scheduleLevelEmit(key: LevelKey, rms: Float, now: UInt64) {   // on stateQueue
+        if let last = lastLevelEmitNanos[key], now - last < levelEmitIntervalNanos {
+            pendingLevel[key] = rms
+            guard levelFlushScheduled.insert(key).inserted else { return }
             let remaining = levelEmitIntervalNanos - (now - last)
             stateQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(remaining))) { [weak self] in
-                self?.flushPendingLevel(id: id)
+                self?.flushPendingLevel(key: key)
             }
             return
         }
-        lastLevelEmitNanos[id] = now
-        pendingLevel.removeValue(forKey: id)
-        emit(.level(id: id, rms: rms))
+        lastLevelEmitNanos[key] = now
+        pendingLevel.removeValue(forKey: key)
+        emit(levelEvent(for: key, rms: rms))
     }
 
     /// Trailing flush for `scheduleLevelEmit` — delivers whatever value arrived
     /// last during the coalescing window, if any (a leading-edge emit may have
     /// already cleared it). On `stateQueue`.
-    private func flushPendingLevel(id: String) {   // on stateQueue
-        levelFlushScheduled.remove(id)
-        guard let rms = pendingLevel.removeValue(forKey: id) else { return }
-        lastLevelEmitNanos[id] = DispatchTime.now().uptimeNanoseconds
-        emit(.level(id: id, rms: rms))
+    private func flushPendingLevel(key: LevelKey) {   // on stateQueue
+        levelFlushScheduled.remove(key)
+        guard let rms = pendingLevel.removeValue(forKey: key) else { return }
+        lastLevelEmitNanos[key] = DispatchTime.now().uptimeNanoseconds
+        emit(levelEvent(for: key, rms: rms))
     }
 
     // MARK: Emit

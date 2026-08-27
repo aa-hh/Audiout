@@ -293,6 +293,16 @@ public final class LicenseSheetViewController: NSViewController {
         onComplete = nil
     }
 
+    /// Fill the field with `key` and submit it, exactly as a paste followed by
+    /// a Register click would — the landing point for
+    /// `audiout://register?key=…`. The sheet stays up until the server answers,
+    /// so a rejected key lands in the result line rather than nowhere.
+    public func submit(key: String) {
+        _ = view
+        keyField.stringValue = key
+        registerTapped()
+    }
+
     // MARK: Test-support hooks
 
     /// Replace the field's text, as typing would.

@@ -706,6 +706,20 @@ plutil -extract NSBonjourServices.3 raw -o - "$PLIST" >/dev/null || { echo "ERRO
 plutil -insert NSBluetoothAlwaysUsageDescription -string "$BLUETOOTH_USAGE" "$PLIST"
 plutil -extract NSBluetoothAlwaysUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBluetoothAlwaysUsageDescription missing from Info.plist" >&2; exit 1; }
 
+# --- audiout:// URL scheme --------------------------------------------------
+# The purchase flow's return path: the thanks page links
+# `audiout://register?key=<key>`, LaunchServices hands that to the app as a
+# kAEGetURL Apple Event, and Settings ▸ General opens the license sheet on the
+# key (`AppDelegate.handleGetURLEvent`). Without this key LaunchServices has no
+# claim on the scheme and the link does nothing at all — silently — so it gets
+# the same plutil-plus-assert treatment as the usage strings above.
+plutil -insert CFBundleURLTypes -array "$PLIST"
+plutil -insert CFBundleURLTypes.0 -dictionary "$PLIST"
+plutil -insert CFBundleURLTypes.0.CFBundleURLName -string "$BUNDLE_ID" "$PLIST"
+plutil -insert CFBundleURLTypes.0.CFBundleURLSchemes -array "$PLIST"
+plutil -insert CFBundleURLTypes.0.CFBundleURLSchemes.0 -string "audiout" "$PLIST"
+plutil -extract CFBundleURLTypes.0.CFBundleURLSchemes.0 raw -o - "$PLIST" >/dev/null || { echo "ERROR: CFBundleURLTypes is missing the audiout:// scheme — the purchase return link would silently do nothing" >&2; exit 1; }
+
 # --- License server + buy page (release builds only) ------------------------
 # AUDIOUT_LICENSE_URL is the base URL of the license server (the Worker in
 # ~/Projects/Audiout License Server). Its presence is the whole switch for the

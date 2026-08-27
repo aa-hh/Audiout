@@ -1110,7 +1110,10 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     private static func makeLegendLabel(_ text: String,
                                         weight: NSFont.Weight,
                                         color: NSColor) -> NSTextField {
-        let font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: weight)
+        // Only `.semibold` (the section title, below) and `.medium` (the
+        // column headers) are ever passed, so both branches route through
+        // `Tokens.Font`.
+        let font = weight == .semibold ? Tokens.Font.captionEmphasized : Tokens.Font.captionMedium
         let label = NSTextField(labelWithAttributedString: NSAttributedString(
             string: text,
             attributes: [.font: font, .foregroundColor: color]))
@@ -1158,7 +1161,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         let label = NSTextField(labelWithString: title)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = Tokens.Font.captionMedium
-        label.textColor = Tokens.Color.tertiaryLabel
+        label.textColor = Tokens.Color.inkTertiary
         let wrapper = NSView()
         wrapper.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(label)
@@ -1176,7 +1179,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             chevron.isBordered = false
             chevron.imagePosition = .imageOnly
             chevron.setContentHuggingPriority(.required, for: .horizontal)
-            chevron.contentTintColor = Tokens.Color.tertiaryLabel
+            chevron.contentTintColor = Tokens.Color.inkTertiary
             chevron.setAccessibilityLabel(collapsed ? "Expand \(title)" : "Collapse \(title)")
             let onChevron = ClosureActionTarget { onToggle?() }
             chevron.target = onChevron
@@ -1265,7 +1268,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         guard let card = currentCard else { return }
         let label = NSTextField(labelWithString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: 11)
+        label.font = Tokens.Font.detail
         // `secondaryLabel`, NOT tertiary. This note is live state — it says the
         // card's rows are inert and names what took over — so it is the highest-
         // stakes sentence on the panel whenever it appears, and tertiary leaves

@@ -3,6 +3,7 @@
 import Testing
 import AppKit
 @testable import AudioutPopoverUI
+@testable import AudioutSharedUI
 
 /// Container-level coverage for `PopoverPanelViewController`: the
 /// whole-header collapse click target (C4), the header
@@ -102,7 +103,7 @@ import AppKit
         let notes = panel.test_cardNotes(title: title)
         #expect(notes.count == 1)
         #expect(notes.first?.stringValue == text)
-        #expect(notes.first?.textColor == .secondaryLabelColor)
+        #expect(notes.first?.textColor == Tokens.Color.secondaryLabel)
     }
 
     @Test func cardNoteSurvivesBodyCollapse() {

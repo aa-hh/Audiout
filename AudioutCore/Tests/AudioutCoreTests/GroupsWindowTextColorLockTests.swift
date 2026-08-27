@@ -19,6 +19,17 @@ import AppKit
 /// repointing a Groups-window label at a warm `Tokens.Color` token — this file
 /// makes that change fail a test instead of merging silently.
 ///
+/// SUPERSESSION (design-token audit, 2026-08-27): the 2026-07-25 accepted debt
+/// on SECONDARY text specifically is now superseded by a TOKEN-LEVEL fix —
+/// `Tokens.Color.secondaryLabel` itself became mode-aware (P2-1) to clear
+/// PRODUCT.md:109's committed WCAG floors, rather than any Groups-window
+/// label being repointed by hand. The lock's real invariant is UNCHANGED and
+/// still fully enforced: no per-label repoint to a warm token; text reaches
+/// color only through the sanctioned semantic tokens (`stockSemantics`
+/// below now lists `Tokens.Color.secondaryLabel` alongside the raw system
+/// alias precisely because it is one of those sanctioned semantics, not a
+/// warm palette escape hatch).
+///
 /// Two halves, matching the deal:
 ///   1. NEGATIVE — every label actually rendered by the Groups window
 ///      (`DeviceDetailViewController`, `MembershipRowView`,
@@ -105,6 +116,7 @@ import AppKit
             ("quaternaryLabelColor", .quaternaryLabelColor),
             ("disabledControlTextColor", .disabledControlTextColor),
             ("controlTextColor", .controlTextColor),
+            ("Tokens.Color.secondaryLabel (mode-aware token)", Tokens.Color.secondaryLabel),
         ]
     }
 

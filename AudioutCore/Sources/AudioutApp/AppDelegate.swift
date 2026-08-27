@@ -1932,7 +1932,7 @@ final class QuittingIndicatorPanel: NSPanel {
         spinner.translatesAutoresizingMaskIntoConstraints = false
 
         let label = NSTextField(labelWithString: "Disconnecting…")
-        label.font = .systemFont(ofSize: NSFont.systemFontSize)
+        label.font = Tokens.Font.body
         label.textColor = .labelColor
         label.translatesAutoresizingMaskIntoConstraints = false
 

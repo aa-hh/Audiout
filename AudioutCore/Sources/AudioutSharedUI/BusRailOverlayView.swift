@@ -275,7 +275,7 @@ public final class BusRailOverlayView: NSView {
     /// rather than the gold/grey patchwork per-stop tones drew on a wire that is
     /// feeding nothing.
     private static func originColor(for plan: RailPlan) -> NSColor {
-        plan.dormant ? Tokens.Color.tertiaryLabel : Tokens.Color.spineTone(armed: plan.gold)
+        plan.dormant ? Tokens.Color.railDormant : Tokens.Color.spineTone(armed: plan.gold)
     }
 
     /// The wire's stroked runs in path order, origin → terminus. Warm Signal
@@ -329,7 +329,7 @@ public final class BusRailOverlayView: NSView {
             // the one quiet tone, so every segment inherits it.
             let segColor: NSColor
             if plan.dormant || stop.node == .failed {
-                segColor = Tokens.Color.tertiaryLabel
+                segColor = Tokens.Color.railDormant
             } else if stop.node == .member {
                 segColor = originColor
             } else {

@@ -370,7 +370,7 @@ public final class OnboardingViewController: NSViewController {
         tile.translatesAutoresizingMaskIntoConstraints = false
 
         titleLabel = NSTextField(labelWithString: "")
-        titleLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        titleLabel.font = Tokens.Font.display
         titleLabel.lineBreakMode = .byWordWrapping
         titleLabel.maximumNumberOfLines = 2
         titleLabel.preferredMaxLayoutWidth = Self.spineWidth

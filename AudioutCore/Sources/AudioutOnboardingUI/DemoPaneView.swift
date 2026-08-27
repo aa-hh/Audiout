@@ -1864,7 +1864,7 @@ final class DemoSettledMockView: NSView {
         headline.textColor = Tokens.Color.label
         headline.alignment = .center
 
-        line.font = .systemFont(ofSize: NSFont.systemFontSize)
+        line.font = Tokens.Font.body
         line.textColor = Tokens.Color.secondaryLabel
         line.alignment = .center
 

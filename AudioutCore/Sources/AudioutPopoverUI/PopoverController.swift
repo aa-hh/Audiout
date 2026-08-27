@@ -2625,7 +2625,7 @@ public final class PopoverController: NSObject {
         let label = NSTextField(labelWithString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = Tokens.Font.menuItem
-        label.textColor = Tokens.Color.tertiaryLabel
+        label.textColor = Tokens.Color.inkTertiary
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
         let wrapper = NSView()
@@ -2716,12 +2716,12 @@ public final class PopoverController: NSObject {
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .regular))
-        icon.contentTintColor = Tokens.Color.tertiaryLabel
+        icon.contentTintColor = Tokens.Color.inkTertiary
         icon.setContentHuggingPriority(.required, for: .horizontal)
         let label = NSTextField(labelWithString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = Tokens.Font.caption
-        label.textColor = Tokens.Color.tertiaryLabel
+        label.textColor = Tokens.Color.inkTertiary
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
         wrapper.addSubview(icon)

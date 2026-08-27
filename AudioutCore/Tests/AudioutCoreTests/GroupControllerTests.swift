@@ -1611,6 +1611,68 @@ import Testing
         #expect(backend.outputSetWrites.last == ["bt-move", "office"],
                 "BT and AirPlay members route; the Mac is filtered out")
     }
+
+    // MARK: Persistence failures leave the model alone
+
+    /// A FILE where the store wants a directory: `createDirectory` can't make
+    /// one underneath it, so every save fails for a real reason.
+    private func blockedDirectory() throws -> URL {
+        let blocker = tempDirectory()
+        try Data().write(to: blocker)
+        return blocker.appendingPathComponent("x")
+    }
+
+    @Test func saveGroupFailedPersistLeavesModelUntouched() async throws {
+        let backend = try await makeBackend()
+        let controller = GroupController(backend: backend,
+                                         store: GroupStore(directory: try blockedDirectory()),
+                                         settings: AppSettings(defaults: isolatedDefaults),
+                                         loadPersisted: false)
+        #expect(throws: (any Error).self) {
+            try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["sonos-move"], memberVolumes: [:]))
+        }
+        #expect(controller.groups.isEmpty, "a failed save must not leave the group live in memory")
+    }
+
+    @Test func deleteGroupFailedPersistKeepsGroup() async throws {
+        let dir = tempDirectory()
+        let (controller, _) = try await makeController(directory: dir)
+        try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["sonos-move"], memberVolumes: [:]))
+
+        // Read-and-execute only: the file is there but cannot be replaced.
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path) }
+
+        #expect(throws: (any Error).self) { try controller.deleteGroup(id: "g1") }
+        #expect(controller.groups.map(\.id) == ["g1"], "a failed delete must not remove it from the pane")
+    }
+
+    // MARK: Routing persistence is off-main and coalesced
+
+    @Test func routingSelectionPersistsAfterFlush() async throws {
+        let backend = try await makeBackend()
+        let dir = tempDirectory()
+        let routing = RoutingStore(directory: dir)
+        let controller = GroupController(backend: backend,
+                                         store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing,
+                                         settings: AppSettings(defaults: isolatedDefaults),
+                                         loadPersisted: false)
+        controller.ensureDefaultSelection()
+        _ = controller.setDeviceSelected("office", true)
+        controller.flushPendingRoutingSave()
+        #expect(try routing.load()?.selectedDeviceIDs == ["office"])
+    }
+
+    // MARK: Pushed device snapshot
+
+    @Test func pushedSnapshotFeedsDeviceReads() async throws {
+        let (controller, _) = try await makeController()
+        let pushed = [Device(id: "only-one", name: "Only One", kind: .generic, volume: 11)]
+        controller.updateDevices(pushed)
+        #expect(controller.devices.map(\.id) == ["only-one"],
+                "reads come from the pushed snapshot, not the backend's own list")
+    }
 }
 
 /// Wraps a real ``MockBackend`` — so `devices`, echoes and queue ordering behave

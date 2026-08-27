@@ -115,7 +115,7 @@ public final class DeviceIconController {
     }
 
     private func persist() {
-        try? store.save(overrides)
+        do { try store.save(overrides) } catch { StoreRecovery.noteWriteFailure(error) }
     }
 
     // MARK: Queries

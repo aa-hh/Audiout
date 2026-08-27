@@ -9430,7 +9430,7 @@ extension NativeBackend: BTOutputControlling {
         // skipped. `btSyncTrim`/`btHasSyncTrim` are read-back seams, and a
         // reader mid-drag should see what the user is hearing.
         if persist {
-            try? btTrimStore?.save(all)
+            do { try btTrimStore?.save(all) } catch { StoreRecovery.noteWriteFailure(error) }
         }
         captureControlQueue.async { [weak self] in
             self?.btSink?.setTrimMs(value, forDeviceUID: id)
@@ -9453,7 +9453,7 @@ extension NativeBackend: BTOutputControlling {
         // ONE read-modify-write of the file for both maps — and a genuine
         // delete, which `save`/`saveLatencies` (whole-map overwrites) could
         // only express by round-tripping the maps back out again.
-        try? btTrimStore?.clearAlignment(deviceUID: id)
+        do { try btTrimStore?.clearAlignment(deviceUID: id) } catch { StoreRecovery.noteWriteFailure(error) }
         // The reference floor is a function of the slowest KNOWN latency, so
         // dropping one can move it — same ordering as the wizard's Keep: the
         // reference first, then the sink's own two terms, both hops enqueued
@@ -9592,7 +9592,7 @@ extension NativeBackend: BTOutputControlling {
                 btAlignmentDismissedUIDs.insert(id)
                 return btAlignmentDismissedUIDs
             }
-            try? btTrimStore?.saveDismissedUIDs(all)
+            do { try btTrimStore?.saveDismissedUIDs(all) } catch { StoreRecovery.noteWriteFailure(error) }
             Telemetry.log(.localPlayback, "bt_alignment_prompt_dismissed", ["device": id])
         }
         stateQueue.async { self.releaseBTAlignmentHoldLocked(id) }
@@ -9700,8 +9700,12 @@ extension NativeBackend: BTOutputControlling {
                 btTrimsByUID[id] = 0
                 return (btLatencyMsByUID, btTrimsByUID)
             }
-            try? btTrimStore?.saveLatencies(latencies)
-            try? btTrimStore?.save(trims)
+            do {
+                try btTrimStore?.saveLatencies(latencies)
+                try btTrimStore?.save(trims)
+            } catch {
+                StoreRecovery.noteWriteFailure(error)
+            }
             // The run's receipt, in one line: what was measured and what the
             // nudge was left at — the two halves of the delay term Keep writes,
             // so a live report never has to infer one from the other. UI-thread

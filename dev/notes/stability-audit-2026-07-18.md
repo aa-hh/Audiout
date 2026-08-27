@@ -68,6 +68,13 @@ per row inside a loop.
 hot repaint path; needs care that call sites don't rely on synchronous
 ordering.
 
+**Partially fixed (`claude/fix-data-safety`):** `GroupController` no longer
+reads through to `backend.devices` per call — the app layer pushes the
+snapshot it already builds (`updateDevices(_:)`), and `devices`/`device(_:)`
+read that, falling back to a live query only before the first push. The
+`GroupController` marker is deleted. The two `NativeBackend` sites are
+untouched and this entry stays open.
+
 When fixed: delete the STABILITY(C8) marker(s) at `NativeBackend.swift:482`,
 `NativeBackend.swift:220`, and `GroupController.swift:167` and move this
 entry to Resolved.
@@ -80,6 +87,13 @@ entry to Resolved.
   a UI gesture handler.
 - `AudioutCore/Sources/AudioutCore/GroupController.swift:155` —
   `persistRouting()`, same shape.
+
+**Both fixed (`claude/fix-data-safety`), markers deleted:** `persistRouting()`
+is now a latest-wins writer on a private serial queue (drained on quit via
+`flushPendingRoutingSave()`), and `AppRoutingController.persist()` reports its
+failure through `StoreRecovery` instead of swallowing it — it stays on main
+deliberately, since routes change at click frequency, not drag frequency. Every
+other D4 sub-item below is untouched and this entry stays open.
 
 **Blocking XPC on main:**
 - `AudioutCore/Sources/AudioutSettingsUI/GeneralSettingsViewController.swift:52`

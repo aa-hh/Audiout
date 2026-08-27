@@ -463,20 +463,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             andEventID: AEEventID(kAEGetURL))
     }
 
-    /// `audiout://register?key=<key>` — the purchase flow's return link. A
-    /// missing, empty or unparseable key is IGNORED, silently: a deep link is
-    /// something a web page can hand us unprompted, so a malformed one must
-    /// never put an alert on the user's screen.
+    /// `audiout://register?key=<key>` — the purchase flow's return link. Event
+    /// plumbing only; what counts as a key is `LicenseDeepLink.parse` (Core, so
+    /// it is testable — this target is not).
     @objc private func handleGetURLEvent(_ event: NSAppleEventDescriptor,
                                          withReplyEvent reply: NSAppleEventDescriptor) {
         guard let text = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
               let url = URL(string: text),
-              url.scheme?.lowercased() == "audiout",
-              url.host?.lowercased() == "register",
-              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let key = components.queryItems?.first(where: { $0.name == "key" })?.value?
-                  .trimmingCharacters(in: .whitespacesAndNewlines),
-              !key.isEmpty
+              let key = LicenseDeepLink.parse(url)
         else { return }
         openLicenseSheet(registering: key)
     }
@@ -494,10 +488,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         showSurface(.settings)
-        // General is the first section (`makeSettingsRoot`), and it has to be
-        // the MOUNTED one: an unmounted pane has no window to host a sheet.
-        settingsRootController?.selectSection(at: 0)
-        generalSettingsController?.presentLicenseSheet(registering: key)
+        // The first open of the process DEFERS the window until discovery
+        // settles, so the surface may not be on screen yet. Submitting into a
+        // sheet that was never presented would validate the key with no UI at
+        // all — and a REJECTED key would then leave the sheet held but
+        // invisible, wedging "Enter License…" for the rest of the session.
+        surface.whenRevealed { [weak self] in
+            // General is the first section (`makeSettingsRoot`), and it has to
+            // be the MOUNTED one: an unmounted pane has no window to host a
+            // sheet.
+            self?.settingsRootController?.selectSection(at: 0)
+            self?.generalSettingsController?.presentLicenseSheet(registering: key)
+        }
     }
 
     /// Decided policy (P3/W7): a menu-bar app with no window restoration —

@@ -4294,7 +4294,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // is ceil(window/40)+1; +50% absorbs timer jitter, and the floor keeps the
         // old bound on a quiet machine. Still far below 40 — one event per
         // callback — which is the property under test.
-        let allowed = max(8, Int((ceil(windowMs / 40.0) + 1) * 1.5))
+        // Capped at 39 — the per-buffer fan-out is 40, so the property stays
+        // falsifiable however long the window stretched.
+        let allowed = min(max(8, Int((ceil(windowMs / 40.0) + 1) * 1.5)), 39)
         #expect(levels.count <= allowed,
             "level emission must be coalesced to ~25Hz, not fanned out per capture buffer (D3): got \(levels.count) events for \(steps) callbacks over \(Int(windowMs))ms (allowed \(allowed))")
         #expect(levels.count > 0, "meter must still receive events")

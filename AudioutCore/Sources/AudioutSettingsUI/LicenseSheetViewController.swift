@@ -299,6 +299,9 @@ public final class LicenseSheetViewController: NSViewController {
     /// so a rejected key lands in the result line rather than nowhere.
     public func submit(key: String) {
         _ = view
+        // Register is disabled for exactly the window a key is in flight, so a
+        // second link during it is dropped the same way a second click is.
+        guard registerButton.isEnabled else { return }
         keyField.stringValue = key
         registerTapped()
     }

@@ -257,10 +257,18 @@ cp -R \"\$BIN/$RESOURCE_BUNDLE_NAME\" .remote-products/"
     if remote_fetch "$REPO_ROOT" ".remote-products/$EXECUTABLE" "$STAGE/$EXECUTABLE" &&
        remote_fetch "$REPO_ROOT" ".remote-products/$TCC_PROBE_EXECUTABLE" "$STAGE/$TCC_PROBE_EXECUTABLE" &&
        remote_fetch "$REPO_ROOT" ".remote-products/$HELPER_EXECUTABLE" "$STAGE/$HELPER_EXECUTABLE" &&
-       remote_fetch "$REPO_ROOT" ".remote-products/$RESOURCE_BUNDLE_NAME/" "$STAGE/$RESOURCE_BUNDLE_NAME"; then
-      # Trailing slash on the source is load-bearing: without it rsync places
-      # the directory INSIDE the destination, nesting the bundle in itself and
-      # silently losing every resource (the brand mark ships as nil).
+       remote_fetch "$REPO_ROOT" ".remote-products/$RESOURCE_BUNDLE_NAME" "$STAGE/$RESOURCE_BUNDLE_NAME" &&
+       test -d "$STAGE/$RESOURCE_BUNDLE_NAME"; then
+      # NO trailing slash on the bundle source, and the `test -d` above is part
+      # of the fetch condition rather than a later assertion. Both are the same
+      # rsync rule seen from two sides: a trailing slash means "copy the
+      # CONTENTS of this directory", so with it the bundle's files land loose in
+      # $STAGE and $STAGE/<bundle> is never created. rsync still reports
+      # SUCCESS, so without the `test -d` the fetch condition passes, the
+      # graceful local-build fallback below is skipped, and the run dies ~70
+      # lines on at the hard `test -d "$BUILT_RESOURCE_BUNDLE"` exit instead.
+      # (`remote_fetch` hands rsync the destination's PARENT — see its own
+      # contract — which is what makes the slash-free form correct here.)
       BUILT_BINARY="$STAGE/$EXECUTABLE"
       BUILT_TCC_PROBE="$STAGE/$TCC_PROBE_EXECUTABLE"
       BUILT_HELPER="$STAGE/$HELPER_EXECUTABLE"

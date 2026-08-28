@@ -1111,7 +1111,7 @@ public final class DeviceRowView: NSView {
             if controlsMuted { color = color.withAlphaComponent(Self.feedMutedTintAlpha) }
             segments.append(.init(text: name, color: color, hasChip: true))
         }
-        let tag = device.supportsAirPlay2 ? nil : Self.ap1FeedTag
+        let tag = isOlderAirPlayReceiver ? Self.ap1FeedTag : nil
         setFeedSegments(segments, tag: tag)
         // Tooltip (P1-5): the FULL, uncapped feed list — the "+N" cap is a
         // screen-only affordance — plus the Older-AirPlay consequence line
@@ -1124,8 +1124,20 @@ public final class DeviceRowView: NSView {
         // erased on every apply.
         var tooltipLines: [String] = []
         if !feedNames.isEmpty { tooltipLines.append("Feeding " + feedNames.joined(separator: ", ")) }
-        if !device.supportsAirPlay2 { tooltipLines.append("Older AirPlay — can't route single apps") }
+        if isOlderAirPlayReceiver { tooltipLines.append("Older AirPlay — can't route single apps") }
         feedStack.toolTip = tooltipLines.isEmpty ? nil : tooltipLines.joined(separator: "\n")
+    }
+
+    /// A genuine AirPlay-1 receiver — the only rows the "Older AirPlay"
+    /// micro-tag and its tooltip consequence line may badge. The local Mac,
+    /// Bluetooth and Cast devices all carry `supportsAirPlay2 == false` too
+    /// (`Device.swift`: AirPlay-only paths must never key off that flag
+    /// alone), but none of them is AirPlay at all, so the tag would lie —
+    /// live on the This Mac row, whose sync-row feed slot also truncated
+    /// "Older AirPlay System" to a bare "Older".
+    private var isOlderAirPlayReceiver: Bool {
+        !device.supportsAirPlay2 && !device.isLocalDevice && device.kind != .localMac
+            && !device.isBluetooth && !device.isCast
     }
 
     /// The FEED column's spoken/tooltip names, in order: `mainMixSourceName`

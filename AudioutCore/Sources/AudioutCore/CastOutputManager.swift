@@ -39,6 +39,54 @@ protocol CastOutputControlling: AnyObject, Sendable {
     func setLevel(_ level: Double, forDevice id: String)
     func retry(deviceID: String)
     func stopAll()
+
+    /// CAST-SYNC: hold this receiver's feed back by `ms`, so a Cast leg that
+    /// plays closer to live than the room's slowest output still lands with it
+    /// (sync architecture brief §4: the `R − settledLead` term of `D_cast`,
+    /// whose trim is ``setCastUserOffsetMs(_:forDeviceID:)``).
+    ///
+    /// **Lengthen only.** `0` is the floor: shortening below the receiver's own
+    /// lead would need frames the wall clock has not produced yet.
+    func setCastRoomDelayMs(_ ms: Int, forDeviceID id: String)
+
+    /// The listener's by-ear trim, added to the room delay. It exists for the
+    /// residue the protocol cannot see — the receiver's own output stage plus
+    /// any TV/HDMI or soundbar chain past it, so tens of ms for a speaker and a
+    /// few hundred for a TV. The sum with the room delay is clamped at 0.
+    func setCastUserOffsetMs(_ ms: Int, forDeviceID id: String)
+
+    /// What one leg's feed is actually doing, for the room-delay controller and
+    /// for a live test. `nil` for an id with no session.
+    func castFeedStats(forDevice id: String) -> CastFeedStats?
+}
+
+extension CastOutputControlling {
+    /// Default no-ops (CAST-SYNC) so a fake that only drives session state
+    /// compiles unchanged; ``CastOutputManager`` provides the real ones.
+    func setCastRoomDelayMs(_ ms: Int, forDeviceID id: String) {}
+    func setCastUserOffsetMs(_ ms: Int, forDeviceID id: String) {}
+    func castFeedStats(forDevice id: String) -> CastFeedStats? { nil }
+}
+
+/// What one Cast leg's feed is doing — the only observability on a path that
+/// had none. Counters are monotone for the ring's whole life, so a caller
+/// sampling them periodically reads deltas.
+struct CastFeedStats: Sendable, Equatable {
+    /// Feed delay + whatever is still queued in the ring: the honest total this
+    /// leg is holding audio back by. Both terms matter, which is why a
+    /// ``CastFeedRing/reset()`` needs no separate bookkeeping — the backlog it
+    /// discards simply stops counting here.
+    let achievedDelayMs: Int
+    /// Whole producer blocks the ring refused, for lock contention or for want
+    /// of room. Live audio that never reached the receiver.
+    let droppedBlocks: Int
+    /// Frames the consumer had to invent because the ring was short. The 1 s
+    /// prime each GET renders from a just-emptied ring lands here too — that
+    /// one is the silent join gap, by design.
+    let underrunFrames: Int
+    /// How many receiver GETs have dropped the backlog. More than one means a
+    /// mid-session re-GET shortened the achieved delay.
+    let feedResets: Int
 }
 
 /// One Cast receiver's feed: the 2-second hand-off between the capture IOProc
@@ -54,6 +102,14 @@ protocol CastOutputControlling: AnyObject, Sendable {
 /// volume is `fixed` (see ``CastOutputManager/pushLevel(_:_:)``): a scalar
 /// gain applied on the way out, ramped so a fader drag does not step.
 ///
+/// CAST-SYNC: and in front of all of it, this leg's own ``PCMDelayLine``,
+/// built on the first non-zero ``setDelayMs(_:)``. Delaying by inserting zeros
+/// AHEAD of the ring is cadence-preserving, so the ring fills at exactly the
+/// rate it did before and the server's wall-clock pacing never notices.
+/// **Nothing here may hold the feed instead** — the receiver drains into
+/// BUFFERING, `secondsSent` freezes while `currentTime` runs on, and the lead
+/// measurement the room-delay controller reads is poisoned.
+///
 /// `razor:` ceiling — one scalar gain with a linear ramp. Mute-click
 /// suppression or a dB mapping belongs here, in the ramp target, not at the
 /// call sites.
@@ -61,6 +117,12 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
 
     /// 2 s at 44 100 Hz.
     private static let capacityFrames = 88_200
+    private static let sampleRate = 44_100
+    /// The delay line's own capacity, sized for the brief's deepest ask (§6):
+    /// `R_max` 9500 ms minus the fastest receiver's lead, plus a full trim,
+    /// rounded up to a whole 10 s. It is the feed delay's real ceiling — the
+    /// ring's 2 s is not, because the zeros never enter the ring.
+    private static let delayCapacityFrames = 10 * 44_100
     /// The gain never moves faster than full scale per 20 ms, so any change
     /// inside [0, 1] lands within 882 frames and none of them zipper.
     private static let gainRampFrames = 882
@@ -71,26 +133,41 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     private var availableFrames = 0
     private var currentGain: Float = 1
     private var targetGain: Float = 1
+    /// Lock-guarded, and `nil` until a non-zero delay is asked for.
+    private var delayLine: PCMDelayLine?
+    /// Producer-owned: incremented only by ``push(_:)``, which cannot take the
+    /// lock on the path that matters (a failed `try()` IS one of the drops).
+    private let droppedBlocksWord: UnsafeMutablePointer<Int>
+    private var underrunFrames = 0                          // lock-guarded (consumer)
+    private var feedResets = 0                              // lock-guarded
 
     init() {
         storage = UnsafeMutablePointer<Int16>.allocate(capacity: Self.capacityFrames * 2)
         storage.initialize(repeating: 0, count: Self.capacityFrames * 2)
+        droppedBlocksWord = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        droppedBlocksWord.initialize(to: 0)
     }
 
     deinit {
         storage.deinitialize(count: Self.capacityFrames * 2)
         storage.deallocate()
+        droppedBlocksWord.deallocate()
     }
 
     /// Producer side (capture IOProc). Interleaved S16LE stereo, 4 bytes/frame.
     func push(_ pcm: Data) {
         let frames = pcm.count / 4
-        guard frames > 0, lock.try() else { return }
+        guard frames > 0 else { return }
+        guard lock.try() else { countDroppedBlock(); return }
         defer { lock.unlock() }
-        guard availableFrames + frames <= Self.capacityFrames else { return }
+        // The line runs before the room check: its clock is the producer's, so
+        // a block the ring then has no space for still has to go through it,
+        // or the delay walks.
+        let block = delayLine?.exchange(pcm) ?? pcm
+        guard availableFrames + frames <= Self.capacityFrames else { countDroppedBlock(); return }
         let writeFrame = (readFrame + availableFrames) % Self.capacityFrames
         let firstRun = min(frames, Self.capacityFrames - writeFrame)
-        pcm.withUnsafeBytes { raw in
+        block.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
             memcpy(storage + writeFrame * 2, base, firstRun * 4)
             if frames > firstRun {
@@ -98,6 +175,54 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
             }
         }
         availableFrames += frames
+    }
+
+    private func countDroppedBlock() {
+        droppedBlocksWord.pointee &+= 1
+        OSMemoryBarrier()                       // release: publish before a reader's acquire
+    }
+
+    /// Hold this leg's feed back by `ms` — the room delay plus the user's trim,
+    /// already summed and clamped by ``CastOutputManager``. Control thread.
+    ///
+    /// The line is built on the first non-zero ask and kept afterwards, so a
+    /// later `0` is a shrink through the crossfade rather than a teardown. With
+    /// no Cast device selected there is no ring at all, so there is no line
+    /// either — the bypass is structural, not a zero delay.
+    func setDelayMs(_ ms: Int) {
+        let frames = max(0, ms) * Self.sampleRate / 1000
+        if let existing = lock.withLock({ delayLine }) {
+            existing.setDelayFrames(frames)
+            return
+        }
+        guard frames > 0 else { return }
+        // Allocated off the lock: 2 MB is not something to make the capture
+        // IOProc's `try()` wait on. Callers are serialised on the manager's
+        // queue, so there is no second builder to race.
+        let line = PCMDelayLine(capacityFrames: Self.delayCapacityFrames)
+        line.setDelayFrames(frames)
+        lock.withLock { delayLine = line }
+    }
+
+    /// Whether this leg has built a delay line at all. The bypass this pins is
+    /// structural: an untouched feed, and every feed while no Cast device is
+    /// selected, has no line to run.
+    var test_hasDelayLine: Bool { lock.withLock { delayLine != nil } }
+
+    /// What this leg is doing, for the room-delay controller and a live test.
+    var stats: CastFeedStats {
+        OSMemoryBarrier()                       // acquire: see the producer's word
+        let dropped = droppedBlocksWord.pointee
+        lock.lock()
+        defer { lock.unlock() }
+        // The APPLIED delay, not the requested one: with the IOProc stopped the
+        // line has adopted nothing and this leg is holding nothing back.
+        let heldFrames = (delayLine?.delayFrames ?? 0) + availableFrames
+        return CastFeedStats(
+            achievedDelayMs: heldFrames * 1000 / Self.sampleRate,
+            droppedBlocks: dropped,
+            underrunFrames: underrunFrames,
+            feedResets: feedResets)
     }
 
     /// Consumer side (the server's pacing timer). Always exactly `frames * 4`
@@ -119,6 +244,7 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
             readFrame = (readFrame + taken) % Self.capacityFrames
             availableFrames -= taken
         }
+        underrunFrames += frames - taken
         // Unity on both ends is the whole attenuation-receiver path: the
         // memcpy above is all it costs.
         if currentGain != 1 || targetGain != 1 { applyGainLocked(&out, frames: frames) }
@@ -169,14 +295,24 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
 
     /// Drop the backlog. Called the moment the receiver's GET arrives, so what
     /// it starts playing is live audio and not up to 2 s of history.
-    func reset() {
+    ///
+    /// Returns the milliseconds it threw away. That audio had already been held
+    /// back by the delay line, so a mid-session re-GET silently SHORTENS this
+    /// leg's achieved delay by exactly this much and the room-delay controller
+    /// has to re-settle. The line itself is deliberately untouched — it sits in
+    /// front of the ring and survives every GET.
+    @discardableResult
+    func reset() -> Int {
         lock.lock()
+        let discardedFrames = availableFrames
         readFrame = 0
         availableFrames = 0
+        feedResets += 1
         // A fresh GET starts at the level the user asked for, not partway
         // through the ramp the previous one was left in.
         currentGain = targetGain
         lock.unlock()
+        return discardedFrames * 1000 / Self.sampleRate
     }
 }
 
@@ -292,6 +428,11 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         var levelInFlight = false
         var levelPending: Double?
         var autoRetryCount = 0
+        /// CAST-SYNC: the controller's `D_cast` and the listener's by-ear trim,
+        /// kept apart so either can change without re-deriving the other. Their
+        /// sum is what reaches the feed.
+        var roomDelayMs = 0
+        var userOffsetMs = 0
         var playDeadline: DispatchWorkItem?
         var statusPoll: DispatchSourceTimer?
         var wasPlaying = false
@@ -363,6 +504,42 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         }
     }
 
+    /// Both delay setters take the ``setLevel(_:forDevice:)`` posture: an id
+    /// with no session is ignored, and the value lives on the session, so it
+    /// survives a drop-and-reconnect without being re-pushed.
+    func setCastRoomDelayMs(_ ms: Int, forDeviceID id: String) {
+        queue.async { [weak self] in
+            guard let self, let session = self.sessions[id] else { return }
+            session.roomDelayMs = ms
+            self.applyFeedDelay(session)
+        }
+    }
+
+    func setCastUserOffsetMs(_ ms: Int, forDeviceID id: String) {
+        queue.async { [weak self] in
+            guard let self, let session = self.sessions[id] else { return }
+            session.userOffsetMs = ms
+            self.applyFeedDelay(session)
+        }
+    }
+
+    func castFeedStats(forDevice id: String) -> CastFeedStats? {
+        queue.sync { sessions[id]?.ring.stats }
+    }
+
+    /// `D_cast + trim`, clamped at the floor: this leg can only be lengthened,
+    /// because the frames a shorter delay would need have not been captured yet.
+    private func applyFeedDelay(_ session: Session) {
+        let applied = max(0, session.roomDelayMs + session.userOffsetMs)
+        session.ring.setDelayMs(applied)
+        Telemetry.log(.cast, "cast_feed_delay", [
+            "device": session.record.id,
+            "room_ms": String(session.roomDelayMs),
+            "offset_ms": String(session.userOffsetMs),
+            "applied_ms": String(applied),
+        ])
+    }
+
     func stopAll() {
         queue.async { [weak self] in
             guard let self else { return }
@@ -427,9 +604,22 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         // feed. The log line hops onto ``queue`` — the session's flag is
         // queue-confined, and Telemetry never belongs on an audio path.
         server.onRequest = { [weak self, weak session] _ in
-            session?.ring.reset()
+            let discardedMs = session?.ring.reset() ?? 0
             self?.queue.async {
-                guard let self, let session = self.live(id, generation), !session.loggedHTTPRequest else { return }
+                guard let self, let session = self.live(id, generation) else { return }
+                // Logged on EVERY GET, unlike the line below: a re-GET throws
+                // away audio the feed delay had already held back, so this leg's
+                // achieved delay shortens without anything else noticing. The
+                // monotone `feedResets` count in ``CastFeedStats`` is what the
+                // room-delay controller re-settles on; this is its live-test copy.
+                let stats = session.ring.stats
+                Telemetry.log(.cast, "cast_feed_reset", [
+                    "device": id,
+                    "discarded_ms": String(discardedMs),
+                    "resets": String(stats.feedResets),
+                    "achieved_delay_ms": String(stats.achievedDelayMs),
+                ])
+                guard !session.loggedHTTPRequest else { return }
                 session.loggedHTTPRequest = true
                 Telemetry.log(.cast, "cast_http_request", ["device": id])
                 // A receiver that is fetching is demonstrably alive, so only

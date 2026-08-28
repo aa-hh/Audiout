@@ -7,16 +7,17 @@ import AppKit
 @testable import AudioutOnboardingUI
 @testable import AudioutSharedUI
 
-/// T3 (colour-return pass, decisions Q1-Q6/NEW-1): the four permission-row
+/// T3 (colour-return pass, decisions Q1-Q6/NEW-1): the five permission-row
 /// identity tokens — `Tokens.Color.permissionSystemAudio` / `permissionLocalNetwork`
-/// / `permissionRemoteControl` / `permissionSpeakerSync` — stay mutually
+/// / `permissionRemoteControl` / `permissionSpeakerSync` / `permissionUsageStats`
+/// — stay mutually
 /// DISTINCT in both accent-dial columns (Q1), each clears the same >=3:1
 /// own-theme contrast floor every other `Tokens.Color` instrument is held to
 /// (T1's written arithmetic, exercised here), the accent dial genuinely MUTES
-/// all four in `.subtle` (Q5) while `.systemAccent` leaves them at their
+/// all five in `.subtle` (Q5) while `.systemAccent` leaves them at their
 /// authored Full-gold hues and STILL mutually distinct (NEW-1 — the explicit
 /// guard against a later regression routing them through `accentDynamic`,
-/// which would collapse all four onto the same live-accent-derived value),
+/// which would collapse all five onto the same live-accent-derived value),
 /// and the glyph-only decision (Q3) holds end to end: the tile's own FILL
 /// never recolours, and each card's glyph keeps its identity hue in every
 /// `SetupCardState`.
@@ -26,7 +27,7 @@ import AppKit
 ///  - `resolved(_:appearanceName:)` — ported from `SettingsAccentAndHintsTests`.
 /// `SettingsAccentAndHintsTests.accentDialNeverRemapsFailureCautionOrRing`
 /// names `failure`/`caution`/`ringConnected` explicitly — not "every token the
-/// dial doesn't touch" — so these four permission tokens (which the dial DOES
+/// dial doesn't touch" — so these five permission tokens (which the dial DOES
 /// remap, just not via `accentDynamic`) don't trip it.
 ///
 /// Nested into `SerializedSharedState` alongside `SettingsAccentAndHintsTests`
@@ -95,7 +96,7 @@ extension SerializedSharedState {
         #expect(abs(a.blueComponent - b.blueComponent) <= 0.02, "blue: \(message)")
     }
 
-    /// The four permission tokens, named for failure messages. A computed
+    /// The five permission tokens, named for failure messages. A computed
     /// property (not a stored snapshot) so every call site gets a fresh
     /// access — irrelevant for correctness (each dynamic `NSColor`'s
     /// provider closure re-reads `Tokens.accentStyle` at RESOLUTION time
@@ -105,7 +106,11 @@ extension SerializedSharedState {
         [("permissionSystemAudio", Tokens.Color.permissionSystemAudio),
          ("permissionLocalNetwork", Tokens.Color.permissionLocalNetwork),
          ("permissionRemoteControl", Tokens.Color.permissionRemoteControl),
-         ("permissionSpeakerSync", Tokens.Color.permissionSpeakerSync)]
+         ("permissionSpeakerSync", Tokens.Color.permissionSpeakerSync),
+         // The fifth is not a macOS permission — the Setup card for Audiout's
+         // own usage-statistics opt-in — but it wears a family hue and is held
+         // to every rule the other four are.
+         ("permissionUsageStats", Tokens.Color.permissionUsageStats)]
     }
 
     private func assertMutuallyDistinct(appearance: NSAppearance.Name,
@@ -121,13 +126,13 @@ extension SerializedSharedState {
 
     // MARK: 1 — Distinctness in both dial columns (Q1)
 
-    @Test func fourTokensAreMutuallyDistinctInFullGold() {
+    @Test func everyTokenIsMutuallyDistinctInFullGold() {
         Tokens.accentStyle = .fullGold
         assertMutuallyDistinct(appearance: .darkAqua)
         assertMutuallyDistinct(appearance: .aqua)
     }
 
-    @Test func fourTokensAreMutuallyDistinctInSubtle() {
+    @Test func everyTokenIsMutuallyDistinctInSubtle() {
         Tokens.accentStyle = .subtle
         assertMutuallyDistinct(appearance: .darkAqua)
         assertMutuallyDistinct(appearance: .aqua)
@@ -136,9 +141,9 @@ extension SerializedSharedState {
     // MARK: 2 — >=3:1 own-theme contrast floor, both dial columns, both appearances
 
     /// Checked against BOTH `panel` and `raised` (the two own-theme surfaces
-    /// T1's doc comments measure against for every one of these four
+    /// T1's doc comments measure against for every one of these
     /// tokens), across `.fullGold`/`.subtle` and `.darkAqua`/`.aqua` — the
-    /// full 4 tokens x 2 columns x 2 appearances x 2 surfaces sweep.
+    /// full 5 tokens x 2 columns x 2 appearances x 2 surfaces sweep.
     @Test func contrastFloorClearsInBothDialColumnsBothAppearancesBothSurfaces() {
         let floor: CGFloat = 3.0
         for style: AccentStyle in [.fullGold, .subtle] {
@@ -159,9 +164,9 @@ extension SerializedSharedState {
         }
     }
 
-    // MARK: 3 — the dial genuinely mutes all four in .subtle (Q5)
+    // MARK: 3 — the dial genuinely mutes all five in .subtle (Q5)
 
-    @Test func subtleActuallyChangesAllFourFromFullGold() {
+    @Test func subtleActuallyChangesEveryTokenFromFullGold() {
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
             Tokens.accentStyle = .fullGold
             let full = permissionTokens.map { (name: $0.name, color: resolved($0.color, appearanceName: appearance)) }
@@ -171,17 +176,17 @@ extension SerializedSharedState {
 
             for (fullEntry, subtleEntry) in zip(full, subtle) {
                 #expect(fullEntry.color != subtleEntry.color,
-                    "\(fullEntry.name)/\(appearance.rawValue): .subtle failed to change the resolved colour from .fullGold — Q5 requires the dial to genuinely mute these four")
+                    "\(fullEntry.name)/\(appearance.rawValue): .subtle failed to change the resolved colour from .fullGold — Q5 requires the dial to genuinely mute these")
             }
         }
     }
 
     // MARK: 4 — .systemAccent stays at the Full-gold hues AND stays distinct (NEW-1)
 
-    /// The executable guard against a later regression routing these four
+    /// The executable guard against a later regression routing these five
     /// through `accentDynamic`'s `.systemAccent` branch (which resolves
     /// `controlAccentColor` scaled by a constant — a value that depends on
-    /// the LIVE SYSTEM ACCENT, not on which token asked for it, so all four
+    /// the LIVE SYSTEM ACCENT, not on which token asked for it, so they
     /// would silently collapse onto the same hue the moment a user picks
     /// Follow System).
     @Test func systemAccentStaysAtFullGoldValuesAndStaysDistinct() {
@@ -209,7 +214,7 @@ extension SerializedSharedState {
 
     /// The final-check row's `checklist` glyph is `gold` on the tile's
     /// `raised` well (a deliberate non-permission hue — the first note of the
-    /// finale's colour story). Same ≥3:1 glyph floor the four permission
+    /// finale's colour story). Same ≥3:1 glyph floor the five permission
     /// tokens are held to, measured in both authored dial columns and both
     /// appearances. `.systemAccent` is excluded on the token's own terms: it
     /// resolves `gold` to the live user accent, whose contrast the OS owns.
@@ -409,7 +414,7 @@ extension SerializedSharedState {
                 "the copied rune must still carry drawable content after the rescale")
     }
 
-    /// The rune wears the Bluetooth SIG brand blue rather than one of the four
+    /// The rune wears the Bluetooth SIG brand blue rather than one of the five
     /// warmed `permission*` hues — a BRAND mark, so it is deliberately fixed
     /// across appearances. It still has to clear the same 3:1 glyph floor on
     /// the neutral `raised` well it sits in.

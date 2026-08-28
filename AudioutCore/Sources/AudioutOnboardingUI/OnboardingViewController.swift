@@ -278,7 +278,7 @@ public final class OnboardingViewController: NSViewController {
         spineStack.spacing = 6
         spineStack.distribution = .fill
         spineStack.translatesAutoresizingMaskIntoConstraints = false
-        for step in SetupFlowModel.steps {
+        for step in flow.steps {
             let row = makeRow(for: step)
             rows[step] = row
             spineStack.addArrangedSubview(row)
@@ -722,6 +722,35 @@ public final class OnboardingViewController: NSViewController {
                 isSkippable: true,
                 spineAskTitle: "Volume-key control",
                 spineDoneTitle: "Volume-key control")
+        case .usageStats:
+            return SetupCardContent(
+                step: step,
+                symbolName: "chart.bar.xaxis",
+                iconColor: Tokens.Color.permissionUsageStats,
+                activeTitle: "Share anonymous usage counts",
+                completedTitle: "Audiout counts feature use, anonymously",
+                detail: "Audiout counts which features get used. No audio, "
+                    + "speaker names, network details or license key ever "
+                    + "leave your Mac.",
+                // What the button gets: not a capability for the user, and the
+                // copy doesn't pretend otherwise. This is the one card where
+                // the person being helped is the one who wrote the app, and
+                // saying so plainly is what earns the yes.
+                heroHeadline: "Help make Audiout better",
+                // The rehearsal below shows WHAT is sent, item by item, so the
+                // why line must not re-read the picture (the deleted-body rule
+                // this window is built on). It carries the two things a picture
+                // can't: that this is optional, and that it is reversible.
+                whyLine: "Entirely optional, and you can change it any time in "
+                    + "Audiout's settings.",
+                // "Share", matching the Settings › General toggle it is the
+                // same switch as. "Counts" rather than "statistics" because
+                // counts is what they are and the shorter word is the plainer
+                // one.
+                allowTitle: "Share Usage Counts",
+                isSkippable: true,
+                spineAskTitle: "Usage statistics",
+                spineDoneTitle: "Usage statistics")
         }
     }
 
@@ -742,7 +771,7 @@ public final class OnboardingViewController: NSViewController {
     ///   initial build and `true`/`canAnimate` for a UI-initiated change (a skip,
     ///   a browse, a snap-back) that isn't a grant.
     private func refresh(animated: Bool? = nil) {
-        let completedNow = Set(SetupFlowModel.steps.filter { flow.isComplete($0) })
+        let completedNow = Set(flow.steps.filter { flow.isComplete($0) })
         let newlyCompleted = completedNow.subtracting(completedAtLastRefresh)
         // Nothing the OPENING state lands is a transition, so the initial read
         // paints settled however it arrives.
@@ -770,7 +799,7 @@ public final class OnboardingViewController: NSViewController {
         }
 
         let active = displayedActiveStep
-        for step in SetupFlowModel.steps {
+        for step in flow.steps {
             rows[step]?.apply(state(for: step, active: active),
                               // No browse ever runs on an ungated OS (macOS
                               // 14), so there is no count to report there —
@@ -798,25 +827,40 @@ public final class OnboardingViewController: NSViewController {
     /// stage is standing back for a real dialog.
     private func refreshHero(active: SetupStep?, animated: Bool) {
         if let browsed = browseStep {
-            // Awkward cell B: a GRANTED Local Network on macOS 14 was never
-            // gated, so there is no privacy pane to show — the dialog it never
-            // raised is the honest picture, at rest.
-            let mode: DemoMode = browsed == .localNetwork && !model.isLocalNetworkGated
-                ? .prompt : .settings
+            // Two steps whose browse is NOT the Settings pane. Usage
+            // Statistics has no such pane at all, so it re-shows its ledger —
+            // which is also the thing worth re-reading. Awkward cell B: a
+            // GRANTED Local Network on macOS 14 was never gated, so there is
+            // no privacy pane to show either, and the dialog it never raised
+            // is the honest picture, at rest.
+            let mode: DemoMode
+            if browsed == .usageStats {
+                mode = .dataReceipt
+            } else if browsed == .localNetwork, !model.isLocalNetworkGated {
+                mode = .prompt
+            } else {
+                mode = .settings
+            }
             demoPane.show(step: browsed, mode: mode, animated: animated,
                           restingSwitchOn: mode == .settings, asBrowse: true)
-            previewFrame.caption = Self.previewFrameLabel
-            previewFrame.spokenCaption = nil
-            previewFrame.isChromeless = false
-        } else if active != nil {
-            demoPane.show(step: active, mode: demoMode(for: active), animated: animated)
-            previewFrame.caption = Self.previewFrameLabel
-            // Remote Control's first ask is the one rehearsal that INSTRUCTS:
-            // two surfaces in sequence, with the wrong button drawn ghosted.
-            // None of that reaches VoiceOver, so the caption says it instead.
+            previewFrame.caption = Self.previewFrameLabel(for: browsed)
             previewFrame.spokenCaption =
-                (active == .remoteControl && demoMode(for: active) == .prompt)
-                ? Self.remoteControlSpokenCaption : nil
+                browsed == .usageStats ? Self.usageStatsSpokenCaption : nil
+            previewFrame.isChromeless = false
+        } else if let active {
+            demoPane.show(step: active, mode: demoMode(for: active), animated: animated)
+            previewFrame.caption = Self.previewFrameLabel(for: active)
+            // Two stages carry more than the picture alone can, and neither
+            // reaches VoiceOver: Remote Control's first ask INSTRUCTS (two
+            // surfaces in sequence, with the wrong button drawn ghosted), and
+            // Usage Statistics' ledger IS the list of what's sent.
+            if active == .usageStats {
+                previewFrame.spokenCaption = Self.usageStatsSpokenCaption
+            } else {
+                previewFrame.spokenCaption =
+                    (active == .remoteControl && demoMode(for: active) == .prompt)
+                    ? Self.remoteControlSpokenCaption : nil
+            }
             previewFrame.isChromeless = false
         } else if flow.finalCheckState == .passed {
             // The beat: the pane HOLDS while the check is pending/running — the
@@ -916,6 +960,10 @@ public final class OnboardingViewController: NSViewController {
         // means "asked, and Accessibility still isn't trusted", and asking again
         // silently no-ops. The retry deep-links to the Accessibility pane.
         case .remoteControl: return model.remoteControlStatus == .requested
+        // Nothing to spend and nowhere to fall back TO: the answer is given
+        // right here, and a "no" is an answer rather than a refusal to route
+        // around.
+        case .usageStats:    return false
         }
     }
 
@@ -962,7 +1010,7 @@ public final class OnboardingViewController: NSViewController {
         case .audio:         return model.audioStatus == .denied
         case .localNetwork:  return model.localNetworkStatus == .denied
         case .bluetooth:     return model.bluetoothStatus == .denied
-        case .speakerSync, .remoteControl: return false
+        case .speakerSync, .remoteControl, .usageStats: return false
         }
     }
 
@@ -990,12 +1038,16 @@ public final class OnboardingViewController: NSViewController {
         case .speakerSync:   return .ptpHelper
         // Neither is a `RequiredPermission` — both are skippable, and a
         // revocation of one never re-opens this window.
-        case .bluetooth, .remoteControl: return nil
+        case .bluetooth, .remoteControl, .usageStats: return nil
         }
     }
 
     private func demoMode(for step: SetupStep?) -> DemoMode {
         guard let step else { return .settled }
+        // Usage Statistics raises no macOS surface at ALL, so it has no
+        // rehearsal — the stage shows the thing the user is actually being
+        // asked to judge instead: what would be sent, and what never is.
+        if step == .usageStats { return .dataReceipt }
         // Speaker Sync has no prompt at all — Login Items is the only surface
         // it ever shows the user.
         if step == .speakerSync { return .settings }
@@ -1214,6 +1266,23 @@ public final class OnboardingViewController: NSViewController {
     /// whole ribbon line on ("This is what macOS will ask you next."), said by
     /// the frame instead.
     static let previewFrameLabel = "You'll see this from macOS"
+    /// Usage Statistics' caption. The frame's whole job is to say WHOSE surface
+    /// is inside it, and this one is not macOS's at all — nor is it a rehearsal
+    /// of anything the user is about to see. It is the promise itself, so the
+    /// caption states what the picture is: the complete list, not a sample.
+    static let usageStatsFrameLabel = "This is everything Audiout would send"
+    /// The caption for the step whose frame carries no macOS surface — the one
+    /// place the label is chosen per step rather than fixed.
+    static func previewFrameLabel(for step: SetupStep) -> String {
+        step == .usageStats ? usageStatsFrameLabel : previewFrameLabel
+    }
+    /// What VoiceOver hears in place of that caption on Usage Statistics. The
+    /// ledger inside the frame is out of the accessibility tree like every
+    /// other mock, and here that would drop the only place the actual contents
+    /// are named — so the caption reads them out.
+    static let usageStatsSpokenCaption = "This is everything Audiout would send: counts of how "
+        + "often features are used, and nothing else. Never your speaker names, your network, "
+        + "what you're playing, or your license key."
     /// What VoiceOver hears in place of that caption on Remote Control's first
     /// ask — the one rehearsal whose two surfaces and ghosted Deny ARE the
     /// instruction, and which a screen reader cannot see.
@@ -1364,7 +1433,15 @@ public final class OnboardingViewController: NSViewController {
         content.why = copy.whyLine
         content.primary = (copy.allowTitle, .prominent)
         content.showsSkip = copy.isSkippable
+        content.skipTitle = Self.skipTitle(for: step)
         return content
+    }
+
+    /// The one step whose skip is an ANSWER rather than a deferral — see
+    /// `RibbonContent.skipTitle`. Everything else keeps the shared "Skip for
+    /// now", which its row really does honour.
+    static func skipTitle(for step: SetupStep) -> String? {
+        step == .usageStats ? "No Thanks" : nil
     }
 
     /// A decided row, opened for READING: what it bought, and where the switch
@@ -1375,7 +1452,11 @@ public final class OnboardingViewController: NSViewController {
         // macOS 14 never gated Local Network, so there is no pane to name and
         // nowhere to send anyone.
         content.headline = Self.content(for: step).heroHeadline
+        // No System Settings pane on the other side: macOS 14 never gated Local
+        // Network, and Usage Statistics is Audiout's own switch — offering
+        // "Open Settings…" for either would open the wrong app on nothing.
         let hasPane = !(step == .localNetwork && !model.isLocalNetworkGated)
+            && step != .usageStats
         var sentence = browseCapabilitySentence(step)
         if hasPane, step != .speakerSync {
             sentence += " It lives under Privacy & Security \u{25B8} \(Self.paneName(for: step)) "
@@ -1399,11 +1480,19 @@ public final class OnboardingViewController: NSViewController {
         // Security, so the shared path sentence would send the user wrong.
         case .speakerSync: return "Your speakers stay in perfect time. It lives in Login Items\u{2026}"
         case .remoteControl: return "Your volume keys control Audiout."
+        // Its switch is OURS, so this one names its own location too — the
+        // shared "Privacy & Security ▸ …" sentence would send the user into
+        // System Settings looking for a row that isn't there.
+        case .usageStats:
+            return "Audiout counts feature use, anonymously. It lives in "
+                + "Audiout's settings, under General."
         }
     }
 
     /// The System Settings pane each step's switch lives on, named the way the
-    /// pane itself is named.
+    /// pane itself is named. Usage Statistics has none — its switch is
+    /// Audiout's own — so it names the place that actually holds it, and every
+    /// caller is gated on `hasPane` before it can reach here anyway.
     static func paneName(for step: SetupStep) -> String {
         switch step {
         case .audio:         return "Screen & System Audio Recording"
@@ -1411,6 +1500,7 @@ public final class OnboardingViewController: NSViewController {
         case .bluetooth:     return "Bluetooth"
         case .remoteControl: return "Accessibility"
         case .speakerSync:   return "Login Items"
+        case .usageStats:    return "Audiout \u{25B8} Settings \u{25B8} General"
         }
     }
 
@@ -1460,7 +1550,7 @@ public final class OnboardingViewController: NSViewController {
     /// One announcement per real transition — driven by the same edge sets the
     /// repaint already computes, so a repaint that changes nothing says nothing.
     private func announceTransitions(newlyCompleted: Set<SetupStep>, active: SetupStep?) {
-        for step in SetupFlowModel.steps where newlyCompleted.contains(step) {
+        for step in flow.steps where newlyCompleted.contains(step) {
             let count = model.isLocalNetworkGated ? flow.localNetworkFoundSpeakers : nil
             announce(Self.content(for: step).spineTitle(for: .completed, foundSpeakers: count))
         }
@@ -1469,10 +1559,10 @@ public final class OnboardingViewController: NSViewController {
         // may flip to .denied while the ask is mid-flight (ribbon still on the
         // waiting line), and speaking then would announce the wait instead of
         // the refusal. The edge fires on the repaint after the prompt resolves.
-        let deniedNow = Set(SetupFlowModel.steps.filter { isProvablyDenied($0) && !isPrompting($0) })
+        let deniedNow = Set(flow.steps.filter { isProvablyDenied($0) && !isPrompting($0) })
         let newlyDenied = deniedNow.subtracting(deniedAtLastRefresh)
         deniedAtLastRefresh = deniedNow
-        for step in SetupFlowModel.steps where newlyDenied.contains(step) {
+        for step in flow.steps where newlyDenied.contains(step) {
             if let status = ribbonContent(active: active).status, step == active {
                 announce(status.text)
             }
@@ -1710,6 +1800,10 @@ public final class OnboardingViewController: NSViewController {
         case .speakerSync:
             didTripLoginItems = true
             model.openPTPHelperLoginItems()
+        // Unreachable: every path here is gated on this step HAVING a System
+        // Settings pane, and this one's switch is Audiout's own. Explicit
+        // rather than a default, so a step added later is a compile error here.
+        case .usageStats: break
         }
     }
 
@@ -1766,6 +1860,10 @@ public final class OnboardingViewController: NSViewController {
         // stepped aside for.
         case .remoteControl: return model.remoteControlStatus == .granted
         case .audio, .bluetooth, .speakerSync: return true
+        // Nothing ever left this app, so there is no front to take back — and
+        // fronting on a click the user made INSIDE this window would be a
+        // flash for nothing.
+        case .usageStats: return false
         }
     }
 

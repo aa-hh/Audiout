@@ -594,17 +594,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                self.presentSetupForUndeterminedIfNeeded() {
                 return
             }
-            if self.analyticsAvailable && !self.settings.telemetryAsked {
-                let alert = NSAlert()
-                alert.messageText = "Share anonymous usage statistics?"
-                alert.informativeText = "Audiout counts which features are used, anonymously. No audio, speaker names, network details, or license keys are ever collected. You can change this anytime in Settings › General."
-                alert.addButton(withTitle: "Share")
-                alert.addButton(withTitle: "Don't Share")
-                let granted = alert.runModal() == .alertFirstButtonReturn
-                self.settings.telemetryAsked = true
-                self.settings.telemetryOptIn = granted
-                Analytics.setConsent(granted)
-            }
+            // NOTHING asks about usage statistics on this click. That ask is
+            // `SetupStep.usageStats`, the Setup window's last card, and a
+            // modal alert here would interrupt the user at the exact moment
+            // they are reaching for the mixer. The Setup flow spends
+            // `settings.telemetryAsked` whichever way it is answered, so
+            // nothing re-asks anywhere; Settings › General is the way back.
             self.surface.perform(action, anchorRect: self.statusAnchorRect())
         }
 

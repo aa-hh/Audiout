@@ -46,6 +46,14 @@ public enum Analytics {
         }
     }
 
+    /// Whether a capture destination is installed at all — independent of
+    /// consent. The Setup window's usage-statistics step reads it: a build
+    /// with no sink (run-from-source, `swift run`, headless) has nothing to
+    /// opt in to, so the ask must not appear there at all.
+    public static var isAvailable: Bool {
+        state.withLock { $0.sink != nil }
+    }
+
     /// Updates the consent flag, then forwards the new value to the
     /// installed sink's `consentChanged` — the user's actual opt-in/out
     /// decision (Settings › General toggle, or the one-time ask).

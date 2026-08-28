@@ -3,8 +3,8 @@
 ## Purpose
 
 The first-run Setup window (pure AppKit): a **two-pane** screen that asks for the
-five permissions **one at a time**. LEFT, the **SPINE** — a fixed 288 pt column
-of the header over six compact status rows (the five permissions plus the
+six grants **one at a time**. LEFT, the **SPINE** — a fixed 288 pt column
+of the header over seven compact status rows (the six grants plus the
 final-check row), carrying short titles and nothing else. RIGHT, the **HERO** —
 one warm panel read top to bottom (owner-approved 2026-08-12):
 
@@ -13,7 +13,10 @@ one warm panel read top to bottom (owner-approved 2026-08-12):
    ask line;
 2. the **PREVIEW FRAME** (`SetupPreviewFrameView`) — a `well` with a caption band
    on its top edge ("You'll see this from macOS") holding the STAGE, the
-   native-drawn miniature of the exact surface this step's ask is about to raise;
+   native-drawn miniature of the exact surface this step's ask is about to raise
+   — except on Usage Statistics, the one step that raises no macOS surface,
+   where the caption becomes "This is everything Audiout would send" and the
+   stage holds the LEDGER instead (see `DemoDataReceiptMockView` below);
 3. the **RIBBON**'s lower region (`SetupRibbonView`) — the status line and the
    recovery paragraph, for the states that have to instruct rather than ask;
 4. the **BARE BOTTOM BAR** — a hairline, then the buttons trailing-aligned, and
@@ -47,7 +50,7 @@ gate/motion/demo/selection rules change.
 
 ## Rules
 
-- **Five steps, four kinds of thing:** **System Audio** and **Local Network** are
+- **Six steps, five kinds of thing:** **System Audio** and **Local Network** are
   real `PermissionStatus`-backed TCC probes; **Bluetooth** is the one permission
   with a fully honest status API (`CBManager.authorization` — granted/denied/
   undetermined all real); **Remote Control** (Accessibility) is primed ahead of a
@@ -55,7 +58,36 @@ gate/motion/demo/selection rules change.
   Sync** is a `PTPHelperStatus` (`SMAppService` Login-Items approval), not a TCC
   permission at all — it has no "Denied" state and registers automatically at load
   with no prompt of its own.
-- **THREE steps are skippable** — Bluetooth, Remote Control, and now **Speaker
+- **Usage Statistics is not a macOS anything.** The last card asks for
+  Audiout's own anonymous usage counts (PRODUCT.md Data Collection stream 1,
+  `AppSettings.telemetryOptIn`). No prompt, no probe, no System Settings pane:
+  the Allow click IS the grant and lands before it returns
+  (`SetupAllowOutcome.consentGranted`). It sits LAST on purpose — it is the one
+  card asking for something the user gives US rather than something macOS gives
+  Audiout, and putting that between two permission asks blurs the difference
+  the whole window is teaching. Three things follow from PRODUCT.md's "asked
+  once, never re-nagged":
+  - **The skip is the DECLINE**, not a deferral, so its button says "No Thanks"
+    (`RibbonContent.skipTitle`, the only per-step override of the shared "Skip
+    for now") and it spends `telemetryAsked` exactly like a grant does.
+  - **A decline is seeded back into `skippedSteps` on every later flow**
+    (`SetupFlowModel.init`), so re-opening Setup for a revoked permission can
+    never smuggle the ask back onto the screen. Clicking the row still re-opens
+    it, which is the deliberate way back inside the window; Settings › General
+    is the way back afterwards.
+  - **A build with no analytics sink DROPS the card** rather than auto-passing
+    it (`SetupModel.usageStatsAreAvailable` → `SetupFlowModel.steps`, the
+    per-presentation list the view controller iterates — NOT the static
+    `SetupFlowModel.steps` order table). A checkmark beside "Usage statistics"
+    in a build that sends nothing would be the one thing this window must never
+    do. This is also why the ask was gated on `analyticsAvailable` when it was
+    still an alert.
+
+  This ask **used to be an `NSAlert` on the first menu-bar click**, fired from
+  `AppDelegate` at the exact moment the user was reaching for the mixer. Don't
+  put it back there.
+
+- **FOUR steps are skippable** — Bluetooth, Remote Control, Usage Statistics, and **Speaker
   Sync** (`SetupFlowModel.skippableSteps`). The first two sit outside
   `RequiredPermission` entirely; Speaker Sync stays required and is still audited
   once it has ever been on, so its skip is an EXIT rather than a demotion —
@@ -1109,6 +1141,7 @@ gate/motion/demo/selection rules change.
 | `DemoPaneView` / `DemoMode` | The hero's STAGE: the mock swap crossfade, the browse/settled resting rules, the waiting dim, the motion policy, the Replay button. |
 | `DemoMockView` | Timeline base class for the animated mocks: restartable score, settled-state hook, and the two multi-stage seams — `held(_:)` and the `stageWindow` offset. |
 | `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The privacy-dialog miniature, the Settings-pane miniature, and the completion finale (one-shot ripple, static gold-aura resting frame). |
+| `DemoDataReceiptMockView` / `DemoStrikeView` | Usage Statistics' stage (`DemoMode.dataReceipt`) — the LEDGER: what a yes would send, over what it never sends with each of those struck through. The only stage that is NOT a rehearsal (that step raises no macOS surface), so: real strings not greeked bars (the words ARE the content), `Tokens` colours not `DemoSystemColor` (it is ours, like the finale), no cursor (nothing on it is a button), no surface of its own (the preview frame's well is its surface — a card inside it is a box in a box). Its settled frame is the FINISHED ledger, inverting the ask mocks' "a pass ends where it started": their rest state is the surface as the user will FIND it, and this one has nothing for the user to do. Keep its two lists in step with PRODUCT.md "Data Collection" — this is the only place the app makes that promise in full. |
 | `DemoSystemAlertMockView` / `DemoLockIconView` | The classic macOS ALERT panel Remote Control's two-stage pass opens on — header, divider, padlock, a MARKED "Open System Settings" beside a ghosted "Deny" — and the gradient-filled padlock it leads with. A passive surface: the host owns the cursor and the crossfade. |
 | `DemoSettingsHandoffMockView` / `DemoStage` | Remote Control's two-stage FIRST ASK: the Accessibility alert handing off to the Settings pane in one pass, the owner of stage one's pointer, and which of its two surfaces the pass rests on. |
 | `DemoWindowSurfaceView` / `DemoPushButtonView` / `DemoButtonEmphasis` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoCursorView` | The drawn parts of the mocks — window body, dialog button (capsule or rounded rect, marked or ghosted), switch, sidebar, list row, greeked label — `demoGistBlock` stacks those into the ragged blocks that stand in for a mock's prose — pill, circle, pointer. |

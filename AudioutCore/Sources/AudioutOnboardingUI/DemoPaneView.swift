@@ -15,6 +15,10 @@ public enum DemoMode: Equatable, Sendable {
     /// The retry path (and Speaker Sync always, which has no prompt at all): a
     /// miniature of the System Settings pane, with a toggle switching on.
     case settings
+    /// Usage Statistics' stage, and the one mode that is not a rehearsal of a
+    /// macOS surface — because that step raises none. It shows the LEDGER: the
+    /// counts that would be sent, over the things that never are.
+    case dataReceipt
     /// Every permission is in — the finale: a one-shot gold signal ripple on
     /// the transition in, then a fully static resting frame. No loop.
     case settled
@@ -330,6 +334,7 @@ final class DemoPaneView: NSView {
         case .settings:
             return DemoSettingsMockView(step: step, switchRestsOn: restingSwitchOn,
                                         metricScale: 1.35)
+        case .dataReceipt: return DemoDataReceiptMockView()
         case .settled:  return DemoSettledMockView()
         }
     }
@@ -999,9 +1004,11 @@ final class DemoPromptMockView: DemoMockView {
     /// and System Audio draws macOS's RED RECORD glyph — NOT Audiout's icon,
     /// which is what this table used to return for it. The badge, the size and
     /// the slot are identical either way; only the tile's contents change.
-    /// `.remoteControl` and `.speakerSync` never reach this mock (one raises the
-    /// Accessibility alert, the other has no dialog at all) and keep the app
-    /// icon as the safe default for a branch nothing takes.
+    /// `.remoteControl`, `.speakerSync` and `.usageStats` never reach this mock
+    /// (one raises the Accessibility alert, one has no dialog at all, and one
+    /// isn't a macOS ask in the first place — it draws
+    /// ``DemoDataReceiptMockView`` instead) and keep the app icon as the safe
+    /// default for a branch nothing takes.
     private static func iconView(for step: SetupStep) -> NSView {
         switch step {
         // The live-confirmed red record tile: macOS leads its system-audio ask
@@ -1031,7 +1038,7 @@ final class DemoPromptMockView: DemoMockView {
         // DIALOG'S icon — the one a separate system process reads out of Launch
         // Services, not this process's own fresher `NSApp.applicationIconImage`
         // (see `demoIconAsAThirdPartyProcessSeesIt`).
-        case .remoteControl, .speakerSync:
+        case .remoteControl, .speakerSync, .usageStats:
             let icon = NSImageView()
             icon.image = demoIconAsAThirdPartyProcessSeesIt()
             icon.imageScaling = .scaleProportionallyUpOrDown
@@ -1605,6 +1612,9 @@ final class DemoSettingsMockView: DemoMockView {
         case .bluetooth:     return "Bluetooth"
         case .remoteControl: return "Accessibility"
         case .speakerSync:   return "Login Items"
+        // Never reached: Usage Statistics has no System Settings pane to land
+        // on, so nothing ever asks this mock to draw one for it.
+        case .usageStats:    return "General"
         }
     }
 
@@ -1739,6 +1749,329 @@ final class DemoSettingsHandoffMockView: DemoMockView {
     var test_stage: DemoStage {
         settings.alphaValue > alert.alphaValue ? .settingsPane : .alert
     }
+}
+
+// MARK: - Usage-statistics ledger
+
+/// Where the ledger's strikes fall along one pass, in seconds. Staggered, so
+/// the four promises are written one after another rather than landing as one
+/// block — the eye follows a list being crossed off.
+enum DemoLedgerBeat {
+    /// Before the first strike moves: long enough that the frame reads as a
+    /// finished document first, and only then starts writing.
+    static let idle: TimeInterval = 0.55
+    /// How long one strike takes to travel the width of its label.
+    static let strike: TimeInterval = 0.50
+    /// Gap between one strike starting and the next.
+    static let stagger: TimeInterval = 0.40
+    static let loop: TimeInterval = 4.60
+}
+
+/// Usage Statistics' stage: a LEDGER of what leaving this switch on would send,
+/// over the list of what it never sends — with each of those four crossed out,
+/// one after another, as the pass plays.
+///
+/// **This is the one stage that is not a rehearsal.** Every other mock in this
+/// file mimics a macOS surface the step's button is about to raise, and is
+/// captioned "You'll see this from macOS" because that is what it is. Usage
+/// Statistics raises nothing: the answer is given in this window, to us. So
+/// there is no dialog to preview, and drawing Audiout's own Settings row
+/// instead would have shown the user a SWITCH when the only question they
+/// actually have is *what does the switch send*. The picture answers that
+/// question and nothing else — which is why it is the whole list, not a
+/// sample, and why the caption above it says so.
+///
+/// Everything is a real string; nothing is greeked. Greeking is how the other
+/// mocks abstract copy the user doesn't need to read word-for-word, and here
+/// the words ARE the content — a promise made in bars would be no promise.
+///
+/// Because it is OURS and not a mimic, its colours come from `Tokens` rather
+/// than `DemoSystemColor` (the same rule ``DemoSettledMockView`` follows), and
+/// it has no drawn cursor: nothing on this stage is a button to press.
+///
+/// **The motion is the promise being written.** The settled frame is the
+/// FINISHED ledger — every strike drawn — so a snapshot, a Reduce Motion rest
+/// and a headless render all carry the complete message; the pass re-draws the
+/// four strikes from nothing. That inverts the ask mocks'
+/// "a pass ends where it started" rule on purpose: their rest state is the
+/// surface as the user will FIND it (switch off, nothing done yet), and this
+/// one has nothing for the user to do.
+final class DemoDataReceiptMockView: DemoMockView {
+
+    /// WIDTH only: the ledger fills the stage's 418 pt bar one comfortable
+    /// margin in, and its HEIGHT is whatever seven lines and a rule come to.
+    /// Unlike every other mock here it draws no surface of its own — the
+    /// preview frame's well IS its surface, and a card inside that well would
+    /// be a box in a box saying nothing the frame hasn't already said (the same
+    /// reason ``DemoSettledMockView`` draws no chrome).
+    static let width: CGFloat = 372
+
+    /// What a month of ordinary use would send. Plausible small numbers, not
+    /// round ones: a ledger of 10 / 5 / 5 reads as a mock-up, and this frame's
+    /// only job is to be believed.
+    private static let sent: [(label: String, count: Int)] = [
+        ("Speakers connected", 12),
+        ("Groups created", 3),
+        ("Apps routed", 5),
+    ]
+
+    /// PRODUCT.md's privacy fence, said in the user's own words rather than
+    /// the document's: no speaker or device names, no network identifiers, no
+    /// audio content, no license key. Keep this list in step with that
+    /// section — this frame is a promise, and it is the only place the app
+    /// makes it in full.
+    private static let neverSent = [
+        "Speaker names",
+        "Your Wi\u{2011}Fi network",
+        "What you're playing",
+        "Your license key",
+    ]
+
+    private static let rowFont = NSFont.systemFont(ofSize: 12)
+    private static let rowHeight: CGFloat = 24
+    /// Air under a block's header. More above a heading than below it, which
+    /// is what ``dividerGap`` is for.
+    private static let headerGap: CGFloat = 8
+    /// Air either side of the rule between the two halves — the one piece of
+    /// structure that says these are two different KINDS of list, not seven
+    /// items with a gap.
+    private static let dividerGap: CGFloat = 17
+
+    private var strikes: [DemoStrikeView] = []
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        build()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var timelineDuration: TimeInterval { DemoLedgerBeat.loop }
+
+    private func build() {
+        let sentRows = Self.sent.map { Self.makeSentRow(label: $0.label, count: $0.count) }
+        let neverRows = Self.neverSent.map { Self.makeNeverRow(label: $0) }
+        strikes = neverRows.map(\.strike)
+
+        let divider = NSBox()
+        divider.boxType = .separator
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        // EXPLICIT: an `NSBox` separator hugs weakly, so in a stack with slack
+        // to distribute it grows and draws its rule down the middle of the
+        // block below (live, and it landed straight through "NEVER SENT").
+        divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
+
+        // The headers are fixed chrome — nothing is decided on them — so they
+        // may carry the console voice PRODUCT.md reserves for exactly that
+        // (labels and nameplates, never a decision).
+        let sentHeader = Self.makeHeader("SENT")
+        let neverHeader = Self.makeHeader("NEVER SENT")
+
+        let stack = NSStackView(views: [sentHeader] + sentRows
+                                + [divider, neverHeader] + neverRows.map(\.row))
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.setCustomSpacing(Self.headerGap, after: sentHeader)
+        stack.setCustomSpacing(Self.dividerGap, after: sentRows.last!)
+        stack.setCustomSpacing(Self.dividerGap, after: divider)
+        stack.setCustomSpacing(Self.headerGap, after: neverHeader)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        var constraints: [NSLayoutConstraint] = [
+            widthAnchor.constraint(equalToConstant: Self.width),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ]
+        // Every row spans the full width — the sent rows need it for their
+        // trailing count column, and the never rows need it so the empty
+        // column beside them is visibly empty.
+        for row in sentRows + neverRows.map(\.row) + [divider] {
+            constraints.append(row.leadingAnchor.constraint(equalTo: stack.leadingAnchor))
+            constraints.append(row.trailingAnchor.constraint(equalTo: stack.trailingAnchor))
+        }
+        for row in sentRows + neverRows.map(\.row) {
+            constraints.append(row.heightAnchor.constraint(equalToConstant: Self.rowHeight))
+        }
+        NSLayoutConstraint.activate(constraints)
+        applySettledState()
+    }
+
+    /// A block header: small, tracked capitals in tertiary ink. The tracking is
+    /// what makes a run of capitals at this size read as a label rather than a
+    /// shouted word.
+    private static func makeHeader(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.attributedStringValue = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: Tokens.Color.inkTertiary,
+            .kern: 0.9,
+        ])
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }
+
+    /// A sent row: what was counted, and how many. The count is the whole point
+    /// of the frame — a NUMBER is what an anonymous count looks like — so it
+    /// gets primary ink and monospaced digits, which keep the three of them in
+    /// a column instead of ragged.
+    private static func makeSentRow(label text: String, count: Int) -> NSView {
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let name = NSTextField(labelWithString: text)
+        name.font = rowFont
+        name.textColor = Tokens.Color.label
+        name.translatesAutoresizingMaskIntoConstraints = false
+
+        let value = NSTextField(labelWithString: "\u{00D7}\(count)")
+        value.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        value.textColor = Tokens.Color.label
+        value.translatesAutoresizingMaskIntoConstraints = false
+
+        row.addSubview(name)
+        row.addSubview(value)
+        NSLayoutConstraint.activate([
+            name.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            name.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            value.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            value.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            name.trailingAnchor.constraint(lessThanOrEqualTo: value.leadingAnchor, constant: -12),
+        ])
+        return row
+    }
+
+    /// A never-sent row: the same list shape with an EMPTY count column, and a
+    /// rule drawn through the words. The empty column is doing real work — the
+    /// two halves line up, and the missing number is the point.
+    ///
+    /// The label stays `inkSecondary` rather than fading out: a promise the
+    /// user has to squint at is worth less than one they can read, and the
+    /// strike alone carries "not this".
+    private static func makeNeverRow(label text: String) -> (row: NSView, strike: DemoStrikeView) {
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let name = NSTextField(labelWithString: text)
+        name.font = rowFont
+        name.textColor = Tokens.Color.inkSecondary
+        name.translatesAutoresizingMaskIntoConstraints = false
+
+        let strike = DemoStrikeView()
+        row.addSubview(name)
+        row.addSubview(strike)
+        NSLayoutConstraint.activate([
+            name.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            name.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            name.trailingAnchor.constraint(lessThanOrEqualTo: row.trailingAnchor),
+            // Exactly the words' width — a rule running on past the last letter
+            // reads as a drawing mistake rather than a deletion.
+            strike.leadingAnchor.constraint(equalTo: name.leadingAnchor),
+            strike.trailingAnchor.constraint(equalTo: name.trailingAnchor),
+            // A point and a half below the label's box centre (this row lays
+            // out top-down, so a POSITIVE constant is downward): a text
+            // field's frame is centred on its ascender/descender box, which
+            // sits above the x-height the eye reads a strike against, so a
+            // rule on the exact centre clips the tops of the letters.
+            strike.centerYAnchor.constraint(equalTo: name.centerYAnchor, constant: 1.5),
+            strike.heightAnchor.constraint(equalToConstant: DemoStrikeView.thickness),
+        ])
+        return (row, strike)
+    }
+
+    /// Settled: the finished ledger. Every strike fully drawn — see the type's
+    /// doc for why this rest state, unlike the ask mocks', is the DONE one.
+    override func applySettledState() {
+        strikes.forEach { $0.setDrawn(1) }
+    }
+
+    override func addTimelineAnimations() {
+        for (index, strike) in strikes.enumerated() {
+            let start = DemoLedgerBeat.idle + Double(index) * DemoLedgerBeat.stagger
+            strike.addSweep(from: start, to: start + DemoLedgerBeat.strike, in: self)
+        }
+    }
+
+    // MARK: Test-support hooks
+
+    /// How far each strike is drawn right now, leading edge to trailing —
+    /// `[1, 1, 1, 1]` on the settled frame every snapshot and Reduce Motion
+    /// rest must land on.
+    var test_strikeProgress: [CGFloat] { strikes.map(\.test_drawn) }
+}
+
+/// The rule struck through one never-sent line. Layer-drawn rather than an
+/// `NSAttributedString` strikethrough because it has to be ANIMATABLE: the
+/// promise is written left to right, which is a scale on a sublayer anchored at
+/// its leading edge, and a text attribute has no such handle.
+final class DemoStrikeView: NSView {
+
+    /// A hair over one point, so it survives a non-integral layout on a 2×
+    /// display without disappearing.
+    static let thickness: CGFloat = 1.5
+
+    private let rule = CALayer()
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        // The sublayer's own frame is ours to set (unlike a backing layer's,
+        // which AppKit rewrites from the view frame on every layout), so the
+        // leading-edge anchor is safe here and only here.
+        rule.anchorPoint = CGPoint(x: 0, y: 0.5)
+        rule.cornerRadius = Self.thickness / 2
+        layer?.addSublayer(rule)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        // No implicit animation: layout runs mid-pass (a window resize, a
+        // re-layout behind the timeline) and a Core Animation default would
+        // slide the rule sideways under the keyframes driving it.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        rule.bounds = CGRect(x: 0, y: 0, width: bounds.width, height: Self.thickness)
+        rule.position = CGPoint(x: 0, y: bounds.midY)
+        rule.backgroundColor = Tokens.Color.inkSecondary.cgColor
+        CATransaction.commit()
+    }
+
+    override func updateLayer() {
+        // Re-stamp on every appearance change: a resolved `CGColor` on a layer
+        // is frozen at the appearance it was taken in (SharedUI's layer-colour
+        // instrument rule).
+        rule.backgroundColor = Tokens.Color.inkSecondary.cgColor
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    /// Draw the rule to `fraction` of the label's width, without animating.
+    func setDrawn(_ fraction: CGFloat) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        rule.transform = CATransform3DMakeScale(fraction, 1, 1)
+        CATransaction.commit()
+    }
+
+    /// Lay this strike's sweep onto `host`'s pass: nothing, then drawn between
+    /// `start` and `end`, then held for the rest of the pass.
+    func addSweep(from start: TimeInterval, to end: TimeInterval, in host: DemoMockView) {
+        rule.add(host.keyframes("transform.scale.x", host.held([
+            (0, 0), (start, 0), (end, 1),
+        ]), timing: .easeOut), forKey: "strikeSweep")
+    }
+
+    // MARK: Test-support hooks
+
+    var test_drawn: CGFloat { rule.transform.m11 }
 }
 
 // MARK: - Settled mock

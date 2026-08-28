@@ -1265,15 +1265,16 @@ public final class GroupEditorViewController: NSViewController {
     /// The reassurance line's exact wording.
     public var test_reassuranceText: String { reassuranceLabel.stringValue }
 
-    /// Drive a membership row's pointer state headlessly — the hover ring is
-    /// the row's "this is clickable" affordance now that the whole row toggles.
+    /// Drive a membership row's pointer state headlessly — the node's hover
+    /// growth is the row's "this is clickable" affordance now that the whole
+    /// row toggles.
     public func test_setRowHovered(_ hovered: Bool, for deviceID: String) {
         rowsByID[deviceID]?.test_setHovered(hovered)
     }
 
-    /// Whether a membership row currently draws its hover ring.
-    public func test_rowDrawsHoverRing(for deviceID: String) -> Bool {
-        rowsByID[deviceID]?.test_drawsHoverRing ?? false
+    /// Whether a membership row's node is grown into its hover size.
+    public func test_rowNodeIsGrown(for deviceID: String) -> Bool {
+        rowsByID[deviceID]?.test_nodeIsGrown ?? false
     }
 
     /// Simulate a click on a membership row's BODY (not its checkbox) — the

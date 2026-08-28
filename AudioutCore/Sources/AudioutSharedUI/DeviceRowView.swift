@@ -135,9 +135,9 @@ public final class DeviceRowView: NSView {
     /// Transient pointer-in-the-gutter state, the same discipline as
     /// `isHovered` (reset on `apply` and re-parenting via
     /// ``setGutterHovered(_:)``). Stored — rather than pushed straight into
-    /// the bus skin — because the node's hover ring now resolves from BOTH
-    /// flags (``refreshBusHoverCue()``): the gutter rings any live node, and
-    /// row hover additionally rings an unselected one.
+    /// the bus skin — because the node's hover GROWTH resolves from BOTH
+    /// flags (``refreshBusHoverCue()``): the gutter grows any live node, and
+    /// row hover additionally grows an unselected one.
     private var isGutterHovered: Bool = false
 
     /// The PRIMARY "Selected Devices" membership control (SPEC §9b device-row
@@ -2563,12 +2563,13 @@ public final class DeviceRowView: NSView {
         return enableCheckbox.frame
     }
 
-    /// The drawn node's outer rect (disc plus hover ring) in this row's
-    /// coordinates — what the hit rect above has to contain.
+    /// The drawn node's outer rect — the node at its GROWN hover size, its
+    /// widest — in this row's coordinates; what the hit rect above has to
+    /// contain.
     public func test_nodeRect() -> NSRect? {
         guard busActive else { return nil }
         layoutSubtreeIfNeeded()
-        let r = PopoverColumnGrid.busNodeHoverRingRadius
+        let r = PopoverColumnGrid.busNodeHoverRadius
         return NSRect(x: busView.frame.midX - r, y: busView.frame.midY - r,
                       width: 2 * r, height: 2 * r)
     }
@@ -2576,8 +2577,13 @@ public final class DeviceRowView: NSView {
     /// Drive the gutter hover through the same private path the tracking area
     /// uses (a real pointer crossing can't be synthesized headlessly).
     public func test_setGutterHovered(_ hovered: Bool) { setGutterHovered(hovered) }
-    /// Whether the node currently draws its gold hover ring.
-    public var test_drawsHoverRing: Bool { busActive && busView.test_drawsHoverRing }
+    /// Whether the node is grown into its hover size.
+    public var test_nodeIsGrown: Bool { busActive && busView.test_nodeIsGrown }
+    /// The radius the node is settling on — resting, or grown for a hover.
+    /// `nil` when the row has no bus.
+    public var test_nodeTargetRadius: CGFloat? {
+        busActive ? busView.test_nodeTargetRadius : nil
+    }
 
     /// The membership control's (the node-skinned checkbox's) current VoiceOver
     /// label — asserts the bus node speaks as the SAME real checkbox (spec §4.8:
@@ -2636,8 +2642,8 @@ public final class DeviceRowView: NSView {
             options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
             owner: self
         ))
-        // The bus gutter's own region: hovering it wakes the socket rim (the
-        // node's "I am clickable" affordance). Same rect as the checkbox's
+        // The bus gutter's own region: hovering it grows the node (its "I am
+        // clickable" affordance). Same rect as the checkbox's
         // expanded hit box, read off the control itself so the two can't drift.
         if busActive {
             // Explicit rect, so NO `.inVisibleRect` here — that option makes
@@ -2720,12 +2726,12 @@ public final class DeviceRowView: NSView {
         refreshBusHoverCue()
     }
 
-    /// Resolve whether the node draws its hover ring: the pointer in the
-    /// GUTTER always rings (any row), and the pointer anywhere on the ROW
-    /// rings an UNSELECTED node too — the invisible checkbox has no resting
+    /// Resolve whether the node grows for the pointer: the pointer in the
+    /// GUTTER always grows it (any row), and the pointer anywhere on the ROW
+    /// grows an UNSELECTED node too — the invisible checkbox has no resting
     /// affordance, so a row not yet in the mix admits its node is the way in
     /// while the pointer is over it. A selected row keeps the gutter-only
-    /// ring (its filled node already reads as the control). Same enabled
+    /// growth (its filled node already reads as the control). Same enabled
     /// guard as ever: never invite a click the checkbox would refuse.
     private func refreshBusHoverCue() {
         guard busActive else { return }

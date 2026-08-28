@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import QuartzCore
 
 /// The **membership bus — the LEFT SPINE** (Warm Signal v4 §Call-1, supersedes
 /// the v3 trailing-column bus): the DRAWING-ONLY skin that renders the "Selected
@@ -29,8 +30,10 @@ import AppKit
 /// GOLD through a connected member, `ember` otherwise — ember survives as a
 /// SEGMENT tone only, which is where Call 3's energize sequence reads.
 ///
-/// **Determinism:** node + rails are steady drawing (no animation), so
-/// `cacheDisplay(in:to:)` captures them identically every run.
+/// **Determinism:** at rest node + rails are steady drawing, so
+/// `cacheDisplay(in:to:)` captures them identically every run. The ONE
+/// transient is the hover growth below, and it only runs while the pointer is
+/// on the row inside a live window — a snapshot fixture never hovers.
 public final class MembershipBusView: NSView {
 
     /// What this row's bus node renders as. The line path follows from it: a
@@ -83,14 +86,37 @@ public final class MembershipBusView: NSView {
     /// (`Tokens.Color.spineTone`). Defaults to true: the popover's rows ARE the
     /// live signal path and keep their gold unchanged.
     private var armed = true
-    /// Whether the pointer is over the row's bus-gutter region — a thin gold ring
-    /// appears around the node so it admits it is clickable. The HOST row owns the
-    /// tracking (this view stays non-interactive) and only reports a hover its
-    /// checkbox can act on.
+    /// Whether the pointer is over the row's bus-gutter region — the node GROWS
+    /// to `PopoverColumnGrid.busNodeHoverRadius` so it admits it is clickable.
+    /// The HOST row owns the tracking (this view stays non-interactive) and only
+    /// reports a hover its checkbox can act on.
     private var hovered = false
+    /// How far the node has travelled from its resting radius toward the hovered
+    /// one: 0 = resting, 1 = fully grown. Animated by ``growthLink``; a hover
+    /// that reverses mid-travel restarts from this live value, so the node never
+    /// snaps back to re-run the tween.
+    private var growth: CGFloat = 0
+    /// Where `growth` stood when the current tween started, and when that was.
+    private var growthOrigin: CGFloat = 0
+    private var growthStartTime: CFTimeInterval = 0
+    /// The tween's clock — the same vsync clock ``FoldAnimator`` and
+    /// ``LevelMeterView`` run on, taken per-view (`NSView.displayLink`, which
+    /// retains its target while active) because the value being animated is this
+    /// view's own drawing, not a shared constraint. Nil at rest: nothing ticks
+    /// once the node has arrived.
+    private var growthLink: CADisplayLink?
 
     public init() {
         super.init(frame: .zero)
+        // Reduce Motion turned on mid-travel lands the node on its target size
+        // immediately — the same live-reconcile contract every other animated
+        // instrument here honours (`RouteArmedDotView`, `HaloRingView`).
+        // Selector-based observation needs no matching removal.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
         // Non-layer-backed: the row it sits in is layer-backed, which promotes
         // this into the layer tree for compositing while this view's own `draw`
         // still runs (clipped to its bounds, which the hop-arc fits inside —
@@ -111,13 +137,75 @@ public final class MembershipBusView: NSView {
         needsDisplay = true
     }
 
-    /// Point the node at the pointer state the HOST row tracked. The node itself
-    /// never moves or resizes on hover — only the ring around it appears — so the
-    /// gutter stays still under the pointer.
+    /// Point the node at the pointer state the HOST row tracked. The node GROWS
+    /// into `PopoverColumnGrid.busNodeHoverRadius` and shrinks back out of it —
+    /// its CENTRE never moves, so the gutter stays still under the pointer and
+    /// the click target is unchanged.
+    ///
+    /// Off-window or under Reduce Motion the size is taken instantly; otherwise
+    /// the tween starts from wherever the node currently stands, so a hover-out
+    /// mid-grow reverses smoothly instead of snapping or queueing.
     public func setHovered(_ hovered: Bool) {
         guard self.hovered != hovered else { return }
         self.hovered = hovered
+        guard window != nil, !reduceMotion else { settleGrowth(); return }
+        growthOrigin = growth
+        growthStartTime = CACurrentMediaTime()
+        startGrowthClock()
         needsDisplay = true
+    }
+
+    /// Land the node on its target size now and stop the clock (Reduce Motion,
+    /// an off-screen row, or the tween arriving).
+    private func settleGrowth() {
+        growthLink?.invalidate()
+        growthLink = nil
+        growth = hovered ? 1 : 0
+        needsDisplay = true
+    }
+
+    private func startGrowthClock() {
+        guard growthLink == nil else { return }
+        // `.common` mode: the pointer can cross the gutter with a button held
+        // (a drag over the rows), and the affordance still has to travel.
+        let link = displayLink(target: self, selector: #selector(growthTick))
+        link.add(to: .main, forMode: .common)
+        growthLink = link
+    }
+
+    /// One frame of the grow/shrink tween. Marked `@objc` for the
+    /// selector-based `NSView.displayLink` callback.
+    @objc private func growthTick() {
+        let duration = PopoverColumnGrid.busNodeHoverGrowDuration
+        let target: CGFloat = hovered ? 1 : 0
+        let t: CGFloat = duration > 0
+            ? min(1, max(0, CGFloat((CACurrentMediaTime() - growthStartTime) / duration)))
+            : 1
+        guard t < 1 else { settleGrowth(); return }
+        // Ease-out cubic: the size is off the mark fastest at the start, so the
+        // node answers the pointer immediately and settles rather than drifting.
+        let eased = 1 - pow(1 - t, 3)
+        growth = growthOrigin + (target - growthOrigin) * eased
+        needsDisplay = true
+    }
+
+    /// A row leaving its window (a popover rebuild, a scroll recycle) has no
+    /// travel left to make — settle, so nothing ticks off screen.
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { settleGrowth() }
+    }
+
+    @objc private func accessibilityDisplayOptionsDidChange() {
+        if reduceMotion { settleGrowth() }
+    }
+
+    /// Test seam for Reduce Motion (`nil` = the live system setting), matching
+    /// ``RouteArmedDotView``/``FoldAnimator``.
+    public var test_reduceMotionOverride: Bool?
+
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
     /// Non-interactive: never intercept clicks — the invisible checkbox behind
@@ -133,7 +221,7 @@ public final class MembershipBusView: NSView {
         // The `.origin` carries no node — the continuous rail overlay draws the
         // Main Audio hook.
         guard node != .origin else { return }
-        let r = Self.nodeRadius(for: node)
+        let r = drawnRadius
 
         effectiveAppearance.performAsCurrentDrawingAppearance {
             // NODE ONLY (Warm Signal v4 §Call-1, Alec's continuity correction):
@@ -146,7 +234,6 @@ public final class MembershipBusView: NSView {
             let cx = bounds.midX
             let cy = bounds.midY
             let ember = dimmed ? Tokens.Color.railDormant : Tokens.Color.ember
-            drawHoverRing(centerX: cx, centerY: cy)
             let rect = NSRect(x: cx - r, y: cy - r, width: 2 * r, height: 2 * r)
             if node == .member {
                 // Filled disc + rim in the spine's own tone: gold on an armed
@@ -162,21 +249,6 @@ public final class MembershipBusView: NSView {
                               dashed: isDashed(node))
             }
         }
-    }
-
-    /// The hover ring: a thin gold circle standing off the node while the pointer
-    /// is over the gutter, so the node admits it is the click target without the
-    /// rail carrying a permanent affordance.
-    private func drawHoverRing(centerX: CGFloat, centerY: CGFloat) {
-        guard hovered else { return }
-        let r = PopoverColumnGrid.busNodeHoverRingRadius
-        let ring = NSBezierPath(ovalIn: NSRect(x: centerX - r, y: centerY - r,
-                                               width: 2 * r, height: 2 * r))
-        ring.lineWidth = 1
-        // The ring is an affordance, but it still speaks the spine's tone: an
-        // idle rail must never flash gold (the LIVE color) just for a hover.
-        Tokens.Color.spineTone(armed: armed).setStroke()
-        ring.stroke()
     }
 
     /// Stroke a node's rim (hollow node border, or the filled node's edge).
@@ -224,6 +296,22 @@ public final class MembershipBusView: NSView {
             : PopoverColumnGrid.busNodeDiameterUnselected / 2
     }
 
+    /// The radius the node is TRAVELLING toward: its resting size, or the grown
+    /// hover size while the host reports an invitation. The resolved state —
+    /// what a test asserts, and where an instant (Reduce Motion, off-screen)
+    /// change lands.
+    private var targetRadius: CGFloat {
+        hovered ? PopoverColumnGrid.busNodeHoverRadius : Self.nodeRadius(for: node)
+    }
+
+    /// The radius drawn THIS frame — resting to hovered, interpolated by the
+    /// tween. The node's centre is untouched, so nothing reflows and the click
+    /// target never moves.
+    private var drawnRadius: CGFloat {
+        let resting = Self.nodeRadius(for: node)
+        return resting + (PopoverColumnGrid.busNodeHoverRadius - resting) * growth
+    }
+
     // MARK: Test-support hooks
 
     /// The node rendering currently drawn (structural hook — the same `node` the
@@ -232,16 +320,21 @@ public final class MembershipBusView: NSView {
     /// Whether this row's node is rendered dimmed via the dormant-divergent tint
     /// (spec §4.7) — a tint, never alpha.
     public var test_dimmed: Bool { dimmed }
-    /// The disc radius this row's node currently draws at (v4.1 item 4 — size
-    /// joins fill as a selection signal). Structural hook, same value `draw`
-    /// reads, so it can't drift from the pixels.
-    public var test_nodeRadius: CGFloat { Self.nodeRadius(for: node) }
-    /// Whether the host row is currently reporting a gutter hover.
+    /// The disc radius this row's node draws at THIS frame — mid-tween while a
+    /// hover is travelling. Structural hook, same value `draw` reads, so it
+    /// can't drift from the pixels. Tests assert ``test_nodeTargetRadius``
+    /// instead: a frame-accurate value is not deterministic under load.
+    public var test_nodeRadius: CGFloat { drawnRadius }
+    /// The radius the node is settling ON — resting, or the grown hover size.
+    /// The resolved state, so it is deterministic whatever the clock has done.
+    public var test_nodeTargetRadius: CGFloat { targetRadius }
+    /// Whether the host row is currently reporting a hover the node grows for.
     public var test_hovered: Bool { hovered }
     /// Whether the node currently renders in the armed (gold) tone vs the quiet
     /// ember idle tone — the same flag `draw` reads for `.member`'s fill.
     public var test_armed: Bool { armed }
-    /// Whether the node currently draws its gold hover ring (structural hook —
-    /// the same condition `drawHoverRing` guards on).
-    public var test_drawsHoverRing: Bool { hovered }
+    /// Whether the node is grown into its hover size (structural hook — derived
+    /// from the RADII the drawing resolves, never from a separate flag, so it
+    /// can't claim a growth the pixels don't show).
+    public var test_nodeIsGrown: Bool { targetRadius > Self.nodeRadius(for: node) }
 }

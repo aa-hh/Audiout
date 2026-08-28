@@ -116,40 +116,40 @@ import AppKit
         #expect(!row.test_isChecked)
     }
 
-    // MARK: The hover ring — the row's "this is clickable" affordance
+    // MARK: The hover growth — the row's "this is clickable" affordance
 
-    @Test func hoveringAWarmRowRingsItsNode() {
+    @Test func hoveringAWarmRowGrowsItsNode() {
         let row = makeRow(.warmPane, checked: false)
-        #expect(!row.test_drawsHoverRing, "no ring at rest")
+        #expect(!row.test_nodeIsGrown, "resting size at rest")
 
         row.test_setHovered(true)
-        #expect(row.test_drawsHoverRing,
-                "the whole row is clickable now, so a pointer anywhere on it lights the ring")
+        #expect(row.test_nodeIsGrown,
+                "the whole row is clickable now, so a pointer anywhere on it grows the node")
 
         row.test_setHovered(false)
-        #expect(!row.test_drawsHoverRing)
+        #expect(!row.test_nodeIsGrown)
     }
 
-    @Test func aPinnedRowNeverRingsItself() {
+    @Test func aPinnedRowNeverGrowsItself() {
         // A PINNED row keeps its `.member` node (it IS a member) — so the
         // refusal for that case has to come from the row's checkbox enablement,
-        // not from `MembershipBusView`'s own node-based ring gate.
+        // not from `MembershipBusView`'s own node-based gate.
         let row = makeRow(.warmPane, checked: true)
         row.test_setHovered(true)
-        #expect(row.test_drawsHoverRing)
+        #expect(row.test_nodeIsGrown)
 
         row.setCheckboxEnabled(false, tooltip: "A group needs at least one device.")
-        #expect(!row.test_drawsHoverRing,
+        #expect(!row.test_nodeIsGrown,
                 "pinning happens under a stationary pointer — the invitation is withdrawn there")
 
         row.test_setHovered(true)
-        #expect(!row.test_drawsHoverRing, "and a fresh hover never revives it")
+        #expect(!row.test_nodeIsGrown, "and a fresh hover never revives it")
     }
 
-    @Test func aSystemSheetRowDrawsNoHoverRing() {
+    @Test func aSystemSheetRowNeverGrowsANode() {
         let row = makeRow(.systemSheet, checked: true)
         row.test_setHovered(true)
-        #expect(!row.test_drawsHoverRing, "no node on the Apple sheet, so no ring")
+        #expect(!row.test_nodeIsGrown, "no node on the Apple sheet, so nothing to grow")
     }
 
     // MARK: The system sheet draws no node and no rail
@@ -440,13 +440,13 @@ import AppKit
                 "the row body reaches the same save path the checkbox does")
     }
 
-    @Test func hoveringAnEditorRowRingsItsNode() throws {
+    @Test func hoveringAnEditorRowGrowsItsNode() throws {
         let (editor, _, _) = try makeEditor()
-        #expect(!editor.test_rowDrawsHoverRing(for: "a"))
+        #expect(!editor.test_rowNodeIsGrown(for: "a"))
         editor.test_setRowHovered(true, for: "a")
-        #expect(editor.test_rowDrawsHoverRing(for: "a"))
+        #expect(editor.test_rowNodeIsGrown(for: "a"))
         editor.test_setRowHovered(false, for: "a")
-        #expect(!editor.test_rowDrawsHoverRing(for: "a"))
+        #expect(!editor.test_rowNodeIsGrown(for: "a"))
     }
 
     // MARK: "Playing now" + the reassurance line (the active editor only)
@@ -543,11 +543,11 @@ import AppKit
     }
 
     @Test func nodeClearsTheIconColumn() {
-        // The gutter reserve must keep the node — and the hover ring around it —
+        // The gutter reserve must keep the node — at its GROWN hover size —
         // from crowding the glyph.
         let row = makeRow(.warmPane, checked: true)
         let nodeRightEdge = PopoverColumnGrid.railGutterCenterX
-            + PopoverColumnGrid.busNodeHoverRingRadius
+            + PopoverColumnGrid.busNodeHoverRadius
         let iconLeading = PopoverColumnGrid.firstElementLeading(indented: false)
         #expect(iconLeading - nodeRightEdge > 8,
                 "the node keeps clear negative space before the icon tile")

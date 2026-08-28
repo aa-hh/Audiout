@@ -474,11 +474,16 @@ public enum PopoverColumnGrid {
     /// node's radius, so a large node and a small one are cleared by the same
     /// margin.
     public static let busDetourBulge: CGFloat = 6.5
-    /// Radius of the HOVER RING — the thin gold circle that appears around the
-    /// node while the pointer is in the gutter. CONSTANT for every node kind, so
-    /// the affordance lands in the same place whether the row is in the mix or
-    /// out of it, and so the gutter reserve can be sized against one number.
-    public static let busNodeHoverRingRadius: CGFloat = 10
+    /// Radius the node GROWS TO while the pointer invites it. CONSTANT for every
+    /// node kind, so the affordance lands at the same size whether the row is in
+    /// the mix or out of it, and so the gutter reserve can be sized against one
+    /// number.
+    public static let busNodeHoverRadius: CGFloat = 10
+    /// How long that growth takes, each way. Pointer feedback, not storytelling:
+    /// an order of magnitude under the rail pulse's `railConnectPulseDuration`
+    /// and inside the "immediate feedback" band, so the node answers the pointer
+    /// rather than performing for it.
+    public static let busNodeHoverGrowDuration: CFTimeInterval = 0.12
     /// FULL-WIRE travel time of the rail's one-shot CONNECT PULSE (Warm Signal
     /// v4.1 item 9, reshaped per Alec 2026-08-12): the glowing bead's climb
     /// from the joining room's node into the Main Audio ring. A mid-wire
@@ -495,9 +500,9 @@ public enum PopoverColumnGrid {
     /// the house clock.
     public static let railConnectPulseArrivalDuration: CFTimeInterval = 0.4
     /// Width of the non-interactive bus-overlay column view a row hosts, centered
-    /// on `railGutterCenterX`. Wide enough to contain the largest node plus its
-    /// hover ring without clipping — the detour arcs are drawn by the panel-level
-    /// overlay, not here. Spans the full
+    /// on `railGutterCenterX`. Wide enough to contain the largest node at its
+    /// GROWN hover size without clipping — the detour arcs are drawn by the
+    /// panel-level overlay, not here. Spans the full
     /// row height so stacked rows' rail segments read as one continuous line.
     public static let busColumnWidth: CGFloat = 30
     /// Minimum hit height of the inline "Undo" link button in the transient

@@ -156,9 +156,19 @@ import Testing
         // Wall-clock pacing (not a fixed frame count per tick) means each
         // chunk's size varies a little, but three ticks of audio should
         // still add up to about 3 x 882 frames x 4 bytes = 10,584 bytes.
+        //
+        // The bounds are deliberately lopsided. The server derives each tick's
+        // payload from elapsed wall time, so a tick that fires LATE sends extra
+        // bytes to catch up: load pushes this sum up, never down. The upper
+        // bound therefore has to tolerate a saturated machine — 11,504, 11,544
+        // and 11,696 were all observed on one, against the old 11,500 ceiling,
+        // and failed three separate commits for no better reason than that the
+        // test box was busy. The lower bound is the one that still means
+        // something: under-sending would starve a real receiver, and no amount
+        // of scheduler jitter causes it.
         let sizes = parsed[1...3].map(\.count)
         #expect(sizes.allSatisfy { $0 > 0 })
-        #expect((9_500...11_500).contains(sizes.reduce(0, +)))
+        #expect((9_500...13_000).contains(sizes.reduce(0, +)))
     }
 
     @Test func headGetsTheHeaderAndThenEOF() throws {

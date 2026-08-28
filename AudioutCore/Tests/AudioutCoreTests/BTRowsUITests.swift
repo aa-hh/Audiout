@@ -304,6 +304,45 @@ import AppKit
         #expect(open.test_syncChipAXValue == "3 milliseconds earlier")
     }
 
+    /// The trailing slot's column order on a sync-capable row: FEED pills at
+    /// the slot's LEADING edge — the same anchor an AirPlay row's pills use,
+    /// under the card header's "Source" — and the chip closing the slot at the
+    /// trailing inset, under "Offset". Anchors and order only; no absolute
+    /// widths (the AppKit rounding grid varies per run).
+    @Test func syncRowPutsTheFeedPillsLeftAndTheChipRight() {
+        let device = btDevice(state: .connected)
+        let row = makeRow(device, delegate: SpyDelegate(), syncTrimMs: 24,
+                          syncTrimIsSet: true, selected: true)
+        row.layoutSubtreeIfNeeded()
+        let (feed, chip) = row.test_trailingSlotFrames
+        #expect(row.test_feedText?.isEmpty == false, "a member row feeds something to place")
+
+        // Measured INWARD from the row's own trailing edge — the frame the
+        // whole grid is anchored off. A row self-sizes to its content, so an
+        // absolute x would only pin this run's rounding grid.
+        let feedInset = row.bounds.maxX - feed.minX
+        let chipInset = row.bounds.maxX - chip.maxX
+        let placement = "feed \(feed), chip \(chip), row \(row.bounds)"
+        #expect(abs(feedInset - PopoverColumnGrid.feedColumnLeadingFromTrailing) <= 1,
+                "pills start at the slot's leading edge — \(placement)")
+        #expect(abs(chipInset - PopoverColumnGrid.trailingInset) <= 1,
+                "the chip closes the slot at the trailing inset — \(placement)")
+        #expect(feed.maxX <= chip.minX,
+                "feed left, chip right — never crossed. \(placement)")
+
+        // The AirPlay row's pills are on the very same anchor, which is what
+        // lets ONE "Source" legend name both.
+        let ap = Device(id: "office", name: "Office", kind: .homePod)
+        let airPlay = DeviceRowView(device: ap, showsToggle: true,
+                                    paintsSelectionBackground: false, showsMeter: true,
+                                    showsBus: true)
+        airPlay.apply(ap, selected: true, controllable: true)
+        airPlay.layoutSubtreeIfNeeded()
+        let airPlayFeed = airPlay.test_trailingSlotFrames.feed
+        #expect(abs((airPlay.bounds.maxX - airPlayFeed.minX) - feedInset) <= 1,
+                "one Source column for both row shapes — airplay \(airPlayFeed) in \(airPlay.bounds)")
+    }
+
     /// The T6 regression guard from the other side: a non-BT row mounts no
     /// chip at all, so nothing about the AirPlay row's trailing slot moved.
     @Test func airPlayRowMountsNoSyncChip() {

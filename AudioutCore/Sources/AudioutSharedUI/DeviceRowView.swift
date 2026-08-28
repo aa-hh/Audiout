@@ -311,10 +311,12 @@ public final class DeviceRowView: NSView {
     // MARK: Bluetooth SYNC chip (BT-OFFSET-UI → PLAN-BT-SYNC-DRAWER T6)
 
     /// Whether this row carries the SYNC control — the popover passes `true`
-    /// for `.bluetooth` rows only. The chip occupies the LEFT portion of the
-    /// reserved trailing slot; the FEED pill right-aligns into
-    /// `PopoverColumnGrid.btFeedReserveWidth` beside it (feed pill far right,
-    /// locked spec). Non-sync rows are byte-for-byte unchanged.
+    /// for `.bluetooth` rows and the Mac's own row. The FEED pills keep the
+    /// reserved trailing slot's LEADING portion
+    /// (`PopoverColumnGrid.btFeedSlotWidth`, on the same anchor every other
+    /// row's pills use) and the chip closes the slot beside them, so the two
+    /// controls run in the order of the card header's "Source" / "Offset"
+    /// legends above them.
     private let showsSyncControls: Bool
     /// The row's ONE sync control (T6): a read-only value chip that opens the
     /// drawer. It replaced the − / value-field / + / metronome cluster
@@ -1648,21 +1650,23 @@ public final class DeviceRowView: NSView {
                     greaterThanOrEqualToConstant: PopoverColumnGrid.removalUndoButtonHeight),
             ])
             if showsSyncControls {
-                // Bluetooth rows (BT-OFFSET-UI): the FEED pill hugs the FAR
-                // RIGHT of the slot (`btFeedReserveWidth` — locked spec) so
-                // the SYNC chip can take the slot's left portion; the
-                // stack's existing mask clips an overlong pill at the reserve's
-                // edge, same honest-clipping fallback as elsewhere.
+                // Sync-capable rows split the slot in the same order as the
+                // card header's legends: FEED pills on the slot's LEADING
+                // edge under "Source" — the identical anchor a plain bus row
+                // uses — capped at `btFeedSlotWidth` so the chip keeps its
+                // share. The stack's mask clips an overlong pill at that cap,
+                // same honest-clipping fallback as elsewhere. (BT-OFFSET-UI's
+                // "feed pill far right" is superseded — see `btFeedSlotWidth`.)
                 constraints.append(contentsOf: [
-                    feedStack.trailingAnchor.constraint(
+                    feedStack.leadingAnchor.constraint(
                         equalTo: trailingAnchor,
-                        constant: -PopoverColumnGrid.trailingInset),
+                        constant: -PopoverColumnGrid.feedColumnLeadingFromTrailing),
                     feedStack.widthAnchor.constraint(
-                        lessThanOrEqualToConstant: PopoverColumnGrid.btFeedReserveWidth),
-                    // The chip: one fixed-width control on the same trailing
-                    // anchor the old cluster ended at, so the card header's
-                    // "Offset" title (trailing-aligned via
-                    // `offsetTitleTrailingFromTrailing`) still lands over it.
+                        lessThanOrEqualToConstant: PopoverColumnGrid.btFeedSlotWidth),
+                    // The chip: one fixed-width control closing the slot. The
+                    // card header's "Offset" title trailing-aligns on
+                    // `offsetTitleTrailingFromTrailing`, which follows
+                    // `syncTrailing`, so it lands over the chip either way.
                     syncChipButton.trailingAnchor.constraint(
                         equalTo: trailingAnchor,
                         constant: -PopoverColumnGrid.syncTrailing),
@@ -2300,6 +2304,14 @@ public final class DeviceRowView: NSView {
     /// The FEED stack's tooltip — the uncapped "Feeding …" line plus the
     /// Older-AirPlay consequence line, `nil` when neither applies (P1-5).
     public var test_feedTooltip: String? { feedStack.toolTip }
+
+    /// The trailing slot's two occupants, in this row's own coordinates, after
+    /// a layout pass. Exposed so a test can pin the column ORDER (pills left
+    /// under "Source", chip right under "Offset") and the two shared anchors —
+    /// never an absolute width, since AppKit's rounding grid varies per run.
+    public var test_trailingSlotFrames: (feed: NSRect, syncChip: NSRect) {
+        (feedStack.frame, syncChipButton.frame)
+    }
 
     /// The color a FEED app-name segment for `appName` currently resolves to —
     /// the seam T7 rewires (``appSegmentColor(for:)``) to `AppTetherColor`.

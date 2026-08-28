@@ -659,15 +659,22 @@ public enum PopoverColumnGrid {
     /// the thing it marks.
     public static let editAffordanceHoverAlpha: CGFloat = 1.0
 
-    // MARK: SYNC column (Bluetooth rows — BT-OFFSET-UI, chip since T6)
+    // MARK: SYNC column (sync-capable rows — BT-OFFSET-UI, chip since T6)
     //
-    // Bluetooth rows carve a per-device SYNC control out of the LEFT portion
-    // of the reserved trailing-control slot: the slider/% columns keep their
-    // exact trailing anchors (cross-section alignment untouched), while the BT
-    // row's FEED pill right-aligns into `btFeedReserveWidth` at the far right
-    // (locked UI spec: "feed pill stays far right") instead of the AirPlay
-    // rows' left-aligned `feedColumnWidth`. Named constants only — the Figma
-    // design-system contract mirrors this file 1:1.
+    // A sync-capable row (every Bluetooth row, plus the Mac's own) splits the
+    // reserved trailing-control slot in two, in the SAME left-to-right order
+    // as the card header's legends: the FEED pills take the slot's LEADING
+    // portion (`btFeedSlotWidth`, under "Source") on the very anchor an
+    // AirPlay row's pills use, and the SYNC chip closes the slot at the
+    // trailing inset (under "Offset"). The slider/% columns keep their exact
+    // trailing anchors, so cross-section alignment is untouched. Named
+    // constants only — the Figma design-system contract mirrors this file 1:1.
+    //
+    // That order SUPERSEDES BT-OFFSET-UI's locked "chip left, feed pill far
+    // right" spec, which predates the column legends: with the controls the
+    // other way round, "Source" printed over the chip and "Offset" over the
+    // pill. The controls moved rather than the legends, since the legends
+    // already name these columns correctly on every AirPlay row.
     //
     // PLAN-BT-SYNC-DRAWER T6 replaced the old four-control cluster (− / value
     // field / + / metronome) with ONE read-only value chip that opens the
@@ -695,29 +702,34 @@ public enum PopoverColumnGrid {
     public static let syncChipDashLength: CGFloat = 3
     /// Dash OFF length of that same untuned border.
     public static let syncChipDashGap: CGFloat = 2
-    /// The BT row's FEED slot: the trailing-control column's far-right portion
-    /// the right-aligned feed pill keeps (an overlong pill clips at the slot's
-    /// edge via the feed stack's existing mask, exactly like overflow pills).
-    public static let btFeedReserveWidth: CGFloat = 48
-    /// Gap between the SYNC chip's trailing edge and the BT feed slot.
+    /// Gap between the FEED pill slot and the SYNC chip that follows it.
     public static let btFeedToSyncGap: CGFloat = 4
-    /// Distance from the row trailing edge to the SYNC chip's TRAILING edge
-    /// — the chip sits immediately left of the BT feed slot.
-    public static var syncTrailing: CGFloat {
-        trailingInset + btFeedReserveWidth + btFeedToSyncGap
+    /// The sync-capable row's FEED slot: the trailing-control column's LEADING
+    /// portion — everything the chip and their gap leave (140 − 84 − 4 = 52).
+    /// The pills left-align on `feedColumnLeadingFromTrailing`, and this width
+    /// is both their ceiling and the feed stack's clipping bound (the stack
+    /// masks to its own bounds), so an overlong pill is cut off at the chip's
+    /// side of the gap — the same honest-clipping fallback as overflow pills.
+    public static var btFeedSlotWidth: CGFloat {
+        trailingControlWidth - syncChipWidth - btFeedToSyncGap
     }
+    /// Distance from the row trailing edge to the SYNC chip's TRAILING edge —
+    /// the chip CLOSES the trailing slot, landing on the same x as every other
+    /// row's trailing control, with the feed pills to its left.
+    public static var syncTrailing: CGFloat { trailingInset }
     /// Distance from the row trailing edge to the "Offset" column title's
     /// TRAILING edge on the card header line — the chip column's own trailing
     /// edge, so the title hangs over the chip it names and moves with it
     /// (sibling of `feedColumnLeadingFromTrailing`, the "Source" title's
-    /// anchor on the same line). TRAILING-aligned, not centred on the chip:
-    /// "Source" left-aligns at `feedColumnLeadingFromTrailing` (154 in) and a
-    /// chip-CENTRED title (center 108 in, ~34 pt wide) runs ~8 pt into it —
-    /// the AirPlay feed slot and the sync-row chip share one physical 140 pt
-    /// slot, so the chip's trailing edge is the only chip-anchored placement
-    /// clear of the Source title. The 2026-08-28 header decision moved this
-    /// legend up from the subsection header lines (where it centred over the
-    /// chip); it prints exactly once now, on the card header.
+    /// anchor on the same line). The pair reads in the order of the controls
+    /// beneath it and clears itself by a wide margin: at
+    /// `Tokens.Font.captionMedium` "Source" measures 37.7 pt and starts 154 in,
+    /// so it ends 116.3 in; "Offset" measures 33.6 pt and ends 14 in, so it
+    /// starts 47.6 in — **68.7 pt of clear air** between them. Re-anchoring
+    /// the chip re-anchors this title, which is the point: with the chip on
+    /// the slot's other side these same two anchors printed each legend over
+    /// the OTHER column's control. This legend prints exactly once, on the
+    /// card header, never on a subsection line.
     public static var offsetTitleTrailingFromTrailing: CGFloat { syncTrailing }
 
     // MARK: SYNC drawer (PLAN-BT-SYNC-DRAWER T5 — `BTSyncDrawerView`)
@@ -814,7 +826,9 @@ public enum PopoverColumnGrid {
     /// title (renamed from "Feed", 2026-08-28) left-aligns on this same anchor
     /// rather than centering over the whole reserved column: with the pills
     /// left-aligned, a centered title floated ~46 pt right of a single pill.
-    /// One derivation for both, so title and pills cannot drift.
+    /// One derivation for all three, so title and pills cannot drift — a
+    /// sync-capable row's pills start here too, just capped at
+    /// `btFeedSlotWidth` to leave the chip its share of the slot.
     public static var feedColumnLeadingFromTrailing: CGFloat {
         trailingControlTrailing + trailingControlWidth
     }

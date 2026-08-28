@@ -210,6 +210,43 @@ import AudioutCore
         #expect(!row.test_drawsHoverRing, "and it settles back on exit")
     }
 
+    @Test func rowHoverRingsAnUnselectedNode() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: false)
+        row.test_setHovered(true)
+        #expect(row.test_drawsHoverRing,
+                "hovering anywhere on an unselected row rings its node — the invisible checkbox's one resting invitation")
+        row.test_setHovered(false)
+        #expect(!row.test_drawsHoverRing)
+    }
+
+    @Test func rowHoverDoesNotRingASelectedNode() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: true, controllable: true)
+        row.test_setHovered(true)
+        #expect(!row.test_drawsHoverRing,
+                "a selected row keeps the gutter-only ring — its filled node already reads as the control")
+    }
+
+    @Test func rowHoverNeverRingsADisabledCheckbox() {
+        let row = makeBusRow()
+        row.apply(makeDevice(isAvailable: false), selected: false)
+        row.test_setHovered(true)
+        #expect(!row.test_drawsHoverRing, "never invite a click the checkbox would refuse")
+    }
+
+    @Test func nameTooltipInvitesOnlyUnselectedAvailableRows() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: false)
+        #expect(row.test_nameTooltip == "Add Test Speaker to the mix")
+        row.apply(makeDevice(), selected: true, controllable: true)
+        #expect(row.test_nameTooltip == nil,
+                "the node's own tooltip already names the removal")
+        row.apply(makeDevice(isAvailable: false), selected: false)
+        #expect(row.test_nameTooltip == nil,
+                "a greyed Bluetooth row's name click CONNECTS — a mix tooltip there would lie")
+    }
+
     @Test func modelRefreshClearsTheGutterHover() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true)

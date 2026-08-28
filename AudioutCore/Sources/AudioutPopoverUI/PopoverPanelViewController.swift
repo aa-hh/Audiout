@@ -71,6 +71,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     private var cardsByHeader: [String: CardView] = [:]
     /// Chevron buttons keyed by section title (for symbol flips + assertions).
     private var chevronsByHeader: [String: NSButton] = [:]
+    /// Card/subsection TITLE labels keyed by their title — the labels carrying
+    /// the AX `.heading` role, kept for the `test_headerTitleAXRole` hook.
+    private var headerTitleLabelsByHeader: [String: NSTextField] = [:]
     /// Whole-header-row click recognizers keyed by section title (C4 — the
     /// entire `headerWrap` row is a collapse click target, not just the
     /// chevron + title; kept for the `test_fireHeaderClick` hook).
@@ -479,6 +482,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         subsectionBodies.removeAll()
         cardsByHeader.removeAll()
         chevronsByHeader.removeAll()
+        headerTitleLabelsByHeader.removeAll()
         chevronSymbolByHeader.removeAll()
         pendingCollapsed.removeAll()
         headerClickRecognizersByHeader.removeAll()
@@ -534,8 +538,14 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// POLICY (recomputing `collapsed` per open, flipping it in `onToggle` +
     /// re-driving `test_toggleCard`/`setCardCollapsed`); this method only builds
     /// the affordance.
+    /// `trailingTitleLeadingFromTrailing`, when non-nil, LEFT-ALIGNS the
+    /// trailing column title at that distance (inward from the row's trailing
+    /// edge) instead of centering it over the reserved column — for a column
+    /// whose content is itself left-aligned (the FEED pills), where a
+    /// centered title floats well right of a single value.
     func beginCard(header: String,
                    trailingTitle: String? = nil,
+                   trailingTitleLeadingFromTrailing: CGFloat? = nil,
                    trailingAccessory accessory: HeaderAccessory? = nil,
                    collapsible: Bool = false,
                    collapsed: Bool = false,
@@ -557,7 +567,11 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // One Case rule); the `header` argument is also the lookup/collapse KEY.
         let label = Self.makeLegendLabel(header, weight: .semibold,
                                          color: Tokens.Color.secondaryLabel)
-        let headerWrap = NSView()
+        // VoiceOver section-jumping (VO-⌘-H) needs real heading roles; the
+        // composed row labels are untouched — only this title label's role.
+        Self.markAsAccessibilityHeading(label)
+        headerTitleLabelsByHeader[header] = label
+        let headerWrap = HeaderHoverWashView()
         headerWrap.translatesAutoresizingMaskIntoConstraints = false
         headerWrap.autoresizingMask = [.width]
 
@@ -613,10 +627,22 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         if let trailingTitle {
             let trailingLabel = Self.makeColumnHeaderLabel(trailingTitle)
             headerWrap.addSubview(trailingLabel)
-            NSLayoutConstraint.activate([
-                trailingLabel.centerXAnchor.constraint(
+            // Centered over the reserved column by default; left-aligned on
+            // the column's own content edge when the caller says the column's
+            // values are left-aligned (see the parameter doc above).
+            let horizontal: NSLayoutConstraint
+            if let leadingFromTrailing = trailingTitleLeadingFromTrailing {
+                trailingLabel.alignment = .left
+                horizontal = trailingLabel.leadingAnchor.constraint(
                     equalTo: headerWrap.trailingAnchor,
-                    constant: -PopoverColumnGrid.trailingControlCenterFromTrailing),
+                    constant: -leadingFromTrailing)
+            } else {
+                horizontal = trailingLabel.centerXAnchor.constraint(
+                    equalTo: headerWrap.trailingAnchor,
+                    constant: -PopoverColumnGrid.trailingControlCenterFromTrailing)
+            }
+            NSLayoutConstraint.activate([
+                horizontal,
                 trailingLabel.centerYAnchor.constraint(equalTo: headerWrap.centerYAnchor),
             ])
         }
@@ -681,6 +707,10 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             objc_setAssociatedObject(headerWrap, &Self.actionTargetKey, onHeaderClick,
                                      .OBJC_ASSOCIATION_RETAIN)
             headerClickRecognizersByHeader[header] = headerClick
+            // C4's whole-row target, made visible before commitment: the row
+            // washes on hover exactly like a body row, so the click target
+            // announces itself. Non-collapsible headers stay inert.
+            headerWrap.showsHoverWash = true
         }
 
         card.addRow(headerWrap)
@@ -1121,6 +1151,19 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         return label
     }
 
+    /// Give a card/subsection TITLE label the AX **heading** role, so
+    /// VoiceOver users can jump section-to-section (VO-⌘-H) instead of
+    /// walking every row. The raw string is the value of `kAXHeadingRole`
+    /// (HIServices) and of AppKit's macOS-26 `NSAccessibilityHeadingRole` —
+    /// spelled out because the AppKit constant does not import into Swift on
+    /// every toolchain this repo builds with, and the AX runtime has
+    /// recognized the role since long before AppKit named it. The label
+    /// still speaks its string as its value; the composed row-label design
+    /// elsewhere is untouched.
+    private static func markAsAccessibilityHeading(_ label: NSTextField) {
+        label.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+    }
+
     /// A column-header label (Output / Feed / Sync / Redirect), centered over its
     /// column in the combined header row built by `beginCard`. Volume is
     /// deliberately NOT among them — see `PopoverController.rebuild()`.
@@ -1162,14 +1205,19 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = Tokens.Font.captionMedium
         label.textColor = Tokens.Color.inkTertiary
-        let wrapper = NSView()
+        // Subsection titles are headings too — one rank below the card title,
+        // same VoiceOver section-jumping (VO-⌘-H).
+        Self.markAsAccessibilityHeading(label)
+        headerTitleLabelsByHeader[title] = label
+        let wrapper = HeaderHoverWashView()
         wrapper.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(label)
-        // Align to the icon column (Warm Signal v4 §Call-1) — out of the rail
-        // gutter, directly above the device icons. A collapsible subsection puts
-        // its chevron on that anchor and the title follows, exactly like a card
-        // header.
-        let leadingInset = PopoverColumnGrid.firstElementLeading(indented: false)
+        // One clear indent step IN from the card header's own anchor
+        // (`subsectionHeaderLeading`), so the two header ranks read as nested
+        // rather than as four peers — both chevrons used to share
+        // `firstElementLeading`, leaving type weight alone to carry the
+        // nesting, which it didn't. Still clear of the rail gutter.
+        let leadingInset = PopoverColumnGrid.subsectionHeaderLeading
         var titleLeadingAnchor = wrapper.leadingAnchor
         var titleLeadingConstant = leadingInset
         if collapsible {
@@ -1205,12 +1253,19 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             objc_setAssociatedObject(wrapper, &Self.actionTargetKey, onHeaderClick,
                                      .OBJC_ASSOCIATION_RETAIN)
             headerClickRecognizersByHeader[title] = headerClick
+            // Same whole-row hover wash as the card header (C4's target made
+            // visible) — the two header ranks share one hover language.
+            wrapper.showsHoverWash = true
         }
         NSLayoutConstraint.activate([
             wrapper.heightAnchor.constraint(equalToConstant: 22),
             label.leadingAnchor.constraint(equalTo: titleLeadingAnchor,
                                            constant: titleLeadingConstant),
-            label.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -2),
+            // Centered in the row, the card title's own rhythm — the two
+            // header ranks differ by indent, size and row height only. A
+            // bottom-pinned label sat on its own vertical beat beside the
+            // centered card title.
+            label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
         ])
         if let columnTitle {
             let columnLabel = Self.makeColumnHeaderLabel(columnTitle)
@@ -1219,7 +1274,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
                 columnLabel.centerXAnchor.constraint(
                     equalTo: wrapper.trailingAnchor,
                     constant: -columnCenterFromTrailing),
-                columnLabel.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -2),
+                // Rides the title's own centerline so the two stay on one
+                // baseline (they share `captionMedium`).
+                columnLabel.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
             ])
         }
         // The header itself is a CARD-body row (it stays visible when the
@@ -1454,6 +1511,16 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     func test_cardChevronSymbolName(title: String) -> String? {
         chevronSymbolByHeader[title]
     }
+    /// The AX role of the card/subsection TITLE label for `title` — pins the
+    /// heading role VoiceOver section-jumping depends on. `nil` if no header
+    /// with that title was built.
+    func test_headerTitleAXRole(title: String) -> NSAccessibility.Role? {
+        headerTitleLabelsByHeader[title]?.accessibilityRole()
+    }
+    /// The chevron's current AX label for `title` (Collapse/Expand flip).
+    func test_chevronAXLabel(title: String) -> String? {
+        chevronsByHeader[title]?.accessibilityLabel()
+    }
 
     // MARK: Whole-header click test hooks (C4)
 
@@ -1566,6 +1633,64 @@ private final class HairlineView: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         layer?.backgroundColor = Tokens.Color.hairline.cgColor
+    }
+}
+
+/// The header rows' host view: a plain container that, when told it is a
+/// collapse click target (`showsHoverWash` — C4 keeps the WHOLE row as the
+/// target), washes on pointer-hover with the exact pill every body row draws
+/// (`engagedChrome` at `rowHoverWashAlpha`, same insets and radius) — one
+/// hover language for everything clickable, and the target announces itself
+/// before commitment. Non-collapsible headers never wash. Hover needs a real
+/// pointer, so snapshot/headless renders are byte-identical to before.
+///
+/// The pointer-position reconcile in `mouseMoved` is `DeviceRowView`'s T-U8
+/// discipline: an `NSTrackingArea` never emits `mouseExited` toward an
+/// untracked dead zone, so exit alone can leave the last header stuck lit.
+private final class HeaderHoverWashView: NSView {
+    var showsHoverWash = false { didSet { updateTrackingAreas() } }
+    private var hovered = false
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        guard showsHoverWash else { return }
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
+            owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+    override func mouseExited(with event: NSEvent) { setHovered(false) }
+    override func mouseMoved(with event: NSEvent) {
+        guard let window else { return setHovered(false) }
+        let local = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        setHovered(bounds.contains(local))
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        setHovered(false)   // a rebuild/remount never keeps a stale wash
+    }
+
+    private func setHovered(_ hovered: Bool) {
+        guard self.hovered != hovered else { return }
+        self.hovered = hovered
+        setNeedsDisplay(bounds)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if showsHoverWash && hovered {
+            let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
+                                      dy: PopoverColumnGrid.selectionHighlightInsetY)
+            Tokens.Color.engagedChrome
+                .withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha).setFill()
+            NSBezierPath(roundedRect: rect,
+                         xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
+                         yRadius: PopoverColumnGrid.selectionHighlightCornerRadius).fill()
+        }
+        super.draw(dirtyRect)
     }
 }
 

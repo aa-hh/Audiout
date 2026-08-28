@@ -77,7 +77,13 @@ private final class CardFooterView: NSView {
         }
         segmented.target = self
         segmented.action = #selector(segmentTapped(_:))
-        segmented.setAccessibilityLabel(showsRemove ? "Add or remove application" : "Add a device")
+        // The devices "+" (showsRemove: false) fronts a MENU — save the
+        // selected devices as a group, pair a Bluetooth speaker, connect a
+        // known one — so its spoken name and tooltip must cover saving too,
+        // not just "add a device".
+        let label = showsRemove ? "Add or remove application" : "Add or save devices"
+        segmented.setAccessibilityLabel(label)
+        if !showsRemove { segmented.toolTip = label }
 
         addSubview(segmented)
 
@@ -1480,7 +1486,14 @@ public final class PopoverController: NSObject {
         // carries NO accessory: the "+" that fronts the add MENU is the card's
         // bottom footer strip now (`devicesFooter`, added after every
         // subsection below).
+        // The FEED pills are LEFT-ALIGNED in their slot, so the "Feed" title
+        // left-aligns on the same leading anchor the pills use
+        // (`feedColumnLeadingFromTrailing`) — centered over the whole reserved
+        // column it floated ~46 pt right of a single pill and crowded the
+        // Sync title on the subsection header line below.
         panel.beginCard(header: Self.outputDevicesCardTitle, trailingTitle: "Feed",
+                        trailingTitleLeadingFromTrailing:
+                            PopoverColumnGrid.feedColumnLeadingFromTrailing,
                         collapsible: true,
                         collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
                         onToggle: { [weak self] in self?.toggleCard(Self.outputDevicesCardTitle) })

@@ -75,6 +75,17 @@ public enum PopoverColumnGrid {
     public static let headerChevronWidth: CGFloat = 16
     /// Gap between that chevron and the title following it.
     public static let headerChevronToTitle: CGFloat = 4
+    /// Leading edge of a SUBSECTION header's first element (its chevron) —
+    /// one clear indent step IN from the card header's own
+    /// `firstElementLeading`, so the two header ranks read as nested rather
+    /// than as four peers (both chevrons used to share the identical anchor,
+    /// which made "Output Devices" and "This Mac" look like siblings). The
+    /// step reuses the existing member-row indent
+    /// (`indentedLeadingInset − leadingInset`) rather than minting a new
+    /// magic number.
+    public static var subsectionHeaderLeading: CGFloat {
+        firstElementLeading(indented: true)
+    }
     /// Leading edge of a header's TITLE TEXT — the x a section title, a
     /// subsection label, and anything annotating them all start at. A card note
     /// is a subtitle to its section title, so it belongs on this column, not on
@@ -792,6 +803,16 @@ public enum PopoverColumnGrid {
     /// Distance from the row trailing edge to the **trailing control's trailing
     /// edge** (i.e. the trailing control's own trailing inset).
     public static var trailingControlTrailing: CGFloat { trailingInset }
+    /// Distance from the row trailing edge to the FEED slot's **leading edge**
+    /// — the x the LEFT-ALIGNED feed pills start at (`DeviceRowView`'s
+    /// `feedStack` pins its leading here). The card header's "Feed" title
+    /// left-aligns on this same anchor rather than centering over the whole
+    /// reserved column: with the pills left-aligned, a centered title floated
+    /// ~46 pt right of a single pill and crowded the Sync title on the next
+    /// header line. One derivation for both, so title and pills cannot drift.
+    public static var feedColumnLeadingFromTrailing: CGFloat {
+        trailingControlTrailing + trailingControlWidth
+    }
     /// Distance from the row trailing edge to the **slider's trailing edge** — the
     /// slider column is fixed-width and fixed here, so it lines up across every
     /// row type. Sized to clear the readout that hangs off it, the min flex

@@ -132,6 +132,14 @@ public final class DeviceRowView: NSView {
     /// pointer leaves the popover without a matching `mouseExited` (T-U8 bug).
     private var isHovered: Bool = false
 
+    /// Transient pointer-in-the-gutter state, the same discipline as
+    /// `isHovered` (reset on `apply` and re-parenting via
+    /// ``setGutterHovered(_:)``). Stored — rather than pushed straight into
+    /// the bus skin — because the node's hover ring now resolves from BOTH
+    /// flags (``refreshBusHoverCue()``): the gutter rings any live node, and
+    /// row hover additionally rings an unselected one.
+    private var isGutterHovered: Bool = false
+
     /// The PRIMARY "Selected Devices" membership control (SPEC §9b device-row
     /// toggle). An `NSButton` **checkbox** (`.switch` button type, empty title)
     /// under the "Selected" column header. `.state` is `.on`/`.off`, identical
@@ -516,6 +524,16 @@ public final class DeviceRowView: NSView {
         enableCheckbox.isEnabled = showsToggle && (device.isAvailable || selected)
         enableCheckbox.toolTip = (busActive && showsToggle)
             ? (selected ? "Remove \(device.name) from the mix" : "Add \(device.name) to the mix")
+            : nil
+        // The name is a click-to-toggle surface too (the mouse convenience
+        // below) — say so before commitment on a row that is NOT yet in the
+        // mix, where the invisible node checkbox gives the eye nothing.
+        // Selected rows carry no name tooltip: the node's own tooltip already
+        // names the removal. Scoped to rows whose toggle would actually accept
+        // the click — a greyed Bluetooth row's name click CONNECTS instead
+        // (`deviceRowDidRequestReconnect`), so a mix tooltip there would lie.
+        nameLabel.toolTip = (busActive && showsToggle && !selected && device.isAvailable)
+            ? "Add \(device.name) to the mix"
             : nil
         // A1: dim, don't disable — `isEnabled` above is untouched by
         // `selectionDimmed`, only the alpha is. EXCEPTION for bus rows (spec §4.7):
@@ -1611,8 +1629,7 @@ public final class DeviceRowView: NSView {
                 // offer can never land in a slot too narrow to read it.
                 removalUndoStack.leadingAnchor.constraint(
                     equalTo: trailingAnchor,
-                    constant: -(PopoverColumnGrid.trailingControlTrailing
-                                + PopoverColumnGrid.trailingControlWidth)),
+                    constant: -PopoverColumnGrid.feedColumnLeadingFromTrailing),
                 removalUndoStack.centerYAnchor.constraint(equalTo: centerYAnchor),
                 // ≥24 pt of hit height for the inline link button.
                 removalUndoButton.heightAnchor.constraint(
@@ -1657,7 +1674,7 @@ public final class DeviceRowView: NSView {
                 constraints.append(contentsOf: [
                     feedStack.leadingAnchor.constraint(
                         equalTo: trailingAnchor,
-                        constant: -(PopoverColumnGrid.trailingControlTrailing + PopoverColumnGrid.trailingControlWidth)),
+                        constant: -PopoverColumnGrid.feedColumnLeadingFromTrailing),
                     feedStack.widthAnchor.constraint(
                         lessThanOrEqualToConstant: PopoverColumnGrid.trailingControlWidth),
                 ])
@@ -2547,6 +2564,8 @@ public final class DeviceRowView: NSView {
     /// The membership checkbox's tooltip — "Add/Remove <name> to/from the mix"
     /// on a bus row with its toggle shown, `nil` otherwise (P1-2).
     public var test_membershipTooltip: String? { enableCheckbox.toolTip }
+    /// The name label's click-to-add tooltip (unselected bus rows only).
+    public var test_nameTooltip: String? { nameLabel.toolTip }
 
     /// Drive the REAL checkbox action dispatch (spec §4.8 — the checkbox stays the
     /// control underneath). Mirrors `MainOutRowMenuDispatchTests`' house style:
@@ -2667,19 +2686,34 @@ public final class DeviceRowView: NSView {
         window?.invalidateCursorRects(for: self)
     }
 
-    /// Push the gutter hover into the bus skin. Only a LIVE membership control
-    /// ever reports a hover: an honestly-disabled checkbox (an
-    /// unavailable+unselected row) must not have its socket invite a click it
-    /// would refuse.
+    /// Record the gutter-hover half of the node cue and re-resolve it. Only a
+    /// LIVE membership control ever reports a hover: an honestly-disabled
+    /// checkbox (an unavailable+unselected row) must not have its socket
+    /// invite a click it would refuse.
     private func setGutterHovered(_ hovered: Bool) {
         guard busActive else { return }
-        busView.setHovered(hovered && enableCheckbox.isEnabled)
+        isGutterHovered = hovered
+        refreshBusHoverCue()
+    }
+
+    /// Resolve whether the node draws its hover ring: the pointer in the
+    /// GUTTER always rings (any row), and the pointer anywhere on the ROW
+    /// rings an UNSELECTED node too — the invisible checkbox has no resting
+    /// affordance, so a row not yet in the mix admits its node is the way in
+    /// while the pointer is over it. A selected row keeps the gutter-only
+    /// ring (its filled node already reads as the control). Same enabled
+    /// guard as ever: never invite a click the checkbox would refuse.
+    private func refreshBusHoverCue() {
+        guard busActive else { return }
+        let inviting = isGutterHovered || (isHovered && !isSelectedInSet)
+        busView.setHovered(inviting && enableCheckbox.isEnabled)
     }
 
     /// Set the transient hover flag and repaint only when it actually changes.
     private func setHovered(_ hovered: Bool) {
         guard isHovered != hovered else { return }
         isHovered = hovered
+        refreshBusHoverCue()
         setNeedsDisplay(bounds)
     }
 

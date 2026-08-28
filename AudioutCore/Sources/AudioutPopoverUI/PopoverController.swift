@@ -237,8 +237,9 @@ public final class PopoverController: NSObject {
     /// debounces to decide when the fleet has quiesced. `nil` when no host cares.
     public var onDeviceSnapshot: ((Set<String>) -> Void)?
     /// Called when an Applications-card slider moves, so the app can push the new
-    /// volume straight to a `.currentDevice` app's LOCAL playback stream (Bug T2)
-    /// for a low-latency response, in ADDITION to the persisted
+    /// volume straight to whichever renderer holds that app — a `.currentDevice`
+    /// app's LOCAL playback stream (Bug T2), or the leveled intercept for an
+    /// un-redirected one — for a low-latency response, in ADDITION to the persisted
     /// `AppRoutingController.setVolume` edit. The app wires this to
     /// `(backend as? AppRouteConfiguring)?.setLocalPlaybackVolume`. Called
     /// unconditionally (for every route kind): the backend no-ops it for a bundle
@@ -4797,7 +4798,8 @@ extension PopoverController: AppRowView.Delegate {
             Analytics.capture("mixer:volume_adjusted", ["control": "app"])
         }
         noteSliderGesture()
-        // Drive `.currentDevice` local stream immediately (low-latency path).
+        // Drive the app's own renderer immediately (low-latency path): a
+        // `.currentDevice` local stream, or the leveled intercept.
         // `appRouting.setVolume` fires `onRoutesDidChange` which re-pushes volumes
         // to the mixer/engine — no rebuild needed here; a rebuild would replace
         // the AppRowView mid-drag and break the NSSlider tracking loop.

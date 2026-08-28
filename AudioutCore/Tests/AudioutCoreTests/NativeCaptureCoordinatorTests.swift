@@ -2158,6 +2158,91 @@ extension SerializedSharedState {
 
         coordinator.stop()
     }
+
+    // MARK: - Leveled-app intercept (per-app volume for un-redirected apps)
+
+    /// Hands back the buffer's own bytes, so what a test feeds the injector is
+    /// exactly what must turn up summed into the delivered program.
+    private struct IdentityPerAppConverter: PCMConverting {
+        func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data? { buffer.channelData.first }
+    }
+
+    /// An ACTIVE injector holding `frames` frames of `(value, value)` for one
+    /// leveled app at full volume.
+    private func leveledInjector(value: Int16, frames: Int) -> LeveledAppInjector {
+        let injector = LeveledAppInjector(makeConverter: { _ in IdentityPerAppConverter() })
+        injector.updateLeveled([(bundleID: "com.leveled", volume: 100)])
+        injector.handleStateChange(bundleID: "com.leveled", state: .capturing(
+            TapFormat(sampleRate: 44_100, channels: 2, bitsPerSample: 16,
+                      isFloat: false, isInterleaved: true)))
+        injector.setActive(true)
+        var pcm = Data(count: frames * 4)
+        pcm.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
+            let samples = raw.bindMemory(to: Int16.self)
+            for i in 0..<(frames * 2) { samples[i] = value }
+        }
+        injector.handleBuffer(bundleID: "com.leveled", buffer: CapturedBuffer(
+            channelData: [pcm], frameCount: frames, pts: timespec(tv_sec: 0, tv_nsec: 0)))
+        return injector
+    }
+
+    /// The delivered PCM as flat interleaved S16 samples.
+    private func s16Samples(_ data: Data) -> [Int16] {
+        var out: [Int16] = []
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var i = 0
+            while i + 1 < raw.count {
+                out.append(Int16(bitPattern: UInt16(raw[i]) | (UInt16(raw[i + 1]) << 8)))
+                i += 2
+            }
+        }
+        return out
+    }
+
+    /// A leveled app's audio is summed into the ONE converted feed, so it reaches
+    /// the engine write (and, by construction, every fan-out off the same block).
+    @Test func leveledInjectorOutputIsPresentInTheDeliveredProgram() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+        coordinator.setLeveledAppInjector(leveledInjector(value: 100, frames: 4))
+
+        coordinator.start()
+        tap.pushBuffer(buffer(hostTime: 1_000_000_000))
+        waitFor { sink.forwarded.count == 1 }
+
+        #expect(s16Samples(sink.forwarded[0].pcm) == [101, 102, 103, 104, 105, 106, 107, 108],
+                "the converted program plus the leveled app's own samples")
+
+        coordinator.stop()
+    }
+
+    /// …and it goes in BEFORE the Main Out stage, because a leveled app is
+    /// program material the user's tone must shape. A hard-left balance zeroes
+    /// the right channel: if the injection landed after the EQ, the injected 100s
+    /// would survive there.
+    @Test func leveledInjectionIsShapedByTheMainOutStage() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+        coordinator.setLeveledAppInjector(leveledInjector(value: 100, frames: 4))
+        coordinator.setEQPlan(WholeSystemEQPlan(
+            main: EQProcessor(eq: DeviceEQ(balance: -1), sampleRate: 44_100),
+            streams: [WholeSystemEQPlan.Stream(streamID: 0, processor: nil)]))
+
+        coordinator.start()
+        tap.pushBuffer(buffer(hostTime: 1_000_000_000))
+        waitFor { sink.batched.count == 1 }
+
+        let delivered = s16Samples(sink.batched[0].streams[0].pcm)
+        #expect(delivered.count == 8)
+        #expect(stride(from: 1, to: delivered.count, by: 2).allSatisfy { delivered[$0] == 0 },
+                "the Main Out stage shaped the leveled audio too — it went in before the EQ")
+        #expect(stride(from: 0, to: delivered.count, by: 2).map { delivered[$0] } == [101, 103, 105, 107],
+                "the untouched channel still carries program + leveled app")
+
+        coordinator.stop()
+    }
     }
 }
 

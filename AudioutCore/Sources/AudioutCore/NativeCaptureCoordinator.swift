@@ -164,6 +164,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         /// ``setAirPlayPreDelay(ms:)`` ran with a positive delay — IS the
         /// bypass: the engine write below stays the statement it always was.
         let airPlayPreDelay: PCMDelayLine?
+        /// The leveled-app intercept (per-app volume for un-redirected apps):
+        /// their own captured audio, summed into the program before the Main Out
+        /// stage. `nil` — the value until ``setLeveledAppInjector(_:)`` runs —
+        /// leaves the delivery path exactly as it was.
+        let leveledInjector: LeveledAppInjector?
         let tickInjector: AlignmentTickInjector?
         /// The wizard is driving the feed itself (``startWizardPacerLocked()``).
         /// While this is set, captured buffers are dropped at the top of
@@ -186,7 +191,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             converter: nil, meteringActive: false,
             syncedLocalSink: nil, syncedLocalBaseResampler: nil,
             btSink: nil, btBaseResampler: nil,
-            castSink: nil, airPlayPreDelay: nil,
+            castSink: nil, airPlayPreDelay: nil, leveledInjector: nil,
             tickInjector: nil, wizardActive: false, tapEpoch: 0, eqPlan: .passthrough)
 
         init(
@@ -198,6 +203,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             btBaseResampler: SyncedLocalBaseResampler?,
             castSink: PCMSink?,
             airPlayPreDelay: PCMDelayLine?,
+            leveledInjector: LeveledAppInjector?,
             tickInjector: AlignmentTickInjector?,
             wizardActive: Bool,
             tapEpoch: Int,
@@ -211,6 +217,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.btBaseResampler = btBaseResampler
             self.castSink = castSink
             self.airPlayPreDelay = airPlayPreDelay
+            self.leveledInjector = leveledInjector
             self.tickInjector = tickInjector
             self.wizardActive = wizardActive
             self.tapEpoch = tapEpoch
@@ -327,6 +334,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// the delay is 0, which is what makes the no-Cast bypass structural rather
     /// than a flag.
     private var airPlayPreDelay: PCMDelayLine?
+
+    /// The leveled-app intercept: the per-app taps of apps left un-redirected at
+    /// a volume below 100, summed into the converted PCM before the Main Out EQ
+    /// and every fan-out, so each consumer renders the same attenuated program.
+    /// Queue-confined here (set via ``setLeveledAppInjector(_:)``), consumed only
+    /// through the published ``BufferSnapshot``.
+    private var leveledInjector: LeveledAppInjector?
 
     /// The align-by-ear tick source (BT-OFFSET-UI), mixed into the converted
     /// PCM BEFORE the engine write and both fan-outs, so every consumer
@@ -1259,6 +1273,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             btBaseResampler: btBaseResampler,
             castSink: castSink,
             airPlayPreDelay: airPlayPreDelay,
+            leveledInjector: leveledInjector,
             tickInjector: tickInjector,
             wizardActive: wizardActive,
             tapEpoch: tapEpoch,
@@ -1266,6 +1281,17 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         snapshotLock.lock()
         _bufferSnapshot = snapshot
         snapshotLock.unlock()
+    }
+
+    /// Attach (or detach, with `nil`) the leveled-app intercept. ADDITIVE seam,
+    /// the same shape as ``setAlignTickMode(_:)``: it swaps one snapshot field
+    /// and touches neither the tap nor the exclusion set. `queue.sync`, so the
+    /// very next delivered buffer already carries the leveled apps.
+    public func setLeveledAppInjector(_ injector: LeveledAppInjector?) {
+        queue.sync {
+            self.leveledInjector = injector
+            self.publishBufferSnapshot()
+        }
     }
 
     /// Start/stop the align-by-ear tick (BT-OFFSET-UI). ADDITIVE seam only: it
@@ -1535,6 +1561,17 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // (throttled + delta-gated inside — see `sampleConversionFailuresIfDue`).
         converter.sampleConversionFailuresIfDue()
         guard var pcm = converted, !pcm.isEmpty else { return }
+
+        // Leveled apps (per-app volume for un-redirected apps): each one's own
+        // captured audio, already scaled by its slider, summed back into the
+        // program HERE — before the Main Out EQ and therefore before every
+        // fan-out, so the AirPlay streams, the synced-local sink, the BT sinks
+        // and Cast all carry the identical attenuated mix. Deliberately BEFORE
+        // the EQ, unlike the tick below: a leveled app is program material and
+        // must be shaped by the user's tone. S16LE stereo == 4 bytes per frame.
+        if let leveledInjector = snapshot.leveledInjector {
+            leveledInjector.mix(into: &pcm, frameCount: pcm.count / 4)
+        }
 
         // Main Out EQ: the whole mix's own tone stage, applied BEFORE the tick
         // and before every fan-out, so the AirPlay streams, the synced-local

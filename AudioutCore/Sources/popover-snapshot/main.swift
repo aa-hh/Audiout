@@ -227,9 +227,10 @@ func findViews<T: NSView>(of type: T.Type, in root: NSView) -> [T] {
 ///
 /// T8: also seeds THREE Applications-card rows across the three
 /// `AppRouteDestination` cases — "Music" → `.device(id: "office")` (routed,
-/// active/undimmed slider), "Safari" → `.currentDevice` (explicit local pick,
-/// dimmed slider), "Podcasts" → `.noRedirect` (the neutral default, also
-/// dimmed) — so every destination state is represented in one panel. Every
+/// gold armed fader), "Safari" → `.currentDevice` (explicit local pick),
+/// "Podcasts" → `.noRedirect` (the neutral default, neutral fader) — so every
+/// destination state is represented in one panel; all three sliders are live.
+/// Every
 /// row is built with `showsMeter: true` (`PopoverController.makeAppRow`
 /// always passes that), so all three get a distinct RMS pushed via
 /// `test_pushAppLevel` and are settled synchronously via `findViews` +
@@ -247,10 +248,10 @@ func snapshotMeters(appearanceName: NSAppearance.Name, label: String, outDir: UR
     let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
                                          loadPersisted: false)
     // T8: three app rows spanning all three `AppRouteDestination` cases —
-    // `.device(id:)` (routed away, active slider), `.currentDevice` (explicit
-    // local pick, dimmed slider), `.noRedirect` (neutral default, also
-    // dimmed) — so the Applications card proves every destination state at
-    // once.
+    // `.device(id:)` (routed away, gold armed fader), `.currentDevice`
+    // (explicit local pick), `.noRedirect` (neutral default) — so the
+    // Applications card proves every destination state at once. Every row's
+    // slider is live.
     let musicBundleID = "com.apple.Music"
     let safariBundleID = "com.apple.Safari"
     let podcastsBundleID = "com.apple.podcasts"

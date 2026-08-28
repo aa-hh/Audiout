@@ -504,6 +504,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// stable device⟷stream_id topology. Pure computation (no Core Audio/engine).
     private let routeMixer: AppRouteMixer
 
+    /// Sums the per-app captures of LEVELED apps (un-redirected, volume < 100)
+    /// back into the whole-system program at their own volume, inside
+    /// ``NativeCaptureCoordinator``'s delivery path. Pure computation, like the
+    /// mixer; handed to the coordinator in ``start()``.
+    private let leveledInjector: LeveledAppInjector
+
     /// A dedicated per-app capture used ONLY to meter listed apps that are NOT
     /// otherwise captured (`.noRedirect`) — the third `.appLevel` source (T3).
     /// Built `.unmuted` (unlike `perAppCapture`, which is `.mutedWhenTapped` for
@@ -998,6 +1004,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// ``localPlaybackEngine`` → built-in speakers. The per-app CAPTURE is started
     /// for the UNION of the two (the tap is destination-agnostic).
     private var localBundleIDs: Set<String> = []
+
+    /// The bundle IDs currently LEVELED: apps the user left un-redirected
+    /// (`.noRedirect`) but pulled BELOW 100 on the row's volume slider. At
+    /// exactly 100 an app is never here — it keeps playing untouched, with no
+    /// tap and no exclusion, which is what makes the intercept engage only when
+    /// the user actually asks for it.
+    ///
+    /// Computed from the RAW route table, never the effective one: a `.device`
+    /// route DEMOTED to `.noRedirect` (R5 / roadmap 008) must rejoin the system
+    /// mix at full volume exactly as before, so a demotion never levels. Excluded
+    /// (privacy denylist) apps are never leveled either.
+    ///
+    /// Like `localBundleIDs` these drive a per-app tap, and the per-app CAPTURE
+    /// is started for the union of all three sets.
+    private var leveledBundleIDs: Set<String> = []
 
     /// bundleID → its route's display name, so a `.routedApps` event can carry
     /// human-readable app names. Refreshed on every `updateAppRoutes`.
@@ -1510,6 +1531,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.meteringCapture = injectedMeteringCapture
             ?? PerAppCaptureCoordinator(processResolver: processResolver, name: "AudioutMeter", muteBehavior: .unmuted)
         self.routeMixer = AppRouteMixer()
+        self.leveledInjector = LeveledAppInjector()
         self.processNotYetAudibleRetryDelay = processNotYetAudibleRetryDelay
         self.processNotYetAudibleMaxBackoff = processNotYetAudibleMaxBackoff
         self.maxRebindRecoveryAttempts = maxRebindRecoveryAttempts
@@ -1527,6 +1549,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // parameter.)
         self.perAppCapture.onStateChange = { [weak self] bundleID, state in
             self?.routeMixer.handleStateChange(bundleID: bundleID, state: state)
+            // Same reason as the mixer's: a leveled app's real `TapFormat` is
+            // only known on the `.capturing` transition.
+            self?.leveledInjector.handleStateChange(bundleID: bundleID, state: state)
             self?.handlePerAppCaptureHealthChange(bundleID: bundleID, state: state)
             // Bug T2: a `.currentDevice` app reaching `.capturing` gets its own
             // local player (its `TapFormat` is now known); leaving `.capturing`
@@ -1535,12 +1560,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self?.handleLocalCaptureStateChange(bundleID: bundleID, state: state)
         }
         self.perAppCapture.onBuffer = { [weak self] bundleID, buffer in
-            // Fan every per-app buffer to BOTH consumers. Each ignores what isn't
-            // its own: the mixer drops a buffer for a bundle with no `.device`
-            // stream, and the local engine drops one for a bundle with no player —
-            // so a `.device` app's audio only reaches the mixer and a
-            // `.currentDevice` app's only reaches the local engine, with no shared
-            // set read on this hot delivery-thread path.
+            // Fan every per-app buffer to ALL THREE consumers. Each ignores what
+            // isn't its own: the mixer drops a buffer for a bundle with no
+            // `.device` stream, the local engine drops one for a bundle with no
+            // player, and the leveled injector drops one for a bundle that isn't
+            // leveled (or while the whole-system capture is off) — so a `.device`
+            // app's audio only reaches the mixer, a `.currentDevice` app's only
+            // the local engine, and a leveled app's only the injector, with no
+            // shared set read on this hot delivery-thread path.
             if AudioDiag.isEnabled {
                 // Report buffer PEAK, not just count: a process tap keeps
                 // delivering buffers at full cadence but SILENT (all-zero) after a
@@ -1550,6 +1577,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 AudioDiag.tick("perAppBuffer:\(bundleID)", detail: "peak=\(Self.diagFloatPeak(buffer))")
             }
             self?.routeMixer.handleBuffer(bundleID: bundleID, buffer: buffer)
+            self?.leveledInjector.handleBuffer(bundleID: bundleID, buffer: buffer)
             self?.localPlaybackEngine?.receive(buffer: buffer, for: bundleID)
         }
         routeMixer.onDestinationSetsChanged = { [weak self] sets in
@@ -1595,6 +1623,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // from the mixer). The mixer gates `onAppLevel` on its OWN `meteringActive`,
         // so this fires only while a meter is shown.
         routeMixer.onAppLevel = { [weak self] bundleID, rms in
+            self?.emitAppLevel(bundleID: bundleID, rms: rms)
+        }
+        // Per-app meter, source 1/3 continued: a LEVELED app while the
+        // whole-system capture runs. Its buffers reach no other metering source
+        // (it is out of the `.unmuted` metering tap's target set, and it has no
+        // local player while capture runs), so the injector emits the same
+        // PRE-volume source RMS the mixer does. Gated on its own `meteringActive`.
+        leveledInjector.onAppLevel = { [weak self] bundleID, rms in
             self?.emitAppLevel(bundleID: bundleID, rms: rms)
         }
         // Per-app meter, source 3/3: listed apps with no other capture
@@ -2039,6 +2075,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //    tap's IOProc delivery thread and must not enqueue per buffer.
             self.captureCoordinator?.onLevel = { [weak self] rms in self?.noteSystemRMS(rms) }
 
+            // Hand the delivery path the leveled-app intercept (the coordinator is
+            // assigned before `start()`); it contributes nothing until
+            // `updateAppRoutes` levels an app AND the capture gate opens. Enqueued
+            // on `captureControlQueue` rather than called inline for the reason
+            // `setEQPlan` is: this block holds `stateQueue`, and the setter takes
+            // the coordinator's own queue — the queue whose callbacks come back
+            // through `stateQueue`.
+            if let coordinator = self.captureCoordinator {
+                let injector = self.leveledInjector
+                self.captureControlQueue.async { coordinator.setLeveledAppInjector(injector) }
+            }
+
             // WIRE the whole-system tap's state machine (T16, E10) so a
             // `.failed` (TCC lost, the aggregate device torn out from under it,
             // a bad ASBD read) drives a capped-exponential-backoff retry instead
@@ -2097,6 +2145,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // ordered `captureControlQueue` stop below (which tears the tap down) can't
         // fire a spurious session reset during teardown.
         captureCoordinator?.onDeviceRateRebuild = nil
+        // Detach the leveled intercept and stop it accumulating: the taps feeding
+        // it are stopped below, and a later `start()` re-attaches it.
+        captureCoordinator?.setLeveledAppInjector(nil)
+        leveledInjector.setActive(false)
+        leveledInjector.updateLeveled([])
         captureCoordinator?.setMeteringActive(false)
         // Metering (T3): leave every metering source switched off (teardown
         // discipline — a closed backend has nobody to render a meter for) and stop
@@ -2105,6 +2158,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // NOT stopped eagerly here — the ordered `captureControlQueue` stop below is
         // the documented final word (C1: an eager caller-thread stop blocked quit).
         routeMixer.setMeteringActive(false)
+        leveledInjector.setMeteringActive(false)
         localPlaybackEngine?.onAppLevel = nil
         localPlaybackEngine?.setMeteringActive(false)
         meteringCapture.stopAll()
@@ -2258,6 +2312,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.bindTail = Task {}
             self.routedBundleIDs.removeAll()
             self.localBundleIDs.removeAll()
+            self.leveledBundleIDs.removeAll()
             self.routeDisplayNames.removeAll()
             self.streamBindings.removeAll()
             self.routedAppNames.removeAll()
@@ -4169,10 +4224,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             let newLocal = Set(effective.compactMap { route -> String? in
                 route.destination == .currentDevice ? route.bundleID : nil
             })
+            // LEVELED apps: un-redirected, but pulled below 100 on the row's
+            // slider. Read off the RAW table on purpose — a `.device` route the
+            // effective pass just demoted must rejoin the system mix at FULL
+            // volume, so a demotion never levels (see `leveledBundleIDs`).
+            // Excluded apps are never leveled: the privacy denylist means "never
+            // captured", which outranks a volume the user set earlier.
+            let newLeveled = Set(routes.compactMap { route -> String? in
+                guard route.destination == .noRedirect, route.volume < 100,
+                      !excludedBundleIDs.contains(route.bundleID) else { return nil }
+                return route.bundleID
+            })
             let previousRouted = self.routedBundleIDs
             let previousLocal = self.localBundleIDs
+            let previousLeveled = self.leveledBundleIDs
+            let captureRunning = self.captureRunning
             self.routedBundleIDs = newRouted
             self.localBundleIDs = newLocal
+            self.leveledBundleIDs = newLeveled
 
             // T8: a bundle ID that isn't in the route table at all any more (fully
             // de-routed or its app-route removed) forgets any dead/retry tracking —
@@ -4198,9 +4267,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // an unneeded `resetAirPlaySessionForRoutedApp`. `newRouted`/`newLocal`
             // are both subsets of `stillPresent`, so "not in either" is a strict
             // superset of the old `!stillPresent` condition — every bundle the old
-            // check cleared is still cleared here, plus the toggle case.
+            // check cleared is still cleared here, plus the toggle case. A LEVELED
+            // bundle is still wanted for the same reason (its tap keeps running),
+            // so it counts as present here too.
             for bundleID in self.everCapturedBundleIDs
-            where !newRouted.contains(bundleID) && !newLocal.contains(bundleID) {
+            where !newRouted.contains(bundleID) && !newLocal.contains(bundleID)
+                && !newLeveled.contains(bundleID) {
                 self.everCapturedBundleIDs.remove(bundleID)
             }
 
@@ -4214,9 +4286,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // destination the app currently routes to — so its start/stop keys on
             // the UNION of device- and local-routed apps. An app that merely SWITCHES
             // between `.device` and `.currentDevice` stays in both unions and keeps
-            // its tap running (only the downstream consumer changes).
-            let previousUnion = previousRouted.union(previousLocal)
-            let newUnion = newRouted.union(newLocal)
+            // its tap running (only the downstream consumer changes). A LEVELED app
+            // joins the same union: it needs the identical `.mutedWhenTapped` tap,
+            // and only what consumes its buffers differs.
+            let previousUnion = previousRouted.union(previousLocal).union(previousLeveled)
+            let newUnion = newRouted.union(newLocal).union(newLeveled)
             // R5: a bundle ID leaving the capture union must ALSO lose any pending
             // `.processNotYetAudible` retry. The T8 cleanup above keys on the RAW
             // table, which a demoted route is still in — so without this, a timer
@@ -4241,6 +4315,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 localRemoved: previousLocal.subtracting(newLocal),
                 localRoutes: effective.filter { $0.destination == .currentDevice },
                 localExcluded: newLocal,
+                leveled: newLeveled,
+                leveledRoutes: routes.filter {
+                    newLeveled.contains($0.bundleID) && !self.deadBundleIDs.contains($0.bundleID)
+                },
+                // A leveled app renders locally ONLY while the whole-system
+                // capture is off; while it runs, its audio goes into the program
+                // through the injector instead and a local player would double it.
+                leveledLocalRoutes: captureRunning
+                    ? []
+                    : routes.filter { newLeveled.contains($0.bundleID) },
+                leveledLocalRemoved: previousLeveled.subtracting(newLeveled),
+                leveledActive: captureRunning,
                 meteringToStart: meteringDiff.start,
                 meteringToStop: meteringDiff.stop)
         }
@@ -4278,15 +4364,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             for bundleID in plan.meteringToStop { self.meteringCapture.stop(bundleID: bundleID) }
             for bundleID in plan.meteringToStart { self.meteringCapture.start(bundleID: bundleID) }
 
-            // Local playback (Bug T2):
-            //  - Drop players for apps that left `.currentDevice`.
+            // Local playback (Bug T2), plus the leveled apps that currently have
+            // nowhere else to play (whole-system capture off — see
+            // `plan.leveledLocalRoutes`):
+            //  - Drop players for apps that left `.currentDevice` or the leveled set.
             //  - (Re)add + re-level every current `.currentDevice` app whose tap is
             //    ALREADY capturing — this covers a `.device`→`.currentDevice` switch,
             //    where the tap keeps running so no fresh `.capturing` transition fires
             //    `handleLocalCaptureStateChange`. `addApp` is idempotent, so overlapping
             //    with that handler (for apps whose tap starts fresh) is harmless.
             for bundleID in plan.localRemoved { self.localPlaybackEngine?.removeApp(bundleID: bundleID) }
-            for route in plan.localRoutes {
+            for bundleID in plan.leveledLocalRemoved {
+                self.localPlaybackEngine?.removeApp(bundleID: bundleID)
+            }
+            for route in plan.localRoutes + plan.leveledLocalRoutes {
                 if case .capturing(let format) = self.perAppCapture.state(for: route.bundleID) {
                     try? self.localPlaybackEngine?.start()
                     try? self.localPlaybackEngine?.addApp(
@@ -4295,6 +4386,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 }
                 self.localPlaybackEngine?.setVolume(Float(route.volume) / 100.0, for: route.bundleID)
             }
+
+            // The leveled intercept: who is leveled, at what volume, and whether
+            // it should be accumulating at all (it must not while the
+            // whole-system capture is off — those apps render locally instead).
+            self.leveledInjector.updateLeveled(
+                plan.leveledRoutes.map { (bundleID: $0.bundleID, volume: $0.volume) })
+            self.leveledInjector.setActive(plan.leveledActive)
 
             // Keep the whole-system tap excluding individually-routed (`.device`) apps,
             // `.currentDevice` apps (Bug T2 — they play via `localPlaybackEngine`, not
@@ -4312,9 +4410,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // coordinator a `.currentDevice`-conditional render pid; with the
             // unconditional guard in place that only bought an extra tap rebuild whose
             // exclusion set was byte-identical to the one already in force.
+            //
+            // LEVELED apps are excluded on the same footing: their audio comes
+            // back through the injector already scaled, so leaving them in the
+            // system tap would play them twice — once at full volume.
             self.captureCoordinator?.updateRouting(
                 appRoutes: plan.effectiveRoutes,
-                excludedBundleIDs: excludedBundleIDs.union(plan.localExcluded))
+                excludedBundleIDs: excludedBundleIDs
+                    .union(plan.localExcluded)
+                    .union(plan.leveled))
         }
     }
 
@@ -4333,6 +4437,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let localRemoved: Set<String>
         let localRoutes: [AppRoute]
         let localExcluded: Set<String>
+        /// The leveled set itself — what the whole-system tap must ALSO exclude
+        /// (a leveled app's audio re-enters through the injector, so leaving it in
+        /// the system tap would play it twice, once unattenuated).
+        let leveled: Set<String>
+        /// The RAW routes of the leveled, non-dead apps — bundle id + volume for
+        /// ``LeveledAppInjector/updateLeveled(_:)``.
+        let leveledRoutes: [AppRoute]
+        /// The leveled routes that need a LOCAL player right now (empty while the
+        /// whole-system capture is running).
+        let leveledLocalRoutes: [AppRoute]
+        /// Bundle IDs that left the leveled set, whose local player must go.
+        let leveledLocalRemoved: Set<String>
+        /// Whether the injector should be accumulating — the capture gate's own
+        /// `captureRunning`, read in the same critical section as the sets above.
+        let leveledActive: Bool
         /// Metering-only tap reconcile (T3): bundle IDs to start/stop a dedicated
         /// `.unmuted` meter tap for (listed, uncaptured, unexcluded apps). Empty
         /// while metering is inactive.
@@ -4354,7 +4473,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         switch state {
         case .capturing(let format):
             let volume: Float? = stateQueue.sync {
-                guard self.localBundleIDs.contains(bundleID) else { return nil }
+                // A LEVELED app takes this path too, but ONLY while the
+                // whole-system capture is off: while it runs, the app's audio
+                // goes into the program through `leveledInjector` and a local
+                // player would render it a second time.
+                let wantsLocal = self.localBundleIDs.contains(bundleID)
+                    || (self.leveledBundleIDs.contains(bundleID) && !self.captureRunning)
+                guard wantsLocal else { return nil }
                 let vol = self.lastRoutes.first { $0.bundleID == bundleID }?.volume ?? 100
                 return Float(vol) / 100.0
             }
@@ -4367,7 +4492,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // already removed it from `localBundleIDs` and `updateAppRoutes` dropped
             // the player explicitly, so this skips then — no double-remove, and
             // `removeApp` is idempotent regardless.
-            let isLocal = stateQueue.sync { self.localBundleIDs.contains(bundleID) }
+            let isLocal = stateQueue.sync {
+                self.localBundleIDs.contains(bundleID) || self.leveledBundleIDs.contains(bundleID)
+            }
             guard isLocal else { return }
             localPlaybackEngine?.removeApp(bundleID: bundleID)
         case .resolvingProcess, .creatingTap:
@@ -4376,14 +4503,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
-    /// Set a `.currentDevice`-routed app's LOCAL playback volume (Bug T2). The
+    /// Set the volume of an app rendered from its own capture — a `.currentDevice`
+    /// route's LOCAL playback (Bug T2) or a LEVELED one's intercept. The
     /// low-latency path the popover slider drives directly (mirroring how a
     /// `.device` app's volume rides the route table into the mixer); the same value
     /// also arrives via `updateAppRoutes` from the persisted route edit. Maps the
-    /// UI's 0–100 int onto the player node's 0.0…1.0 contract. A no-op for a bundle
-    /// ID with no local player (non-`.currentDevice`, or not yet capturing).
+    /// UI's 0–100 int onto the player node's 0.0…1.0 contract.
     public func setLocalPlaybackVolume(volume: Int, bundleID: String) {
         localPlaybackEngine?.setVolume(Float(volume.clampedToVolume) / 100.0, for: bundleID)
+        // A LEVELED app's slider drives the same low-latency path — its audio is
+        // scaled inside the injector rather than by a local player whenever the
+        // whole-system capture is running. Both calls no-op for a bundle the
+        // consumer doesn't know, so forwarding unconditionally is correct.
+        leveledInjector.setVolume(volume.clampedToVolume, for: bundleID)
     }
 
     /// React to a per-app capture's state transition (T8, edge case 3: a
@@ -4421,7 +4553,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // (incorrectly) assume. That builds a brand-new coordinator slot
                 // that nothing in `updateAppRoutes`'s route-table diff will ever
                 // see again. Refuse it here rather than accept it.
-                guard self.routedBundleIDs.contains(bundleID) || self.localBundleIDs.contains(bundleID) else {
+                guard self.wantsPerAppCaptureLocked(bundleID) else {
                     return (false, false, true)
                 }
                 let wasDead = self.deadBundleIDs.remove(bundleID) != nil
@@ -4512,6 +4644,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         case .idle, .resolvingProcess, .creatingTap, .stopping:
             break
         }
+    }
+
+    /// Whether the per-app tap layer currently wants a tap for `bundleID` — the
+    /// union `updateAppRoutes` starts/stops captures for: `.device` routes,
+    /// `.currentDevice` routes, and LEVELED (`.noRedirect`, volume < 100) routes.
+    /// Every "is this capture still wanted" question goes through this one
+    /// predicate: a bundle missing from it has its landing `.capturing` refused as
+    /// an orphan and its tap stopped, which for a leveled app would silently undo
+    /// the intercept. On `stateQueue`.
+    private func wantsPerAppCaptureLocked(_ bundleID: String) -> Bool {   // on stateQueue
+        routedBundleIDs.contains(bundleID)
+            || localBundleIDs.contains(bundleID)
+            || leveledBundleIDs.contains(bundleID)
     }
 
     /// Re-run the mixer over the current route table minus dead bundle IDs (T8).
@@ -5161,7 +5306,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let wasCaptured: Bool = stateQueue.sync {
             self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
             self.retryCounts.removeValue(forKey: bundleID)
-            return self.routedBundleIDs.contains(bundleID) || self.localBundleIDs.contains(bundleID)
+            return self.wantsPerAppCaptureLocked(bundleID)
         }
         guard wasCaptured else { return }
         perAppCapture.stop(bundleID: bundleID)
@@ -5228,7 +5373,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // `localBundleIDs` is ours (synced-local): an app routed to the Mac itself
         // still has a capture slot to revive on relaunch, so it takes this path too.
         let hasRoute: Bool = stateQueue.sync {
-            guard self.routedBundleIDs.contains(bundleID) || self.localBundleIDs.contains(bundleID) else { return false }
+            guard self.wantsPerAppCaptureLocked(bundleID) else { return false }
             // Clear any dead/retry state from a prior quit (edge case 1 cleanup).
             self.deadBundleIDs.remove(bundleID)
             self.retryCounts.removeValue(forKey: bundleID)
@@ -6663,6 +6808,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // other gate decision) so the Mac isn't left muted by a tap streaming into
         // dead sockets. `expectedSelected` is untouched.
         self.captureRunning = false
+        // The leveled apps lose the program they were being summed into — hand
+        // them back to the local engine, exactly as the gate's own false edge does
+        // (this path bypasses `reconcileCaptureGate` entirely).
+        self.reconcileLeveledConsumersLocked(running: false)
         // W3-T3: capture just stopped (above) — clear the double-path guard note on
         // the true→false edge, exactly as `stop()` does. Sleep hits neither
         // `reconcileSystemAirPlayGuard`'s else-branch nor `stop()`, so without this
@@ -8743,6 +8892,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 emit(.captureFailed(message: nil, retrying: false))
             }
         }
+        // A leveled app plays through the injector while the whole-system capture
+        // runs and through the local engine while it doesn't — this edge is where
+        // it changes hands.
+        reconcileLeveledConsumersLocked(running: want)
         // W3-T3: streaming just started or stopped — re-evaluate the double-path
         // guard (it also depends on the system default output, which didn't
         // necessarily change here, but `captureRunning` — the other half of its
@@ -8750,6 +8903,43 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         reconcileSystemAirPlayGuard()
         captureControlQueue.async {
             if want { coordinator.start() } else { coordinator.stop() }
+        }
+    }
+
+    /// Move every LEVELED app between its two renderers on a `captureRunning`
+    /// edge: while the whole-system capture runs its audio is summed into the
+    /// program by `leveledInjector`, and while it doesn't there IS no program, so
+    /// the app renders on the Mac through `localPlaybackEngine` at the same
+    /// volume — the pipeline a `.currentDevice` app always uses. Exactly one of
+    /// the two is live at a time, or the app would be heard twice.
+    ///
+    /// Called on `stateQueue` (it reads the leveled set and the route table) but
+    /// does its work on `captureControlQueue`, where the local engine's graph
+    /// mutations already live and where the gate's own start/stop is ordered.
+    private func reconcileLeveledConsumersLocked(running: Bool) {   // on stateQueue
+        let leveled = leveledBundleIDs
+        let routes = lastRoutes.filter { leveled.contains($0.bundleID) }
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            if running {
+                for bundleID in leveled { self.localPlaybackEngine?.removeApp(bundleID: bundleID) }
+                self.leveledInjector.setActive(true)
+                return
+            }
+            self.leveledInjector.setActive(false)
+            // Same idempotent add-if-capturing shape `updateAppRoutes` uses for
+            // `.currentDevice`: a tap that is not capturing yet gets its player
+            // from `handleLocalCaptureStateChange` when it lands.
+            for route in routes {
+                if case .capturing(let format) = self.perAppCapture.state(for: route.bundleID) {
+                    try? self.localPlaybackEngine?.start()
+                    try? self.localPlaybackEngine?.addApp(
+                        bundleID: route.bundleID, tapFormat: format,
+                        volume: Float(route.volume) / 100.0)
+                }
+                self.localPlaybackEngine?.setVolume(
+                    Float(route.volume) / 100.0, for: route.bundleID)
+            }
         }
     }
 
@@ -8800,10 +8990,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         systemRMSLock.unlock()
     }
 
-    /// Flip the popover-visibility metering gate. Forwards to ALL THREE RMS
-    /// sources — the whole-system `captureCoordinator`, the `routeMixer`
-    /// (`.device` per-app meter), and the `localPlaybackEngine` (`.currentDevice`
-    /// per-app meter) — and drives the metering-only tap lifecycle (the
+    /// Flip the popover-visibility metering gate. Forwards to EVERY RMS
+    /// source — the whole-system `captureCoordinator`, the `routeMixer`
+    /// (`.device` per-app meter), the `leveledInjector` (a leveled app while the
+    /// whole-system capture runs), and the `localPlaybackEngine`
+    /// (`.currentDevice`, and a leveled app while it doesn't) — and drives the
+    /// metering-only tap lifecycle (the
     /// `.noRedirect` per-app meter): on `true`, start a dedicated `.unmuted` tap
     /// for every currently-eligible listed app; on `false`, stop them all.
     /// `PopoverController` calls this on `surfaceDidShow`/`surfaceDidHide` via
@@ -8812,6 +9004,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     public func setMeteringActive(_ active: Bool) {
         captureCoordinator?.setMeteringActive(active)
         routeMixer.setMeteringActive(active)
+        leveledInjector.setMeteringActive(active)
         localPlaybackEngine?.setMeteringActive(active)
         let diff: (start: Set<String>, stop: Set<String>) = stateQueue.sync {
             self.meteringActive = active
@@ -8862,7 +9055,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Metering-only taps exist ONLY for apps in the Applications list
     /// (`lastRoutes`) that have no other capture — not `.device`-routed (level
     /// comes from the mixer), not `.currentDevice` (from local playback), not
-    /// user-excluded (PRIVACY: never metered) — and ONLY while a meter is shown
+    /// LEVELED (from the injector, or from local playback while the whole-system
+    /// capture is off), not user-excluded (PRIVACY: never metered) — and ONLY
+    /// while a meter is shown
     /// (`meteringActive`). When metering is off the desired set is empty, so this
     /// also STOPS every metering-only tap.
     private func meteringTapDiffLocked() -> (start: Set<String>, stop: Set<String>) {
@@ -8870,6 +9065,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             ? Set(lastRoutes.map(\.bundleID))
                 .subtracting(routedBundleIDs)
                 .subtracting(localBundleIDs)
+                .subtracting(leveledBundleIDs)
                 .subtracting(lastExcludedBundleIDs)
             : []
         let current = meteringTapTargets
@@ -9420,6 +9616,11 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// the real one.
     func setAlignTick(_ active: Bool)
 
+    /// Attach/detach the leveled-app intercept — the per-app volume path for
+    /// apps that are NOT redirected (see ``LeveledAppInjector``). Default no-op;
+    /// ``NativeCaptureCoordinator`` provides the real one.
+    func setLeveledAppInjector(_ injector: LeveledAppInjector?)
+
     /// Hand the delivery path a new set of tone stages: the Main Out EQ (applied
     /// before every fan-out) plus one AirPlay write per EQ stream. Default no-op
     /// so a fake that doesn't exercise EQ compiles unchanged;
@@ -9454,6 +9655,8 @@ extension CaptureControlling {
     func setAirPlayPreDelay(ms: Int) {}
     /// Default no-op (BT-OFFSET-UI align tick), same posture.
     func setAlignTick(_ active: Bool) {}
+    /// Default no-op (leveled-app intercept), same posture.
+    func setLeveledAppInjector(_ injector: LeveledAppInjector?) {}
     /// Default no-ops (roadmap 056 Part B wizard stimulus), same posture.
     func armWizardTicks() {}
     func setWizardTempo(bpm: Double) {}

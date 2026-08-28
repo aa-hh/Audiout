@@ -79,8 +79,17 @@ run_remote() {
         *)      rargs="--parallel --num-workers $workers" ;;
     esac
 
+    # The remote command is a STRING the far shell re-parses, so caller flags
+    # must be quoted INTO it: an unquoted `--filter "A|B"` arrived there as a
+    # pipe into a command named `B`. Single-quote each argument, escaping any
+    # single quote it contains ('\'' — the standard sh idiom).
+    qargs=""
+    for a in "$@"; do
+        qargs="$qargs '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"
+    done
+
     rrc=0
-    remote_run "$repo_root" "cd AudioutCore && swift test $rargs $*" || rrc=$?
+    remote_run "$repo_root" "cd AudioutCore && swift test $rargs$qargs" || rrc=$?
     if [ "$rrc" -eq 2 ]; then
         # "Ran, but failed" — re-run locally rather than trusting the verdict. A
         # machine on a different Swift/SDK must never be what REFUSES a commit:
@@ -319,6 +328,17 @@ if [ "$acquired" -eq 1 ]; then
     else
         echo "  suite: slot $(basename "$slot_file") of $slots — parallel, $workers workers ($why)." >&2
     fi
+fi
+
+# --- cold checkouts: resolve solo first --------------------------------------
+# A run that has to MATERIALISE .build/checkouts while another SwiftPM process
+# races it over the shared package cache is what produced the "unable to read
+# tree" Sparkle failures during the merge guards. Doing the checkout step on its
+# own first removes the race; a warm checkout skips this entirely. Best-effort:
+# a resolve failure is left for `swift test` below to report properly.
+if [ ! -d "$core/.build/checkouts" ] || [ -z "$(ls -A "$core/.build/checkouts" 2>/dev/null)" ]; then
+    echo "  suite: cold package checkouts — resolving first, on its own." >&2
+    ( cd "$core" && swift package resolve ) >&2 || true
 fi
 
 # --- run --------------------------------------------------------------------

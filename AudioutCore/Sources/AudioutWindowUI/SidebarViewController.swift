@@ -158,6 +158,15 @@ public final class SidebarViewController: NSViewController {
         }
     }
 
+    /// Put keyboard focus on the row list. The SANCTIONED second
+    /// `makeFirstResponder` site (the seed above is the first): the group
+    /// editor's Escape used to hand focus to `nil`, which is precisely the
+    /// dead-Tab state A11Y-GROUPS fixed, so the host routes it here instead —
+    /// the sidebar is the one control present whatever pane is showing.
+    public func claimKeyboardFocus() {
+        view.window?.makeFirstResponder(outlineView)
+    }
+
     public override func loadView() {
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("main"))
         column.resizingMask = .autoresizingMask
@@ -420,9 +429,17 @@ public final class SidebarViewController: NSViewController {
     public func select(_ target: SidebarSelection, notify: Bool = true) {
         var target = target
         if case .group = target { target = .groupsOverview }
-        guard let node = findNode(matching: target) else { return }
-        let row = outlineView.row(forItem: node)
-        guard row >= 0 else { return }
+        // A target that no longer exists CLEARS the highlight. Returning
+        // silently (which is what this did) left the old row drawn as selected
+        // after the thing it named was deleted elsewhere — the source list
+        // claiming a selection the window no longer has.
+        guard let node = findNode(matching: target),
+              case let row = outlineView.row(forItem: node), row >= 0 else {
+            suppressSelectionCallback = !notify
+            outlineView.deselectAll(nil)
+            suppressSelectionCallback = false
+            return
+        }
         suppressSelectionCallback = !notify
         outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         suppressSelectionCallback = false
@@ -731,6 +748,13 @@ private final class SidebarContainerView: NSView {
     var onCommandN: (() -> Void)?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // A FIELD EDITOR wins. Key equivalents are dispatched down the view
+        // tree before the responder chain sees the key, so this view claimed
+        // ⌘N even while the user was typing in a text field somewhere in the
+        // window — swallowing whatever that field's own ⌘N would mean.
+        if let textView = window?.firstResponder as? NSTextView, textView.isFieldEditor {
+            return super.performKeyEquivalent(with: event)
+        }
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
            event.charactersIgnoringModifiers?.lowercased() == "n",
            let handler = onCommandN {
@@ -766,7 +790,14 @@ extension SidebarViewController: NSMenuDelegate {
             // outside it → that one row (macOS arbitration).
             let selected = selectedDeviceIDs
             let ids = selected.contains(device.id) ? selected : [device.id]
-            menu.addItem(contextMenuItem("New Group from Selection…",
+            // Say what it will act on. "…from Selection…" named nothing, on
+            // the one menu whose target changes with where you clicked; a
+            // single id is always the clicked row, so it can be named outright
+            // (the bottom bar's retitle already uses the plural form).
+            let title = ids.count == 1
+                ? "New Group from \u{201C}\(device.name)\u{201D}\u{2026}"
+                : "New Group from \(ids.count) Speakers\u{2026}"
+            menu.addItem(contextMenuItem(title,
                                          #selector(newGroupFromSelectionMenuItemSelected(_:)), ids))
         }
     }
@@ -915,18 +946,31 @@ extension SidebarViewController: NSOutlineViewDelegate {
         // pool that ever asks for it.
         if emphasized { cell.textField?.font = Tokens.Font.bodyEmphasized }
         cell.imageView?.isHidden = false
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: text)
+        // The icon is DECORATIVE: the text field beside it speaks the row, and
+        // a description here made VoiceOver read the name twice (the detail
+        // pane's group rows already pass nil for the same reason). CACHED and
+        // SHARED — never mutate it; the tint below is a view property.
+        //
         // Force flat monochrome rendering (design feedback 2026-07-18: some SF
         // Symbols default to a lighter hierarchical secondary tone, which read
         // as an unwanted "highlight" on the glyph) — a single, controlled dark
-        // fill instead, via `.isTemplate` + an explicit `contentTintColor`.
-        image?.isTemplate = true
-        cell.imageView?.image = image
+        // fill instead, via `.isTemplate` (which `DeviceIcon.image` sets) plus
+        // an explicit `contentTintColor`.
+        cell.imageView?.image = DeviceIcon.image(symbol)
         cell.imageView?.contentTintColor = dimmed ? .disabledControlTextColor : Tokens.Color.label
         cell.textField?.stringValue = text
         cell.textField?.textColor = dimmed ? .disabledControlTextColor : Tokens.Color.label
         cell.setActiveMarkerVisible(showsActiveMarker)
         cell.setDisclosureVisible(showsDisclosure)
+        // Both states were COLOUR/GLYPH ONLY: a dimmed row and a gold marker
+        // say nothing to VoiceOver. Same words the visible UI uses
+        // ("Unavailable" annotation, "Playing now" marker/tooltip). Set on
+        // EVERY pass, unconditionally — cells are reused, so a conditional set
+        // would leave the previous row's suffix on this one.
+        let spoken = text
+            + (dimmed ? ", unavailable" : "")
+            + (showsActiveMarker ? ", playing now" : "")
+        cell.textField?.setAccessibilityLabel(spoken)
         return cell
     }
 

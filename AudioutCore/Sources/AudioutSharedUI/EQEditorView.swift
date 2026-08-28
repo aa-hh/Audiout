@@ -737,11 +737,14 @@ public final class EQEditorView: NSView {
     }
 
     /// The spoken (accessibility-value) form — a full sentence rather than
-    /// the printed readout's short form.
+    /// the printed readout's short form. The digits go through `VolumePercent`
+    /// so a screen reader hears the listener's own grouping, not a raw
+    /// interpolation.
     static func balanceText(_ balance: Double) -> String {
         let percent = Int((abs(balance) * 100).rounded())
         if percent == 0 { return "center" }
-        return balance < 0 ? "left \(percent) percent" : "right \(percent) percent"
+        let spoken = VolumePercent.spoken(percent)
+        return balance < 0 ? "left \(spoken)" : "right \(spoken)"
     }
 
     // MARK: The Advanced fold (Settings-Advanced precedent, one clock)

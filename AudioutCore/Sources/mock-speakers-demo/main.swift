@@ -78,6 +78,10 @@ func describe(_ event: BackendEvent) -> String? {
         // Native-only (Wave 3 T5 public-aggregate off-switch warning); never under
         // mock. Handled so the switch stays exhaustive.
         return "⚠ routing blocked needs default: \(active)"
+    case .captureFailed(let message, let retrying):
+        // Native-only (the T16 whole-system tap); never under mock. Handled so the
+        // switch stays exhaustive.
+        return "⚠ capture failed: \(message ?? "cleared") retrying:\(retrying)"
     case .btFirstMixAlignmentPrompt(let deviceID):
         // Native-only (W3 first-mix alignment intercept); never under mock.
         // Handled so the switch stays exhaustive.

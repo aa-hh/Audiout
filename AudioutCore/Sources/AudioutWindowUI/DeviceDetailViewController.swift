@@ -49,8 +49,9 @@ import AudioutSharedUI
 /// page restating it put the same sentence on screen twice.
 ///
 /// The whole column SCROLLS (`../AGENTS.md`): the Equalizer's Advanced fold
-/// exceeds the Groups screen's height budget, and the screen is user-resizable
-/// with drag memory, so growing the window was rejected (roadmap 039).
+/// exceeds the Groups screen's height budget, and the surface frame is FIXED
+/// for every screen (`AppSurfaceController` — the frame never changes), so
+/// scrolling is the only room; growing the window was rejected (roadmap 039).
 ///
 /// No volume slider, no mute, no Selected-Devices toggle, no group activation
 /// control of any kind lives here — that's the popover/mixer's job, not this
@@ -180,6 +181,9 @@ public final class DeviceDetailViewController: NSViewController {
         nameLabel.font = Tokens.Font.heading
         nameLabel.alignment = .natural   // left-aligned (LTR) to match the form column
         nameLabel.lineBreakMode = .byTruncatingTail
+        // SELECTABLE, not editable: this page exists to state facts about a
+        // speaker, and a fact you can't copy is a fact you have to retype.
+        nameLabel.isSelectable = true
         // A long device name TRUNCATES; it never widens the pane. Without this
         // the label's default compression resistance beats the split view's own
         // divider geometry, and a long name silently squeezes the sidebar past
@@ -479,6 +483,9 @@ public final class DeviceDetailViewController: NSViewController {
         valueLabel.translatesAutoresizingMaskIntoConstraints = false
         valueLabel.alignment = .right
         valueLabel.lineBreakMode = .byTruncatingTail
+        // Selectable for the same reason the device name is: these are facts
+        // to quote in a support thread, not decoration.
+        valueLabel.isSelectable = true
         valueLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         valueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -643,17 +650,51 @@ public final class DeviceDetailViewController: NSViewController {
         groupController.groups.filter { $0.memberIDs.contains(device.id) }
     }
 
+    /// Exactly what one membership row draws, named as one Equatable value so
+    /// ``rebuildGroupRows()`` can be gated on it changing. Not a diffing
+    /// framework — one struct, one equality check, the same shape
+    /// `MixerWindowController.SidebarProjection` uses one pane over.
+    private struct GroupRowProjection: Equatable {
+        let id: String
+        let name: String
+        let symbolName: String
+    }
+
+    /// The projection the rows currently on screen were built from.
+    private var lastGroupRowProjection: [GroupRowProjection]?
+
+    /// How many times the membership rows have actually been rebuilt — proves
+    /// the change gate: a volume/connection-only refresh must leave this
+    /// unchanged, a group rename must bump it exactly once.
+    public private(set) var test_groupRowsRebuildCount = 0
+
     /// Rebuild the membership rows for the shown device. `NSStackView`'s
     /// `removeArrangedSubview` alone leaves the view IN the hierarchy (it only
     /// stops arranging it), so every old row is removed from its superview too
     /// or the section quietly stacks up ghosts behind the live rows.
     private func rebuildGroupRows() {
+        let memberGroups = shownDevice.map(groups(containing:)) ?? []
+        // `refreshUI()` runs on every backend event for the app's whole
+        // lifetime, and almost none of them touch this list — rebuilding a
+        // fresh `NSButton` + `NSImage` per group each time threw away the rows
+        // under the pointer several times a second during discovery. This is
+        // exactly what a row renders, as one comparable value; an empty list
+        // compares equal to empty, so the "Not in any group" row is stable too.
+        let projection = memberGroups.map {
+            GroupRowProjection(
+                id: $0.id, name: $0.name,
+                symbolName: DeviceIcon.resolve($0.iconSymbolName,
+                                               default: Group.defaultIconSymbolName))
+        }
+        guard projection != lastGroupRowProjection else { return }
+        lastGroupRowProjection = projection
+        test_groupRowsRebuildCount += 1
+
         for row in groupsStack.arrangedSubviews {
             groupsStack.removeArrangedSubview(row)
             row.removeFromSuperview()
         }
 
-        let memberGroups = shownDevice.map(groups(containing:)) ?? []
         shownGroupIDs = memberGroups.map(\.id)
 
         let rows: [NSView] = memberGroups.isEmpty
@@ -719,10 +760,9 @@ public final class DeviceDetailViewController: NSViewController {
         button.action = #selector(groupRowClicked(_:))
         // The ONE group-icon resolution path (`AGENTS.md`): a stale override
         // falls back to the group default rather than a blank glyph.
+        // CACHED and SHARED — never mutate it; the tint is a view property.
         let symbol = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        image?.isTemplate = true
-        button.image = image
+        button.image = DeviceIcon.image(symbol)
         button.setAccessibilityLabel(group.name)
         // A long group name truncates; it never widens the pane (the same rule
         // the device name above it follows).
@@ -733,8 +773,7 @@ public final class DeviceDetailViewController: NSViewController {
         // documented non-interactive-chrome pattern).
         let chevron = ClickThroughImageView()
         chevron.translatesAutoresizingMaskIntoConstraints = false
-        let chevronImage = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
-        chevronImage?.isTemplate = true
+        let chevronImage = DeviceIcon.image("chevron.right")
         chevron.image = chevronImage
         chevron.contentTintColor = Tokens.Color.secondaryLabel
         cell.chevronReserve = (chevronImage?.size.width ?? 0) + Self.groupRowChevronGap
@@ -1158,6 +1197,7 @@ extension DeviceDetailViewController: EQEditorViewDelegate {
         eqEdits[id] = (eq, committed)
         onSetEQ?(eq, id, committed)
         refreshResetEnabled()
+        if committed { Analytics.capture("eq:adjusted", ["target": "device"]) }
     }
 
     public func eqEditorDidRequestReset(_ editor: EQEditorView) {
@@ -1167,6 +1207,7 @@ extension DeviceDetailViewController: EQEditorViewDelegate {
         eqEdits[id] = (.flat, true)
         onSetEQ?(.flat, id, true)
         refreshResetEnabled()
+        Analytics.capture("eq:reset", ["target": "device"])
     }
 }
 

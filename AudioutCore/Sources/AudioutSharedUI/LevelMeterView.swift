@@ -128,9 +128,22 @@ public final class LevelMeterView: NSView {
             selector: #selector(accessibilityDisplayOptionsDidChange),
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
             object: nil)
+        // A layer-color instrument: the gradient's CGColors are stamped once
+        // and won't re-resolve on their own, so the accent dial (AGENTS.md
+        // rule 36 / Tokens.swift's accentStyleDidChangeNotification doc) needs
+        // its own observer alongside the a11y one above.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(accentStyleDidChange),
+            name: Tokens.accentStyleDidChangeNotification,
+            object: nil)
     }
 
     @objc private func accessibilityDisplayOptionsDidChange() {
+        updateLayerColors()
+    }
+
+    @objc private func accentStyleDidChange() {
         updateLayerColors()
     }
 

@@ -407,8 +407,14 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   clears every redirect there, so a fresh launch after granting is the
   supported — and only — recovery path. Do not reintroduce a mid-session
   resume without revisiting that decision.
-- `NativeBackend` has no `ConnectionDiagnosing` seam — `.failed` cause is
-  always `.unknown`. `MockBackend` mutation stays no-op-silent and confined
+- `NativeBackend` still has no `ConnectionDiagnosing` seam, but a `.failed`
+  cause is no longer always `.unknown`: it is mapped from the engine's own
+  evidence — `.authRequired` (`passwordRequired`), `.timedOut` (`opTimedOut`),
+  `.droppedMidStream` (a live session dying out-of-band), `.vanished` (the
+  sticky-AP2 offline merge), `.timingUnavailable` (the PTP gate). Anything
+  else stays `.unknown`, because a plausible-but-wrong cause is worse than a
+  vague one, and every native failure carries `detail` so Copy Details works.
+  `MockBackend` mutation stays no-op-silent and confined
   to its private serial queue.
 - Known stability findings in this package carry `STABILITY(id)` inline
   markers — details and fix sketches in
@@ -783,3 +789,4 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `TapRebuildDecision` | Pure compare-before-rebuild guard (`NativeCaptureCoordinator.swift`) evaluated once per subscriber inside `DefaultOutputDeviceMonitor`'s fan-out (the single process-wide default-device/nominal-rate listener pair both `CoreAudioProcessTap` and `CoreAudioSystemTap` subscribe to, replacing each tap's own raw HAL listener block): fires a rebuild only when the device/rate a tap is actually pinned to genuinely changed, never on an unrelated HAL notification — the structural fix for the multi-tap rebuild storm (every live tap shares one physical device, so one tap's own rebuild could otherwise re-trigger every other tap's listener). A failed live read counts as "changed" (never suppresses a fire). |
 | `AudioDiag` | Env-gated (`AIRPLAY_AUDIO_DIAG`) diagnostic logging + live-handle counters (`handleCreated`/`handleDestroyed`/`dumpLiveHandles`) for coreaudiod-side objects (process tap / aggregate device / IOProc) — a no-op when disabled, so it costs nothing on the hot audio path in production. Wired into `PerAppCaptureCoordinator`'s `CoreAudioProcessTap` as the reference integration. |
 | `Telemetry` | Always-on structured JSON-lines decision log; never the render path. |
+| `Analytics` | Opt-in anonymous usage-analytics facade; sink installed by the app target. |

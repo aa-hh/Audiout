@@ -36,8 +36,11 @@ import AppKit
             SurfaceToolbarController.titleItemIdentifier,
             .flexibleSpace,
             SurfaceToolbarController.pinItemIdentifier,
+            .space,
             SurfaceToolbarController.quitItemIdentifier,
-        ], "tabs lead, the app name sits centered, Pin and Quit trail")
+        ], "tabs lead, the app name sits centered, Pin and Quit trail — with a gap between them")
+        #expect(controller.test_quitItemHasImage,
+                "Quit carries an exit glyph, resolved on this OS")
         #expect(window.toolbar === controller.toolbar)
         #expect(window.toolbarStyle == .unified, "D1: unified — the toolbar IS the one header strip")
     }

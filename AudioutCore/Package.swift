@@ -52,12 +52,18 @@ let swiftClangImporterFlags: [String] =
 // fail to build/resolve otherwise). Rather than fighting per-symbol
 // `@available` annotations to keep .v13 alive for code paths that never run
 // on 13 anyway (NativeBackend is opt-in via AIRPLAY_BACKEND=native), we take
-// the whole package to .v14. The mock/OwnTone-backed paths are unaffected —
+// the whole package to macOS 14. The mock/OwnTone-backed paths are unaffected —
 // they don't reference anything gated above .v13; this only tightens the
 // deployment target the app links for and installs on.
+//
+// Raised again to 14.2 (the version-STRING form — `.v14` cannot express a
+// minor): the process-tap API onboarding's System Audio step depends on only
+// exists from 14.2, so 14.0/14.1 could install the app and then be told a
+// required permission is simply unavailable. `scripts/make-app.sh` already
+// stamps `LSMinimumSystemVersion` 14.2, so this makes the two agree.
 let package = Package(
     name: "AudioutCore",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("14.2")],
     products: [
         // The core library the AppKit app links against. It knows nothing about
         // AppKit — it's the seam between "the UI" and "wherever audio actually goes."
@@ -133,6 +139,8 @@ let package = Package(
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.0"),
+        // PostHog product analytics SDK for the app lifecycle and UI.
+        .package(url: "https://github.com/PostHog/posthog-ios.git", from: "3.59.3"),
     ],
     targets: [
         // Block-based Objective-C exception catcher. Swift's `catch` cannot
@@ -244,6 +252,7 @@ let package = Package(
                 "AudioutSettingsUI",
                 "AudioutOnboardingUI",
                 .product(name: "Sparkle", package: "Sparkle"),
+                .product(name: "PostHog", package: "posthog-ios"),
             ],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),

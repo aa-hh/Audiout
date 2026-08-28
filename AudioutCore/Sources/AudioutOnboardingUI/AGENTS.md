@@ -24,6 +24,11 @@ one warm panel read top to bottom (owner-approved 2026-08-12):
 paragraph and the honesty line were DELETED, not moved: each explained a picture
 the user is already looking at.
 
+  **One amendment to that rationale:** System Audio's why line now also warns
+  that allowing plays a brief tone. The deletion rule holds for anything the
+  rehearsal SHOWS — and a picture cannot show a sound, so this one sentence
+  rides the why line rather than resurrecting the body. (**OWNER-PENDING**.)
+
 That split is the rebuild's whole point (Direction 04, "the rehearsal leads",
 owner-chosen 2026-08-11 — it REPLACES the expanding-card column, so read the
 history before pulling the copy back into the left column): the rehearsal is this
@@ -50,6 +55,26 @@ gate/motion/demo/selection rules change.
   Sync** is a `PTPHelperStatus` (`SMAppService` Login-Items approval), not a TCC
   permission at all — it has no "Denied" state and registers automatically at load
   with no prompt of its own.
+- **THREE steps are skippable** — Bluetooth, Remote Control, and now **Speaker
+  Sync** (`SetupFlowModel.skippableSteps`). The first two sit outside
+  `RequiredPermission` entirely; Speaker Sync stays required and is still audited
+  once it has ever been on, so its skip is an EXIT rather than a demotion —
+  `SetupFlowModel.unmetRequiredSteps()` is the filter that keeps a skipped one out
+  of the gate. Before it, an approval macOS simply refused locked the gate forever
+  with nothing on screen to press. Speaker Sync's other states, all new:
+  - **Asked, and still off.** Once the flow has actually opened Login Items
+    (`didTripLoginItems`) and the helper still reads `.requiresApproval`, the
+    ribbon shows its own recovery — where the switch really lives (Login Items,
+    not Privacy & Security), "Open Login Items…" to go back, and "Skip for now"
+    beside it. (**OWNER-PENDING** copy.)
+  - **Nothing there to approve.** `.notFound` (the daemon isn't in the bundle) or a
+    `register()` that threw auto-passes the row with the note "Couldn't be turned
+    on", the same posture as `.unsupported` audio: a packaging fault is not a user
+    decision, so it must not hold the gate shut. (**OWNER-PENDING** copy.)
+  - **The skip is remembered** (`AppSettings.speakerSyncWasEnabled` — set the first
+    time the status reads `.enabled`, cleared by a skip). The app-level wake audit
+    re-opens this window for the Login Item only on a real REGRESSION, never at a
+    user who passed on it or never approved it.
 - **Setup is a GATE, not guidance** (owner decision 2026-08-11 — this REVERSES the
   documented "setup is guidance, not a gate" decision, so read the history before
   changing it back). Done is **ABSENT from the view hierarchy** until
@@ -192,7 +217,10 @@ gate/motion/demo/selection rules change.
   (this SUPERSEDES the "whole ACTIVE card is the click target" rule, which had to
   keep Allow/Skip hit-testing above the card by construction — the spine has no
   buttons left to hit-test above anything). Every state the user has already
-  DECIDED is pressable; a locked row and an auto-passed one refuse, silently.
+  DECIDED is pressable; a locked row and an auto-passed one refuse, silently. The
+  ONE exception is a row drawn BROKEN: it is pressable whatever state it wears, and
+  pressing it snaps the flow to it — the loud treatment was already asking to be
+  looked at, and a group VoiceOver cannot press was asking for nothing.
   `SetupSpineRowView.mouseUp` and `accessibilityPerformPress()` are the same one
   entry (`onPress`), and `OnboardingViewController.rowPressed(_:)` is the whole
   dispatch table — the selection rules above. The ACTIONS live in the ribbon:
@@ -203,7 +231,9 @@ gate/motion/demo/selection rules change.
   sees it as a `.button` named for what pressing it does ("Allow…" live, "Show"
   for a decided row) with its STATE in the label (", locked" / ", allowed" /
   ", skipped" / ", turned off — needs attention") — a marker VoiceOver can't see
-  is a marker that isn't there. A locked row is a plain `.group`. **The live row,
+  is a marker that isn't there. An auto-passed row speaks its NOTE instead
+  (", requires macOS 14.2 or later", ", couldn't be turned on"): it never earned a
+  grant, so ", allowed" was hiding the only thing worth hearing. A locked row is a plain `.group`. **The live row,
   every prominent Allow, and the CTA act on the click that ACTIVATES the app**
   (`acceptsFirstMouse` overrides on `ProminentButton` and `SetupSpineRowView`; v4
   live fix 2026-08-11, "Start listening took two clicks"): the bounce to System
@@ -252,7 +282,7 @@ gate/motion/demo/selection rules change.
 
   | Step | Hero headline | Why line | Button |
   |---|---|---|---|
-  | System Audio | Hear your Mac's sound | Audiout needs this to send your music to your speakers. | Enable System Audio |
+  | System Audio | Hear your Mac's sound | Audiout needs this to send your music to your speakers. Allowing plays a brief tone to confirm it's working. | Enable System Audio |
   | Local Network | Find speakers on your Wi‑Fi | Audiout needs this to reach the speakers on your network. | Enable Local Network |
   | Bluetooth | Use Bluetooth speakers | Audiout needs this to stream to Bluetooth speakers and wake ones that are off. | Enable Bluetooth Access |
   | Speaker Sync | Keep speakers in perfect time | A small helper shares one clock so your speakers never drift. | Turn On at Login |
@@ -427,6 +457,18 @@ gate/motion/demo/selection rules change.
     routes through the one deep-link table,
     `SetupFlowModel.settingsDestination(for:)`, which the denied-path Allow
     shares. `test_fireStuckPromptTimer()` is the seam (20 s is not waitable).
+  - **A refused ✕ says why.** `windowShouldClose` still refuses while a dialog is
+    unanswered, but no longer in silence: it calls
+    `OnboardingViewController.noteCloseRefused()`, which puts the reason on the
+    ribbon's status line (spinner kept — the wait is unchanged), announces it, and
+    re-arms the stuck-dialog hint at the shortened
+    `stuckPromptDelayAfterCloseAttempt` (5 s), since reaching for the close box is
+    itself the user saying the dialog has stopped being answerable. **Escape is the
+    ✕**: `cancelOperation` routes through `performClose`, so it meets the same
+    refusal and the same words rather than being a quieter second way out.
+    (**OWNER-PENDING** copy — as is Remote Control's spoken caption, the one
+    rehearsal whose instruction VoiceOver cannot see, substituted onto the preview
+    frame's caption band via `SetupPreviewFrameView.spokenCaption`.)
 - **The window is `OnboardingWindow`, the click witness** (live symptom: the
   first "Start listening" click left NO telemetry at all — not even the
   single-flight swallow — so the failure sat somewhere no view-level fix or
@@ -1017,6 +1059,11 @@ gate/motion/demo/selection rules change.
   re-read — the load-time one fires a detached task, so a caller that needs its
   result (Bluetooth and Remote Control only reach `.granted` through it) has to be
   able to wait.
+- **The Setup window runs its own display scale at five ledgered off-token
+  sizes** (9.5 pt `DemoPaneView:2696`, 11.5 pt `SetupRibbonView:348`, 12 pt
+  `DemoPaneView:2336`, 14.5 pt `SetupRibbonView:97`, 24 pt `DemoPaneView:1863`)
+  — deliberate, same ledger idea as `DemoSystemColor`; do not tokenise
+  without a type-scale decision.
 
 ## Feature Flow
 

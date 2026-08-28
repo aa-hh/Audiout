@@ -61,7 +61,7 @@ import AudioutCore
         let (row, _) = makeHostedRow(connectionState: .connected)
         row.apply(makeDevice(connectionState: .connected), selected: true, controllable: true)
         #expect(!row.test_controlsMuted)
-        assertSameHue(row.test_feedNeutralColor, Tokens.Color.secondaryLabel,
+        assertSameHue(row.test_feedNeutralColor, Tokens.Color.feedPillText,
                       "a connected row's FEED reads at normal (full) tint")
     }
 
@@ -94,7 +94,7 @@ import AudioutCore
         row.apply(makeDevice(connectionState: .connected), selected: true, controllable: true)
         #expect(!row.test_isBrightening, "Reduce Motion removes the transition entirely")
         #expect(!row.test_controlsMuted, "the row still lands on the resolved bright state — just instantly")
-        assertSameHue(row.test_feedNeutralColor, Tokens.Color.secondaryLabel,
+        assertSameHue(row.test_feedNeutralColor, Tokens.Color.feedPillText,
                       "the settled FEED tint is unaffected by Reduce Motion — only the transition is")
     }
 

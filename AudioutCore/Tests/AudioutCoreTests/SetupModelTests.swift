@@ -686,7 +686,7 @@ extension SerializedSharedState {
         #expect(ptpHelper.openSettingsCount == 1)
     }
 
-    @Test func refreshPTPHelperStatusPicksUpApprovalWithoutReregistering() {
+    @Test func refreshPTPHelperStatusPicksUpApprovalWithoutReregistering() async {
         // The poll while `.requiresApproval` waits for the user to flip Login
         // Items — it must re-read `.status`, never call `register()` again.
         let ptpHelper = FakePTPHelper()
@@ -696,17 +696,17 @@ extension SerializedSharedState {
         #expect(model.ptpHelperStatus == .requiresApproval)
 
         ptpHelper.status = .enabled   // user approved it in Login Items
-        model.refreshPTPHelperStatus()
+        await model.refreshPTPHelperStatus()
 
         #expect(model.ptpHelperStatus == .enabled, "enabled → available")
         #expect(ptpHelper.registerCount == 1, "poll never re-registers")
     }
 
-    @Test func refreshPTPHelperStatusIsQuietWhenUnchanged() {
+    @Test func refreshPTPHelperStatusIsQuietWhenUnchanged() async {
         let ptpHelper = FakePTPHelper()
         let (model, _, _, counter) = makeModel(audio: .granted, ptpHelper: ptpHelper)
         counter.count = 0
-        model.refreshPTPHelperStatus()
+        await model.refreshPTPHelperStatus()
         #expect(counter.count == 0, "no transition ⇒ no onChange noise")
     }
 
@@ -955,12 +955,48 @@ extension SerializedSharedState {
         #expect(model.unmetRequiredPermissions() == [])
     }
 
-    @Test func unmetRequiredPermissionsFlagsRequiresApprovalPTPHelper() {
+    /// The nag is for a REGRESSION only: a helper the user did once approve and
+    /// that is off now. The ratchet (``AppSettings/speakerSyncWasEnabled``) is
+    /// what remembers the "once approved" half.
+    @Test func unmetRequiredPermissionsFlagsARevokedPTPHelper() async {
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.statusAfterRegister = .enabled
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        model.registerPTPHelper()                       // → .enabled, arming the ratchet
+        #expect(model.unmetRequiredPermissions() == [], "nothing lost while it is on")
+
+        ptpHelper.status = .requiresApproval             // switched off in Login Items
+        await model.refreshPTPHelperStatus()
+
+        #expect(model.unmetRequiredPermissions() == [.ptpHelper])
+    }
+
+    /// …and a helper that was NEVER approved is not a regression, however loudly
+    /// `.requiresApproval` reads: nobody turned anything off.
+    @Test func unmetRequiredPermissionsNeverFlagsANeverApprovedPTPHelper() {
         let ptpHelper = FakePTPHelper()
         ptpHelper.statusAfterRegister = .requiresApproval
         let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
         model.registerPTPHelper()
-        #expect(model.unmetRequiredPermissions() == [.ptpHelper])
+        #expect(model.ptpHelperStatus == .requiresApproval)
+        #expect(model.unmetRequiredPermissions() == [])
+    }
+
+    /// A skip takes the ratchet back down, so passing on Speaker Sync is not
+    /// re-litigated at every wake.
+    @Test func noteSpeakerSyncSkippedDisarmsTheWakeAudit() async {
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.statusAfterRegister = .enabled
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        model.registerPTPHelper()                       // → .enabled, arming the ratchet
+        ptpHelper.status = .requiresApproval
+        await model.refreshPTPHelperStatus()
+        #expect(model.unmetRequiredPermissions() == [.ptpHelper], "armed, as a sanity check")
+
+        model.noteSpeakerSyncSkipped()
+
+        #expect(model.unmetRequiredPermissions() == [])
+        #expect(!AppSettings(defaults: defaults).speakerSyncWasEnabled, "and it persists")
     }
 
     @Test func unmetRequiredPermissionsNeverFlagsNotRegisteredPTPHelper() {
@@ -987,12 +1023,14 @@ extension SerializedSharedState {
 
     @Test func unmetRequiredPermissionsCanReportAllThree() async {
         let ptpHelper = FakePTPHelper()
-        ptpHelper.statusAfterRegister = .notFound
+        ptpHelper.statusAfterRegister = .enabled
         let (model, net, _, _) = makeModel(audio: .denied, ptpHelper: ptpHelper)
         await model.requestAudioCapture()            // → .denied
         net.reachable = false
         await model.primeLocalNetwork()              // → .requested
-        model.registerPTPHelper()                     // → .notFound
+        model.registerPTPHelper()                     // → .enabled, arming the ratchet
+        ptpHelper.status = .requiresApproval          // …then switched off again
+        await model.refreshPTPHelperStatus()
         #expect(Set(model.unmetRequiredPermissions()) ==
                        Set([.audioCapture, .localNetwork, .ptpHelper]))
     }
@@ -1044,6 +1082,33 @@ extension SerializedSharedState {
         let (model, _, _, _) = makeModel(audio: .granted)
         #expect(model.ptpHelperStatus == .notRegistered)
         #expect(model.requiredPermissionsNotGranted().contains(.ptpHelper))
+    }
+
+    /// `.notFound` means the daemon isn't in the bundle — a packaging fault with
+    /// no switch anywhere for the user to flip, so it must not hold Done shut.
+    @Test func requiredPermissionsNotGrantedExcludesANotFoundPTPHelper() {
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.statusAfterRegister = .notFound
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        model.registerPTPHelper()
+        #expect(model.ptpHelperStatus == .notFound)
+        #expect(!model.requiredPermissionsNotGranted().contains(.ptpHelper))
+        #expect(model.unmetRequiredPermissions() == [], "and it never nags on wake either")
+    }
+
+    /// Same for a `register()` that threw: nothing got registered, so there is
+    /// nothing to approve, and the flag says so.
+    @Test func aFailedRegistrationIsRecordedAndNeverHoldsTheGate() {
+        struct RegistrationFailed: Error {}
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.registerError = RegistrationFailed()
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        #expect(!model.ptpHelperRegistrationFailed, "nothing has been tried yet")
+
+        model.registerPTPHelper()
+
+        #expect(model.ptpHelperRegistrationFailed)
+        #expect(!model.requiredPermissionsNotGranted().contains(.ptpHelper))
     }
 
     @Test func requiredPermissionsNotGrantedIgnoresRemoteControl() {
@@ -1183,6 +1248,9 @@ extension SerializedSharedState {
     @Test func auditRequiredPermissionsSilentlyRereadsPTPHelperStatus() async {
         let ptpHelper = FakePTPHelper()
         ptpHelper.status = .requiresApproval
+        // The wake nag is for a REGRESSION, so the helper has to have been on
+        // once for `.requiresApproval` to count as one.
+        AppSettings(defaults: defaults).speakerSyncWasEnabled = true
         let model = SetupModel(audioProbe: SilentAudioProbe(silentResult: .granted),
                                localNetwork: SpyLocalNetwork(),
                                remoteControl: SpyRemoteControl(),

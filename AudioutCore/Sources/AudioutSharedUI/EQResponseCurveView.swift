@@ -21,7 +21,12 @@ import AudioutCore
 /// **An approved custom-drawn instrument** (SharedUI AGENTS.md): a plotted
 /// curve has no stock AppKit equivalent. Everything it draws lives in
 /// `draw(_:)` with `NSBezierPath` — no `CALayer`, no animation, no state
-/// beyond the last pushed ``DeviceEQ``.
+/// beyond the last pushed ``DeviceEQ``. The one exception is bookkeeping, not
+/// a second surface: the STATIC half of the figure (ground, dB ruler, band
+/// grid, 0 dB line) is nothing but a function of the view's size, so it is
+/// rasterized once into a cached `NSImage` and only the trace is stroked per
+/// drag frame. That cache is dropped on exactly two triggers — a size change,
+/// and the accessibility/accent notification that re-tints the tokens.
 ///
 /// **It never themes.** The scope is authored dark in BOTH appearances, the
 /// way a hardware analyser's screen is dark whatever room it sits in — a
@@ -182,6 +187,16 @@ public final class EQResponseCurveView: NSView {
     /// re-resolve.
     public private(set) var test_planResolveCount = 0
 
+    /// Ground + ruler + grid + 0 dB line, rasterized once. Everything in it is a
+    /// function of `bounds.size` and the resolved tokens — the applied tone
+    /// reaches none of it — so a drag frame re-lays-out no ruler text and
+    /// re-strokes no gridlines.
+    private var staticFigure: NSImage?
+
+    /// How many times the static figure has been rasterized — the mirror of
+    /// `test_planResolveCount`, proving a repeated draw reuses it.
+    public private(set) var test_staticFigureBuildCount = 0
+
     private var plan: Plan {
         if let cachedPlan { return cachedPlan }
         let resolved = Self.resolve(eq: appliedEQ, bypassed: appliedBypassed)
@@ -226,7 +241,12 @@ public final class EQResponseCurveView: NSView {
     /// hosts it.
     public override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    @objc private func displayOptionsDidChange() { needsDisplay = true }
+    @objc private func displayOptionsDidChange() {
+        // The static figure has resolved tokens baked into it — re-tinting means
+        // re-rasterizing.
+        staticFigure = nil
+        needsDisplay = true
+    }
 
     // MARK: Public API
 
@@ -257,18 +277,16 @@ public final class EQResponseCurveView: NSView {
     private func drawScope() {
         let ground = NSBezierPath(roundedRect: bounds,
                                   xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
-        Tokens.Color.scopeGround.setFill()
-        ground.fill()
 
         // The plot does not span the view: the leading gutter is the dB
         // ruler's, and the trailing margin keeps the 16 kHz fader — centred on
         // the last gridline — inside the editor. `drawGrid`/`drawTrace` map
         // their `0…1` values across THIS rect, so a gridline lands exactly
         // where `bandCentreX` says its fader goes.
-        var plot = bounds.insetBy(dx: 0, dy: Self.plotInset)
-        plot.origin.x += Self.plotLeadingInset
-        plot.size.width -= Self.plotLeadingInset + Self.plotTrailingInset
-        guard plot.width > 0, plot.height > 0 else { return }
+        guard plotRect() != nil else { return }
+
+        if staticFigure?.size != bounds.size { staticFigure = makeStaticFigure() }
+        staticFigure?.draw(in: bounds)
 
         // Clipped to the ground so a clamped trace can never paint over the
         // rounded corners.
@@ -276,9 +294,42 @@ public final class EQResponseCurveView: NSView {
         ground.setClip()
         defer { NSGraphicsContext.restoreGraphicsState() }
 
-        drawRuler(beside: plot)
-        drawGrid(in: plot)
-        drawTrace(in: plot)
+        if let plot = plotRect() { drawTrace(in: plot) }
+    }
+
+    /// The plot rect inside the current bounds, or `nil` when there is no room
+    /// to plot in (a view that has not been laid out yet).
+    private func plotRect() -> NSRect? {
+        var plot = bounds.insetBy(dx: 0, dy: Self.plotInset)
+        plot.origin.x += Self.plotLeadingInset
+        plot.size.width -= Self.plotLeadingInset + Self.plotTrailingInset
+        guard plot.width > 0, plot.height > 0 else { return nil }
+        return plot
+    }
+
+    /// Rasterize the size-only half of the figure. `NSImage`, not a `CALayer`
+    /// (the type forbids one) — AppKit caches the rasterization per backing
+    /// scale, so a Retina redraw is not a re-render.
+    private func makeStaticFigure() -> NSImage {
+        test_staticFigureBuildCount += 1
+        let size = bounds.size
+        let ground = NSBezierPath(roundedRect: NSRect(origin: .zero, size: size),
+                                  xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
+        return NSImage(size: size, flipped: false) { [weak self] _ in
+            guard let self, let plot = self.plotRect() else { return true }
+            // The handler can run outside `draw`'s pinned block, so it pins the
+            // scope's authored-dark appearance itself.
+            NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
+                Tokens.Color.scopeGround.setFill()
+                ground.fill()
+                NSGraphicsContext.saveGraphicsState()
+                ground.setClip()
+                self.drawRuler(beside: plot)
+                self.drawGrid(in: plot)
+                NSGraphicsContext.restoreGraphicsState()
+            }
+            return true
+        }
     }
 
     /// The dB ruler in the leading gutter: the vertical scale, stated once, so
@@ -320,7 +371,10 @@ public final class EQResponseCurveView: NSView {
         gridColor.setStroke()
         let grid = NSBezierPath()
         grid.lineWidth = 1
-        for x in plan.gridX {
+        // `Self.bandGridX` directly, not `plan.gridX`: the grid is the same ten
+        // band centres whatever the tone, and this runs inside the static
+        // figure, which must not depend on the applied EQ.
+        for x in Self.bandGridX {
             let px = plot.minX + x * plot.width
             grid.move(to: NSPoint(x: px, y: plot.minY))
             grid.line(to: NSPoint(x: px, y: plot.maxY))

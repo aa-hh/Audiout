@@ -43,7 +43,10 @@ public enum PTPHelperStatus: Equatable, Sendable {
 /// is build/bundle-tested only (T5) and unit-tested only via the injected fake
 /// (T6) until Developer ID signing lands; never call the real
 /// `SMAppServicePTPHelper` from a test.
-public protocol PTPHelperManaging {
+/// `Sendable` so a caller can read ``status`` off the main actor: the read is a
+/// synchronous launchd XPC round-trip, and on the main thread it would ride the
+/// Setup window's 1.5 s poll (see ``SetupModel/refreshPTPHelperStatus()``).
+public protocol PTPHelperManaging: Sendable {
     /// The live status, mapped from `SMAppService.Status`. Read fresh, not
     /// cached — the user can flip the Login Items toggle, or macOS can revoke
     /// it, at any time outside the app's control.
@@ -83,7 +86,10 @@ public protocol PTPHelperManaging {
 /// `scripts/ptp-helper.plist`'s own comment and `scripts/make-app.sh`'s
 /// `HELPER_LABEL`. `SMAppService.daemon(plistName:)` resolves the plist by
 /// this exact string; a mismatch fails registration silently into `.notFound`.
-public struct SMAppServicePTPHelper: PTPHelperManaging {
+/// `@unchecked Sendable`: an immutable struct whose one stored property is an
+/// `SMAppService` handle, and whose only cross-thread use is the thread-safe
+/// `status` read.
+public struct SMAppServicePTPHelper: PTPHelperManaging, @unchecked Sendable {
 
     /// Mirrors `scripts/make-app.sh`'s `HELPER_LABEL` + ".plist" and
     /// `scripts/ptp-helper.plist`'s `Label` — BOTH are `${BUNDLE_ID}.ptphelper`

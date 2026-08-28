@@ -134,7 +134,7 @@ extension ConnectionFailure {
         case .notPaired:
             return "This speaker's pairing was removed. Pair it again in Bluetooth Settings, then try again."
         case .castAppUnavailable:
-            return "This receiver can't run the Default Media Receiver — some software receivers don't support it. Try a different Cast device."
+            return "This receiver can't play a stream from Audiout — some software receivers don't support it. Try a different Cast device."
         case .castConnectionFailed:
             return "The Cast receiver didn't accept the connection. Check that it's powered on and on the same network, then try again."
         case .unknown:

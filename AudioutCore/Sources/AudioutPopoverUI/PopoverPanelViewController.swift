@@ -1110,7 +1110,10 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     private static func makeLegendLabel(_ text: String,
                                         weight: NSFont.Weight,
                                         color: NSColor) -> NSTextField {
-        let font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: weight)
+        // Only `.semibold` (the section title, below) and `.medium` (the
+        // column headers) are ever passed, so both branches route through
+        // `Tokens.Font`.
+        let font = weight == .semibold ? Tokens.Font.captionEmphasized : Tokens.Font.captionMedium
         let label = NSTextField(labelWithAttributedString: NSAttributedString(
             string: text,
             attributes: [.font: font, .foregroundColor: color]))
@@ -1158,7 +1161,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         let label = NSTextField(labelWithString: title)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = Tokens.Font.captionMedium
-        label.textColor = Tokens.Color.tertiaryLabel
+        label.textColor = Tokens.Color.inkTertiary
         let wrapper = NSView()
         wrapper.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(label)
@@ -1176,7 +1179,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             chevron.isBordered = false
             chevron.imagePosition = .imageOnly
             chevron.setContentHuggingPriority(.required, for: .horizontal)
-            chevron.contentTintColor = Tokens.Color.tertiaryLabel
+            chevron.contentTintColor = Tokens.Color.inkTertiary
             chevron.setAccessibilityLabel(collapsed ? "Expand \(title)" : "Collapse \(title)")
             let onChevron = ClosureActionTarget { onToggle?() }
             chevron.target = onChevron
@@ -1265,7 +1268,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         guard let card = currentCard else { return }
         let label = NSTextField(labelWithString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: 11)
+        label.font = Tokens.Font.detail
         // `secondaryLabel`, NOT tertiary. This note is live state — it says the
         // card's rows are inert and names what took over — so it is the highest-
         // stakes sentence on the panel whenever it appears, and tertiary leaves
@@ -1300,6 +1303,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     // MARK: Silence-fallback banner (Wave 2 W2-T2, R11)
 
     private weak var bannerLabel: NSTextField?
+    private weak var bannerView: SilenceFallbackBannerView?
 
     /// Show (or, with `nil`, clear) a full-width warning banner PINNED above every
     /// card — used by the generalized silence watchdog to say "Speakers unreachable
@@ -1307,17 +1311,24 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// rounded inset card with a warning glyph and a wrapping label; system colors
     /// only, no custom drawing. `clearRows()` drops it along with the cards, so the
     /// host re-applies it at the tail of every `rebuild()`.
-    func setBanner(_ text: String?) {
+    ///
+    /// `action`, when non-nil, renders a trailing call-to-action button — the
+    /// note slot's shape, so the banner is a place the user can DO something
+    /// rather than a dead end.
+    func setBanner(_ text: String?, action: SilenceFallbackBannerView.Action? = nil) {
         if let existing = stackView.arrangedSubviews.first(where: { $0 is SilenceFallbackBannerView }) {
             stackView.removeArrangedSubview(existing)
             existing.removeFromSuperview()
         }
         bannerLabel = nil
+        bannerView = nil
         guard let text else { return }
         let banner = SilenceFallbackBannerView(
             text: text,
-            maxTextWidth: panelWidth - 28 - 30)
+            maxTextWidth: panelWidth - 28 - 30,
+            action: action)
         bannerLabel = banner.label
+        bannerView = banner
         stackView.insertArrangedSubview(banner, at: 0)
         NSLayoutConstraint.activate([
             // Flush to the stack edges, matching the cards (Warm Signal dropped
@@ -1329,6 +1340,10 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
 
     /// Test-only: the banner's copy, or `nil` when no banner is shown.
     var test_bannerText: String? { bannerLabel?.stringValue }
+    /// Test-only: whether the currently-shown banner has an action button.
+    var test_bannerHasActionButton: Bool { bannerView?.test_hasActionButton ?? false }
+    /// Test-only: simulate a click on the banner's action button, if any.
+    func test_tapBannerAction() { bannerView?.test_tapActionButton() }
 
     // MARK: System-AirPlay guard note (Wave 3 W3-T3)
 

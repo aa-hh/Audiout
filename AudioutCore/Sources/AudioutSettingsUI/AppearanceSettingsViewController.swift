@@ -263,13 +263,20 @@ final class ThemeTileButton: NSButton {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Remove only OUR area, never `trackingAreas.forEach(removeTrackingArea)`
+    /// — that also tears out any area AppKit installed on this view, and
+    /// nothing here puts those back.
+    private var hoverTrackingArea: NSTrackingArea?
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(
+        if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
+        let area = NSTrackingArea(
             rect: bounds,
             options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
-            owner: self))
+            owner: self)
+        addTrackingArea(area)
+        hoverTrackingArea = area
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
@@ -380,7 +387,7 @@ final class ThemeTileButton: NSButton {
         let para = NSMutableParagraphStyle()
         para.alignment = .center
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: isSelectedTile ? .medium : .regular),
+            .font: isSelectedTile ? Tokens.Font.captionMedium : Tokens.Font.caption,
             .foregroundColor: isSelectedTile ? NSColor.labelColor : NSColor.secondaryLabelColor,
             .paragraphStyle: para,
         ]

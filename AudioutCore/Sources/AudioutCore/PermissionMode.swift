@@ -198,7 +198,7 @@ public struct SimulatedBluetoothPermission: BluetoothPermissionReading, Bluetoot
 
 /// A ``PTPHelperManaging`` that reports a fixed status and never registers a
 /// real `SMAppService` daemon (so no Login Items entry appears).
-public struct SimulatedPTPHelper: PTPHelperManaging {
+public struct SimulatedPTPHelper: PTPHelperManaging, @unchecked Sendable {
     public let simulatedStatus: PTPHelperStatus
     public init(status: PTPHelperStatus) { self.simulatedStatus = status }
     public var status: PTPHelperStatus { simulatedStatus }

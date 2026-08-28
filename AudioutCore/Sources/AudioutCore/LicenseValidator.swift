@@ -54,6 +54,10 @@ public struct LicenseValidator {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["license_key": key])
+        // Well under URLSession's 60s default: nothing waits on this answer, but
+        // a captive portal that never replies would otherwise leave the Settings
+        // pane's "Checking…" line sitting there for a minute.
+        request.timeoutInterval = 10
 
         transport(request) { data, response, _ in
             // Parsed off the main queue; only the write and the callback hop.

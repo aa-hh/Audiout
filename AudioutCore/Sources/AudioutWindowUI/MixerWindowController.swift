@@ -267,6 +267,12 @@ public final class MixerWindowController {
         editorViewController.onDidEditGroup = { [weak self] in
             self?.refreshSidebar()
         }
+        // Escape out of a rename hands keyboard focus to the sidebar's row
+        // list — the one control present whatever pane is showing. Anywhere
+        // else (including nowhere) leaves Tab with nothing to advance from.
+        editorViewController.onDidCancelRename = { [weak self] in
+            self?.sidebarViewController.claimKeyboardFocus()
+        }
         // An icon override picked in any pane repaints every surface. Chain onto
         // any existing observer rather than clobbering it — the controller is
         // shared and another owner may already be listening.
@@ -482,7 +488,7 @@ public final class MixerWindowController {
     private func suggestedGroupName(preselected: [String], devices: [Device]) -> String {
         let names = preselected.compactMap { id in devices.first(where: { $0.id == id })?.name }
         switch names.count {
-        case 0:  return "Group \(groupController.groups.count + 1)"
+        case 0:  return groupController.nextDefaultGroupName()
         case 1:  return names[0]
         case 2:  return "\(names[0]) + \(names[1])"
         default: return "\(names[0]) + \(names.count - 1) more"
@@ -853,3 +859,7 @@ final class ContentPaneHostViewController: NSViewController {
     /// The persistent footer caption's text (structural test hook).
     var test_footerText: String { footerLabel.stringValue }
 }
+
+// GroupsEmptyStateViewController is GONE (direction C): the overview's empty
+// canvas absorbed it — same copy strings, same centered-block rules. main's
+// last tweaks to the class arrived in the merge that deletes it.

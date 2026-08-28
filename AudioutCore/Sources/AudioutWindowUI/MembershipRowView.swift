@@ -119,6 +119,7 @@ public final class MembershipRowView: NSView {
         set {
             checked = newValue
             checkbox.state = newValue ? .on : .off
+            updateCheckboxAccessibilityLabel()
             updateBus()
         }
     }
@@ -254,14 +255,13 @@ public final class MembershipRowView: NSView {
         checkbox.state = checked ? .on : .off
         checkbox.isEnabled = true   // visibility policy is the host's job, not this row's
 
+        // CACHED and SHARED — never mutate the returned image; the tint is a
+        // view property. The row's own a11y label (below) already speaks the
+        // device name, so the glyph carries no description of its own.
         let symbolName = DeviceIcon.resolve(iconSymbolName, default: device.kind.symbolName)
-        iconView.image = NSImage(
-            systemSymbolName: symbolName,
-            accessibilityDescription: device.name
-        )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
-                                        weight: .regular)
-        )
+        iconView.image = DeviceIcon.image(symbolName,
+                                          pointSize: PopoverColumnGrid.iconGlyphPointSize,
+                                          weight: .regular)
 
         nameLabel.stringValue = device.name
         // Dimmed like the sidebar's unavailable devices — de-emphasized, still
@@ -273,10 +273,19 @@ public final class MembershipRowView: NSView {
 
         setAccessibilityLabel(
             "\(device.name)\(device.isAvailable ? "" : ", unavailable")")
-        checkbox.setAccessibilityLabel(
-            checked ? "Remove \(device.name) from group" : "Add \(device.name) to group")
+        updateCheckboxAccessibilityLabel()
 
         updateBus()
+    }
+
+    /// Re-announce the checkbox's VERB from the CURRENT membership state. It
+    /// used to be written once in ``apply(device:checked:iconSymbolName:)`` and
+    /// never again, so a row toggled in place kept telling VoiceOver to "Add"
+    /// a device it had just added. Every path that changes `checked` calls
+    /// this.
+    private func updateCheckboxAccessibilityLabel() {
+        checkbox.setAccessibilityLabel(
+            checked ? "Remove \(device.name) from group" : "Add \(device.name) to group")
     }
 
     /// Enable or disable the membership checkbox, with an optional tooltip
@@ -395,6 +404,7 @@ public final class MembershipRowView: NSView {
 
     @objc private func checkboxToggled(_ sender: NSButton) {
         checked = sender.state == .on
+        updateCheckboxAccessibilityLabel()
         updateBus()
         onToggle?(device.id, checked)
     }

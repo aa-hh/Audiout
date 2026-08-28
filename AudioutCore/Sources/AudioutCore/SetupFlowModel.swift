@@ -118,11 +118,20 @@ public final class SetupFlowModel {
     /// optional last, per `dev/notes/wispr-permissions-brief.md`.
     public static let steps: [SetupStep] = [.audio, .localNetwork, .bluetooth, .speakerSync, .remoteControl]
 
-    /// The two steps a user may pass on. Both are excluded from
-    /// ``RequiredPermission``, so their PERMISSIONS never hold Done shut — but
-    /// an UNDECIDED one does: the gate waits for every card to be decided, and
-    /// a skip is the decision that clears it (see ``isDoneAvailable``).
-    public static let skippableSteps: Set<SetupStep> = [.bluetooth, .remoteControl]
+    /// The three steps a user may pass on. An UNDECIDED one holds Done shut:
+    /// the gate waits for every card to be decided, and a skip is the decision
+    /// that clears it (see ``isDoneAvailable``).
+    ///
+    /// Bluetooth and Remote Control are outside ``RequiredPermission`` entirely,
+    /// so their permissions never held Done shut either. **Speaker Sync is
+    /// different** and deliberately so: it stays a `RequiredPermission` and is
+    /// still audited whenever it was ever enabled, because a helper that was
+    /// approved and then switched off is a real regression. What the skip buys
+    /// is an EXIT — approval lives in Login Items, macOS can refuse it outright,
+    /// and without a skip an unapproved helper locked this gate forever with
+    /// nothing on screen to press. ``unmetRequiredSteps()`` is what filters a
+    /// skipped Speaker Sync out of the gate.
+    public static let skippableSteps: Set<SetupStep> = [.bluetooth, .remoteControl, .speakerSync]
 
     /// Steps the user explicitly passed on. Skipped is NOT granted: such a step
     /// stays unchecked, and the app asks again the next time it genuinely needs
@@ -160,7 +169,14 @@ public final class SetupFlowModel {
         // `.requested` (asked, nothing answered) and `.denied` do not complete.
         case .localNetwork: return setup.localNetworkStatus == .granted || !setup.isLocalNetworkGated
         case .bluetooth: return setup.bluetoothStatus == .granted
-        case .speakerSync: return setup.ptpHelperStatus == .enabled
+        // Same auto-pass posture as `.unsupported` audio two lines up: a
+        // `.notFound` daemon (missing from the bundle) and a `register()` that
+        // threw are packaging/signing faults, not user decisions, so no
+        // approval exists to demand and a hard gate must not demand one.
+        case .speakerSync:
+            return setup.ptpHelperStatus == .enabled
+                || setup.ptpHelperStatus == .notFound
+                || setup.ptpHelperRegistrationFailed
         case .remoteControl: return setup.remoteControlStatus == .granted
         }
     }
@@ -317,6 +333,11 @@ public final class SetupFlowModel {
     public func skip(_ step: SetupStep) {
         guard Self.skippableSteps.contains(step) else { return }
         skippedSteps.insert(step)
+        // Remember it beyond this window: the wake audit must stop reading an
+        // unapproved helper as "something got turned off in Login Items".
+        // `reopen(_:)` needs no counterpart — the flag only re-arms on a real
+        // `.enabled`.
+        if step == .speakerSync { setup.noteSpeakerSyncSkipped() }
     }
 
     /// Re-open a previously skipped step so it can be decided again. A skip
@@ -355,7 +376,18 @@ public final class SetupFlowModel {
     /// re-entry start index, so a required permission GRANTED at entry but
     /// revoked mid-presentation is caught here, not by the walk.
     public var isReadyForFinalCheck: Bool {
-        setup.requiredPermissionsNotGranted().isEmpty && activeStep == nil
+        unmetRequiredSteps().isEmpty && activeStep == nil
+    }
+
+    /// The required steps still standing in the gate's way — the required
+    /// permissions that aren't granted, MINUS a Speaker Sync the user has
+    /// explicitly skipped. The skip is the exit: without this filter the step
+    /// would be skippable in name only, since its permission would keep the
+    /// gate shut from the other side.
+    private func unmetRequiredSteps() -> [SetupStep] {
+        setup.requiredPermissionsNotGranted()
+            .map(Self.step(for:))
+            .filter { !($0 == .speakerSync && skippedSteps.contains(.speakerSync)) }
     }
 
     /// Backing store for ``finalCheckState``. The public read derives
@@ -390,7 +422,7 @@ public final class SetupFlowModel {
     private func auditVerdict(trustingProvenLocalNetworkGrant: Bool) async -> SetupFlowVerification {
         _ = await setup.auditRequiredPermissions(
             trustingProvenLocalNetworkGrant: trustingProvenLocalNetworkGrant)
-        guard let unmet = Self.firstUnmetRequiredStep(in: setup) else { return .complete }
+        guard let unmet = unmetRequiredSteps().first else { return .complete }
         return .unmet(unmet)
     }
 

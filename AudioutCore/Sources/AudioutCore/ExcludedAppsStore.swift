@@ -67,7 +67,13 @@ public struct ExcludedAppsStore: Sendable {
     public func load() throws -> [ExcludedApp]? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
         let data = try Data(contentsOf: fileURL)
-        let envelope = try decoder.decode(Envelope.self, from: data)
+        let envelope: Envelope
+        do {
+            envelope = try decoder.decode(Envelope.self, from: data)
+        } catch {
+            StoreRecovery.quarantine(fileURL)
+            throw error
+        }
         guard envelope.schemaVersion <= Self.currentSchemaVersion else { return nil }
         return envelope.apps.map { $0.app }
     }

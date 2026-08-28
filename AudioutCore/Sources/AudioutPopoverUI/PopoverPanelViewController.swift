@@ -505,8 +505,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// card (plus the chevron) is what separates sections now; the type doesn't
     /// have to shout to do it.
     ///
-    /// `trailingTitle` names the trailing control column (Output / Feed /
-    /// REDIRECT); `nil` omits it for a card with no trailing control. There is
+    /// `trailingTitle` names the trailing control column (Output / Source /
+    /// Redirect); `nil` omits it for a card with no trailing control. There is
     /// deliberately NO parameter for a title over the SLIDER column — a fader
     /// with a live `%` beside it names itself, and every card shares that one
     /// column, so any title over it prints the same word once per card. The
@@ -543,9 +543,19 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// edge) instead of centering it over the reserved column — for a column
     /// whose content is itself left-aligned (the FEED pills), where a
     /// centered title floats well right of a single value.
+    ///
+    /// `secondTrailingTitle` optionally adds ONE more column-header label
+    /// LEFT of `trailingTitle` on the same line, RIGHT-ALIGNED with its
+    /// trailing edge `secondTrailingTitleTrailing` in from the row's trailing
+    /// edge — the Output Devices card's "Offset" title over the sync-chip
+    /// column (2026-08-28 header decision; the legend used to ride the
+    /// subsection header lines). The anchor is the caller's, from
+    /// `PopoverColumnGrid`, so the title cannot drift off its column.
     func beginCard(header: String,
                    trailingTitle: String? = nil,
                    trailingTitleLeadingFromTrailing: CGFloat? = nil,
+                   secondTrailingTitle: String? = nil,
+                   secondTrailingTitleTrailing: CGFloat = 0,
                    trailingAccessory accessory: HeaderAccessory? = nil,
                    collapsible: Bool = false,
                    collapsed: Bool = false,
@@ -644,6 +654,20 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             NSLayoutConstraint.activate([
                 horizontal,
                 trailingLabel.centerYAnchor.constraint(equalTo: headerWrap.centerYAnchor),
+            ])
+        }
+
+        // The optional SECOND column title (the "Offset" legend), right-aligned
+        // on its column's trailing edge — see the parameter doc above.
+        if let secondTrailingTitle {
+            let secondLabel = Self.makeColumnHeaderLabel(secondTrailingTitle)
+            secondLabel.alignment = .right
+            headerWrap.addSubview(secondLabel)
+            NSLayoutConstraint.activate([
+                secondLabel.trailingAnchor.constraint(
+                    equalTo: headerWrap.trailingAnchor,
+                    constant: -secondTrailingTitleTrailing),
+                secondLabel.centerYAnchor.constraint(equalTo: headerWrap.centerYAnchor),
             ])
         }
 
@@ -1164,8 +1188,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         label.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
     }
 
-    /// A column-header label (Output / Feed / Sync / Redirect), centered over its
-    /// column in the combined header row built by `beginCard`. Volume is
+    /// A column-header label (Output / Source / Offset / Redirect), placed over
+    /// its column in the combined header row built by `beginCard`. Volume is
     /// deliberately NOT among them — see `PopoverController.rebuild()`.
     private static func makeColumnHeaderLabel(_ text: String) -> NSTextField {
         let label = makeLegendLabel(text, weight: .medium, color: Tokens.Color.secondaryLabel)
@@ -1173,16 +1197,15 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         return label
     }
 
-    /// Add a small subsection header ("Current Device" / "AirPlay Devices")
-    /// INSIDE the current card (SPEC §9b split). Tertiary label color (V10,
-    /// 2026-07-18): a grouping label sits one step below the column
-    /// headers (`makeColumnHeaderLabel`, still secondary), so it reads as a
-    /// quieter sub-level in the hierarchy rather than competing with them.
-    /// `columnTitle`/`columnCenterFromTrailing` optionally add ONE extra
-    /// column-header label on the same line, centered over a column
-    /// only this subsection's rows carry — the Bluetooth subsection's "Sync"
-    /// title over its stepper cluster (BT-OFFSET-UI). Same
-    /// `makeColumnHeaderLabel` voice as the card header's Volume/Feed titles.
+    /// Add a small subsection header ("AirPlay Devices" / "Bluetooth
+    /// Devices") INSIDE the current card (SPEC §9b split). Tertiary label
+    /// color (V10, 2026-07-18): a grouping label sits one step below the
+    /// column headers (`makeColumnHeaderLabel`, still secondary), so it reads
+    /// as a quieter sub-level in the hierarchy rather than competing with
+    /// them. A subsection header carries NO column titles of its own — the
+    /// legends all live on the card header line (the "Offset" title moved up
+    /// there 2026-08-28, `beginCard`'s `secondTrailingTitle`), so each prints
+    /// exactly once.
     ///
     /// `collapsible` reuses the card header's own affordance verbatim — the
     /// leading `chevron.right`/`chevron.down` button, the whole-row click
@@ -1196,8 +1219,6 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// clip is built even when `collapsed` (empty, pinned to 0), so a later
     /// expand has a clip to fill and travel.
     func addSubsectionHeader(_ title: String,
-                             columnTitle: String? = nil,
-                             columnCenterFromTrailing: CGFloat = 0,
                              collapsible: Bool = false,
                              collapsed: Bool = false,
                              onToggle: (() -> Void)? = nil) {
@@ -1267,18 +1288,6 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             // centered card title.
             label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
         ])
-        if let columnTitle {
-            let columnLabel = Self.makeColumnHeaderLabel(columnTitle)
-            wrapper.addSubview(columnLabel)
-            NSLayoutConstraint.activate([
-                columnLabel.centerXAnchor.constraint(
-                    equalTo: wrapper.trailingAnchor,
-                    constant: -columnCenterFromTrailing),
-                // Rides the title's own centerline so the two stay on one
-                // baseline (they share `captionMedium`).
-                columnLabel.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
-            ])
-        }
         // The header itself is a CARD-body row (it stays visible when the
         // subsection collapses), so close any previous subsection first.
         currentSubsectionStack = nil

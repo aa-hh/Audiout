@@ -1660,9 +1660,9 @@ public final class DeviceRowView: NSView {
                     feedStack.widthAnchor.constraint(
                         lessThanOrEqualToConstant: PopoverColumnGrid.btFeedReserveWidth),
                     // The chip: one fixed-width control on the same trailing
-                    // anchor the old cluster ended at, so the subsection
-                    // header's SYNC title (centred via
-                    // `syncCenterFromTrailing`) still lands over it.
+                    // anchor the old cluster ended at, so the card header's
+                    // "Offset" title (trailing-aligned via
+                    // `offsetTitleTrailingFromTrailing`) still lands over it.
                     syncChipButton.trailingAnchor.constraint(
                         equalTo: trailingAnchor,
                         constant: -PopoverColumnGrid.syncTrailing),

@@ -706,14 +706,19 @@ public enum PopoverColumnGrid {
     public static var syncTrailing: CGFloat {
         trailingInset + btFeedReserveWidth + btFeedToSyncGap
     }
-    /// Distance from the row trailing edge to the SYNC chip's CENTER, so the
-    /// Bluetooth subsection header can center its "SYNC" column title over the
-    /// chip (the title lives in that subsection header ONLY — the card
-    /// header's VOLUME/FEED titles are untouched). Derived from the chip's own
-    /// width, so re-sizing the chip re-centres the title in lockstep.
-    public static var syncCenterFromTrailing: CGFloat {
-        syncTrailing + syncChipWidth / 2
-    }
+    /// Distance from the row trailing edge to the "Offset" column title's
+    /// TRAILING edge on the card header line — the chip column's own trailing
+    /// edge, so the title hangs over the chip it names and moves with it
+    /// (sibling of `feedColumnLeadingFromTrailing`, the "Source" title's
+    /// anchor on the same line). TRAILING-aligned, not centred on the chip:
+    /// "Source" left-aligns at `feedColumnLeadingFromTrailing` (154 in) and a
+    /// chip-CENTRED title (center 108 in, ~34 pt wide) runs ~8 pt into it —
+    /// the AirPlay feed slot and the sync-row chip share one physical 140 pt
+    /// slot, so the chip's trailing edge is the only chip-anchored placement
+    /// clear of the Source title. The 2026-08-28 header decision moved this
+    /// legend up from the subsection header lines (where it centred over the
+    /// chip); it prints exactly once now, on the card header.
+    public static var offsetTitleTrailingFromTrailing: CGFloat { syncTrailing }
 
     // MARK: SYNC drawer (PLAN-BT-SYNC-DRAWER T5 — `BTSyncDrawerView`)
     //
@@ -805,11 +810,11 @@ public enum PopoverColumnGrid {
     public static var trailingControlTrailing: CGFloat { trailingInset }
     /// Distance from the row trailing edge to the FEED slot's **leading edge**
     /// — the x the LEFT-ALIGNED feed pills start at (`DeviceRowView`'s
-    /// `feedStack` pins its leading here). The card header's "Feed" title
-    /// left-aligns on this same anchor rather than centering over the whole
-    /// reserved column: with the pills left-aligned, a centered title floated
-    /// ~46 pt right of a single pill and crowded the Sync title on the next
-    /// header line. One derivation for both, so title and pills cannot drift.
+    /// `feedStack` pins its leading here). The card header's "Source" column
+    /// title (renamed from "Feed", 2026-08-28) left-aligns on this same anchor
+    /// rather than centering over the whole reserved column: with the pills
+    /// left-aligned, a centered title floated ~46 pt right of a single pill.
+    /// One derivation for both, so title and pills cannot drift.
     public static var feedColumnLeadingFromTrailing: CGFloat {
         trailingControlTrailing + trailingControlWidth
     }

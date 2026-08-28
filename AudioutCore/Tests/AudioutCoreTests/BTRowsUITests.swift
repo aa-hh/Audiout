@@ -430,26 +430,28 @@ import AppKit
     @Test func bluetoothSubsectionHeaderAlwaysRendersWithAConnectRowWhenEmpty() {
         let (popover, _, _) = makePopover()
         popover.update(devices: [local(), airplay()])
-        #expect(popover.test_subsectionTitles() == ["This Mac", "AirPlay Devices", "Bluetooth Devices"])
+        #expect(popover.test_subsectionTitles() == ["AirPlay Devices", "Bluetooth Devices"])
         #expect(popover.test_bluetoothRowOrder().isEmpty)
         #expect(popover.test_bluetoothConnectRowShown())
     }
 
-    /// The "SYNC" column title is printed only when BT rows carrying a sync chip
-    /// sit under it. The Bluetooth header renders even with nothing listed (its
-    /// empty body IS the Connect affordance), so without the gate the title names
-    /// a column that does not exist.
-    @Test func syncColumnTitleIsPrintedOnlyWhenBluetoothRowsExist() {
+    /// The "Offset" column title (the card header's, since 2026-08-28) is
+    /// printed only when a row carrying the sync chip actually renders. The
+    /// Bluetooth header renders even with nothing listed (its empty body IS
+    /// the Connect affordance), so without the gate the title names a column
+    /// that does not exist. A Mac-less, BT-less fleet is the empty case here —
+    /// the Mac's own row carries the chip too and would satisfy the gate.
+    @Test func offsetColumnTitleIsPrintedOnlyWhenSyncChipRowsExist() {
         let (popover, _, _) = makePopover()
-        popover.update(devices: [local(), airplay()])
+        popover.update(devices: [airplay()])
         #expect(popover.test_bluetoothConnectRowShown(),
                 "precondition: the subsection is in its empty state")
-        #expect(!popover.test_syncColumnTitleShown(in: "Bluetooth Devices"),
-                "no rows under it means no column to name")
+        #expect(!popover.test_offsetColumnTitleShown(),
+                "no chip rows under it means no column to name")
 
-        popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Attic Speaker")])
+        popover.update(devices: [airplay(), bt("bt-a:output", name: "Attic Speaker")])
         #expect(popover.test_bluetoothRowOrder() == ["bt-a:output"])
-        #expect(popover.test_syncColumnTitleShown(in: "Bluetooth Devices"),
+        #expect(popover.test_offsetColumnTitleShown(),
                 "one listed BT row brings its SYNC chip — and the title back")
     }
 
@@ -470,7 +472,7 @@ import AppKit
             bt("bt-old:output", name: "Attic Speaker"),
         ])
         #expect(popover.test_subsectionTitles()
-                == ["This Mac", "AirPlay Devices", "Bluetooth Devices"])
+                == ["AirPlay Devices", "Bluetooth Devices"])
         #expect(popover.test_bluetoothRowOrder()
                 == ["bt-new:output", "bt-old:output", "bt-ghost:output"],
                 "most recent first; a pairing with no recency sinks to the bottom")

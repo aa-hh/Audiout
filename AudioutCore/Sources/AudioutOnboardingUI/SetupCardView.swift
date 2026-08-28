@@ -65,6 +65,7 @@ struct SetupCardContent {
     /// The SPINE's own earned title — a short form of ``completedTitle``.
     let spineDoneTitle: String
 
+
     /// The one place the per-state title table lives (brief §"Card anatomy":
     /// imperative → earned capability). The RIBBON reads this; the spine reads
     /// ``spineTitle(for:foundSpeakers:)``.
@@ -559,6 +560,14 @@ final class SetupSpineRowView: NSView {
         if isBroken { return true }
         switch state {
         case .pending, .autoPassed: return false
+        // The live row IS its primary button. Safe for every step, because no
+        // step's primary is itself a decision any more: each one raises a
+        // surface the user still has to answer — macOS's dialog for the five
+        // permissions, Audiout's own Share / Don't Share sheet for Usage
+        // Statistics. Usage Statistics briefly granted on the click instead,
+        // and this row is where that reached the user (owner, live: "clicking
+        // on the line item accepts, even though the person might not actually
+        // be meaning to").
         case .active: return isLive
         case .completed, .skipped: return true
         }

@@ -851,6 +851,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onBTWizardTempo = { [weak self] bpm in
             (self?.backend as? BTOutputControlling)?.setBTWizardTickTempo(bpm: bpm)
         }
+        // Roadmap 064: the mic-probe measurement rides the wizard feed. Wired
+        // ONLY when the backend can actually stage it, so a mock/dev run can
+        // never reach the mic-permission prompt from the wizard.
+        if backend is BTOutputControlling {
+            popoverController.onStageBTMicProbe = { [weak self] started, finished in
+                (self?.backend as? BTOutputControlling)?
+                    .stageBTMicProbe(onStarted: started, onFinished: finished)
+            }
+        }
         // Roadmap 056 Part A: a Bluetooth run measures the speaker's own
         // LATENCY (the Mac is the zero), stored beside the trim rather than
         // overwriting it.

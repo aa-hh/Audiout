@@ -68,6 +68,8 @@ LOCAL_NETWORK_USAGE="Audiout looks for AirPlay speakers on your local network so
 # PLAN-UNIVERSAL-SYNC §B/§K). Same mental-model rule as the two above.
 BLUETOOTH_USAGE="Audiout connects to Bluetooth speakers you've already paired so it can play your Mac's audio on them. It only reaches speakers you choose — it never scans for or reads anything else."
 
+MICROPHONE_USAGE="Audiout can listen through your Mac's built-in microphone for a couple of seconds during speaker alignment, to measure how far apart your speakers sound. The recording is analysed on your Mac and thrown away — nothing is saved or sent anywhere."
+
 # The privileged root PTP helper (T2/T5, ptp-helper-design.md §2). Lives in
 # the AirPlayEngine package, not AudioutCore — a separate `swift build`
 # invocation below. Label MUST equal the LaunchDaemons plist's own filename
@@ -255,7 +257,10 @@ cp -R \"\$BIN/$RESOURCE_BUNDLE_NAME\" .remote-products/"
     if remote_fetch "$REPO_ROOT" ".remote-products/$EXECUTABLE" "$STAGE/$EXECUTABLE" &&
        remote_fetch "$REPO_ROOT" ".remote-products/$TCC_PROBE_EXECUTABLE" "$STAGE/$TCC_PROBE_EXECUTABLE" &&
        remote_fetch "$REPO_ROOT" ".remote-products/$HELPER_EXECUTABLE" "$STAGE/$HELPER_EXECUTABLE" &&
-       remote_fetch "$REPO_ROOT" ".remote-products/$RESOURCE_BUNDLE_NAME" "$STAGE/$RESOURCE_BUNDLE_NAME"; then
+       remote_fetch "$REPO_ROOT" ".remote-products/$RESOURCE_BUNDLE_NAME/" "$STAGE/$RESOURCE_BUNDLE_NAME"; then
+      # Trailing slash on the source is load-bearing: without it rsync places
+      # the directory INSIDE the destination, nesting the bundle in itself and
+      # silently losing every resource (the brand mark ships as nil).
       BUILT_BINARY="$STAGE/$EXECUTABLE"
       BUILT_TCC_PROBE="$STAGE/$TCC_PROBE_EXECUTABLE"
       BUILT_HELPER="$STAGE/$HELPER_EXECUTABLE"
@@ -708,6 +713,14 @@ plutil -extract NSBonjourServices.3 raw -o - "$PLIST" >/dev/null || { echo "ERRO
 # same plutil-plus-assert treatment as the audio-capture string above.
 plutil -insert NSBluetoothAlwaysUsageDescription -string "$BLUETOOTH_USAGE" "$PLIST"
 plutil -extract NSBluetoothAlwaysUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBluetoothAlwaysUsageDescription missing from Info.plist" >&2; exit 1; }
+
+# Microphone (roadmap 064): the alignment wizard's mic-probe measurement
+# records the BUILT-IN mic for a few seconds. A separate TCC bucket from
+# System Audio Recording above — same plutil-plus-assert treatment, same
+# reason (a silently missing rationale is a bare "wants to record" prompt,
+# or on this key a capture that delivers only zeros).
+plutil -insert NSMicrophoneUsageDescription -string "$MICROPHONE_USAGE" "$PLIST"
+plutil -extract NSMicrophoneUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSMicrophoneUsageDescription missing from Info.plist" >&2; exit 1; }
 
 # --- audiout:// URL scheme (release builds only) ----------------------------
 # The purchase flow's return path: the thanks page links

@@ -297,6 +297,24 @@ public final class BTAlignmentWizardSession {
         presentEstimatorPhase()
     }
 
+    /// A mic-probe measurement landing mid-run (roadmap 064): present it as
+    /// the proposal to confirm by ear. `valueMs` is in VALUE space (a
+    /// Bluetooth run's measured latency in ms). Meaningful only while
+    /// questions are running — a run already proposing, ended, or still on the
+    /// intro keeps its state, and the probe result is simply dropped (the
+    /// by-ear machinery owes it nothing). The estimator's belief is untouched:
+    /// the measurement feeds the proposal, never the prior.
+    public func offerMeasuredProposal(valueMs: Double) {
+        guard case .question = screen, !ended else { return }
+        let estimate = invertsEstimate ? baseValueMs - valueMs : valueMs - baseValueMs
+        estimator.offerProposal(estimate)
+        Telemetry.log(.localPlayback, "wizard_mic_proposal", [
+            "uid": deviceID,
+            "valueMs": String(Int(valueMs.rounded())),
+        ])
+        presentEstimatorPhase()
+    }
+
     /// Undo the last answer and ask that question again. Available only while
     /// questions are running and at least one answer stands — which is exactly
     /// what `.question`'s `answersSoFar` reports, so the button's enabled state

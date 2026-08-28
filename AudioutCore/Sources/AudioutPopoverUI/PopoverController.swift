@@ -428,6 +428,11 @@ public final class PopoverController: NSObject {
     /// The wizard's stimulus tempo (BPM), driven by the estimator's stage.
     /// Wired to `setBTWizardTickTempo`.
     public var onBTWizardTempo: ((_ bpm: Double) -> Void)?
+    /// Stage the mic-probe calibration sweeps on the live wizard feed
+    /// (roadmap 064). Wired to `stageBTMicProbe`; nil (mock/dev backends)
+    /// means no probe and the run stays purely by-ear.
+    public var onStageBTMicProbe: ((_ onStarted: @escaping () -> Void,
+                                    _ onFinished: @escaping () -> Void) -> Void)?
 
     // MARK: Measured latency (roadmap 056 Part A)
 
@@ -475,6 +480,16 @@ public final class PopoverController: NSObject {
     /// close and ends only with its own window or its target.
     private var btWizardDeviceID: String?
     private var btWizardSession: BTAlignmentWizardSession?
+    /// The in-flight mic-probe measurement, if this run has one (roadmap 064).
+    private var btWizardMicProbe: MicProbeSession?
+    /// Bumped on every live preview push. The probe result is only trusted if
+    /// the preview it was measured under is STILL the one applied — an answer
+    /// (or a reference swap) mid-probe moves the sink under the sweep, and a
+    /// measurement across that splice would be about two different timelines.
+    private var btWizardPreviewGeneration = 0
+    /// The preview value in force when the probe's sweeps started — the
+    /// measured Δ corrects THIS value into the proposal.
+    private var btWizardLastPreviewMs: Double = 0
     private var btWizardView: BTAlignmentWizardView?
     private var btWizardSheet: AlignmentWizardViewController?
     /// The reference device this run SELECTED for itself, so every exit path
@@ -4350,6 +4365,8 @@ extension PopoverController: DeviceRowView.Delegate {
             // local seam takes no half-width — its telemetry is the Mac's, and
             // this run is not what it is about.
             applyPreviewTrim: { [weak self] ms, halfWidthMs in
+                self?.btWizardPreviewGeneration += 1
+                self?.btWizardLastPreviewMs = ms
                 if isLocalTarget {
                     self?.onLocalTrimPreview?(ms)
                 } else {
@@ -4401,6 +4418,15 @@ extension PopoverController: DeviceRowView.Delegate {
             },
             setTick: { [weak self] active in
                 self?.pushBTWizardTick(active, target: isLocalTarget ? nil : deviceID)
+                // The probe rides the tick's lifetime: staged on every `true`
+                // edge (start AND try-again both deserve a fresh measurement),
+                // dropped on every `false` one.
+                if active {
+                    self?.startBTWizardMicProbe(deviceID: deviceID)
+                } else {
+                    self?.btWizardMicProbe?.cancel()
+                    self?.btWizardMicProbe = nil
+                }
             },
             setTempo: { [weak self] bpm in self?.onBTWizardTempo?(bpm) })
         btWizardDeviceID = deviceID
@@ -4408,6 +4434,57 @@ extension PopoverController: DeviceRowView.Delegate {
         Analytics.capture("bt_sync:wizard_started", ["target": isLocalTarget ? "local" : "bluetooth"])
         reconcileBTAlignmentPanels(animated: true)
         refreshDeviceRows()
+    }
+
+    /// Run one mic-probe measurement under the wizard run just started
+    /// (roadmap 064): the wizard feed plays the dual sweeps in place of the
+    /// first ticks, the built-in mic records them, and the resulting Δ —
+    /// corrected onto the preview in force when the sweeps started — arrives
+    /// as the run's proposal to confirm by ear. Every failure path is silent:
+    /// the by-ear run is already underway and owes the probe nothing.
+    ///
+    /// The Δ→proposal arithmetic is the same for both run kinds because Δ is
+    /// LANE-anchored (Bluetooth-lane arrival minus engine-lane arrival): a
+    /// positive Δ means the Bluetooth side is late, which a Bluetooth target
+    /// fixes with MORE latency (fed earlier) and a Mac target fixes with MORE
+    /// trim (held later) — in both value spaces, `applied + Δ`.
+    private func startBTWizardMicProbe(deviceID: String) {
+        btWizardMicProbe?.cancel()
+        btWizardMicProbe = nil
+        guard let stageProbe = onStageBTMicProbe,
+              let session = btWizardSession,
+              // One sweep per fan-out: a pair on the SAME fan-out (BT against
+              // BT, or the Mac against AirPlay) would carry both sweeps to
+              // both speakers and the arrivals would be unattributable.
+              session.pairSoundsDiffer else { return }
+        MicCapturePermission.ensure { [weak self] granted in
+            guard granted, let self, self.btWizardDeviceID == deviceID,
+                  self.btWizardMicProbe == nil else { return }
+            var generationAtSweep = -1
+            var appliedMsAtSweep = 0.0
+            let probe = MicProbeSession()
+            self.btWizardMicProbe = probe
+            probe.start(stage: { onStarted, onFinished in
+                stageProbe({
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        generationAtSweep = self.btWizardPreviewGeneration
+                        appliedMsAtSweep = self.btWizardLastPreviewMs
+                        // Marking the ambient boundary a hop late is safe: air
+                        // always lags the feed, never leads it.
+                        onStarted()
+                    }
+                }, onFinished)
+            }, completion: { [weak self] result in
+                guard let self, self.btWizardDeviceID == deviceID,
+                      self.btWizardMicProbe === probe else { return }
+                self.btWizardMicProbe = nil
+                guard let result, generationAtSweep >= 0,
+                      generationAtSweep == self.btWizardPreviewGeneration else { return }
+                self.btWizardSession?.offerMeasuredProposal(
+                    valueMs: appliedMsAtSweep + result.deltaMs)
+            })
+        }
     }
 
     /// Hand the wizard's committed trim to this device's OPEN sync drawer.
@@ -4553,6 +4630,8 @@ extension PopoverController: DeviceRowView.Delegate {
     /// `onFinished` with the session already gone and dismisses then.
     private func tearDownBTWizard(targetLost: Bool = false, viaFinish: Bool = false) {
         let hadRun = btWizardSession != nil
+        btWizardMicProbe?.cancel()
+        btWizardMicProbe = nil
         if hadRun && !viaFinish {
             Analytics.capture("bt_sync:wizard_abandoned", ["target_lost": targetLost ? "true" : "false"])
         }

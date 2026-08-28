@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>mic-probe-spike listens through the built-in microphone for a couple of seconds to measure the timing offset between two speakers.</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.audiout.mic-probe-spike</string>
+    <key>CFBundleName</key>
+    <string>mic-probe-spike</string>
+</dict>
+</plist>

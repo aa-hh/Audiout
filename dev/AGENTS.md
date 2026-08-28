@@ -47,6 +47,7 @@ not the primary offline tool, which is the in-app `MockBackend` in
 | `notes/p2b-synced-local-brief.md` | Synced local Core Audio output design (deferred). |
 | `notes/p2b-helper-productionization-brief.md` | PTP helper review, needs paid Developer ID (deferred). |
 | `notes/p2b-v2-smallwork-brief.md` | Smaller v2 backlog items (deferred). |
+| `notes/mic-probe-calibration-brief.md` | Mic-probe sync calibration: plan, constraints, HFP hazard. |
 | `notes/playback-meter-research.md` | Level-meter design research (not built). |
 | `notes/stability-audit-2026-07-18.md` | Crash/freeze audit ledger: findings, marker convention, resolved list. |
 | `notes/objc-exception-shim-handoff.md` | ObjC exception shim adoption brief for the per-app-routing branch. |

@@ -9370,6 +9370,12 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// Same default-no-op posture as ``armWizardTicks()``.
     func setWizardTempo(bpm: Double)
 
+    /// Stage the mic-probe calibration sweeps on the live wizard feed
+    /// (roadmap 064): the arm gate then starts them in place of the first
+    /// tick. Default no-op; ``NativeCaptureCoordinator`` provides the real one.
+    func stageWizardMicProbe(onStarted: @escaping () -> Void,
+                             onFinished: @escaping () -> Void)
+
     /// Keep the whole-system tap's exclusion set in sync with the routing table
     /// (T4/T6): individually-routed apps (`.device(id:)` routes) and user-excluded
     /// apps must not double up into the system-wide mix. Default no-op so a fake
@@ -9451,6 +9457,9 @@ extension CaptureControlling {
     /// Default no-ops (roadmap 056 Part B wizard stimulus), same posture.
     func armWizardTicks() {}
     func setWizardTempo(bpm: Double) {}
+    /// Default no-op (roadmap 064 mic probe), same posture.
+    func stageWizardMicProbe(onStarted: @escaping () -> Void,
+                             onFinished: @escaping () -> Void) {}
     /// Default no-op (per-device + Main Out EQ), same posture.
     func setEQPlan(_ plan: WholeSystemEQPlan) {}
     /// Default forwards to the flag-only seam so a fake recording plain
@@ -9577,6 +9586,20 @@ public protocol BTOutputControlling: AnyObject {
     /// ``endBTWizardTrimPreview(forDevice:keepMs:)``.
     func endBTWizardLatencyPreview(forDevice id: String, keepMs: Double?)
 
+    // MARK: Mic probe (roadmap 064)
+
+    /// Stage the one-shot mic-probe sweeps on the live wizard feed: DOWN sweep
+    /// to the engine/AirPlay/Mac fan-out, UP sweep to the Bluetooth fan-out.
+    /// Call after the wizard tick has been activated
+    /// (``setBTWizardTickActive(_:btTargetDeviceID:btReferenceDeviceID:)``);
+    /// the existing arm gate then starts the sweeps instead of the first tick,
+    /// and the tick grid arms itself when they finish. `onStarted` fires at
+    /// the gate opening, `onFinished` when the last sweep frame has entered
+    /// the feed; a run torn down early fires neither — the mic session's
+    /// timeout is the recovery. Default: no-op (mock/dev backends have no
+    /// wizard feed to stage on).
+    func stageBTMicProbe(onStarted: @escaping () -> Void, onFinished: @escaping () -> Void)
+
     // MARK: First-mix intercept (W3)
 
     /// Answer a ``BackendEvent/btFirstMixAlignmentPrompt(deviceID:)``: release
@@ -9605,6 +9628,9 @@ extension BTOutputControlling {
     public func btUsableTrimRangeMs(forDevice id: String) -> ClosedRange<Double> {
         -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
     }
+
+    public func stageBTMicProbe(onStarted: @escaping () -> Void,
+                                onFinished: @escaping () -> Void) {}
 }
 
 extension NativeBackend: BTOutputControlling {
@@ -9760,6 +9786,11 @@ extension NativeBackend: BTOutputControlling {
             self.btWizardHeldUIDs = want
             for uid in changed { self.pushBTSinkGainLocked(uid) }
         }
+    }
+
+    public func stageBTMicProbe(onStarted: @escaping () -> Void,
+                                onFinished: @escaping () -> Void) {
+        captureCoordinator?.stageWizardMicProbe(onStarted: onStarted, onFinished: onFinished)
     }
 
     public func endBTWizardRun() {

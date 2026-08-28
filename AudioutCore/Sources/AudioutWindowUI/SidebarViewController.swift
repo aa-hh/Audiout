@@ -4,47 +4,55 @@ import AppKit
 import AudioutCore
 import AudioutSharedUI
 
-/// What the user selected in the sidebar. Drives which detail pane the window
-/// shows (a group → its editor; a device → its detail pane; nothing → auto-select).
+/// What the user selected in the sidebar. Drives which content pane the screen
+/// shows (the pinned Groups row → the card overview; a group → its editor; a
+/// device → its detail pane; nothing → auto-select).
 public enum SidebarSelection: Equatable, Sendable {
     /// The whole mix — everything the app sends to speakers. One row, no id:
     /// it is a destination, not a device.
     case mainOut
+    /// The pinned "Groups" row: the saved-group card overview in the content
+    /// pane (direction C — the sidebar itself lists no groups any more).
+    case groupsOverview
+    /// One saved group's editor. No sidebar row of its own: the overview's
+    /// cards set it, and the sidebar highlights the Groups row for it.
     case group(id: String)
     case device(id: String)
 }
 
-/// The mixer window's sidebar (SPEC §9 "Sidebar list": source-list
-/// `NSOutlineView`).
+/// The Groups screen's sidebar (SPEC §9 "Sidebar list": source-list
+/// `NSOutlineView`) — **the device fleet, and nothing else** (direction C,
+/// `dev/notes/groups-speakers-split-direction-c-brief-2026-08-27.md`).
 ///
-/// Two top-level sections — **Groups** and **Speakers** — exactly the "Groups"
-/// / "Speakers" split the editor and creation sheet use, in the documented
-/// source-list style (`selectionHighlightStyle = .sourceList`, header rows via
-/// `isGroupItem`). Both sections are FLAT: a group row is a single leaf row
-/// (icon + name, same icon column as a device row) with no disclosure
-/// chevron and no child device rows — previewing a group's members happens in
-/// the group editor's own "Speakers" checklist, not by expanding the sidebar
-/// row, so nesting here was pure duplication (design review 2026-07-18). The
-/// Speakers section lists every device, grouped or not, since membership is no
-/// longer previewed via expansion. Selection is reported through `onSelect`.
+/// Top to bottom: the pinned **Groups** row (the only non-device row — drawn
+/// as a raised PLATE with a hairline edge, taller and bolder than the fleet
+/// rows, because it is a doorway to the card overview and not one more list
+/// item; a trailing chevron says it leads somewhere, and it carries the gold
+/// "playing" marker whenever any group is live), then two flat sections,
+/// **System Audio** and **Speakers**. Saved groups used to be a third section
+/// here; a growing fleet pushed them off the top, so they moved into the
+/// content pane as `GroupsOverviewViewController`'s card grid, and their
+/// Rename…/Delete Group… menu went with them. What stays anchored to the
+/// device list stays: the bottom add bar, its multi-select retitle, Cmd-N, and
+/// the speaker row's "New Group from Selection…". Selection is reported
+/// through `onSelect`.
 ///
 /// The outline model is still a small tree of reference-typed `Node`s (one
-/// level: section header → leaf rows) so the `NSOutlineViewDataSource`
-/// identity methods are stable across reloads and the source-list header
-/// styling (`isGroupItem`) keeps working; `NSOutlineView` with zero-depth
-/// leaves is simpler here than switching containers, since header
-/// vibrancy/appearance still requires it.
+/// level: section header → leaf rows, plus the two pinned root rows) so the
+/// `NSOutlineViewDataSource` identity methods are stable across reloads and
+/// the source-list header styling (`isGroupItem`) keeps working;
+/// `NSOutlineView` with zero-depth leaves is simpler here than switching
+/// containers, since header vibrancy/appearance still requires it.
 public final class SidebarViewController: NSViewController {
 
     /// A node in the source-list tree. Reference type so `NSOutlineView` can key
     /// on object identity.
     final class Node {
         enum Payload {
-            case header(String)             // "System Audio" / "Groups" / "Speakers" (isGroupItem)
+            case header(String)             // "System Audio" / "Speakers" (isGroupItem)
+            case groupsOverview             // the pinned "Groups" plate row (root-level leaf)
             case mainOut                    // the one "Main Audio" row (flat leaf row)
-            case group(Group)               // a saved group (flat leaf row)
             case device(Device)             // a device row (flat leaf row)
-            case emptyState(String)         // non-selectable placeholder row (e.g. "No groups yet")
         }
         let payload: Payload
         /// Only section headers ever have children now — group/device rows are
@@ -73,17 +81,6 @@ public final class SidebarViewController: NSViewController {
     /// (which may carry the CLICKED row alone — see `menuNeedsUpdate`).
     public var onNewGroupFromSelection: (([String]) -> Void)?
 
-    /// Called when the user asks to rename the group with this id — a group
-    /// row's "Rename…" context item or a double-click on the row. The sidebar
-    /// selects that group first, so the host can put focus straight on the
-    /// editor's rename field; it owns no rename UI itself.
-    public var onRequestRename: ((String) -> Void)?
-
-    /// Called when the user chooses a group row's "Delete Group…" context item.
-    /// Confirmation and the delete itself belong to the host — this only
-    /// reports the request.
-    public var onRequestDelete: ((String) -> Void)?
-
     /// Resolves per-device icon overrides (set via the icon picker) so sidebar
     /// device rows show the same glyph as the popover/mixer. `nil` (the
     /// default) falls back to `Device.Kind.symbolName` — old behavior.
@@ -94,14 +91,17 @@ public final class SidebarViewController: NSViewController {
     private let addButton = NSButton()
     private let warmSurfaceView: SidebarWarmSurfaceView
 
-    /// Top-level nodes (the two section headers). Rebuilt on `reload`.
+    /// Top-level nodes (the pinned Groups row, the hairline, then the two
+    /// section headers). Rebuilt on `reload`.
     private var roots: [Node] = []
 
-    /// The active Main Out group's id, captured on `reload` — drives the small
-    /// gold "playing" marker on that group's row. Gold is the LIVE color
-    /// (Warm Signal §3.3), and the active group IS live, so this is the one
-    /// place the sidebar may use it. Pure model state, never audio-driven.
-    private var activeGroupID: String?
+    /// Whether SOME saved group is the active Main Out, captured on `reload` —
+    /// drives the small gold "playing" marker on the pinned Groups row. Gold is
+    /// the LIVE color (Warm Signal §3.3) and the active group IS live, so this
+    /// is the one place the sidebar may use it; with the groups themselves now
+    /// in the content pane, this marker is all the sidebar can say about which
+    /// one. Pure model state, never audio-driven.
+    private var hasLiveGroup = false
 
     /// Whether a system sidebar material sits behind the warm wash for it to
     /// tint (T7, spec Q4-b). FALSE on every OS since the surface's split
@@ -139,7 +139,7 @@ public final class SidebarViewController: NSViewController {
     // seeding here is safe unconditionally and costs nothing headless.
     //
     // The sidebar is the one control ALWAYS present regardless of which
-    // content pane is showing (editor/detail/empty), so it's the natural
+    // content pane is showing (overview/editor/detail), so it's the natural
     // anchor: force AppKit to (re)compute the window's automatic key-view
     // loop (`autorecalculatesKeyViewLoop`, on by default for a window built
     // entirely in code, as this one is — but recalculation is reactive and
@@ -198,10 +198,10 @@ public final class SidebarViewController: NSViewController {
         let contextMenu = NSMenu()
         contextMenu.delegate = self
         outlineView.menu = contextMenu
-        // Double-click a group row = rename. `doubleAction` fires after the
-        // single click has already moved the selection.
-        outlineView.target = self
-        outlineView.doubleAction = #selector(rowDoubleClicked(_:))
+        // No `doubleAction`: the only row that ever had one was a group row
+        // (double-click to rename), and groups live on the overview's cards
+        // now. A device row's first click already opened its detail pane, so
+        // there is nothing left here for a second click to do.
 
         scrollView.documentView = outlineView
         scrollView.hasVerticalScroller = true
@@ -307,14 +307,14 @@ public final class SidebarViewController: NSViewController {
         addButton.toolTip = title
     }
 
-    // MARK: Context menu / double-click
+    // MARK: Context menu
     //
-    // Both act on the CLICKED row, which is NOT always a selected one: standard
+    // It acts on the CLICKED row, which is NOT always a selected one: standard
     // macOS arbitration is that a right-click inside the selection acts on the
     // whole selection and a right-click outside it acts on that row alone.
-    // `NSTableView` sets `clickedRow` before it shows its menu and before
-    // `doubleAction` fires, which is why the items are rebuilt per click in
-    // `menuNeedsUpdate` rather than assembled once at setup.
+    // `NSTableView` sets `clickedRow` before it shows its menu, which is why
+    // the items are rebuilt per click in `menuNeedsUpdate` rather than
+    // assembled once at setup.
 
     /// The clicked row, injected. A headless run never right-clicks, so
     /// `outlineView.clickedRow` is permanently -1 there — this is the ONLY seam
@@ -345,68 +345,44 @@ public final class SidebarViewController: NSViewController {
         return menu
     }
 
-    @objc private func renameGroupMenuItemSelected(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
-        // Select first: the rename field lives in that group's editor, so the
-        // host has nothing to focus until the selection has swapped it in.
-        select(.group(id: id), notify: true)
-        onRequestRename?(id)
-    }
-
-    @objc private func deleteGroupMenuItemSelected(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
-        onRequestDelete?(id)
-    }
-
     @objc private func newGroupFromSelectionMenuItemSelected(_ sender: NSMenuItem) {
         guard let ids = sender.representedObject as? [String] else { return }
         onNewGroupFromSelection?(ids)
     }
 
-    /// A device row's double-click does nothing on purpose: the first click
-    /// already opened its (read-only) detail pane, so there is nothing further
-    /// to open.
-    @objc private func rowDoubleClicked(_ sender: Any?) {
-        guard let node = clickedNode, case .group(let group) = node.payload else { return }
-        onRequestRename?(group.id)
+    @objc private func newGroupMenuItemSelected(_ sender: NSMenuItem) {
+        onAddGroup?()
     }
 
     // MARK: Model
 
-    /// Rebuild the tree from the current groups + devices and reload. Preserves
-    /// the selection by `SidebarSelection` identity where possible.
+    /// Rebuild the tree from the current devices and reload. Preserves the
+    /// selection by `SidebarSelection` identity where possible.
     ///
-    /// Both sections are flat leaf lists (design review 2026-07-18): a group
-    /// row never carries member-device children, and the Devices section lists
-    /// EVERY device rather than filtering out members of the active group —
-    /// once the sidebar no longer previews membership via expansion, hiding a
-    /// device here would just make it unreachable. `activeGroupID` no longer
-    /// filters anything; it marks the active group's row with the gold
-    /// "playing" indicator so the user can tell which group is live without
-    /// clicking through each one.
+    /// `groups` and `activeGroupID` still arrive because the pinned Groups row
+    /// reports on them — the row shows the gold "playing" marker whenever one
+    /// of the saved groups is the active Main Out — but NO group row is built
+    /// any more (direction C): the cards in the content pane are the group
+    /// list. Both sections are flat leaf lists, and the Speakers section lists
+    /// EVERY device, grouped or not (hiding one here would just make it
+    /// unreachable).
     public func reload(groups: [Group], activeGroupID: String?, devices: [Device]) {
         let previous = currentSelection
-        self.activeGroupID = activeGroupID
+        hasLiveGroup = activeGroupID.map { id in groups.contains { $0.id == id } } ?? false
 
         var newRoots: [Node] = []
 
-        // 1. System Audio section — the whole mix, always present and never
+        // 1. The pinned Groups row — a root-level row rather than a one-item
+        //    section: it is a doorway, not a category, and a header over a
+        //    single row read as one more list to scan past. Its PLATE drawing
+        //    (`PlateRowView`) is what divides it from the fleet below; the
+        //    hairline row that used to do that job is gone with it.
+        newRoots.append(Node(.groupsOverview))
+
+        // 2. System Audio section — the whole mix, always present and never
         //    tied to a device: it is where the Main Audio page (and its
         //    Equalizer) is reached.
         newRoots.append(Node(.header("System Audio"), children: [Node(.mainOut)]))
-
-        // 2. Groups section — always shown (this window is groups-configuration
-        //    only). Zero groups gets a non-selectable "No groups yet"
-        //    placeholder row instead of vanishing. Each group is a flat leaf
-        //    row (icon + name); members are previewed in the group editor's
-        //    own checklist, not here.
-        let groupsHeader = Node(.header("Groups"))
-        if groups.isEmpty {
-            groupsHeader.children = [Node(.emptyState("No groups yet"))]
-        } else {
-            groupsHeader.children = groups.map { Node(.group($0)) }
-        }
-        newRoots.append(groupsHeader)
 
         // 3. Speakers section — every device, grouped or not, so it stays
         //    reachable now that membership isn't previewed via expansion.
@@ -437,16 +413,22 @@ public final class SidebarViewController: NSViewController {
 
     private func selection(for node: Node) -> SidebarSelection? {
         switch node.payload {
-        case .header, .emptyState: return nil
+        case .header: return nil
+        case .groupsOverview: return .groupsOverview
         case .mainOut: return .mainOut
-        case .group(let g): return .group(id: g.id)
         case .device(let d): return .device(id: d.id)
         }
     }
 
     /// Programmatically select a target. Used to restore selection across reloads
     /// and by the test hooks. `notify` controls whether `onSelect` fires.
+    ///
+    /// A `.group` target lands on the pinned Groups ROW: the group's editor is
+    /// pushed inside the content pane, and the fleet list must not move under
+    /// the pointer while it is open (direction C).
     public func select(_ target: SidebarSelection, notify: Bool = true) {
+        var target = target
+        if case .group = target { target = .groupsOverview }
         // A target that no longer exists CLEARS the highlight. Returning
         // silently (which is what this did) left the old row drawn as selected
         // after the thing it named was deleted elsewhere — the source list
@@ -476,17 +458,12 @@ public final class SidebarViewController: NSViewController {
         return search(roots)
     }
 
-    /// The non-selectable row (a section header or the "No groups yet"
-    /// placeholder) showing `title` — the rows that carry no identity, so
-    /// `findNode(matching:)` can't reach them.
+    /// The non-selectable section header showing `title` — it carries no
+    /// identity, so `findNode(matching:)` can't reach it.
     private func findNode(titled title: String) -> Node? {
         func search(_ nodes: [Node]) -> Node? {
             for node in nodes {
-                switch node.payload {
-                case .header(let t) where t == title: return node
-                case .emptyState(let t) where t == title: return node
-                default: break
-                }
+                if case .header(let t) = node.payload, t == title { return node }
                 if let hit = search(node.children) { return hit }
             }
             return nil
@@ -496,31 +473,29 @@ public final class SidebarViewController: NSViewController {
 
     // MARK: Test-support hooks
 
-    /// The section-header titles in order
-    /// (["System Audio", "Groups", "Speakers"]).
+    /// The section-header titles in order (["System Audio", "Speakers"]) — the
+    /// pinned Groups row and its hairline sit ABOVE them and are not sections.
     public var test_sectionTitles: [String] {
         roots.compactMap { if case .header(let t) = $0.payload { return t } else { return nil } }
     }
 
-    /// True when the "Groups" header's only child is the "No groups yet"
-    /// non-selectable placeholder row (i.e. there are zero saved groups).
-    public var test_hasGroupsEmptyStateRow: Bool {
-        guard let groupsHeader = roots.first(where: {
-            if case .header("Groups") = $0.payload { return true } else { return false }
-        }) else { return false }
-        return groupsHeader.children.contains {
-            if case .emptyState = $0.payload { return true } else { return false }
-        }
+    /// True when the pinned "Groups" row is present (it always is).
+    public var test_hasGroupsRow: Bool {
+        roots.contains { if case .groupsOverview = $0.payload { return true } else { return false } }
     }
 
-    /// Number of group rows under the "Groups" header (excludes the "no groups
-    /// yet" placeholder row). Each is a flat leaf row — no member children.
-    public var test_groupRowCount: Int {
-        roots.first { if case .header("Groups") = $0.payload { return true } else { return false } }?
-            .children.filter {
-                if case .group = $0.payload { return true } else { return false }
-            }.count ?? 0
+    /// Whether the pinned Groups row currently renders the gold "playing"
+    /// marker — built through the same delegate path a real reload uses.
+    public var test_groupsRowShowsLiveMarker: Bool {
+        guard let node = findNode(matching: .groupsOverview),
+              let cell = self.outlineView(outlineView, viewFor: nil, item: node)
+                  as? IconLabelCellView else { return false }
+        return !cell.activeMarkerView.isHidden
     }
+
+    /// Whether the pinned Groups row is the current selection — true while the
+    /// overview shows AND while a group's editor is pushed over it.
+    public var test_groupsRowIsSelected: Bool { currentSelection == .groupsOverview }
 
     /// Number of device rows under the "Speakers" header. Lists every device
     /// (grouped or not) since the flat model no longer previews membership
@@ -528,18 +503,6 @@ public final class SidebarViewController: NSViewController {
     public var test_deviceRowCount: Int {
         roots.first { if case .header("Speakers") = $0.payload { return true } else { return false } }?
             .children.count ?? 0
-    }
-
-    /// True when every group row has no expandable children (flat model:
-    /// selecting a group opens its editor, it never discloses member rows).
-    public var test_groupRowsAreFlat: Bool {
-        guard let groupsHeader = roots.first(where: {
-            if case .header("Groups") = $0.payload { return true } else { return false }
-        }) else { return true }
-        return groupsHeader.children.allSatisfy { node in
-            if case .group = node.payload { return node.children.isEmpty }
-            return true
-        }
     }
 
     /// Simulate the user clicking a sidebar row (fires `onSelect`).
@@ -569,15 +532,6 @@ public final class SidebarViewController: NSViewController {
     /// Group from N Speakers…" while ≥2 speakers are multi-selected.
     public var test_addButtonTitle: String { addButton.title }
 
-    /// Whether the group row for `id` currently renders the gold "playing"
-    /// marker — built through the same delegate path a real reload uses.
-    public func test_groupRowShowsActiveMarker(id: String) -> Bool {
-        guard let node = findNode(matching: .group(id: id)),
-              let cell = self.outlineView(outlineView, viewFor: nil, item: node)
-                  as? IconLabelCellView else { return false }
-        return !cell.activeMarkerView.isHidden
-    }
-
     /// Simulate clicking the "+" button (new empty group, or new-from-selection
     /// when devices are selected).
     public func test_tapAdd() {
@@ -594,8 +548,8 @@ public final class SidebarViewController: NSViewController {
         contextMenu(clickedNode: findNode(matching: target)).items.map(\.title)
     }
 
-    /// Same, for the rows with no identity — the section headers and the "No
-    /// groups yet" placeholder. Both must come back EMPTY.
+    /// Same, for the rows with no identity — the section headers, which must
+    /// come back EMPTY.
     public func test_contextMenuItems(forRowTitled title: String) -> [String] {
         contextMenu(clickedNode: findNode(titled: title)).items.map(\.title)
     }
@@ -621,14 +575,6 @@ public final class SidebarViewController: NSViewController {
                                            characters: "n", charactersIgnoringModifiers: "n",
                                            isARepeat: false, keyCode: 45) else { return false }
         return view.performKeyEquivalent(with: event)
-    }
-
-    /// Double-click a row (a group row asks for rename; a device row does
-    /// nothing).
-    public func test_doubleClick(_ target: SidebarSelection) {
-        clickedRowOverride = findNode(matching: target).map { outlineView.row(forItem: $0) } ?? -1
-        defer { clickedRowOverride = nil }
-        rowDoubleClicked(outlineView)
     }
 
     /// Drive the real `viewDidAppear()` lifecycle override directly (A11Y-GROUPS)
@@ -671,12 +617,19 @@ public final class SidebarViewController: NSViewController {
     }
 }
 
-/// A sidebar row cell with a trailing "playing" marker slot: a small gold
-/// `speaker.wave.2.fill` glyph shown ONLY on the active Main Out group's row.
-/// Gold = LIVE (Warm Signal §3.3) and the active group is genuinely live, so
-/// this is the sidebar's one sanctioned use of it. `Tokens.Color.gold` is an
-/// instrument — it keeps its authored value in every theme. Internal (not
-/// file-private) so the controller's test hook can read the marker.
+/// A sidebar row cell with two trailing slots: a small gold
+/// `speaker.wave.2.fill` "playing" marker, shown ONLY on the pinned Groups row
+/// while some saved group is the active Main Out, and a tertiary
+/// `chevron.right` saying the row leads somewhere (the Groups row alone). Gold
+/// = LIVE (Warm Signal §3.3) and the active group is genuinely live, so this is
+/// the sidebar's one sanctioned use of it; `Tokens.Color.gold` is an instrument
+/// — it keeps its authored value in every theme.
+///
+/// Both slots live in an `NSStackView`, which DETACHES hidden arranged
+/// subviews: a device row, where both are hidden, gets its full label width
+/// back instead of reserving trailing space it never uses ("MacBook Pro
+/// Speakers" is already the name this 210 pt sidebar barely fits). Internal
+/// (not file-private) so the controller's test hook can read the marker.
 final class IconLabelCellView: NSTableCellView {
     /// The trailing marker, hidden by default; `setActiveMarkerVisible` shows it.
     let activeMarkerView: NSImageView = {
@@ -693,9 +646,90 @@ final class IconLabelCellView: NSTableCellView {
         return v
     }()
 
+    /// The trailing disclosure chevron — drawing only, and never an AX element:
+    /// the row itself is what VoiceOver announces and activates.
+    let disclosureView: NSImageView = {
+        let v = NSImageView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold))
+        v.image?.isTemplate = true
+        v.contentTintColor = Tokens.Color.tertiaryLabel
+        v.isHidden = true
+        v.setAccessibilityElement(false)
+        v.setContentHuggingPriority(.required, for: .horizontal)
+        return v
+    }()
+
+    /// Holds both trailing slots. `detachesHiddenViews` (the default) is what
+    /// makes a hidden slot cost zero width.
+    let trailingStack: NSStackView = {
+        let stack = NSStackView()
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 6
+        stack.setContentHuggingPriority(.required, for: .horizontal)
+        return stack
+    }()
+
     func setActiveMarkerVisible(_ visible: Bool) {
         activeMarkerView.isHidden = !visible
     }
+
+    func setDisclosureVisible(_ visible: Bool) {
+        disclosureView.isHidden = !visible
+    }
+}
+
+/// The pinned Groups row's row view: a raised plate with a hairline edge —
+/// `GroupedSectionView`'s `.card` surface vocabulary at row scale, promising
+/// the pane of cards the row opens. Drawn (not a layer colour) so the `Tokens`
+/// fills re-resolve live per appearance flip and Increase Contrast on every
+/// paint, same rule as `HairlineView`.
+///
+/// **Never two shapes: the plate and the selection take turns.** Selected, the
+/// row draws nothing and the source list's own pill stands alone; unselected,
+/// the plate stands alone — on the SAME footprint, so the swap doesn't jump.
+///
+/// TRAP: under `NSTableView.style = .sourceList` that pill is not the row
+/// view's to suppress — neither a `drawSelection(in:)` override nor pinning
+/// `selectionHighlightStyle` to `.none` stops it (both measured against
+/// rendered pixels, 2026-08-27). Drawing the plate at any other inset stacks
+/// the two: the pill covers the middle and the plate's corners peek out at
+/// both ends as stray arcs. That is the bug this rule exists to prevent.
+final class PlateRowView: NSTableRowView {
+    /// Plate row height: the `.medium` source-list row plus breathing room, so
+    /// the raised fill reads as a surface rather than a selection artifact.
+    static let rowHeight: CGFloat = 36
+    /// The source list's own selection-pill inset, measured off a rendered
+    /// pill. The plate borrows it so the two footprints coincide: matching
+    /// shapes are what keep the swap below from jumping.
+    private static let selectionInsetX: CGFloat = 10
+
+    /// Half-point inset so the 1 pt stroke lands on whole pixels.
+    private var platePath: NSBezierPath {
+        let rect = bounds.insetBy(dx: Self.selectionInsetX + 0.5, dy: 0.5)
+        let radius = Tokens.Layout.groupedSectionCornerRadius - 2
+        return NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+    }
+
+    override func drawBackground(in dirtyRect: NSRect) {
+        super.drawBackground(in: dirtyRect)
+        // Selected: the pill IS the plate. Drawing under a shape that already
+        // covers this rect only stacks a second rounded rect behind it.
+        guard !isSelected else { return }
+        let path = platePath
+        Tokens.Color.raised.setFill()
+        path.fill()
+        Tokens.Color.hairline.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+
+    /// A row view that draws its own background is NOT redisplayed when
+    /// selection changes — without this the plate survives under the pill.
+    override var isSelected: Bool { didSet { needsDisplay = true } }
 }
 
 /// The sidebar's container view. Exists only to catch Cmd-N: key equivalents
@@ -744,16 +778,13 @@ extension SidebarViewController: NSMenuDelegate {
         menu.autoenablesItems = false
         guard let node = clickedNode else { return }
         switch node.payload {
-        case .header, .emptyState, .mainOut:
+        case .header, .mainOut:
             break   // no identity to act on — an empty menu shows nothing at all
-        case .group(let group):
-            menu.addItem(contextMenuItem("Rename…",
-                                         #selector(renameGroupMenuItemSelected(_:)), group.id))
-            // No destructive styling: `NSMenuItem` has no equivalent of
-            // `hasDestructiveAction`, and the confirmation the delete goes
-            // through is the host's, not this menu's.
-            menu.addItem(contextMenuItem("Delete Group…",
-                                         #selector(deleteGroupMenuItemSelected(_:)), group.id))
+        case .groupsOverview:
+            // The overview's one action. Rename…/Delete Group… moved to the
+            // cards with the groups themselves.
+            menu.addItem(contextMenuItem("New Group…",
+                                         #selector(newGroupMenuItemSelected(_:)), ""))
         case .device(let device):
             // Clicked inside the multi-selection → the whole selection; clicked
             // outside it → that one row (macOS arbitration).
@@ -802,11 +833,31 @@ extension SidebarViewController: NSOutlineViewDelegate {
     }
 
     public func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
-        // Section headers and the "no groups yet" placeholder aren't selectable
-        // (source-list convention; the placeholder carries no identity to select).
-        guard let node = item as? Node else { return false }
-        if case .emptyState = node.payload { return false }
+        // Section headers aren't selectable (source-list convention).
         return !self.outlineView(outlineView, isGroupItem: item)
+    }
+
+    /// The Groups row alone is taller: its plate needs air around the label or
+    /// the raised fill reads as a selection artifact, not a surface.
+    public func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
+        if let node = item as? Node, case .groupsOverview = node.payload {
+            return PlateRowView.rowHeight
+        }
+        return outlineView.rowHeight
+    }
+
+    /// The Groups row rides a `PlateRowView` — the raised + hairline "card"
+    /// surface vocabulary (`GroupedSectionView`'s `.card`), at row scale. It is
+    /// the visual promise of what the row opens: a pane of cards.
+    public func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
+        guard let node = item as? Node, case .groupsOverview = node.payload else { return nil }
+        let id = NSUserInterfaceItemIdentifier("groupsPlateRow")
+        if let reused = outlineView.makeView(withIdentifier: id, owner: self) as? PlateRowView {
+            return reused
+        }
+        let row = PlateRowView()
+        row.identifier = id
+        return row
     }
 
     public func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
@@ -814,16 +865,15 @@ extension SidebarViewController: NSOutlineViewDelegate {
         switch node.payload {
         case .header(let title):
             return makeHeaderLabel(title)
-        case .emptyState(let text):
-            return makeLabel(text, identifier: "emptyState", secondary: true)
+        case .groupsOverview:
+            return makeIconLabel(symbol: Group.defaultIconSymbolName,
+                                 text: "Groups", identifier: "groupsOverview",
+                                 showsActiveMarker: hasLiveGroup,
+                                 showsDisclosure: true,
+                                 emphasized: true)
         case .mainOut:
             return makeIconLabel(symbol: DeviceIcon.mainAudioSymbolName,
                                  text: "Main Audio", identifier: "mainOut")
-        case .group(let group):
-            let symbol = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
-            return makeIconLabel(symbol: symbol,
-                                 text: group.name, identifier: "group",
-                                 showsActiveMarker: group.id == activeGroupID)
         case .device(let device):
             let symbol = deviceIconController?.symbolName(for: device) ?? device.kind.symbolName
             return makeIconLabel(symbol: symbol,
@@ -842,17 +892,6 @@ extension SidebarViewController: NSOutlineViewDelegate {
 
     // MARK: Cell builders
 
-    private func makeLabel(_ text: String, identifier: String, secondary: Bool) -> NSTableCellView {
-        let id = NSUserInterfaceItemIdentifier(identifier)
-        let cell = outlineView.makeView(withIdentifier: id, owner: self) as? NSTableCellView
-            ?? Self.newCell(identifier: id)
-        cell.textField?.stringValue = text
-        cell.textField?.textColor = secondary ? Tokens.Color.secondaryLabel : Tokens.Color.label
-        cell.imageView?.image = nil
-        cell.imageView?.isHidden = true
-        return cell
-    }
-
     /// Section header cell ("Groups" / "Speakers") — a DIFFERENT cell shape
     /// from `makeLabel`/`newCell` on purpose (design feedback 2026-07-18c):
     /// Finder's own sidebar headers sit flush-left with the ICON column
@@ -860,9 +899,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
     /// bolder than a plain label. Reusing `newCell`'s icon+text layout (text
     /// anchored past `imageView.trailingAnchor`) was what misaligned this —
     /// headers need their own cell with the text pinned straight to
-    /// `cell.leadingAnchor`. The empty-state placeholder is NOT a header (it
-    /// occupies an ITEM row position under "Groups") and correctly keeps
-    /// `makeLabel`/`newCell`'s indentation — do not route it through this.
+    /// `cell.leadingAnchor`.
     private func makeHeaderLabel(_ text: String) -> NSTableCellView {
         let id = NSUserInterfaceItemIdentifier("header")
         let cell = outlineView.makeView(withIdentifier: id, owner: self) as? NSTableCellView
@@ -897,10 +934,17 @@ extension SidebarViewController: NSOutlineViewDelegate {
     }
 
     private func makeIconLabel(symbol: String, text: String, identifier: String,
-                               dimmed: Bool = false, showsActiveMarker: Bool = false) -> NSTableCellView {
+                               dimmed: Bool = false, showsActiveMarker: Bool = false,
+                               showsDisclosure: Bool = false,
+                               emphasized: Bool = false) -> NSTableCellView {
         let id = NSUserInterfaceItemIdentifier(identifier)
         let cell = outlineView.makeView(withIdentifier: id, owner: self) as? IconLabelCellView
             ?? Self.newCell(identifier: id)
+        // Only the Groups plate takes the emphasized weight; the fleet rows
+        // keep the source list's own font. Reuse-safe without an else branch:
+        // cells are pooled per identifier, and "groupsOverview" is the only
+        // pool that ever asks for it.
+        if emphasized { cell.textField?.font = Tokens.Font.bodyEmphasized }
         cell.imageView?.isHidden = false
         // The icon is DECORATIVE: the text field beside it speaks the row, and
         // a description here made VoiceOver read the name twice (the detail
@@ -917,6 +961,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
         cell.textField?.stringValue = text
         cell.textField?.textColor = dimmed ? .disabledControlTextColor : Tokens.Color.label
         cell.setActiveMarkerVisible(showsActiveMarker)
+        cell.setDisclosureVisible(showsDisclosure)
         // Both states were COLOUR/GLYPH ONLY: a dimmed row and a gold marker
         // say nothing to VoiceOver. Same words the visible UI uses
         // ("Unavailable" annotation, "Playing now" marker/tooltip). Set on
@@ -949,7 +994,8 @@ extension SidebarViewController: NSOutlineViewDelegate {
         cell.addSubview(textField)
         cell.textField = textField
 
-        cell.addSubview(cell.activeMarkerView)
+        cell.trailingStack.setViews([cell.activeMarkerView, cell.disclosureView], in: .leading)
+        cell.addSubview(cell.trailingStack)
 
         NSLayoutConstraint.activate([
             imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
@@ -960,11 +1006,11 @@ extension SidebarViewController: NSOutlineViewDelegate {
             textField.leadingAnchor.constraint(
                 equalTo: imageView.trailingAnchor, constant: SurfaceLayout.sidebarIconToLabelGap),
             textField.trailingAnchor.constraint(
-                lessThanOrEqualTo: cell.activeMarkerView.leadingAnchor, constant: -6),
+                lessThanOrEqualTo: cell.trailingStack.leadingAnchor, constant: -6),
             textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
 
-            cell.activeMarkerView.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
-            cell.activeMarkerView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            cell.trailingStack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
+            cell.trailingStack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
         return cell
     }

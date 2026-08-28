@@ -10,19 +10,22 @@ import AudioutSharedUI
 /// in the Mixer screen.
 ///
 /// It owns an `NSSplitViewController` whose sidebar item is a source-list
-/// `NSOutlineView` (`SidebarViewController`) and whose content item is swapped
-/// between four panes: the group editor (`GroupEditorViewController`, when a
-/// group is selected), the device detail pane (`DeviceDetailViewController`,
-/// when a device is selected), the whole-mix `MainOutDetailViewController`
-/// (the sidebar's "Main Audio" row), and an empty "No groups yet" pane
-/// (nothing to select). It owns NO window: the app's
-/// `AppSurfaceController` hosts `contentController` as the surface's Groups
-/// screen and tells this controller when that screen is visible via
-/// `setHostVisible(_:)` (the standalone Groups window was retired in U6).
+/// `NSOutlineView` (`SidebarViewController` — the device fleet) and whose
+/// content item is swapped between four panes: the saved-group card overview
+/// (`GroupsOverviewViewController`, the sidebar's pinned "Groups" row), the
+/// group editor (`GroupEditorViewController`, pushed in place when a card is
+/// opened), the device detail pane (`DeviceDetailViewController`, when a device
+/// is selected), and the whole-mix `MainOutDetailViewController` (the sidebar's
+/// "Main Audio" row). It owns NO window: the app's `AppSurfaceController` hosts
+/// `contentController` as the surface's Groups screen and tells this controller
+/// when that screen is visible via `setHostVisible(_:)` (the standalone Groups
+/// window was retired in U6).
 ///
-/// AUTO-SELECT: with no sidebar selection the controller selects the FIRST
-/// saved group and shows its editor; with no groups at all it shows the empty
-/// pane. The content area is never a no-op view.
+/// AUTO-SELECT: with no sidebar selection the controller selects the pinned
+/// Groups ROW and shows the overview — which absorbed the old "No groups yet"
+/// pane as its own zero-groups canvas, so there is one landing place instead of
+/// two and no first-saved-group favouritism. The content area is never a no-op
+/// view.
 ///
 /// Group creation is a standard macOS sheet (`GroupCreationSheetController`)
 /// presented over the hosting window; creating a group never activates it
@@ -71,7 +74,7 @@ public final class MixerWindowController {
     private let editorViewController: GroupEditorViewController
     private let detailViewController: DeviceDetailViewController
     private let mainOutDetailViewController: MainOutDetailViewController
-    private let emptyStateViewController = GroupsEmptyStateViewController()
+    private let overviewViewController: GroupsOverviewViewController
 
     /// Tone seams, wired by the app to the backend. This controller never
     /// calls a backend itself (`AGENTS.md`) — it only forwards what the two
@@ -122,12 +125,14 @@ public final class MixerWindowController {
         self.editorViewController = GroupEditorViewController(groupController: groupController)
         self.detailViewController = DeviceDetailViewController(groupController: groupController, settings: settings)
         self.mainOutDetailViewController = MainOutDetailViewController(settings: settings)
+        self.overviewViewController = GroupsOverviewViewController(groupController: groupController)
 
         // Share the one icon controller across every pane so a per-device
         // override picked anywhere renders identically everywhere.
         sidebarViewController.deviceIconController = deviceIconController
         editorViewController.deviceIconController = deviceIconController
         detailViewController.deviceIconController = deviceIconController
+        overviewViewController.deviceIconController = deviceIconController
 
         // A PLAIN split item, NOT `.sidebar(withViewController:)` — the one
         // thing that keeps the surface's tab strip still. A split item with
@@ -171,8 +176,8 @@ public final class MixerWindowController {
         sidebarSplitItem = sidebarItem
 
         // Content item — wraps the footer-bearing host, which starts on the
-        // empty pane; the first refresh auto-selects a group when one exists.
-        contentHostViewController.setContent(emptyStateViewController)
+        // overview (empty canvas until the first group is saved).
+        contentHostViewController.setContent(overviewViewController)
         contentSplitItem = NSSplitViewItem(viewController: contentHostViewController)
 
         splitViewController.addSplitViewItem(sidebarItem)
@@ -216,28 +221,44 @@ public final class MixerWindowController {
         sidebarViewController.onNewGroupFromSelection = { [weak self] deviceIDs in
             self?.presentCreateSheet(preselected: deviceIDs)
         }
-        // Context-menu "Rename…" / double-click on a group row: open its
-        // editor and drop focus straight into the rename field.
-        sidebarViewController.onRequestRename = { [weak self] groupID in
+        // A card opens its group's editor as an IN-PANE push: the sidebar keeps
+        // the Groups row highlighted (`select` maps a `.group` target onto it),
+        // so the fleet list never moves under the pointer.
+        overviewViewController.onOpenGroup = { [weak self] groupID in
+            guard let self else { return }
+            self.sidebarViewController.select(.group(id: groupID), notify: false)
+            self.showEditor(for: groupID)
+        }
+        // Both of the overview's "+" doors — the dashed grid tile and the empty
+        // canvas's centred one — run the same creation sheet as the sidebar's.
+        overviewViewController.onNewGroup = { [weak self] in
+            self?.presentCreateSheet(preselected: [])
+        }
+        // A card's "Rename…": open its editor and drop focus straight into the
+        // rename field. (This menu lived on the sidebar's group rows until the
+        // groups moved into the pane; the flow is unchanged.)
+        overviewViewController.onRequestRename = { [weak self] groupID in
             guard let self else { return }
             self.sidebarViewController.select(.group(id: groupID), notify: false)
             self.showEditor(for: groupID)
             self.editorViewController.focusRenameField()
         }
-        // Context-menu "Delete Group…": open the group's editor and run the
-        // same confirm-then-delete flow its button does.
-        sidebarViewController.onRequestDelete = { [weak self] groupID in
+        // A card's "Delete Group…": open the group's editor and run the same
+        // confirm-then-delete flow its button does.
+        overviewViewController.onRequestDelete = { [weak self] groupID in
             guard let self else { return }
             self.sidebarViewController.select(.group(id: groupID), notify: false)
             self.showEditor(for: groupID)
             self.editorViewController.requestDelete()
         }
-        // The empty pane's call-to-action runs the same creation sheet.
-        emptyStateViewController.onNewGroup = { [weak self] in
-            self?.presentCreateSheet(preselected: [])
+        // "‹ Groups" / Escape / ⌘[ pops the editor back to the overview. The
+        // Groups row was already the selected one, so nothing in the sidebar
+        // moves.
+        editorViewController.onBack = { [weak self] in
+            self?.showOverview()
         }
         // The editor's "Delete Group…" falls back to the default content (the
-        // next remaining group's editor, or the empty pane).
+        // overview, now one card lighter).
         editorViewController.onDidDeleteGroup = { [weak self] in
             self?.refreshAll()
             self?.showDefaultContent()
@@ -307,7 +328,7 @@ public final class MixerWindowController {
     }
 
     /// The root content view controller — the split view (sidebar full-height
-    /// + the footer-bearing content host swapping editor/detail/empty panes).
+    /// + the footer-bearing content host swapping overview/editor/detail panes).
     /// This is what the app's surface hosts as the Groups screen — one
     /// controller, whatever the host, footer included. Refreshing the content
     /// before handing it off keeps a freshly-hosted screen correct.
@@ -320,6 +341,8 @@ public final class MixerWindowController {
 
     private func handleSidebarSelection(_ selection: SidebarSelection?) {
         switch selection {
+        case .groupsOverview:
+            showOverview()
         case .group(let id):
             // Selecting a group ONLY shows its editor (rename / membership /
             // delete). CONFIG-ONLY: selection never activates the group or moves
@@ -337,17 +360,23 @@ public final class MixerWindowController {
         }
     }
 
-    /// The screen's AUTO-SELECT rule (live-test feedback 2026-07-18): with no
-    /// explicit selection, select the first saved group and show its editor;
-    /// with no groups at all, show the empty "No groups yet" pane.
+    /// The screen's AUTO-SELECT rule (direction C): with no explicit selection,
+    /// select the pinned Groups ROW and show the card overview. It replaces the
+    /// old "first saved group's editor, else the empty pane" pair — the
+    /// overview is the same landing place whether there are zero groups or ten
+    /// (it draws its own empty canvas), and it opens no group's editor on the
+    /// user's behalf.
     private func showDefaultContent() {
-        if let first = groupController.groups.first {
-            sidebarViewController.select(.group(id: first.id), notify: false)
-            showEditor(for: first.id)
-        } else {
-            shownDetailDeviceID = nil
-            swapContent(to: emptyStateViewController)
-        }
+        sidebarViewController.select(.groupsOverview, notify: false)
+        showOverview()
+    }
+
+    /// Show the saved-group card overview, re-read from the current model +
+    /// fleet snapshot.
+    private func showOverview() {
+        shownDetailDeviceID = nil
+        overviewViewController.reload(devices: orderedDevices())
+        swapContent(to: overviewViewController)
     }
 
     /// Show the detail pane for `deviceID` — the page that DESCRIBES and TUNES
@@ -510,6 +539,18 @@ public final class MixerWindowController {
             } else {
                 showDefaultContent()
             }
+        } else if currentContent === overviewViewController {
+            if sidebarViewController.currentSelection == nil {
+                // The very first refresh: the host starts on the overview, so
+                // this branch — not the `else` below — is where AUTO-SELECT
+                // has to seed the Groups row's highlight.
+                showDefaultContent()
+            } else {
+                // The card field is a pure projection of the model + the
+                // fleet, so a fresher snapshot just redraws it (a rename, a new
+                // group from the popover's quick-save, a member back online).
+                overviewViewController.reload(devices: devices)
+            }
         } else if currentContent === mainOutDetailViewController {
             // Nothing in a snapshot can invalidate the whole mix, and the page
             // owns its own in-flight tone state now (`MainOutDetailViewController
@@ -517,13 +558,6 @@ public final class MixerWindowController {
             // `stateQueue.sync` on the main thread for every backend event
             // during a drag. The one legitimate pull is at `showMainOut()`,
             // on open.
-        } else {
-            // Empty pane showing: AUTO-SELECT kicks in as soon as a group
-            // exists (first launch with persisted groups, or one created from
-            // the popover's quick-save while this screen sat empty).
-            if sidebarViewController.currentSelection == nil {
-                showDefaultContent()
-            }
         }
 
         applyPendingSelection()
@@ -612,7 +646,7 @@ public final class MixerWindowController {
     public var test_editor: GroupEditorViewController { editorViewController }
     public var test_detail: DeviceDetailViewController { detailViewController }
     public var test_mainOutDetail: MainOutDetailViewController { mainOutDetailViewController }
-    public var test_emptyState: GroupsEmptyStateViewController { emptyStateViewController }
+    public var test_overview: GroupsOverviewViewController { overviewViewController }
 
     /// How many times the sidebar has actually been reloaded — proves the
     /// change-gate in ``reloadSidebarIfNeeded`` : an EQ-only `update(devices:)`
@@ -638,9 +672,11 @@ public final class MixerWindowController {
     /// The deep link still waiting for the device it names, or nil.
     public var test_pendingSelection: SidebarSelection? { pendingSelection }
 
-    /// True when the "No groups yet" empty pane is the visible content.
-    public var test_isShowingEmptyState: Bool {
-        currentContent === emptyStateViewController
+    /// True when the saved-group card overview is the visible content (its own
+    /// `test_isShowingEmptyCanvas` says whether it is drawing cards or the
+    /// zero-groups canvas).
+    public var test_isShowingOverview: Bool {
+        currentContent === overviewViewController
     }
 
     /// Simulate the user selecting a sidebar row (nil = deselect → AUTO-SELECT).
@@ -673,8 +709,7 @@ public final class MixerWindowController {
 
     /// The height the persistent footer strip takes out of the screen's
     /// content area, so a test can derive the budget a swapped content pane
-    /// actually gets: `screen content height − this`. The editor pane has
-    /// no scroll view, so that budget is a hard ceiling, not a preference.
+    /// actually gets: `screen content height − this`.
     public var test_contentPaneChromeHeight: CGFloat {
         contentHostViewController.test_chromeHeight
     }
@@ -706,7 +741,7 @@ final class HairlineView: NSView {
 
 // MARK: - ContentPaneHostViewController
 
-/// Hosts the swapped content pane (editor / detail / empty) plus the
+/// Hosts the swapped content pane (overview / editor / detail) plus the
 /// persistent footer caption pinned beneath it. This exists so the footer is
 /// scoped to the CONTENT split item only — the sidebar split item runs the
 /// full height of the split view, with no footer stealing its bottom space
@@ -716,11 +751,10 @@ final class HairlineView: NSView {
 final class ContentPaneHostViewController: NSViewController {
 
     /// Persistent secondary-color caption beneath the content pane. ALWAYS
-    /// visible. Pairs with, but
-    /// doesn't duplicate, the empty state's lighter nudge
-    /// (`GroupsEmptyStateViewController.subtitleLabel`): the footer is the one
-    /// full teaching line; the empty-state subtitle is a shorter contextual
-    /// nudge shown only when there's nothing else on screen.
+    /// visible. Pairs with, but doesn't duplicate, the overview's lighter
+    /// zero-groups nudge (`GroupsOverviewViewController`'s empty canvas): the
+    /// footer is the one full teaching line; that subtitle is a shorter
+    /// contextual nudge shown only when there's nothing else on screen.
     private let footerLabel = NSTextField(labelWithString: "Set up groups here — switch to the Mixer to play")
 
     /// The container the swapped child view fills; sits above the footer.
@@ -731,7 +765,7 @@ final class ContentPaneHostViewController: NSViewController {
     /// Gap between the footer caption and the pane's bottom edge.
     private static let footerBottomInset: CGFloat = 8
 
-    /// The currently-hosted child (editor / detail / empty pane), for
+    /// The currently-hosted child (overview / editor / detail pane), for
     /// structural comparisons. `nil` only before the first `setContent(_:)`.
     private(set) var currentChild: NSViewController?
 
@@ -826,92 +860,6 @@ final class ContentPaneHostViewController: NSViewController {
     var test_footerText: String { footerLabel.stringValue }
 }
 
-// MARK: - GroupsEmptyStateViewController
-
-/// The "No groups yet" pane shown when there is nothing to select (stock
-/// AppKit): a centered primary message, a secondary line teaching the
-/// feature per §5.9's locked copy, and a "New Group…" button running the
-/// same creation sheet as the sidebar's bottom-bar button. The whole message
-/// block is one vertical stack centered on BOTH axes so it sits truly
-/// centered in the pane rather than hanging off a hand-tuned offset.
-public final class GroupsEmptyStateViewController: NSViewController {
-
-    /// Fired when the call-to-action button is clicked.
-    var onNewGroup: (() -> Void)?
-
-    // Deliberately NOT "No groups yet" — the sidebar's own placeholder row
-    // (a different file/owner) already says that right above this pane, so
-    // repeating it here read as the same message twice on one screen. This
-    // headline instead states the feature promise the subtitle explains.
-    private let messageLabel = NSTextField(labelWithString: "Group your speakers")
-    /// A PARAGRAPH, not a width driver. On one line this sentence measures
-    /// ~480 pt, which made it the widest required thing on the whole Groups
-    /// screen — AppKit widened the window to fit it, so the empty screen
-    /// mounted ~85 pt wider than every other one (probed 2026-08-12). It wraps
-    /// inside the form column's own measure instead (see `loadView`).
-    private let subtitleLabel = NSTextField(wrappingLabelWithString:
-        "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
-    private let newGroupButton = NSButton()
-
-    /// The measure this pane's copy wraps to: the form column the editor and
-    /// detail panes use, less this pane's own 16pt margins.
-    private static let emptyPaneTextWidth: CGFloat = GroupsPaneLayout.contentMaxWidth - 32
-
-    public override func loadView() {
-        messageLabel.font = Tokens.Font.titleLarge
-        // The HEADLINE reads as primary text; the subtitle under it stays
-        // tertiary. Both at secondary flattened the pair into one grey block
-        // with no hierarchy at all. Stock `.labelColor` — the frozen-text rule
-        // holds (`AGENTS.md`).
-        messageLabel.textColor = Tokens.Color.label
-        messageLabel.alignment = .center
-
-        subtitleLabel.font = Tokens.Font.subtitleLarge
-        subtitleLabel.textColor = Tokens.Color.tertiaryLabel
-        subtitleLabel.alignment = .center
-        subtitleLabel.isSelectable = false
-        // Wraps within the form column's measure, minus this pane's own 16pt
-        // margins — so the empty screen is exactly as wide as every other
-        // Groups screen instead of setting the window's width by itself.
-        subtitleLabel.preferredMaxLayoutWidth = Self.emptyPaneTextWidth
-        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        newGroupButton.title = "New Group…"
-        newGroupButton.bezelStyle = .rounded
-        newGroupButton.target = self
-        newGroupButton.action = #selector(newGroupTapped(_:))
-
-        let stack = NSStackView(views: [messageLabel, subtitleLabel, newGroupButton])
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .vertical
-        stack.alignment = .centerX
-        stack.spacing = 4
-        stack.setCustomSpacing(12, after: subtitleLabel)
-
-        let container = NSView()
-        container.addSubview(stack)
-
-        NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            stack.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
-            subtitleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: Self.emptyPaneTextWidth),
-        ])
-
-        view = container
-    }
-
-    @objc private func newGroupTapped(_ sender: NSButton) {
-        onNewGroup?()
-    }
-
-    /// Simulate clicking the call-to-action (headless test hook).
-    public func test_tapNewGroup() { onNewGroup?() }
-
-    /// The visible message text (for structural assertions).
-    public var test_messageText: String { messageLabel.stringValue }
-
-    /// The visible subtitle text (for structural assertions).
-    public var test_subtitleText: String { subtitleLabel.stringValue }
-}
+// GroupsEmptyStateViewController is GONE (direction C): the overview's empty
+// canvas absorbed it — same copy strings, same centered-block rules. main's
+// last tweaks to the class arrived in the merge that deletes it.

@@ -71,9 +71,15 @@ public final class GroupEditorViewController: NSViewController {
     public var onDidEditGroup: (() -> Void)?
     /// Called after the group was deleted (pop back to the mixer).
     public var onDidDeleteGroup: (() -> Void)?
+    /// Called when the user leaves this editor for the group overview — the
+    /// "‹ Groups" band, Escape, or ⌘[. The host owns the pane swap; this pane
+    /// only reports the request (direction C's in-pane push).
+    public var onBack: (() -> Void)?
     /// Called when Escape abandoned a rename, so the host can put keyboard
     /// focus somewhere real (the sidebar's outline view) instead of leaving
-    /// the window as its own first responder — see ``cancelRename()``.
+    /// the window as its own first responder — see ``cancelRename()``. Escape
+    /// while renaming stops HERE (the field editor consumes it); only an
+    /// Escape outside a rename reaches the container and fires `onBack`.
     public var onDidCancelRename: (() -> Void)?
 
     /// The group currently being edited, nil before `show`.
@@ -90,6 +96,11 @@ public final class GroupEditorViewController: NSViewController {
     /// but not in the backend's output set fills ember, not gold.
     private var isActiveGroup = false
 
+    /// The "‹ Groups" band at the top of the scrolled document — the way back
+    /// to the card overview this editor was pushed from. It rides on the
+    /// scroll view roadmap 039 gave the pane: before that there was not a
+    /// single spare point of height to put it in.
+    private let backBand = BackBandView()
     private let iconWell = DeviceIconWellView()
     private let nameField = NSTextField(string: "")
     private let membershipStack = RailRepaintingStackView()
@@ -106,6 +117,11 @@ public final class GroupEditorViewController: NSViewController {
     /// `test_headerSectionFrame` / the badge anchors measure its frame.
     private let headerWell = GroupedSectionView()
     private let deleteButton = NSButton()
+
+    /// The pane's scroll view (roadmap 039) — see the note in ``loadView()``.
+    /// Held so the `test_*` seams can measure the document without walking the
+    /// view tree.
+    private var scrollView: NSScrollView?
 
     /// The header's "Playing now" marker, shown ONLY while the edited group is
     /// the active Main Out — the SAME glyph + wording the sidebar's
@@ -163,6 +179,17 @@ public final class GroupEditorViewController: NSViewController {
     /// deliberately: the field may overflow its section by a hair on a
     /// pathologically narrow pane rather than vanish.
     private static let titleFieldMinWidth: CGFloat = 140
+
+    /// The back band's own geometry. It rides INSIDE the pane's existing top
+    /// inset rather than adding to it: 4 + 16 + 0 == `columnTopInset`, so the
+    /// header section's top border — and with it the icon well and the name —
+    /// stay at exactly the y the device detail pane puts theirs. HEADER PARITY
+    /// IS GEOMETRIC (`GroupsHeaderParityTests` asserts the two panes' real
+    /// laid-out title frames), so a band that PUSHED the header down would
+    /// make every sidebar swap between a group and a speaker twitch.
+    private static let backBandTopInset: CGFloat = 4
+    private static let backBandHeight: CGFloat = 16
+    private static let backBandToColumnGap: CGFloat = 0
 
     /// The rename field's live width, recomputed from the name it holds
     /// (an editable field has no intrinsic width to hug with, so the hug is
@@ -298,9 +325,17 @@ public final class GroupEditorViewController: NSViewController {
         // both cases alone — this stack floats inside the elastic form column,
         // so its `layout()` is not guaranteed to run on every container
         // resize. The popover could DELETE its container hook; here both stay.
+        backBand.translatesAutoresizingMaskIntoConstraints = false
+        backBand.onActivate = { [weak self] in self?.onBack?() }
+
         let container = RailRepaintingView()
         container.railOverlay = railOverlay
         container.membershipWell = membershipWell
+        // Escape and ⌘[ are the band's keyboard equivalents. Both have to live
+        // on a VIEW: key equivalents are dispatched down the view tree, and
+        // `cancelOperation` up the responder chain from whatever is focused —
+        // an `NSViewController` override would be called by neither.
+        container.onBack = { [weak self] in self?.onBack?() }
         membershipStack.railOverlay = railOverlay
         membershipStack.membershipWell = membershipWell
         // The form column: symmetric margins off the pane, ELASTIC up to
@@ -327,13 +362,36 @@ public final class GroupEditorViewController: NSViewController {
         for v in [iconWell, nameField, playingBadge, speakersLabel, membershipStack] {
             column.addSubview(v)
         }
-        for v in [column, deleteButton, reassuranceLabel] {
-            container.addSubview(v)
+        // The pane SCROLLS (roadmap 039, `../AGENTS.md`): the surface frame is
+        // FIXED, so a fleet the editor cannot fit used to have to be paid for by
+        // raising `AppSurfaceController.minimumContentSize`. It now overflows
+        // into the scroller instead. Same recipe as `DeviceDetailViewController`
+        // — overlay scrollers + no background so the pane still reads as one
+        // warm surface, and a FLIPPED document so the form starts at the TOP
+        // rather than bottom-gravitating.
+        //
+        // Everything the container used to host lives in the DOCUMENT now,
+        // including the rail overlay, whose anchoring traps below are unchanged
+        // — they just read document space rather than container space.
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        for v in [backBand, column, deleteButton, reassuranceLabel] {
+            document.addSubview(v)
         }
         // Added LAST so the spine composites ON TOP of the header and the rows
         // it passes; non-interactive, so nothing beneath it loses a click.
         railOverlay.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(railOverlay)
+        document.addSubview(railOverlay)
+
+        let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = document
+        scrollView.hasVerticalScroller = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        container.addSubview(scrollView)
+        self.scrollView = scrollView
 
         // The column STRETCHES with the pane: this pushes it out to the
         // trailing margin, the required `<=` cap stops it at
@@ -341,7 +399,7 @@ public final class GroupEditorViewController: NSViewController {
         // pane at any width. Without this fill the sections hugged their
         // ~277 pt intrinsic content and left a dead strip beside them.
         let columnFill = column.trailingAnchor.constraint(
-            equalTo: container.trailingAnchor, constant: -GroupsPaneLayout.columnTrailingInset)
+            equalTo: document.trailingAnchor, constant: -GroupsPaneLayout.columnTrailingInset)
         columnFill.priority = .defaultHigh
 
         // The rename field HUGS its name — measured by hand, since an editable
@@ -377,15 +435,40 @@ public final class GroupEditorViewController: NSViewController {
         reassuranceTrailing.priority = NSLayoutConstraint.Priority(999)
 
         NSLayoutConstraint.activate([
-            column.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor,
-                                        constant: GroupsPaneLayout.columnTopInset),
+            scrollView.topAnchor.constraint(equalTo: container.topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
+            // The document is exactly as wide as the pane and as tall as its
+            // content needs — vertical scrolling only, never horizontal.
+            document.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
+
+            // The back band tops the DOCUMENT, not the pane's safe-area guide
+            // — the clip view already sits below the title-bar chrome, so the
+            // document itself is the correct top reference here. It scrolls
+            // WITH the form rather than pinning to the clip view: the form is
+            // short enough to scroll only on a large fleet, and a floating
+            // band would have to solve its own backdrop against the rows
+            // passing under it. It spends the pane's EXISTING top inset (see
+            // `backBandTopInset`) — it must not push the header down.
+            backBand.topAnchor.constraint(equalTo: document.topAnchor,
+                                          constant: Self.backBandTopInset),
+            backBand.leadingAnchor.constraint(equalTo: document.leadingAnchor,
+                                              constant: GroupsPaneLayout.columnInset),
+            backBand.trailingAnchor.constraint(lessThanOrEqualTo: document.trailingAnchor,
+                                               constant: -GroupsPaneLayout.columnTrailingInset),
+            backBand.heightAnchor.constraint(equalToConstant: Self.backBandHeight),
+
+            column.topAnchor.constraint(equalTo: backBand.bottomAnchor,
+                                        constant: Self.backBandToColumnGap),
             // SYMMETRIC margins (design review 2026-07-25). The column used to
             // start at the pane's own leading edge, with the whole left margin
             // living inside `contentLeadingInset` — which put the bordered
             // sections flush against the window edge on one side only.
-            column.leadingAnchor.constraint(equalTo: container.leadingAnchor,
+            column.leadingAnchor.constraint(equalTo: document.leadingAnchor,
                                             constant: GroupsPaneLayout.columnInset),
-            column.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor,
+            column.trailingAnchor.constraint(lessThanOrEqualTo: document.trailingAnchor,
                                              constant: -GroupsPaneLayout.columnTrailingInset),
             column.widthAnchor.constraint(lessThanOrEqualToConstant: GroupsPaneLayout.contentMaxWidth),
             columnFill,
@@ -477,15 +560,18 @@ public final class GroupEditorViewController: NSViewController {
             deleteButton.topAnchor.constraint(
                 equalTo: column.bottomAnchor,
                 constant: GroupsPaneLayout.actionBandGap + GroupedSectionView.verticalPadding),
-            // `<=`, NOT `==`: pinning the button to the PANE's bottom made the
-            // whole chain above it stretch to reach — the column grew, the row
-            // stack (pinned to the column's bottom) grew with it, and the
-            // section's bottom padding silently absorbed every spare point of
-            // pane height. It measured 49.5pt below the last divider against
-            // 36.5pt above the first (design review 2026-07-25). Now the
-            // content keeps its natural height and the slack falls BELOW the
-            // button, where nothing is drawn.
-            deleteButton.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor,
+            // `==` against the DOCUMENT (roadmap 039). It used to be `<=`
+            // against the pane, because pinning the button to the PANE's bottom
+            // made the whole chain above it stretch to reach — the column grew,
+            // the row stack (pinned to the column's bottom) grew with it, and
+            // the section's bottom padding silently absorbed every spare point
+            // of pane height (49.5pt below the last divider against 36.5pt
+            // above the first — design review 2026-07-25). A scroll document
+            // has no spare height to absorb: it HUGS its content, so this
+            // equality is what gives the document its bottom edge, and the
+            // slack — when the pane is taller than the content — falls below
+            // the document inside the clip view, where nothing is drawn.
+            deleteButton.bottomAnchor.constraint(equalTo: document.bottomAnchor,
                                                  constant: -GroupsPaneLayout.paneBottomInset),
 
             // Beside the button, centred on it, with NO bottom pin: the line's
@@ -502,10 +588,10 @@ public final class GroupEditorViewController: NSViewController {
             // own space while each row places its node at that x from its own
             // leading edge, so a mismatch floats every node off the line by
             // exactly the difference.
-            railOverlay.topAnchor.constraint(equalTo: container.topAnchor),
+            railOverlay.topAnchor.constraint(equalTo: document.topAnchor),
             railOverlay.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             railOverlay.trailingAnchor.constraint(equalTo: column.trailingAnchor),
-            railOverlay.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            railOverlay.bottomAnchor.constraint(equalTo: document.bottomAnchor),
         ])
 
         view = container
@@ -1332,6 +1418,37 @@ public final class GroupEditorViewController: NSViewController {
               let stackIndex = column.subviews.firstIndex(of: membershipStack) else { return false }
         return wellIndex < stackIndex
     }
+
+    /// Click the "‹ Groups" band — the real band action, not `onBack` behind
+    /// its back.
+    public func test_goBack() { backBand.test_activate() }
+
+    /// Press ⌘[ in the editor — a real `NSEvent` through the real
+    /// `performKeyEquivalent` chain (`test_performCmdN`'s shape). True when the
+    /// pane claimed it.
+    @discardableResult
+    public func test_performBackKeyEquivalent() -> Bool {
+        guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                           modifierFlags: .command, timestamp: 0,
+                                           windowNumber: 0, context: nil,
+                                           characters: "[", charactersIgnoringModifiers: "[",
+                                           isARepeat: false, keyCode: 33) else { return false }
+        return view.performKeyEquivalent(with: event)
+    }
+
+    /// True while the pane is wrapped in the scroll view roadmap 039 gave it
+    /// (`../AGENTS.md`) — the same seam `DeviceDetailViewController` carries.
+    public var test_hasScrollView: Bool { scrollView != nil }
+
+    /// The height the scroll DOCUMENT needs for its content — the editor's real
+    /// content height now that the pane's own fitting height is capped by the
+    /// scroll view. Overflow past the frame scrolls; it no longer asks the
+    /// surface to grow.
+    public var test_scrollDocumentHeight: CGFloat {
+        view.layoutSubtreeIfNeeded()
+        guard let document = scrollView?.documentView else { return 0 }
+        return document.fittingSize.height
+    }
 }
 
 // MARK: - Continuous rail origin hook (Warm Signal v4 §Call-1)
@@ -1376,14 +1493,155 @@ extension GroupEditorViewController: RailHookProviding {
 /// membership well (T5) on every layout pass so both track the current row
 /// frames with no cached geometry. Both
 /// draw from settled frames, so `cacheDisplay` snapshots stay deterministic.
+/// A flipped document view so the editor scrolls from the TOP rather than
+/// bottom-gravitating with dead space above the header. File-scoped on purpose
+/// (`DeviceDetailViewController` and `GroupCreationSheetController` each keep
+/// their own for the same reason).
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 private final class RailRepaintingView: NSView {
     weak var railOverlay: BusRailOverlayView?
     weak var membershipWell: GroupedSectionView?
+
+    /// Leaves this editor for the group overview. Set at build time.
+    var onBack: (() -> Void)?
+
     override func layout() {
         super.layout()
         railOverlay?.needsDisplay = true
         membershipWell?.needsDisplay = true
     }
+
+    /// ⌘[ — the standard macOS "back" key equivalent. Dispatched DOWN the view
+    /// tree (the window asks its content view, which asks each subview), not
+    /// along the responder chain, so it has to be a view; `SidebarContainerView`
+    /// catches Cmd-N the same way.
+    ///
+    /// razor: view-local, like Cmd-N. The Groups screen is hosted in the
+    /// menu-bar surface and has no menu bar of its own, so this works while
+    /// the editor is in the key window and nowhere else, and no UI can print
+    /// the shortcut. Upgrade path: a real "Back" item in the app's main menu.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers == "[",
+           let onBack {
+            onBack()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    /// ESCAPE. Safe to claim unconditionally: a rename in progress consumes
+    /// Escape first, in the field editor's own
+    /// `control(_:textView:doCommandBy:)` (it reverts the name), so this only
+    /// ever fires when nothing is being edited.
+    override func cancelOperation(_ sender: Any?) {
+        guard let onBack else { return super.cancelOperation(sender) }
+        onBack()
+    }
+}
+
+// MARK: - Back band
+
+/// The "‹ Groups" band above the identity card: the whole band is the target,
+/// not just the word, and it reads in the same quiet caption tone the rest of
+/// the pane's secondary text uses. Bare `NSView` rather than an `NSButton` so
+/// its geometry is the band's, so it hand-rolls what a control gets for free:
+/// `acceptsFirstResponder` + the focus ring, Space/Return, and
+/// `accessibilityPerformPress()` (`DeviceIconWellView`'s precedent).
+private final class BackBandView: NSView {
+
+    var onActivate: (() -> Void)?
+
+    private let glyphView = NSImageView()
+    private let label = NSTextField(labelWithString: "Groups")
+    private var trackingArea: NSTrackingArea?
+    private var isHovered = false { didSet { updateTone() } }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        build()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func build() {
+        glyphView.translatesAutoresizingMaskIntoConstraints = false
+        glyphView.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold))
+        glyphView.image?.isTemplate = true
+        // The label beside it already speaks the word — an AX element here
+        // would announce it twice.
+        glyphView.setAccessibilityElement(false)
+
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = Tokens.Font.caption
+
+        addSubview(glyphView)
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            glyphView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            glyphView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            glyphView.widthAnchor.constraint(equalToConstant: 11),
+            glyphView.heightAnchor.constraint(equalToConstant: 11),
+
+            label.leadingAnchor.constraint(equalTo: glyphView.trailingAnchor, constant: 5),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+        ])
+
+        updateTone()
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Back to Groups")
+        toolTip = "Back to Groups"
+    }
+
+    /// Hover is a tone step from secondary to primary — text colours are
+    /// frozen to stock semantics in this pane (`AGENTS.md`), so the affordance
+    /// has to come from WHICH stock grey, never from a hue.
+    private func updateTone() {
+        let color = isHovered ? Tokens.Color.label : Tokens.Color.secondaryLabel
+        label.textColor = color
+        glyphView.contentTintColor = color
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(rect: bounds,
+                                  options: [.mouseEnteredAndExited, .activeInActiveApp],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+    override func mouseDown(with event: NSEvent) { onActivate?() }
+
+    override var acceptsFirstResponder: Bool { true }
+    override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() { bounds.fill() }
+
+    override func keyDown(with event: NSEvent) {
+        let isReturn = event.keyCode == 36 || event.keyCode == 76
+        if isReturn || event.charactersIgnoringModifiers == " " {
+            onActivate?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onActivate?()
+        return true
+    }
+
+    /// Headless seam: a real run has no click to synthesize, so this drives the
+    /// band's own action — the same closure `mouseDown` fires.
+    func test_activate() { onActivate?() }
 }
 
 /// The checklist stack, carrying the SAME re-invalidation for relayouts that

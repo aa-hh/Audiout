@@ -34,7 +34,7 @@ import AppKit
 ///   1. NEGATIVE — every label actually rendered by the Groups window
 ///      (`DeviceDetailViewController`, `MembershipRowView`,
 ///      `SidebarViewController`'s outline cells, `GroupEditorViewController`,
-///      `MixerWindowController`/`GroupsEmptyStateViewController`,
+///      `MixerWindowController`/`GroupsOverviewViewController`,
 ///      `IconPickerViewController`, `GroupCreationSheetController`) resolves to
 ///      a stock system color and NEVER to a warm palette token.
 ///   2. POSITIVE — `GroupEditorViewController`'s membership checklist, the
@@ -226,20 +226,23 @@ import AppKit
         assertAllLabelsFrozen(in: row, host: "MembershipRowView(unavailable, disabledControlTextColor path)")
     }
 
-    // MARK: 3. NEGATIVE — SidebarViewController's outline cells (all four Node payloads)
+    // MARK: 3. NEGATIVE — SidebarViewController's outline cells (every labelled Node payload)
 
     @Test func sidebarOutlineCellsStayStock() throws {
         let sidebar = SidebarViewController()
-        let group = Group(name: "Downstairs", memberIDs: [], memberVolumes: [:])
         let device = makeDevice()
 
         let headerCell = try #require(
-            sidebar.outlineView(NSOutlineView(), viewFor: nil, item: SidebarViewController.Node(.header("Groups"))) as? NSTableCellView)
+            sidebar.outlineView(NSOutlineView(), viewFor: nil, item: SidebarViewController.Node(.header("Speakers"))) as? NSTableCellView)
         assertFrozenToStock(headerCell.textField?.textColor, "Sidebar header cell")
 
-        let groupCell = try #require(
-            sidebar.outlineView(NSOutlineView(), viewFor: nil, item: SidebarViewController.Node(.group(group))) as? NSTableCellView)
-        assertFrozenToStock(groupCell.textField?.textColor, "Sidebar group row cell")
+        let groupsRowCell = try #require(
+            sidebar.outlineView(NSOutlineView(), viewFor: nil, item: SidebarViewController.Node(.groupsOverview)) as? NSTableCellView)
+        assertFrozenToStock(groupsRowCell.textField?.textColor, "Sidebar pinned Groups row cell")
+
+        let mainOutCell = try #require(
+            sidebar.outlineView(NSOutlineView(), viewFor: nil, item: SidebarViewController.Node(.mainOut)) as? NSTableCellView)
+        assertFrozenToStock(mainOutCell.textField?.textColor, "Sidebar Main Audio row cell")
 
         let deviceCell = try #require(
             sidebar.outlineView(NSOutlineView(), viewFor: nil, item: SidebarViewController.Node(.device(device))) as? NSTableCellView)
@@ -249,10 +252,6 @@ import AppKit
             sidebar.outlineView(NSOutlineView(), viewFor: nil,
                                 item: SidebarViewController.Node(.device(makeDevice(isAvailable: false)))) as? NSTableCellView)
         assertFrozenToStock(unavailableCell.textField?.textColor, "Sidebar unavailable-device row cell (dimmed path)")
-
-        let emptyStateCell = try #require(
-            sidebar.outlineView(NSOutlineView(), viewFor: nil, item: SidebarViewController.Node(.emptyState("No groups yet"))) as? NSTableCellView)
-        assertFrozenToStock(emptyStateCell.textField?.textColor, "Sidebar empty-state placeholder cell")
     }
 
     // MARK: 4. NEGATIVE — GroupEditorViewController (name field, "Speakers" label, checklist rows)
@@ -279,7 +278,7 @@ import AppKit
         assertAllLabelsFrozen(in: editor.view, host: "GroupEditorViewController")
     }
 
-    // MARK: 5. NEGATIVE — MixerWindowController's footer + empty-state pane
+    // MARK: 5. NEGATIVE — MixerWindowController's footer + the overview's empty canvas
 
     private func makeMixerWindow() -> MixerWindowController {
         MixerWindowController(groupController: makeGroupController(),
@@ -289,19 +288,25 @@ import AppKit
     @Test func mixerWindowFooterAndEmptyStateLabelsStayStock() {
         let window = makeMixerWindow()
         window.update(devices: [])
-        // Zero groups + zero devices selects the empty state (per AGENTS.md's
-        // auto-select rule) — walking `contentController`'s whole tree
-        // exercises both the persistent footer (`ContentPaneHostViewController
-        // .footerLabel`) AND `GroupsEmptyStateViewController`'s message/
-        // subtitle in one pass, via the real public hosting API rather than
-        // reaching for a private view.
+        // Zero groups + zero devices auto-selects the overview (per AGENTS.md's
+        // auto-select rule), which draws its zero-groups canvas — walking
+        // `contentController`'s whole tree exercises both the persistent footer
+        // (`ContentPaneHostViewController.footerLabel`) AND
+        // `GroupsOverviewViewController`'s message/subtitle in one pass, via
+        // the real public hosting API rather than reaching for a private view.
+        //
+        // Deliberately NOT a live-card state: the live card's meta line paints
+        // its "Playing now" half in gold ON PURPOSE (one of this screen's two
+        // sanctioned gold sites), which this frozen-label walk would read as a
+        // violation.
         let content = window.contentController
         content.view.frame = NSRect(x: 0, y: 0, width: 720, height: 460)
         content.view.layoutSubtreeIfNeeded()
-        assertAllLabelsFrozen(in: content.view, host: "MixerWindowController content (footer + empty state)")
-        #expect(window.test_isShowingEmptyState, "expected the empty state pane with zero groups/devices")
-        #expect(window.test_emptyState.test_messageText == "Group your speakers")
-        #expect(window.test_emptyState.test_subtitleText ==
+        assertAllLabelsFrozen(in: content.view, host: "MixerWindowController content (footer + empty canvas)")
+        #expect(window.test_isShowingOverview, "expected the overview with zero groups/devices")
+        #expect(window.test_overview.test_isShowingEmptyCanvas)
+        #expect(window.test_overview.test_emptyMessageText == "Group your speakers")
+        #expect(window.test_overview.test_emptySubtitleText ==
                 "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
     }
 

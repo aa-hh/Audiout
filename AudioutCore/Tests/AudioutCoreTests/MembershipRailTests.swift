@@ -489,10 +489,13 @@ import AppKit
         #expect(abs(editor.test_headerTitleAlignmentFrame.minY - title.minY) <= 0.01)
     }
 
-    /// The pane has NO scroll view and, at a seven-device fleet, no spare
-    /// points: the shipping budget is met exactly. So the two active-group
-    /// markers have to cost ZERO fitting height — the badge inside the header
-    /// band, the reassurance line inside the delete button's bottom margin.
+    /// At a seven-device fleet the pane has no spare points: the shipping
+    /// budget is met exactly. So the two active-group markers have to cost ZERO
+    /// content height — the badge inside the header band, the reassurance line
+    /// inside the delete button's bottom margin. Measured on the SCROLL
+    /// DOCUMENT since roadmap 039: the pane's own fitting height is capped by
+    /// the scroll view, so only the document still reports what the content
+    /// costs.
     @Test func theActiveGroupsMarkersAddNoHeightToTheEditorPane() throws {
         let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
         let controller = GroupController(backend: MockBackend(fleet: []),
@@ -505,15 +508,15 @@ import AppKit
         editor.show(groupID: group.id, devices: devices)
         editor.view.frame = NSRect(x: 0, y: 0, width: 520, height: 460)
         editor.view.layoutSubtreeIfNeeded()
-        let idle = editor.view.fittingSize.height
+        let idle = editor.test_scrollDocumentHeight
 
         controller.activateGroup(id: group.id)
         editor.show(groupID: group.id, devices: devices)
         editor.view.layoutSubtreeIfNeeded()
 
         #expect(editor.test_playingBadgeVisible && editor.test_reassuranceVisible)
-        #expect(abs(editor.view.fittingSize.height - idle) <= 0.01,
-                Comment(rawValue: "the active editor needs \(editor.view.fittingSize.height)pt against " +
+        #expect(abs(editor.test_scrollDocumentHeight - idle) <= 0.01,
+                Comment(rawValue: "the active editor needs \(editor.test_scrollDocumentHeight)pt against " +
                 "\(idle)pt idle — the markers must ride inside space the pane already spends"))
     }
 

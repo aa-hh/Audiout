@@ -11,6 +11,19 @@ import Testing
 /// cannot produce a trustworthy number.
 @Suite struct MicProbeSessionTests {
 
+    /// SplitMix64 — a seed pins the scene, so a failure is reproducible.
+    private struct SeededRNG: RandomNumberGenerator {
+        private var state: UInt64
+        init(seed: UInt64) { state = seed }
+        mutating func next() -> UInt64 {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return z ^ (z >> 31)
+        }
+    }
+
     private final class FakeRecorder: MicProbeRecording, @unchecked Sendable {
         let rate: Double
         let scene: [Float]
@@ -124,6 +137,30 @@ import Testing
     /// they render the same probes from two files.
     @Test func sessionAndInjectorAgreeOnTheSweepLength() {
         #expect(MicProbeSession.sweepSeconds == AlignmentTickInjector.probeSweepSeconds)
+    }
+
+    /// The live 2026-08-28 refusal: the ambient slice carries the tail of the
+    /// user's music (loud, broadband, gone by sweep time), the SNR weighting
+    /// crushes the sweep band, and the weighted pass finds nothing. The
+    /// unweighted fallback must still measure.
+    @Test func aMusicTailInTheAmbientSliceCannotRefuseTheMeasurement() throws {
+        let rate = 8_000.0
+        var scene = scene(rate: rate, downDelay: 12_000, upDelay: 12_060)
+        // Two seconds of loud broadband "music" at the head — ambient only,
+        // absent during the sweeps.
+        var rng = SeededRNG(seed: 42)
+        for i in 0..<16_000 {
+            let u1 = Double.random(in: 1e-12..<1, using: &rng)
+            let u2 = Double.random(in: 0..<1, using: &rng)
+            scene[i] += Float(0.5 * (-2 * Foundation.log(u1)).squareRoot()
+                              * Foundation.cos(2 * .pi * u2))
+        }
+        let result = try #require(
+            MicProbeSession.analyze(recording: scene, sampleRate: rate,
+                                    ambientEnd: 15_000),
+            "stale ambient noise must never veto a clean sweep pair")
+        #expect(abs(result.deltaMs - 7.5) < 0.3,
+                "the fallback still measures the true Δ: got \(result.deltaMs)")
     }
 }
 

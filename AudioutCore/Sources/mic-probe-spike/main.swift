@@ -261,21 +261,30 @@ guard let accessGranted = accessResult, accessGranted else {
 final class ProbePlayer {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
+    private let rate: Double
 
-    init(deviceID: AudioDeviceID) throws {
+    /// `rate` is the pinned device's HAL nominal rate, passed in so it is the
+    /// same number the sweeps were synthesized at — one rate for the whole
+    /// tool rather than a second, independently queried one that can disagree.
+    ///
+    /// Both graph edges are connected explicitly at that format. Merely
+    /// touching `mainMixerNode` connects it to the output node implicitly, at
+    /// whatever format the output node happened to carry then, which a later
+    /// device pin does not rebuild.
+    init(deviceID: AudioDeviceID, rate: Double) throws {
+        self.rate = rate
         try engine.outputNode.auAudioUnit.setDeviceID(deviceID)
+        let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2)
         engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode,
-                       format: AVAudioFormat(standardFormatWithSampleRate:
-                                             engine.outputNode.outputFormat(forBus: 0).sampleRate,
-                                             channels: 2))
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: format)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
         engine.prepare()
         try engine.start()
     }
 
-    /// Plays L/R and blocks until the buffer has been consumed.
-    func playBlocking(left: [Float], right: [Float]) {
-        let rate = engine.outputNode.outputFormat(forBus: 0).sampleRate
+    /// Plays L/R and blocks until the buffer has been consumed. False means the
+    /// device took the buffer and never reported playing it.
+    func playBlocking(left: [Float], right: [Float]) -> Bool {
         let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2)!
         let frames = AVAudioFrameCount(max(left.count, right.count))
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
@@ -287,7 +296,7 @@ final class ProbePlayer {
         let sem = DispatchSemaphore(value: 0)
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in sem.signal() }
         player.play()
-        sem.wait()
+        return sem.wait(timeout: .now() + Double(frames) / rate + 10) == .success
     }
 
     func stop() { engine.stop() }
@@ -304,16 +313,28 @@ Thread.sleep(forTimeInterval: leadIn)
 let rateDuringCapture = nominalRate(outputID)
 
 let outputRate = nominalRate(outputID)
+guard outputRate > 0 else {
+    fputs("Could not read a sample rate from \(deviceName(outputID)).\n", stderr)
+    _ = capture.stop()
+    exit(2)
+}
 var upOut = SyncProbe.samples(.upSweep(sampleRate: outputRate, duration: duration))
 var downOut = SyncProbe.samples(.downSweep(sampleRate: outputRate, duration: duration))
 for i in 0..<upOut.count { upOut[i] *= gain }
 for i in 0..<downOut.count { downOut[i] *= gain }
 
 do {
-    let player = try ProbePlayer(deviceID: outputID)
-    player.playBlocking(left: upOut, right: downOut)
+    let player = try ProbePlayer(deviceID: outputID, rate: outputRate)
+    let played = player.playBlocking(left: upOut, right: downOut)
     Thread.sleep(forTimeInterval: 0.6)
     player.stop()
+    if !played {
+        fputs("\(deviceName(outputID)) accepted the probes but never reported " +
+              "playing them. Check nothing else is holding the device, or pick " +
+              "another --output.\n", stderr)
+        _ = capture.stop()
+        exit(2)
+    }
 } catch {
     fputs("Could not open the output device: \(error)\n", stderr)
     _ = capture.stop()

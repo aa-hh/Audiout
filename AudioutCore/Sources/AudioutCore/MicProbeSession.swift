@@ -231,6 +231,24 @@ public final class MicProbeSession {
         finished = true
         let recording = sampleRate > 0 ? recorder.stop() : []
         let result: Result? = analyze ? measure(recording: recording) : nil
+        // Diagnosis hatch: AUDIOUT_MIC_PROBE_DUMP=1 keeps the raw capture
+        // (mono Float32) beside the telemetry, so a refused measurement can
+        // be analysed offline instead of guessed at. Debug only, nothing
+        // reads it in a shipping run.
+        if ProcessInfo.processInfo.environment["AUDIOUT_MIC_PROBE_DUMP"] == "1",
+           !recording.isEmpty {
+            let url = FileManager.default.urls(for: .libraryDirectory,
+                                               in: .userDomainMask)[0]
+                .appendingPathComponent("Logs/Audiout/mic-probe-capture.f32")
+            recording.withUnsafeBufferPointer { try? Data(buffer: $0).write(to: url) }
+            Telemetry.log(.localPlayback, "mic_probe_dump", [
+                "path": url.path,
+                "rate": String(Int(sampleRate)),
+                "startedAtSeconds": startedAt.flatMap { started in
+                    recordingBegan.map { String(format: "%.2f", started.timeIntervalSince($0)) }
+                } ?? "-",
+            ])
+        }
         Telemetry.log(.localPlayback, "mic_probe_finished", [
             "ok": result != nil ? "1" : "0",
             "deltaMs": result.map { String(format: "%.2f", $0.deltaMs) } ?? "-",
@@ -247,22 +265,42 @@ public final class MicProbeSession {
         guard sampleRate > 0, !recording.isEmpty else { return nil }
         // Ambient = the capture up to just before the sweeps entered the feed
         // (air can only lag the feed, so this slice is provably probe-free).
-        var ambient: [Float]?
+        var ambientEnd = 0
         if let startedAt, let recordingBegan {
             let seconds = startedAt.timeIntervalSince(recordingBegan) - 0.25
-            let count = Int(seconds * sampleRate)
-            if count > Int(0.3 * sampleRate) {
-                ambient = Array(recording[0..<min(count, recording.count)])
-            }
+            ambientEnd = min(Int(seconds * sampleRate), recording.count)
         }
+        return Self.analyze(recording: recording, sampleRate: sampleRate,
+                            ambientEnd: ambientEnd)
+    }
+
+    /// The analysis, split from the wall-clock bookkeeping so tests can hand
+    /// it a scene with an exact ambient boundary.
+    ///
+    /// The SNR weighting gets first go, but its failure is never the run's:
+    /// the ambient slice describes the room BEFORE the sweeps, and during a
+    /// wizard entry that slice legitimately carries the tail of the user's
+    /// music still draining through the sinks' ~2 s delay (live finding,
+    /// 2026-08-28: every probe measured fine acoustically and was then
+    /// refused, because weighting by the music's spectrum crushed exactly
+    /// the sweep band — for noise that was gone by sweep time). Weighting is
+    /// an optimization for noise that is genuinely stationary; when it finds
+    /// nothing, the plain matched filter decides.
+    static func analyze(recording: [Float], sampleRate: Double,
+                        ambientEnd: Int) -> Result? {
         let down = SyncProbe.samples(.downSweep(sampleRate: sampleRate,
-                                                duration: Self.sweepSeconds))
+                                                duration: sweepSeconds))
         let up = SyncProbe.samples(.upSweep(sampleRate: sampleRate,
-                                            duration: Self.sweepSeconds))
+                                            duration: sweepSeconds))
         let correlator = SyncProbeCorrelator(sampleRate: sampleRate)
-        guard let m = correlator.relativeOffset(probeA: down, probeB: up,
-                                                recording: recording,
-                                                ambientNoise: ambient) else { return nil }
+        let ambient: [Float]? = ambientEnd > Int(0.3 * sampleRate)
+            ? Array(recording[0..<ambientEnd]) : nil
+        let measurement = ambient.flatMap {
+            correlator.relativeOffset(probeA: down, probeB: up,
+                                      recording: recording, ambientNoise: $0)
+        } ?? correlator.relativeOffset(probeA: down, probeB: up,
+                                       recording: recording, ambientNoise: nil)
+        guard let m = measurement else { return nil }
         return Result(deltaMs: m.offsetSeconds * 1000,
                       confidence: min(m.arrivalA.peakToSidelobe, m.arrivalB.peakToSidelobe))
     }

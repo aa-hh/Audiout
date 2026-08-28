@@ -356,6 +356,27 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   Cast device selected the capture path is byte-identical to what it always was
   — `NativeCaptureCoordinatorTests` pins that, so never move the engine write
   or make the Cast hop unconditional.
+- **The room delay `R` has one writer and one shape.** A Cast receiver plays
+  seconds behind live and cannot be hurried, so everything else is held back to
+  meet it: `R = NativeBackend.roomDelayLocked()` — the longest intrinsic delay
+  any active output has — and every output delays itself to that ONE number.
+  The Mac's sink reads it through `localSinkReferenceDelayMs`; the BT sinks
+  through their injected `presentationDelayMs()` closure (`btReferenceDelayMs`,
+  NOT `BTReferenceTimeline.delayNanos`'s `castTermMs:` parameter — either route
+  works, so using both reads as though they differed); the AirPlay feed through
+  the `PCMDelayLine` `setAirPlayPreDelay` installs in front of the engine write,
+  because the sender reads its start buffer once at session creation and clamps
+  it to 5 s. `R` moves ONLY through `roomDelayChangedLocked`. Deriving the same
+  quantity a second way is how outputs end up in sync with the room but not with
+  each other. **A `nil` Cast term is the invariant, not a feature flag:** with no
+  Cast device the `max` has no second operand and `setAirPlayPreDelay` publishes
+  no line at all, so every delay is the number it was before Cast existed.
+- **`airPlayPresent` means AirPlay; `usesPresentationReference` chooses the
+  reference.** A Cast receiver authors a presentation timeline exactly as AirPlay
+  does, so every site choosing between the room's timeline and the Mac's own
+  scheduling buffer asks `BTGroupComposition.usesPresentationReference`. Reading
+  `airPlayPresent` there is right only by accident, and wrong the moment Cast is
+  the room's only presentation output.
 - **A Bluetooth sink held at gain 0 must always have a live release path.**
   The first-mix alignment intercept (W3) is the ONLY sanctioned writer of a
   0 gain (`BTDeviceSink.setGain` → `mainMixerNode.outputVolume` — the session,
@@ -762,7 +783,8 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `CastSender` | Hand-rolled Google Cast v2 sender: browse, control channel, live WAV server; driven by `CastOutputManager`. |
 | `CastOutputManager` | Per-Cast-device session recipe (connect → launch DMR → LOAD no-autoplay → PLAY), 1 s status poll, composed level, one automatic reconnect policy; feeds each receiver from `CastFeedRing` via the capture fan-out. |
 | `CastDeviceEnumerator` | `_googlecast._tcp` browse → `.cast` rows through the same `known`/`order`/`emit` flow as Bluetooth. |
-| `PCMDelayLine` | Cadence-preserving S16LE delay line for Phase (ii) sync; built and tested, wired nowhere yet. |
+| `PCMDelayLine` | Cadence-preserving S16LE delay line: what holds the AirPlay feed back to the room delay. Installed only while a Cast device contributes a term. |
+| `CastRoomDelay` | The room-delay policy (sync brief §4): a receiver's assumed lead at select, the settle gate over its measured leads, the high-water term and the `R_max` refusal. Pure — no queue, no clock — so it is replayed in tests against a real receiver's recorded samples. **The term never falls while a receiver stays in the mix**: one that comes back towards live is corrected on its own feed instead, because dragging the whole house forward for a number the next stall undoes is worse than being 150 ms late. Its only writer is `NativeBackend`, on `stateQueue`. |
 | `CastFakeReceiver` | In-memory mock Cast receiver for testing (macOS 15+ only). |
 | `cast-spike` | Standalone CLI tool proving end-to-end Cast audio streaming. |
 | `mic-probe-spike` | CLI: dual-sweep playback + built-in-mic capture + matched filter; A2DP/HFP check. |

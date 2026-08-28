@@ -175,10 +175,10 @@ public final class AppSurfaceController {
     /// Both are WINDOW CONTENT sizes — the toolbar strip is included, because
     /// the Mixer's fit (`fittingSizeSettled()`) already carries the measured
     /// chrome inset. The Mixer's fit at open raises the height above this
-    /// floor; the screen's visible frame caps it. The floor exists for the
-    /// screens that cannot scroll: the Groups editor pane has no scroll view,
-    /// so a 7-device fleet's editor plus the screen's footer strip must fit
-    /// here (`AppSurfaceControllerTests.theSevenDeviceEditorFitsTheMinimumFrame`).
+    /// floor; the screen's visible frame caps it. The Groups editor pane now
+    /// SCROLLS (roadmap 039), so a fleet it cannot fit overflows into its
+    /// scroller instead of asking this floor to grow — guarded by
+    /// `AppSurfaceControllerTests.theSevenDeviceEditorScrollsInsideTheMinimumFrame`.
     public static let minimumContentSize = NSSize(width: SurfaceLayout.width, height: 600)
 
     /// How long the fleet must stop changing before the first-open reveal fires.

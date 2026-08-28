@@ -21,7 +21,9 @@
 //
 // States rendered (light + dark each), all through the real surface except
 // where noted:
-//   1. default      — fresh window, no groups saved (the state under critique)
+//   1. default      — fresh window, no groups saved: the card overview drawing
+//                      its own zero-groups canvas (direction C absorbed the
+//                      separate "No groups yet" pane into it)
 //   2. create-sheet — the `GroupCreationSheetController`'s own view, rendered
 //                      standalone at its fitted size (`presentAsSheet` never
 //                      actually draws in a headless run, so the window-frame
@@ -48,6 +50,9 @@
 //                      ACTIVE Main Out target (thin gold ring on the icon
 //                      well); activation happens through the model — the
 //                      window stays config-only
+//   8. groups-overview — the card field with three saved groups, one of them
+//                      ACTIVE, so the live card's gold border + wave marker
+//                      and the sidebar Groups row's gold marker both render
 //
 // Run: `swift run window-snapshot [output-dir]`.
 
@@ -574,8 +579,8 @@ func run() -> Int32 {
             surface.select(.groups)
         }
 
-        // 1. Default state: no groups — the empty "No groups yet" pane (the
-        //    mixer pane was removed by live-test feedback 2026-07-18).
+        // 1. Default state: no groups — the card overview's own zero-groups
+        //    canvas (direction C absorbed the separate empty pane into it).
         snapshotControlPanel(surface.shell, label: "1-default", appearanceName: appearanceName,
                             outDir: outDir, present: presentGroups)
 
@@ -668,6 +673,22 @@ func run() -> Int32 {
             // beak-backed bubble (live-review D1) actually draws on the
             // unpinned bubble.
             snapshotControlPanel(surface.shell, label: "5-panel-chrome",
+                                appearanceName: appearanceName, outDir: outDir, present: presentGroups)
+
+            // 8. Groups overview (direction C): the card field the sidebar's
+            // pinned Groups row opens. Two more groups are saved so the grid
+            // has both of its columns AND the dashed "New Group" tile as its
+            // last cell, and "Downstairs" is still the ACTIVE group from state
+            // 7 — so the live card's gold border + wave marker render beside
+            // two quiet ones, matching the Groups row's own gold marker.
+            _ = try? controller.createGroup(name: "Whole House",
+                                            memberIDs: backend.devices.map(\.id))
+            _ = try? controller.createGroup(name: "Party",
+                                            memberIDs: ["sonos-move", "office", "homepod-bed"])
+            windowController.update(devices: backend.devices)
+            windowController.test_select(.groupsOverview)
+            drain()
+            snapshotControlPanel(surface.shell, label: "8-groups-overview",
                                 appearanceName: appearanceName, outDir: outDir, present: presentGroups)
         }
     }

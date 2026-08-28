@@ -77,15 +77,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let environment = ProcessInfo.processInfo.environment
         guard let projectToken = environment["POSTHOG_PROJECT_TOKEN"], !projectToken.isEmpty else {
-#if DEBUG
-            assertionFailure("POSTHOG_PROJECT_TOKEN variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once POSTHOG_PROJECT_TOKEN is configured")
-#endif
+            log("PostHog disabled: POSTHOG_PROJECT_TOKEN not set (analytics will no-op)")
             return
         }
         guard let host = environment["POSTHOG_HOST"], !host.isEmpty else {
-#if DEBUG
-            assertionFailure("POSTHOG_HOST variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once POSTHOG_HOST is configured")
-#endif
+            log("PostHog disabled: POSTHOG_HOST not set (analytics will no-op)")
             return
         }
 

@@ -82,9 +82,18 @@ func analyze(recording: [Float], sampleRate: Double, leadInSeconds: Double) -> P
     let ambientCount = min(recording.count, Int(leadInSeconds * 0.75 * sampleRate))
     let ambient = ambientCount > 0 ? Array(recording[0..<ambientCount]) : nil
     let correlator = SyncProbeCorrelator(sampleRate: sampleRate)
-    guard let m = correlator.relativeOffset(probeA: upRef, probeB: downRef,
-                                            recording: recording, ambientNoise: ambient)
-    else { return nil }
+    // Same two-pass rule the app's MicProbeSession.analyze uses: the SNR
+    // weighting goes first, but a lead-in that misdescribes the sweep window
+    // (music draining through a sink, a passing noise) must not be able to
+    // refuse the run, so the plain matched filter decides when it finds
+    // nothing. A hardware tool that is stricter than the app it validates
+    // reports false negatives nobody can act on.
+    let measurement = ambient.flatMap {
+        correlator.relativeOffset(probeA: upRef, probeB: downRef,
+                                  recording: recording, ambientNoise: $0)
+    } ?? correlator.relativeOffset(probeA: upRef, probeB: downRef,
+                                   recording: recording, ambientNoise: nil)
+    guard let m = measurement else { return nil }
     return ProbeAnalysis(up: m.arrivalA, down: m.arrivalB, deltaMs: m.offsetSeconds * 1000)
 }
 

@@ -314,7 +314,24 @@ let package = Package(
         .executableTarget(
             name: "mic-probe-spike",
             dependencies: ["AudioutCore"],
-            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
+            // Info.plist is embedded into the Mach-O at link time (below), NOT
+            // shipped as an SPM resource — exclude it so SPM stops warning.
+            exclude: ["Info.plist"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)],
+            linkerSettings: [
+                // A bare SwiftPM executable has no Info.plist, so
+                // AVCaptureDevice.requestAccess has no NSMicrophoneUsageDescription
+                // to show — and without one, macOS never surfaces the TCC prompt
+                // at all (no crash, no dialog, no callback: exactly the silent
+                // hang this tool hit live against a Sonos Move). Same
+                // -sectcreate fix dev/audiocap uses for its own usage string.
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/mic-probe-spike/Info.plist"
+                ])
+            ]
         ),
         // Tiny, short-lived TCC-preflight probe (T14) — see Sources/tcc-probe/main.swift
         // for the output contract `TCCProbeRunner` parses. Run directly with:

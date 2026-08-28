@@ -217,6 +217,59 @@ import Testing
                 "blend-grade needs ±6 ms; the probe delivers sub-0.1 ms: got \(m.offsetSeconds * 1000) ms")
     }
 
+    @Test func theTwoLaneBandsDoNotOverlap() {
+        // The isolation between the lanes is their disjoint bands, not their
+        // opposite sweep directions — see the note on `SyncProbe`. Overlap
+        // them again and the loud lane's leakage buries the quiet one.
+        let up = SyncProbe.SweepDesign.upSweep(sampleRate: 48_000)
+        let down = SyncProbe.SweepDesign.downSweep(sampleRate: 48_000)
+        let upBand = (min(up.startHz, up.endHz), max(up.startHz, up.endHz))
+        let downBand = (min(down.startHz, down.endHz), max(down.startHz, down.endHz))
+        #expect(upBand.0 > downBand.1,
+                "the lanes must not share a hertz: up \(upBand), down \(downBand)")
+        #expect(upBand.0 / downBand.1 >= 1.25,
+                "abutting edges lose the isolation — keep a guard gap")
+    }
+
+    @Test func theQuietLaneIsFoundBesideALaneTwentyThreeDecibelsLouder() throws {
+        // The live 2026-08-28 refusal, to scale. One mic, built into the Mac:
+        // the Mac's own speakers arrived at amplitude 0.0395 and the Bluetooth
+        // speaker across the room at 0.00268 — 23.4 dB down — over a room
+        // noise floor of −71 dBFS. Both sweeps were plainly audible and every
+        // run was refused, because with both lanes sharing 500 Hz–10 kHz the
+        // loud lane's cross-correlation leakage stood ABOVE the quiet lane's
+        // true peak. Nothing here is quiet in absolute terms; the imbalance
+        // alone is the whole failure.
+        let rate = 48_000.0
+        let upDesign = SyncProbe.SweepDesign.upSweep(sampleRate: rate)
+        let downDesign = SyncProbe.SweepDesign.downSweep(sampleRate: rate)
+        let delayDown = 21_684.0   // 451.75 ms
+        let delayUp = 20_590.0     // 428.958 ms → true Δ exactly −22.79 ms
+        let rec = renderScene(length: 96_000, sampleRate: rate,
+                              probes: [
+                                PlacedProbe(design: downDesign, delaySamples: delayDown,
+                                            gain: 0.0395),
+                                PlacedProbe(design: downDesign, delaySamples: delayDown + 4_800,
+                                            gain: 0.0135),
+                                PlacedProbe(design: upDesign, delaySamples: delayUp,
+                                            gain: 0.00268),
+                                PlacedProbe(design: upDesign, delaySamples: delayUp + 4_800,
+                                            gain: 0.00092),
+                              ],
+                              noiseRMS: 0.000_5)
+        let correlator = SyncProbeCorrelator(sampleRate: rate)
+        let m = try #require(
+            correlator.relativeOffset(probeA: SyncProbe.samples(downDesign),
+                                      probeB: SyncProbe.samples(upDesign),
+                                      recording: rec),
+            "a 23 dB quieter speaker is the ordinary geometry, not a bad capture")
+        let expected = (delayUp - delayDown) / rate
+        #expect(abs(m.offsetSeconds - expected) < 0.000_5,
+                "got \(m.offsetSeconds * 1000) ms, wanted \(expected * 1000) ms")
+        #expect(m.arrivalB.peakToSidelobe >= correlator.minPeakToSidelobe,
+                "the quiet lane clears the shipping gate with margin, not barely: PSR \(m.arrivalB.peakToSidelobe)")
+    }
+
     // MARK: noise weighting
 
     @Test func aLoudHumIsSurvivedWhenAmbientNoiseIsSupplied() throws {

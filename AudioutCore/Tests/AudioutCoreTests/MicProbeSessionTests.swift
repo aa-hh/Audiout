@@ -29,7 +29,7 @@ import Testing
         let scene: [Float]
         let failsToStart: Bool
         private(set) var stopped = false
-        init(rate: Double = 8_000, scene: [Float] = [], failsToStart: Bool = false) {
+        init(rate: Double = 24_000, scene: [Float] = [], failsToStart: Bool = false) {
             self.rate = rate
             self.scene = scene
             self.failsToStart = failsToStart
@@ -44,6 +44,11 @@ import Testing
 
     /// A mic capture holding both sweeps: DOWN (the reference lane) at
     /// `downDelay` samples, UP (the Bluetooth lane) at `upDelay`.
+    ///
+    /// Every scene here runs at 24 kHz rather than some cheaper rate: the
+    /// Bluetooth lane sweeps to 10 kHz, and a rate that cannot represent that
+    /// band would leave these scenes correlating one aliasing artefact against
+    /// another — passing while proving nothing.
     private func scene(rate: Double, downDelay: Int, upDelay: Int) -> [Float] {
         let down = SyncProbe.SweepDesign.downSweep(sampleRate: rate,
                                                    duration: MicProbeSession.sweepSeconds)
@@ -60,10 +65,10 @@ import Testing
     }
 
     @Test func aCleanSceneReducesToTheSignedDelta() async {
-        // UP (Bluetooth) 60 samples after DOWN (reference) at 8 kHz: +7.5 ms.
-        let recorder = FakeRecorder(rate: 8_000,
-                                    scene: scene(rate: 8_000, downDelay: 5_600,
-                                                 upDelay: 5_660))
+        // UP (Bluetooth) 180 samples after DOWN (reference) at 24 kHz: +7.5 ms.
+        let recorder = FakeRecorder(rate: 24_000,
+                                    scene: scene(rate: 24_000, downDelay: 16_800,
+                                                 upDelay: 16_980))
         let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 0.05)
         let result: MicProbeSession.Result? = await withCheckedContinuation { cont in
             session.start(stage: { onStarted, onFinished in
@@ -76,15 +81,15 @@ import Testing
             return
         }
         #expect(abs(result.deltaMs - 7.5) < 0.2,
-                "Bluetooth late by 60 samples reads +7.5 ms: got \(result.deltaMs)")
+                "Bluetooth late by 180 samples reads +7.5 ms: got \(result.deltaMs)")
         #expect(result.confidence > 5, "a clean scene is confident")
         #expect(recorder.stopped, "the mic is released")
     }
 
     @Test func aBluetoothSideArrivingEarlyReadsNegative() async {
-        let recorder = FakeRecorder(rate: 8_000,
-                                    scene: scene(rate: 8_000, downDelay: 5_660,
-                                                 upDelay: 5_560))
+        let recorder = FakeRecorder(rate: 24_000,
+                                    scene: scene(rate: 24_000, downDelay: 16_980,
+                                                 upDelay: 16_680))
         let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 0.05)
         let result: MicProbeSession.Result? = await withCheckedContinuation { cont in
             session.start(stage: { onStarted, onFinished in
@@ -92,14 +97,14 @@ import Testing
             }, completion: { cont.resume(returning: $0) })
         }
         #expect(result.map { abs($0.deltaMs - (-12.5)) < 0.2 } == true,
-                "Bluetooth early by 100 samples reads −12.5 ms: got \(String(describing: result))")
+                "Bluetooth early by 300 samples reads −12.5 ms: got \(String(describing: result))")
     }
 
     @Test func aRunWhoseProbeNeverPlaysTimesOutToNil() async {
         // The wizard was torn down before the gate armed: neither callback
         // ever fires, and the capture holds nothing but room.
-        let recorder = FakeRecorder(rate: 8_000,
-                                    scene: [Float](repeating: 0.01, count: 16_000))
+        let recorder = FakeRecorder(rate: 24_000,
+                                    scene: [Float](repeating: 0.01, count: 48_000))
         let session = MicProbeSession(recorder: recorder, timeout: 0.2, pipelineTail: 0.05)
         let result: MicProbeSession.Result? = await withCheckedContinuation { cont in
             session.start(stage: { _, _ in }, completion: { cont.resume(returning: $0) })
@@ -121,9 +126,9 @@ import Testing
     }
 
     @Test func cancelCompletesNilWithoutAnalysis() async {
-        let recorder = FakeRecorder(rate: 8_000,
-                                    scene: scene(rate: 8_000, downDelay: 5_600,
-                                                 upDelay: 5_660))
+        let recorder = FakeRecorder(rate: 24_000,
+                                    scene: scene(rate: 24_000, downDelay: 16_800,
+                                                 upDelay: 16_980))
         let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 5)
         let result: MicProbeSession.Result? = await withCheckedContinuation { cont in
             session.start(stage: { onStarted, _ in onStarted() },
@@ -144,12 +149,12 @@ import Testing
     /// crushes the sweep band, and the weighted pass finds nothing. The
     /// unweighted fallback must still measure.
     @Test func aMusicTailInTheAmbientSliceCannotRefuseTheMeasurement() throws {
-        let rate = 8_000.0
-        var scene = scene(rate: rate, downDelay: 12_000, upDelay: 12_060)
+        let rate = 24_000.0
+        var scene = scene(rate: rate, downDelay: 36_000, upDelay: 36_180)
         // Two seconds of loud broadband "music" at the head — ambient only,
         // absent during the sweeps.
         var rng = SeededRNG(seed: 42)
-        for i in 0..<16_000 {
+        for i in 0..<48_000 {
             let u1 = Double.random(in: 1e-12..<1, using: &rng)
             let u2 = Double.random(in: 0..<1, using: &rng)
             scene[i] += Float(0.5 * (-2 * Foundation.log(u1)).squareRoot()
@@ -157,7 +162,7 @@ import Testing
         }
         let result = try #require(
             MicProbeSession.analyze(recording: scene, sampleRate: rate,
-                                    ambientEnd: 15_000),
+                                    ambientEnd: 45_000),
             "stale ambient noise must never veto a clean sweep pair")
         #expect(abs(result.deltaMs - 7.5) < 0.3,
                 "the fallback still measures the true Δ: got \(result.deltaMs)")

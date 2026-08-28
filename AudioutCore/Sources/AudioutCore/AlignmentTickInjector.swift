@@ -354,8 +354,8 @@ final class AlignmentTickInjector: @unchecked Sendable {
 
     // MARK: Mic-probe run control (pacer-queue only)
 
-    /// How long each calibration sweep runs. One second buys ~40 dB of
-    /// processing gain across the band — see `SyncProbe`.
+    /// How long each calibration sweep runs. One second buys 30–40 dB of
+    /// processing gain across the lane's band — see `SyncProbe`.
     static let probeSweepSeconds = 1.0
     /// Silence between the arm and the sweeps, so the probe never rides on the
     /// tail of whatever the gate interrupted.

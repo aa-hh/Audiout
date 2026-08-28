@@ -18,13 +18,27 @@ import Foundation
 ///
 /// The probe is an exponential sine sweep: constant amplitude, frequency
 /// rising (or falling) exponentially between two band edges. Its virtue for
-/// this job is the time–bandwidth product — a one-second sweep across ~10 kHz
-/// concentrates ~40 dB of processing gain into one correlation peak, so a
-/// probe played quietly under real room noise still yields an unambiguous
-/// arrival time. An UP sweep and a DOWN sweep over the same band are
-/// near-orthogonal under cross-correlation, which is what lets two speakers
-/// play their probes simultaneously and still be told apart in one mic
-/// recording.
+/// this job is the time–bandwidth product — a one-second sweep concentrates
+/// 30–40 dB of processing gain into one correlation peak, so a probe played
+/// quietly under real room noise still yields an unambiguous arrival time.
+///
+/// **The two lanes occupy DISJOINT bands, and that separation is what lets
+/// both speakers play at once.** Opposite sweep DIRECTIONS over a shared band
+/// are not enough: measured, an up sweep and a down sweep across 500 Hz–10 kHz
+/// cross-correlate only ~33 dB down. The recording comes from the Mac's own
+/// built-in microphone, so the Mac's own speakers are inches away while the
+/// other speaker is across the room — a level imbalance of 23 dB in the live
+/// 2026-08-28 capture. The loud lane's leakage then sits ABOVE the quiet
+/// lane's true peak, and every measurement is refused for want of confidence
+/// while both sweeps are plainly audible. Disjoint bands share no bins at all
+/// (measured cross-correlation −134 dB), so the tolerable imbalance stops
+/// being a probe property and becomes the room's own noise floor — 53 dB for
+/// the distant speaker in that same capture. Keep the GUARD GAP between the
+/// two bands when tuning them; abutting edges lose most of the isolation.
+///
+/// The quiet, distant lane gets the HIGH band: room noise is dominated by
+/// low-frequency rumble, and that same capture measured its noise floor 12 dB
+/// lower above 3 kHz — worth more than the extra air absorption up there.
 ///
 /// The band edges deliberately stay inside 500 Hz–10 kHz: small speakers roll
 /// off below a few hundred Hz, and A2DP codecs commonly roll off above
@@ -44,13 +58,17 @@ public enum SyncProbe {
         /// annoy the listener).
         public var fadeDuration: Double
 
+        /// The Bluetooth lane — the one heard from across the room, hence the
+        /// high band (see the type note).
         public static func upSweep(sampleRate: Double, duration: Double = 1.0) -> SweepDesign {
-            SweepDesign(sampleRate: sampleRate, startHz: 500, endHz: 10_000,
+            SweepDesign(sampleRate: sampleRate, startHz: 3_200, endHz: 10_000,
                         duration: duration, fadeDuration: 0.01)
         }
 
+        /// The engine/Mac lane — nearest the microphone, so it takes the low
+        /// band and its noisier floor.
         public static func downSweep(sampleRate: Double, duration: Double = 1.0) -> SweepDesign {
-            SweepDesign(sampleRate: sampleRate, startHz: 10_000, endHz: 500,
+            SweepDesign(sampleRate: sampleRate, startHz: 2_000, endHz: 500,
                         duration: duration, fadeDuration: 0.01)
         }
     }

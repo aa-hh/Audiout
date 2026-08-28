@@ -167,7 +167,15 @@ All group logic goes through the shared
   selection. The plate is also the divider: no hairline row under it (one
   existed briefly and was removed with the plate). No expand/collapse, no
   nested rows; the Speakers section lists EVERY device (membership is previewed
-  in the editor, not by expansion). A `.group(id:)` target passed to
+  in the editor, not by expansion), **available first, unavailable dimmed at
+  the bottom** — `MixerWindowController.orderedDevices()` is the ONE ordering
+  rule, shared by the sidebar, the editor's checklist, the creation sheet and
+  the overview's chips (Alec 2026-08-28, chosen over keep-in-place; a row
+  moving when availability flips is the accepted trade). **An unavailable
+  speaker may JOIN a group** — the sheet and editor offer every device (same
+  decision; reverses the old available-only candidate rules), which is also
+  what keeps the add bar's multi-select count honest. A `.group(id:)` target
+  passed to
   `select(_:)` lands on the Groups ROW: the editor is pushed inside the content
   pane, and the fleet must never move under the pointer while it is open.
 - **The card overview is the group list, and it absorbed the empty state.**

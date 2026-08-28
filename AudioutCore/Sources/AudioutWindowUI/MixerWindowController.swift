@@ -630,8 +630,16 @@ public final class MixerWindowController {
             })
     }
 
+    /// Available speakers first, then the unavailable ones, alphabetical
+    /// within each — every list on this screen (sidebar, editor, sheet,
+    /// overview) reads this one order. Sort-to-the-bottom is Alec's call
+    /// (2026-08-28) over keep-in-place; the accepted trade is that a
+    /// speaker's row moves when its availability flips.
     private func orderedDevices() -> [Device] {
-        devicesByID.values.sorted { ($0.name, $0.id) < ($1.name, $1.id) }
+        devicesByID.values.sorted {
+            (($0.isAvailable ? 0 : 1), $0.name, $0.id)
+                < (($1.isAvailable ? 0 : 1), $1.name, $1.id)
+        }
     }
 
     // MARK: Test-support hooks

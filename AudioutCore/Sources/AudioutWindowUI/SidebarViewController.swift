@@ -501,8 +501,16 @@ public final class SidebarViewController: NSViewController {
     /// (grouped or not) since the flat model no longer previews membership
     /// via expansion.
     public var test_deviceRowCount: Int {
+        test_deviceRowIDs.count
+    }
+
+    /// Device row ids under the "Speakers" header, in DISPLAY order — the
+    /// order assertion seam (available first, unavailable at the bottom).
+    public var test_deviceRowIDs: [String] {
         roots.first { if case .header("Speakers") = $0.payload { return true } else { return false } }?
-            .children.count ?? 0
+            .children.compactMap {
+                if case .device(let d) = $0.payload { return d.id } else { return nil }
+            } ?? []
     }
 
     /// Simulate the user clicking a sidebar row (fires `onSelect`).

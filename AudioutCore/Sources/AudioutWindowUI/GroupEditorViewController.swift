@@ -650,8 +650,7 @@ public final class GroupEditorViewController: NSViewController {
             // Re-derive them from the fresh snapshot without touching the
             // rows: only the render path may rebuild those.
             allDevices = devices
-            let memberSet = Set(group.memberIDs)
-            candidateDevices = devices.filter { $0.isAvailable || memberSet.contains($0.id) }
+            candidateDevices = devices
             return
         }
         render(group: group, devices: devices)
@@ -724,8 +723,10 @@ public final class GroupEditorViewController: NSViewController {
     private func editorProjection(for group: Group, devices: [Device]) -> EditorProjection {
         let memberSet = Set(group.memberIDs)
         let isActive = groupController.activeGroupID == group.id
-        // The same candidate rule `rebuildCandidates(memberSet:)` uses.
-        let candidates = devices.filter { $0.isAvailable || memberSet.contains($0.id) }
+        // Every device is a candidate, unavailable ones included (Alec,
+        // 2026-08-28) — same rule as `rebuildCandidates(memberSet:)` and the
+        // creation sheet. Rows for unavailable devices render dimmed.
+        let candidates = devices
         return EditorProjection(
             groupID: group.id,
             groupName: group.name,
@@ -783,10 +784,10 @@ public final class GroupEditorViewController: NSViewController {
     /// unchanged — only the list's membership/labels moved, so refreshing each
     /// row in place keeps the very view instances the pointer, the keyboard
     /// focus and any in-flight click are attached to. A changed sequence (a
-    /// device appeared or an unchecked unavailable member dropped out) still
-    /// falls through to the full rebuild.
+    /// device appeared or vanished) still falls through to the full rebuild.
     private func rebuildCandidates(memberSet: Set<String>) {
-        let newCandidates = allDevices.filter { $0.isAvailable || memberSet.contains($0.id) }
+        // Every device, unavailable ones included (Alec, 2026-08-28).
+        let newCandidates = allDevices
         guard newCandidates.map(\.id) == candidateDevices.map(\.id), !rowsByID.isEmpty else {
             candidateDevices = newCandidates
             buildRows(memberSet: memberSet)

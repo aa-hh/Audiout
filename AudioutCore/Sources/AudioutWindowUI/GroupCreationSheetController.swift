@@ -16,10 +16,11 @@ import AudioutSharedUI
 ///   anonymous form with no heading);
 /// - a `Name` `NSTextField`, prefilled by the caller via ``configure``;
 /// - a "Speakers" label + a scrollable checklist of `MembershipRowView` rows.
-///   Candidates are ONLY devices with `isAvailable == true` — unlike the
-///   editor's existing-membership case (which must still show/remove an
-///   already-offline member), a brand-new group never offers joining a
-///   speaker that isn't reachable right now;
+///   EVERY device is a candidate, unavailable ones included (Alec,
+///   2026-08-28 — reverses the earlier available-only rule): a sleeping
+///   HomePod can be put in "Whole House" now and simply plays when it is
+///   back. Unavailable rows render dimmed with the row's own "Unavailable"
+///   annotation; the caller passes devices already sorted available-first;
 /// - a live "N speaker(s) selected" count label in secondary color;
 /// - bottom-trailing Cancel (Escape) / Create (Return, the default button) —
 ///   Create is enabled only once at least one row is checked, recomputed on
@@ -264,13 +265,15 @@ public final class GroupCreationSheetController: NSViewController {
     // MARK: Model
 
     /// Configure the sheet before presenting it: prefill the name field with
-    /// `defaultName`, and build the membership checklist from `devices` — ONLY
-    /// `device.isAvailable` devices become candidates (approved rule: the
-    /// creation sheet never offers joining a speaker that isn't reachable
-    /// right now). `preselected` checks any candidate whose id is a member.
+    /// `defaultName`, and build the membership checklist from `devices` —
+    /// EVERY device, unavailable ones included (Alec, 2026-08-28: an offline
+    /// speaker may join a group and plays when it returns; this is also what
+    /// keeps the add bar's "New Group from N Speakers…" count honest when the
+    /// selection includes a sleeping speaker). `preselected` checks any
+    /// candidate whose id is a member.
     public func configure(defaultName: String, devices: [Device], preselected: Set<String> = []) {
         nameField.stringValue = defaultName
-        candidateDevices = devices.filter(\.isAvailable)
+        candidateDevices = devices
         checkedIDs = preselected.intersection(Set(candidateDevices.map(\.id)))
         buildRows()
         updateCountLabel()

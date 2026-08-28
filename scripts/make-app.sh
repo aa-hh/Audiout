@@ -240,7 +240,10 @@ cp -R \"\$BIN/$RESOURCE_BUNDLE_NAME\" .remote-products/"
     if remote_fetch "$REPO_ROOT" ".remote-products/$EXECUTABLE" "$STAGE/$EXECUTABLE" &&
        remote_fetch "$REPO_ROOT" ".remote-products/$TCC_PROBE_EXECUTABLE" "$STAGE/$TCC_PROBE_EXECUTABLE" &&
        remote_fetch "$REPO_ROOT" ".remote-products/$HELPER_EXECUTABLE" "$STAGE/$HELPER_EXECUTABLE" &&
-       remote_fetch "$REPO_ROOT" ".remote-products/$RESOURCE_BUNDLE_NAME" "$STAGE/$RESOURCE_BUNDLE_NAME"; then
+       remote_fetch "$REPO_ROOT" ".remote-products/$RESOURCE_BUNDLE_NAME/" "$STAGE/$RESOURCE_BUNDLE_NAME"; then
+      # Trailing slash on the source is load-bearing: without it rsync places
+      # the directory INSIDE the destination, nesting the bundle in itself and
+      # silently losing every resource (the brand mark ships as nil).
       BUILT_BINARY="$STAGE/$EXECUTABLE"
       BUILT_TCC_PROBE="$STAGE/$TCC_PROBE_EXECUTABLE"
       BUILT_HELPER="$STAGE/$HELPER_EXECUTABLE"
@@ -329,9 +332,12 @@ chmod +x "$MACOS_DIR/$HELPER_EXECUTABLE"
 cp "$BUILT_TCC_PROBE" "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 chmod +x "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 
-# SwiftPM resource bundle → Contents/Resources. `Bundle.module`'s generated
-# accessor searches Bundle.main.resourceURL (== Contents/Resources) first, so
-# this is where the in-app brand mark becomes reachable at runtime.
+# SwiftPM resource bundle → Contents/Resources. NOTE: the generated
+# `Bundle.module` accessor for an executable target does NOT look here — it
+# searches only Bundle.main.bundleURL (the .app root, which codesign refuses)
+# and the compiling machine's absolute .build path. AudioutSharedUI resolves
+# this location itself (BrandMark.swift, `resourceBundle`); keep the copy
+# destination and that lookup in sync.
 mkdir -p "$RESOURCES_DIR"
 cp -R "$BUILT_RESOURCE_BUNDLE" "$RESOURCES_DIR/$RESOURCE_BUNDLE_NAME"
 

@@ -65,6 +65,22 @@ struct SetupCardContent {
     /// The SPINE's own earned title — a short form of ``completedTitle``.
     let spineDoneTitle: String
 
+    /// Whether pressing this step's LIVE spine row may fire its primary button
+    /// as a shortcut.
+    ///
+    /// True wherever the primary opens a door the user still has to walk
+    /// through: every TCC step's Allow raises a system dialog that asks again,
+    /// so a stray row click costs a dialog, not a decision.
+    ///
+    /// FALSE for Usage Statistics, whose primary IS the consent — applied
+    /// in-app the moment it fires. There the shortcut would opt a user in from
+    /// a click on a row they were only trying to read, and then advance past
+    /// the card (owner, live: "I click the line item and it just goes to the
+    /// next step"). The row stops being pressable at all rather than becoming
+    /// a click that silently does nothing: no hover treatment, no button role
+    /// for VoiceOver, and no `allowTitle` offered as its action.
+    var livePressRunsTheAsk: Bool { step != .usageStats }
+
     /// The one place the per-state title table lives (brief §"Card anatomy":
     /// imperative → earned capability). The RIBBON reads this; the spine reads
     /// ``spineTitle(for:foundSpeakers:)``.
@@ -559,7 +575,9 @@ final class SetupSpineRowView: NSView {
         if isBroken { return true }
         switch state {
         case .pending, .autoPassed: return false
-        case .active: return isLive
+        // A live row is a shortcut to its primary — but only where firing that
+        // primary is not itself the decision (``livePressRunsTheAsk``).
+        case .active: return isLive && content.livePressRunsTheAsk
         case .completed, .skipped: return true
         }
     }

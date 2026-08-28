@@ -242,6 +242,46 @@ extension SerializedSharedState {
         #expect(!vc.test_hasCheckmark(.usageStats), "a decline is not a grant")
     }
 
+    /// **The consent bug this step nearly shipped with.** Every other live row
+    /// doubles as a shortcut to its primary, which is safe there because the
+    /// primary only raises a system dialog that asks again. Here the primary IS
+    /// the consent, so the shortcut opted the user in from a click on a row
+    /// they were reading — and then advanced past the card, which is exactly
+    /// what it looked like live ("I click the line item and it just goes to the
+    /// next step").
+    @Test func pressingTheLiveRowNeverGrantsConsent() async {
+        let settings = AppSettings(defaults: isolatedDefaults)
+        let setup = makeSetup(settings: settings)
+        let vc = makeViewController(setup)
+        await vc.test_refreshStatuses()
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_demoMode == .prompt, "the card is up and undecided")
+
+        #expect(!(await vc.test_pressRow(.usageStats)), "the live row must refuse the press")
+
+        #expect(!settings.telemetryOptIn, "a row click is not consent")
+        #expect(!settings.telemetryAsked, "and it must not spend the ask either")
+        #expect(vc.test_demoMode == .prompt, "the card is still up, still undecided")
+    }
+
+    /// The refusal is structural, not just a swallowed click: the row stops
+    /// advertising itself as a button at all, so nothing — pointer, keyboard or
+    /// VoiceOver — offers "Share Usage Counts" as a row action.
+    @Test func theLiveRowOffersNoActionToPressAtAll() async {
+        let setup = makeSetup()
+        let vc = makeViewController(setup)
+        await vc.test_refreshStatuses()
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(!vc.test_isRowPressable(.usageStats))
+        #expect(!vc.test_rowIsAccessibilityButton(.usageStats))
+        #expect(vc.test_rowAccessibilityAction(.usageStats) == nil)
+        // The rule is per-step, not a blanket change: a live TCC row keeps its
+        // shortcut, because macOS still asks before anything is granted.
+        #expect(OnboardingViewController.content(for: .bluetooth).livePressRunsTheAsk)
+        #expect(!OnboardingViewController.content(for: .usageStats).livePressRunsTheAsk)
+    }
+
     /// Browsing the ticked row re-shows this step's OWN card, never a System
     /// Settings pane — it has none, and the shared browse path defaults to one.
     /// The body says where the switch really lives instead.

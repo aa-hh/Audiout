@@ -90,6 +90,20 @@ gate/motion/demo/selection rules change.
   privacy fence, in the user's words) lives in `whyLine` — the only body copy a
   first ask shows. Keep the two in step; there is nowhere else it is stated.
 
+  **TRAP — its live spine row is NOT pressable, and that is load-bearing.**
+  Every other live row doubles as a shortcut to its primary button
+  (`rowPressed` → `ribbonPrimaryTapped`), which is safe there because the
+  primary only raises a system dialog that asks again: a stray row click costs
+  a dialog, not a decision. Here the primary IS the consent, applied in-app the
+  moment it fires — so the shortcut opted the user in from a click on a row
+  they were only trying to read, and then advanced past the card (found live:
+  "I click the line item and it just goes to the next step"). One property
+  decides it, `SetupCardContent.livePressRunsTheAsk`, and BOTH the row's
+  `isPressable` and `rowPressed` read it; don't re-add a step-specific check in
+  either. The row goes fully unpressable rather than swallowing the click, so
+  nothing — pointer, keyboard or VoiceOver — offers `allowTitle` as a row
+  action.
+
   This ask **used to be an `NSAlert` on the first menu-bar click**, fired from
   `AppDelegate` at the exact moment the user was reaching for the mixer. Don't
   put it back there.

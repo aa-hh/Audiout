@@ -314,6 +314,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// dedicated lock keeps those reads off `stateQueue` entirely.
     private let btTrimLock = NSLock()
     private var btTrimsByUID: [String: Double] = [:]   // btTrimLock
+
+    // MARK: Cast per-device by-ear offset (CAST-SYNC)
+
+    /// Persistence for the per-receiver Cast offsets — its own file beside the
+    /// Bluetooth trims'. `nil` (most tests) = offsets live for the session only.
+    private let castOffsetStore: BTTrimStore?
+    /// Guards ``castOffsetsByID`` alone, for the same reason ``btTrimLock``
+    /// guards its own map: the UI reads it, and `captureControlQueue` reads it
+    /// again when a receiver is armed.
+    private let castOffsetLock = NSLock()
+    private var castOffsetsByID: [String: Double] = [:]   // castOffsetLock
     /// Each Bluetooth device's MEASURED output latency in ms (roadmap 056 Part
     /// A) — how late the speaker plays on its own, which is what the alignment
     /// wizard now determines. Distinct from the trim: the latency is a
@@ -1394,6 +1405,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             castEnumerator: CastDeviceEnumerator(),
             castOutputManager: CastOutputManager(),
             btTrimStore: BTTrimStore(),
+            castOffsetStore: BTTrimStore(fileName: BTTrimStore.castFileName),
             eqStore: DeviceEQStore(),
             processResolver: processResolver,
             defaultOutputSwitcher: DefaultOutputSwitcher())
@@ -1436,6 +1448,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         castEnumerator: CastDeviceEnumerating? = nil,
         castOutputManager: CastOutputControlling? = nil,
         btTrimStore: BTTrimStore? = nil,
+        castOffsetStore: BTTrimStore? = nil,
         eqStore: DeviceEQStore? = nil,
         dacpEndpoint: DACPEndpoint = DACPServer(),
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
@@ -1484,13 +1497,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.castOutputManager = castOutputManager
         self.btTrimStore = btTrimStore
         if let loaded = (try? btTrimStore?.load()) ?? nil {
-            self.btTrimsByUID = loaded.mapValues(BTSyncTrim.clamp)
+            self.btTrimsByUID = loaded.mapValues { BTSyncTrim.clamp($0) }
         }
         if let latencies = (try? btTrimStore?.loadLatencies()) ?? nil {
             self.btLatencyMsByUID = latencies.mapValues { Swift.max(0, $0) }
         }
         if let dismissed = try? btTrimStore?.loadDismissedUIDs() {
             self.btAlignmentDismissedUIDs = dismissed
+        }
+        self.castOffsetStore = castOffsetStore
+        if let castOffsets = (try? castOffsetStore?.load()) ?? nil {
+            self.castOffsetsByID = castOffsets.mapValues {
+                BTSyncTrim.quantise($0, rangeMs: BTSyncTrim.castRangeMs)
+            }
         }
         self.eqStore = eqStore
         if let loaded = (try? eqStore?.load()) ?? nil {
@@ -3988,6 +4007,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             for (id, level) in levels {
                 manager.setLevel(level, forDevice: id)
             }
+            // CAST-SYNC: an arm re-states every receiver's stored by-ear offset,
+            // so reselecting one brings its offset back rather than leaving the
+            // delay line at whatever the last armed stretch left there.
+            pushStoredCastUserOffsets(forDeviceIDs: records.map(\.id))
         } else {
             manager.setDevices([])
             if castFeedAttached {
@@ -10260,6 +10283,81 @@ extension NativeBackend: LocalSyncOffsetControlling {
             self.lastAppliedLocalOffsetMs = effective
             guard delta != 0 else { return }
             self.syncedLocalSink?.applyUserOffsetDelta(ms: delta)
+        }
+    }
+}
+
+/// Optional backend capability for a CAST row's SYNC control (CAST-SYNC) —
+/// same `backend as? Capability` posture as ``BTOutputControlling``, and
+/// `NativeBackend` is again the only conformer.
+///
+/// The value is the user's BY-EAR offset, in whole milliseconds, ±
+/// ``BTSyncTrim/castRangeMs``. It is NOT the receiver's buffer: that is
+/// measured on the wire and taken out automatically. This covers only what the
+/// protocol cannot see — the receiver's output stage, its DAC, and, when the
+/// target is a TV, the HDMI → TV → soundbar chain behind it.
+public protocol CastSyncOffsetControlling: AnyObject {
+    /// The stored offset for a receiver (0 when none).
+    func castUserOffsetMs(forDevice id: String) -> Double
+    /// Whether this receiver has an ENTRY at all — the honest answer to "tuned
+    /// or never tuned?", which the value alone cannot give: a receiver
+    /// deliberately set to 0 ms is tuned, and must not read "Not set".
+    func castHasUserOffset(forDevice id: String) -> Bool
+    /// Store an offset and apply it to the live Cast feed.
+    func setCastUserOffsetMs(_ ms: Double, forDevice id: String)
+    /// Delete the stored offset and put the live feed back on no correction.
+    /// REMOVED, never written as 0: ``castHasUserOffset(forDevice:)`` answers
+    /// by existence, so a stored 0 would leave the row reading "0 ms".
+    func clearCastUserOffset(forDevice id: String)
+}
+
+extension NativeBackend: CastSyncOffsetControlling {
+
+    public func castUserOffsetMs(forDevice id: String) -> Double {
+        castOffsetLock.withLock { castOffsetsByID[id] ?? 0 }
+    }
+
+    public func castHasUserOffset(forDevice id: String) -> Bool {
+        castOffsetLock.withLock { castOffsetsByID[id] != nil }
+    }
+
+    public func setCastUserOffsetMs(_ ms: Double, forDevice id: String) {
+        let value = BTSyncTrim.quantise(ms, rangeMs: BTSyncTrim.castRangeMs)
+        let all: [String: Double] = castOffsetLock.withLock {
+            castOffsetsByID[id] = value
+            return castOffsetsByID
+        }
+        do { try castOffsetStore?.save(all) } catch { StoreRecovery.noteWriteFailure(error) }
+        pushCastUserOffset(value, forDevice: id)
+    }
+
+    public func clearCastUserOffset(forDevice id: String) {
+        let all: [String: Double] = castOffsetLock.withLock {
+            castOffsetsByID.removeValue(forKey: id)
+            return castOffsetsByID
+        }
+        do { try castOffsetStore?.save(all) } catch { StoreRecovery.noteWriteFailure(error) }
+        pushCastUserOffset(0, forDevice: id)
+    }
+
+    /// The one write onto the live feed. The session manager owns the per-device
+    /// delay line and applies `max(0, roomDelay + userOffset)`, so this term is
+    /// stored beside the controller's automatic one rather than competing with
+    /// it — writing the offset never disturbs the room delay, and vice versa.
+    /// An id with no session is ignored there (the `setLevel` posture), which is
+    /// why an unarmed receiver needs no guard here and picks its value up from
+    /// the arm instead.
+    private func pushCastUserOffset(_ ms: Double, forDevice id: String) {
+        castOutputManager?.setCastUserOffsetMs(Int(ms), forDeviceID: id)
+    }
+
+    /// Re-push every armed receiver's stored offset — the Cast twin of the
+    /// Bluetooth sinks' arm-time trim replay, so a receiver the user reselects
+    /// comes back carrying the offset it was tuned to rather than none.
+    func pushStoredCastUserOffsets(forDeviceIDs ids: [String]) {
+        let stored = castOffsetLock.withLock { castOffsetsByID }
+        for id in ids {
+            pushCastUserOffset(stored[id] ?? 0, forDevice: id)
         }
     }
 }

@@ -52,9 +52,10 @@ public enum SetupAllowOutcome: String, Equatable, Sendable {
     /// row in the spine) — the skip never spent a prompt, so the step goes
     /// back to being undecided.
     case skipReopened = "skip_reopened"
-    /// Usage Statistics' only path: there is no OS to ask, so the click IS
-    /// the answer and it lands in-app.
-    case consentGranted = "consent_granted"
+    /// Usage Statistics' only path: no OS is asked, so the click raises
+    /// Audiout's OWN consent sheet. The answer lands when that sheet is
+    /// answered, never on the click itself.
+    case consentSheetRaised = "consent_sheet_raised"
 }
 
 /// Where an Allow click sends the user, when it sends them anywhere. The flow
@@ -68,6 +69,11 @@ public enum SetupAllowDestination: Equatable, Sendable {
     case settingsPane(SystemSettingsPane)
     /// Open System Settings ▸ General ▸ Login Items & Extensions.
     case loginItems
+    /// Raise Audiout's own Share / Don't Share sheet. The one destination that
+    /// is not another app: Usage Statistics is our ask, so the surface it
+    /// raises is ours too — and it exists so that a click can never BE the
+    /// consent, only the thing that asks for it.
+    case usageStatsConsent
 }
 
 /// The full answer to one Allow click.
@@ -259,9 +265,8 @@ public final class SetupFlowModel {
         // Not a privacy pane at all — approval only exists in Login Items.
         case .speakerSync: return .loginItems
         case .remoteControl: return .settingsPane(.accessibility)
-        // Nowhere to send anyone: the switch is Audiout's own, in Settings ›
-        // General, and there is no System Settings pane for it at all.
-        case .usageStats: return .none
+        // Not a System Settings pane at all — our own sheet.
+        case .usageStats: return .usageStatsConsent
         }
     }
 
@@ -357,13 +362,12 @@ public final class SetupFlowModel {
             return SetupAllowResult(setup.remoteControlStatus == .granted ? .promptTriggered : .probeTimeout)
 
         case .usageStats:
-            // No prompt, no probe, no pane — the click IS the grant, and it
-            // lands before this returns, so the row is ticked by the time the
-            // caller repaints. Named `consentGranted` rather than borrowing
-            // `promptTriggered`, so a live trail can't be read as macOS having
-            // asked the user something it never asked.
-            setup.grantUsageStats()
-            return SetupAllowResult(.consentGranted)
+            // Raises a surface and grants NOTHING. Every other step's Allow
+            // hands the decision to a dialog the user still has to answer, and
+            // this one now does the same — with our sheet rather than macOS's.
+            // Granting here instead is what let a click on the spine row opt a
+            // user in without showing them anything (owner, live).
+            return SetupAllowResult(.consentSheetRaised, .usageStatsConsent)
         }
     }
 

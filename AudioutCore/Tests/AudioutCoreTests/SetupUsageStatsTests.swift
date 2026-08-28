@@ -95,8 +95,10 @@ extension SerializedSharedState {
                 "an undecided optional card holds the gate exactly like the other three")
     }
 
-    /// Saying yes ticks the card, persists the consent, and spends the ask.
-    @Test func grantingUsageStatsCompletesTheCardAndSpendsTheAsk() async {
+    /// The ask RAISES a surface and grants nothing — the same contract every
+    /// other step's ask has, with our sheet in place of macOS's dialog. The
+    /// answer lands when the sheet is answered, never on the click.
+    @Test func theAskRaisesTheConsentSheetAndGrantsNothing() async {
         let settings = AppSettings(defaults: isolatedDefaults)
         let setup = makeSetup(settings: settings)
         let flow = SetupFlowModel(setup: setup)
@@ -104,8 +106,22 @@ extension SerializedSharedState {
 
         let result = await flow.allow(.usageStats)
 
-        #expect(result.outcome == .consentGranted, "no OS was asked anything")
-        #expect(result.destination == .none, "there is no pane to open")
+        #expect(result.outcome == .consentSheetRaised)
+        #expect(result.destination == .usageStatsConsent, "ours, not a Settings pane")
+        #expect(!settings.telemetryOptIn, "the click is not the consent")
+        #expect(!settings.telemetryAsked, "and it has not spent the ask either")
+        #expect(flow.display(.usageStats) != .completed)
+    }
+
+    /// Answering the sheet is what decides it, either way.
+    @Test func answeringTheSheetIsWhatDecidesTheCard() async {
+        let settings = AppSettings(defaults: isolatedDefaults)
+        let setup = makeSetup(settings: settings)
+        let flow = SetupFlowModel(setup: setup)
+        await prime(setup)
+
+        setup.grantUsageStats()
+
         #expect(flow.display(.usageStats) == .completed)
         #expect(settings.telemetryOptIn)
         #expect(settings.telemetryAsked)
@@ -174,7 +190,8 @@ extension SerializedSharedState {
         flow.reopen(.usageStats)
         #expect(flow.activeStep == .usageStats)
 
-        _ = await flow.allow(.usageStats)
+        #expect(await flow.allow(.usageStats).destination == .usageStatsConsent)
+        setup.grantUsageStats()
         #expect(settings.telemetryOptIn)
         #expect(flow.display(.usageStats) == .completed)
     }
@@ -205,29 +222,57 @@ extension SerializedSharedState {
                 "asked once means the pass is an answer, not a 'Skip for now'")
     }
 
-    /// The card carries its OWN words, not the OS's — it is not a macOS grant,
-    /// so "Allow"/"Don't Allow" would put words in macOS's mouth.
-    @Test func theDialogCarriesShareRatherThanAllow() {
-        #expect(DemoPromptMockView.confirmTitle(for: .usageStats) == "Share")
-        #expect(DemoPromptMockView.refuseTitle(for: .usageStats) == "Don't Share")
-        #expect(DemoPromptMockView.confirmTitle(for: .bluetooth) == "Allow",
-                "every real TCC card keeps the OS's own verb")
-        #expect(DemoPromptMockView.refuseTitle(for: .bluetooth) == "Don't Allow")
+    /// The rehearsal is not a DRAWING of the sheet — it is the same view, built
+    /// by the same initialiser. That is what makes "looks exactly like the
+    /// mock-up" true by construction rather than by careful copying.
+    @Test func theStageDrawsTheRealConsentCard() {
+        let stage = DemoConsentCardMockView()
+        stage.layoutSubtreeIfNeeded()
+
+        #expect(stage.test_card.shareButton.title == "Share")
+        #expect(stage.test_card.declineButton.title == "Don't Share")
+        // Inert, but NOT disabled — a disabled button greys its own title
+        // whatever alpha it is drawn at, and the whole point is that the
+        // rehearsal looks like the surface that is about to appear.
+        #expect(stage.test_card.shareButton.isEnabled)
+        #expect(stage.hitTest(NSPoint(x: 10, y: 10)) == nil, "and it takes no clicks")
     }
 
-    /// The never-sent promise has nowhere else to live now that the stage is a
-    /// two-button card rather than an itemised ledger: the why line is the only
-    /// copy a first ask shows, so it has to carry the terms in full.
-    @Test func theWhyLineCarriesTheNeverSentPromise() {
-        let why = OnboardingViewController.content(for: .usageStats).whyLine.lowercased()
-        for promised in ["speaker names", "network", "audio", "licence key"] {
-            #expect(why.contains(promised),
-                    "the why line is the only place the fence is stated — missing: \(promised)")
+    /// The card is the ONLY place the app states what it sends, so it is held
+    /// to the payload in both directions: it must DISCLOSE what the autocapture
+    /// really carries, and it must still name what genuinely never leaves.
+    ///
+    /// Both halves are regression guards for the same live failure — an earlier
+    /// draft promised "never your network" and "never your licence key" while
+    /// the SDK was sending both, and nothing caught it until a real ingested
+    /// event was read back.
+    @Test func theCardStatesWhatIsSentAndWhatIsWithheld() {
+        let body = UsageStatsConsentCard.bodyText.lowercased()
+
+        // Disclosed, because it is genuinely sent.
+        for disclosed in ["random id", "licensed", "city", "macos"] {
+            #expect(body.contains(disclosed),
+                    "the card must disclose what the payload carries — missing: \(disclosed)")
         }
+        // Withheld, and the card says so.
+        for withheld in ["speakers", "play"] {
+            #expect(body.contains(withheld),
+                    "the card must still name what never leaves — missing: \(withheld)")
+        }
+        // The claims the payload cannot back any more. An absolute "never" on
+        // either of these is the exact sentence that was false before.
+        #expect(!body.contains("never your network"))
+        #expect(!body.contains("never your licence key"))
     }
 
-    /// The decline button really declines: one tap answers the card, and the
-    /// gate opens without it ever having claimed a grant.
+    /// The card carries the promise; the hero's why line carries the WHY. They
+    /// sit inches apart on the stage, so saying the same thing in both read as
+    /// a stutter.
+    @Test func theWhyLineDoesNotRepeatTheCard() {
+        #expect(OnboardingViewController.content(for: .usageStats).whyLine
+                != UsageStatsConsentCard.bodyText)
+    }
+
     @Test func tappingNoThanksAnswersTheCardFromTheRibbon() async {
         let settings = AppSettings(defaults: isolatedDefaults)
         let setup = makeSetup(settings: settings)
@@ -242,67 +287,23 @@ extension SerializedSharedState {
         #expect(!vc.test_hasCheckmark(.usageStats), "a decline is not a grant")
     }
 
-    /// **The consent bug this step nearly shipped with.** Every other live row
-    /// doubles as a shortcut to its primary, which is safe there because the
-    /// primary only raises a system dialog that asks again. Here the primary IS
-    /// the consent, so the shortcut opted the user in from a click on a row
-    /// they were reading — and then advanced past the card, which is exactly
-    /// what it looked like live ("I click the line item and it just goes to the
-    /// next step").
-    @Test func pressingTheLiveRowNeverGrantsConsent() async {
-        let settings = AppSettings(defaults: isolatedDefaults)
-        let setup = makeSetup(settings: settings)
-        let vc = makeViewController(setup)
-        await vc.test_refreshStatuses()
-        await vc.test_allow([.audio, .localNetwork])
-        #expect(vc.test_demoMode == .prompt, "the card is up and undecided")
-
-        #expect(!(await vc.test_pressRow(.usageStats)), "the live row must refuse the press")
-
-        #expect(!settings.telemetryOptIn, "a row click is not consent")
-        #expect(!settings.telemetryAsked, "and it must not spend the ask either")
-        #expect(vc.test_demoMode == .prompt, "the card is still up, still undecided")
-    }
-
-    /// The refusal is structural, not just a swallowed click: the row stops
-    /// advertising itself as a button at all, so nothing — pointer, keyboard or
-    /// VoiceOver — offers "Share Usage Counts" as a row action.
-    @Test func theLiveRowOffersNoActionToPressAtAll() async {
+    /// The row keeps its ACTION — it is a control again, and what it reaches is
+    /// the sheet. VoiceOver offers the same words the button does.
+    @Test func theLiveRowStillOffersItsActionToPress() async {
         let setup = makeSetup()
         let vc = makeViewController(setup)
         await vc.test_refreshStatuses()
         await vc.test_allow([.audio, .localNetwork])
 
-        #expect(!vc.test_isRowPressable(.usageStats))
-        #expect(!vc.test_rowIsAccessibilityButton(.usageStats))
-        #expect(vc.test_rowAccessibilityAction(.usageStats) == nil)
-    }
-
-    /// The rule is UNIVERSAL, not an exemption for this one card (owner, live:
-    /// "clicking on the line item accepts, even though the person might not
-    /// actually be meaning to — they're just trying to trigger that step"). On
-    /// the TCC steps the same shortcut spent the one prompt macOS gives; here
-    /// it granted outright. A row reaches a step; the hero's buttons answer it.
-    @Test func noLiveRowAnywhereAnswersItsOwnStep() async {
-        let setup = makeSetup()
-        let vc = makeViewController(setup)
-        await vc.test_refreshStatuses()
-
-        // Walk the flow and check each step while it is the live one.
-        for step in [SetupStep.audio, .localNetwork, .usageStats] {
-            if step != .audio { await vc.test_allow([step == .usageStats ? .localNetwork : .audio]) }
-            guard vc.test_activeStep == step else { continue }
-            #expect(!vc.test_isRowPressable(step),
-                    "\(step)'s live row must not be pressable")
-            #expect(!(await vc.test_pressRow(step)),
-                    "\(step)'s live row must refuse the press")
-        }
+        #expect(vc.test_isRowPressable(.usageStats))
+        #expect(vc.test_rowIsAccessibilityButton(.usageStats))
+        #expect(vc.test_rowAccessibilityAction(.usageStats) == "Share Usage Counts")
     }
 
     /// Browsing the ticked row re-shows this step's OWN card, never a System
     /// Settings pane — it has none, and the shared browse path defaults to one.
     /// The body says where the switch really lives instead.
-    @Test func browsingTheGrantedRowReShowsTheLedgerNotASettingsPane() async {
+    @Test func browsingTheGrantedRowReShowsItsOwnCardNotASettingsPane() async {
         let setup = makeSetup()
         let vc = makeViewController(setup)
         await vc.test_refreshStatuses()

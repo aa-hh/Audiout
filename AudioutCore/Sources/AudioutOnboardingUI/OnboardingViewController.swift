@@ -742,9 +742,11 @@ public final class OnboardingViewController: NSViewController {
                 // itemised ledger. The deleted-body rule still holds — the
                 // picture shows the SHAPE of the decision and cannot show its
                 // terms, so the terms ride the why line.
-                whyLine: "Feature counts only \u{2014} never your speaker names, "
-                    + "network, audio or licence key. You can change this any "
-                    + "time in Audiout's settings.",
+                // The WHY, not the terms: the card this ask raises carries the
+                // privacy fence in full, and it appears directly under this
+                // line on the stage — saying it in both read as a stutter.
+                whyLine: "Knowing which features get used is what decides "
+                    + "what gets built next.",
                 // "Share", matching the Settings › General toggle it is the
                 // same switch as. "Counts" rather than "statistics" because
                 // counts is what they are and the shorter word is the plainer
@@ -1717,11 +1719,9 @@ public final class OnboardingViewController: NSViewController {
     /// that button's target), a decided one opens for reading, a skipped one
     /// takes the skip back, and a locked one refuses without a sound.
     private func rowPressed(_ step: SetupStep) {
-        // The live step is already in the hero pane with its own buttons, so
-        // its row has nothing to do — and must not ANSWER it (see
-        // `SetupSpineRowView.isPressable`). The row refuses the press itself;
-        // this is the belt for programmatic callers.
-        if step == displayedActiveStep { return }
+        // The live row is a shortcut to its primary, for every step — see
+        // `SetupSpineRowView.isPressable` for why that is safe again.
+        if step == displayedActiveStep { ribbonPrimaryTapped(); return }
         // The loud row: pressing it moves the flow there, which is the only
         // thing its treatment was ever asking for. The snap-back announcement
         // in `announceTransitions` then speaks the recovery status.
@@ -1876,6 +1876,11 @@ public final class OnboardingViewController: NSViewController {
                 settingsTripStep = step
                 armSettingsTripTimer()
             }
+        // Our own sheet is not a trip out of the app, so it arms no
+        // settings-trip ceiling — that timer exists to catch a user who left
+        // for System Settings and never came back.
+        case .usageStatsConsent:
+            openDestination(result.destination)
         case .settingsPane, .loginItems:
             settingsTripStep = step
             armSettingsTripTimer()
@@ -1883,11 +1888,51 @@ public final class OnboardingViewController: NSViewController {
         }
     }
 
+    /// How the usage-statistics consent sheet is raised, and how its answer
+    /// comes back. Injected so a headless test (and the snapshot renderers) can
+    /// answer it without a real modal on screen; `nil` runs the real sheet.
+    public var presentUsageStatsConsent: ((@escaping (Bool) -> Void) -> Void)?
+
+    /// Audiout's own Share / Don't Share sheet — the surface this step's ask
+    /// raises, exactly as every other step's ask raises one of macOS's.
+    ///
+    /// It is ``UsageStatsConsentCard`` — the SAME view the rehearsal on the
+    /// stage draws, with its buttons live instead of switched off. An `NSAlert`
+    /// was the first attempt and was wrong for exactly the reason this window
+    /// exists: the stage promises "this is what you'll see", and a stock alert
+    /// is not what the stage was showing (owner: "why can't you make it look
+    /// exactly like your mock-up"). One card, two hosts, nothing to keep in
+    /// step.
+    ///
+    /// This is NOT the `NSAlert` that was deleted from `AppDelegate`. That one
+    /// ambushed the first menu-bar click, with nothing on screen to explain it;
+    /// this one answers a card the user is looking at and pressed.
+    private func presentConsentSheet() {
+        let deliver: (Bool) -> Void = { [weak self] granted in
+            guard let self else { return }
+            if granted { model.grantUsageStats() } else { flow.skip(.usageStats) }
+            announce(granted ? Self.content(for: .usageStats).spineDoneTitle
+                             : "Not sharing usage statistics.")
+            refresh(animated: canAnimate)
+        }
+        if let presentUsageStatsConsent {
+            presentUsageStatsConsent(deliver)
+            return
+        }
+        // No window means no sheet to attach one to (headless renders, an
+        // off-screen controller). Refusing beats a stray app-modal dialog.
+        guard view.window != nil else { return }
+        presentAsSheet(UsageStatsConsentViewController(onAnswer: deliver))
+    }
+
     /// Open a destination the flow model named, yielding the window level first
     /// so System Settings can actually come to the front.
     private func openDestination(_ destination: SetupAllowDestination) {
         switch destination {
         case .none: return
+        // OURS, so no level yield and no `onWillOpenSystemSettings` — nothing
+        // is coming to the front over us; the sheet lands on this window.
+        case .usageStatsConsent: presentConsentSheet()
         case .settingsPane(let pane):
             onWillOpenSystemSettings?()
             onOpenSettings(pane)

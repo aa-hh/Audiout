@@ -319,6 +319,9 @@ final class DemoPaneView: NSView {
         case .prompt:
             switch step {
             case .remoteControl: return DemoSettingsHandoffMockView(step: step)
+            // The one ask whose surface is OURS, so the rehearsal is the real
+            // view rather than a drawing of one.
+            case .usageStats:    return DemoConsentCardMockView()
             default:             return DemoPromptMockView(step: step)
             }
         // Every retry lands on the pane itself — Remote Control's included, now
@@ -886,7 +889,7 @@ final class DemoPromptMockView: DemoMockView {
         // Two EQUAL capsules filling the content width: the refusal on the left,
         // ghosted, and the confirming one on the right, MARKED — the whole
         // reason the rehearsal is on screen is to say which of the two to press.
-        let deny = DemoPushButtonView(title: Self.refuseTitle(for: step))
+        let deny = DemoPushButtonView(title: "Don't Allow")
         confirmButton = DemoPushButtonView(title: Self.confirmTitle(for: step),
                                            emphasis: .correct)
         let buttons = NSStackView(views: [deny, confirmButton])
@@ -899,15 +902,6 @@ final class DemoPromptMockView: DemoMockView {
         ask.translatesAutoresizingMaskIntoConstraints = false
         for view in [icon, badge, badgeGlyph, help, helpGlyph, title, body, buttons] {
             ask.addSubview(view)
-        }
-        // Two markers belong to macOS's privacy card and to nothing else: the
-        // blue hand badge that says "this is a privacy prompt", and the Help
-        // button that opens Apple's own documentation. Usage Statistics wears
-        // this card's SHAPE because the decision has the same two-button shape,
-        // but it is Audiout asking — so it carries neither, and the frame drops
-        // its "You'll see this from macOS" caption for the same reason.
-        if step == .usageStats {
-            for view in [badge, badgeGlyph, help, helpGlyph] { view.isHidden = true }
         }
 
         // The granted state — what the pass crossfades to once the pointer has
@@ -1008,12 +1002,10 @@ final class DemoPromptMockView: DemoMockView {
     /// and System Audio draws macOS's RED RECORD glyph — NOT Audiout's icon,
     /// which is what this table used to return for it. The badge, the size and
     /// the slot are identical either way; only the tile's contents change.
-    /// `.remoteControl` and `.speakerSync` never reach this mock (one raises
-    /// the Accessibility alert, the other has no dialog at all) and keep the
-    /// app icon as the safe default for a branch nothing takes.
-    ///
-    /// `.usageStats` DOES reach it, and is the one case that must read the icon
-    /// the other way round — see its own branch.
+    /// `.remoteControl`, `.speakerSync` and `.usageStats` never reach this mock
+    /// (the first raises the Accessibility alert, the second has no dialog at
+    /// all, and the third draws its own real card — `DemoConsentCardMockView`)
+    /// and keep the app icon as the safe default for a branch nothing takes.
     private static func iconView(for step: SetupStep) -> NSView {
         switch step {
         // The live-confirmed red record tile: macOS leads its system-audio ask
@@ -1043,29 +1035,12 @@ final class DemoPromptMockView: DemoMockView {
         // DIALOG'S icon — the one a separate system process reads out of Launch
         // Services, not this process's own fresher `NSApp.applicationIconImage`
         // (see `demoIconAsAThirdPartyProcessSeesIt`).
-        case .remoteControl, .speakerSync:
+        case .remoteControl, .speakerSync, .usageStats:
             let icon = NSImageView()
             icon.image = demoIconAsAThirdPartyProcessSeesIt()
             icon.imageScaling = .scaleProportionallyUpOrDown
             icon.translatesAutoresizingMaskIntoConstraints = false
             return icon
-        // A TILE, like the three capability grants above it, not an app icon:
-        // this card is AUDIOUT's rather than macOS's, and both ways of asking
-        // for our own icon are wrong here. `demoIconAsAThirdPartyProcessSeesIt`
-        // exists to reproduce another process's possibly-stale view of us,
-        // which we are not; and `NSApp.applicationIconImage` resolves to a
-        // generic folder whenever the running binary is not a real `.app` — the
-        // snapshot renderers, where these fixtures come from. The tile wears
-        // the step's OWN identity glyph and hue (the pairing its spine row
-        // already carries), so the card is recognisably this step's in every
-        // render context. `Tokens` inside a mock is the same exception
-        // `DemoSettledMockView` takes: the system-look rule governs surfaces
-        // that MIMIC macOS, and this one does not.
-        case .usageStats:
-            return systemTile(fill: Tokens.Color.permissionUsageStats) {
-                demoGlyph("chart.bar.xaxis", pointSize: iconSide * 0.5,
-                          weight: .regular, color: .white)
-            }
         }
     }
 
@@ -1154,17 +1129,7 @@ final class DemoPromptMockView: DemoMockView {
     /// across that family is "Allow" (verified against the real audio and
     /// Local Network dialogs) — never "OK", which was an unverified guess
     /// from before any real dialog had been checked.
-    static func confirmTitle(for step: SetupStep) -> String {
-        // Usage Statistics is not a macOS grant, so its card carries the words
-        // its own buttons carry rather than the OS's.
-        step == .usageStats ? "Share" : "Allow"
-    }
-
-    /// The refusal's label — the button the rehearsal is telling the user NOT
-    /// to press. Same split as ``confirmTitle(for:)``.
-    static func refuseTitle(for step: SetupStep) -> String {
-        step == .usageStats ? "Don't Share" : "Don't Allow"
-    }
+    static func confirmTitle(for step: SetupStep) -> String { "Allow" }
 }
 
 // MARK: - System alert mock
@@ -1781,6 +1746,96 @@ final class DemoSettingsHandoffMockView: DemoMockView {
     var test_stage: DemoStage {
         settings.alphaValue > alert.alphaValue ? .settingsPane : .alert
     }
+}
+
+// MARK: - Usage-statistics consent card
+
+/// Usage Statistics' stage: the REAL ``UsageStatsConsentCard``, inert, with the
+/// pointer gliding to Share and pressing it.
+///
+/// Every other mock in this file is a drawing of a surface macOS owns, which is
+/// the best that can be done for something another process renders. This step's
+/// surface is Audiout's, so the rehearsal is not a drawing at all — it is the
+/// same view the sheet presents, built by the same initialiser, with its two
+/// buttons switched off. There is nothing to keep in step and nothing to get
+/// subtly wrong (owner: "why can't you make it look exactly like your
+/// mock-up").
+///
+/// The pass ends where it started, like every other ask: the card at rest with
+/// nothing pressed, because that is how the user will FIND it.
+final class DemoConsentCardMockView: DemoMockView {
+
+    private let card = UsageStatsConsentCard()
+    private let cursor = DemoCursorView(pointerHeight: 22)
+
+    /// Where the pointer waits: bottom-left, level with the buttons and clear
+    /// of every line of copy. A cursor resting on top of text reads as a
+    /// drawing mistake rather than a pointer.
+    private let cursorParkLeading: CGFloat = 34
+    private let cursorParkAboveBottom: CGFloat = 34
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        card.makeDecorative()
+        addSubview(card)
+        addSubview(cursor)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalTo: card.widthAnchor),
+            heightAnchor.constraint(equalTo: card.heightAnchor),
+            card.leadingAnchor.constraint(equalTo: leadingAnchor),
+            card.topAnchor.constraint(equalTo: topAnchor),
+            cursor.leadingAnchor.constraint(equalTo: leadingAnchor, constant: cursorParkLeading),
+            cursor.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -cursorParkAboveBottom),
+        ])
+        applySettledState()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// The rehearsal takes no clicks. Its buttons are real, undimmed AppKit
+    /// controls — that is what makes it accurate — so the refusal has to be
+    /// here, or a pointer over the stage would light up a hover state on a
+    /// button that answers nobody.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override var timelineDuration: TimeInterval { DemoBeat.loop }
+
+    override func applySettledState() {
+        cursor.alphaValue = 1
+        cursor.layer?.transform = CATransform3DIdentity
+    }
+
+    override func addTimelineAnimations() {
+        let end = timelineDuration
+        let delta = travelToShare()
+        let moved = NSValue(caTransform3D: CATransform3DMakeTranslation(delta.x, delta.y, 0))
+        let still = NSValue(caTransform3D: CATransform3DIdentity)
+        cursor.layer?.add(keyframes("transform", [
+            (0, still), (DemoBeat.idle, still), (DemoBeat.travelEnd, moved),
+            (DemoBeat.resetEnd, moved), (end, still),
+        ], timing: .easeOut), forKey: "cursorGlide")
+        cursor.layer?.add(keyframes("opacity", [
+            (0, 1), (DemoBeat.holdEnd - 0.3, 1), (DemoBeat.holdEnd, 0),
+            (DemoBeat.resetEnd, 0), (end, 1),
+        ]), forKey: "cursorFade")
+        cursor.addClickSplash(on: self, at: DemoBeat.pressEnd)
+    }
+
+    /// How far the pointer's TIP has to travel to the Share button's middle.
+    private func travelToShare() -> CGPoint {
+        let from = cursor.convert(cursor.tipPoint, to: self)
+        let button = card.shareButton
+        let to = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: self)
+        return CGPoint(x: to.x - from.x, y: to.y - from.y)
+    }
+
+    // MARK: Test-support hooks
+
+    /// The card the sheet would show, so a test can prove the two are the same
+    /// view rather than two drawings that happen to agree.
+    var test_card: UsageStatsConsentCard { card }
 }
 
 // MARK: - Settled mock

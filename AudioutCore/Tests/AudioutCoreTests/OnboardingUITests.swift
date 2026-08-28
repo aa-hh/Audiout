@@ -416,21 +416,16 @@ import Testing
 
     // MARK: Row press dispatch
 
-    /// The live row is NOT a shortcut to its primary — it refuses the press
-    /// entirely (owner, live: "clicking on the line item accepts, even though
-    /// the person might not actually be meaning to, they're just trying to
-    /// trigger that step"). It used to fire the same Allow, which turned a
-    /// navigation gesture into an ANSWER: on a TCC step that spent the one
-    /// prompt macOS gives, and on Usage Statistics it granted outright. The
-    /// live step is already in the hero pane with its own buttons.
-    @Test func theLiveRowNeverFiresItsOwnAsk() async {
+    /// The live row IS the ribbon's primary button: pressing anywhere on it runs
+    /// the same Allow.
+    @Test func pressingTheLiveRowFiresTheRibbonsPrimary() async {
         let vc = makeVC(model: makeGrantableModel())
-        #expect(!vc.test_isRowPressable(.audio))
+        #expect(vc.test_isRowPressable(.audio))
 
-        #expect(!(await vc.test_pressRow(.audio)))
+        #expect(await vc.test_pressRow(.audio))
 
-        #expect(!vc.test_hasCheckmark(.audio), "nothing was asked, so nothing was granted")
-        #expect(vc.test_activeStep == .audio, "and the flow has not moved on")
+        #expect(vc.test_hasCheckmark(.audio), "the row press ran the real Allow path")
+        #expect(vc.test_activeStep == .localNetwork)
     }
 
     /// No jump-ahead: the flow is sequential, so a locked row refuses the press
@@ -452,19 +447,15 @@ import Testing
         #expect(vc.test_browseStep == nil, "and nothing opened for reading")
     }
 
-    /// The two-mode primary still flips to the Settings deep link after a
-    /// denial — but only the RIBBON's button reaches it now. The row is not a
-    /// second way in, so it opens nothing however often it is pressed.
-    @Test func theRibbonsPrimaryFollowsTheTwoModeFlipAndTheRowNeverDoes() async {
+    /// The row-level target is two-mode aware for free — it fires whatever the
+    /// ribbon currently offers, so after a denial it opens Settings.
+    @Test func theRowPressFollowsTheTwoModePrimary() async {
         var opened: [SystemSettingsPane] = []
         let vc = makeVC(model: makeModel(audio: .denied), onOpenSettings: { opened.append($0) })
-        await vc.test_tapAllow(.audio)       // first ask: the probe lands denied
+        _ = await vc.test_pressRow(.audio)   // first press: the probe lands denied
         #expect(opened.isEmpty)
 
         _ = await vc.test_pressRow(.audio)
-        #expect(opened.isEmpty, "the live row is not a way to fire the ask")
-
-        await vc.test_ribbonTapPrimary()
 
         #expect(opened == [.screenAndSystemAudioRecording])
     }
@@ -495,12 +486,11 @@ import Testing
         #expect(!vc.test_rowIsBrowseSelected(.audio))
     }
 
-    /// A browse is a reading position on a decided row — and the moment the live
-    /// step's ask fires, the stage belongs to that ask. Browse content left in
+    /// A browse is a reading position on a decided row — and the moment the LIVE
+    /// row fires its ask, the stage belongs to that ask. Browse content left in
     /// place would mask the waiting dim, the denied status line, and the
-    /// announcement that line drives. (The ask fires from the RIBBON; the live
-    /// row is not a way in — see `theLiveRowNeverFiresItsOwnAsk`.)
-    @Test func firingTheLiveAskClosesAnyBrowse() async {
+    /// announcement that line drives.
+    @Test func firingTheLiveRowsAskClosesAnyBrowse() async {
         let vc = makeVC(model: makeModel(audio: .granted,
                                          localNetwork: CannedOutcomeLocalNetwork(outcome: .denied),
                                          ptpHelper: FakePTPHelper(status: .enabled)))
@@ -511,7 +501,7 @@ import Testing
         #expect(await vc.test_pressRow(.audio))
         #expect(vc.test_browseStep == .audio, "the decided row is open for reading")
 
-        await vc.test_ribbonTapPrimary()
+        #expect(await vc.test_pressRow(.localNetwork))
 
         #expect(vc.test_browseStep == nil, "the live ask took the stage back")
         #expect(vc.test_ribbonStatusText?.contains("macOS only asks once") ?? false,
@@ -566,11 +556,8 @@ import Testing
     /// VoiceOver can't see is a marker that isn't there.
     @Test func rowsSpeakTheirStateAndTheirAction() async {
         let vc = makeVC(model: makeGrantableModel())
-        // The LIVE row is not a button any more: its ask lives on the ribbon,
-        // and offering `allowTitle` here would let VoiceOver answer a step from
-        // a row the user was only navigating to.
-        #expect(!vc.test_rowIsAccessibilityButton(.audio))
-        #expect(vc.test_rowAccessibilityAction(.audio) == nil)
+        #expect(vc.test_rowIsAccessibilityButton(.audio))
+        #expect(vc.test_rowAccessibilityAction(.audio) == "Enable System Audio")
         #expect(!vc.test_rowIsAccessibilityButton(.localNetwork), "a locked row offers no action")
         #expect(vc.test_rowAccessibilityLabel(.localNetwork) == "Find speakers on Wi\u{2011}Fi, locked")
 
@@ -856,10 +843,8 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
 
         #expect(!vc.test_ribbonIsWaiting, "never a stuck wait")
-        // Actionable means the RIBBON offers the way forward. The live row
-        // itself takes no press — that is the point of it not being a shortcut.
         #expect(vc.test_ribbonButtonTitles == ["Open Settings…", "Try Again"])
-        #expect(!vc.test_isRowPressable(.localNetwork))
+        #expect(vc.test_isRowPressable(.localNetwork))
     }
 
     /// The waiting beat, whole: the shared line, the spinner, a stage that steps
@@ -1437,13 +1422,10 @@ import Testing
     /// frontmost app can make macOS decline our re-activation — so the user
     /// returns to an INACTIVE app, where a stock control spends the first click
     /// activating the window. The CTA, every prominent Allow, and the live row
-    /// act on that activating click. Rows that take no press at all — a LOCKED
-    /// one, and now the LIVE one, whose ask moved to the ribbon — keep stock
-    /// behaviour, because there is nothing for the first click to do.
-    @Test func theCTAActsOnTheActivatingClick() async {
+    /// act on that activating click; a locked row keeps stock behaviour.
+    @Test func theCTAAndLiveRowActOnTheActivatingClick() async {
         let vc = makeVC(model: makeGrantableModel())
-        #expect(!vc.test_rowAcceptsFirstMouse(.audio),
-                "the live row is not pressable, so it has no first-mouse case")
+        #expect(vc.test_rowAcceptsFirstMouse(.audio), "the live row acts on first mouse")
         #expect(!vc.test_rowAcceptsFirstMouse(.bluetooth), "a locked row keeps stock behaviour")
         #expect(ProminentButton(title: "Allow…", target: nil, action: nil)
                     .acceptsFirstMouse(for: nil),

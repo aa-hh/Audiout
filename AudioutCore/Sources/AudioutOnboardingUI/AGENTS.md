@@ -83,12 +83,47 @@ gate/motion/demo/selection rules change.
     do. This is also why the ask was gated on `analyticsAvailable` when it was
     still an alert.
 
-  **Its stage is the privacy card's shape, and its terms are in the WHY LINE.**
-  Owner call: the stage must read as a sibling of the Bluetooth / Local Network
-  cards rather than inventing its own kind of picture. That shape can show the
-  two-button decision but not its terms, so the never-sent promise (PRODUCT.md's
-  privacy fence, in the user's words) lives in `whyLine` — the only body copy a
-  first ask shows. Keep the two in step; there is nowhere else it is stated.
+  **Its ask raises Audiout's OWN sheet, and that is what makes the row click
+  safe.** `SetupAllowDestination.usageStatsConsent` → `presentConsentSheet()`,
+  a stock `NSAlert` on the Setup window with Share / Don't Share. The ask
+  GRANTS NOTHING: it raises a surface the user still has to answer, exactly
+  like every other step's ask, and the answer arrives from the sheet. Briefly
+  it granted on the click instead, and the spine row is where that reached the
+  user — a press on a row they were only reading opted them in and advanced
+  past the card (owner, live). The row is a shortcut to the primary for every
+  step; the fix belongs at the primary, not by taking the click away. Do not
+  reintroduce a "grant on click" path here.
+
+  (This sheet is NOT the `NSAlert` deleted from `AppDelegate`. That one
+  ambushed the first menu-bar click with nothing on screen to explain it; this
+  one answers a card the user is looking at and pressed. `presentUsageStatsConsent`
+  is the seam headless tests and the snapshot renderers answer it through.)
+
+  **The promise lives in `UsageStatsConsentCard.bodyText`, and it is held to
+  the real payload — not to intent.** An earlier draft promised "never your
+  network" and "never your licence key" while the SDK was autocapturing both;
+  nothing caught it until a real ingested event was read back out of PostHog.
+  Audit the same way before changing what is sent: query the event, list its
+  property keys, and make the string match. `SetupUsageStatsTests` pins both
+  directions — what must be disclosed, and the two absolute "never" claims that
+  must not come back.
+
+  The hero's `whyLine` carries the WHY only. It sits directly above the card on
+  the stage, so anything said in both reads as a stutter.
+
+  **TRAP — its live spine row is NOT pressable, and that is load-bearing.**
+  Every other live row doubles as a shortcut to its primary button
+  (`rowPressed` → `ribbonPrimaryTapped`), which is safe there because the
+  primary only raises a system dialog that asks again: a stray row click costs
+  a dialog, not a decision. Here the primary IS the consent, applied in-app the
+  moment it fires — so the shortcut opted the user in from a click on a row
+  they were only trying to read, and then advanced past the card (found live:
+  "I click the line item and it just goes to the next step"). One property
+  decides it, `SetupCardContent.livePressRunsTheAsk`, and BOTH the row's
+  `isPressable` and `rowPressed` read it; don't re-add a step-specific check in
+  either. The row goes fully unpressable rather than swallowing the click, so
+  nothing — pointer, keyboard or VoiceOver — offers `allowTitle` as a row
+  action.
 
   This ask **used to be an `NSAlert` on the first menu-bar click**, fired from
   `AppDelegate` at the exact moment the user was reaching for the mixer. Don't
@@ -114,25 +149,6 @@ gate/motion/demo/selection rules change.
     time the status reads `.enabled`, cleared by a skip). The app-level wake audit
     re-opens this window for the Login Item only on a real REGRESSION, never at a
     user who passed on it or never approved it.
-- **NO live row fires its own ask** (owner decision, REVERSING the earlier
-  "the live row IS the ribbon's primary button" — read the history before
-  putting the shortcut back). `rowPressed` returns immediately for the live
-  step and `SetupSpineRowView.isPressable` reports `false` for `.active`, so
-  the row is not a button at all: no hover treatment, no first-mouse case, no
-  `AXButton` role, and no `allowTitle` offered as an accessibility action.
-
-  The shortcut turned a NAVIGATION gesture into an ANSWER. On the TCC steps it
-  spent the single prompt macOS gives, from a click the user meant as "take me
-  to this step"; on Usage Statistics, whose primary IS the consent, it opted
-  them in outright and advanced past the card. Found live: *"clicking on the
-  line item accepts, even though the person might not actually be meaning to,
-  they're just trying to trigger that step."*
-
-  A row still reaches a step it is not on — a completed one browses, a skipped
-  one re-arms, a broken one snaps the flow to it. Only the row the user is
-  ALREADY looking at does nothing, because the hero pane beside it already
-  carries that step's buttons.
-
 - **Setup is a GATE, not guidance** (owner decision 2026-08-11 — this REVERSES the
   documented "setup is guidance, not a gate" decision, so read the history before
   changing it back). Done is **ABSENT from the view hierarchy** until

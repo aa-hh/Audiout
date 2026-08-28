@@ -48,6 +48,7 @@ import CoreAudio
         private let lock = NSLock()
         private var _onStateChange: (@Sendable (String, CastSessionState) -> Void)?
         private var _onVolumeLagChange: (@Sendable (String, Int?) -> Void)?
+        private var _onLeadSample: (@Sendable (String, Int) -> Void)?
         private var _deviceSets: [[CastDeviceRecord]] = []
         private var _levels: [(level: Double, id: String)] = []
         private var _retries: [String] = []
@@ -62,6 +63,10 @@ import CoreAudio
         var onVolumeLagChange: (@Sendable (String, Int?) -> Void)? {
             get { lock.withLock { _onVolumeLagChange } }
             set { lock.withLock { _onVolumeLagChange = newValue } }
+        }
+        var onLeadSample: (@Sendable (String, Int) -> Void)? {
+            get { lock.withLock { _onLeadSample } }
+            set { lock.withLock { _onLeadSample = newValue } }
         }
         var deviceSets: [[CastDeviceRecord]] { lock.withLock { _deviceSets } }
         var levels: [(level: Double, id: String)] { lock.withLock { _levels } }
@@ -82,6 +87,14 @@ import CoreAudio
             let handler = lock.withLock { _onVolumeLagChange }
             handler?(id, lag)
         }
+
+        /// CAST-SYNC: `count` believed lead measurements, as the real manager
+        /// delivers them — one a second, already gated on PLAYING and on a
+        /// round trip fast enough to trust.
+        func fireLead(id: String, leadMs: Int, count: Int = 1) {
+            let handler = lock.withLock { _onLeadSample }
+            for _ in 0..<count { handler?(id, leadMs) }
+        }
     }
 
     /// Records the Cast fan-out attaches/detaches; every other capture op is a
@@ -91,6 +104,7 @@ import CoreAudio
         private var _onLevel: (@Sendable (Float) -> Void)?
         private var _onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)?
         private var _castSinkCalls: [(isNil: Bool, pid: pid_t?)] = []
+        private var _preDelayMs: [Int] = []
 
         var onLevel: (@Sendable (_ rms: Float) -> Void)? {
             get { lock.withLock { _onLevel } }
@@ -101,11 +115,16 @@ import CoreAudio
             set { lock.withLock { _onStateChange = newValue } }
         }
         var castSinkCalls: [(isNil: Bool, pid: pid_t?)] { lock.withLock { _castSinkCalls } }
+        /// CAST-SYNC: every AirPlay pre-delay the backend published, in order.
+        var preDelayMs: [Int] { lock.withLock { _preDelayMs } }
 
         func start() {}
         func stop() {}
         func setCastSink(_ sink: PCMSink?, renderProcessPID: pid_t?) {
             lock.withLock { _castSinkCalls.append((sink == nil, renderProcessPID)) }
+        }
+        func setAirPlayPreDelay(ms: Int) {
+            lock.withLock { _preDelayMs.append(ms) }
         }
     }
 
@@ -132,6 +151,19 @@ import CoreAudio
         var onEvent: (@Sendable (DiscoveryEvent) -> Void)?
         func start() {}
         func stop() {}
+        func fire(_ event: DiscoveryEvent) { onEvent?(event) }
+    }
+
+    /// One AirPlay 2 speaker, for the CAST-SYNC tests: the room delay only
+    /// reaches the AirPlay feed when there is an AirPlay session to feed.
+    private static func ap2Device(id: String = "AA:BB:CC:DD:EE:01",
+                                  name: String = "Sonos Move") -> DiscoveredDevice {
+        let txt = ["deviceid": id, "model": "S13", "features": "0x445F8A00,0x1C340"]
+        let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
+        let desc = DeviceDescriptor(
+            name: name, address: "192.168.1.10", family: .ipv4, port: 7000, txtRecord: txt)
+        return DiscoveredDevice(
+            id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: true)
     }
 
     /// No sockets: the real `DACPServer.start(dacpID:)` binds a live
@@ -186,6 +218,7 @@ import CoreAudio
         let manager: FakeCastOutputManager
         let capture: FakeCapture
         let bt: FakeBTEnumerator
+        let discovery: NoOpDiscovery
     }
 
     /// `castAbsenceGrace` defaults SHORT so the browse-debounce never adds
@@ -200,9 +233,10 @@ import CoreAudio
         let manager = FakeCastOutputManager()
         let capture = FakeCapture()
         let bt = FakeBTEnumerator()
+        let discovery = NoOpDiscovery()
         let backend = NativeBackend(
             engineControl: NoOpEngine(),
-            discoverySource: NoOpDiscovery(),
+            discoverySource: discovery,
             btEnumerator: withBT ? bt : nil,
             castEnumerator: cast,
             castOutputManager: manager,
@@ -213,7 +247,8 @@ import CoreAudio
             aggregateControl: NoOpAggregateControl())
         backend.captureCoordinator = capture
         backend.start()
-        return Rig(backend: backend, cast: cast, manager: manager, capture: capture, bt: bt)
+        return Rig(backend: backend, cast: cast, manager: manager, capture: capture, bt: bt,
+                   discovery: discovery)
     }
 
     private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {
@@ -525,6 +560,142 @@ import CoreAudio
         rig.backend.retryOutput(Self.record.id)
         waitFor(timeout: 0.3) { false }
         #expect(rig.manager.retries == [Self.record.id], "an unselected receiver has nothing to retry")
+    }
+
+    // MARK: - CAST-SYNC (room delay)
+
+    /// An AirPlay speaker and a Cast receiver, selected together, and the
+    /// receiver already playing — the room every CAST-SYNC test below is set in.
+    private func castRoom() -> (rig: Rig, ap: DiscoveredDevice) {
+        let rig = makeBackend()
+        let ap = Self.ap2Device()
+        rig.discovery.fire(.appeared(ap))
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil
+            && Self.device(rig.backend, ap.id) != nil }
+        return (rig, ap)
+    }
+
+    /// The whole point of the activation phase: selecting a Cast receiver
+    /// makes the room play at the receiver's pace, and the AirPlay feed is
+    /// held back by the difference between that and its own start buffer.
+    /// Deselecting hands the room back on the very next buffer.
+    @Test func selectingACastDeviceHoldsTheAirPlayFeedBack() {
+        let (rig, ap) = castRoom()
+        rig.backend.setOutputSet([ap.id])
+        waitFor(timeout: 0.3) { false }
+        #expect(rig.backend.localSinkReferenceDelayMs() == rig.backend.startBufferMs)
+        #expect(rig.capture.preDelayMs.isEmpty, "AirPlay alone is never held back")
+
+        rig.backend.setOutputSet([ap.id, Self.record.id])
+        waitFor { !rig.capture.preDelayMs.isEmpty }
+        let assumed = CastRoomDelay.defaultLeadMs
+        #expect(rig.backend.localSinkReferenceDelayMs() == assumed,
+                "the room now plays at the receiver's assumed lead")
+        #expect(rig.capture.preDelayMs.last == assumed - rig.backend.startBufferMs,
+                "and AirPlay is held back by the part it does not already have")
+
+        rig.backend.setOutputSet([ap.id])
+        waitFor { rig.capture.preDelayMs.last == 0 }
+        #expect(rig.capture.preDelayMs.last == 0, "0 removes the line rather than emptying it")
+        #expect(rig.backend.localSinkReferenceDelayMs() == rig.backend.startBufferMs)
+    }
+
+    /// THE INVARIANT, at this seam: with no Cast device in the selection the
+    /// backend never so much as mentions a pre-delay, so the AirPlay path is
+    /// the one that shipped. (Its AirPlay+BT sibling, which also pins every
+    /// published composition, is `NativeBackendBTSelectionTests`.)
+    @Test func aCastFreeSelectionNeverPublishesAPreDelay() {
+        let rig = makeBackend(withBT: true)
+        let ap = Self.ap2Device()
+        rig.discovery.fire(.appeared(ap))
+        rig.cast.fire([Self.record])
+        let btID = "C4-38-75-0E-BF-4A:output"
+        rig.bt.fire([BTDeviceSnapshot(id: btID, name: "Move 2", isConnected: true)])
+        waitFor { Self.device(rig.backend, btID) != nil && Self.device(rig.backend, ap.id) != nil }
+
+        rig.backend.setOutputSet([btID])
+        rig.backend.setOutputSet([btID, ap.id])
+        rig.backend.setOutputSet([ap.id])
+        waitFor(timeout: 0.3) { false }
+        #expect(rig.capture.preDelayMs.isEmpty, "got \(rig.capture.preDelayMs)")
+    }
+
+    /// A Cast receiver in a room with no AirPlay device in it installs no line
+    /// either: nothing would read it, and it costs a megabyte and a memcpy per
+    /// buffer. The room delay itself still moves — the Mac's own sink meets it.
+    @Test func aCastRoomWithNoAirPlayDeviceInstallsNoLine() {
+        let rig = makeBackend()
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { rig.backend.localSinkReferenceDelayMs() == CastRoomDelay.defaultLeadMs }
+        #expect(rig.capture.preDelayMs.allSatisfy { $0 == 0 }, "got \(rig.capture.preDelayMs)")
+    }
+
+    /// A receiver that turns out to play LATER than assumed moves the whole
+    /// room once more — and a settled one that stays where it is moves nothing
+    /// at all, however many samples it reports.
+    @Test func aLateReceiverMovesTheRoomOnceAndThenStops() {
+        let (rig, ap) = castRoom()
+        rig.backend.setOutputSet([ap.id, Self.record.id])
+        waitFor { !rig.capture.preDelayMs.isEmpty }
+        let published = rig.capture.preDelayMs.count
+
+        let late = 7_000
+        rig.manager.fireLead(id: Self.record.id, leadMs: late,
+                             count: CastRoomDelay.settleSampleCount)
+        waitFor { rig.capture.preDelayMs.last == late - rig.backend.startBufferMs }
+        #expect(rig.backend.localSinkReferenceDelayMs() == late)
+
+        // Still there, still reporting: a settled receiver is left alone.
+        rig.manager.fireLead(id: Self.record.id, leadMs: late, count: 30)
+        waitFor(timeout: 0.3) { false }
+        #expect(rig.capture.preDelayMs.count == published + 1, "got \(rig.capture.preDelayMs)")
+    }
+
+    /// A receiver that plays EARLIER than assumed is delayed on its own feed
+    /// instead — the rest of the house is not dragged forward for it.
+    @Test func anEarlyReceiverLeavesTheRoomWhereItIs() {
+        let (rig, ap) = castRoom()
+        rig.backend.setOutputSet([ap.id, Self.record.id])
+        waitFor { !rig.capture.preDelayMs.isEmpty }
+        let published = rig.capture.preDelayMs.count
+
+        rig.manager.fireLead(id: Self.record.id, leadMs: 4_000,
+                             count: CastRoomDelay.settleSampleCount)
+        waitFor(timeout: 0.3) { false }
+        #expect(rig.capture.preDelayMs.count == published, "got \(rig.capture.preDelayMs)")
+        #expect(rig.backend.localSinkReferenceDelayMs() == CastRoomDelay.defaultLeadMs)
+    }
+
+    /// A receiver that fails stops holding the room back — the others must not
+    /// keep playing seconds late for a device that is no longer playing at all.
+    @Test func aFailedReceiverHandsTheRoomBack() {
+        let (rig, ap) = castRoom()
+        rig.backend.setOutputSet([ap.id, Self.record.id])
+        waitFor { rig.capture.preDelayMs.last ?? 0 > 0 }
+
+        rig.manager.fire(id: Self.record.id, state: .failed(.timedOut))
+        waitFor { rig.capture.preDelayMs.last == 0 }
+        #expect(rig.capture.preDelayMs.last == 0)
+        #expect(rig.backend.localSinkReferenceDelayMs() == rig.backend.startBufferMs)
+    }
+
+    /// Past `R_max` the receiver is refused for sync: it keeps playing, and
+    /// the room is handed back rather than held that far behind live.
+    @Test func aReceiverPastTheCapIsRefusedForSync() {
+        let (rig, ap) = castRoom()
+        rig.backend.setOutputSet([ap.id, Self.record.id])
+        waitFor { rig.capture.preDelayMs.last ?? 0 > 0 }
+
+        rig.manager.fireLead(id: Self.record.id, leadMs: CastRoomDelay.maxTermMs + 1_000,
+                             count: CastRoomDelay.settleSampleCount)
+        waitFor { rig.capture.preDelayMs.last == 0 }
+        #expect(rig.capture.preDelayMs.last == 0)
+        #expect(rig.backend.localSinkReferenceDelayMs() == rig.backend.startBufferMs)
+        #expect(rig.manager.deviceSets.last == [Self.record], "and it is still being fed")
     }
 
     // MARK: - Lifecycle

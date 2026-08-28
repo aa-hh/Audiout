@@ -32,6 +32,11 @@ protocol CastOutputControlling: AnyObject, Sendable {
     /// seconds later. Always `nil` for attenuation receivers and stopped
     /// sessions.
     var onVolumeLagChange: (@Sendable (_ deviceID: String, _ lagSeconds: Int?) -> Void)? { get set }
+    /// CAST-SYNC (brief §4): one trustworthy measurement of how far behind
+    /// live this receiver is playing, at most one a second. Only samples the
+    /// receiver was PLAYING for and answered promptly enough to believe are
+    /// reported; the room-delay policy on the other end assumes as much.
+    var onLeadSample: (@Sendable (_ deviceID: String, _ leadMs: Int) -> Void)? { get set }
     /// The capture fan-out slot: every whole-system buffer written here is
     /// copied into each desired receiver's feed ring.
     var feed: PCMSink { get }
@@ -237,6 +242,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     private let stateLock = NSLock()
     private var _onStateChange: (@Sendable (String, CastSessionState) -> Void)?
     private var _onVolumeLagChange: (@Sendable (String, Int?) -> Void)?
+    private var _onLeadSample: (@Sendable (String, Int) -> Void)?
 
     /// Queue-confined.
     private var sessions: [String: Session] = [:]
@@ -270,6 +276,11 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     var onVolumeLagChange: (@Sendable (String, Int?) -> Void)? {
         get { stateLock.withLock { _onVolumeLagChange } }
         set { stateLock.withLock { _onVolumeLagChange = newValue } }
+    }
+
+    var onLeadSample: (@Sendable (String, Int) -> Void)? {
+        get { stateLock.withLock { _onLeadSample } }
+        set { stateLock.withLock { _onLeadSample = newValue } }
     }
 
     var feed: PCMSink { fanOut }
@@ -429,7 +440,17 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         server.onRequest = { [weak self, weak session] _ in
             session?.ring.reset()
             self?.queue.async {
-                guard let self, let session = self.live(id, generation), !session.loggedHTTPRequest else { return }
+                guard let self, let session = self.live(id, generation) else { return }
+                guard !session.loggedHTTPRequest else {
+                    // CAST-SYNC: the reset above just threw away up to 2 s of
+                    // audio the receiver was already holding, so it lands that
+                    // much closer to live than the room is delayed for. The
+                    // lead metric reads it as a step DOWN and the policy
+                    // re-settles on its own — this line is what makes the step
+                    // explicable afterwards.
+                    Telemetry.log(.cast, "cast_http_reget", ["device": id])
+                    return
+                }
                 session.loggedHTTPRequest = true
                 Telemetry.log(.cast, "cast_http_request", ["device": id])
                 // A receiver that is fetching is demonstrably alive, so only
@@ -522,10 +543,10 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     private func handle(_ status: CastMediaStatus, id: String, generation: Int) {
         guard let session = live(id, generation) else { return }
         var lead = "nil"
-        if status.playerState == "PLAYING", let time = status.currentTime, let sent = session.server?.secondsSent {
-            lead = String(format: "%.2f", sent - time)
+        if let seconds = Self.leadSeconds(session, status) {
+            lead = String(format: "%.2f", seconds)
             if session.volumeControlIsFixed {
-                let lagSeconds = Int(max(0, sent - time).rounded())
+                let lagSeconds = Int(max(0, seconds).rounded())
                 if lagSeconds != session.reportedLagSeconds {
                     session.reportedLagSeconds = lagSeconds
                     onVolumeLagChange?(id, lagSeconds)
@@ -551,17 +572,68 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         }
     }
 
+    /// How far behind live this receiver is playing, in seconds — the audio we
+    /// have handed the socket minus the point it says it has reached. `nil`
+    /// unless it is actually playing: a paused or buffering receiver's
+    /// `currentTime` stands still while `secondsSent` does not.
+    private static func leadSeconds(_ session: Session, _ status: CastMediaStatus) -> Double? {
+        guard status.playerState == "PLAYING", let time = status.currentTime,
+              let sent = session.server?.secondsSent else { return nil }
+        return sent - time
+    }
+
+    /// A lead measurement is only believed if the answer came back inside
+    /// this. A reply that queued behind a stall carries a `currentTime` from
+    /// before the queue, which reads as a lead seconds too long — and how long
+    /// the answer took is the cheapest way to tell that apart from a receiver
+    /// that has genuinely fallen further behind. The roadmap 006 spike measured
+    /// a settled control round trip at 17 ms and a mid-stall one at ~1 s, so
+    /// there is an order of magnitude either side of this line.
+    private static let leadRoundTripLimitMs = 100
+
     /// One `GET_STATUS` a second: the receiver volunteers state changes, but
     /// `currentTime` (and with it the measured lead) only arrives when asked.
+    /// The reply is TIMED as well as read (CAST-SYNC, brief §4) — the room's
+    /// whole delay is derived from these samples, so a slow one is thrown away
+    /// rather than believed.
     private func armStatusPoll(_ session: Session, id: String, generation: Int) {
         let poll = DispatchSource.makeTimerSource(queue: queue)
         poll.schedule(deadline: .now() + 1, repeating: 1)
         poll.setEventHandler { [weak self] in
             guard let self, let session = self.live(id, generation), let app = session.application else { return }
-            session.client?.getMediaStatus(app: app) { _ in }
+            let asked = DispatchTime.now()
+            session.client?.getMediaStatus(app: app) { [weak self] result in
+                guard case .success(let status) = result else { return }
+                // Timed HERE, in the channel's own completion, before the hop
+                // onto `queue`: a busy queue is this process being slow, not
+                // the receiver, and charging it to the receiver would throw
+                // away good samples exactly when the Mac is under load.
+                let roundTripMs = Int(
+                    (DispatchTime.now().uptimeNanoseconds - asked.uptimeNanoseconds) / 1_000_000)
+                self?.queue.async {
+                    guard let self, let session = self.live(id, generation) else { return }
+                    self.reportLead(session, status, roundTripMs: roundTripMs, id: id)
+                }
+            }
         }
         session.statusPoll = poll
         poll.resume()
+    }
+
+    /// Hand one measured lead to the room-delay policy (on ``queue``).
+    private func reportLead(_ session: Session, _ status: CastMediaStatus,
+                            roundTripMs: Int, id: String) {
+        guard let seconds = Self.leadSeconds(session, status) else { return }
+        let leadMs = Int((seconds * 1_000).rounded())
+        let kept = roundTripMs < Self.leadRoundTripLimitMs
+        Telemetry.log(.cast, "cast_lead_sample", [
+            "device": id,
+            "lead_ms": String(leadMs),
+            "rtt_ms": String(roundTripMs),
+            "kept": kept ? "1" : "0",
+        ])
+        guard kept else { return }
+        onLeadSample?(id, leadMs)
     }
 
     // MARK: - Volume (on queue)

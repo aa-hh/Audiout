@@ -1790,6 +1790,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             castOutputManager.onVolumeLagChange = { [weak self] id, lag in
                 self?.stateQueue.async { self?.applyCastVolumeLag(id, lag) }
             }
+            castOutputManager.onLeadSample = { [weak self] id, leadMs in
+                self?.stateQueue.async { self?.applyCastLeadSample(id, leadMs) }
+            }
         }
 
         // 1b. TWO-WAY SYNC for the local row. Its slider/mute ARE the Mac's default
@@ -2128,6 +2131,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         castEnumerator?.stop()
         castOutputManager?.onStateChange = nil
         castOutputManager?.onVolumeLagChange = nil
+        castOutputManager?.onLeadSample = nil
         // Drop the local row's two-way sync (the row itself is removed below).
         systemVolume.onExternalChange = nil
         systemVolume.stop()
@@ -2188,6 +2192,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // teardown below so the FIFO's last Cast op is the disable.
             self.castSelectedIDs = []
             self.castPlaying = []
+            // CAST-SYNC: the room delay goes with them. Publishing the AirPlay
+            // line away is enqueued below with the rest of the Cast teardown,
+            // so a backend that stops and starts again is back to today's exact
+            // bytes; without a term there was never a line to remove.
+            let hadCastTerm = self.castRoomDelay.setReceivers([])
             // Drop the pending availability grace timers with them: a flip that
             // lands after stop would grey a row nothing is watching any more.
             self.castAbsenceFlips.removeAll()
@@ -2234,6 +2243,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             self.captureControlQueue.async { [weak self] in
                 self?.applyCastTransition(enable: false, records: [], levels: [:])
+                if hadCastTerm { self?.captureCoordinator?.setAirPlayPreDelay(ms: 0) }
             }
             let ids = self.order
             self.known.removeAll()
@@ -3185,12 +3195,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     }
                 }
             }
+            // CAST-SYNC: the room delay is decided from the SELECTION, ahead
+            // of anything launching (brief §4) — a Cast receiver contributes
+            // its remembered steady lead (or the measured default) the moment
+            // it is selected, so everything else takes its one delay hit now
+            // rather than ten seconds into the song.
+            let castIDs = ids.filter { self.known[$0]?.isCast == true }.sorted()
+            let castSelectionChanged = castIDs != self.castSelectedIDs
+            self.castSelectedIDs = castIDs
+            let castTermMoved = self.updateCastRoomDelayLocked()
+
             let composition = BTGroupComposition(
                 airPlayPresent: ids.contains {
-                    self.known[$0].map { !$0.isBluetooth && !$0.isLocalDevice } == true
+                    self.known[$0].map {
+                        !$0.isBluetooth && !$0.isLocalDevice && !$0.isCast
+                    } == true
                 },
                 macLocalPresent: macSelected,
-                castPresent: ids.contains { self.known[$0]?.isCast == true })
+                castPresent: !castIDs.isEmpty)
 
             // W3 — the first-mix alignment intercept. The trigger is exactly
             // the locked spec's: a BT id in a MIX (any other member — another
@@ -3221,14 +3243,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             for uid in self.btAlignmentHeldUIDs.subtracting(wantBT ? Set(btUIDs) : []) {
                 self.releaseBTAlignmentHoldLocked(uid)
             }
-            // Wave-4 delay agreement: a BT presence/AirPlay-presence flip moves
-            // the LOCAL sink's reference too (`localSinkReferenceDelayMs`), so
-            // capture whether the reference input changed before overwriting.
-            // macLocalPresent never changes a BT delay (BTReferenceTimeline
-            // .delayNanos doc, BTSyncedSink.swift:52-55), so only an
-            // airPlayPresent flip counts as the reference moving.
-            let referenceMoved =
-                wantBT && composition.airPlayPresent != self.btComposition.airPlayPresent
+            // Wave-4 delay agreement: a BT-presence flip, or a flip of the
+            // timeline BT renders against, moves the LOCAL sink's reference too
+            // (`localSinkReferenceDelayMs`), so capture whether the reference
+            // input changed before overwriting. macLocalPresent never changes a
+            // BT delay (BTReferenceTimeline.delayNanos doc,
+            // BTSyncedSink.swift:52-55), so it is deliberately not part of this;
+            // a Cast receiver IS, because it authors a presentation timeline
+            // exactly as AirPlay does and BT renders against that instead of
+            // the Mac's own clock the moment one joins.
+            let referenceMoved = wantBT
+                && composition.usesPresentationReference
+                    != self.btComposition.usesPresentationReference
             let localReferenceMoved = (wantBT != self.btSinkEnabled) || referenceMoved
             if wantBT != self.btSinkEnabled || btUIDs != self.btSelectedUIDs
                 || referenceMoved {
@@ -3257,11 +3283,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 }
             }
 
+            // CAST-SYNC (brief §5 ordering): the new room delay reaches every
+            // output that has to meet it BEFORE the receiver that set it is
+            // launched below — the house is already playing on the new
+            // timeline by the time the Cast device starts filling its buffer.
+            if castTermMoved {
+                self.roomDelayChangedLocked(cause: "cast_selection")
+            } else if self._castTermMs != nil {
+                // The room did not move, but who has to meet it may have: an
+                // AirPlay device joining a Cast room needs the line from its
+                // first buffer, and re-publishing the same depth costs nothing.
+                self.publishAirPlayPreDelayLocked()
+            }
+
             // CAST-OUT (R-partition, third arm): selected `.cast` ids drive the
             // Cast session manager — same decide-here/apply-on-`captureControlQueue`
             // split as BT, and an unchanged id list enqueues nothing. An empty
             // `castIDs` on an already-empty selection is a no-op.
-            let castIDs = ids.filter { self.known[$0]?.isCast == true }.sorted()
+            //
             // The row's connect story, twin of the BT arm's: a newly-selected
             // AVAILABLE Cast id breathes until its receiver reports PLAYING; a
             // newly-selected UNAVAILABLE one stays `.off`. A deselect ends the
@@ -3280,8 +3319,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     }
                 }
             }
-            if castIDs != self.castSelectedIDs {
-                self.castSelectedIDs = castIDs
+            if castSelectionChanged {
                 let records = castIDs.compactMap { self.castRecords[$0] }
                 let levels = Dictionary(
                     uniqueKeysWithValues: castIDs.map { ($0, self.castLevel(forID: $0)) })
@@ -3508,6 +3546,102 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // by whichever gesture caused the teardown.
             castPlaying.remove(id)
         }
+        // CAST-SYNC: a receiver that failed stops holding the room back, and
+        // one that came back starts again — both are `R` moving.
+        if updateCastRoomDelayLocked() { roomDelayChangedLocked(cause: "cast_session_state") }
+    }
+
+    /// CAST-SYNC: recompute which Cast receivers contribute a room-delay term
+    /// — every SELECTED one whose session has not failed. Returns whether `R`
+    /// moved. On `stateQueue`; the only writer of the policy's receiver set.
+    @discardableResult
+    private func updateCastRoomDelayLocked() -> Bool {   // on stateQueue
+        let contributing = castSelectedIDs.filter { id in
+            if case .failed = known[id]?.connectionState { return false }
+            return true
+        }
+        return castRoomDelay.setReceivers(contributing)
+    }
+
+    /// CAST-SYNC (brief §4): one lead measurement the session manager judged
+    /// trustworthy. Most change nothing — the policy only speaks up when a
+    /// receiver settles. On `stateQueue`.
+    private func applyCastLeadSample(_ id: String, _ leadMs: Int) {   // on stateQueue
+        guard let settlement = castRoomDelay.ingest(leadMs: leadMs, forID: id) else { return }
+        Telemetry.log(.cast, "cast_lead_settled", [
+            "device": id,
+            "lead_ms": String(settlement.leadMs),
+            "refused": settlement.refused ? "1" : "0",
+            "term_ms": _castTermMs.map(String.init) ?? "nil",
+        ])
+        guard settlement.termMoved else { return }
+        roomDelayChangedLocked(cause: "cast_lead")
+    }
+
+    /// CAST-SYNC (brief §3): the room delay moved — hand `R` to every output
+    /// that has to delay itself to it. On `stateQueue`.
+    ///
+    /// The Bluetooth sinks and the Mac's own sink read `R` live and re-sample
+    /// it whenever they re-anchor, so a nudge is all they need. The AirPlay
+    /// feed has no such loop and is held back explicitly, by a line in FRONT
+    /// of the engine: the sender reads its start buffer once, at session
+    /// creation, and clamps it to 5 s, so it cannot carry seconds of room
+    /// delay however it is set.
+    ///
+    /// A Cast join also flips the BT composition, so those sinks can take this
+    /// re-anchor on top of that transition's rebuild — the same hold restarted
+    /// a queue hop later, not a second gap.
+    private func roomDelayChangedLocked(cause: String) {   // on stateQueue
+        let airPlayPreDelayMs = publishAirPlayPreDelayLocked()
+        let btRides = btSinkEnabled
+        let macRides = syncedLocalSinkApplied
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            if btRides { self.btSink?.reanchorAll(cause: "room_delay_change") }
+            if macRides { self.syncedLocalSink?.requestReanchor(cause: "room_delay_change") }
+        }
+        // The per-receiver Cast feed lines are the fourth leg of this fan-out,
+        // and the only one still missing: each receiver's own feed is held back
+        // by `roomDelayLocked() − settledLeadMs(forID:)`, the part of the room
+        // delay it does not already produce by itself. A settled receiver's
+        // remainder is usually tens of ms; a SECOND, faster receiver's is
+        // seconds. The seam it goes through
+        // (`CastOutputControlling.setCastRoomDelayMs`) lands with the Cast feed
+        // delay line, which is a sibling track — a receiver still settling, or
+        // one whose remainder is 0, is deliberately left unset there so no line
+        // is allocated at all.
+        Telemetry.log(.cast, "room_delay_changed", [
+            "cause": cause,
+            "room_ms": String(roomDelayLocked()),
+            "cast_term_ms": _castTermMs.map(String.init) ?? "nil",
+            "airplay_pre_ms": String(airPlayPreDelayMs),
+        ])
+    }
+
+    /// Hold the AirPlay feed back by the part of the room delay the sender does
+    /// not already provide, and return what was published. Idempotent — the
+    /// same depth twice is one word written on the control thread — so it is
+    /// also what a selection change calls when the room did not move but the
+    /// devices meeting it did. On `stateQueue`.
+    @discardableResult
+    private func publishAirPlayPreDelayLocked() -> Int {   // on stateQueue
+        // No AirPlay device, no line: nothing would read it, and it is a
+        // megabyte and a memcpy per buffer. An output also cannot be delayed by
+        // less than nothing — and `0` publishes NO line rather than an empty
+        // one, which is the whole bypass: a room that leaves Cast is back to
+        // today's exact bytes on the very next buffer.
+        //
+        // Read from the SELECTION, never from `btComposition`: that memo is
+        // only refreshed when the Bluetooth side moves, so in an AirPlay+Cast
+        // room with no Bluetooth in it it never becomes true at all.
+        let airPlayPresent = expectedSelected.contains { id in
+            known[id].map { !$0.isBluetooth && !$0.isLocalDevice && !$0.isCast } == true
+        }
+        let ms = airPlayPresent ? Swift.max(0, roomDelayLocked() - _startBufferMs) : 0
+        captureControlQueue.async { [weak self] in
+            self?.captureCoordinator?.setAirPlayPreDelay(ms: ms)
+        }
+        return ms
     }
 
     /// Fold one `BTConnectionManager.connect` outcome into the row's
@@ -3593,7 +3727,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             : Self.btOnlyReferenceMs(latencies: latencies, uids: btSelectedUIDs)
         guard desired != btReferenceBufferMs else { return desired }
         btReferenceBufferMs = desired
-        let localRides = btSinkEnabled && !btComposition.airPlayPresent && syncedLocalSinkApplied
+        let localRides =
+            btSinkEnabled && !btComposition.usesPresentationReference && syncedLocalSinkApplied
         captureControlQueue.async { [weak self] in
             guard let self else { return }
             self.btSink?.setBTOnlyBufferMs(desired)
@@ -6411,17 +6546,30 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         stateQueue.sync { _startBufferMs }
     }
 
+    /// `R` — the room delay (ms): the longest intrinsic delay any active
+    /// output has, which every other output then delays itself to (sync
+    /// architecture brief §3). One number for the whole room, so the outputs
+    /// agree with each other by construction rather than by each deriving its
+    /// own reference.
+    ///
+    /// With no Cast device it is the Wave-4 rule unchanged: a presentation
+    /// timeline in the selection (or no BT at all) → the live start-buffer;
+    /// BT+Mac without one → the BT-only buffer, the same reference every BT
+    /// sink uses, otherwise the Mac would lead each BT speaker by
+    /// `startBufferMs − btOnlyBufferMs`. A Cast receiver authors a
+    /// presentation timeline exactly as AirPlay does, which is why the branch
+    /// asks `usesPresentationReference` rather than about AirPlay alone.
+    func roomDelayLocked() -> Int {   // on stateQueue
+        let today = (btSinkEnabled && !btComposition.usesPresentationReference)
+            ? btReferenceBufferMs : _startBufferMs
+        return _castTermMs.map { Swift.max(today, $0) } ?? today
+    }
+
     /// The reference delay (ms) the Mac-local sink renders on (Wave-4 delay
-    /// agreement). AirPlay in the selection (or no BT at all) → the live
-    /// start-buffer, same as always. BT+Mac with NO AirPlay → the BT-only
-    /// buffer, the same reference every BT sink uses — otherwise the Mac leads
-    /// each BT speaker by `startBufferMs − btOnlyBufferMs` in that composition.
+    /// agreement) — the room delay itself: the Mac has no intrinsic delay of
+    /// its own to subtract beyond the output latency the sink measures.
     func localSinkReferenceDelayMs() -> Int {
-        stateQueue.sync {
-            let today = (btSinkEnabled && !btComposition.airPlayPresent)
-                ? btReferenceBufferMs : _startBufferMs
-            return _castTermMs.map { Swift.max(today, $0) } ?? today
-        }
+        stateQueue.sync { roomDelayLocked() }
     }
 
     /// The reference delay (ms) every Bluetooth sink renders on — the AirPlay
@@ -6437,12 +6585,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// playing (ms), or `nil` when no Cast device is contributing a term — the
     /// `max` reduction's absent operand, and the reason every delay above
     /// reduces to today's number by construction rather than by a flag.
-    ///
-    /// razor: read-only for now. The room-delay controller that measures a
-    /// receiver's settled lead and writes this is the activation phase; until
-    /// it exists the term is `nil` on every path, which is exactly the state
-    /// the invariant needs.
-    private var _castTermMs: Int?
+    private var _castTermMs: Int? { castRoomDelay.termMs }
+
+    /// The room-delay policy (brief §4): the settle gate, the high-water mark
+    /// and the `R_max` refusal, kept pure so it can be replayed offline
+    /// against recorded lead samples. Confined to `stateQueue`; the only
+    /// writers are ``updateCastRoomDelayLocked()`` (the receiver set moved)
+    /// and ``applyCastLeadSample(_:_:)`` (a receiver measured itself).
+    private var castRoomDelay = CastRoomDelay()
 
     /// Seed the initial value without triggering an apply (`makeBackend` only —
     /// the engine was just constructed with this same value in its config).
@@ -6514,6 +6664,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
         // 2. New buffer value; the next master session picks it up.
         await engine.setStartBufferMs(ms)
+
+        // CAST-SYNC (brief §3): the AirPlay share of the room delay is
+        // `R − startBufferMs`, so moving the start buffer moves the line in
+        // front of the engine by the same amount in the opposite direction.
+        // Done HERE, between the teardown and the re-adds, because that is the
+        // one moment in this method when nothing is streaming. Guarded on the
+        // Cast term for the invariant's sake: with no Cast device there is no
+        // line, and this must not be what creates one.
+        stateQueue.sync {
+            guard _castTermMs != nil else { return }
+            roomDelayChangedLocked(cause: "start_buffer")
+        }
 
         // 3. Re-add the same set via converge (best-effort, D4). Converge
         //    re-feeds the descriptor through its normal add path.
@@ -9872,7 +10034,8 @@ extension NativeBackend: BTOutputControlling {
         // in the run bows out. The staircase has to be able to REVERSE out of a
         // wrong early answer, so the range gives it somewhere to go.
         let reference = stateQueue.sync { () -> Int in
-            btComposition.airPlayPresent ? _startBufferMs : Self.btWizardReferenceBufferMs
+            btComposition.usesPresentationReference
+                ? _startBufferMs : Self.btWizardReferenceBufferMs
         }
         let lower = -BTSyncTrim.rangeMs
         let upper = Double(reference) - Double(BTSyncedSink.defaultBTOnlyBufferMs)

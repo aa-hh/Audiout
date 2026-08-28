@@ -1266,15 +1266,15 @@ public final class GroupEditorViewController: NSViewController {
     public var test_reassuranceText: String { reassuranceLabel.stringValue }
 
     /// Drive a membership row's pointer state headlessly — the node's hover
-    /// growth is the row's "this is clickable" affordance now that the whole
+    /// resize is the row's "this is clickable" affordance now that the whole
     /// row toggles.
     public func test_setRowHovered(_ hovered: Bool, for deviceID: String) {
         rowsByID[deviceID]?.test_setHovered(hovered)
     }
 
-    /// Whether a membership row's node is grown into its hover size.
-    public func test_rowNodeIsGrown(for deviceID: String) -> Bool {
-        rowsByID[deviceID]?.test_nodeIsGrown ?? false
+    /// Whether a membership row's node is previewing its post-click size.
+    public func test_rowNodePreviewsClick(for deviceID: String) -> Bool {
+        rowsByID[deviceID]?.test_nodePreviewsClick ?? false
     }
 
     /// Simulate a click on a membership row's BODY (not its checkbox) — the

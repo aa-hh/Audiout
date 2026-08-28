@@ -32,7 +32,7 @@ import QuartzCore
 ///
 /// **Determinism:** at rest node + rails are steady drawing, so
 /// `cacheDisplay(in:to:)` captures them identically every run. The ONE
-/// transient is the hover growth below, and it only runs while the pointer is
+/// transient is the hover resize below, and it only runs while the pointer is
 /// on the row inside a live window — a snapshot fixture never hovers.
 public final class MembershipBusView: NSView {
 
@@ -86,15 +86,16 @@ public final class MembershipBusView: NSView {
     /// (`Tokens.Color.spineTone`). Defaults to true: the popover's rows ARE the
     /// live signal path and keep their gold unchanged.
     private var armed = true
-    /// Whether the pointer is over the row's bus-gutter region — the node GROWS
-    /// to `PopoverColumnGrid.busNodeHoverRadius` so it admits it is clickable.
-    /// The HOST row owns the tracking (this view stays non-interactive) and only
-    /// reports a hover its checkbox can act on.
+    /// Whether the pointer is over the row's bus-gutter region — the node
+    /// RESIZES to ``postClickRadius(for:)``, the size it would rest at once the
+    /// click lands, so the pointer previews the toggle instead of just admitting
+    /// the node is clickable. The HOST row owns the tracking (this view stays
+    /// non-interactive) and only reports a hover its checkbox can act on.
     private var hovered = false
     /// How far the node has travelled from its resting radius toward the hovered
-    /// one: 0 = resting, 1 = fully grown. Animated by ``growthLink``; a hover
-    /// that reverses mid-travel restarts from this live value, so the node never
-    /// snaps back to re-run the tween.
+    /// one: 0 = resting, 1 = fully at the post-click size. Animated by
+    /// ``growthLink``; a hover that reverses mid-travel restarts from this live
+    /// value, so the node never snaps back to re-run the tween.
     private var growth: CGFloat = 0
     /// Where `growth` stood when the current tween started, and when that was.
     private var growthOrigin: CGFloat = 0
@@ -137,10 +138,10 @@ public final class MembershipBusView: NSView {
         needsDisplay = true
     }
 
-    /// Point the node at the pointer state the HOST row tracked. The node GROWS
-    /// into `PopoverColumnGrid.busNodeHoverRadius` and shrinks back out of it —
-    /// its CENTRE never moves, so the gutter stays still under the pointer and
-    /// the click target is unchanged.
+    /// Point the node at the pointer state the HOST row tracked. The node
+    /// travels to ``postClickRadius(for:)`` and back — its CENTRE never moves,
+    /// so the gutter stays still under the pointer and the click target is
+    /// unchanged.
     ///
     /// Off-window or under Reduce Motion the size is taken instantly; otherwise
     /// the tween starts from wherever the node currently stands, so a hover-out
@@ -296,20 +297,39 @@ public final class MembershipBusView: NSView {
             : PopoverColumnGrid.busNodeDiameterUnselected / 2
     }
 
-    /// The radius the node is TRAVELLING toward: its resting size, or the grown
-    /// hover size while the host reports an invitation. The resolved state —
-    /// what a test asserts, and where an instant (Reduce Motion, off-screen)
-    /// change lands.
-    private var targetRadius: CGFloat {
-        hovered ? PopoverColumnGrid.busNodeHoverRadius : Self.nodeRadius(for: node)
+    /// The radius this node would REST at once its checkbox's click has landed
+    /// — the hover's whole target (Alec 2026-08-28: "it should only grow to the
+    /// size it would eventually be if it's clicked"). The checkbox toggles
+    /// membership, so the click moves an off-spine node ON to the spine and an
+    /// on-spine one OFF it: this is exactly ``nodeRadius(for:)`` with the spine
+    /// test inverted, reusing `onSpine` for the same reason that one does. A
+    /// non-member therefore GROWS 5.5 → 7.5 and a member SHRINKS 7.5 → 5.5 —
+    /// the direction of travel is what tells the user which way the click goes.
+    /// The earlier fixed 10 pt hover radius was REJECTED: it was bigger than any
+    /// size a node legitimately rests at, so the hover promised a state that
+    /// does not exist.
+    static func postClickRadius(for node: Node) -> CGFloat {
+        BusRailOverlayView.onSpine(node)
+            ? PopoverColumnGrid.busNodeDiameterUnselected / 2
+            : PopoverColumnGrid.busNodeDiameterSelected / 2
     }
 
-    /// The radius drawn THIS frame — resting to hovered, interpolated by the
-    /// tween. The node's centre is untouched, so nothing reflows and the click
-    /// target never moves.
+    /// The radius the node is TRAVELLING toward: its resting size, or its
+    /// post-click size while the host reports an invitation. The resolved state
+    /// — what a test asserts, and where an instant (Reduce Motion, off-screen)
+    /// change lands.
+    private var targetRadius: CGFloat {
+        hovered ? Self.postClickRadius(for: node) : Self.nodeRadius(for: node)
+    }
+
+    /// The radius drawn THIS frame — resting to post-click, interpolated by the
+    /// tween. Resolves through the SAME ``postClickRadius(for:)`` the target
+    /// does, so the interpolation can never travel somewhere the target isn't.
+    /// The node's centre is untouched, so nothing reflows and the click target
+    /// never moves.
     private var drawnRadius: CGFloat {
         let resting = Self.nodeRadius(for: node)
-        return resting + (PopoverColumnGrid.busNodeHoverRadius - resting) * growth
+        return resting + (Self.postClickRadius(for: node) - resting) * growth
     }
 
     // MARK: Test-support hooks
@@ -325,16 +345,17 @@ public final class MembershipBusView: NSView {
     /// can't drift from the pixels. Tests assert ``test_nodeTargetRadius``
     /// instead: a frame-accurate value is not deterministic under load.
     public var test_nodeRadius: CGFloat { drawnRadius }
-    /// The radius the node is settling ON — resting, or the grown hover size.
+    /// The radius the node is settling ON — resting, or its post-click size.
     /// The resolved state, so it is deterministic whatever the clock has done.
     public var test_nodeTargetRadius: CGFloat { targetRadius }
-    /// Whether the host row is currently reporting a hover the node grows for.
+    /// Whether the host row is currently reporting a hover the node resizes for.
     public var test_hovered: Bool { hovered }
     /// Whether the node currently renders in the armed (gold) tone vs the quiet
     /// ember idle tone — the same flag `draw` reads for `.member`'s fill.
     public var test_armed: Bool { armed }
-    /// Whether the node is grown into its hover size (structural hook — derived
-    /// from the RADII the drawing resolves, never from a separate flag, so it
-    /// can't claim a growth the pixels don't show).
-    public var test_nodeIsGrown: Bool { targetRadius > Self.nodeRadius(for: node) }
+    /// Whether the node is settling on its POST-CLICK size rather than its
+    /// resting one — true for a growing non-member and a shrinking member alike
+    /// (structural hook — derived from the RADII the drawing resolves, never
+    /// from a separate flag, so it can't claim a resize the pixels don't show).
+    public var test_nodePreviewsClick: Bool { targetRadius != Self.nodeRadius(for: node) }
 }

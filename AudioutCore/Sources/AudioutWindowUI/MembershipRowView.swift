@@ -444,10 +444,10 @@ public final class MembershipRowView: NSView {
         setRowHovered(hovered)
     }
 
-    /// Whether the node is grown into its hover size (reads the node's own
-    /// resolved radii, so it can't drift from the pixels).
-    public var test_nodeIsGrown: Bool {
-        surface == .warmPane && busView.test_nodeIsGrown
+    /// Whether the node is previewing its post-click size — grown or shrunk
+    /// (reads the node's own resolved radii, so it can't drift from the pixels).
+    public var test_nodePreviewsClick: Bool {
+        surface == .warmPane && busView.test_nodePreviewsClick
     }
 
     /// The name label's current text (for asserting the row shows the right

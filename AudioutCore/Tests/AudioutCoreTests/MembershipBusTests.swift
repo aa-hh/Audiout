@@ -193,50 +193,67 @@ import AudioutCore
             Issue.record("a bus row must expose both rects"); return
         }
         #expect(hit.contains(node),
-                "the invisible checkbox's target covers the node at its GROWN hover size, not just the resting disc")
+                "the invisible checkbox's target covers the node at the widest it ever draws, not just the resting disc")
         #expect(hit.height == row.bounds.height, "…over the full row height")
         #expect(hit.maxX <= PopoverColumnGrid.firstElementLeading(indented: false),
                 "…and stops at the icon column, so it steals nothing from the row's other controls")
     }
 
-    @Test func gutterHoverGrowsTheNode() {
+    @Test func gutterHoverGrowsANonMemberIntoItsMemberSize() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false, controllable: true)
         let resting = row.test_nodeTargetRadius
         #expect(resting == PopoverColumnGrid.busNodeDiameterUnselected / 2,
                 "at rest the node draws at its own size — the gutter adds no ink")
         row.test_setGutterHovered(true)
-        #expect(row.test_nodeTargetRadius == PopoverColumnGrid.busNodeHoverRadius,
-                "hovering the gutter grows the node itself, so it admits it is the click target")
-        #expect(row.test_nodeIsGrown)
+        #expect(row.test_nodeTargetRadius == PopoverColumnGrid.busNodeDiameterSelected / 2,
+                "hovering previews the click: this node's click ADDS it, so it grows to the member size — never past it")
+        #expect(row.test_nodePreviewsClick)
         row.test_setGutterHovered(false)
         #expect(row.test_nodeTargetRadius == resting, "and it settles back on exit")
-        #expect(!row.test_nodeIsGrown)
+        #expect(!row.test_nodePreviewsClick)
+    }
+
+    @Test func gutterHoverShrinksAMemberIntoItsNonMemberSize() {
+        // Alec's correction: the hover previews the POST-CLICK state, so a
+        // member — whose click REMOVES it from the mix — travels DOWN. The
+        // direction of travel is what says which way the click goes.
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: true, controllable: true)
+        let resting = row.test_nodeTargetRadius
+        #expect(resting == PopoverColumnGrid.busNodeDiameterSelected / 2)
+        row.test_setGutterHovered(true)
+        #expect(row.test_nodeTargetRadius == PopoverColumnGrid.busNodeDiameterUnselected / 2,
+                "a member's click removes it, so the hover shrinks the node to the size it would land on")
+        #expect(row.test_nodePreviewsClick)
+        row.test_setGutterHovered(false)
+        #expect(row.test_nodeTargetRadius == resting, "and it settles back on exit")
     }
 
     @Test func rowHoverGrowsAnUnselectedNode() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false)
         row.test_setHovered(true)
-        #expect(row.test_nodeTargetRadius == PopoverColumnGrid.busNodeHoverRadius,
+        #expect(row.test_nodeTargetRadius == PopoverColumnGrid.busNodeDiameterSelected / 2,
                 "hovering anywhere on an unselected row grows its node — the invisible checkbox's one resting invitation")
         row.test_setHovered(false)
-        #expect(!row.test_nodeIsGrown)
+        #expect(!row.test_nodePreviewsClick)
     }
 
-    @Test func rowHoverDoesNotGrowASelectedNode() {
+    @Test func rowHoverDoesNotResizeASelectedNode() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true)
         row.test_setHovered(true)
         #expect(row.test_nodeTargetRadius == PopoverColumnGrid.busNodeDiameterSelected / 2,
-                "a selected row grows only from the gutter — its filled node already reads as the control")
+                "a selected row resizes only from the gutter — its filled node already reads as the control")
+        #expect(!row.test_nodePreviewsClick)
     }
 
-    @Test func rowHoverNeverGrowsADisabledCheckbox() {
+    @Test func rowHoverNeverResizesADisabledCheckbox() {
         let row = makeBusRow()
         row.apply(makeDevice(isAvailable: false), selected: false)
         row.test_setHovered(true)
-        #expect(!row.test_nodeIsGrown, "never invite a click the checkbox would refuse")
+        #expect(!row.test_nodePreviewsClick, "never preview a click the checkbox would refuse")
     }
 
     // MARK: The hover growth itself (the tween, and Reduce Motion's way out)
@@ -249,12 +266,14 @@ import AudioutCore
                               styleMask: .borderless, backing: .buffered, defer: false)
         let resting = PopoverColumnGrid.busNodeDiameterUnselected / 2
 
+        let postClick = PopoverColumnGrid.busNodeDiameterSelected / 2
+
         let travelling = makeBusView()
         travelling.test_reduceMotionOverride = false
         window.contentView!.addSubview(travelling)
         travelling.setHovered(true)
-        #expect(travelling.test_nodeTargetRadius == PopoverColumnGrid.busNodeHoverRadius,
-                "the hover moves the node's TARGET to the grown radius")
+        #expect(travelling.test_nodeTargetRadius == postClick,
+                "the hover moves the node's TARGET to its post-click radius")
         #expect(travelling.test_nodeRadius == resting,
                 "…and the node starts the travel from its resting size, not at the target")
         travelling.removeFromSuperview()  // settles the tween; nothing ticks off screen
@@ -263,29 +282,39 @@ import AudioutCore
         instant.test_reduceMotionOverride = true
         window.contentView!.addSubview(instant)
         instant.setHovered(true)
-        #expect(instant.test_nodeRadius == PopoverColumnGrid.busNodeHoverRadius,
-                "Reduce Motion removes the tween, not the affordance — the node is at the grown size already")
+        #expect(instant.test_nodeRadius == postClick,
+                "Reduce Motion removes the tween, not the affordance — the node is at the post-click size already")
         instant.setHovered(false)
         #expect(instant.test_nodeRadius == resting, "…and back, in the same turn")
         instant.removeFromSuperview()
     }
 
-    /// Structural hooks say the target moved; this says the PIXELS did — the
-    /// drawn node spans more of the gutter when hovered. Off-window, so the
-    /// size is taken instantly and the bitmap is deterministic.
-    @Test func theGrownNodeReallyDrawsWider() {
-        let bus = makeBusView()
-        let resting = drawnNodeExtent(bus)
-        bus.setHovered(true)
-        let hovered = drawnNodeExtent(bus)
-        #expect(hovered > resting,
-                Comment(rawValue: "the hovered node spans \(hovered) px against \(resting) at rest"))
+    /// Structural hooks say the target moved; this says the PIXELS did — and in
+    /// BOTH directions, which is the whole correction: a hovered non-member
+    /// spans more of the gutter, a hovered member spans less. Off-window, so the
+    /// size is taken instantly and the bitmaps are deterministic.
+    @Test func theHoveredNodeReallyDrawsItsPostClickWidth() {
+        let joining = makeBusView()
+        let restingNonMember = drawnNodeExtent(joining)
+        joining.setHovered(true)
+        let hoveredNonMember = drawnNodeExtent(joining)
+        #expect(hoveredNonMember > restingNonMember,
+                Comment(rawValue: "the hovered non-member spans \(hoveredNonMember) px against \(restingNonMember) at rest"))
+
+        let leaving = makeBusView(node: .member)
+        let restingMember = drawnNodeExtent(leaving)
+        leaving.setHovered(true)
+        let hoveredMember = drawnNodeExtent(leaving)
+        #expect(hoveredMember < restingMember,
+                Comment(rawValue: "the hovered member spans \(hoveredMember) px against \(restingMember) at rest"))
+        #expect(restingMember > restingNonMember,
+                "sanity: the resting sizes the two hovers trade between are the real ones")
     }
 
-    private func makeBusView() -> MembershipBusView {
+    private func makeBusView(node: MembershipBusView.Node = .nonMember) -> MembershipBusView {
         let bus = MembershipBusView()
         bus.frame = NSRect(x: 0, y: 0, width: PopoverColumnGrid.busColumnWidth, height: 40)
-        bus.apply(node: .nonMember)
+        bus.apply(node: node)
         return bus
     }
 
@@ -318,11 +347,11 @@ import AudioutCore
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true)
         row.test_setGutterHovered(true)
-        #expect(row.test_nodeIsGrown)
+        #expect(row.test_nodePreviewsClick)
         // Row reuse (any `apply`) drops the transient hover, exactly like the
         // row's own hover wash.
         row.apply(makeDevice(id: "dev-2"), selected: false)
-        #expect(!row.test_nodeIsGrown)
+        #expect(!row.test_nodePreviewsClick)
     }
 
     @Test func nonBusCheckboxKeepsItsLegacyVoiceOverLabel() {

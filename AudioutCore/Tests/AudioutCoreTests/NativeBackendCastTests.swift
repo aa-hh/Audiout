@@ -67,9 +67,15 @@ import CoreAudio
         var levels: [(level: Double, id: String)] { lock.withLock { _levels } }
         var retries: [String] { lock.withLock { _retries } }
         var stopAllCount: Int { lock.withLock { _stopAllCount } }
+        /// CAST-SYNC: every by-ear offset written onto the live feed, in order.
+        var castUserOffsets: [(ms: Int, id: String)] { lock.withLock { _castUserOffsets } }
+        private var _castUserOffsets: [(ms: Int, id: String)] = []
 
         func setDevices(_ records: [CastDeviceRecord]) { lock.withLock { _deviceSets.append(records) } }
         func setLevel(_ level: Double, forDevice id: String) { lock.withLock { _levels.append((level, id)) } }
+        func setCastUserOffsetMs(_ ms: Int, forDeviceID id: String) {
+            lock.withLock { _castUserOffsets.append((ms, id)) }
+        }
         func retry(deviceID: String) { lock.withLock { _retries.append(deviceID) } }
         func stopAll() { lock.withLock { _stopAllCount += 1 } }
 
@@ -194,7 +200,8 @@ import CoreAudio
     private func makeBackend(
         withBT: Bool = false,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
-        castAbsenceGrace: TimeInterval = 0.05
+        castAbsenceGrace: TimeInterval = 0.05,
+        castOffsetStore: BTTrimStore? = nil
     ) -> Rig {
         let cast = FakeCastEnumerator()
         let manager = FakeCastOutputManager()
@@ -206,6 +213,7 @@ import CoreAudio
             btEnumerator: withBT ? bt : nil,
             castEnumerator: cast,
             castOutputManager: manager,
+            castOffsetStore: castOffsetStore,
             dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: NoOpSystemVolume(),
             silenceFallbackDelay: silenceFallbackDelay,
@@ -321,6 +329,67 @@ import CoreAudio
         #expect(Self.device(rig.backend, Self.record.id)?.connectionState == .off)
     }
 
+    // MARK: - CAST-SYNC by-ear offset
+
+    /// The manual offset round-trips through its OWN file (never the Bluetooth
+    /// trims') and reaches the capture path as whole milliseconds.
+    @Test func theByEarOffsetPersistsToItsOwnFileAndReachesTheCapturePath() {
+        let store = BTTrimStore(directory: scratchDir, fileName: BTTrimStore.castFileName)
+        let rig = makeBackend(castOffsetStore: store)
+
+        rig.backend.setCastUserOffsetMs(-180, forDevice: Self.record.id)
+        #expect(rig.backend.castUserOffsetMs(forDevice: Self.record.id) == -180)
+        #expect(rig.backend.castHasUserOffset(forDevice: Self.record.id))
+        #expect(rig.manager.castUserOffsets.last?.ms == -180)
+        #expect(rig.manager.castUserOffsets.last?.id == Self.record.id)
+        #expect((try? store.load())?[Self.record.id] == -180)
+        #expect(FileManager.default.fileExists(
+            atPath: scratchDir.appendingPathComponent(BTTrimStore.bluetoothFileName).path) == false,
+            "the Bluetooth trims' file is untouched")
+
+        // A fresh backend over the same file starts carrying the offset.
+        let reopened = makeBackend(castOffsetStore: store)
+        #expect(reopened.backend.castUserOffsetMs(forDevice: Self.record.id) == -180)
+
+        // Cleared, not zeroed: "tuned" is answered by existence.
+        rig.backend.clearCastUserOffset(forDevice: Self.record.id)
+        #expect(!rig.backend.castHasUserOffset(forDevice: Self.record.id))
+        #expect((try? store.load())?[Self.record.id] == nil)
+        #expect(rig.manager.castUserOffsets.last?.ms == 0, "the live feed goes back to no correction")
+    }
+
+    /// The value covers a TV's HDMI-to-soundbar chain, which passes the
+    /// Bluetooth trim's own ±500 ms bound.
+    @Test func theByEarOffsetReachesPastTheBluetoothBoundAndStopsAtTheCastOne() {
+        let rig = makeBackend()
+        rig.backend.setCastUserOffsetMs(800, forDevice: Self.record.id)
+        #expect(rig.backend.castUserOffsetMs(forDevice: Self.record.id) == 800)
+
+        rig.backend.setCastUserOffsetMs(5_000, forDevice: Self.record.id)
+        #expect(rig.backend.castUserOffsetMs(forDevice: Self.record.id) == BTSyncTrim.castRangeMs,
+                "it is a residue dial, not a seconds dial")
+    }
+
+    /// Arming re-states the stored offset, so a receiver the user reselects
+    /// comes back carrying what it was tuned to.
+    @Test func armingAReceiverRePushesItsStoredOffset() {
+        let rig = makeBackend()
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+        rig.backend.setCastUserOffsetMs(-180, forDevice: Self.record.id)
+
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { rig.manager.deviceSets.last == [Self.record] }
+        rig.backend.setOutputSet([])
+        waitFor { rig.manager.deviceSets.last == [] }
+
+        let beforeReselect = rig.manager.castUserOffsets.count
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { rig.manager.castUserOffsets.count > beforeReselect }
+        #expect(rig.manager.castUserOffsets.last?.ms == -180)
+        #expect(rig.manager.castUserOffsets.last?.id == Self.record.id)
+    }
+
     /// THE Phase (i) invariant at the backend seam: a selection with no Cast id
     /// in it must never touch a Cast seam at all.
     @Test func noCastSelectionNeverTouchesTheCastSeams() {
@@ -338,6 +407,7 @@ import CoreAudio
 
         #expect(rig.capture.castSinkCalls.isEmpty, "no Cast id selected ⇒ the fan-out slot is never touched")
         #expect(rig.manager.deviceSets.isEmpty, "nor the session manager")
+        #expect(rig.manager.castUserOffsets.isEmpty, "nor the by-ear offset seam (CAST-SYNC)")
     }
 
     // MARK: - Session state → row

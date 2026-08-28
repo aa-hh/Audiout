@@ -454,7 +454,7 @@ public final class BTSyncDrawerView: NSView {
     /// already made, so it moves the model and the Revert baseline with it.
     public func beginEditingSuggestedValue(_ ms: Double) {
         focusValueField()
-        valueField.stringValue = "\(Int(BTSyncTrim.quantise(ms)))"
+        valueField.stringValue = "\(Int(BTSyncTrim.snap(ms)))"
         valueField.currentEditor()?.selectAll(nil)
     }
 
@@ -493,7 +493,10 @@ public final class BTSyncDrawerView: NSView {
     }
 
     private func stepTrim(by deltaMs: Double) {
-        applyCommit(clampToUsableRange(BTSyncTrim.quantise(trimMs + deltaMs)))
+        // `snap`, not `quantise`: the host's usable range is the ONE bound a
+        // drawer answers to (a Cast row's reaches past ±`BTSyncTrim.rangeMs`),
+        // and `clampToUsableRange` right here is what applies it.
+        applyCommit(clampToUsableRange(BTSyncTrim.snap(trimMs + deltaMs)))
     }
 
     @objc private func alignTapped(_ sender: NSButton) {
@@ -564,7 +567,7 @@ public final class BTSyncDrawerView: NSView {
 
     private func refreshDisplay() {
         valueFieldEditor.setCommittedValue(trimMs, displayText: Self.fieldText(trimMs))
-        revertButton.isEnabled = BTSyncTrim.quantise(trimMs) != BTSyncTrim.quantise(openTimeMs)
+        revertButton.isEnabled = BTSyncTrim.snap(trimMs) != BTSyncTrim.snap(openTimeMs)
         // Hidden, not disabled: with nothing stored there is nothing to explain
         // — a permanently dead button beside Revert would only invite the
         // question. Nothing is anchored to it, so hiding it moves no other
@@ -592,7 +595,7 @@ public final class BTSyncDrawerView: NSView {
     /// when parsing, so the suffix simply cannot be edited — it is re-rendered
     /// here on every commit.
     private static func fieldText(_ ms: Double) -> String {
-        "\(Int(BTSyncTrim.quantise(ms))) ms"
+        "\(Int(BTSyncTrim.snap(ms))) ms"
     }
 
     // MARK: ⇧ modifier seam (mirrors `SyncValueFieldEditor

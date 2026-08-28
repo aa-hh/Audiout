@@ -46,6 +46,11 @@ final class PCMDelayLine {
     private static let channelCount = 2
     private static let bytesPerFrame = 4
 
+    /// 5 ms at 44.1 kHz — the ``BTDelayLine/crossfadeMs`` figure, for the same
+    /// reason: long enough to hide a join, short enough that the music does
+    /// not audibly double.
+    private static let crossfadeFrames = 220
+
     /// Rounded up to a power of two so the wrap is a mask and the whole
     /// capacity stays usable (the ``BTFrameRing`` idiom).
     let capacityFrames: Int
@@ -58,6 +63,17 @@ final class PCMDelayLine {
 
     private let requestedDelayFrames: UnsafeMutablePointer<Int>  // control-thread-owned
     private let appliedDelayFrames: UnsafeMutablePointer<Int>    // IOProc-owned
+
+    /// `[fadeOut, fadeIn]` per fade frame, precomputed so the IOProc never
+    /// evaluates a transcendental.
+    private let fadeGains: UnsafeMutablePointer<Float>
+
+    /// How much of a shrink's crossfade is still to run, and how far behind the
+    /// live read position the faded-out side sits. Both IOProc-owned: only
+    /// ``adoptPendingDelay(blockFrames:)`` and ``mixShrinkCrossfade(into:readingFrom:frameCount:)``
+    /// touch them, and both run on the IOProc.
+    private var fadeRemaining = 0
+    private var fadeBackFrames = 0
 
     init(capacityFrames: Int) {
         var capacity = 1
@@ -73,6 +89,12 @@ final class PCMDelayLine {
         writeFrame.initialize(to: 0)
         requestedDelayFrames.initialize(to: 0)
         appliedDelayFrames.initialize(to: 0)
+        self.fadeGains = UnsafeMutablePointer<Float>.allocate(capacity: Self.crossfadeFrames * 2)
+        for frame in 0..<Self.crossfadeFrames {
+            let theta = Double.pi / 2 * Double(frame) / Double(Self.crossfadeFrames)
+            fadeGains[frame * 2] = Float(cos(theta))
+            fadeGains[frame * 2 + 1] = Float(sin(theta))
+        }
     }
 
     deinit {
@@ -80,6 +102,7 @@ final class PCMDelayLine {
         writeFrame.deallocate()
         requestedDelayFrames.deallocate()
         appliedDelayFrames.deallocate()
+        fadeGains.deallocate()
     }
 
     /// The delay actually in force, in frames — what the last ``exchange(_:)``
@@ -128,6 +151,7 @@ final class PCMDelayLine {
             // Read AFTER the write, so a delay of 0 reads back the very frames
             // just stored and the output is the input, byte for byte.
             copyOutOfRing(into: block, atFrame: write &- delay, frameCount: frameCount)
+            mixShrinkCrossfade(into: block, readingFrom: write &- delay, frameCount: frameCount)
         }
         writeFrame.pointee = write &+ frameCount
     }
@@ -140,8 +164,9 @@ final class PCMDelayLine {
     /// the frames now under the read position are old audio from before the
     /// change, and replaying them would be an audible jump backwards. Silence
     /// is the honest thing to emit while the line fills at the new depth.
-    /// Shrinking needs no such care — it jumps forward onto audio the line has
-    /// already got, which is a plain skip.
+    /// Shrinking instead jumps forward onto audio the line has already got —
+    /// a plain skip, which ``mixShrinkCrossfade(into:readingFrom:frameCount:)``
+    /// then hides.
     private func adoptPendingDelay(blockFrames: Int) -> Int {
         OSMemoryBarrier()                       // acquire: see the control thread's word
         let requested = requestedDelayFrames.pointee
@@ -153,9 +178,53 @@ final class PCMDelayLine {
         if effective > applied {
             let write = writeFrame.pointee
             zeroRing(fromFrame: write &- effective, frameCount: effective - applied)
+            // Nothing to fade INTO: the newly exposed stretch is silence by
+            // design, and a fade still in flight would be reading history the
+            // zero-fill has just wiped.
+            fadeRemaining = 0
+        } else {
+            fadeBackFrames = applied - effective
+            fadeRemaining = Self.crossfadeFrames
         }
         appliedDelayFrames.pointee = effective
         return effective
+    }
+
+    /// Fade the audio the line WOULD have gone on emitting into the audio a
+    /// shrink jumped to. Without it the join is a bare cut between two
+    /// uncorrelated stretches of the same music, which clicks.
+    ///
+    /// Equal-power (`cos² + sin² = 1`) for ``BTDelayLine/mixFadeStep(into:)``'s
+    /// reason: a linear pair sums to a 3 dB dip in the middle, audible as a
+    /// hole.
+    ///
+    /// The faded-out side is always `readPosition − fadeBackFrames`, because
+    /// both positions advance one frame per output frame — so a fade that
+    /// spans several blocks needs no stored anchor, only the two counters.
+    ///
+    /// razor: a second shrink arriving mid-fade restarts the fade instead of
+    /// folding the in-flight mix into the new one (``BTDelayLine`` does fold,
+    /// in `requestShift`). The room-delay controller re-settles over ten
+    /// seconds, so two shrinks inside 5 ms is not a sequence it can produce;
+    /// if one ever does, capture the mixed output the way that method does.
+    private func mixShrinkCrossfade(
+        into dst: UnsafeMutableRawPointer, readingFrom startFrame: Int, frameCount: Int
+    ) {
+        guard fadeRemaining > 0 else { return }
+        let fading = min(fadeRemaining, frameCount)
+        let out = dst.assumingMemoryBound(to: Int16.self)
+        for offset in 0..<fading {
+            let index = (startFrame &- fadeBackFrames &+ offset) & frameMask
+            let old = samples.advanced(by: index * Self.channelCount)
+            let gain = (Self.crossfadeFrames - fadeRemaining + offset) * 2
+            let fadeOut = fadeGains[gain], fadeIn = fadeGains[gain + 1]
+            for channel in 0..<Self.channelCount {
+                let slot = offset * Self.channelCount + channel
+                let mixed = (Float(old[channel]) * fadeOut + Float(out[slot]) * fadeIn).rounded()
+                out[slot] = Int16(max(-32_768, min(32_767, mixed)))
+            }
+        }
+        fadeRemaining -= fading
     }
 
     // MARK: - Ring primitives

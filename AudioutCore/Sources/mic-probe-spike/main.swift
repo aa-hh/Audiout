@@ -226,16 +226,33 @@ print("output: \(deviceName(outputID))  (\(Int(nominalRate(outputID))) Hz)")
 
 // MARK: - Mic permission
 
-let accessGranted: Bool = {
-    let sem = DispatchSemaphore(value: 0)
-    var ok = false
-    AVCaptureDevice.requestAccess(for: .audio) { granted in ok = granted; sem.signal() }
-    sem.wait()
-    return ok
-}()
-guard accessGranted else {
-    fputs("Microphone access denied. Grant it to this terminal in System Settings › " +
-          "Privacy & Security › Microphone and re-run.\n", stderr)
+// A DispatchSemaphore here deadlocks: requestAccess's completion is queued
+// onto the main dispatch queue, and this bare `main.swift` has no run loop
+// draining it — sem.wait() blocks the one thread that would ever drain it,
+// so the TCC dialog either never appears or never reports back, and the
+// process hangs silently forever with no crash and no sound. Pumping the
+// run loop instead lets the completion actually run.
+var accessResult: Bool?
+if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+    accessResult = true
+} else {
+    print("Requesting microphone access — look for the system permission " +
+          "prompt (it can appear behind this window)…")
+    AVCaptureDevice.requestAccess(for: .audio) { granted in accessResult = granted }
+    let deadline = Date().addingTimeInterval(60)
+    while accessResult == nil, Date() < deadline {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+}
+guard let accessGranted = accessResult, accessGranted else {
+    if accessResult == nil {
+        fputs("Timed out waiting for the microphone permission prompt. " +
+              "Check System Settings › Privacy & Security › Microphone for a " +
+              "pending request, or grant Terminal access there and re-run.\n", stderr)
+    } else {
+        fputs("Microphone access denied. Grant it to this terminal in System Settings › " +
+              "Privacy & Security › Microphone and re-run.\n", stderr)
+    }
     exit(2)
 }
 

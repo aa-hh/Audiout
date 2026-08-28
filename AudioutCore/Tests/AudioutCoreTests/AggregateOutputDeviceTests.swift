@@ -1137,6 +1137,7 @@ extension SerializedSharedState {
 
         backend.setOutputSet([])
         await pollUntil { control.setDefaultCalls.count == 2 }
+        box.set(Self.builtInSpeakers)   // the HAL switch lands, so no retry is due
 
         #expect(control.setDefaultCalls == [501, 601], "the deselect restores the pre-takeover output")
         #expect(backend.test_aggregateDefaultActive == false, "we no longer hold the Mac's default")
@@ -1159,6 +1160,7 @@ extension SerializedSharedState {
 
         backend.setOutputSet([])
         await pollUntil { control.setDefaultCalls.count == 2 }
+        box.set("com.apple.builtin")   // the HAL switch lands, so no retry is due
 
         #expect(control.setDefaultCalls == [501, 601], "an unresolvable prior falls back on the built-in output")
         #expect(backend.test_aggregateDefaultActive == false)
@@ -1223,7 +1225,10 @@ extension SerializedSharedState {
         await pollUntil { control.setDefaultCalls.count == 2 }
 
         // The box still reports the aggregate: the restore write has not landed.
+        // The re-select below lands INSIDE the landing-check window, and is exactly
+        // what `verifyRestoreLanded` must not fight — no retry may follow it.
         _ = await collectQuiescent(from: backend) { backend.setOutputSet(["some-airplay-device"]) }
+        try? await Task.sleep(for: .milliseconds(700))   // past the landing check
 
         #expect(control.setDefaultCalls == [501, 601], "the aggregate already reads as default — no third write")
         #expect(backend.test_aggregateDefaultActive == true, "we own the default again")
@@ -1254,6 +1259,79 @@ extension SerializedSharedState {
         await pollUntil { !systemVolume.setVolumeCalls.isEmpty }
 
         #expect(systemVolume.setVolumeCalls == [42], "Main is pushed to the restored device, once")
+    }
+
+    // MARK: - A default we never took, and writes that don't land
+
+    /// THE LIVE CASE. The aggregate can be the Mac's
+    /// default output without this process ever having written it: left by a
+    /// previous session, auto-picked by macOS when the device appeared, or chosen
+    /// by the user in Sound settings. `aggregateDefaultActive` is false in all
+    /// three — process-local state cannot see a system-wide, persistent fact — so
+    /// gating the restore on it left the Mac playing through the aggregate, with
+    /// dead volume, for the whole session. Not routing + it is ours = hand it back.
+    @Test func restoreFiresForAnAggregateDefaultThisProcessNeverTook() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501,
+            "com.apple.builtin": 601])
+        // Already the default at launch, and no speaker is ever selected.
+        let box = LockedBox<String?>(AggregateOutputDevice.productUID)
+        let (backend, _) = makeBackend(aggregateControl: control, currentDefaultOutputUIDBox: box)
+        backend.start(); defer { backend.stop() }
+        #expect(backend.test_aggregateDefaultActive == false, "we never took it — that is the whole point")
+
+        backend.setOutputSet([])
+        await pollUntil { !control.setDefaultCalls.isEmpty }
+        box.set("com.apple.builtin")   // the switch lands
+
+        #expect(control.setDefaultCalls == [601], "a default we never took is still handed back")
+        #expect(control.destroyCalls.isEmpty, "the aggregate stays alive")
+    }
+
+    /// The HAL accepts a write and does nothing — the documented failure mode for
+    /// this device (root AGENTS.md: destroying the current system output returns
+    /// `noErr` and leaves it there). A write reported as successful therefore
+    /// proves nothing; the default is read BACK, and one retry follows.
+    @Test func restoreRetriesOnceWhenTheWriteIsAcceptedButIgnored() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501,
+            Self.builtInSpeakers: 601])
+        let box = LockedBox<String?>(Self.builtInSpeakers)
+        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        defer { backend.stop() }
+
+        // The box keeps reporting the aggregate: every write is accepted (the fake
+        // returns true) and none of them moves the default.
+        backend.setOutputSet([])
+        await pollUntil { control.setDefaultCalls.count == 3 }
+
+        #expect(control.setDefaultCalls == [501, 601, 601], "the ignored write is retried exactly once")
+
+        // Past the retry's OWN read-back: it stops there (no loop), and the flag
+        // ends up back true — the aggregate is still the default, so we still hold
+        // it and quit must still restore.
+        try? await Task.sleep(for: .milliseconds(900))
+        #expect(control.setDefaultCalls.count == 3, "one retry, never a loop")
+        #expect(backend.test_aggregateDefaultActive == true)
+    }
+
+    /// The other side of the read-back: once the switch has genuinely landed there
+    /// is nothing to retry.
+    @Test func restoreDoesNotRetryOnceTheSwitchLands() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501,
+            Self.builtInSpeakers: 601])
+        let box = LockedBox<String?>(Self.builtInSpeakers)
+        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        defer { backend.stop() }
+
+        backend.setOutputSet([])
+        await pollUntil { control.setDefaultCalls.count == 2 }
+        box.set(Self.builtInSpeakers)   // landed, well inside the check window
+
+        try? await Task.sleep(for: .milliseconds(900))
+        #expect(control.setDefaultCalls == [501, 601], "a landed switch is never re-written")
+        #expect(backend.test_aggregateDefaultActive == false)
     }
 }
 

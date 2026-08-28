@@ -63,21 +63,44 @@ rule `run-tests.sh` uses (see Tests below). `make-app.sh` moves only the
 compile — assembly, dylib bundling and codesigning always happen locally, so the
 `.app` is identical either way. `AUDIOUT_BUILD_LOCAL=1` forces local.
 
-**Every build handed over for testing gets its OWN bundle id and app name —
-every time, even for a one-line change.** Bump a version suffix on each
-rebuild; never reuse an id that has already been launched:
+**Know what is being tested, then pick the bundle id — and say which you
+picked and why when you hand the build over** (Alec, 2026-08-28):
 
-```bash
-APP_NAME="Audiout Sync v2" BUNDLE_ID="com.audiout.Audiout.syncv2" bash scripts/make-app.sh
-```
+- **Testing the permissions path itself** — onboarding, TCC grants (system
+  audio capture, Bluetooth, Local Network), the PTP helper's Login Items
+  approval, or any first-run gate: **fresh id every time**, so the flow starts
+  from a virgin state and you see the real prompts.
 
-macOS pins TCC grants (system audio capture, Bluetooth, local network) to the
-bundle id AND the code signature. Re-signing the same id with changed code
-invalidates the grant, and the failure mode is erratic — stale grants, silent
-denials, sometimes no prompt at all — so the tester ends up debugging
-permissions instead of the feature. A fresh id always gets a clean prompt.
-Bare `make-app.sh` builds the DEFAULT `com.audiout.Audiout`, which is the
-live `/Applications` copy: never overwrite it for a test.
+  ```bash
+  APP_NAME="Audiout Sync v2" BUNDLE_ID="com.audiout.Audiout.syncv2" bash scripts/make-app.sh
+  ```
+
+- **Everything else** — UI, layout, audio behaviour, bug fixes: **reuse the
+  standing dev id**, approved once and silent thereafter.
+
+  ```bash
+  APP_NAME="Audiout Dev" BUNDLE_ID="com.audiout.Audiout.dev" bash scripts/make-app.sh
+  ```
+
+Why the split. macOS pins TCC grants to the bundle id AND the code signature,
+but *how* it pins depends on the signature: an **ad-hoc** signature has no
+stable identity, so the grant re-pins to the binary's hash and every rebuild
+goes erratic — stale grants, silent denials, sometimes no prompt at all. That
+is the failure this rule was originally written against. Builds are
+**Developer ID** signed now (`make-app.sh` picks the identity up
+automatically), and TCC then stores a signature-based requirement that
+**survives every rebuild of the same id** — see the same reasoning at
+`scripts/make-app.sh:132` and in `PermissionMode.swift`.
+
+Reusing one dev id also dodges a second wall: since 2026-08-28 macOS refuses
+`SMAppService` daemon registration for every NEW bundle id until someone
+clicks Allow in the Background (System Settings › General › Login Items &
+Extensions). One dev id = one approval, ever.
+
+Run **one copy of the dev id at a time** — two copies under one id fight over
+the same daemon identity and the loser's `register()` silently no-ops. Bare
+`make-app.sh` builds the DEFAULT `com.audiout.Audiout`, which is the live
+`/Applications` copy: never overwrite it for a test.
 
 ## Tests
 

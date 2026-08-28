@@ -61,8 +61,12 @@ public final class BuiltInMicRecorder: MicProbeRecording {
             throw RecorderError.noBuiltInMicrophone
         }
         try engine.inputNode.auAudioUnit.setDeviceID(mic)
-        let rate = engine.inputNode.outputFormat(forBus: 0).sampleRate
-        engine.inputNode.installTap(onBus: 0, bufferSize: 4_096, format: nil) { [self] buffer, _ in
+        // Pinning the device updates `inputFormat` but leaves `outputFormat`
+        // reporting the PREVIOUS device's rate, and a tap installed with that
+        // stale format (`format: nil` takes it) makes `start()` throw -10868
+        // from InitializeActiveNodesInInputChain. Tap with the hardware format.
+        let format = engine.inputNode.inputFormat(forBus: 0)
+        engine.inputNode.installTap(onBus: 0, bufferSize: 4_096, format: format) { [self] buffer, _ in
             let frames = Int(buffer.frameLength)
             guard frames > 0, let data = buffer.floatChannelData else { return }
             let channels = Int(buffer.format.channelCount)
@@ -78,7 +82,7 @@ public final class BuiltInMicRecorder: MicProbeRecording {
         }
         engine.prepare()
         try engine.start()
-        return rate
+        return format.sampleRate
     }
 
     public func stop() -> [Float] {

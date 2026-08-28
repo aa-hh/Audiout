@@ -454,9 +454,25 @@ trailing control, a device-selector dropdown as THE routing control.
    Selected Devices: one row per user-routed app — app icon · name ·
    **always-visible** volume slider (`ControlCenterSlider`, dimmed/disabled
    while the destination is "Current device," matching `DeviceRowView`
-   dimming) · a "redirect audio to…" `NSPopUpButton` with **exactly two
-   sections, Current Device and AirPlay Devices** (no Groups — Main Out's
-   Output Groups entries are unaffected). A hover-revealed **✕** removes the
+   dimming) · a "redirect audio to…" `NSPopUpButton` with **three
+   sections: Output Groups, Current Device and AirPlay Devices** (Main Out's
+   own Output Groups entries are unaffected).
+   - **An App Exception may target a saved GROUP — REVERSAL, 2026-08-28.**
+     This supersedes the original "no Groups" rule (PLAN-POPOVER-ROUTING
+     decision 4, now struck there). A group route follows the group's LIVE
+     membership: editing the group changes what the app plays on at once, and
+     no member list is stored with the route. Speakers the main output has
+     claimed drop out of the app's set and it plays on whichever members are
+     left — the entry says so ("Plays on 2 of 4 — the rest are in the main
+     mix"), the stored route is untouched, and those speakers rejoin the app
+     when the main output releases them; a group with no free speaker is
+     listed but greyed. Members must be AirPlay 2 (no local Mac, no AirPlay 1,
+     no Bluetooth, no Cast), the same rule a single target already has.
+     What reaches a member is the app's own slider × that speaker's level
+     inside the group; the group's master volume does not apply. Deleting the
+     group returns its routes to "Follows main output".
+
+   A hover-revealed **✕** removes the
    route (`HoverActionButton` idiom, same discipline as other rows). A
    full-width **"+ Add application…"** row sits at the card's bottom; it is
    also the card's empty state, and opens a running-app picker sourced from

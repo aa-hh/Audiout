@@ -70,7 +70,14 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   Main is a stored master GAIN (`Main × Group × Device`, formed once at the write
   boundary in `NativeBackend.engineVolume(forID:uiVolume:)` and never stored), so
   a key press moves one number and every device follows. Per-app redirect targets
-  are exempt by design — each redirected app owns its volume.
+  are exempt by design — each redirected app owns its volume. The ONE thing that
+  composes with an app's own level is a routed GROUP's per-speaker level
+  (`AppRouteMixer.composedGain`, applied at SAMPLE level in the mixer, never via
+  the wire `setMasterGain` — one receiver can carry contributions from apps at
+  different group gains). The group's MASTER volume deliberately stays out of it.
+  Consequence: two speakers fed the same apps at different gains cannot share one
+  mixed buffer, so the mixer's stream signature carries the gain and they split
+  into a stream each.
   `applyExternalSystemVolume(_:)` is the read-back arm and writes no hardware;
   the only hardware write is `setMasterGain`'s `mirrorToSystemVolume` on the
   user-drag arm. One direction writes, the other never does — that, not a
@@ -153,14 +160,30 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   which concrete processes a bundle id resolved to, nor how — a bundle
   resolving to ZERO processes is exactly that leak's signature and is now
   visible in the log alone, no repro needed.
-- **`AppRouteDestination` is three cases, not two: `.noRedirect` (new default,
-  unset) / `.currentDevice` (explicit "play here" pick) / `.device(id:)`.**
+- **`AppRouteDestination` is four cases: `.noRedirect` (default,
+  unset) / `.currentDevice` (explicit "play here" pick) / `.device(id:)` /
+  `.group(id:)` (a SAVED GROUP — PLAN-POPOVER-ROUTING decision 4, reversed).**
   `.noRedirect` and `.currentDevice` are capture/engine-equivalent — both mean
   "plays locally, stays in the whole-system mix" — they differ only in popover
   UI state (unset vs. a deliberate choice). Don't pattern-match negatively on
-  `.currentDevice` to mean "is redirected"; use `AppRouteDestination.isDeviceRoute`
-  (true only for `.device`), the single source of truth for "actually routed
-  away."
+  `.currentDevice` to mean "is redirected". TWO predicates, and picking the
+  wrong one is the trap: `isDeviceRoute` is true ONLY for `.device` — use it
+  where a single `Device.id` is the question (the one-role-per-speaker clear,
+  the app-quit resume of a speaker); `isRoutedAway` is true for `.device` AND
+  `.group` — use it for "is this app out of the whole-system mix", which is
+  what the tap's exclusion set and the routed-app count ask.
+- **A `.group` route is a LIVE REFERENCE, never a snapshot.** Nothing persists
+  the membership; the backend resolves it on every push against the
+  `groupTargets` it is handed (built by `AppRoutingController
+  .resolveGroupTargets`, the ONE place group → eligible speakers is decided).
+  A group edit therefore has to re-push the route table even though the table
+  did not change — that is what makes the audio move.
+- **Group overlap with Main Out is PARTIAL, and that is the difference from a
+  `.device` route.** `effectiveAppRoutesLocked` subtracts claimed/unreachable
+  members one by one and keeps whatever survives; only an EMPTY survivor set
+  demotes the route to effective-`.noRedirect`. So `clearRoutes(toDevices:)`
+  must never clear a `.group` route — clearing would discard an intent that is
+  still partly satisfiable, and would not come back when the speakers do.
 - **`.currentDevice` local playback follows the Mac's real default output device
   (Bluetooth, USB, HDMI, built-in, etc.), re-resolved on each cold start.**
   ANTI-FEEDBACK GUARD: it refuses to follow a default whose transport is AirPlay
@@ -775,7 +798,8 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeCaptureCoordinator` | Whole-system Core Audio capture; excludes individually-routed + user-excluded apps. |
 | `PerAppCaptureCoordinator` | Per-process Core Audio capture taps, one per individually-routed app. |
 | `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + helper/child processes) via four ANY-of attribution layers: own bundle id, responsible pid, bundle-path containment, parent-pid walk; the AppKit lookups (pid→bundle, bundle→`.app` path) are injected. `resolveWithAttribution(bundleID:)` (T2) is the diagnostic twin of `resolve(bundleID:)`, tagging each resolved process with its matching `AttributionLayer` for `Telemetry`. |
-| `AppRouteMixer` | Combines per-app captures into per-destination mixed streams; applies per-app volume. |
+| `AppRouteMixer` | Combines per-app captures into per-destination mixed streams; applies each app's gain per speaker. |
+| `GroupRouteTarget` | One saved group resolved to the speakers it can feed a per-app stream, with each one's level inside the group. |
 | `SystemOutputVolume` | Reads/writes the Mac's output volume/mute. |
 | `makeBackend(_:)` | The one factory that knows concrete backend types. |
 | `SetupModel` | Brain of the first-run permission-priming flow (AppKit-free): per-permission `PermissionStatus`, PTP helper `PTPHelperStatus`, runs the injected probes, persists `AppSettings.hasCompletedSetup`, gates auto-present via `shouldPresentOnLaunch(settings:backendKind:)` (native only). UI = `AudioutOnboardingUI`. **A PROVED Local Network grant is sticky**: `refreshStatuses()` re-primes on every app activation, and a rescan that proves nothing (empty network, prime already in flight, browse ended early) must NEVER downgrade `.granted` — only the mDNS policy refusal does. Letting it downgrade is what made the completed card flap "permission lost" and back, live. The speaker COUNT follows the same rule: only a browse that saw something rewrites it. |

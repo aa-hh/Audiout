@@ -477,6 +477,87 @@ import AppKit
         #expect(item?.toolTip == nil)
     }
 
+    // MARK: Output Groups section (decision 4's reversal)
+
+    private func makeGroupDestinations(groupEnabled: Bool = true,
+                                       groupSubtitle: String? = "4 speakers")
+        -> [AppRowView.Destination] {
+        [
+            AppRowView.Destination(id: "no-redirect", title: "Follows main output", isLocal: true,
+                                   symbolName: nil, isStandalone: true),
+            AppRowView.Destination(id: "local", title: "Current Device", isLocal: true,
+                                   symbolName: "laptopcomputer"),
+            AppRowView.Destination(id: "group-1", title: "Kitchen", isLocal: false,
+                                   symbolName: "rectangle.3.group",
+                                   subtitle: groupSubtitle,
+                                   isGroup: true, isEnabled: groupEnabled,
+                                   buttonTitle: "→ Kitchen"),
+            AppRowView.Destination(id: "device-1", title: "Living Room", isLocal: false,
+                                   symbolName: "airplayaudio"),
+        ]
+    }
+
+    private func makeRowWithGroups(selected: String = "no-redirect",
+                                   groupEnabled: Bool = true) -> (AppRowView, RecordingDelegate) {
+        let row = AppRowView()
+        let delegate = RecordingDelegate()
+        row.delegate = delegate
+        row.apply(AppRowView.Configuration(
+            appID: "com.example.app", name: "Example App", icon: nil, volume: 42,
+            selectedDestinationID: selected,
+            destinations: makeGroupDestinations(groupEnabled: groupEnabled)))
+        return (row, delegate)
+    }
+
+    @Test func groupsGetTheirOwnSectionAheadOfCurrentDeviceAndAirPlayDevices() {
+        let (row, _) = makeRowWithGroups()
+        let titles = row.test_menuTitles
+
+        #expect(titles.contains("Output Groups"))
+        let groupHeader = titles.firstIndex(of: "Output Groups")!
+        #expect(groupHeader < titles.firstIndex(of: "Current Device")!)
+        #expect(titles.firstIndex(of: "Kitchen")! == groupHeader + 1)
+        #expect(titles.firstIndex(of: "Current Device")! < titles.firstIndex(of: "AirPlay Devices")!)
+    }
+
+    @Test func aGroupIsNotAlsoListedUnderAirPlayDevices() {
+        let (row, _) = makeRowWithGroups()
+        #expect(row.test_menuTitles.filter { $0 == "Kitchen" }.count == 1)
+    }
+
+    @Test func selectedGroupNamesItselfWithAnArrowOnTheCollapsedButton() {
+        let (row, _) = makeRowWithGroups(selected: "group-1")
+        #expect(row.test_collapsedDestinationTitle == "→ Kitchen")
+        #expect(row.test_destinationPopUpMenuItem(forDestinationID: "group-1")?.title == "Kitchen",
+                "the open menu keeps the plain name")
+    }
+
+    @Test func aDeviceSelectionLeavesTheCollapsedButtonOnTheMenuTitle() {
+        let (row, _) = makeRowWithGroups(selected: "device-1")
+        #expect(row.test_collapsedDestinationTitle == "Living Room")
+    }
+
+    @Test func groupSubtitleReachesTheMenuItemAsATooltip() {
+        let (row, _) = makeRowWithGroups()
+        #expect(row.test_destinationPopUpMenuItem(forDestinationID: "group-1")?.toolTip == "4 speakers")
+    }
+
+    /// A group with nothing to play on stays listed but can't be picked.
+    @Test func anUnusableGroupIsListedButNotPickable() {
+        let (row, _) = makeRowWithGroups(groupEnabled: false)
+        let item = row.test_destinationPopUpMenuItem(forDestinationID: "group-1")
+        #expect(item != nil, "the group must stay visible — it wasn't deleted")
+        #expect(item?.isEnabled == false, "greyed out, so the click can't land")
+        #expect(row.test_destinationPopUpMenuItem(forDestinationID: "device-1")?.isEnabled == true,
+                "an ordinary entry stays pickable")
+    }
+
+    @Test func aGroupSelectionReachesTheDelegateAsItsOwnID() {
+        let (row, delegate) = makeRowWithGroups()
+        row.test_selectDestination("group-1")
+        #expect(delegate.lastDestination?.destinationID == "group-1")
+    }
+
     // MARK: Cursor (C3) — pointingHand over the selectable body dead-zone
 
     @Test func cursorRectsCoverBodyDeadZone() {

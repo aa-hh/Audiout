@@ -17,18 +17,19 @@ public final class AppRoutingController {
     /// decision 2 / `AppRouteStore` doc). The UI renders rows in this order.
     private(set) public var appRoutes: [AppRoute]
 
-    /// `bundleID` → the `.device(id:)` target `resetDeviceRoute(bundleID:)` most
-    /// recently cleared it FROM (an app-quit-triggered reset, not a deliberate
-    /// user pick). IN-MEMORY ONLY, never persisted through `store` — no
-    /// `AppRouteStore` schema change — so it is forgotten for free when
-    /// Audiout itself quits, same as any other plain property. Lets the
-    /// popover offer a one-click "Resume → <device>" pick when the app
-    /// relaunches (`PopoverController.appDestinations(devices:keeping:bundleID:)`)
-    /// instead of forcing a manual re-pick, without reversing the 2026-07-22
-    /// decision that a redirect itself does not survive the app's quit. Cleared
-    /// the moment it's consumed or made moot — see `setDestination(_:for:)` and
+    /// `bundleID` → the destination `resetDeviceRoute(bundleID:)` most recently
+    /// cleared it FROM (an app-quit-triggered reset, not a deliberate user
+    /// pick) — a `.device` or a `.group`. IN-MEMORY ONLY, never persisted
+    /// through `store` — no `AppRouteStore` schema change — so it is forgotten
+    /// for free when Audiout itself quits, same as any other plain property.
+    /// Lets the popover offer a one-click "Resume → <device or group>" pick when
+    /// the app relaunches
+    /// (`PopoverController.appDestinations(devices:keeping:bundleID:)`) instead
+    /// of forcing a manual re-pick, without reversing the 2026-07-22 decision
+    /// that a redirect itself does not survive the app's quit. Cleared the
+    /// moment it's consumed or made moot — see `setDestination(_:for:)` and
     /// `removeRoute(bundleID:)`.
-    private var clearedDeviceRouteMemory: [String: String] = [:]
+    private var clearedRouteMemory: [String: AppRouteDestination] = [:]
 
     /// Fired AFTER any mutation that actually changes `appRoutes` (add / remove /
     /// destination / volume / silent device-unavailable fallback), immediately
@@ -84,13 +85,13 @@ public final class AppRoutingController {
     ///
     /// ANY resolvable pick — the "Resume → <device>" offer, the same device
     /// picked again, or a completely different destination — consumes
-    /// `clearedDeviceRouteMemory`'s entry for `bundleID` unconditionally, even
+    /// `clearedRouteMemory`'s entry for `bundleID` unconditionally, even
     /// when the destination itself turns out to be a no-op: once the user has
     /// touched this row's popup, the remembered target is stale/moot either
     /// way, and there is no separate "Resume" mutation to special-case.
     public func setDestination(_ destination: AppRouteDestination, for bundleID: String) {
         guard let i = index(of: bundleID) else { return }
-        clearedDeviceRouteMemory.removeValue(forKey: bundleID)
+        clearedRouteMemory.removeValue(forKey: bundleID)
         guard appRoutes[i].destination != destination else { return }
         appRoutes[i].destination = destination
         persist()
@@ -107,69 +108,150 @@ public final class AppRoutingController {
     }
 
     /// Remove a route entirely. No-op if `bundleID` isn't present. Also drops any
-    /// `clearedDeviceRouteMemory` entry for `bundleID` — a removed route has
+    /// `clearedRouteMemory` entry for `bundleID` — a removed route has
     /// nothing left to resume.
     public func removeRoute(bundleID: String) {
         guard let i = index(of: bundleID) else { return }
         appRoutes.remove(at: i)
-        clearedDeviceRouteMemory.removeValue(forKey: bundleID)
+        clearedRouteMemory.removeValue(forKey: bundleID)
         persist()
     }
 
-    /// Revert a route that currently redirects to a specific AirPlay DEVICE back
+    /// Revert a route that currently redirects AWAY (to a specific AirPlay
+    /// device, or to a saved group) back
     /// to `.noRedirect` — used when the routed app QUITS, so a redirect no longer
     /// silently persists across the app's own quit/relaunch (product decision
     /// 2026-07-22): relaunching the app won't auto-resume streaming to a speaker;
     /// the user re-picks it deliberately. No-op for a `.noRedirect`/`.currentDevice`
-    /// route (only an involuntary device redirect is reset — a "play on this Mac"
+    /// route (only an involuntary redirect is reset — a "play on this Mac"
     /// pick is left alone) or a bundle with no route, so it's safe to call on
     /// every app termination. Mirrors ``handleDeviceDisappeared(id:)``'s
     /// involuntary reset-to-`.noRedirect`, and reuses the same un-route path a
     /// manual change takes (persist → `onRoutesDidChange`).
     ///
-    /// Also records the cleared target in `clearedDeviceRouteMemory` (in-memory
+    /// Also records the cleared destination in `clearedRouteMemory` (in-memory
     /// only) so a relaunch can offer a one-click way back — this does NOT
     /// reverse the quit-clears-the-route decision above; it only remembers what
-    /// was cleared, kept entirely off disk.
+    /// was cleared, kept entirely off disk. The whole destination is stored, so
+    /// a cleared GROUP route can be resumed as that same group.
     public func resetDeviceRoute(bundleID: String) {
         guard let i = index(of: bundleID),
-              case .device(let deviceID) = appRoutes[i].destination else { return }
-        clearedDeviceRouteMemory[bundleID] = deviceID
+              appRoutes[i].destination.isRoutedAway else { return }
+        clearedRouteMemory[bundleID] = appRoutes[i].destination
         appRoutes[i].destination = .noRedirect
         persist()
     }
 
-    /// The device id `resetDeviceRoute(bundleID:)` most recently cleared
+    /// The destination `resetDeviceRoute(bundleID:)` most recently cleared
     /// `bundleID`'s route from, if any and if not yet consumed — `nil` once
     /// the user picks any destination (`setDestination`) or removes the route
     /// (`removeRoute`). `PopoverController` reads this to decide whether to
-    /// offer a "Resume → <device>" destination entry.
-    public func clearedDeviceRouteTarget(for bundleID: String) -> String? {
-        clearedDeviceRouteMemory[bundleID]
+    /// offer a "Resume → <device or group>" destination entry, and drops the
+    /// offer itself when the remembered target is no longer offerable.
+    public func clearedRouteDestination(for bundleID: String) -> AppRouteDestination? {
+        clearedRouteMemory[bundleID]
     }
 
     // MARK: Derived state
 
-    /// Count of routes redirected away to a specific AirPlay device (PLAN §B —
-    /// drives the Applications-section collapse default: collapsed unless
-    /// this is > 0). Uses `isDeviceRoute` (positive match on `.device`) rather
-    /// than `!= .currentDevice` — the latter would incorrectly count
-    /// `.noRedirect` routes as "routed."
+    /// Count of routes redirected away from the main mix — to a specific AirPlay
+    /// device or to a saved group (PLAN §B — drives the Applications-section
+    /// collapse default: collapsed unless this is > 0). Uses `isRoutedAway`
+    /// (positive match) rather than `!= .currentDevice` — the latter would
+    /// incorrectly count `.noRedirect` routes as "routed."
     public var routedAppCount: Int {
-        appRoutes.reduce(0) { $0 + ($1.destination.isDeviceRoute ? 1 : 0) }
+        appRoutes.reduce(0) { $0 + ($1.destination.isRoutedAway ? 1 : 0) }
     }
 
-    /// App display names whose route destination is this device (bypassed to
-    /// it), in stable route order. Excludes both `.noRedirect` and
-    /// `.currentDevice` (local / no redirect) — those apps aren't routed to
-    /// any AirPlay device. Backs the device row's routing sublabel
+    /// App display names whose route lands on this device, in stable route
+    /// order — a `.device` route naming it, or a `.group` route whose resolved
+    /// membership contains it. Excludes both `.noRedirect` and `.currentDevice`
+    /// (local / no redirect) — those apps aren't routed to any AirPlay device.
+    /// Backs the device row's routing sublabel
     /// (`DeviceRowView.apply(routedAppNames:)`) in both host controllers
     /// (popover + window).
-    public func routedAppNames(for deviceID: String) -> [String] {
+    ///
+    /// - Parameter groupTargets: the resolved membership of every saved group,
+    ///   from ``resolveGroupTargets(_:devices:)``. Empty (the default) means no
+    ///   group route can name any device — correct for a host with no groups
+    ///   to resolve against.
+    public func routedAppNames(
+        for deviceID: String, groupTargets: [String: GroupRouteTarget] = [:]
+    ) -> [String] {
         appRoutes.compactMap { route in
-            if case .device(let id) = route.destination, id == deviceID { return route.displayName }
+            switch route.destination {
+            case .device(let id) where id == deviceID:
+                return route.displayName
+            case .group(let id) where groupTargets[id]?.memberVolumes[deviceID] != nil:
+                return route.displayName
+            default:
+                return nil
+            }
+        }
+    }
+
+    /// Display names of the apps a saved group currently feeds, in stable route
+    /// order — what the Groups screen's card meta line discloses ("· Feeding
+    /// Safari"). Route INTENT, not confirmed streaming: a group route counts
+    /// here even while its members are all busy carrying the main mix.
+    public func appNamesRouted(toGroup groupID: String) -> [String] {
+        appRoutes.compactMap { route in
+            if case .group(let id) = route.destination, id == groupID { return route.displayName }
             return nil
         }
+    }
+
+    /// Every route pointed at the deleted group `id` falls back to
+    /// `.noRedirect` — the group is gone, so there is nothing left to resolve
+    /// the route against. Mirrors Main Out's own fallback to `.selectedDevices`
+    /// on group deletion (`GroupController`), and
+    /// ``handleDeviceDisappeared(id:)``'s involuntary reset: same `.noRedirect`
+    /// landing, same batched single `persist()`. No-op — no persist, no
+    /// `onRoutesDidChange` — when nothing targets the group.
+    public func handleGroupDeleted(id: String) {
+        var changed = false
+        for i in appRoutes.indices {
+            if case .group(let groupID) = appRoutes[i].destination, groupID == id {
+                appRoutes[i].destination = .noRedirect
+                changed = true
+            }
+        }
+        guard changed else { return }
+        persist()
+    }
+
+    // MARK: Group resolution
+
+    /// The ONE resolver from saved groups to the speakers they can currently
+    /// feed as per-app route targets: each group's members, minus this Mac,
+    /// minus AirPlay-1-only receivers, minus Bluetooth and Cast — exactly the
+    /// eligibility an individually-picked target already has (a per-app rebind
+    /// re-anchors an AP1 clock; BT/Cast ids never reach the AirPlay engine).
+    /// A member the fleet snapshot doesn't hold at all is dropped here too:
+    /// nothing is known about it to judge.
+    ///
+    /// Deliberately NOT a reachability filter. A member that is discovered but
+    /// unreachable — or currently claimed by the main output — survives this
+    /// resolve and is subtracted per device inside the backend's own effective-
+    /// route pass, so the app keeps playing on the group's remaining members
+    /// and re-gains the others by itself.
+    public static func resolveGroupTargets(
+        _ groups: [Group], devices: [Device]
+    ) -> [String: GroupRouteTarget] {
+        let eligible = Dictionary(
+            devices.filter { !$0.isLocalDevice && $0.supportsAirPlay2 && !$0.isBluetooth && !$0.isCast }
+                .map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first })
+        var targets: [String: GroupRouteTarget] = [:]
+        for group in groups {
+            let memberVolumes = group.memberIDs
+                .filter { eligible[$0] != nil }
+                .reduce(into: [String: Int]()) { volumes, id in
+                    volumes[id] = (group.memberVolumes[id] ?? 100).clampedToVolume
+                }
+            targets[group.id] = GroupRouteTarget(memberVolumes: memberVolumes)
+        }
+        return targets
     }
 
     /// PLAN decision 7 (silent fallback), narrowed by R5: any route targeting the
@@ -218,6 +300,12 @@ public final class AppRoutingController {
     /// a whole set. A no-op — no persist, no `onRoutesDidChange` — when nothing
     /// currently targets any of `deviceIDs` (including an empty set), so the
     /// coordinator can call it unconditionally on every selection change.
+    ///
+    /// A `.group` route is deliberately NOT cleared, even when Main Out takes
+    /// some of that group's speakers: the route names a set, not a speaker, and
+    /// the app simply plays on whichever members are left (the backend subtracts
+    /// the claimed ones per device). Clearing it would throw away an intent that
+    /// is still partly satisfiable — and would not come back when the speakers do.
     public func clearRoutes(toDevices deviceIDs: Set<String>) {
         guard !deviceIDs.isEmpty else { return }
         var changed = false
@@ -244,7 +332,7 @@ public final class AppRoutingController {
     /// redirect intent from a previous run is stale intent.
     ///
     /// Rows and their volumes persist — only the DESTINATION resets. This
-    /// deliberately does NOT touch `clearedDeviceRouteMemory` — that map backs
+    /// deliberately does NOT touch `clearedRouteMemory` — that map backs
     /// the narrower per-app-quit "Resume → <device>" offer, a separate
     /// mechanism from this broader launch-time clear. Batches every changed
     /// route into exactly one `persist()` / `onRoutesDidChange` fire, not one

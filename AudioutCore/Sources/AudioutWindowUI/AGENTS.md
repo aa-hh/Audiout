@@ -12,6 +12,7 @@ All group logic goes through the shared
 
 ## Rules
 
+- **A group card's "Feeding …" clause is the ONE thing this screen reads out of `AppRoutingController`** (an optional the host injects, like `deviceIconController` — unset simply means no clause). It states route INTENT, not confirmed playback: a group counts as fed even while every one of its speakers is busy carrying the main mix. This screen still assigns nothing — a route is only ever made from the Mixer's App Exceptions card.
 - **Configuration-only: selection ≠ activation.** Selecting the pinned Groups
   row opens the saved-group card overview, and a card pushes that group's
   editor in place; selecting a device opens its detail pane (which describes

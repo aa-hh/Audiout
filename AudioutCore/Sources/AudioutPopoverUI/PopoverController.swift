@@ -714,21 +714,33 @@ public final class PopoverController: NSObject {
     /// `Device.id` or with `currentDeviceDestinationID`.
     static let noRedirectDestinationID = "\u{0000}no-redirect"
 
-    /// The sentinel PREFIX a "Resume → <device>" destination entry's id carries
+    /// The sentinel PREFIX a "Resume → <device or group>" destination entry's id
+    /// carries
     /// (see `appDestinations(devices:keeping:bundleID:)`) — offered when
-    /// `AppRoutingController.clearedDeviceRouteTarget(for:)` names a device the
-    /// app-quit reset cleared and that device is currently available again. The
-    /// underlying device id is appended after the prefix so `destination(forID:)`
-    /// can recover it; prefixed (rather than reusing the plain device id) so this
-    /// entry never collides with that same device's own plain entry lower in the
+    /// `AppRoutingController.clearedRouteDestination(for:)` names a target the
+    /// app-quit reset cleared and that target is currently offerable again. The
+    /// underlying destination id is appended after the prefix so
+    /// `destination(forID:)`
+    /// can recover it; prefixed (rather than reusing the plain id) so this
+    /// entry never collides with that same target's own plain entry lower in the
     /// same popup.
     static let resumeDestinationIDPrefix = "\u{0000}resume:"
+
+    /// The sentinel PREFIX a saved-group destination entry's id carries — a
+    /// group id and a `Device.id` are both opaque strings, so the two spaces are
+    /// kept apart by construction rather than by hoping they never collide.
+    static let groupDestinationIDPrefix = "\u{0000}group:"
 
     /// Builds the destination-popup id for a "Resume → <device>" entry
     /// targeting `deviceID`. Inverse of the prefix-stripping in
     /// `destination(forID:)`.
     static func resumeDestinationID(forDeviceID deviceID: String) -> String {
         resumeDestinationIDPrefix + deviceID
+    }
+
+    /// Builds the destination-popup id for a saved-group entry.
+    static func groupDestinationID(forGroupID groupID: String) -> String {
+        groupDestinationIDPrefix + groupID
     }
 
     /// The SF Symbol shown for a routed app that isn't currently running (its icon
@@ -2412,10 +2424,37 @@ public final class PopoverController: NSObject {
         return view
     }
 
+    /// The saved groups resolved against the current fleet — what turns a
+    /// `.group` app route into the speakers whose FEED column names that app.
+    /// Recomputed per read rather than cached: it is a small pure fold over
+    /// state that several unrelated paths mutate, and a stale copy would show a
+    /// speaker feeding an app it no longer carries.
+    /// App display name → the saved group whose membership carries it, for
+    /// every app currently on a `.group` route. Feeds the device rows' spoken
+    /// FEED clause ("Safari, through Kitchen"), which is the only place the
+    /// difference between a group route and a direct one is stated.
+    private func appRouteGroupNames() -> [String: String] {
+        guard let controller = groupController else { return [:] }
+        var names: [String: String] = [:]
+        for route in appRouting.appRoutes {
+            if case .group(let groupID) = route.destination,
+               let group = controller.groups.first(where: { $0.id == groupID }) {
+                names[route.displayName] = group.name
+            }
+        }
+        return names
+    }
+
+    private func groupRouteTargets() -> [String: GroupRouteTarget] {
+        guard let controller = groupController else { return [:] }
+        return AppRoutingController.resolveGroupTargets(
+            controller.groups, devices: Array(devicesByID.values))
+    }
+
     /// Whether an app route currently redirects to this device — the canonical
     /// `isRedirectTarget` source (backs `controllable` and the Q4 retry path).
     private func isRedirectTarget(_ id: String) -> Bool {
-        !appRouting.routedAppNames(for: id).isEmpty
+        !appRouting.routedAppNames(for: id, groupTargets: groupRouteTargets()).isEmpty
     }
 
     /// The Devices card's genuinely-DIVERGING dormant state (spec §4.7 FINAL
@@ -2507,9 +2546,11 @@ public final class PopoverController: NSObject {
             // No controller ⇒ nothing routable ⇒ not controllable.
             row.apply(device, selected: false, controllable: false,
                       selectionDimmed: dimmed,
-                      routedAppNames: appRouting.routedAppNames(for: device.id),
+                      routedAppNames: appRouting.routedAppNames(for: device.id,
+                                                              groupTargets: groupRouteTargets()),
                       liveAppNames: liveRoutedAppNames[device.id] ?? [],
                       appTintColors: appTintColorsByName(),
+                      appRouteGroupNames: appRouteGroupNames(),
                       mainOutTargetsGroupName: activeMainOutGroupName,
                       energizePending: energizePendingIDs.contains(device.id),
                       iconSymbolName: deviceIconController?.symbolName(for: device),
@@ -2560,9 +2601,11 @@ public final class PopoverController: NSObject {
                   selected: selected,
                   controllable: controller.isMainOutMember(device.id) || isRedirectTarget(device.id),
                   selectionDimmed: dimmed,
-                  routedAppNames: appRouting.routedAppNames(for: device.id),
+                  routedAppNames: appRouting.routedAppNames(for: device.id,
+                                                              groupTargets: groupRouteTargets()),
                   liveAppNames: liveRoutedAppNames[device.id] ?? [],
                   appTintColors: appTintColorsByName(),
+                  appRouteGroupNames: appRouteGroupNames(),
                   masterMuted: controller.isMainOutMuted,
                   inActiveTarget: inActiveTarget,
                   mainOutTargetsGroupName: activeMainOutGroupName,
@@ -3217,14 +3260,12 @@ public final class PopoverController: NSObject {
         let row = AppRowView(showsMeter: true)
         row.delegate = self
         // Tether chip (Warm Signal v4.1 CORRECTIONS, extending item 7): only
-        // an actual AirPlay-device redirect has a matching device-row FEED
-        // segment to tether to — "No Redirect"/"Current Device" get no chip.
-        let tetherColor: NSColor?
-        if case .device = route.destination {
-            tetherColor = appTintColor(for: route.bundleID)
-        } else {
-            tetherColor = nil
-        }
+        // a redirect away from the main mix has matching device-row FEED
+        // segments to tether to (one per speaker a group route reaches) —
+        // "No Redirect"/"Current Device" get no chip.
+        let tetherColor: NSColor? = route.destination.isRoutedAway
+            ? appTintColor(for: route.bundleID)
+            : nil
         row.apply(AppRowView.Configuration(
             appID: route.bundleID,
             name: route.displayName,
@@ -3278,14 +3319,8 @@ public final class PopoverController: NSObject {
                                 bundleID: String) -> [AppRowView.Destination] {
         let available = availableAirPlayDestinations(devices: devices)
         var entries: [AppRowView.Destination] = []
-        if let resumeTargetID = appRouting.clearedDeviceRouteTarget(for: bundleID),
-           let resumeDevice = available.first(where: { $0.id == resumeTargetID }) {
-            entries.append(.init(id: Self.resumeDestinationID(forDeviceID: resumeDevice.id),
-                                 title: "Resume → \(resumeDevice.name)",
-                                 isLocal: false,
-                                 symbolName: resumeDevice.kind.symbolName,
-                                 isStandalone: true,
-                                 subtitle: "Return to where this app was playing"))
+        if let resume = resumeEntry(for: bundleID, available: available) {
+            entries.append(resume)
         }
         entries.append(contentsOf: [
             .init(id: Self.noRedirectDestinationID,
@@ -3300,6 +3335,8 @@ public final class PopoverController: NSObject {
                   symbolName: Device.Kind.localMac.symbolName,
                   subtitle: "Plays locally with its own volume"),
         ])
+        entries.append(contentsOf: groupDestinations(devices: devices, keeping: current,
+                                                    bundleID: bundleID))
         for device in available {
             // One role per speaker: a device currently in Main Out (Selected
             // Devices, or the active group's members) is carrying the
@@ -3341,6 +3378,122 @@ public final class PopoverController: NSObject {
         }
         return entries
     }
+
+    /// The "Resume → <target>" entry, when this row has one to offer: the
+    /// destination an app-quit `resetDeviceRoute` cleared, still pickable now.
+    /// A remembered DEVICE has to be available again; a remembered GROUP has to
+    /// still exist and still have a speaker free — a group deleted (or emptied)
+    /// while the app was away is simply not offered, rather than offered and
+    /// then silently doing nothing.
+    private func resumeEntry(
+        for bundleID: String, available: [Device]
+    ) -> AppRowView.Destination? {
+        switch appRouting.clearedRouteDestination(for: bundleID) {
+        case .device(let deviceID):
+            guard let device = available.first(where: { $0.id == deviceID }) else { return nil }
+            return .init(id: Self.resumeDestinationID(forDeviceID: device.id),
+                         title: "Resume → \(device.name)",
+                         isLocal: false,
+                         symbolName: device.kind.symbolName,
+                         isStandalone: true,
+                         subtitle: "Return to where this app was playing")
+        case .group(let groupID):
+            guard let group = groupController?.groups.first(where: { $0.id == groupID }),
+                  !usableGroupMemberIDs(group, available: available).isEmpty
+            else { return nil }
+            return .init(id: Self.resumeDestinationIDPrefix + Self.groupDestinationID(forGroupID: groupID),
+                         title: "Resume → \(group.name)",
+                         isLocal: false,
+                         symbolName: DeviceIcon.resolve(group.iconSymbolName,
+                                                        default: Group.defaultIconSymbolName),
+                         isStandalone: true,
+                         subtitle: "Return to where this app was playing")
+        case .noRedirect, .currentDevice, .none:
+            return nil
+        }
+    }
+
+    /// The "Output Groups" section of one row's destination popup: every saved
+    /// group that has members, each disclosing what picking it would actually
+    /// do right now. Mirrors Main Out's own group list (same header, same
+    /// "→ <name>" collapsed title). PLAN-POPOVER-ROUTING decision 4, which kept
+    /// groups out of this menu, is reversed.
+    ///
+    /// The group the row is ALREADY on is listed even if it has been emptied
+    /// since, for the same reason a kept-but-unreachable device is
+    /// (`appDestinations`' `keeping` rule): an intact route whose entry is
+    /// missing renders as an unset row.
+    private func groupDestinations(
+        devices: [Device], keeping current: AppRouteDestination, bundleID: String
+    ) -> [AppRowView.Destination] {
+        guard let controller = groupController else { return [] }
+        let available = availableAirPlayDestinations(devices: devices)
+        var currentGroupID: String?
+        if case .group(let id) = current { currentGroupID = id }
+        return controller.groups
+            .filter { !$0.memberIDs.isEmpty || $0.id == currentGroupID }
+            .map { group in
+                let usable = usableGroupMemberIDs(group, available: available)
+                return .init(id: Self.groupDestinationID(forGroupID: group.id),
+                             title: group.name,
+                             isLocal: false,
+                             symbolName: DeviceIcon.resolve(group.iconSymbolName,
+                                                            default: Group.defaultIconSymbolName),
+                             subtitle: groupDestinationSubtitle(
+                                group, usable: usable, bundleID: bundleID),
+                             isGroup: true,
+                             isEnabled: !usable.isEmpty,
+                             buttonTitle: "→ \(group.name)")
+            }
+    }
+
+    /// The members of `group` that could carry this app's own stream right now:
+    /// discovered, reachable, AirPlay-2, and not already claimed by the main
+    /// output (one role per speaker — the main mix is the senior claim, and the
+    /// app plays on whatever is left).
+    private func usableGroupMemberIDs(_ group: Group, available: [Device]) -> [String] {
+        let availableIDs = Set(available.map(\.id))
+        return group.memberIDs.filter {
+            availableIDs.contains($0) && groupController?.isMainOutMember($0) != true
+        }
+    }
+
+    /// A group entry's secondary line — what the user gets if they pick it, in
+    /// the order that matters most: nothing to play on, then the main mix having
+    /// taken some of it, then speakers being away, then the shared-speaker
+    /// quality warning, and otherwise plain size.
+    private func groupDestinationSubtitle(
+        _ group: Group, usable: [String], bundleID: String
+    ) -> String {
+        let total = group.memberIDs.count
+        guard !usable.isEmpty else { return Self.emptyGroupDestinationSubtitle }
+        let claimedByMainOut = group.memberIDs.contains { groupController?.isMainOutMember($0) == true }
+        if claimedByMainOut {
+            return "Plays on \(usable.count) of \(total) — the rest are in the main mix"
+        }
+        if usable.count < total { return Self.offlineGroupDestinationSubtitle }
+        let usableIDs = Set(usable)
+        let sharedWithAnotherApp = appRouting.appRoutes.contains { other in
+            guard other.bundleID != bundleID else { return false }
+            switch other.destination {
+            case .device(let id):     return usableIDs.contains(id)
+            case .group(let id):      return id == group.id
+            default:                  return false
+            }
+        }
+        if sharedWithAnotherApp { return Self.sameSpeakerQualitySubtitle }
+        return total == 1 ? "1 speaker" : "\(total) speakers"
+    }
+
+    /// The secondary line on a group entry with nothing left to play on — every
+    /// member away or already carrying the main mix. The entry stays visible
+    /// (greyed) rather than vanishing: a group the user saved should not look
+    /// like it was deleted.
+    static let emptyGroupDestinationSubtitle = "No speakers available right now"
+
+    /// The secondary line on a group some of whose speakers aren't reachable —
+    /// the app will play on the rest.
+    static let offlineGroupDestinationSubtitle = "Some speakers are offline"
 
     /// The secondary line on a kept-but-unreachable redirect target's menu entry
     /// (R5). It has to state the AUDIBLE consequence, not just the device's state:
@@ -3391,6 +3544,7 @@ public final class PopoverController: NSObject {
         case .noRedirect:          return Self.noRedirectDestinationID
         case .currentDevice:       return Self.currentDeviceDestinationID
         case .device(let id):      return id
+        case .group(let id):       return Self.groupDestinationID(forGroupID: id)
         }
     }
 
@@ -3404,7 +3558,10 @@ public final class PopoverController: NSObject {
         if id == Self.noRedirectDestinationID { return .noRedirect }
         if id == Self.currentDeviceDestinationID { return .currentDevice }
         if id.hasPrefix(Self.resumeDestinationIDPrefix) {
-            return .device(id: String(id.dropFirst(Self.resumeDestinationIDPrefix.count)))
+            return destination(forID: String(id.dropFirst(Self.resumeDestinationIDPrefix.count)))
+        }
+        if id.hasPrefix(Self.groupDestinationIDPrefix) {
+            return .group(id: String(id.dropFirst(Self.groupDestinationIDPrefix.count)))
         }
         return .device(id: id)
     }
@@ -4812,9 +4969,24 @@ extension PopoverController: AppRowView.Delegate {
         case .noRedirect: destProp = "no_redirect"
         case .currentDevice: destProp = "current_device"
         case .device: destProp = "device"
+        case .group: destProp = "group"
         }
-        Analytics.capture("app_routing:destination_selected", ["destination": destProp])
         appRouting.setDestination(mapped, for: appID)
+        // Captured AFTER the mutation: the event means the route was applied,
+        // not that a menu item was clicked.
+        Analytics.capture("app_routing:destination_selected", ["destination": destProp])
+        if case .group(let groupID) = mapped,
+           let group = groupController?.groups.first(where: { $0.id == groupID }) {
+            // Counts only — never a group or speaker name (PRODUCT.md "Data
+            // Collection"). `dropped` is how many of the group's speakers this
+            // app does NOT get right now: away, or carrying the main mix.
+            let usable = usableGroupMemberIDs(
+                group, available: availableAirPlayDestinations(devices: Array(devicesByID.values)))
+            Analytics.capture("app_routing:group_selected", [
+                "members": String(group.memberIDs.count),
+                "dropped": String(group.memberIDs.count - usable.count),
+            ])
+        }
         rebuild()
     }
 

@@ -731,6 +731,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         groupController.onMainOutMembersChanged = { [weak self] memberIDs in
             self?.appRouting.clearRoutes(toDevices: memberIDs)
         }
+        // A `.group` app route is a live reference to the group's membership, so
+        // a group edit changes what a routed app plays on without touching the
+        // route table — re-push so the backend re-resolves. A deleted group is
+        // the one case that DOES edit the table (nothing left to resolve
+        // against), and that edit fires `onRoutesDidChange` → the same push.
+        groupController.onGroupsDidChange = { [weak self] in
+            guard let self else { return }
+            let liveGroupIDs = Set(self.groupController.groups.map(\.id))
+            for route in self.appRouting.appRoutes {
+                if case .group(let id) = route.destination, !liveGroupIDs.contains(id) {
+                    self.appRouting.handleGroupDeleted(id: id)
+                }
+            }
+            self.pushAppRoutesToBackend()
+        }
         popoverController = PopoverController(appRouting: appRouting)
         popoverController.deviceIconController = deviceIconController
         popoverController.configure(groupController: groupController)
@@ -1620,7 +1635,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func groupsScreenContent() -> NSViewController {
         let controller = mixerWindowController ?? MixerWindowController(
             groupController: groupController,
-            deviceIconController: deviceIconController)
+            deviceIconController: deviceIconController,
+            appRouting: appRouting)
         mixerWindowController = controller
         // The two Equalizer seams. This screen owns no backend (its own
         // AGENTS.md); the tone it reports is applied here, at the one place
@@ -1753,17 +1769,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.update(devices: Array(devicesByID.values))
     }
 
-    /// Push the current app-routing table + excluded set into the backend's per-app
+    /// Whether any app is currently routed to a saved GROUP — the only routes
+    /// whose resolution depends on the fleet snapshot this class holds.
+    @MainActor
+    private var hasGroupRoute: Bool {
+        appRouting.appRoutes.contains {
+            if case .group = $0.destination { return true }
+            return false
+        }
+    }
+
+    /// Push the current app-routing table + excluded set + the saved groups'
+    /// resolved memberships into the backend's per-app
     /// capture path (T7). No-ops on backends without per-app routing
     /// (`MockBackend` / `OwnToneBackend` don't conform to `AppRouteConfiguring`).
-    /// Called from `onRoutesDidChange`, the excluded-apps handler, and once at
+    /// Called from `onRoutesDidChange`, the excluded-apps handler, a group edit,
+    /// a device arriving or leaving while an app is group-routed, and once at
     /// launch. Never invoked from inside a backend lock/queue (T6's deadlock
     /// warning) — every caller is a plain MainActor path.
     @MainActor
     private func pushAppRoutesToBackend() {
         (backend as? AppRouteConfiguring)?.updateAppRoutes(
             appRouting.appRoutes,
-            excludedBundleIDs: excludedApps.excludedBundleIDs)
+            excludedBundleIDs: excludedApps.excludedBundleIDs,
+            groupTargets: AppRoutingController.resolveGroupTargets(
+                groupController.groups, devices: Array(devicesByID.values)))
     }
 
     /// Remove any per-app route whose app is currently excluded (an excluded app
@@ -1914,10 +1944,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func apply(_ event: BackendEvent) {
         switch event {
         case .deviceAdded(let device), .deviceUpdated(let device):
+            let isNew = devicesByID[device.id] == nil
             devicesByID[device.id] = device
+            // A group route resolves against the fleet snapshot, so a member
+            // that only just turned up has to be re-resolved for the app to
+            // start playing on it. Reachability of an ALREADY-known member is
+            // the backend's own business (it re-drives itself), hence new
+            // arrivals only — and only while some app is group-routed.
+            if isNew, hasGroupRoute { pushAppRoutesToBackend() }
             logEvent(event)
         case .deviceRemoved(let id):
             devicesByID.removeValue(forKey: id)
+            if hasGroupRoute { pushAppRoutesToBackend() }
             logEvent(event)
         case .level(let id, let rms):
             // Meters are SKIPPED in Phase 1 (RESOLVED Q8) — ignore for now.

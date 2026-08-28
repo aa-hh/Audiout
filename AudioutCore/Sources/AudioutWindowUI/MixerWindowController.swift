@@ -118,6 +118,7 @@ public final class MixerWindowController {
 
     public init(groupController: GroupController,
                deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false),
+               appRouting: AppRoutingController? = nil,
                settings: AppSettings = AppSettings()) {
         self.groupController = groupController
         self.deviceIconController = deviceIconController
@@ -133,6 +134,7 @@ public final class MixerWindowController {
         editorViewController.deviceIconController = deviceIconController
         detailViewController.deviceIconController = deviceIconController
         overviewViewController.deviceIconController = deviceIconController
+        overviewViewController.appRouting = appRouting
 
         // A PLAIN split item, NOT `.sidebar(withViewController:)` — the one
         // thing that keeps the surface's tab strip still. A split item with

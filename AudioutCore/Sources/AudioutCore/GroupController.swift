@@ -60,7 +60,9 @@ public final class GroupController {
     private let routingStore: RoutingStore
     private let settings: AppSettings
 
-    private(set) public var groups: [Group]
+    private(set) public var groups: [Group] {
+        didSet { if groups != oldValue { onGroupsDidChange?() } }
+    }
     private(set) public var activeGroupID: String?
 
     /// Keyed by device id. Cleared WHOLESALE on group-activation transitions
@@ -118,6 +120,15 @@ public final class GroupController {
     /// this controller ignorant of `AppRoutingController`. Fires on every apply
     /// (even an unchanged set); the consumer no-ops when nothing conflicts.
     public var onMainOutMembersChanged: ((Set<String>) -> Void)?
+
+    /// Fired after any change to the saved groups themselves — created, renamed,
+    /// deleted, or a membership/level edit. The coordinating layer re-pushes the
+    /// per-app route table, because a `.group` route follows the group's LIVE
+    /// membership: editing the group changes what the routed app plays on, with
+    /// no route edit of its own. Same injected-closure idiom as
+    /// `onMainOutMembersChanged`, and equally ignorant of who listens. Not fired
+    /// during init's persisted load.
+    public var onGroupsDidChange: (() -> Void)?
 
     /// - Parameters:
     ///   - backend: where volume/output-set changes actually go.

@@ -777,10 +777,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// layer (`NativeBackend`/`AppDelegate`) whenever `AppRoutingController`
     /// or `ExcludedAppsController` mutate.
     public func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>) {
-        let routedAway = Set(appRoutes.compactMap { route -> String? in
-            guard case .device = route.destination else { return nil }
-            return route.bundleID
-        })
+        // `isRoutedAway` covers `.device` AND `.group`. Safe against over-
+        // exclusion because the caller hands in the EFFECTIVE table, where a
+        // route with no speaker left to stream to is already `.noRedirect`.
+        let routedAway = Set(appRoutes.filter(\.destination.isRoutedAway).map(\.bundleID))
         let union = routedAway.union(excludedBundleIDs)
 
         let needsRecreate: Bool = queue.sync {

@@ -73,6 +73,18 @@ import Testing
         #expect(StatusRoutingIndicator.isRoutingLive(devices: devices, hasLiveAppRoutes: true))
     }
 
+    /// A GROUP route is a route: it reaches the indicator the same way a direct
+    /// one does — every member the app actually plays on confirms itself with
+    /// its own `.routedApps`, so nothing here needs to know about groups.
+    @Test func groupRoute_countsThroughTheSameConfirmedSignal() {
+        let devices = [
+            device(id: "kitchen", isSelected: false, connectionState: .connected),
+            device(id: "hall", isSelected: false, connectionState: .connected),
+        ]
+        #expect(StatusRoutingIndicator.isRoutingLive(devices: devices, hasLiveAppRoutes: true))
+        #expect(!StatusRoutingIndicator.isRoutingLive(devices: devices, hasLiveAppRoutes: false))
+    }
+
     @Test func emptyFleet_appRoutesStillCount() {
         #expect(StatusRoutingIndicator.isRoutingLive(devices: [], hasLiveAppRoutes: true))
         #expect(!StatusRoutingIndicator.isRoutingLive(devices: [], hasLiveAppRoutes: false))

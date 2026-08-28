@@ -1867,7 +1867,7 @@ import AppKit
 
         #expect(appRouting.appRoutes.first?.destination == .device(id: "office"),
                 "picking Resume redirects the app back to the remembered device")
-        #expect(appRouting.clearedDeviceRouteTarget(for: "com.example.music") == nil,
+        #expect(appRouting.clearedRouteDestination(for: "com.example.music") == nil,
                "the memory is consumed once acted on")
         // The resume entry is gone on the next render — the route is active again.
         let titlesAfter = try #require(popover.test_appRowDestinationTitles(for: "com.example.music"))
@@ -1890,7 +1890,7 @@ import AppKit
         row.test_selectDestination("homepod-bed") // an ordinary device pick, not the resume offer
 
         #expect(appRouting.appRoutes.first?.destination == .device(id: "homepod-bed"))
-        #expect(appRouting.clearedDeviceRouteTarget(for: "com.example.music") == nil,
+        #expect(appRouting.clearedRouteDestination(for: "com.example.music") == nil,
                "a fresh pick moots the remembered target even though it wasn't the one chosen")
     }
 
@@ -1902,14 +1902,194 @@ import AppKit
         seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
                   destination: .device(id: "office"))
         appRouting.resetDeviceRoute(bundleID: "com.example.music")
-        #expect(appRouting.clearedDeviceRouteTarget(for: "com.example.music") == "office")
+        #expect(appRouting.clearedRouteDestination(for: "com.example.music") == .device(id: "office"))
 
         let (popover, _, _) = try await makePopover(appRouting: appRouting,
                                                      runningAppsProvider: routedApps)
         let row = try #require(popover.test_appRow(for: "com.example.music"))
         row.test_remove()
 
-        #expect(appRouting.clearedDeviceRouteTarget(for: "com.example.music") == nil)
+        #expect(appRouting.clearedRouteDestination(for: "com.example.music") == nil)
+    }
+
+    // MARK: App Exceptions — routing to a saved group
+
+    /// Saves a group of two demo-fleet AirPlay speakers and returns its id.
+    @discardableResult
+    private func seedGroup(_ controller: GroupController, name: String = "Kitchen",
+                           members: [String] = ["homepod-bed", "office"],
+                           volumes: [String: Int]? = nil) throws -> String {
+        try controller.createGroup(name: name, memberIDs: members,
+                                   memberVolumes: volumes).group.id
+    }
+
+    @Test func appDestinationsListSavedGroupsUnderTheirOwnHeader() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
+        let (popover, groups, backend) = try await makePopover(appRouting: appRouting,
+                                                               runningAppsProvider: routedApps)
+        try seedGroup(groups)
+        popover.test_simulateOpen()
+
+        let titles = try #require(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        #expect(titles.contains("Output Groups"))
+        #expect(titles.contains("Kitchen"))
+        #expect(titles.firstIndex(of: "Output Groups")! < titles.firstIndex(of: "AirPlay Devices")!)
+    }
+
+    @Test func pickingAGroupRoutesTheAppToThatGroup() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
+        let (popover, groups, backend) = try await makePopover(appRouting: appRouting,
+                                                               runningAppsProvider: routedApps)
+        let groupID = try seedGroup(groups)
+        popover.test_simulateOpen()
+
+        let row = try #require(popover.test_appRow(for: "com.example.music"))
+        row.test_selectDestination(PopoverController.groupDestinationID(forGroupID: groupID))
+
+        #expect(appRouting.appRoutes.first?.destination == .group(id: groupID))
+    }
+
+    /// The collapsed pop-up names the group the way Main Out's own dropdown
+    /// does, and the row wears the tether chip a device route wears.
+    @Test func aGroupRoutedRowNamesTheGroupAndWearsTheTetherChip() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
+        let (popover, groups, backend) = try await makePopover(appRouting: appRouting,
+                                                               runningAppsProvider: routedApps)
+        let groupID = try seedGroup(groups)
+        appRouting.setDestination(.group(id: groupID), for: "com.example.music")
+        popover.test_simulateOpen()
+
+        let row = try #require(popover.test_appRow(for: "com.example.music"))
+        #expect(row.test_collapsedDestinationTitle == "→ Kitchen")
+        #expect(row.test_hasTetherChip, "a group route tethers to its speakers' FEED chips too")
+    }
+
+    /// Every eligible member's FEED column names the app — a group route fans
+    /// out, it doesn't pick one speaker.
+    @Test func aGroupRouteNamesTheAppOnEveryMembersFeedColumn() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
+        let (popover, groups, backend) = try await makePopover(appRouting: appRouting,
+                                                               runningAppsProvider: routedApps)
+        let groupID = try seedGroup(groups)
+        appRouting.setDestination(.group(id: groupID), for: "com.example.music")
+        popover.test_simulateOpen()
+
+        #expect(popover.test_deviceRow(for: "homepod-bed")?.test_feedText?.contains("Music") == true)
+        #expect(popover.test_deviceRow(for: "office")?.test_feedText?.contains("Music") == true)
+        #expect(popover.test_deviceRow(for: "appletv-lr")?.test_feedText?.contains("Music") != true,
+                "a speaker outside the group is untouched")
+    }
+
+    /// The group entry discloses what picking it would actually do.
+    @Test func groupEntrySubtitleNamesTheSpeakerCount() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
+        let (popover, groups, backend) = try await makePopover(appRouting: appRouting,
+                                                               runningAppsProvider: routedApps)
+        let groupID = try seedGroup(groups)
+        popover.test_simulateOpen()
+
+        let row = try #require(popover.test_appRow(for: "com.example.music"))
+        let item = row.test_destinationPopUpMenuItem(
+            forDestinationID: PopoverController.groupDestinationID(forGroupID: groupID))
+        #expect(item?.toolTip == "2 speakers")
+    }
+
+    /// One member carried off by the main output: the entry says how much of
+    /// the group the app still gets, and stays pickable.
+    @Test func groupEntryDisclosesMainOutTakingSomeMembers() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
+        let (popover, groups, backend) = try await makePopover(appRouting: appRouting,
+                                                               runningAppsProvider: routedApps)
+        let groupID = try seedGroup(groups)
+        groups.setMainOut(.selectedDevices)
+        _ = groups.setDeviceSelected("office", true)
+        popover.test_simulateOpen()
+
+        let row = try #require(popover.test_appRow(for: "com.example.music"))
+        let item = row.test_destinationPopUpMenuItem(
+            forDestinationID: PopoverController.groupDestinationID(forGroupID: groupID))
+        #expect(item?.toolTip == "Plays on 1 of 2 — the rest are in the main mix")
+        #expect(item?.isEnabled == true)
+    }
+
+    /// Every member carried off: nothing left to play on, so the entry is
+    /// greyed — but still listed, because the group still exists.
+    @Test func groupEntryWithNoFreeSpeakerIsGreyedButStillListed() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
+        let (popover, groups, backend) = try await makePopover(appRouting: appRouting,
+                                                               runningAppsProvider: routedApps)
+        let groupID = try seedGroup(groups)
+        groups.setMainOut(.selectedDevices)
+        _ = groups.setDeviceSelected("office", true)
+        _ = groups.setDeviceSelected("homepod-bed", true)
+        popover.test_simulateOpen()
+
+        let row = try #require(popover.test_appRow(for: "com.example.music"))
+        let item = row.test_destinationPopUpMenuItem(
+            forDestinationID: PopoverController.groupDestinationID(forGroupID: groupID))
+        #expect(item?.toolTip == "No speakers available right now")
+        #expect(item?.isEnabled == false)
+    }
+
+    /// A group whose members include an AirPlay-1 speaker: that member simply
+    /// isn't reachable as a per-app target, so the entry says so.
+    @Test func groupEntryDisclosesAnIneligibleMember() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
+        let (popover, groups, backend) = try await makePopover(appRouting: appRouting,
+                                                               runningAppsProvider: routedApps)
+        let groupID = try seedGroup(groups, members: ["office", "airport-mixer"])
+        popover.test_simulateOpen()
+
+        let row = try #require(popover.test_appRow(for: "com.example.music"))
+        let item = row.test_destinationPopUpMenuItem(
+            forDestinationID: PopoverController.groupDestinationID(forGroupID: groupID))
+        #expect(item?.toolTip == "Some speakers are offline")
+    }
+
+    /// A quit app that was on a group route is offered its group back.
+    @Test func resumeOffersTheGroupAQuitAppWasRoutedTo() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
+        let (popover, groups, backend) = try await makePopover(appRouting: appRouting,
+                                                               runningAppsProvider: routedApps)
+        let groupID = try seedGroup(groups)
+        appRouting.setDestination(.group(id: groupID), for: "com.example.music")
+        appRouting.resetDeviceRoute(bundleID: "com.example.music")
+        popover.test_simulateOpen()
+
+        let titles = try #require(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        #expect(titles.contains("Resume → Kitchen"))
+
+        let row = try #require(popover.test_appRow(for: "com.example.music"))
+        row.test_selectDestination(
+            PopoverController.resumeDestinationIDPrefix
+                + PopoverController.groupDestinationID(forGroupID: groupID))
+        #expect(appRouting.appRoutes.first?.destination == .group(id: groupID))
+    }
+
+    /// A group deleted while the app was away is not offered — the resume would
+    /// resolve to nothing.
+    @Test func resumeDropsAGroupThatNoLongerExists() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
+        let (popover, groups, backend) = try await makePopover(appRouting: appRouting,
+                                                               runningAppsProvider: routedApps)
+        let groupID = try seedGroup(groups)
+        appRouting.setDestination(.group(id: groupID), for: "com.example.music")
+        appRouting.resetDeviceRoute(bundleID: "com.example.music")
+        try groups.deleteGroup(id: groupID)
+        popover.test_simulateOpen()
+
+        let titles = try #require(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        #expect(!titles.contains { $0.hasPrefix("Resume") })
     }
 
     /// The Applications card's collapse default (C5, updated from the old

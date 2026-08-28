@@ -63,6 +63,25 @@ import AudioutCore
         #expect(row.test_feedText == "Downstairs · Music")
     }
 
+    /// A group route paints exactly like a direct one — the speaker carries the
+    /// app either way — but VoiceOver says which group brought it there, the
+    /// one place that difference is stated.
+    @Test func aGroupRoutedAppReadsAsThroughItsGroup() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: true, controllable: true,
+                  routedAppNames: ["Music"], appRouteGroupNames: ["Music": "Downstairs"])
+
+        #expect(row.test_feedText == "System · Music", "the pills are unchanged")
+        #expect(row.test_accessibilityLabel?.contains("feeding System, Music, through Downstairs") == true)
+    }
+
+    @Test func aDirectlyRoutedAppNamesNoGroup() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
+        #expect(row.test_accessibilityLabel?.contains("feeding System, Music") == true)
+        #expect(row.test_accessibilityLabel?.contains("through") != true)
+    }
+
     @Test func manualMemberPlusTwoApps() {
         // Pre-pill this fit at the same `feedColumnWidth` as one packed
         // string; each value now carries its own bordered-pill chrome

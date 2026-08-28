@@ -100,10 +100,25 @@ import Testing
         return out
     }
 
-    private func route(_ bundle: String, to deviceID: String?, volume: Int = 100) -> AppRoute {
-        AppRoute(bundleID: bundle, displayName: bundle,
-                 destination: deviceID.map { .device(id: $0) } ?? .currentDevice,
-                 volume: volume)
+    /// One app routed to one device at `volume`, in the mixer's own input
+    /// vocabulary. `nil` stands for a route the backend resolves to nothing
+    /// (`.currentDevice`/`.noRedirect`) — no devices, so no stream.
+    private func route(_ bundle: String, to deviceID: String?, volume: Int = 100)
+        -> AppRouteMixer.RoutedApp {
+        AppRouteMixer.RoutedApp(
+            bundleID: bundle,
+            deviceGains: deviceID.map { [$0: volume] } ?? [:])
+    }
+
+    /// One app routed to several devices, each at its own gain — what a group
+    /// route with differing per-speaker levels resolves to.
+    private func route(_ bundle: String, gains: [String: Int]) -> AppRouteMixer.RoutedApp {
+        AppRouteMixer.RoutedApp(bundleID: bundle, deviceGains: gains)
+    }
+
+    /// The single stream `bundle` feeds, or `nil` when it feeds none.
+    private func streamID(_ mixer: AppRouteMixer, for bundle: String) -> Int? {
+        mixer.streamIDs(for: bundle).first
     }
 
     private func capturing(_ format: TapFormat = TapFormat(
@@ -127,15 +142,15 @@ import Testing
         let m = mixer()
         m.updateRoutes([
             route("com.spotify.client", to: "kitchen"),
-            AppRoute(bundleID: "us.zoom.xos", displayName: "Zoom", destination: .noRedirect),
-            AppRoute(bundleID: "com.apple.Music", displayName: "Music", destination: .currentDevice),
+            route("us.zoom.xos", to: nil),      // .noRedirect — resolves to nothing
+            route("com.apple.Music", to: nil),  // .currentDevice — likewise
         ])
         let sets = m.destinationSets
         #expect(sets.count == 1)
         #expect(sets[0].bundleIDs == ["com.spotify.client"],
                        "neither .noRedirect nor .currentDevice ever joins a destination set")
-        #expect(m.streamID(for: "us.zoom.xos") == nil)
-        #expect(m.streamID(for: "com.apple.Music") == nil)
+        #expect(streamID(m, for: "us.zoom.xos") == nil)
+        #expect(streamID(m, for: "com.apple.Music") == nil)
     }
 
     @Test func devicesWithIdenticalMembershipShareOneStream() {
@@ -181,18 +196,18 @@ import Testing
     @Test func sameSignatureKeepsStreamIDAcrossRecompute() {
         let m = mixer()
         m.updateRoutes([route("a", to: "dev1"), route("b", to: "dev2")])
-        let firstA = m.streamID(for: "a")
-        let firstB = m.streamID(for: "b")
+        let firstA = streamID(m, for: "a")
+        let firstB = streamID(m, for: "b")
 
         m.updateRoutes([route("a", to: "dev1", volume: 50), route("b", to: "dev2")])
-        #expect(m.streamID(for: "a") == firstA)
-        #expect(m.streamID(for: "b") == firstB)
+        #expect(streamID(m, for: "a") == firstA)
+        #expect(streamID(m, for: "b") == firstB)
     }
 
     @Test func changedMembershipGetsDifferentStreamID() {
         let m = mixer()
         m.updateRoutes([route("a", to: "dev1")])
-        let original = m.streamID(for: "a")!
+        let original = streamID(m, for: "a")!
 
         m.updateRoutes([route("a", to: "dev1"), route("b", to: "dev1")])
         let changed = m.destinationSets.first { $0.bundleIDs == ["a", "b"] }!.streamID
@@ -216,9 +231,25 @@ import Testing
         m.onDestinationSetsChanged = { _ in count.bump() }
 
         m.updateRoutes([route("a", to: "dev1")])             // change -> fire
-        m.updateRoutes([route("a", to: "dev1", volume: 20)]) // volume only -> no fire
+        m.updateRoutes([route("a", to: "dev1")])             // identical -> no fire
         m.updateRoutes([route("a", to: "dev2")])             // device change -> fire
         #expect(count.value == 2)
+    }
+
+    /// A gain change publishes (the sets carry the gain each stream is mixed
+    /// at), but keeps every stream id — so the backend's binding diff comes out
+    /// empty and no receiver is rebound for what is only a mixer-level change.
+    @Test func gainOnlyChangePublishesWithoutMovingStreamIDs() {
+        let m = mixer()
+        let count = Counter()
+        m.updateRoutes([route("a", to: "dev1")])
+        let before = streamID(m, for: "a")
+        m.onDestinationSetsChanged = { _ in count.bump() }
+
+        m.updateRoutes([route("a", to: "dev1", volume: 20)])
+
+        #expect(count.value == 1, "the new gain has to reach the published topology")
+        #expect(streamID(m, for: "a") == before, "a gain change must not force a rebind")
     }
 
     // MARK: - 3. Summing correctness + clipping
@@ -240,7 +271,7 @@ import Testing
         #expect(all.count == 2)
         #expect(all[0].0 == 110); #expect(all[0].1 == 220)
         #expect(all[1].0 == 330); #expect(all[1].1 == 440)
-        #expect(sink.all.allSatisfy { $0.streamID == m.streamID(for: "a") })
+        #expect(sink.all.allSatisfy { $0.streamID == streamID(m, for: "a") })
     }
 
     /// Regression for Bug T1 ("two apps routed -> audio extremely compressed or
@@ -321,6 +352,61 @@ import Testing
         #expect(AppRouteMixer.clip(-32768) == -32768)
     }
 
+    // MARK: - 3b. Group routes: per-device gain
+
+    /// A group whose speakers all sit at the same level is still ONE encode.
+    @Test func groupMembersAtEqualGainShareOneStream() {
+        let m = mixer()
+        m.updateRoutes([route("a", gains: ["kitchen": 70, "hall": 70])])
+        let sets = m.destinationSets
+        #expect(sets.count == 1)
+        #expect(sets[0].deviceIDs == ["kitchen", "hall"])
+        #expect(sets[0].contributors == [.init(bundleID: "a", gain: 70)])
+    }
+
+    /// Two speakers in the same group at different levels can't share a mixed
+    /// buffer — one stream each, and the app feeds both.
+    @Test func groupMembersAtDifferentGainsSplitIntoOwnStreams() {
+        let m = mixer()
+        m.updateRoutes([route("a", gains: ["kitchen": 70, "hall": 40])])
+        let sets = m.destinationSets
+        #expect(sets.count == 2)
+        #expect(Set(sets.flatMap { $0.deviceIDs }) == ["kitchen", "hall"])
+        #expect(m.streamIDs(for: "a").count == 2)
+    }
+
+    /// Each of those streams carries the app at its OWN speaker's level.
+    @Test func eachGroupStreamAppliesItsOwnGain() {
+        let m = mixer()
+        let sink = Sink()
+        m.onMixedBuffer = { sink.append($0) }
+
+        m.updateRoutes([route("a", gains: ["kitchen": 50, "hall": 100])])
+        m.handleStateChange(bundleID: "a", state: capturing())
+        let quiet = m.destinationSets.first { $0.deviceIDs == ["kitchen"] }!.streamID
+
+        m.handleBuffer(bundleID: "a", buffer: s16Buffer(frames: [(1000, 1000)], atSecond: 1))
+        m.flush()
+
+        let byStream = Dictionary(grouping: sink.all, by: \.streamID)
+        #expect(byStream.count == 2, "one buffer in, one buffer out per fed speaker")
+        #expect(pairs(byStream[quiet]!.map(\.pcm).reduce(Data(), +))[0].0 == 500)
+        let loud = byStream.first { $0.key != quiet }!.value
+        #expect(pairs(loud.map(\.pcm).reduce(Data(), +))[0].0 == 1000)
+    }
+
+    /// The composition rule: the app's own slider times that speaker's level
+    /// inside the group. The group's master volume is deliberately not in it.
+    @Test func composedGainMultipliesRouteVolumeByMemberVolume() {
+        #expect(AppRouteMixer.composedGain(routeVolume: 100, memberVolume: 100) == 100)
+        #expect(AppRouteMixer.composedGain(routeVolume: 50, memberVolume: 100) == 50)
+        #expect(AppRouteMixer.composedGain(routeVolume: 100, memberVolume: 40) == 40)
+        #expect(AppRouteMixer.composedGain(routeVolume: 50, memberVolume: 50) == 25)
+        #expect(AppRouteMixer.composedGain(routeVolume: 0, memberVolume: 100) == 0)
+        #expect(AppRouteMixer.composedGain(routeVolume: 200, memberVolume: 200) == 100,
+                "an out-of-range level can never amplify")
+    }
+
     // MARK: - 4. Per-app volume scaling
 
     @Test func volumeScalesAppContributionBeforeSumming() {
@@ -386,7 +472,7 @@ import Testing
         #expect(sets.count == 1)
         #expect(sets[0].bundleIDs == ["com.spotify.client"])
         #expect(sets[0].deviceIDs == ["kitchen"])
-        #expect(m.streamID(for: "us.zoom.xos") == nil)
+        #expect(streamID(m, for: "us.zoom.xos") == nil)
 
         // Even a defensive Zoom buffer (never happens — no tap) produces nothing.
         m.handleStateChange(bundleID: "com.spotify.client", state: capturing())

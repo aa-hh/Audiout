@@ -1129,6 +1129,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// app quit — PLAN §C — so nothing else re-drives `updateAppRoutes` for it).
     private var lastRoutes: [AppRoute] = []
 
+    /// The saved groups' resolved per-app-route memberships, as last handed to
+    /// `updateAppRoutes` — group id → eligible members and their levels inside
+    /// the group. This is what a `.group` route resolves against; it is a
+    /// SNAPSHOT of a live reference, replaced wholesale on every push (a group
+    /// edit re-pushes it), never merged. On `stateQueue`.
+    private var lastGroupTargets: [String: GroupRouteTarget] = [:]
+
     /// Bundle IDs currently known NOT to be producing audio despite an active
     /// `.device(id:)` route: quit mid-stream (`handleAppTerminated`) or a failed
     /// per-app capture (`handlePerAppCaptureHealthChange`). Excluded from
@@ -1286,7 +1293,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `everCapturedBundleIDs`. Asserted DIRECTLY (rather than via an
     /// engine-bind side effect) because `resetAirPlaySessionForRoutedApp` —
     /// the consumer of a stale entry here — is a guaranteed no-op via its own
-    /// `routeMixer.streamID(for:)` guard when triggered from
+    /// `routeMixer.streamIDs(for:)` guard when triggered from
     /// `handleAppLaunched`'s synchronous relaunch path (the topology republish
     /// that would bind a stream hasn't run yet), so a test built on engine
     /// binds alone cannot distinguish a fixed `handleAppTerminated` from a
@@ -4036,25 +4043,60 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// reset-on-unavailable behavior, and it is what lets
     /// `rerunAppRoutesForReachabilityChange` restore the redirect with no
     /// route-table edit and no user action.
-    private func effectiveAppRoutesLocked(_ routes: [AppRoute]) -> [AppRoute] {   // on stateQueue
+    /// What one resolve produced: the effective route table (a route with no
+    /// eligible speaker left demoted to `.noRedirect`) and, for every route that
+    /// kept at least one, the speakers it actually feeds with the gain to feed
+    /// them at.
+    private struct EffectiveAppRoutes {
+        let routes: [AppRoute]
+        let routedApps: [AppRouteMixer.RoutedApp]
+    }
+
+    private func effectiveAppRoutesLocked(_ routes: [AppRoute]) -> EffectiveAppRoutes {   // on stateQueue
         // Roadmap 008: demotion now keys on ELIGIBILITY (reachable AND not
         // whole-system-claimed), not bare reachability — a route whose target is a
         // Selected Device is demoted exactly like an unreachable one, so the app
         // rejoins the whole-system mix (which includes the contested device)
         // instead of streaming into the void. Claim demotions additionally keep an
         // edge-triggered, queryable conflict record (loud loser).
+        //
+        // A GROUP route runs the same per-device test over each resolved member
+        // and keeps whatever survives — the app plays on the group's remaining
+        // speakers rather than losing the whole route to one contested member.
+        // Only an EMPTY survivor set demotes it, which is the same "nowhere to
+        // stream" condition a single unreachable target already means.
         var claimDemotions: [String: [String]] = [:]   // device id → demoted bundle ids
+        var routedApps: [AppRouteMixer.RoutedApp] = []
         let mapped = routes.map { route -> AppRoute in
-            guard case .device(let id) = route.destination else { return route }
-            let claimed = isWholeSystemClaimedLocked(id)
-            guard claimed || !isRouteTargetReachableLocked(id) else { return route }
-            if claimed { claimDemotions[id, default: []].append(route.bundleID) }
-            var demoted = route
-            demoted.destination = .noRedirect
-            return demoted
+            let candidates: [String: Int]
+            switch route.destination {
+            case .noRedirect, .currentDevice:
+                return route
+            case .device(let id):
+                candidates = [id: 100]
+            case .group(let id):
+                candidates = lastGroupTargets[id]?.memberVolumes ?? [:]
+            }
+            var gains: [String: Int] = [:]
+            for (deviceID, memberVolume) in candidates {
+                if isWholeSystemClaimedLocked(deviceID) {
+                    claimDemotions[deviceID, default: []].append(route.bundleID)
+                    continue
+                }
+                guard isRouteTargetReachableLocked(deviceID) else { continue }
+                gains[deviceID] = AppRouteMixer.composedGain(
+                    routeVolume: route.volume, memberVolume: memberVolume)
+            }
+            guard !gains.isEmpty else {
+                var demoted = route
+                demoted.destination = .noRedirect
+                return demoted
+            }
+            routedApps.append(AppRouteMixer.RoutedApp(bundleID: route.bundleID, deviceGains: gains))
+            return route
         }
         reconcileScopeConflictsLocked(claimDemotions)
-        return mapped
+        return EffectiveAppRoutes(routes: mapped, routedApps: routedApps)
     }
 
     /// Edge-triggered bookkeeping for demote-at-decision (roadmap 008): diff the
@@ -4099,11 +4141,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func rerunAppRoutesForReachabilityChange() {
         captureControlQueue.async { [weak self] in
             guard let self else { return }
-            let (routes, excluded) = self.stateQueue.sync {
-                (self.lastRoutes, self.lastExcludedBundleIDs)
+            let (routes, excluded, groupTargets) = self.stateQueue.sync {
+                (self.lastRoutes, self.lastExcludedBundleIDs, self.lastGroupTargets)
             }
             guard !routes.isEmpty else { return }
-            self.updateAppRoutes(routes, excludedBundleIDs: excluded)
+            self.updateAppRoutes(routes, excludedBundleIDs: excluded, groupTargets: groupTargets)
         }
     }
 
@@ -4145,12 +4187,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `localPlaybackEngine` graph mutations, and the mixer's own queue hop — runs
     /// OUTSIDE `stateQueue`, the same discipline the capture gate keeps for
     /// `captureControlQueue`.
-    public func updateAppRoutes(_ routes: [AppRoute], excludedBundleIDs: Set<String> = []) {
+    public func updateAppRoutes(
+        _ routes: [AppRoute], excludedBundleIDs: Set<String> = [],
+        groupTargets: [String: GroupRouteTarget] = [:]
+    ) {
         // T6-rev: the other routing-action permission chokepoint. Same placement
         // and same non-blocking contract as `setOutputSet`'s — see `onRoutingAction`.
         onRoutingAction?()
         let plan: UpdateRoutesPlan = stateQueue.sync {
             self.lastRoutes = routes
+            // A `.group` route is a live reference: this snapshot is what it
+            // resolves against, so a group edit re-pushing an unchanged route
+            // table still moves the audio.
+            self.lastGroupTargets = groupTargets
             // Retained so the metering-only target set can subtract it and so a
             // denylist change alone re-reconciles the metering taps (T3, PRIVACY).
             self.lastExcludedBundleIDs = excludedBundleIDs
@@ -4160,11 +4209,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // whose target is unreachable right now reads as `.noRedirect`, so the
             // app stays in the whole-system mix rather than being excluded in favour
             // of a stream that can't reach anything.
-            let effective = self.effectiveAppRoutesLocked(routes)
-            let newRouted = Set(effective.compactMap { route -> String? in
-                if case .device = route.destination { return route.bundleID }
-                return nil
-            })
+            let resolved = self.effectiveAppRoutesLocked(routes)
+            let effective = resolved.routes
+            let newRouted = Set(resolved.routedApps.map(\.bundleID))
             // Bug T2: apps deliberately pinned to the local Mac ("Current Device").
             let newLocal = Set(effective.compactMap { route -> String? in
                 route.destination == .currentDevice ? route.bundleID : nil
@@ -4208,7 +4255,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // capturing — a `deadBundleIDs` entry (quit mid-stream, or a per-app tap
             // that's `.failed`) is excluded here so `.routedApps` / the engine stream
             // binding never claim a silent app is streaming.
-            let mixerRoutes = effective.filter { !self.deadBundleIDs.contains($0.bundleID) }
+            let mixerRoutes = resolved.routedApps.filter { !self.deadBundleIDs.contains($0.bundleID) }
 
             // The per-app tap is destination-agnostic — one tap serves whichever
             // destination the app currently routes to — so its start/stop keys on
@@ -4327,7 +4374,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         /// `.noRedirect` (R5). This — not the raw table — is what the whole-system
         /// tap's exclusion set is computed from.
         let effectiveRoutes: [AppRoute]
-        let mixerRoutes: [AppRoute]
+        let mixerRoutes: [AppRouteMixer.RoutedApp]
         let captureToStart: Set<String>
         let captureToStop: Set<String>
         let localRemoved: Set<String>
@@ -4526,13 +4573,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// rebinding it (removeOutput → addOutput = a fresh RTSP/RTP session with a
     /// clean timeline anchor). Called when a routed app's per-app tap was rebuilt
     /// (a sample-rate/device change), which leaves the receiver desynced and
-    /// permanently silent even though real PCM keeps flowing. `streamID(for:)`
+    /// permanently silent even though real PCM keeps flowing. `streamIDs(for:)`
     /// reads the mixer's own queue, so it's fetched BEFORE taking `stateQueue`.
     private func resetAirPlaySessionForRoutedApp(bundleID: String) {
-        guard let stream = routeMixer.streamID(for: bundleID) else { return }
-        let streamU = UInt32(stream)
+        let streams = Set(routeMixer.streamIDs(for: bundleID).map(UInt32.init))
+        guard !streams.isEmpty else { return }
         stateQueue.sync {
-            for (deviceID, bound) in self.streamBindings where bound == streamU {
+            for (deviceID, bound) in self.streamBindings where streams.contains(bound) {
                 if let outputID = self.outputIDs[deviceID] {
                     // Fresh reset → bump the generation (supersedes + cancels any
                     // in-flight recovery for this device) and start attempt 1.
@@ -4548,12 +4595,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     Telemetry.log(.airplay, "session_reset", [
                         "device": deviceID,
                         "scope": bundleID,
-                        "stream": "\(stream)",
+                        "stream": "\(bound)",
                         "gen": "\(gen)",
                         "trigger": "recapture",
                     ])
                     self.enqueueRebindRecovery(
-                        deviceID: deviceID, outputID: outputID, scope: .perApp(stream: streamU),
+                        deviceID: deviceID, outputID: outputID, scope: .perApp(stream: bound),
                         gen: gen, attempt: 1)
                 }
             }
@@ -4978,9 +5025,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// from OUTSIDE any existing `stateQueue.sync` block (e.g. not from
     /// `updateAppRoutes`'s own critical section, which computes the equivalent
     /// inline to avoid a same-queue deadlock).
-    private func effectiveMixerRoutes() -> [AppRoute] {
+    private func effectiveMixerRoutes() -> [AppRouteMixer.RoutedApp] {
         stateQueue.sync {
-            self.effectiveAppRoutesLocked(self.lastRoutes)
+            self.effectiveAppRoutesLocked(self.lastRoutes).routedApps
                 .filter { !self.deadBundleIDs.contains($0.bundleID) }
         }
     }
@@ -5173,7 +5220,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // practice `resetAirPlaySessionForRoutedApp` is ALSO a guaranteed
             // no-op for this exact call path today — `handleAppLaunched` calls
             // `perAppCapture.start` synchronously-to-completion BEFORE its own
-            // `republishMixerTopology()` runs, so `routeMixer.streamID(for:)`
+            // `republishMixerTopology()` runs, so `routeMixer.streamIDs(for:)`
             // is still nil when `.capturing` lands — but this keeps the
             // invariant this field documents true regardless of that other
             // function's current implementation, and keeps it in sync with

@@ -623,6 +623,16 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   committed through this gate, so `main` stays green. Filtering in the loop is
   a convention (this doc), not machine-enforced; `--no-verify` skips the gate
   for a deliberate emergency.
+- **A new regression test must be watched to FAIL before you trust it.** A test
+  that has never been seen to fail proves nothing about the bug it claims to
+  cover. Take the fix back out — revert it, or comment out the fixing line — run
+  `bash scripts/run-tests.sh --filter <YourNewTests>`, confirm it fails for the
+  reason you expect, then restore the fix. A green suite is not evidence until
+  you have seen the red. Honest exception: some tests legitimately pass both
+  ways — an assertion that something must NOT happen, guarding against
+  over-correction, is green before the fix and after. Those are worth keeping,
+  but say so in the report rather than letting them pad the count of tests that
+  actually demonstrate the fix.
 - **Real-audio-hardware tests are opt-in via `AIRPLAY_AUDIO_HARDWARE_TESTS=1`.**
   `LocalPlaybackEngineTests` drives the concrete `LocalPlaybackEngine` (a real
   `AVAudioEngine`) against the Mac's actual output. **The reason is determinism,

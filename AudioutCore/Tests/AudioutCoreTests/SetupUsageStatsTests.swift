@@ -189,54 +189,41 @@ extension SerializedSharedState {
         return vc
     }
 
-    /// The first ask, in full: its own frame caption (this stage is not a
-    /// rehearsal of a macOS surface, so the shared "You'll see this from macOS"
-    /// would be a lie), the ledger on the stage, and a decline that says what it
-    /// really is.
-    @Test func theFirstAskCarriesItsOwnFrameLedgerAndFinalDecline() async {
+    /// The first ask: the privacy card's two-button shape, UNcaptioned (macOS
+    /// raises nothing here, so the shared "You'll see this from macOS" would be
+    /// a claim we can't back), and a decline that says what it really is.
+    @Test func theFirstAskWearsTheDialogShapeUncaptioned() async {
         let setup = makeSetup()
         let vc = makeViewController(setup)
         await vc.test_refreshStatuses()
         await vc.test_allow([.audio, .localNetwork])
 
-        #expect(vc.test_previewFrameLabel == OnboardingViewController.usageStatsFrameLabel)
-        #expect(!(vc.test_previewFrameLabel?.contains("macOS") ?? true),
-                "nothing about this step comes from macOS")
-        #expect(vc.test_demoMode == .dataReceipt)
+        #expect(vc.test_demoMode == .prompt)
+        #expect(vc.test_previewFrameLabel == nil,
+                "the card is Audiout's, so the frame claims no macOS surface")
         #expect(vc.test_ribbonButtonTitles == ["No Thanks", "Share Usage Counts"],
                 "asked once means the pass is an answer, not a 'Skip for now'")
     }
 
-    /// The drawn ledger is out of the accessibility tree like every other mock,
-    /// so the caption is where a screen reader hears what would be sent.
-    @Test func voiceOverHearsTheWholeLedgerFromTheCaption() async {
-        let setup = makeSetup()
-        let vc = makeViewController(setup)
-        await vc.test_refreshStatuses()
-        await vc.test_allow([.audio, .localNetwork])
-
-        let spoken = vc.test_previewFrameSpokenCaption
-        #expect(spoken == OnboardingViewController.usageStatsSpokenCaption)
-        for promised in ["speaker names", "network", "playing", "license key"] {
-            #expect(spoken?.lowercased().contains(promised) ?? false,
-                    "the spoken caption must carry the whole never-sent list, not a summary of it")
-        }
+    /// The card carries its OWN words, not the OS's — it is not a macOS grant,
+    /// so "Allow"/"Don't Allow" would put words in macOS's mouth.
+    @Test func theDialogCarriesShareRatherThanAllow() {
+        #expect(DemoPromptMockView.confirmTitle(for: .usageStats) == "Share")
+        #expect(DemoPromptMockView.refuseTitle(for: .usageStats) == "Don't Share")
+        #expect(DemoPromptMockView.confirmTitle(for: .bluetooth) == "Allow",
+                "every real TCC card keeps the OS's own verb")
+        #expect(DemoPromptMockView.refuseTitle(for: .bluetooth) == "Don't Allow")
     }
 
-    /// The ledger's settled frame is the FINISHED one — every promise struck
-    /// through — so a snapshot, a Reduce Motion rest and a headless render all
-    /// carry the complete message rather than a half-written list.
-    @Test func theLedgerRestsFullyStruckThrough() {
-        let ledger = DemoDataReceiptMockView()
-        ledger.layoutSubtreeIfNeeded()
-
-        #expect(ledger.test_strikeProgress.count == 4)
-        #expect(ledger.test_strikeProgress.allSatisfy { $0 == 1 })
-
-        ledger.startTimeline(loop: false)
-        ledger.stopTimeline()
-        #expect(ledger.test_strikeProgress.allSatisfy { $0 == 1 },
-                "stopping mid-pass must land on the settled frame, never a half-drawn rule")
+    /// The never-sent promise has nowhere else to live now that the stage is a
+    /// two-button card rather than an itemised ledger: the why line is the only
+    /// copy a first ask shows, so it has to carry the terms in full.
+    @Test func theWhyLineCarriesTheNeverSentPromise() {
+        let why = OnboardingViewController.content(for: .usageStats).whyLine.lowercased()
+        for promised in ["speaker names", "network", "audio", "licence key"] {
+            #expect(why.contains(promised),
+                    "the why line is the only place the fence is stated — missing: \(promised)")
+        }
     }
 
     /// The decline button really declines: one tap answers the card, and the
@@ -255,8 +242,8 @@ extension SerializedSharedState {
         #expect(!vc.test_hasCheckmark(.usageStats), "a decline is not a grant")
     }
 
-    /// Browsing the ticked row re-shows the LEDGER, never a System Settings
-    /// pane — this step has none, and the shared browse path defaults to one.
+    /// Browsing the ticked row re-shows this step's OWN card, never a System
+    /// Settings pane — it has none, and the shared browse path defaults to one.
     /// The body says where the switch really lives instead.
     @Test func browsingTheGrantedRowReShowsTheLedgerNotASettingsPane() async {
         let setup = makeSetup()
@@ -267,7 +254,7 @@ extension SerializedSharedState {
 
         #expect(await vc.test_pressRow(.usageStats))
 
-        #expect(vc.test_demoMode == .dataReceipt)
+        #expect(vc.test_demoMode == .prompt)
         #expect(!vc.test_ribbonButtonTitles.contains("Open Settings…"),
                 "there is no System Settings pane to open for Audiout's own switch")
     }

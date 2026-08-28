@@ -737,12 +737,14 @@ public final class OnboardingViewController: NSViewController {
                 // the person being helped is the one who wrote the app, and
                 // saying so plainly is what earns the yes.
                 heroHeadline: "Help make Audiout better",
-                // The rehearsal below shows WHAT is sent, item by item, so the
-                // why line must not re-read the picture (the deleted-body rule
-                // this window is built on). It carries the two things a picture
-                // can't: that this is optional, and that it is reversible.
-                whyLine: "Entirely optional, and you can change it any time in "
-                    + "Audiout's settings.",
+                // This is the ONLY place the never-sent promise is made now
+                // that the card below is a two-button dialog rather than an
+                // itemised ledger. The deleted-body rule still holds — the
+                // picture shows the SHAPE of the decision and cannot show its
+                // terms, so the terms ride the why line.
+                whyLine: "Feature counts only \u{2014} never your speaker names, "
+                    + "network, audio or licence key. You can change this any "
+                    + "time in Audiout's settings.",
                 // "Share", matching the Settings › General toggle it is the
                 // same switch as. "Counts" rather than "statistics" because
                 // counts is what they are and the shorter word is the plainer
@@ -828,14 +830,14 @@ public final class OnboardingViewController: NSViewController {
     private func refreshHero(active: SetupStep?, animated: Bool) {
         if let browsed = browseStep {
             // Two steps whose browse is NOT the Settings pane. Usage
-            // Statistics has no such pane at all, so it re-shows its ledger —
-            // which is also the thing worth re-reading. Awkward cell B: a
+            // Statistics has no such pane at all, so it re-shows its own card.
+            // Awkward cell B: a
             // GRANTED Local Network on macOS 14 was never gated, so there is
             // no privacy pane to show either, and the dialog it never raised
             // is the honest picture, at rest.
             let mode: DemoMode
             if browsed == .usageStats {
-                mode = .dataReceipt
+                mode = .prompt
             } else if browsed == .localNetwork, !model.isLocalNetworkGated {
                 mode = .prompt
             } else {
@@ -844,23 +846,17 @@ public final class OnboardingViewController: NSViewController {
             demoPane.show(step: browsed, mode: mode, animated: animated,
                           restingSwitchOn: mode == .settings, asBrowse: true)
             previewFrame.caption = Self.previewFrameLabel(for: browsed)
-            previewFrame.spokenCaption =
-                browsed == .usageStats ? Self.usageStatsSpokenCaption : nil
+            previewFrame.spokenCaption = nil
             previewFrame.isChromeless = false
         } else if let active {
             demoPane.show(step: active, mode: demoMode(for: active), animated: animated)
             previewFrame.caption = Self.previewFrameLabel(for: active)
-            // Two stages carry more than the picture alone can, and neither
-            // reaches VoiceOver: Remote Control's first ask INSTRUCTS (two
-            // surfaces in sequence, with the wrong button drawn ghosted), and
-            // Usage Statistics' ledger IS the list of what's sent.
-            if active == .usageStats {
-                previewFrame.spokenCaption = Self.usageStatsSpokenCaption
-            } else {
-                previewFrame.spokenCaption =
-                    (active == .remoteControl && demoMode(for: active) == .prompt)
-                    ? Self.remoteControlSpokenCaption : nil
-            }
+            // Remote Control's first ask is the one rehearsal that INSTRUCTS:
+            // two surfaces in sequence, with the wrong button drawn ghosted.
+            // None of that reaches VoiceOver, so the caption says it instead.
+            previewFrame.spokenCaption =
+                (active == .remoteControl && demoMode(for: active) == .prompt)
+                ? Self.remoteControlSpokenCaption : nil
             previewFrame.isChromeless = false
         } else if flow.finalCheckState == .passed {
             // The beat: the pane HOLDS while the check is pending/running — the
@@ -1044,10 +1040,10 @@ public final class OnboardingViewController: NSViewController {
 
     private func demoMode(for step: SetupStep?) -> DemoMode {
         guard let step else { return .settled }
-        // Usage Statistics raises no macOS surface at ALL, so it has no
-        // rehearsal — the stage shows the thing the user is actually being
-        // asked to judge instead: what would be sent, and what never is.
-        if step == .usageStats { return .dataReceipt }
+        // Usage Statistics wears the privacy card's two-button SHAPE — the
+        // decision has that shape — but the card is ours, so the frame drops
+        // its macOS caption (see `previewFrameLabel(for:)`).
+        if step == .usageStats { return .prompt }
         // Speaker Sync has no prompt at all — Login Items is the only surface
         // it ever shows the user.
         if step == .speakerSync { return .settings }
@@ -1266,23 +1262,15 @@ public final class OnboardingViewController: NSViewController {
     /// whole ribbon line on ("This is what macOS will ask you next."), said by
     /// the frame instead.
     static let previewFrameLabel = "You'll see this from macOS"
-    /// Usage Statistics' caption. The frame's whole job is to say WHOSE surface
-    /// is inside it, and this one is not macOS's at all — nor is it a rehearsal
-    /// of anything the user is about to see. It is the promise itself, so the
-    /// caption states what the picture is: the complete list, not a sample.
-    static let usageStatsFrameLabel = "This is everything Audiout would send"
-    /// The caption for the step whose frame carries no macOS surface — the one
-    /// place the label is chosen per step rather than fixed.
-    static func previewFrameLabel(for step: SetupStep) -> String {
-        step == .usageStats ? usageStatsFrameLabel : previewFrameLabel
+    /// The frame's caption, per step. Its whole job is to say WHOSE surface is
+    /// inside it, so Usage Statistics gets NONE: that card wears the privacy
+    /// dialog's two-button shape because the decision has that shape, but macOS
+    /// raises nothing here and captioning it "You'll see this from macOS" would
+    /// be a claim we can't back. Same rule the finale already follows — its own
+    /// card is ours, so it is uncaptioned too.
+    static func previewFrameLabel(for step: SetupStep) -> String? {
+        step == .usageStats ? nil : previewFrameLabel
     }
-    /// What VoiceOver hears in place of that caption on Usage Statistics. The
-    /// ledger inside the frame is out of the accessibility tree like every
-    /// other mock, and here that would drop the only place the actual contents
-    /// are named — so the caption reads them out.
-    static let usageStatsSpokenCaption = "This is everything Audiout would send: counts of how "
-        + "often features are used, and nothing else. Never your speaker names, your network, "
-        + "what you're playing, or your license key."
     /// What VoiceOver hears in place of that caption on Remote Control's first
     /// ask — the one rehearsal whose two surfaces and ghosted Deny ARE the
     /// instruction, and which a screen reader cannot see.

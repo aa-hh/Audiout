@@ -215,9 +215,18 @@ remote_run() {
     return 2
 }
 
-# Copy one file back from the synced remote tree. $2 is relative to the remote
-# repo root; $3 is the local destination path.
+# Copy one product back from the synced remote tree. $2 is relative to the remote
+# repo root; $3 is the local destination path, whose LAST COMPONENT must equal
+# $2's — the destination handed to rsync is $3's parent directory, not $3.
+#
+# That indirection is what makes a DIRECTORY source (the SwiftPM resource bundle)
+# land correctly. rsync, unlike cp, does not rename a directory source to the
+# destination path: `rsync -a src/foo dest/foo` treats dest/foo as a container and
+# writes dest/foo/foo, so the bundle used to nest one level deep and Bundle.module
+# could no longer find it (a remote-built .app then trapped on first access). Both
+# a file and a directory copy into a destination DIRECTORY under their own name,
+# so passing the parent is the one form that is correct for either.
 remote_fetch() {
     _esc=$(printf '%s/%s' "$(remote_dir_for "$1")" "$2" | sed 's/ /\\ /g')
-    rsync -az --timeout=30 "$remote_host:$_esc" "$3" >/dev/null 2>&1
+    rsync -az --timeout=30 "$remote_host:$_esc" "$(dirname "$3")/" >/dev/null 2>&1
 }

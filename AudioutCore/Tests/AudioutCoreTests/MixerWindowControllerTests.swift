@@ -461,7 +461,12 @@ import AppKit
         #expect(completedResult?.alreadyExisted == true)
     }
 
-    @Test func createSheetCandidatesExcludeUnavailableDevices() async throws {
+    /// Reversed 2026-08-28 (Alec): an offline speaker MAY join a brand-new
+    /// group — it simply plays when it is back — and listing it is also what
+    /// keeps the add bar's "New Group from N Speakers…" count honest when the
+    /// selection includes a sleeping speaker. Unavailable candidates sort to
+    /// the bottom, matching every other list on the screen.
+    @Test func createSheetOffersUnavailableDevicesLast() async throws {
         let (window, _, backend) = try await makeWindow()
         let unavailableID = "office"
         let devices = backend.devices.map { device -> Device in
@@ -471,12 +476,16 @@ import AppKit
         }
         window.update(devices: devices)
 
-        window.test_presentCreateSheet(preselected: [])
+        window.test_presentCreateSheet(preselected: [unavailableID])
         await drain()
         let sheet = try #require(window.test_createSheet)
 
-        #expect(!(sheet.test_candidateDeviceIDs.contains(unavailableID)), "a brand-new group never offers joining an unreachable speaker")
-        #expect(sheet.test_candidateDeviceIDs.count == 6)
+        #expect(sheet.test_candidateDeviceIDs.count == 7,
+                "every device is a candidate, asleep or not")
+        #expect(sheet.test_candidateDeviceIDs.last == unavailableID,
+                "the unavailable one sorts to the bottom")
+        #expect(sheet.test_checkedDeviceIDs.contains(unavailableID),
+                "a preselected offline speaker stays checked — the count never lies")
     }
 
     // MARK: Selecting a group → editor only, never activation
@@ -497,9 +506,13 @@ import AppKit
         #expect(window.test_editor.test_candidateDeviceIDs.count == 7)
     }
 
-    // MARK: Editor candidates: unavailable devices stay only while a member
+    // MARK: Editor candidates: every device, unavailable ones last
 
-    @Test func editorCandidatesIncludeUnavailableDeviceOnlyIfMember() async throws {
+    /// Reversed 2026-08-28 (Alec): the editor offers EVERY device — an
+    /// unavailable non-member can be checked into the group and plays when it
+    /// returns. Unavailable rows sort to the bottom (the shared
+    /// `orderedDevices()` rule), rendered dimmed by the row itself.
+    @Test func editorOffersUnavailableDevicesLast() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         // "office" is a member of Group 1; mark it unavailable, and mark a
@@ -514,8 +527,11 @@ import AppKit
         window.test_select(.group(id: saved.id))
         await drain()
 
-        #expect(window.test_editor.test_candidateDeviceIDs.contains("office"), "an unavailable device stays offered while it remains a member")
-        #expect(!(window.test_editor.test_candidateDeviceIDs.contains("appletv-lr")), "an unavailable non-member is not offered")
+        let ids = window.test_editor.test_candidateDeviceIDs
+        #expect(ids.contains("office"), "an unavailable member is still offered")
+        #expect(ids.contains("appletv-lr"), "an unavailable NON-member is offered too — it may join now")
+        #expect(ids.suffix(2).sorted() == ["appletv-lr", "office"],
+                "the two unavailable devices sort to the bottom")
     }
 
     // MARK: Editor → GroupController
@@ -873,14 +889,12 @@ import AppKit
 
     // MARK: The creation sheet's empty checklist (P1-5)
 
+    /// Since 2026-08-28 an offline speaker is still a candidate, so a fleet
+    /// that is merely ASLEEP no longer empties the checklist — only a fleet
+    /// the app has never seen does. The explanatory copy is for that case.
     @Test func anEmptyChecklistExplainsItself() async throws {
         let (window, _, backend) = try await makeWindow()
-        let allOffline = backend.devices.map { device -> Device in
-            var d = device
-            d.isAvailable = false
-            return d
-        }
-        window.update(devices: allOffline)
+        window.update(devices: [])
         window.test_presentCreateSheet(preselected: [])
         await drain()
         let sheet = try #require(window.test_createSheet)
@@ -889,6 +903,17 @@ import AppKit
         #expect(sheet.test_emptyChecklistText
                 == "No speakers found yet. Speakers appear here once they\u{2019}re reachable on your network.")
         #expect(!sheet.test_isCreateEnabled)
+
+        let allOffline = backend.devices.map { device -> Device in
+            var d = device
+            d.isAvailable = false
+            return d
+        }
+        window.update(devices: allOffline)
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        #expect(try #require(window.test_createSheet).test_candidateDeviceIDs.count == 7,
+                "an all-asleep fleet is still a checklist, not an empty state")
 
         window.update(devices: backend.devices)
         window.test_presentCreateSheet(preselected: [])
@@ -947,6 +972,26 @@ import AppKit
                 "the sidebar follows onto the Groups row, so the screen has one selection, not two")
         #expect(controller.activeGroupID == nil,
                 "selecting a group from the detail pane NEVER activates it")
+    }
+
+    /// Unavailable speakers sink to the bottom of the Speakers section, kept
+    /// alphabetical within each half (Alec, 2026-08-28 — chosen over
+    /// keep-in-place; the accepted trade is that a row moves when its
+    /// availability flips).
+    @Test func unavailableSpeakersSortToTheBottomOfTheSidebar() async throws {
+        let (window, _, backend) = try await makeWindow()
+        let devices = backend.devices.map { device -> Device in
+            var d = device
+            if d.id == "office" || d.id == "appletv-lr" { d.isAvailable = false }
+            return d
+        }
+        window.update(devices: devices)
+
+        let ids = window.test_sidebar.test_deviceRowIDs
+        #expect(ids.count == 7)
+        #expect(ids.suffix(2).sorted() == ["appletv-lr", "office"],
+                "the two asleep speakers are the last two rows")
+        #expect(ids.prefix(5).allSatisfy { $0 != "office" && $0 != "appletv-lr" })
     }
 
     /// `select(_:)` is the deep-link/cross-link entry point (the detail pane's

@@ -95,9 +95,8 @@ TCC_PROBE_EXECUTABLE="tcc-probe"
 
 # SwiftPM resource bundle for AudioutSharedUI (holds the in-app brand mark,
 # Audiout-Hero-1024.svg). SwiftPM emits it next to the app executable in the
-# build's bin dir and `Bundle.module` resolves it from Contents/Resources at
-# runtime — so it MUST be copied into the .app or the first BrandMark.image
-# access traps (the generated accessor fatalErrors when the bundle is absent).
+# build's bin dir; BrandMark resolves it from Contents/Resources at runtime — so
+# it MUST be copied into the .app or the in-app brand mark comes up blank.
 # Name is `<PackageName>_<TargetName>.bundle`, deterministic from Package.swift.
 RESOURCE_BUNDLE_NAME="AudioutCore_AudioutSharedUI.bundle"
 
@@ -345,9 +344,13 @@ chmod +x "$MACOS_DIR/$HELPER_EXECUTABLE"
 cp "$BUILT_TCC_PROBE" "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 chmod +x "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 
-# SwiftPM resource bundle → Contents/Resources. `Bundle.module`'s generated
-# accessor searches Bundle.main.resourceURL (== Contents/Resources) first, so
-# this is where the in-app brand mark becomes reachable at runtime.
+# SwiftPM resource bundle → Contents/Resources, the only place codesign accepts
+# it (content at the .app root is refused: "unsealed contents present in the
+# bundle root"). SwiftPM's own generated `Bundle.module` accessor does NOT look
+# here — it checks `Bundle.main.bundleURL/<name>.bundle` (the .app ROOT for a
+# bundled app) and then an absolute build-directory path baked in at compile
+# time — which is why BrandMark resolves the bundle itself rather than through
+# `Bundle.module`: see BrandMark.swift.
 mkdir -p "$RESOURCES_DIR"
 cp -R "$BUILT_RESOURCE_BUNDLE" "$RESOURCES_DIR/$RESOURCE_BUNDLE_NAME"
 

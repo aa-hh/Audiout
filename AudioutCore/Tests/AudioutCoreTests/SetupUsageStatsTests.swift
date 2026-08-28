@@ -276,10 +276,27 @@ extension SerializedSharedState {
         #expect(!vc.test_isRowPressable(.usageStats))
         #expect(!vc.test_rowIsAccessibilityButton(.usageStats))
         #expect(vc.test_rowAccessibilityAction(.usageStats) == nil)
-        // The rule is per-step, not a blanket change: a live TCC row keeps its
-        // shortcut, because macOS still asks before anything is granted.
-        #expect(OnboardingViewController.content(for: .bluetooth).livePressRunsTheAsk)
-        #expect(!OnboardingViewController.content(for: .usageStats).livePressRunsTheAsk)
+    }
+
+    /// The rule is UNIVERSAL, not an exemption for this one card (owner, live:
+    /// "clicking on the line item accepts, even though the person might not
+    /// actually be meaning to — they're just trying to trigger that step"). On
+    /// the TCC steps the same shortcut spent the one prompt macOS gives; here
+    /// it granted outright. A row reaches a step; the hero's buttons answer it.
+    @Test func noLiveRowAnywhereAnswersItsOwnStep() async {
+        let setup = makeSetup()
+        let vc = makeViewController(setup)
+        await vc.test_refreshStatuses()
+
+        // Walk the flow and check each step while it is the live one.
+        for step in [SetupStep.audio, .localNetwork, .usageStats] {
+            if step != .audio { await vc.test_allow([step == .usageStats ? .localNetwork : .audio]) }
+            guard vc.test_activeStep == step else { continue }
+            #expect(!vc.test_isRowPressable(step),
+                    "\(step)'s live row must not be pressable")
+            #expect(!(await vc.test_pressRow(step)),
+                    "\(step)'s live row must refuse the press")
+        }
     }
 
     /// Browsing the ticked row re-shows this step's OWN card, never a System

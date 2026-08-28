@@ -65,21 +65,6 @@ struct SetupCardContent {
     /// The SPINE's own earned title — a short form of ``completedTitle``.
     let spineDoneTitle: String
 
-    /// Whether pressing this step's LIVE spine row may fire its primary button
-    /// as a shortcut.
-    ///
-    /// True wherever the primary opens a door the user still has to walk
-    /// through: every TCC step's Allow raises a system dialog that asks again,
-    /// so a stray row click costs a dialog, not a decision.
-    ///
-    /// FALSE for Usage Statistics, whose primary IS the consent — applied
-    /// in-app the moment it fires. There the shortcut would opt a user in from
-    /// a click on a row they were only trying to read, and then advance past
-    /// the card (owner, live: "I click the line item and it just goes to the
-    /// next step"). The row stops being pressable at all rather than becoming
-    /// a click that silently does nothing: no hover treatment, no button role
-    /// for VoiceOver, and no `allowTitle` offered as its action.
-    var livePressRunsTheAsk: Bool { step != .usageStats }
 
     /// The one place the per-state title table lives (brief §"Card anatomy":
     /// imperative → earned capability). The RIBBON reads this; the spine reads
@@ -559,14 +544,14 @@ final class SetupSpineRowView: NSView {
 
     // MARK: Interaction
 
-    /// Whether a click on this row does anything. The live row fires its primary
-    /// action, a granted one browses it in the hero pane, a skipped one re-arms
-    /// its ask. Two states are not pressable: a LOCKED row (the flow is
-    /// sequential, and jumping ahead would ask for a permission out of order),
-    /// and an AUTO-PASSED one (its permanent note is the whole story, and there
-    /// is no honest hero for a grant macOS cannot make). Both refuse SILENTLY
-    /// (owner decision: no padlock shake — a refusal that animates invites a
-    /// second try).
+    /// Whether a click on this row does anything. A granted row browses itself
+    /// in the hero pane and a skipped one re-arms its ask — both are ways of
+    /// GETTING to a step. Three states are not pressable: a LOCKED row (the
+    /// flow is sequential, and jumping ahead would ask for a permission out of
+    /// order), an AUTO-PASSED one (its permanent note is the whole story, and
+    /// there is no honest hero for a grant macOS cannot make), and the LIVE row
+    /// (below). All refuse SILENTLY (owner decision: no padlock shake — a
+    /// refusal that animates invites a second try).
     var isPressable: Bool {
         // A BROKEN row is the one row on the spine asking to be looked at, so
         // it is pressable whatever state it is otherwise in — pressing it snaps
@@ -575,9 +560,17 @@ final class SetupSpineRowView: NSView {
         if isBroken { return true }
         switch state {
         case .pending, .autoPassed: return false
-        // A live row is a shortcut to its primary — but only where firing that
-        // primary is not itself the decision (``livePressRunsTheAsk``).
-        case .active: return isLive && content.livePressRunsTheAsk
+        // The LIVE row does nothing, and that is the point (owner, live: "so
+        // clicking on the line item accepts, even though the person might not
+        // actually be meaning to — they're just trying to trigger that step").
+        // It used to fire the row's primary as a shortcut, which quietly turned
+        // a navigation gesture into an ANSWER: on the TCC steps it spent the
+        // one prompt macOS gives, and on Usage Statistics, whose primary is
+        // itself the consent, it opted the user in outright. A row is how you
+        // reach a step; the hero's own buttons are how you answer one. The live
+        // step is already in the hero, so there is nothing left for its row to
+        // do.
+        case .active: return false
         case .completed, .skipped: return true
         }
     }

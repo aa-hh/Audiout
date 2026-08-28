@@ -1717,17 +1717,11 @@ public final class OnboardingViewController: NSViewController {
     /// that button's target), a decided one opens for reading, a skipped one
     /// takes the skip back, and a locked one refuses without a sound.
     private func rowPressed(_ step: SetupStep) {
-        // The live row's shortcut to its primary, gated on the one rule that
-        // decides whether firing that primary is safe from here — see
-        // ``SetupCardContent/livePressRunsTheAsk``. The row itself already
-        // refuses to be pressable when it isn't, so this is the belt for
-        // programmatic callers rather than a second opinion: both read the
-        // same property.
-        if step == displayedActiveStep {
-            guard Self.content(for: step).livePressRunsTheAsk else { return }
-            ribbonPrimaryTapped()
-            return
-        }
+        // The live step is already in the hero pane with its own buttons, so
+        // its row has nothing to do — and must not ANSWER it (see
+        // `SetupSpineRowView.isPressable`). The row refuses the press itself;
+        // this is the belt for programmatic callers.
+        if step == displayedActiveStep { return }
         // The loud row: pressing it moves the flow there, which is the only
         // thing its treatment was ever asking for. The snap-back announcement
         // in `announceTransitions` then speaks the recovery status.

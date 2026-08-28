@@ -113,10 +113,14 @@ public enum RequiredPermission: CaseIterable, Sendable {
 /// is denied or unverifiable. The `x-apple.systempreferences:` scheme is the
 /// documented way to open a specific pane; the `Privacy_*` anchors below are
 /// stable, but the PANE the anchors hang off changed name in macOS 26 (see
-/// ``privacySettingsBundleID(osMajorVersion:)``). They are best-effort — Apple
-/// can rename an anchor between releases — so the opener
-/// (``AudioutOnboardingUI``) falls back to ``privacyRoot`` if a specific pane
-/// URL won't open.
+/// ``privacySettingsBundleID(osMajorVersion:)``).
+///
+/// They are BEST-EFFORT, and there is no code-level fallback behind them:
+/// `NSWorkspace.open` returns true for any of these URLs the scheme resolves,
+/// including one whose anchor misroutes to the wrong pane, so a wrong anchor is
+/// indistinguishable from a right one at the call site. What recovers a
+/// misroute is the written path in the onboarding ribbon (the "turn Audiout on
+/// under Privacy & Security ▸ …" sentence), not a retry.
 public enum SystemSettingsPane: Equatable, Sendable {
     case screenAndSystemAudioRecording
     case localNetwork
@@ -155,7 +159,9 @@ public enum SystemSettingsPane: Equatable, Sendable {
         }
     }
 
-    /// Privacy & Security root — the fallback when a specific anchor won't open.
+    /// Privacy & Security root — the anchorless pane URL. Nothing falls back to
+    /// it any more (see the type comment); it is kept for callers that want the
+    /// root itself.
     public static var privacyRoot: URL { privacyRoot(osMajorVersion: liveOSMajorVersion) }
 
     /// The root for an explicit macOS major version (same seam as ``url(osMajorVersion:)``).
@@ -849,7 +855,7 @@ public final class SetupModel {
         }
 
         // PTP helper — silent status read only, never re-registers here.
-        ptpHelperStatus = ptpHelper.status
+        setPTPHelperStatus(ptpHelper.status)
 
         // Bluetooth — silent, prompt-free, so always re-read.
         refreshBluetoothStatus()
@@ -875,12 +881,41 @@ public final class SetupModel {
     public func registerPTPHelper() {
         do {
             try ptpHelper.register()
+            ptpHelperRegistrationFailed = false
         } catch {
+            // Nothing the user can fix — so it must not hold the gate shut
+            // (``requiredPermissionsNotGranted()``), and the failure has to
+            // reach somewhere a support ticket can quote: `Telemetry` writes to
+            // `~/Library/Logs/Audiout/`, the stderr line stays for a dev run.
+            ptpHelperRegistrationFailed = true
+            Telemetry.log(.permission, "ptp_register_failed", ["error": String(describing: error)])
             FileHandle.standardError.write(
                 Data("[Audiout] PTP helper registration failed: \(error)\n".utf8))
         }
-        ptpHelperStatus = ptpHelper.status
+        setPTPHelperStatus(ptpHelper.status)
         onChange?()
+    }
+
+    /// Whether the launch-time ``registerPTPHelper()`` threw. Like
+    /// ``PTPHelperStatus/notFound`` it is a packaging/signing fault rather than
+    /// a user decision, so the Speaker Sync step auto-passes on it instead of
+    /// asking for an approval that can never be given.
+    public private(set) var ptpHelperRegistrationFailed = false
+
+    /// The one place ``ptpHelperStatus`` is written, so the "was it ever really
+    /// on?" ratchet cannot be bypassed by a new assignment site. Reaching
+    /// `.enabled` — however it is reached — is what arms the wake audit's
+    /// Login Items nag; only an explicit skip
+    /// (``noteSpeakerSyncSkipped()``) disarms it again.
+    private func setPTPHelperStatus(_ next: PTPHelperStatus) {
+        ptpHelperStatus = next
+        if next == .enabled { settings.speakerSyncWasEnabled = true }
+    }
+
+    /// Remember that the user passed on Speaker Sync, so the wake audit stops
+    /// treating an unapproved helper as something that got turned off.
+    public func noteSpeakerSyncSkipped() {
+        settings.speakerSyncWasEnabled = false
     }
 
     /// Deep-link to System Settings › General › Login Items & Extensions,
@@ -889,14 +924,20 @@ public final class SetupModel {
         ptpHelper.openSystemSettingsLoginItems()
     }
 
-    /// Re-read the PTP helper's live status WITHOUT re-registering — cheap
-    /// enough to poll on a timer while `.requiresApproval` waits for the user
-    /// to flip the Login Items toggle (mirrors ``refreshRemoteControlStatus()``
+    /// Re-read the PTP helper's live status WITHOUT re-registering, so the
+    /// Setup window can poll while `.requiresApproval` waits for the user to
+    /// flip the Login Items toggle (mirrors ``refreshRemoteControlStatus()``
     /// below). Fires `onChange` only on an actual transition.
-    public func refreshPTPHelperStatus() {
-        let next = ptpHelper.status
+    ///
+    /// The read itself happens OFF the main actor: `SMAppService.status` is a
+    /// synchronous launchd XPC round-trip, and riding it on the main thread
+    /// every 1.5 s is a stall the window pays for the whole time it is open.
+    /// Only the compare-and-publish comes back here.
+    public func refreshPTPHelperStatus() async {
+        let helper = ptpHelper
+        let next = await Task.detached { helper.status }.value
         guard next != ptpHelperStatus else { return }
-        ptpHelperStatus = next
+        setPTPHelperStatus(next)
         onChange?()
     }
 
@@ -931,11 +972,15 @@ public final class SetupModel {
     /// - Local Network is unmet on `.requested` (asked, nothing answered) and
     ///   on the now-real `.denied`; `.unknown` means never engaged, not lost,
     ///   so it never counts.
-    /// - The PTP helper is unmet when it's registered but not usable
-    ///   (`.requiresApproval`/`.notFound`) — a REGISTERED-but-not-approved
-    ///   helper is the actionable "turned off in Login Items" case.
+    /// - The PTP helper is unmet ONLY on a REGRESSION: `.requiresApproval` on a
+    ///   helper the user did once approve (``AppSettings/speakerSyncWasEnabled``
+    ///   — the ratchet set the first time the status reads `.enabled`). That is
+    ///   the real "turned off in Login Items" case, and the only one worth
+    ///   re-opening the window for. A helper that was never approved, or that
+    ///   the user explicitly skipped (which clears the flag), is not a
+    ///   regression; `.notFound` is a packaging bug the user cannot fix;
     ///   `.notRegistered` is the pre-registration state (handled by the app's
-    ///   launch-time registration attempt, not a nag here) and `.enabled` is fine.
+    ///   launch-time registration attempt, not a nag here); `.enabled` is fine.
     public func unmetRequiredPermissions() -> [RequiredPermission] {
         var unmet: [RequiredPermission] = []
         if audioStatus == .denied {
@@ -944,7 +989,7 @@ public final class SetupModel {
         if localNetworkStatus == .requested || localNetworkStatus == .denied {
             unmet.append(.localNetwork)
         }
-        if ptpHelperStatus != .enabled, ptpHelperStatus != .notRegistered {
+        if ptpHelperStatus == .requiresApproval, settings.speakerSyncWasEnabled {
             unmet.append(.ptpHelper)
         }
         return unmet
@@ -969,7 +1014,11 @@ public final class SetupModel {
     /// - Audio capture: granted only on `.granted` — `.unsupported` is excluded
     ///   (pre-14.2 OS; no grant can fix it, so nagging about it would mislead).
     /// - Local Network: granted only on `.granted`.
-    /// - PTP helper: granted only on `.enabled`.
+    /// - PTP helper: granted on `.enabled`, and treated as granted on the two
+    ///   states no approval can fix — `.notFound` (the daemon is missing from
+    ///   the bundle) and a `register()` that threw
+    ///   (``ptpHelperRegistrationFailed``). Holding the Done gate shut on a
+    ///   packaging bug would leave the user with nothing to press.
     public func requiredPermissionsNotGranted() -> [RequiredPermission] {
         var notGranted: [RequiredPermission] = []
         if audioStatus != .granted, audioStatus != .unsupported {
@@ -978,7 +1027,7 @@ public final class SetupModel {
         if localNetworkStatus != .granted {
             notGranted.append(.localNetwork)
         }
-        if ptpHelperStatus != .enabled {
+        if ptpHelperStatus != .enabled, ptpHelperStatus != .notFound, !ptpHelperRegistrationFailed {
             notGranted.append(.ptpHelper)
         }
         return notGranted
@@ -1041,7 +1090,7 @@ public final class SetupModel {
 
         let nextPTPHelperStatus = ptpHelper.status
         if nextPTPHelperStatus != ptpHelperStatus {
-            ptpHelperStatus = nextPTPHelperStatus
+            setPTPHelperStatus(nextPTPHelperStatus)
             changed = true
         }
 
@@ -1060,6 +1109,7 @@ public final class SetupModel {
     /// here — the flow returns next launch.
     public func complete() {
         settings.hasCompletedSetup = true
+        Analytics.capture("onboarding:setup_completed")
     }
 
     /// Whether the flow should present at launch.

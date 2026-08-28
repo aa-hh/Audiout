@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Direction C — Devices own the sidebar, groups become an overview page</title>
+<style>
+  :root{
+    --canvas-top:#1B1712;
+    --canvas:#16130F;
+    --panel:#1D1915;
+    --well:#241F1A;
+    --deep:#100D0A;
+    --hair:#3A332B;
+    --hair-soft:#2A241D;
+    --text:#EFE9DD;
+    --text2:#B4ADA0;
+    --text3:#7A7266;
+    --gold:#E8B84B;
+    --ember:#B99B53;
+    --sel:#0B0908;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:#0c0a08;}
+  body{
+    font-family:-apple-system,"SF Pro Text","SF Pro Display",system-ui,"Helvetica Neue",sans-serif;
+    -webkit-font-smoothing:antialiased;
+    color:var(--text);
+    padding:44px 0 72px;
+    display:flex;flex-direction:column;align-items:center;gap:14px;
+  }
+
+  .pagehead{width:623px;margin-bottom:14px}
+  .pagehead h1{font-size:15px;font-weight:600;letter-spacing:.1px;color:var(--text)}
+  .pagehead p{font-size:12.5px;line-height:1.5;color:var(--text3);margin-top:6px}
+
+  .caption{width:623px;color:var(--text2);font-size:12.5px;line-height:1.5;margin-top:34px}
+  .caption b{color:var(--text);font-weight:600}
+  .caption .n{color:var(--text3);font-weight:600;letter-spacing:.4px}
+
+  /* ---------- window shell ---------- */
+  .win{
+    width:623px;height:600px;border-radius:12px;overflow:hidden;position:relative;
+    background:linear-gradient(180deg,var(--canvas-top) 0%, var(--canvas) 46%, var(--canvas) 100%);
+    border:1px solid #262019;
+  }
+  .win.tall{height:600px}
+
+  .hdr{height:62px;position:relative;border-bottom:1px solid var(--hair-soft)}
+  .capsule{
+    position:absolute;left:218px;top:14px;width:113px;height:34px;border-radius:17px;
+    background:var(--well);border:1px solid var(--hair-soft);
+    display:flex;align-items:center;justify-content:space-between;padding:0 6px;
+  }
+  .capsule .pill{width:28px;height:28px;border-radius:14px;background:#F2EEE7}
+  .capsule .g{width:19px;height:19px;color:var(--text2);display:block}
+  .wtitle{
+    position:absolute;top:0;height:62px;left:210px;width:412px;
+    display:flex;align-items:center;justify-content:center;
+    font-size:16.5px;font-weight:600;color:#9A9287;letter-spacing:.2px;
+  }
+  .hdrRight{
+    position:absolute;right:8px;top:14px;height:34px;width:74px;border-radius:17px;
+    background:var(--well);border:1px solid var(--hair-soft);
+    display:flex;align-items:center;justify-content:space-around;
+  }
+  .hdrRight .g{width:19px;height:19px;color:var(--text2);display:block}
+
+  .body{display:flex;height:537px}
+
+  /* ---------- sidebar ---------- */
+  .sb{width:210px;border-right:1px solid var(--hair-soft);position:relative;background:rgba(255,244,228,.014)}
+  .sbScroll{padding-top:9px}
+  .sect{font-size:11px;color:var(--text3);letter-spacing:.35px;padding:9px 0 5px 18px}
+  .sect.first{padding-top:4px}
+  .row{
+    height:31px;margin:0 8px;border-radius:8px;display:flex;align-items:center;gap:10px;
+    padding:0 8px 0 8px;color:var(--text2);font-size:13px;
+  }
+  .row .ico{width:19px;height:19px;flex:0 0 19px;color:#8E8779;display:block}
+  .row .nm{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  .row.sel{background:var(--sel);border:1px solid #2C261F;color:var(--text);height:33px;margin:-1px 8px}
+  .row.sel .ico{color:var(--text)}
+  .row .live{width:15px;height:15px;color:var(--gold);flex:0 0 15px;display:block}
+  .row .chev{width:12px;height:12px;color:#5F594F;flex:0 0 12px;display:block}
+
+  .sbDiv{height:1px;background:var(--hair-soft);margin:9px 12px 0}
+
+  .addbar{
+    position:absolute;left:0;right:0;bottom:0;height:46px;display:flex;align-items:center;gap:9px;
+    padding:0 16px;color:var(--text);font-size:13.5px;
+  }
+  .addbar .g{width:17px;height:17px;color:var(--text2);display:block}
+
+  /* ---------- content pane ---------- */
+  .pane{flex:1;position:relative}
+  .footer{
+    position:absolute;left:0;right:0;bottom:12px;text-align:center;
+    font-size:12px;color:#8A8377;
+  }
+
+  .card{background:var(--panel);border:1px solid var(--hair-soft);border-radius:10px}
+  .lbl{font-size:12.5px;color:var(--text2)}
+
+  /* ---------- 1 · overview ---------- */
+  .ovHead{position:absolute;left:16px;top:14px;right:16px;display:flex;align-items:baseline;gap:9px}
+  .ovHead .g{width:17px;height:17px;color:#8E8779;position:relative;top:3px;display:block}
+  .ovHead h2{font-size:15px;font-weight:600;color:var(--text);letter-spacing:.1px}
+  .ovHead .cnt{margin-left:auto;font-size:11.5px;color:var(--text3)}
+
+  .grid{position:absolute;left:16px;top:52px;width:380px;display:flex;flex-wrap:wrap;gap:16px}
+  .gcard{
+    width:182px;height:118px;border-radius:10px;background:var(--panel);
+    border:1px solid var(--hair-soft);padding:12px;position:relative;
+  }
+  .gcard.live{border-color:var(--gold)}
+  .gcard .top{display:flex;align-items:center;height:17px}
+  .gcard .top .g{width:17px;height:17px;color:#8E8779;display:block}
+  .gcard .top .live{width:15px;height:15px;color:var(--gold);margin-left:auto;display:block}
+  .gcard h3{font-size:13.5px;font-weight:600;color:var(--text);margin-top:9px;letter-spacing:.05px}
+  .gcard .meta{font-size:11px;color:var(--text3);margin-top:3px}
+  .gcard .meta .on{color:var(--gold)}
+  .chips{display:flex;gap:6px;position:absolute;left:12px;bottom:12px}
+  .chip{
+    width:24px;height:24px;border-radius:6px;background:var(--well);border:1px solid #322B24;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .chip .g{width:13px;height:13px;color:var(--text2);display:block}
+  .chip.more{font-size:10px;color:var(--text3);background:transparent;border-style:dashed}
+
+  .newtile{
+    width:182px;height:118px;border-radius:10px;border:1px dashed var(--hair);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;
+  }
+  .newtile .ring{
+    width:28px;height:28px;border-radius:14px;border:1px solid var(--hair);
+    display:flex;align-items:center;justify-content:center;
+  }
+  .newtile .ring .g{width:14px;height:14px;color:var(--text2);display:block}
+  .newtile span{font-size:11.5px;color:var(--text3)}
+
+  /* ---------- 2 · editor ---------- */
+  .back{
+    position:absolute;left:16px;top:10px;height:20px;display:flex;align-items:center;gap:5px;
+    font-size:12px;color:var(--text2);
+  }
+  .back .g{width:11px;height:11px;color:var(--text2);display:block}
+
+  .idcard{position:absolute;left:16px;top:36px;width:380px;height:80px}
+  .idwell{
+    position:absolute;left:36px;top:11px;width:58px;height:58px;border-radius:12px;
+    background:var(--well);border:1px solid var(--hair-soft);
+    display:flex;align-items:center;justify-content:center;
+  }
+  .idwell.armed{border-color:var(--gold)}
+  .idwell .g{width:28px;height:28px;color:#B7B0A2;display:block}
+  .badge{
+    position:absolute;right:-6px;bottom:-6px;width:19px;height:19px;border-radius:10px;
+    background:#181410;border:1px solid var(--hair);display:flex;align-items:center;justify-content:center;
+  }
+  .badge .g{width:10px;height:10px;color:#CFC8BA;display:block}
+
+  .namefield{
+    position:absolute;left:108px;top:15px;height:30px;min-width:150px;border-radius:7px;
+    border:1px solid var(--hair);display:flex;align-items:center;gap:10px;padding:0 9px 0 11px;
+  }
+  .namefield span{font-size:16px;font-weight:600;color:var(--text)}
+  .namefield .g{width:12px;height:12px;color:#7C756A;display:block}
+  .playing{
+    position:absolute;left:110px;top:52px;display:flex;align-items:center;gap:7px;
+    font-size:12.5px;color:var(--gold);
+  }
+  .playing .g{width:15px;height:15px;color:var(--gold);display:block}
+
+  .secLbl{position:absolute;left:52px;font-size:12.5px;color:var(--text2)}
+
+  .mcard{position:absolute;left:16px;top:148px;width:380px;height:312px;overflow:hidden}
+  .mrow{height:31px;display:flex;align-items:center;padding-left:42px;position:relative}
+  .mrow .g{width:19px;height:19px;color:#8E8779;display:block;flex:0 0 19px}
+  .mrow .nm{margin-left:11px;font-size:13px;color:var(--text)}
+  .mrow.off .nm{color:var(--text2)}
+  .mrow+.mrow::before{
+    content:"";position:absolute;left:42px;right:0;top:0;height:1px;background:var(--hair-soft);
+  }
+  .rail{position:absolute;left:16px;top:41.5px;width:120px;height:460px;pointer-events:none}
+
+  .delrow{position:absolute;left:16px;top:470px;right:16px;display:flex;align-items:flex-start;gap:14px}
+  .btn{
+    height:28px;border-radius:7px;background:var(--well);border:1px solid var(--hair);
+    display:flex;align-items:center;padding:0 13px;font-size:12.5px;color:var(--text);
+  }
+  .delrow p{font-size:11px;line-height:1.35;color:var(--text3);flex:1;padding-top:1px}
+
+  /* ---------- 3 · device detail ---------- */
+  .dcard{position:absolute;left:16px;top:10px;width:380px;height:80px}
+  .dname{position:absolute;left:108px;top:0;height:80px;display:flex;align-items:center;
+    font-size:17px;font-weight:600;color:var(--text)}
+
+  .eq{position:absolute;left:16px;top:104px;width:380px;height:141px}
+  .eqhead{display:flex;align-items:baseline;padding:13px 16px 0}
+  .eqhead h4{font-size:12.5px;font-weight:600;color:var(--text)}
+  .eqhead .reset{margin-left:auto;font-size:12px;color:var(--text2)}
+  .eqbank{display:flex;padding:10px 16px 0;justify-content:space-between}
+  .band{width:30px;display:flex;flex-direction:column;align-items:center}
+  .track{width:4px;height:72px;border-radius:2px;background:var(--deep);border:1px solid #332C25;position:relative}
+  .knob{position:absolute;left:-6px;width:15px;height:8px;border-radius:3px;background:#B8B1A4;border:1px solid #6E675C}
+  .band .hz{font-size:9px;color:#6B6459;margin-top:6px}
+
+  .bare{position:absolute;left:16px;width:380px;background:var(--panel);border-radius:10px;border:1px solid var(--hair-soft)}
+  .brow{height:30px;display:flex;align-items:center;padding:0 14px;position:relative;font-size:12.5px}
+  .brow .k{color:var(--text2)}
+  .brow .v{margin-left:auto;color:var(--text)}
+  .brow .nm{color:var(--text)}
+  .brow .live{width:14px;height:14px;color:var(--gold);margin-left:8px;display:block}
+  .brow .chev{width:11px;height:11px;color:#5F594F;margin-left:auto;display:block}
+  .brow+.brow::before{content:"";position:absolute;left:14px;right:0;top:0;height:1px;background:var(--hair-soft)}
+</style>
+</head>
+<body>
+
+<!-- ============ icon library ============ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <g id="s-speaker"><rect x="3.5" y="1.5" width="9" height="13" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="10.4" r="2.1" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="4.9" r="1" fill="currentColor"/></g>
+    <g id="s-homepod"><path d="M4 5.2c0-2 1.8-3.4 4-3.4s4 1.4 4 3.4v6.1c0 2-1.8 3.4-4 3.4s-4-1.4-4-3.4z" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M5.8 5.4h4.4M5.8 7.6h4.4M5.8 9.8h4.4" stroke="currentColor" stroke-width=".9" opacity=".55"/></g>
+    <g id="s-hpmini"><path d="M4.2 6.6c0-1.7 1.7-2.9 3.8-2.9s3.8 1.2 3.8 2.9v3.1c0 1.7-1.7 2.9-3.8 2.9s-3.8-1.2-3.8-2.9z" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M6 7h4M6 9.2h4" stroke="currentColor" stroke-width=".9" opacity=".55"/></g>
+    <g id="s-tv"><rect x="1.8" y="2.6" width="12.4" height="9" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M5.4 14h5.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></g>
+    <g id="s-laptop"><rect x="3" y="3.2" width="10" height="7" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M1.4 12.4h13.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></g>
+    <g id="s-sonos"><path d="M3 5.6c0-1.5 1.2-2.6 2.7-2.6S8.4 4.1 8.4 5.6v5.2c0 1.5-1.2 2.6-2.7 2.6S3 12.3 3 10.8z" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8.4 4.6c.5-.4 1.2-.6 1.9-.6 1.5 0 2.7 1.1 2.7 2.6v5.2c0 1.5-1.2 2.6-2.7 2.6-.7 0-1.4-.2-1.9-.6" fill="none" stroke="currentColor" stroke-width="1.2"/></g>
+    <g id="s-group"><rect x="1.6" y="2.2" width="5.2" height="4.6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="1.6" y="9.2" width="5.2" height="4.6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="9" y="2.2" width="5.4" height="11.6" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/></g>
+    <g id="s-wave"><path d="M7.4 2.6 4.2 5.4H2.1v5.2h2.1l3.2 2.8z" fill="currentColor"/><path d="M10 5.6a3.6 3.6 0 0 1 0 4.8M12.3 3.6a6.6 6.6 0 0 1 0 8.8" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></g>
+    <g id="s-mainout"><path d="M2.2 8h3.1l2.4-3.6L10.2 12l1.7-4h1.9" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/></g>
+    <g id="s-sliders"><path d="M2 4.4h12M2 11.6h12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="5.6" cy="4.4" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="10.4" cy="11.6" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/></g>
+    <g id="s-gear"><circle cx="8" cy="8" r="4.5" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8" r="1.7" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M8 1.6v1.5M8 12.9v1.5M14.4 8h-1.5M3.1 8h-1.5M12.53 3.47l-1.06 1.06M4.53 11.47l-1.06 1.06M12.53 12.53l-1.06-1.06M4.53 4.53 3.47 3.47" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></g>
+    <g id="s-pin"><path d="M6 1.6h4v4.1l2.3 3.2H3.7L6 5.7z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 8.9v5.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></g>
+    <g id="s-power"><path d="M8 1.9v6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M4.4 4.4a5 5 0 1 0 7.2 0" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></g>
+    <g id="s-plus"><path d="M8 2.4v11.2M2.4 8h11.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></g>
+    <g id="s-chevR"><path d="M6 3.2 10.6 8 6 12.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></g>
+    <g id="s-chevL"><path d="M10 3.2 5.4 8 10 12.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></g>
+    <g id="s-pencil"><path d="M11.1 1.9 14 4.8 5.6 13.2 1.9 14l.8-3.7z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></g>
+  </defs>
+</svg>
+
+<div class="pagehead">
+  <h1>Direction C — Devices own the sidebar; groups become an overview page</h1>
+  <p>The sidebar is now one thing only: the fleet. Groups move out of the list and into the content pane as a
+     card field you read at a glance — who is in each group, and which one is live.</p>
+</div>
+
+
+<!-- =========================================================
+     1 · GROUPS OVERVIEW
+     ========================================================= -->
+<div class="caption" style="margin-top:6px">
+  <span class="n">1</span> &nbsp;<b>Groups overview.</b> The pinned Groups row at the top of the sidebar is the only
+  non-device row; selecting it fills the pane with the group cards. Gold on the row and on the card is the same
+  signal: something is playing.
+</div>
+
+<div class="win">
+  <div class="hdr">
+    <div class="capsule">
+      <svg class="g" viewBox="0 0 16 16"><use href="#s-sliders"/></svg>
+      <div class="pill"></div>
+      <svg class="g" viewBox="0 0 16 16"><use href="#s-gear"/></svg>
+    </div>
+    <div class="wtitle">Audiout</div>
+    <div class="hdrRight">
+      <svg class="g" viewBox="0 0 16 16"><use href="#s-pin"/></svg>
+      <svg class="g" viewBox="0 0 16 16"><use href="#s-power"/></svg>
+    </div>
+  </div>
+
+  <div class="body">
+    <div class="sb">
+      <div class="sbScroll">
+        <div class="row sel" style="margin-top:4px">
+          <svg class="ico" viewBox="0 0 16 16"><use href="#s-group"/></svg>
+          <span class="nm">Groups</span>
+          <svg class="live" viewBox="0 0 16 16"><use href="#s-wave"/></svg>
+          <svg class="chev" viewBox="0 0 16 16"><use href="#s-chevR"/></svg>
+        </div>
+        <div class="sbDiv"></div>
+
+        <div class="sect">System Audio</div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-mainout"/></svg><span class="nm">Main Audio</span></div>
+
+        <div class="sect">Speakers</div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-homepod"/></svg><span class="nm">Bedroom HomePod</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-tv"/></svg><span class="nm">Living Room TV</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-laptop"/></svg><span class="nm">MacBook Pro Speakers</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-hpmini"/></svg><span class="nm">Kitchen HomePod mini</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Office</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-sonos"/></svg><span class="nm">Sonos Move</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Move 2</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Bathroom</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Hallway Left</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Hallway Right</span></div>
+      </div>
+      <div class="addbar"><svg class="g" viewBox="0 0 16 16"><use href="#s-plus"/></svg><span>New Group…</span></div>
+    </div>
+
+    <div class="pane">
+      <div class="ovHead">
+        <svg class="g" viewBox="0 0 16 16"><use href="#s-group"/></svg>
+        <h2>Groups</h2>
+        <span class="cnt">3 saved</span>
+      </div>
+
+      <div class="grid">
+        <!-- live group -->
+        <div class="gcard live">
+          <div class="top">
+            <svg class="g" viewBox="0 0 16 16"><use href="#s-group"/></svg>
+            <svg class="live" viewBox="0 0 16 16"><use href="#s-wave"/></svg>
+          </div>
+          <h3>Downstairs</h3>
+          <div class="meta">5 speakers · <span class="on">Playing now</span></div>
+          <div class="chips">
+            <div class="chip"><svg class="g" viewBox="0 0 16 16"><use href="#s-tv"/></svg></div>
+            <div class="chip"><svg class="g" viewBox="0 0 16 16"><use href="#s-laptop"/></svg></div>
+            <div class="chip"><svg class="g" viewBox="0 0 16 16"><use href="#s-speaker"/></svg></div>
+            <div class="chip"><svg class="g" viewBox="0 0 16 16"><use href="#s-sonos"/></svg></div>
+            <div class="chip more">+1</div>
+          </div>
+        </div>
+
+        <div class="gcard">
+          <div class="top"><svg class="g" viewBox="0 0 16 16"><use href="#s-group"/></svg></div>
+          <h3>Whole House</h3>
+          <div class="meta">10 speakers</div>
+          <div class="chips">
+            <div class="chip"><svg class="g" viewBox="0 0 16 16"><use href="#s-homepod"/></svg></div>
+            <div class="chip"><svg class="g" viewBox="0 0 16 16"><use href="#s-tv"/></svg></div>
+            <div class="chip"><svg class="g" viewBox="0 0 16 16"><use href="#s-hpmini"/></svg></div>
+            <div class="chip"><svg class="g" viewBox="0 0 16 16"><use href="#s-sonos"/></svg></div>
+            <div class="chip more">+6</div>
+          </div>
+        </div>
+
+        <div class="gcard">
+          <div class="top"><svg class="g" viewBox="0 0 16 16"><use href="#s-group"/></svg></div>
+          <h3>Party</h3>
+          <div class="meta">3 speakers</div>
+          <div class="chips">
+            <div class="chip"><svg class="g" viewBox="0 0 16 16"><use href="#s-sonos"/></svg></div>
+            <div class="chip"><svg class="g" viewBox="0 0 16 16"><use href="#s-speaker"/></svg></div>
+            <div class="chip"><svg class="g" viewBox="0 0 16 16"><use href="#s-speaker"/></svg></div>
+          </div>
+        </div>
+
+        <div class="newtile">
+          <div class="ring"><svg class="g" viewBox="0 0 16 16"><use href="#s-plus"/></svg></div>
+          <span>New Group…</span>
+        </div>
+      </div>
+
+      <div class="footer">Set up groups here — switch to the Mixer to play</div>
+    </div>
+  </div>
+</div>
+
+
+<!-- =========================================================
+     2 · GROUP EDITOR (pushed from a card)
+     ========================================================= -->
+<div class="caption">
+  <span class="n">2</span> &nbsp;<b>A card opens its editor in place.</b> The sidebar keeps the Groups row selected,
+  so nothing about the fleet moves under you; “‹ Groups” is the way back (Escape and ⌘[ do the same). The rail is
+  gold because this group is the one playing.
+</div>
+
+<div class="win">
+  <div class="hdr">
+    <div class="capsule">
+      <svg class="g" viewBox="0 0 16 16"><use href="#s-sliders"/></svg>
+      <div class="pill"></div>
+      <svg class="g" viewBox="0 0 16 16"><use href="#s-gear"/></svg>
+    </div>
+    <div class="wtitle">Audiout</div>
+    <div class="hdrRight">
+      <svg class="g" viewBox="0 0 16 16"><use href="#s-pin"/></svg>
+      <svg class="g" viewBox="0 0 16 16"><use href="#s-power"/></svg>
+    </div>
+  </div>
+
+  <div class="body">
+    <div class="sb">
+      <div class="sbScroll">
+        <div class="row sel" style="margin-top:4px">
+          <svg class="ico" viewBox="0 0 16 16"><use href="#s-group"/></svg>
+          <span class="nm">Groups</span>
+          <svg class="live" viewBox="0 0 16 16"><use href="#s-wave"/></svg>
+          <svg class="chev" viewBox="0 0 16 16"><use href="#s-chevR"/></svg>
+        </div>
+        <div class="sbDiv"></div>
+
+        <div class="sect">System Audio</div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-mainout"/></svg><span class="nm">Main Audio</span></div>
+
+        <div class="sect">Speakers</div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-homepod"/></svg><span class="nm">Bedroom HomePod</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-tv"/></svg><span class="nm">Living Room TV</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-laptop"/></svg><span class="nm">MacBook Pro Speakers</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-hpmini"/></svg><span class="nm">Kitchen HomePod mini</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Office</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-sonos"/></svg><span class="nm">Sonos Move</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Move 2</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Bathroom</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Hallway Left</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Hallway Right</span></div>
+      </div>
+      <div class="addbar"><svg class="g" viewBox="0 0 16 16"><use href="#s-plus"/></svg><span>New Group…</span></div>
+    </div>
+
+    <div class="pane">
+      <div class="back"><svg class="g" viewBox="0 0 16 16"><use href="#s-chevL"/></svg><span>Groups</span></div>
+
+      <div class="idcard card">
+        <div class="idwell armed">
+          <svg class="g" viewBox="0 0 16 16"><use href="#s-group"/></svg>
+          <div class="badge"><svg class="g" viewBox="0 0 16 16"><use href="#s-pencil"/></svg></div>
+        </div>
+        <div class="namefield"><span>Downstairs</span><svg class="g" viewBox="0 0 16 16"><use href="#s-pencil"/></svg></div>
+        <div class="playing"><svg class="g" viewBox="0 0 16 16"><use href="#s-wave"/></svg><span>Playing now</span></div>
+      </div>
+
+      <div class="secLbl" style="top:126px">Speakers</div>
+
+      <div class="mcard card">
+        <div class="mrow off"><svg class="g" viewBox="0 0 16 16"><use href="#s-homepod"/></svg><span class="nm">Bedroom HomePod</span></div>
+        <div class="mrow"><svg class="g" viewBox="0 0 16 16"><use href="#s-tv"/></svg><span class="nm">Living Room TV</span></div>
+        <div class="mrow"><svg class="g" viewBox="0 0 16 16"><use href="#s-laptop"/></svg><span class="nm">MacBook Pro Speakers</span></div>
+        <div class="mrow off"><svg class="g" viewBox="0 0 16 16"><use href="#s-hpmini"/></svg><span class="nm">Kitchen HomePod mini</span></div>
+        <div class="mrow"><svg class="g" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Office</span></div>
+        <div class="mrow"><svg class="g" viewBox="0 0 16 16"><use href="#s-sonos"/></svg><span class="nm">Sonos Move</span></div>
+        <div class="mrow"><svg class="g" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Move 2</span></div>
+        <div class="mrow off"><svg class="g" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Bathroom</span></div>
+        <div class="mrow off"><svg class="g" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Hallway Left</span></div>
+        <div class="mrow off"><svg class="g" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Hallway Right</span></div>
+      </div>
+
+      <!-- gold bus rail: hooks off the icon well, threads every membership node -->
+      <svg class="rail" viewBox="0 0 120 460" width="120" height="460">
+        <path d="M36 34.5 H27 Q19 34.5 19 42.5 V309.5" fill="none" stroke="#E8B84B" stroke-width="1.6"/>
+        <circle cx="19" cy="123.5" r="5.2" fill="none" stroke="#E8B84B" stroke-width="1.5"/>
+        <circle cx="19" cy="154.5" r="5.2" fill="#E8B84B"/>
+        <circle cx="19" cy="185.5" r="5.2" fill="#E8B84B"/>
+        <circle cx="19" cy="216.5" r="5.2" fill="none" stroke="#E8B84B" stroke-width="1.5"/>
+        <circle cx="19" cy="247.5" r="5.2" fill="#E8B84B"/>
+        <circle cx="19" cy="278.5" r="5.2" fill="#E8B84B"/>
+        <circle cx="19" cy="309.5" r="5.2" fill="#E8B84B"/>
+        <circle cx="19" cy="340.5" r="5.2" fill="none" stroke="#E8B84B" stroke-width="1.5"/>
+        <circle cx="19" cy="371.5" r="5.2" fill="none" stroke="#E8B84B" stroke-width="1.5"/>
+        <circle cx="19" cy="402.5" r="5.2" fill="none" stroke="#E8B84B" stroke-width="1.5"/>
+      </svg>
+
+      <div class="delrow">
+        <div class="btn">Delete Group…</div>
+        <p>Changes here are saved for next time — they don’t change what’s playing now.</p>
+      </div>
+
+      <div class="footer">Set up groups here — switch to the Mixer to play</div>
+    </div>
+  </div>
+</div>
+
+
+<!-- =========================================================
+     3 · DEVICE DETAIL
+     ========================================================= -->
+<div class="caption">
+  <span class="n">3</span> &nbsp;<b>A speaker, selected in its own list.</b> With groups gone from the sidebar, the
+  fleet starts at the top and every speaker is one click from its Equalizer. “In groups” is the way back the other
+  direction — a row here opens that group’s editor.
+</div>
+
+<div class="win">
+  <div class="hdr">
+    <div class="capsule">
+      <svg class="g" viewBox="0 0 16 16"><use href="#s-sliders"/></svg>
+      <div class="pill"></div>
+      <svg class="g" viewBox="0 0 16 16"><use href="#s-gear"/></svg>
+    </div>
+    <div class="wtitle">Audiout</div>
+    <div class="hdrRight">
+      <svg class="g" viewBox="0 0 16 16"><use href="#s-pin"/></svg>
+      <svg class="g" viewBox="0 0 16 16"><use href="#s-power"/></svg>
+    </div>
+  </div>
+
+  <div class="body">
+    <div class="sb">
+      <div class="sbScroll">
+        <div class="row" style="margin-top:5px">
+          <svg class="ico" viewBox="0 0 16 16"><use href="#s-group"/></svg>
+          <span class="nm">Groups</span>
+          <svg class="live" viewBox="0 0 16 16"><use href="#s-wave"/></svg>
+          <svg class="chev" viewBox="0 0 16 16"><use href="#s-chevR"/></svg>
+        </div>
+        <div class="sbDiv"></div>
+
+        <div class="sect">System Audio</div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-mainout"/></svg><span class="nm">Main Audio</span></div>
+
+        <div class="sect">Speakers</div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-homepod"/></svg><span class="nm">Bedroom HomePod</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-tv"/></svg><span class="nm">Living Room TV</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-laptop"/></svg><span class="nm">MacBook Pro Speakers</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-hpmini"/></svg><span class="nm">Kitchen HomePod mini</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Office</span></div>
+        <div class="row sel"><svg class="ico" viewBox="0 0 16 16"><use href="#s-sonos"/></svg><span class="nm">Sonos Move</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Move 2</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Bathroom</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Hallway Left</span></div>
+        <div class="row"><svg class="ico" viewBox="0 0 16 16"><use href="#s-speaker"/></svg><span class="nm">Hallway Right</span></div>
+      </div>
+      <div class="addbar"><svg class="g" viewBox="0 0 16 16"><use href="#s-plus"/></svg><span>New Group…</span></div>
+    </div>
+
+    <div class="pane">
+      <div class="dcard card">
+        <div class="idwell">
+          <svg class="g" viewBox="0 0 16 16"><use href="#s-sonos"/></svg>
+          <div class="badge"><svg class="g" viewBox="0 0 16 16"><use href="#s-pencil"/></svg></div>
+        </div>
+        <div class="dname">Sonos Move</div>
+      </div>
+
+      <div class="eq card">
+        <div class="eqhead"><h4>Equalizer</h4><span class="reset">Reset</span></div>
+        <div class="eqbank">
+          <div class="band"><div class="track"><div class="knob" style="top:30px"></div></div><div class="hz">60</div></div>
+          <div class="band"><div class="track"><div class="knob" style="top:22px"></div></div><div class="hz">150</div></div>
+          <div class="band"><div class="track"><div class="knob" style="top:32px"></div></div><div class="hz">400</div></div>
+          <div class="band"><div class="track"><div class="knob" style="top:38px"></div></div><div class="hz">1k</div></div>
+          <div class="band"><div class="track"><div class="knob" style="top:32px"></div></div><div class="hz">2.4k</div></div>
+          <div class="band"><div class="track"><div class="knob" style="top:26px"></div></div><div class="hz">4k</div></div>
+          <div class="band"><div class="track"><div class="knob" style="top:18px"></div></div><div class="hz">8k</div></div>
+          <div class="band"><div class="track"><div class="knob" style="top:24px"></div></div><div class="hz">12k</div></div>
+        </div>
+      </div>
+
+      <div class="secLbl" style="top:259px">In groups</div>
+      <div class="bare" style="top:281px">
+        <div class="brow"><span class="nm">Downstairs</span><svg class="live" viewBox="0 0 16 16"><use href="#s-wave"/></svg><svg class="chev" viewBox="0 0 16 16"><use href="#s-chevR"/></svg></div>
+        <div class="brow"><span class="nm">Party</span><svg class="chev" viewBox="0 0 16 16"><use href="#s-chevR"/></svg></div>
+      </div>
+
+      <div class="secLbl" style="top:357px">About</div>
+      <div class="bare" style="top:379px">
+        <div class="brow"><span class="k">Status</span><span class="v">Connected</span></div>
+        <div class="brow"><span class="k">On the network</span><span class="v">Yes</span></div>
+        <div class="brow"><span class="k">Volume</span><span class="v">40%</span></div>
+        <div class="brow"><span class="k">Kind</span><span class="v">Sonos</span></div>
+      </div>
+
+      <div class="footer">Set up groups here — switch to the Mixer to play</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

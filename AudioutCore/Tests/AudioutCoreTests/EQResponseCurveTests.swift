@@ -234,4 +234,24 @@ import AppKit
         #expect(abs(dark.greenComponent - light.greenComponent) < 0.001)
         #expect(abs(dark.blueComponent - light.blueComponent) < 0.001)
     }
+
+    // MARK: The cached static figure
+
+    /// Ground, ruler, grid and the 0 dB line depend only on the view's size and
+    /// the resolved tokens, so a repeated draw — every frame of a fader drag —
+    /// must reuse the rasterization rather than re-lay-out three attributed
+    /// strings and re-stroke eleven lines.
+    @Test func repeatedDrawsReuseTheStaticFigure() {
+        let view = EQResponseCurveView()
+        view.frame = NSRect(x: 0, y: 0, width: 357, height: EQResponseCurveView.height)
+
+        _ = view.dataWithPDF(inside: view.bounds)
+        _ = view.dataWithPDF(inside: view.bounds)
+        #expect(view.test_staticFigureBuildCount == 1)
+
+        // The tokens are baked into the raster, so a re-tint has to rebuild it.
+        NotificationCenter.default.post(name: Tokens.accentStyleDidChangeNotification, object: nil)
+        _ = view.dataWithPDF(inside: view.bounds)
+        #expect(view.test_staticFigureBuildCount == 2)
+    }
 }

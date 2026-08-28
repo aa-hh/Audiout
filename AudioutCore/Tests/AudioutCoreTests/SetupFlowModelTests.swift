@@ -102,6 +102,16 @@ import Testing
         func unregister() async throws {}
     }
 
+    /// A helper whose `register()` fails — the packaging/signing fault the user
+    /// cannot answer, and which must not be asked to.
+    private struct ThrowingPTPHelper: PTPHelperManaging {
+        struct RegistrationFailed: Error {}
+        let status: PTPHelperStatus = .notRegistered
+        func register() throws { throw RegistrationFailed() }
+        func openSystemSettingsLoginItems() {}
+        func unregister() async throws {}
+    }
+
     /// A model wired to canned seams, with every status still at its initial
     /// value — nothing has been asked yet.
     private func makeSetup(
@@ -150,7 +160,7 @@ import Testing
 
     @Test func stepOrderIsTheSpecOrder() {
         #expect(SetupFlowModel.steps == [.audio, .localNetwork, .bluetooth, .speakerSync, .remoteControl])
-        #expect(SetupFlowModel.skippableSteps == [.bluetooth, .remoteControl])
+        #expect(SetupFlowModel.skippableSteps == [.bluetooth, .remoteControl, .speakerSync])
     }
 
     @Test func freshFlowStartsOnSystemAudio() {
@@ -319,6 +329,84 @@ import Testing
         flow.skip(.bluetooth)
         flow.skip(.remoteControl)
         #expect(flow.isReadyForFinalCheck, "the auto-pass counts as decided — it never blocks the check")
+    }
+
+    /// The daemon isn't in the bundle: there is no Login Items switch to flip,
+    /// so demanding an approval would be demanding the impossible.
+    @Test func speakerSyncAutoPassesWhenTheDaemonIsMissing() async {
+        let setup = makeSetup(audio: .granted, localNetworkReachable: true, ptpHelper: .notFound)
+        await prime(setup)
+        let flow = SetupFlowModel(setup: setup)
+
+        #expect(flow.isComplete(.speakerSync))
+        #expect(setup.ptpHelperStatus == .notFound, "the status itself is never faked")
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
+        #expect(flow.isReadyForFinalCheck)
+    }
+
+    /// …and the same for a `register()` that threw: nothing was ever registered,
+    /// so nothing can be approved.
+    @Test func speakerSyncAutoPassesWhenRegistrationThrew() async {
+        let setup = makeSetup(audio: .granted, localNetworkReachable: true,
+                              ptpHelperManager: ThrowingPTPHelper())
+        setup.registerPTPHelper()
+        await prime(setup)
+        let flow = SetupFlowModel(setup: setup)
+
+        #expect(setup.ptpHelperRegistrationFailed)
+        #expect(flow.isComplete(.speakerSync))
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
+        #expect(flow.isReadyForFinalCheck)
+    }
+
+    // MARK: Speaker Sync's skip (the gate's only exit when Login Items says no)
+
+    /// The P0: an approval macOS refused used to hold the gate shut forever.
+    /// A skip is now the way past — and it is a skip, not a grant.
+    @Test func skippingSpeakerSyncOpensTheGateWithTheHelperStillUnapproved() async {
+        let setup = makeSetup(audio: .granted, localNetworkReachable: true,
+                              ptpHelper: .requiresApproval)
+        await prime(setup)
+        let flow = SetupFlowModel(setup: setup)
+        #expect(!flow.isReadyForFinalCheck, "unskipped, the unapproved helper holds the gate")
+
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
+        flow.skip(.speakerSync)
+
+        #expect(!flow.isComplete(.speakerSync), "skipped is not granted")
+        #expect(flow.isReadyForFinalCheck)
+        _ = await flow.runFinalCheck()
+        #expect(flow.isDoneAvailable)
+    }
+
+    /// The skip is remembered beyond this window, so the wake audit stops
+    /// reading an unapproved helper as something that got turned off.
+    @Test func skippingSpeakerSyncClearsTheWasEnabledRatchet() async {
+        let setup = makeSetup(audio: .granted, localNetworkReachable: true, ptpHelper: .enabled)
+        await prime(setup)
+        let settings = AppSettings(defaults: isolatedDefaults)
+        #expect(settings.speakerSyncWasEnabled, "reading `.enabled` armed the ratchet")
+
+        SetupFlowModel(setup: setup).skip(.speakerSync)
+
+        #expect(!settings.speakerSyncWasEnabled)
+    }
+
+    /// Done's re-verification honours the skip too — otherwise the gate would
+    /// open and then snap straight back to the card the user just passed on.
+    @Test func verifyForDoneDoesNotSnapBackToASkippedSpeakerSync() async {
+        let setup = makeSetup(audio: .granted, localNetworkReachable: true,
+                              ptpHelper: .requiresApproval)
+        await prime(setup)
+        let flow = SetupFlowModel(setup: setup)
+        #expect(await flow.verifyForDone() == .unmet(.speakerSync), "unskipped, it still refuses")
+
+        flow.skip(.speakerSync)
+
+        #expect(await flow.verifyForDone() == .complete)
     }
 
     // MARK: The Done gate
@@ -560,7 +648,7 @@ import Testing
         #expect(flow.isDoneAvailable, "Bluetooth, behind the start, never blocked the gate")
     }
 
-    private final class MutablePTPHelper: PTPHelperManaging {
+    private final class MutablePTPHelper: PTPHelperManaging, @unchecked Sendable {
         var status: PTPHelperStatus
         init(_ status: PTPHelperStatus) { self.status = status }
         func register() throws {}

@@ -297,8 +297,8 @@ Do not "fix" the code to match any of these; they are Figma stand-ins:
 - **SF Symbols are placeholder vectors**, not the real glyphs the app renders.
 - **Canvas grain is not rendered** (dark-mode 48×48 procedural tile exists only
   in `WarmCanvasView.swift`).
-- **`separator`, `underPageBackground`, `selectedContentBackground`,
-  `tertiarySystemFill` are approximations** of dynamic system colors.
+- **`separator`, `underPageBackground`, `selectedContentBackground`
+  are approximations** of dynamic system colors.
 - **Computed blends are stored as dark-appearance literals** (e.g. the armed
   fader gradient's ember-toward-gold blend, diagnosis panel's failure-tinted
   fill) — code computes them at runtime.
@@ -321,12 +321,34 @@ banners, sidebar. This is a color theme only — no Circuit UI components.
 | Warm Signal (Light alias) | Circuit token |
 |---|---|
 | `canvas`, `canvasHi` (gradient collapses flat), `panel`, `raised`, `underPageBackground`, `windowBackground` | `bg/normal` |
-| `well`, `sidebarWarmTint` | `bg/subtle` |
-| `hairline`, `separator` | `border/divider` |
+| `well` | shipped `#E2DFD3`, off-sheet (see below) |
+| `sidebarWarmTint` | shipped `#F5F4ED`, off-sheet, near `bg/normal` |
+| `hairline` | shipped `#D0CDC3` = Circuit `border/normal` (see below) |
+| `separator` | `border/divider` |
 | `label` / `secondaryLabel` / `tertiaryLabel` | `fg/normal` / `fg/subtle` / `fg/placeholder` |
-| `quaternaryLabel`, `tertiarySystemFill` | `bg/highlight` |
+| `quaternaryLabel` | `bg/highlight` |
 | `destructive` / `warning` | `fg/danger` / `fg/warning` |
 | `selectedContentBackground` (hover wash @10%) | `fg/normal` |
+
+**Shipped departures from the raw alias, measured** (`well` and `hairline` are
+NOT plain Circuit aliases in code — both were re-tuned after the alias
+measured under a locked floor):
+- `well` mapped to Circuit `bg/highlight` `#E8E6DC` rather than `bg/subtle`
+  (`bg/subtle` measured 1.06:1 vs the flat Circuit `panel`, under the
+  membership checklist's locked 1.10:1 surface-separation floor); `#E8E6DC`
+  itself then measured 1.098:1 against Direction 04's light `raised`
+  `#F2F0EA`, under the checklist's locked 1.15:1 raised-vs-well floor, so it
+  was re-tuned one step deeper, OFF the Circuit sheet entirely, to the
+  shipped `#E2DFD3` (`Tokens.swift:269-292`).
+- `hairline` mapped to Circuit `border/normal` `#D0CDC3` rather than
+  `border/divider` (`border/divider` measured 1.21:1 vs the flat Circuit
+  `panel`, under the checklist's locked 1.25:1 separator floor;
+  `border/normal` holds 1.53:1 and is still a Circuit-family hex —
+  `Tokens.swift:296-319`).
+- `separator` stays mapped straight to `border/divider` as the table states —
+  it carries no separate floor of its own.
+- `sidebarWarmTint` light is `#F5F4ED`, off-sheet, near `bg/normal` (not a
+  Circuit alias at all).
 
 **Contrast, measured 2026-08-07** (instruments vs `bg/normal` #FBFBF9; 3:1 is
 the WCAG 1.4.11 bar for graphical objects): gold **3.53** (up from 3.20 on the
@@ -339,8 +361,9 @@ meterTrack 1.77, glow 1.78, dotSocket 1.37 — those three are intentionally
 quiet backdrops, not signal-bearers. Circuit's own text tokens all pass body
 contrast (fg/normal 16.4, fg/subtle 5.48, fg/placeholder 4.67).
 
-**Two NEW tokens the code does not have yet** (added 2026-08-07 fixing a measured
-FEED-pill contrast failure; both carry iOS code syntax and land with roadmap 035):
+**Two tokens landed since the Figma proposal** (added 2026-08-07 fixing a measured
+FEED-pill contrast failure; both shipped with roadmap 035 — `Tokens.swift:1057`
+and `:1071`):
 
 - `feedPillFill` — dark `#38322B` / dark-HC `#423B33`, light aliases Circuit
   `border/normal`, light-HC `bg/neutral-strong`. Replaces
@@ -354,16 +377,42 @@ The pill now reads by fill alone — 1.46:1 vs canvas dark (was 1.31), 1.54:1
 light (was 1.21) — while keeping the error pill at 3.24:1 and lifting light
 neutral text from 4.54 to **10.66:1**. `feedPillBorderWidth` becomes unused.
 
-**Figma light is AHEAD of code.** `Tokens.swift`'s light/lightHC columns still
-hold the original warm-paper values (canvas #F4EFE7 …), so the shipping app is
-unchanged — Figma holds the proposal until those Circuit hexes are pulled
-across. The warm-paper light values remain recoverable from the code.
+**The Circuit pull LANDED** (`PRODUCT.md:84` dates it 2026-08-11, superseding
+the earlier warm-paper light): code ships light `canvas` `#FBFBF9`
+(`Tokens.swift:241`), not the old warm-paper `#F4EFE7`. Figma and code now
+describe the same light state — this section documents the mapping that
+shipped, not a pending proposal.
 
 `accent` deliberately KEEPS the macOS system accent in light (Alec's call).
 Any frame showing light mode must also pin `Theme · Circuit` → Light (`79:0`)
 so the alias chain resolves (all light twins already do). Pulling light values
 to code now means pulling the resolved Circuit hexes into `Tokens.swift`'s
 light/lightHC columns.
+
+**Owed to Figma (wrap-up, design-token audit 2026-08-27).** This pass landed
+several token changes in code that Figma does not carry yet. This is the
+handoff list — making the Figma edit itself is not this pass's job (root
+AGENTS.md's "Figma mirrors the UI code" rule).
+
+Variables to ADD:
+- `secondaryLabel` — now mode-aware: light `#5C574C` / light-HC `#453F35`
+  (previously a plain alias of the system secondary label).
+- `inkTertiary` — dark `#969083` / dark-HC `#AFA79A` / light `#665F4C` /
+  light-HC `#4A443A`.
+- `railDormant` — dark `#7D7466` / dark-HC `#948C7C` / light `#8A8272` /
+  light-HC `#7A7263`.
+- Subtle-column `ember` light — `#877750` (was `#AE9668`).
+- IC variants for `warningText` (dark `#E09A55` / light `#8F4E1D`),
+  `inkSecondary` (dark `#C6C0B4` / light `#453F35`), and `success` (dark
+  `#7BD495` / light `#246B3C`).
+- Two text styles mirroring `Tokens.Font`: `detail` (11 pt regular) and
+  `display` (20 pt bold).
+
+Variables to DELETE:
+- `tertiarySystemFill` (dead in code — zero consumers).
+- The `Tokens.Material.sidebar` alias (also dead in code — zero consumers;
+  no separate Figma note currently names it, so there is nothing else to
+  drop alongside it).
 
 ## Pull direction (Figma → code)
 

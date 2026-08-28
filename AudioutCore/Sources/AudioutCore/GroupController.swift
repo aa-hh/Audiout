@@ -72,10 +72,12 @@ public final class GroupController {
     /// forever until the next wholesale clear.
     ///
     /// NOT fixed here (audit finding, scoped low-effort/deferred): this class
-    /// has no per-device-removal signal to prune against. `devices` (above)
-    /// always reads `backend.devices` LIVE and on demand — `GroupController`
-    /// never caches a device list or subscribes to `BackendEvent` itself, so
-    /// there's no hook that fires when a device drops out. The nearest
+    /// has no per-device-removal signal to prune against. `devices` (above) is
+    /// the snapshot the app layer last pushed via ``updateDevices(_:)`` (or,
+    /// before the first push, a live `backend.devices` read) — a snapshot that
+    /// is REPLACED wholesale, never diffed, and `GroupController` subscribes to
+    /// no `BackendEvent` itself, so there's no hook that fires when a device
+    /// drops out of it. The nearest
     /// candidate, `BackendEvent.deviceRemoved`, is also the WRONG signal for
     /// this even if wired up: its own doc comment says a device "stays in the
     /// model as unavailable; this signals availability, not deletion" — i.e.
@@ -186,7 +188,7 @@ public final class GroupController {
     /// see the decision note there.)
     public func ensureDefaultSelection() {
         guard !loadedPersistedRouting, selectedDeviceIDs.isEmpty else { return }
-        guard let local = backend.devices.first(where: \.isLocalDevice) else { return }
+        guard let local = devices.first(where: \.isLocalDevice) else { return }
         // Opt-in resume (Settings › General "Reconnect last speakers when
         // Audiout starts", roadmap 050) — the "future 'resume last routing'
         // option" the init decision note reserved `routingStore` for. OFF (the
@@ -213,23 +215,77 @@ public final class GroupController {
         persistRouting()
     }
 
+    // MARK: Routing persistence
+    //
+    // Selection changes arrive at gesture frequency, and each one used to
+    // serialize and write JSON on the main thread inside the gesture. The write
+    // is latest-wins on a private serial queue instead: only the newest state
+    // matters, so a burst of toggles costs one file write, none of it on main.
+    //
+    // THE INVARIANT that makes `flushPendingRoutingSave()` a real drain:
+    // whenever `pendingRoutingState` is non-nil, at least one flush block that
+    // has not yet run is enqueued on `routingPersistQueue`. `persistRouting`
+    // enqueues one exactly when it finds the slot idle, and `flushRoutingStateNow`
+    // empties the slot as it takes the state. So a `sync {}` on that serial
+    // queue can only return after every such block has run — i.e. after
+    // everything pending has been written.
+
+    private let routingPersistQueue = DispatchQueue(label: "GroupController.routingPersist", qos: .utility)
+    private let routingPersistLock = NSLock()
+    private var pendingRoutingState: RoutingStore.State?
+
     /// Persist the current routing state (Selected Devices + Main Out target).
-    // STABILITY(D4): UI-thread stalls and stuck-drag state — see dev/notes/stability-audit-2026-07-18.md
+    /// Called on the main thread; the disk write happens elsewhere.
     private func persistRouting() {
         let state = RoutingStore.State(selectedDeviceIDs: Array(selectedDeviceIDs).sorted(),
                                        mainOut: mainOut)
-        try? routingStore.save(state)
+        let schedule: Bool = routingPersistLock.withLock {
+            let wasIdle = pendingRoutingState == nil
+            pendingRoutingState = state
+            return wasIdle
+        }
+        guard schedule else { return }   // a flush is already enqueued; it will take the newest state
+        routingPersistQueue.async { [weak self] in self?.flushRoutingStateNow() }
+    }
+
+    private func flushRoutingStateNow() {
+        let state = routingPersistLock.withLock { () -> RoutingStore.State? in
+            defer { pendingRoutingState = nil }
+            return pendingRoutingState
+        }
+        guard let state else { return }
+        do { try routingStore.save(state) } catch { StoreRecovery.noteWriteFailure(error) }
+    }
+
+    /// Drain any pending routing write synchronously — the quit path calls this so a
+    /// selection made just before quitting still lands on disk. Also a test seam.
+    public func flushPendingRoutingSave() {
+        routingPersistQueue.sync { }
     }
 
     // MARK: Devices
 
-    /// Current device snapshot, straight from the backend — `GroupController`
-    /// never caches its own copy.
-    public var devices: [Device] { backend.devices }
+    /// The last snapshot ``updateDevices(_:)`` was handed, or `nil` before the
+    /// first push.
+    private var pushedDevices: [Device]?
 
-    // STABILITY(C8): main thread blocks on the state queue for slow work — see dev/notes/stability-audit-2026-07-18.md
+    /// Hand this controller the current device snapshot. The app layer pushes
+    /// the same array `AppDelegate.repaintFromCurrentState` already builds from
+    /// its folded backend events, once per event, so every read below is a
+    /// plain array access instead of a hop onto the backend's state queue —
+    /// which on `NativeBackend` is a `sync` the main thread would wait on.
+    public func updateDevices(_ devices: [Device]) {
+        pushedDevices = devices
+    }
+
+    /// The current device snapshot. Normally whatever the app layer last pushed
+    /// (see ``updateDevices(_:)``); until the first push — tests and the offline
+    /// harnesses, which drive this controller with no app layer above it — a
+    /// live read of `backend.devices`.
+    public var devices: [Device] { pushedDevices ?? backend.devices }
+
     private func device(_ id: String) -> Device? {
-        backend.devices.first { $0.id == id }
+        devices.first { $0.id == id }
     }
 
     // MARK: Selected Devices + Main Out routing (SPEC.md §9 2026-07-14b)
@@ -259,17 +315,8 @@ public final class GroupController {
         }
     }
 
-    /// Legacy user-facing string for the (now-lifted) local-mix block. Retained
-    /// only because out-of-tree callers still reference the symbol
-    /// (`AudioutPopoverUI.PopoverController`, popover-harness); with the synced
-    /// local sink the Mac may now join a mixed Selected Devices set, so nothing in
-    /// this type ever emits it as a refusal any more (T-GROUPCTL / Q5). The popover
-    /// wiring is retired separately in T-UI-ALLOW.
-    public static let localMixRefusalReason =
-        "Can't combine with AirPlay yet"
-
     /// The local (Mac's own) device id in the current fleet, if discovered.
-    private var localDeviceID: String? { backend.devices.first(where: \.isLocalDevice)?.id }
+    private var localDeviceID: String? { devices.first(where: \.isLocalDevice)?.id }
 
     /// Whether `id` is in the "Selected Devices" set. (Membership, NOT "is it
     /// receiving audio" — routing is decided by Main Out.)
@@ -404,13 +451,6 @@ public final class GroupController {
     public func requestReconnect(for id: String) {
         backend.retryOutput(id)
     }
-
-    /// Whether the local Mac may currently be toggled ON. Always `true` now: with
-    /// the synced local sink the Mac may join any (including mixed) Selected
-    /// Devices set (Q5 / T-GROUPCTL), so the pre-engine local-mix block is gone.
-    /// Retained as a stable predicate for the popover row (its greying-out is
-    /// retired separately in T-UI-ALLOW).
-    public func canSelectLocalSpeaker(_ id: String) -> Bool { true }
 
     // MARK: Legacy on/off shims (kept for callers not yet migrated)
 
@@ -553,17 +593,21 @@ public final class GroupController {
     /// Add or replace (by `id`) a group and persist the full set.
     ///
     /// Throws ``GroupError/emptyMembership`` if `group.memberIDs` is empty — a
-    /// group must always keep at least one device. The guard runs before any
-    /// mutation so a rejected save leaves `groups` untouched.
+    /// group must always keep at least one device. The edit is made on a COPY
+    /// and committed to `groups` only once the disk write has succeeded, so a
+    /// rejected OR failed save leaves `groups` untouched — the editor's "didn't
+    /// save" alert and what the pane shows can never disagree.
     @discardableResult
     public func saveGroup(_ group: Group) throws -> Group {
         guard !group.memberIDs.isEmpty else { throw GroupError.emptyMembership }
-        if let index = groups.firstIndex(where: { $0.id == group.id }) {
-            groups[index] = group
+        var updated = groups
+        if let index = updated.firstIndex(where: { $0.id == group.id }) {
+            updated[index] = group
         } else {
-            groups.append(group)
+            updated.append(group)
         }
-        try store.save(groups)
+        try store.save(updated)
+        groups = updated
         return group
     }
 
@@ -623,14 +667,33 @@ public final class GroupController {
         )
     }
 
-    /// Remove a group. Deactivates it first if it was active, and if Main Out
-    /// pointed at it, falls back to `.selectedDevices` so the routing target
-    /// never dangles at a deleted group.
+    /// The default name a new group is offered: "Group N" for the lowest N not
+    /// already taken. `groups.count + 1` — what both call sites used — collides
+    /// after a delete: "Group 1" and "Group 2" saved, "Group 1" deleted, and the
+    /// next suggestion is "Group 2" again.
+    public func nextDefaultGroupName() -> String {
+        let taken = Set(groups.map(\.name))
+        var n = 1
+        while taken.contains("Group \(n)") { n += 1 }
+        return "Group \(n)"
+    }
+
+    /// Remove a group. Deactivates it if it was active, and if Main Out pointed
+    /// at it, falls back to `.selectedDevices` so the routing target never
+    /// dangles at a deleted group.
+    ///
+    /// Both of those follow the SUCCESSFUL disk write, not precede it: the
+    /// removal happens on a copy, so a failed save moves nothing at all rather
+    /// than leaving a group gone from the pane and back at next launch. The
+    /// `.selectedDevices` fallback reads nothing from `groups`, so the success
+    /// path is unaffected by the later ordering.
     public func deleteGroup(id: String) throws {
+        var remaining = groups
+        remaining.removeAll { $0.id == id }
+        try store.save(remaining)
+        groups = remaining
         if activeGroupID == id { activeGroupID = nil }
         if mainOut == .group(id: id) { setMainOut(.selectedDevices) }
-        groups.removeAll { $0.id == id }
-        try store.save(groups)
     }
 
     // MARK: Activation

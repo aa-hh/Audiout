@@ -194,7 +194,7 @@ import AudioutCore
 
         row.apply(makeDevice(isMuted: false), selected: true, controllable: true)
         #expect(!(row.test_isMutePillEngaged), "unmuting removes the pill")
-        #expect(row.test_muteTintColor == .secondaryLabelColor)
+        #expect(row.test_muteTintColor == Tokens.Color.secondaryLabel)
     }
 
     @Test func mutePillEngagesInstantlyOnLiveClick() {

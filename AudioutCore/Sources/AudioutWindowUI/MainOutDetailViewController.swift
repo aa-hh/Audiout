@@ -26,8 +26,9 @@ import AudioutSharedUI
 ///   whole-mix seam, `OutputBackend.setMainOutEQ`, not a per-device one.
 ///
 /// Like the device pane it SCROLLS: the Equalizer's Advanced fold exceeds the
-/// screen's height budget and the Groups screen is user-resizable with drag
-/// memory, so growing the window was rejected (roadmap 039).
+/// Groups screen's height budget, and the surface frame is FIXED for every
+/// screen (`AppSurfaceController` — the frame never changes), so scrolling is
+/// the only room; growing the window was rejected (roadmap 039).
 public final class MainOutDetailViewController: NSViewController {
 
     /// Where this page's tone actually lands. Plain words, and deliberately
@@ -348,6 +349,7 @@ extension MainOutDetailViewController: EQEditorViewDelegate {
         pendingEdit = (eq, committed)
         onSetEQ?(eq, committed)
         refreshResetEnabled()
+        if committed { Analytics.capture("eq:adjusted", ["target": "main_out"]) }
     }
 
     public func eqEditorDidRequestReset(_ editor: EQEditorView) {
@@ -355,6 +357,7 @@ extension MainOutDetailViewController: EQEditorViewDelegate {
         pendingEdit = (.flat, true)
         onSetEQ?(.flat, true)
         refreshResetEnabled()
+        Analytics.capture("eq:reset", ["target": "main_out"])
     }
 }
 

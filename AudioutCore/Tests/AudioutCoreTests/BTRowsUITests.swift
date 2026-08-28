@@ -24,7 +24,6 @@ import AppKit
         func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {
             toggles.append((on, id))
         }
-        func deviceRowDidRequestBlockedExplanation(_ row: DeviceRowView) {}
         func deviceRowDidRequestReconnect(_ row: DeviceRowView) {
             reconnects.append(row.device.id)
         }
@@ -237,8 +236,8 @@ import AppKit
         let row = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 0, syncTrimIsSet: false)
         #expect(row.test_syncChipTitle == "Not set")
         #expect(row.test_syncChipIsDashed, "the dashed border IS the invitation")
-        #expect(row.test_syncChipTitleColor == Tokens.Color.tertiaryLabel)
-        #expect(row.test_syncChipBorderColor == Tokens.Color.tertiaryLabel,
+        #expect(row.test_syncChipTitleColor == Tokens.Color.inkTertiary)
+        #expect(row.test_syncChipBorderColor == Tokens.Color.inkTertiary,
                 "one de-emphasis tone, spoken by both the text and its outline")
     }
 

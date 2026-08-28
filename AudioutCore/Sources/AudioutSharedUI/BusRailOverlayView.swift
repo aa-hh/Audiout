@@ -130,6 +130,9 @@ public final class BusRailOverlayView: NSView {
 
     public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
+        // Not input-driven: the geometry is identical, the TONES are not. Drop
+        // the memo so the skip below can't swallow this invalidation.
+        lastDrawnInput = nil
         needsDisplay = true
     }
 
@@ -160,13 +163,44 @@ public final class BusRailOverlayView: NSView {
     /// mid-flight — drop it, and let the settled draw re-resolve its tokens.
     @objc private func accentStyleDidChange() {
         cancelConnectPulse()
+        // Same as the appearance change: unchanged geometry, new tones.
+        lastDrawnInput = nil
         needsDisplay = true
     }
 
     public override func draw(_ dirtyRect: NSRect) {
-        guard let plan = resolvePlan() else { return }
+        guard let input = gatherInput() else { return }
+        lastDrawnInput = input
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            drawPlan(plan)
+            drawPlan(RailPlan.resolve(input))
+        }
+    }
+
+    /// The input the currently-committed contents were drawn from.
+    private var lastDrawnInput: RailPlan.Input?
+
+    /// How many invalidations actually reached AppKit — every one the skip below
+    /// drops is a whole wire not re-resolved and not re-stroked. This is the
+    /// observable, rather than reading `needsDisplay` back, because this view is
+    /// layer-backed and a layer-backed view's dirty flag cannot be cleared once
+    /// set (verified in this suite), so the flag can never show a skip.
+    public private(set) var test_redrawRequestCount = 0
+
+    public override var needsDisplay: Bool {
+        get { super.needsDisplay }
+        set {
+            // A layout pass that moved nothing must not re-resolve and re-stroke
+            // the whole wire. `RailPlan.resolve` is pure, so an input equal to
+            // the last drawn one yields an identical figure and the committed
+            // contents already show it. During a collapse the input changes
+            // every frame, so the documented per-frame resolve is untouched.
+            //
+            // Only THIS property is intercepted: AppKit's own rect-based
+            // dirtying (a resize, say) bypasses it and still redraws, which errs
+            // the safe way.
+            if newValue, let last = lastDrawnInput, gatherInput() == last { return }
+            if newValue { test_redrawRequestCount += 1 }
+            super.needsDisplay = newValue
         }
     }
 
@@ -184,6 +218,13 @@ public final class BusRailOverlayView: NSView {
     /// after snap. `nil` when the origin anchor can't be resolved (no window / not
     /// laid out) — nothing to draw.
     func resolvePlan() -> RailPlan? {
+        gatherInput().map(RailPlan.resolve)
+    }
+
+    /// The gather half of `resolvePlan`: read the live frames, return the plain
+    /// numbers. Split out so the redraw skip can compare inputs without
+    /// resolving, and so `draw` gathers exactly once per pass.
+    private func gatherInput() -> RailPlan.Input? {
         guard let mainOutRow, let anchor = mainOutRow.railHookAnchor(in: self) else { return nil }
 
         // EVERY device node is a stop, top-to-bottom — the channel runs the full
@@ -212,7 +253,7 @@ public final class BusRailOverlayView: NSView {
             dropsHiddenRows: deviceSectionRowsDropped,
             dormant: dormant,
             stops: stops)
-        return RailPlan.resolve(input)
+        return input
     }
 
     /// A collapsible section's body-clip frame as an overlay-space y-range
@@ -275,7 +316,7 @@ public final class BusRailOverlayView: NSView {
     /// rather than the gold/grey patchwork per-stop tones drew on a wire that is
     /// feeding nothing.
     private static func originColor(for plan: RailPlan) -> NSColor {
-        plan.dormant ? Tokens.Color.tertiaryLabel : Tokens.Color.spineTone(armed: plan.gold)
+        plan.dormant ? Tokens.Color.railDormant : Tokens.Color.spineTone(armed: plan.gold)
     }
 
     /// The wire's stroked runs in path order, origin → terminus. Warm Signal
@@ -329,7 +370,7 @@ public final class BusRailOverlayView: NSView {
             // the one quiet tone, so every segment inherits it.
             let segColor: NSColor
             if plan.dormant || stop.node == .failed {
-                segColor = Tokens.Color.tertiaryLabel
+                segColor = Tokens.Color.railDormant
             } else if stop.node == .member {
                 segColor = originColor
             } else {
@@ -390,11 +431,11 @@ public final class BusRailOverlayView: NSView {
 
     /// Whether a node sits ON the spine (rail runs through it) vs OFF it (the
     /// line detours around it). Members and members-in-transition are on-spine;
-    /// genuine non-members and the blocked local node are detoured.
+    /// genuine non-members are detoured.
     static func onSpine(_ node: MembershipBusView.Node) -> Bool {
         switch node {
         case .member, .connecting, .failed, .origin: return true
-        case .nonMember, .blocked:                   return false
+        case .nonMember:                             return false
         }
     }
 
@@ -838,7 +879,11 @@ public struct RailPlan: Equatable {
     public var gold: Bool
 
     /// Plain-number inputs read from live frames by `BusRailOverlayView`.
-    public struct Input {
+    ///
+    /// `Equatable` is load-bearing, not incidental: `RailPlan.resolve` is pure,
+    /// so an input equal to the last drawn one resolves to the same figure and
+    /// the overlay can skip the redraw entirely (`needsDisplay`'s setter).
+    public struct Input: Equatable {
         public var gold: Bool
         public var ringCenterY: CGFloat
         public var ringCenterX: CGFloat

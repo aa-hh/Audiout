@@ -47,6 +47,9 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// connect path surfaces `.authRequired` instead of flattening to
     /// `.unknown`.
     var addFailureError: AirPlayEngineError = .sessionFailed
+    /// Ids whose `setVolume` should THROW (still recording the call) — a
+    /// receiver that refuses the write, which the fader must not keep lying about.
+    var volumeFailures: Set<UInt64> = []
     /// Ids that should THROW on `removeOutput`.
     var removeFailures: Set<UInt64> = []
     /// Ids that should THROW on `flushOutput` — forces a whole-system rebind
@@ -272,6 +275,7 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     func feedCount(for id: OutputID) -> Int { lock.withLock { feedCounts[id.rawValue] ?? 0 } }
     func setVolume(_ id: OutputID, _ volume: Double) async throws {
         lock.withLock { volumes.append((id, volume)); opLog.append("volume:\(id.rawValue)") }
+        if volumeFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
     }
     func setStartBufferMs(_ ms: Int) async {
         lock.withLock { bufferSets.append(ms); opLog.append("setBuffer:\(ms)") }
@@ -2213,6 +2217,54 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                        "Main 40 × device 50 must reach the engine as ONE Double product (0.40 × 0.50 = 0.20), with no intermediate rounding")
     }
 
+    /// A refused volume write must not leave the fader parked on a level the
+    /// speaker never took. There is no poll loop down here by design — the
+    /// engine's completion IS the only ground truth — so that completion has to
+    /// be the fader's bound: the optimistic echo snaps back to the last level
+    /// the engine actually acknowledged.
+    @Test func refusedVolumePushRevertsTheFaderToTheLastConfirmedLevel() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:6A", name: "Refuser")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+
+        // A push the engine accepts: this level is now the confirmed one.
+        backend.setVolume(60, for: device.id)
+        #expect(await waitForVolumePush(engine, device.outputID, 0.60), "precondition: the accepted push reached the engine")
+        await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 60 }
+        // The engine records the call before it can throw, so arming the failure
+        // the instant the call is seen could still catch THIS push. Let the
+        // completion's confirm hop land first — it is the thing under test.
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        // Now the receiver starts refusing. The next push echoes optimistically
+        // to 25, then must snap back to the confirmed 60.
+        engine.volumeFailures = [device.outputID.rawValue]
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.volume == 60 } else { return false } }
+        } after: { backend.setVolume(25, for: device.id) }
+
+        #expect(backend.devices.first { $0.id == device.id }?.volume == 60,
+                "a refused push must leave the fader on the level the engine last confirmed, not the one it rejected")
+
+        let volumeEdits = events.compactMap { event -> Int? in
+            if case .deviceUpdated(let d) = event, d.id == device.id { return d.volume } else { return nil }
+        }
+        #expect(volumeEdits.firstIndex(of: 25) != nil, "the optimistic echo still shows the user's edit immediately")
+        if let echoed = volumeEdits.firstIndex(of: 25), let reverted = volumeEdits.lastIndex(of: 60) {
+            #expect(echoed < reverted, "the snap-back follows the echo, it doesn't replace it")
+        }
+    }
+
     /// The GROUP stage actually multiplies into the wire — not just Main × Device.
     /// Every other `setMasterGain` in these tests passes `group: 100`, so a
     /// regression dropping the group term from `masterGainFraction` would ship
@@ -3237,8 +3289,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                        "an offline AP2 device MUST stay supportsAirPlay2==true — NOT reclassified AP1-only (the bug)")
         #expect(d?.isAvailable == false, "an offline AP2 device is unavailable")
         #expect(d?.isSelected == false)
-        #expect(d?.connectionState == .failed(ConnectionFailure(cause: .unknown)),
-                       "an offline AP2 device shows a retry-on-click .failed dot, not the AP1 .off state")
+        #expect(d?.connectionState == .failed(ConnectionFailure(cause: .vanished)),
+                       "an offline AP2 device shows a retry-on-click .vanished dot — it literally stopped advertising — not the AP1 .off state")
     }
 
     /// An offline AP2 device coming back (airplay advert re-resolves → `.updated`
@@ -3748,9 +3800,71 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             Issue.record("expected .failed after a NACKed addOutput, got \(String(describing: d?.connectionState))")
             return
         }
-        #expect(failure.cause == .unknown, "NativeBackend has no diagnostics seam — always .unknown")
+        #expect(failure.cause == .unknown,
+                "a bare session failure carries no evidence for a specific cause — guessing one would be worse than vague")
+        #expect(failure.detail != nil, "the engine's raw error backs Copy Details")
         #expect(d?.isAvailable == false)
         #expect(d?.isSelected == false)
+    }
+
+    /// A timed-out connect op says so: the engine's `opTimedOut` is exactly
+    /// `.timedOut`'s copy ("the connection attempt didn't complete"), so it must
+    /// not flatten to "failed for an unknown reason".
+    @Test func connectionStateAddTimeoutMapsToTimedOut() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:3A", name: "Slowpoke")
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .opTimedOut
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }
+            return false
+        }
+        guard case .failed(let failure) = backend.devices.first(where: { $0.id == device.id })?.connectionState else {
+            Issue.record("expected .failed after a timed-out addOutput")
+            return
+        }
+        #expect(failure.cause == .timedOut, "an op whose completion never arrived IS the timed-out story")
+        #expect(failure.detail != nil, "the engine's raw error backs Copy Details")
+    }
+
+    /// A LIVE session dying out-of-band is "was connected, silently dropped" —
+    /// the one shape the engine's own state stream can prove, and a materially
+    /// more useful sentence than the unknown-reason fallback.
+    @Test func connectionStateLiveSessionDeathMapsToDroppedMidStream() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:3B", name: "Dropper")
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+
+        engine.pushState(device.outputID, .failed)
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }
+            return false
+        }
+        guard case .failed(let failure) = backend.devices.first(where: { $0.id == device.id })?.connectionState else {
+            Issue.record("expected .failed after the engine reported the live session dead")
+            return
+        }
+        #expect(failure.cause == .droppedMidStream,
+                "a device that WAS streaming when the engine reported .failed dropped mid-stream")
+        #expect(failure.detail != nil, "the engine state backs Copy Details")
     }
 
     /// Recovery clears to connecting/connected: after a NACK parks the device
@@ -4098,7 +4212,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { capture.meteringActive }
         #expect(capture.meteringActive, "setMeteringActive(true) must reach the coordinator")
         capture.fireLevelIfActive(0.5)
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        // A fired sample is try-stored, then picked up by the `stateQueue` drain
+        // at the ~40 ms display cadence, so allow several cadences here.
+        try? await Task.sleep(nanoseconds: 150_000_000)
         seen = await box.snapshot()
         #expect(seen.contains { if case .level = $0 { return true } else { return false } },
                        "a level fired while active must reach the event stream")
@@ -4128,7 +4244,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         backend.setOutputSet([device.id])
-        // This backend's `emitLevel` is metering-gated, so turn metering ON for
+        // This backend's level emission is metering-gated, so turn metering ON for
         // levels to flow at all (the gate defaults off).
         (backend as MeteringControlling).setMeteringActive(true)
         await pollUntil { engine.addedIDs.contains(device.outputID) }
@@ -4157,6 +4273,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let burstDuration: UInt64 = 100_000_000
         let steps = 40
         let finalValue: Float = 0.987
+        let windowStart = DispatchTime.now()
         for i in 0..<steps {
             let value: Float = i == steps - 1 ? finalValue : Float(i) / Float(steps)
             capture.onLevel?(value)
@@ -4166,15 +4283,22 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Give the trailing flush (scheduled up to ~40ms after the last coalesced
         // leading edge) time to deliver the final value.
         try? await Task.sleep(nanoseconds: 80_000_000)
+        let windowMs = Double(DispatchTime.now().uptimeNanoseconds - windowStart.uptimeNanoseconds) / 1_000_000
         collector.cancel()
 
         let levels = await box.levels
-        // Burst spans ~100ms at a 40ms cadence: the ideal count is ceil(100/40)+1
-        // = 4, generously bounded to allow for scheduler/timer jitter — the point
-        // is coalescing to well below 40 (one event per callback), not a razor's
-        // edge on exact timer firing.
-        #expect(levels.count <= 8,
-            "level emission must be coalesced to ~25Hz, not fanned out per capture buffer (D3): got \(levels.count) events for \(steps) callbacks")
+        // The bound scales with how long the emission window ACTUALLY took: under
+        // heavy load every `Task.sleep` above stretches, so genuinely more 40ms
+        // cadences elapse and more coalesced events are CORRECT (a fixed bound of
+        // 8 refused legitimate runs at 10 and 12 during the merge guards). Ideal
+        // is ceil(window/40)+1; +50% absorbs timer jitter, and the floor keeps the
+        // old bound on a quiet machine. Still far below 40 — one event per
+        // callback — which is the property under test.
+        // Capped at 39 — the per-buffer fan-out is 40, so the property stays
+        // falsifiable however long the window stretched.
+        let allowed = min(max(8, Int((ceil(windowMs / 40.0) + 1) * 1.5)), 39)
+        #expect(levels.count <= allowed,
+            "level emission must be coalesced to ~25Hz, not fanned out per capture buffer (D3): got \(levels.count) events for \(steps) callbacks over \(Int(windowMs))ms (allowed \(allowed))")
         #expect(levels.count > 0, "meter must still receive events")
         #expect(levels.last == finalValue,
             "the burst's final value must eventually land via the trailing-edge flush, so the meter never freezes on a stale pre-quiet value")
@@ -4221,6 +4345,90 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         await pollUntil(timeout: 2) { capture.startCount >= 2 }
         #expect(capture.startCount >= 2, "a transient whole-system-tap failure must self-heal via a backoff retry (T16, E10)")
+    }
+
+    /// A dead tap is silence on EVERY speaker while their rows still read
+    /// "Connected" — the one condition no per-device state can express. It must
+    /// reach the UI as a `.captureFailed` event carrying the error's own
+    /// user-facing message, and must retire itself when capture recovers.
+    @Test func wholeSystemCaptureFailureEmitsAndClearsTheNote() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 5, captureRetryMaxBackoff: 5)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:96", name: "Note Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+
+        let error = NativeCaptureError.tapCreationFailed(reason: "x")
+        let failEvents = await collect(from: backend) { events in
+            events.contains { if case .captureFailed(let m, _) = $0 { return m != nil } else { return false } }
+        } after: { capture.fireState(.failed(error)) }
+        let reported = failEvents.compactMap { event -> (String?, Bool)? in
+            if case .captureFailed(let m, let retrying) = event { return (m, retrying) } else { return nil }
+        }.first
+        #expect(reported?.0 == error.userMessage, "the note renders the capture error's own message verbatim")
+        #expect(reported?.1 == true, "a retryable failure says the backoff retry is armed")
+
+        let format = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
+        let clearEvents = await collect(from: backend) { events in
+            events.contains { if case .captureFailed(let m, _) = $0 { return m == nil } else { return false } }
+        } after: { capture.fireState(.capturing(format)) }
+        #expect(clearEvents.contains { if case .captureFailed(let m, _) = $0 { return m == nil } else { return false } },
+                "recovering to .capturing retires the note")
+    }
+
+    /// `.osUnsupported` still surfaces — it is the WORST case for the user (no
+    /// retry will ever fix it) — but it must say so: `retrying: false`.
+    @Test func wholeSystemCaptureFailureNoteSaysWhenNoRetryIsArmed() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 5, captureRetryMaxBackoff: 5)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:97", name: "Permanent Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+
+        let events = await collect(from: backend) { events in
+            events.contains { if case .captureFailed(let m, _) = $0 { return m != nil } else { return false } }
+        } after: { capture.fireState(.failed(.osUnsupported(minimum: "14.2"))) }
+        let retrying = events.compactMap { event -> Bool? in
+            if case .captureFailed(let m, let retrying) = event, m != nil { return retrying } else { return nil }
+        }.first
+        #expect(retrying == false, "a permanently-dead failure must not claim a retry is coming")
+    }
+
+    /// A tap failure while NOTHING is selected is noise, not news — nobody is
+    /// listening, so it must not put a warning in the popover.
+    @Test func wholeSystemCaptureFailureWithNothingSelectedEmitsNoNote() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 5, captureRetryMaxBackoff: 5)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // The tap failure is emitted synchronously if at all, and the discovery
+        // that follows it is the marker that the stream has caught up — so a
+        // `.captureFailed` would have to appear before the `.deviceAdded`.
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:98", name: "Bystander")
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: {
+            capture.fireState(.failed(.tapCreationFailed(reason: "test")))
+            discovery.fire(.appeared(device))
+        }
+        #expect(!events.contains { if case .captureFailed = $0 { return true } else { return false } },
+                "a failure while capture isn't desired must never surface a note")
     }
 
     /// A `.capturing` transition — recovery, whether from our own retry or a
@@ -6942,6 +7150,76 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                              "a .noRedirect listed app must emit .appLevel from its metering-only tap")
     }
 
+    /// D3, app half: `.appLevel` rides the SAME leading/trailing-edge sampler the
+    /// per-device `.level` does, keyed by bundle id. A tap delivering buffers far
+    /// above the ~25 Hz display cadence must not fan out one event per buffer,
+    /// and the burst's LOUDEST final buffer must still land via the trailing
+    /// flush — the app row's version of "the meter never freezes on a stale
+    /// pre-quiet value".
+    @Test func appLevelEmissionIsCoalescedToDisplayCadence() async {
+        let registry = TapRegistry()
+        let metering = registeringPerAppCapture(muteBehavior: .unmuted, bundleIDs: ["com.burst"], into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
+        defer { backend.stop() }
+        backend.start(); await waitUntilStarted(engine)
+        _ = discovery
+
+        backend.updateAppRoutes([AppRoute(bundleID: "com.burst", displayName: "Burst")])
+        backend.setMeteringActive(true)
+        await pollUntil {
+            if case .capturing = metering.state(for: "com.burst") { return true }; return false
+        }
+        guard let tap = registry.tap(for: "com.burst") else {
+            Issue.record("the metering-only tap must register once metering is active")
+            return
+        }
+
+        // A dedicated stream: the shared `collect` helper filters meter events out.
+        let stream = backend.makeEventStream()
+        actor LevelBox {
+            private(set) var levels: [Float] = []
+            func append(_ v: Float) { levels.append(v) }
+        }
+        let box = LevelBox()
+        let collector = Task {
+            for await event in stream {
+                if case .appLevel(let bundleID, let rms) = event, bundleID == "com.burst" {
+                    await box.append(rms)
+                }
+            }
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+
+        // 40 buffers over ~100 ms, the last one distinctly louder than the rest.
+        let steps = 40
+        let began = DispatchTime.now().uptimeNanoseconds
+        for i in 0..<steps {
+            let amplitude: Float = i == steps - 1 ? 0.9 : 0.3
+            tap.push(float32Buffer(amplitude: amplitude, frames: 512, atSecond: i + 1))
+            try? await Task.sleep(nanoseconds: 100_000_000 / UInt64(steps))
+        }
+
+        // Room for the trailing flush (up to ~40 ms after the last coalesced
+        // leading edge) to deliver the loudest buffer.
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        collector.cancel()
+        let elapsed = DispatchTime.now().uptimeNanoseconds - began
+
+        let levels = await box.levels
+        #expect(levels.count > 0, "the app row must still receive events")
+        // The bound is derived from the WALL CLOCK the burst actually took, not
+        // from the 100 ms it was asked to take: under parallel load `Task.sleep`
+        // stretches, and a longer window legitimately fits more 40 ms slots. The
+        // point is coalescing to the cadence, not to a fixed count.
+        let allowed = Int(elapsed / 40_000_000) + 3
+        #expect(levels.count <= allowed,
+                "`.appLevel` must be coalesced to ~25 Hz, not fanned out per tap buffer: got \(levels.count) events for \(steps) buffers over \(elapsed / 1_000_000) ms (allowed \(allowed))")
+        let last = levels.last ?? 0
+        let earlier = levels.dropLast().max() ?? 0
+        #expect(last > earlier,
+                "the burst's loudest FINAL buffer must land via the trailing flush: last \(last) vs earlier max \(earlier)")
+    }
+
     /// T3 PRIVACY: a user-EXCLUDED app is NEVER metered — no metering-only tap is
     /// started and no `.appLevel` fires for it — even while it is a listed
     /// `.noRedirect` app and metering is active. A non-excluded sibling proves
@@ -7021,7 +7299,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     // Pre-existing gap fix (docs/plans/PLAN-SYNCED-LOCAL-DROPOUT-FIX.md
     // follow-up, live by-ear report): the local device's meter never received
     // ANY `.level`, even while genuinely playing the synced mix, because
-    // `emitLevel`/`emitCombinedLevel` gated the whole-system contribution on
+    // `emitCombinedLevel` gated the whole-system contribution on
     // `Device.isSelected` — a flag the local device structurally never sets
     // (see "MARK: Current (local) output device (BUG B)"). `isMeterable` now
     // substitutes `syncedLocalSinkEnabled` for the local device only.

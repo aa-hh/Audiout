@@ -732,21 +732,21 @@ import AppKit
         return nil
     }
 
-    /// The Groups screen is a SPLIT: speakers/groups sidebar on the left,
-    /// editor pane on the right. Both halves must be mounted, laid out and
+    /// The Groups screen is a SPLIT: the speaker sidebar on the left, the
+    /// content pane on the right. Both halves must be mounted, laid out and
     /// side by side at the surface's real Groups size — a screen showing only
-    /// the editor has no way to change selection at all. Hand the surface the
+    /// the content has no way to change selection at all. Hand the surface the
     /// content half alone, or drop the sidebar split item, and this fails.
-    @Test func theGroupsScreenShowsTheSidebarAndTheEditor() throws {
+    @Test func theGroupsScreenShowsTheSidebarAndTheContentPane() throws {
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
         backend.start()
         let groupController = GroupController(backend: backend,
                                               store: GroupStore(directory: scratchDir),
                                               loadPersisted: false)
-        // A saved group over a fully-discovered fleet, so the screen
-        // auto-selects it and mounts a POPULATED editor pane — the state the
-        // live regression was reported in.
+        // A saved group over a fully-discovered fleet, so the screen mounts a
+        // POPULATED content pane (the card overview it auto-selects) — the
+        // state the live regression was reported in.
         _ = try groupController.createGroup(name: "Group 1",
                                             memberIDs: ["sonos-move", "office"])
         let groups = MixerWindowController(groupController: groupController,
@@ -780,23 +780,25 @@ import AppKit
                 "the sidebar item is not collapsed")
 
         let sidebar = groups.test_sidebar.view
-        let editor = groups.test_editor.view
+        // The auto-selected content pane is the card overview (direction C),
+        // not one group's editor.
+        let content = groups.test_overview.view
         #expect(sidebar.isDescendant(of: screen.view),
-                "the speakers/groups sidebar is mounted in the Groups screen")
-        #expect(editor.isDescendant(of: screen.view),
-                "the editor pane is mounted beside the sidebar")
+                "the speaker sidebar is mounted in the Groups screen")
+        #expect(content.isDescendant(of: screen.view),
+                "the content pane is mounted beside the sidebar")
         #expect(!sidebar.isHiddenOrHasHiddenAncestor, "and it is not hidden")
 
         // Compare in ONE coordinate space — the two panes have different
         // superviews, so raw `frame`s are not comparable.
         let sidebarBox = sidebar.convert(sidebar.bounds, to: screen.view)
-        let editorBox = editor.convert(editor.bounds, to: screen.view)
+        let contentBox = content.convert(content.bounds, to: screen.view)
         #expect(sidebarBox.width >= 200 && sidebarBox.height > 0,
                 "the sidebar gets its real width, not a zero-width sliver (got \(sidebarBox))")
-        #expect(editorBox.width > 0 && editorBox.height > 0,
-                "the editor pane gets real space (got \(editorBox))")
-        #expect(editorBox.minX >= sidebarBox.maxX - 1,
-                "editor sits to the RIGHT of the sidebar — a real split, not a stack")
+        #expect(contentBox.width > 0 && contentBox.height > 0,
+                "the content pane gets real space (got \(contentBox))")
+        #expect(contentBox.minX >= sidebarBox.maxX - 1,
+                "the content sits to the RIGHT of the sidebar — a real split, not a stack")
     }
 
     // MARK: Visible-screen publishing (the Groups content's hidden-work gate)
@@ -830,13 +832,13 @@ import AppKit
 
     // MARK: The fixed frame's two hard budgets
 
-    /// The Groups editor pane has NO scroll view, so whatever the frame gives
-    /// it at the FLOOR is a hard budget — the popover here has no devices, so
-    /// the Mixer's fit cannot raise the height and the floor is what the
-    /// screen gets. If this fails, raise
-    /// `AppSurfaceController.minimumContentSize`; never let the editor
-    /// overflow.
-    @Test func theSevenDeviceEditorFitsTheMinimumFrame() throws {
+    /// The Groups editor pane SCROLLS (roadmap 039), so a seven-device fleet
+    /// no longer spends the frame's height budget: the pane itself asks for no
+    /// more than the frame gives it, and the content that does not fit lives in
+    /// the scroll document and scrolls. The floor in
+    /// `AppSurfaceController.minimumContentSize` stays where it is — an editor
+    /// that overflows is now the scroller's problem, not the frame's.
+    @Test func theSevenDeviceEditorScrollsInsideTheMinimumFrame() throws {
         let (surface, groups, groupID) = try makeRealGroupsSurface()
         surface.show(anchorRect: nil)
         surface.select(.groups)
@@ -846,10 +848,12 @@ import AppKit
 
         let editor = groups.test_editor.view
         #expect(editor.fittingSize.height <= editor.frame.height,
-                Comment(rawValue: "the editor needs \(editor.fittingSize.height)pt but the "
-                        + "fixed frame gives the pane \(editor.frame.height)pt. The pane has "
-                        + "no scroll view, so this is an overflow, not a preference — raise "
-                        + "AppSurfaceController.minimumContentSize."))
+                Comment(rawValue: "the editor asks for \(editor.fittingSize.height)pt but the "
+                        + "fixed frame gives the pane \(editor.frame.height)pt — the scroll "
+                        + "view is meant to absorb the overflow, not pass it to the window."))
+        #expect(groups.test_editor.test_hasScrollView)
+        #expect(groups.test_editor.test_scrollDocumentHeight > 0,
+                "the scroll document carries the editor's real content height")
     }
 
     /// AppKit widens a window to its content's fitting width, and this window
@@ -1033,6 +1037,76 @@ import AppKit
             #expect(surface.test_settleTracker == nil,
                     "no splash ⇒ no settle wait; the surface opens immediately on the old timing")
         }
+    }
+
+    /// P0-1: the wait used to SWALLOW every further menu-bar click, so a user
+    /// who saw nothing happen and clicked again got nothing again, for up to
+    /// three seconds. A second click is the user asking for the surface NOW —
+    /// it cuts the wait short and fronts at the size measured so far, with the
+    /// splash over it.
+    @Test func aSecondClickCancelsTheRevealWaitAndFrontsAtOnce() throws {
+        try asAFirstRealLaunch {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            #expect(surface.test_isRevealPending, "the first click starts the wait")
+
+            surface.show(anchorRect: nil)
+            #expect(!surface.test_isRevealPending, "the second click ends it")
+            #expect(surface.test_splash != nil, "and the surface is on screen with its hold")
+        }
+    }
+
+    /// The backstop is now a bound on how long a click can appear to do
+    /// nothing, so it must stay above the settle's own quiet window — a ceiling
+    /// at or below it would pre-empt the settled reveal on every warm open.
+    @Test func theRevealCeilingStaysAboveTheSettleQuietWindow() {
+        #expect(AppSurfaceController.revealCeiling > AppSurfaceController.revealQuietWindow)
+        #expect(AppSurfaceController.revealCeiling <= 1.0,
+                "a click must not look dead for longer than this")
+    }
+
+    // MARK: Occlusion gating (perf P2-12)
+
+    /// A PINNED surface can sit fully covered by another window for days, and
+    /// "is it open" was the only question anyone asked — so metering and the
+    /// Mixer's monitors ran full tilt against pixels nobody could see. Covering
+    /// it now puts the Mixer to sleep; uncovering runs the full open ritual.
+    /// The latch is what keeps a stream of occlusion notifications from tearing
+    /// the panel down over and over.
+    @Test func aCoveredSurfacePutsTheMixerToSleepAndWakesItOnce() {
+        let (surface, popover, _, _) = makeSurface()
+        var meteringTransitions: [Bool] = []
+        popover.onMeteringActiveChange = { meteringTransitions.append($0) }
+        surface.show(anchorRect: nil)
+        #expect(meteringTransitions == [true], "showing the Mixer turns metering on")
+
+        surface.test_notePixelVisibility(false)
+        #expect(surface.test_surfaceCoveredHidden)
+        #expect(meteringTransitions == [true, false], "covered ⇒ metering off")
+
+        surface.test_notePixelVisibility(false)
+        #expect(meteringTransitions == [true, false], "the latch swallows a repeat")
+
+        let rebuildsBefore = popover.test_rebuildCount
+        surface.test_notePixelVisibility(true)
+        #expect(!surface.test_surfaceCoveredHidden)
+        #expect(meteringTransitions == [true, false, true], "uncovered ⇒ metering back on")
+        #expect(popover.test_rebuildCount > rebuildsBefore,
+                "waking runs the Mixer open ritual — hidden means stale")
+
+        surface.test_notePixelVisibility(true)
+        #expect(meteringTransitions == [true, false, true],
+                "and a repeat wake is a no-op too")
+    }
+
+    /// A surface that is not on screen has no pixels to lose.
+    @Test func occlusionIsIgnoredWhileTheSurfaceIsClosed() {
+        let (surface, popover, _, _) = makeSurface()
+        var meteringTransitions: [Bool] = []
+        popover.onMeteringActiveChange = { meteringTransitions.append($0) }
+        surface.test_notePixelVisibility(false)
+        #expect(!surface.test_surfaceCoveredHidden)
+        #expect(meteringTransitions.isEmpty)
     }
 
     @Test func aSecondSurfaceInTheSameProcessGetsNoSplash() throws {

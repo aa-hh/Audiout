@@ -873,17 +873,11 @@ func snapshotRestingRing(appearanceName: NSAppearance.Name, label: String, outDi
     window.contentView = NSView()
 }
 
-/// Render the `local-mix-blocked` scenario (spec §4.6, the §4.8 fixture list's
-/// **greyed-blocked** and **hover** nodes): an AirPlay device (Office) is
-/// checked, so the Mac's own row ("MacBook Pro Speakers") is local-mix BLOCKED —
-/// greyed hollow bus node, honestly-disabled checkbox, tertiary name. The
-/// production body-click branch (`test_simulateBlockedBodyClick` → the exact
-/// `mouseDown` path) then MOUNTS the in-place one-line refusal note
-/// (`GroupController.localMixRefusalReason`) under the row — the reachable
-/// trigger, proven rendered rather than tooltip-only. "Bedroom HomePod"
-/// (an ordinary hollow row) is set HOVERED via `test_setHovered(true)` (the
-/// same `setHovered` path a real pointer crossing drives), so the neutral
-/// hover wash — never gold, never on the node — is pinned in the same panel.
+/// Render the `local-mix-blocked` scenario (the §4.8 fixture list's **hover**
+/// node): an AirPlay device (Office) is checked, and "Bedroom HomePod" (an
+/// ordinary hollow row) is set HOVERED via `test_setHovered(true)` (the same
+/// `setHovered` path a real pointer crossing drives), so the neutral hover
+/// wash — never gold, never on the node — is pinned in the panel.
 @MainActor
 func snapshotLocalMixBlocked(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
     let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
@@ -908,19 +902,6 @@ func snapshotLocalMixBlocked(appearanceName: NSAppearance.Name, label: String, o
     _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
     popover.update(devices: backend.devices)
     popover.test_simulateOpen()
-
-    // Mount the refusal note through the REAL blocked-body-click branch — the
-    // same `mouseDown(with:)` production path, minus the synthesized event.
-    guard let localRow = popover.test_deviceRow(for: "local-mac") else {
-        print("  SETUP FAIL: no local-mac row mounted"); return
-    }
-    localRow.test_simulateBlockedBodyClick()
-    // `insertRow(animated: true)` mounts the note at its full height straight
-    // away — its reveal clip's height constraint takes the grown value the
-    // moment the animator retargets it, so the capture needs no end-state
-    // settling of its own even though a windowless view never fires the
-    // animation's completion handler.
-    drain(0.1)
 
     let appearance = snapshotAppearance(appearanceName)
     let panelView = popover.test_panelView

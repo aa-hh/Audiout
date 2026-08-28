@@ -134,19 +134,6 @@ import AudioutCore
         #expect(row.test_accessibilityValue == "")
     }
 
-    @Test func blockedRowSpeaksTheRefusalReasonAsItsHint() {
-        // Spec §4.6: the body-click refusal note's spoken equivalent rides the
-        // row HINT — once, and only while blocked.
-        let reason = "The Mac can't join a mixed speaker set"
-        let row = DeviceRowView(device: makeDevice(), showsBus: true)
-        row.apply(makeDevice(), selected: false, blocked: true, blockReason: reason)
-        #expect(row.test_accessibilityHint == reason)
-        #expect(!((row.test_accessibilityLabel ?? "").contains(reason)), "the reason is a HINT, not a second label fragment")
-
-        row.apply(makeDevice(), selected: false, blocked: false)
-        #expect(row.test_accessibilityHint == nil, "unblocking clears the hint on the next apply")
-    }
-
     // MARK: 2 — mid-session Reduce Motion toggles reconcile LIVE
 
     @Test func connectingRingGoesStaticWhenReduceMotionArrivesMidSession() {

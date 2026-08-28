@@ -56,7 +56,7 @@ final class BTAlignmentPromptView: NSView {
         addSubview(background)
 
         copyLabel.translatesAutoresizingMaskIntoConstraints = false
-        copyLabel.font = .systemFont(ofSize: 11)
+        copyLabel.font = Tokens.Font.detail
         copyLabel.textColor = Tokens.Color.secondaryLabel
         background.addSubview(copyLabel)
 

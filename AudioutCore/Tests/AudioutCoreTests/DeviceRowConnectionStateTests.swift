@@ -348,15 +348,11 @@ import AudioutCore
     private final class RecordingDelegate: DeviceRowView.Delegate {
         var toggledFor: String?
         var toggledOn: Bool?
-        var blockedExplanationRequests = 0
         func deviceRow(_ row: DeviceRowView, didSetVolume volume: Int, for id: String) {}
         func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {}
         func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {
             toggledFor = id
             toggledOn = on
-        }
-        func deviceRowDidRequestBlockedExplanation(_ row: DeviceRowView) {
-            blockedExplanationRequests += 1
         }
     }
 
@@ -388,24 +384,6 @@ import AudioutCore
         #expect(delegate.toggledOn == true, "clicking a failed row's name retries (enables)")
     }
 
-    @Test func clickingNameOnBlockedRowRequestsRefusalExplanation() {
-        // S4 (spec §4.6 "a click anywhere on the row body / name / node"): the
-        // local-mix block disables the checkbox, so the name-click can't toggle —
-        // instead it requests the in-place refusal note through the SAME delegate
-        // path the row-body mouseDown uses. It must never toggle membership.
-        let device = Device(id: "local", name: "This Mac", kind: .localMac)
-        let row = DeviceRowView(device: device)
-        row.apply(device, selected: false, blocked: true, blockReason: "blocked")
-        let delegate = RecordingDelegate()
-        row.delegate = delegate
-
-        row.test_clickName()
-
-        #expect(delegate.toggledFor == nil, "a blocked row's name-click never toggles membership")
-        #expect(delegate.blockedExplanationRequests == 1,
-                "…it surfaces the refusal explanation instead (S4)")
-    }
-
     @Test func failedUnavailableSelectedRowStaysDeselectable() {
         // Live bug (2026-08-06, the deselect dead-end): the native backend's
         // failure paths pair `.failed` with `isAvailable = false` while the
@@ -432,8 +410,8 @@ import AudioutCore
     }
 
     @Test func clickingNameIsNoOpWhenUnavailable() {
-        // A merely-UNAVAILABLE device (checkbox disabled, not blocked) keeps the
-        // old behavior: the name-click is a plain no-op — no toggle, no note.
+        // A merely-UNAVAILABLE device (checkbox disabled) keeps the old
+        // behavior: the name-click is a plain no-op — no toggle.
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isAvailable: false)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: false)
@@ -443,8 +421,6 @@ import AudioutCore
         row.test_clickName()
 
         #expect(delegate.toggledFor == nil, "name-click is a no-op when the toggle is disabled")
-        #expect(delegate.blockedExplanationRequests == 0,
-                "unavailable is not blocked — no refusal note request")
     }
 
     // MARK: Checkbox replaces the switch — old toggle test hooks still pass through it
@@ -536,14 +512,14 @@ import AudioutCore
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
 
-        #expect(row.test_muteTintColor == .secondaryLabelColor, "unmuted reads as the neutral secondary tint")
+        #expect(row.test_muteTintColor == Tokens.Color.secondaryLabel, "unmuted reads as the neutral secondary tint")
     }
 
     @Test func muteTintUpdatesInstantlyOnLiveClick() {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isMuted: false)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
-        #expect(row.test_muteTintColor == .secondaryLabelColor)
+        #expect(row.test_muteTintColor == Tokens.Color.secondaryLabel)
 
         // `test_toggleMute` drives the exact same path a real click does
         // (AppKit's own state flip, then `muteToggled(_:)`'s `updateMuteTint()`)
@@ -553,7 +529,7 @@ import AudioutCore
                 "a live click updates the tint instantly")
 
         row.test_toggleMute(false)
-        #expect(row.test_muteTintColor == .secondaryLabelColor, "toggling back off reverts the tint instantly")
+        #expect(row.test_muteTintColor == Tokens.Color.secondaryLabel, "toggling back off reverts the tint instantly")
     }
 
     // MARK: V7 — the `%` readout dims with the slider's disabled state
@@ -574,23 +550,12 @@ import AudioutCore
         row.apply(device, selected: true, controllable: true)
 
         #expect(row.test_isSliderEnabled)
-        #expect(row.test_readoutColor == .secondaryLabelColor, "readout is the normal secondary color when enabled")
+        #expect(row.test_readoutColor == Tokens.Color.secondaryLabel, "readout is the normal secondary color when enabled")
     }
 
-    // MARK: S4 (spec §4.6/R5) — blocked keeps NORMAL text, distinct from unavailable
+    // MARK: R5 — unavailable dims the row-level text
 
-    @Test func blockedRowKeepsNormalTextDistinctFromUnavailable() {
-        // Supersedes the old V12 name-grey: a BLOCKED row's signature is the
-        // greyed bus node + body-click refusal note, with the name at the NORMAL
-        // (non-member) treatment. Only UNAVAILABLE dims at the row level — the
-        // two "can't" states must never look alike (R5).
-        let blocked = Device(id: "local", name: "This Mac", kind: .localMac)
-        let blockedRow = DeviceRowView(device: blocked)
-        blockedRow.apply(blocked, selected: false, blocked: true, blockReason: "blocked")
-        #expect(blockedRow.test_nameColor == .secondaryLabelColor,
-                "a blocked row's name stays at the normal non-member treatment (S4)")
-        #expect(blockedRow.test_statusText == nil, "…and it carries no sublabel")
-
+    @Test func unavailableRowDimsTextAndCarriesSublabel() {
         let unavailable = Device(id: "dev-1", name: "Test Speaker", kind: .homePod,
                                  isAvailable: false)
         let unavailableRow = DeviceRowView(device: unavailable)
@@ -601,22 +566,6 @@ import AudioutCore
                 "…plus its own sublabel — a distinct negative signature (R5)")
     }
 
-    // MARK: S4 — the blocked row's VoiceOver hint carries the refusal reason
-
-    @Test func blockedRowAccessibilityHintCarriesRefusalReason() {
-        let device = Device(id: "local", name: "This Mac", kind: .localMac)
-        let row = DeviceRowView(device: device)
-        row.apply(device, selected: false, blocked: true,
-                  blockReason: "This Mac can't join a mixed set")
-
-        #expect(row.test_accessibilityHint == "This Mac can't join a mixed set",
-                "the refusal reason is spoken as the row's hint (S4 — every visual state ships its VoiceOver equivalent)")
-
-        // Unblocking clears it — the hint never sticks to a normal row.
-        row.apply(device, selected: false)
-        #expect(row.test_accessibilityHint == nil, "a non-blocked repaint clears the hint")
-    }
-
     // MARK: A5 — slider stays live while muted (mute ≠ frozen volume)
 
     @Test func sliderStaysEnabledWhileMuted() {
@@ -625,6 +574,28 @@ import AudioutCore
         row.apply(device, selected: true, controllable: true)
 
         #expect(row.test_isSliderEnabled, "a muted device's slider stays draggable")
+    }
+
+    // MARK: P1-9 — a non-mouse slider change never wedges the drag flag
+
+    @Test func keyboardShapedSliderChangeNeverWedgesTheDragFlag() {
+        // `test_fireSliderAction` fires the slider's real target/action with a
+        // nil `NSApp.currentEvent` — the keyboard/scroll/AX-shaped path, which
+        // must never set `isDraggingSlider`. Before the fix, ANY change set the
+        // flag unconditionally and only a coincident `.leftMouseUp` cleared it,
+        // so this left the row permanently ignoring model pushes.
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: true, controllable: true)
+
+        row.test_fireSliderAction(settingValueTo: 30)
+
+        var updated = device
+        updated.volume = 55
+        row.apply(updated, selected: true, controllable: true)
+
+        #expect(row.test_sliderValue == 55,
+                "a non-mouse change must not wedge isDraggingSlider and block the model push")
     }
 
     // MARK: A1 — selectionDimmed dims the checkbox without disabling it

@@ -51,6 +51,11 @@ public final class LicenseSheetViewController: NSViewController {
     /// `SettingsForm.contentWidth`; wide enough for a full key plus slop.
     private static let sheetContentWidth: CGFloat = 320
 
+    /// The shape of a key, in ONE place — the field's placeholder and the
+    /// `.invalid` verdict both read it, so the two can never disagree about
+    /// what a key looks like. `AUDT` is the prefix the license worker issues.
+    static let keyFormatHint = "AUDT-XXXXX-XXXXX-XXXXX-XXXXX"
+
     public init(settings: AppSettings,
                 transport: LicenseValidator.Transport?,
                 openURL: @escaping (URL) -> Void) {
@@ -69,8 +74,8 @@ public final class LicenseSheetViewController: NSViewController {
         switch status {
         case .active: return "Registered. Thank you for supporting Audiout."
         case .revoked: return "This key was refunded or revoked. It no longer gets updates."
-        case .unknown: return "This key isn’t recognised. Check it against your receipt."
-        case .invalid: return "That doesn’t look like an Audiout key (AUDT-XXXXX-XXXXX-XXXXX-XXXXX)."
+        case .unknown: return "This key isn’t recognized. Check it against your receipt."
+        case .invalid: return "That doesn’t look like an Audiout key (\(keyFormatHint))."
         }
     }
 
@@ -84,9 +89,14 @@ public final class LicenseSheetViewController: NSViewController {
         explainer.preferredMaxLayoutWidth = Self.sheetContentWidth
 
         keyField.stringValue = settings.licenseKey ?? ""
-        keyField.placeholderString = "AUDT-XXXXX-XXXXX-XXXXX-XXXXX"
+        keyField.placeholderString = Self.keyFormatHint
         keyField.setAccessibilityLabel("License key")
         keyField.translatesAutoresizingMaskIntoConstraints = false
+        // A key is one line. Without this a pasted receipt fragment carrying a
+        // newline wraps the field open mid-sheet; scrollable keeps an
+        // over-long paste readable by scrolling inside the fixed width.
+        keyField.usesSingleLineMode = true
+        keyField.cell?.isScrollable = true
 
         resultLine.isHidden = true
         resultLine.preferredMaxLayoutWidth = Self.sheetContentWidth
@@ -96,8 +106,6 @@ public final class LicenseSheetViewController: NSViewController {
         buyButton.controlSize = .small
         buyButton.target = self
         buyButton.action = #selector(buyTapped)
-        buyButton.setAccessibilityLabel("Buy an Audiout license")
-        buyButton.isHidden = settings.buyURL == nil
 
         // Only offered when there is something to remove; a fresh sheet
         // opened from "Enter License…" never shows it.
@@ -106,8 +114,7 @@ public final class LicenseSheetViewController: NSViewController {
         removeButton.controlSize = .small
         removeButton.target = self
         removeButton.action = #selector(removeTapped)
-        removeButton.setAccessibilityLabel("Remove the stored license key")
-        removeButton.isHidden = (settings.licenseKey ?? "").isEmpty
+        removeButton.hasDestructiveAction = true
 
         cancelButton.title = "Cancel"
         cancelButton.bezelStyle = .rounded
@@ -120,7 +127,6 @@ public final class LicenseSheetViewController: NSViewController {
         registerButton.keyEquivalent = "\r"
         registerButton.target = self
         registerButton.action = #selector(registerTapped)
-        registerButton.setAccessibilityLabel("Register this license key")
 
         let spacer = NSView()
         spacer.translatesAutoresizingMaskIntoConstraints = false
@@ -149,18 +155,69 @@ public final class LicenseSheetViewController: NSViewController {
             buttonRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         view = container
+
+        // Tab order, authored rather than inferred from frames: the field
+        // first, then the two commit buttons, then the two optional ones, and
+        // back to the field.
+        keyField.nextKeyView = registerButton
+        registerButton.nextKeyView = cancelButton
+        cancelButton.nextKeyView = buyButton
+        buyButton.nextKeyView = removeButton
+        removeButton.nextKeyView = keyField
+
+        refreshButtons()
+    }
+
+    /// The ONE place the sheet's two optional buttons decide whether they are
+    /// on screen, so every state change lands the same way: Buy only where it
+    /// can work AND would help, Remove exactly when there is a stored key.
+    private func refreshButtons() {
+        buyButton.isHidden = !(settings.buyURL != nil && settings.licenseUnregistered)
+        removeButton.isHidden = (settings.licenseKey ?? "").isEmpty
+    }
+
+    public override func viewDidAppear() {
+        super.viewDidAppear()
+        // The field is why the sheet exists — typing starts without a click.
+        view.window?.makeFirstResponder(keyField)
     }
 
     @objc private func buyTapped() {
         guard let url = settings.buyURL else { return }
+        Analytics.capture("license:buy_link_opened", ["source": "license_sheet"])
         // Leaves the sheet open: the buyer comes back with a key to paste.
         openURL(url)
     }
 
+    /// Removing is destructive and the key may be the only copy the user can
+    /// lay hands on, so the ellipsis in "Remove License…" is honoured: ask
+    /// first. Headless (no window) there is nothing to ask with, so the removal
+    /// happens directly — every existing test still means "confirmed remove".
     @objc private func removeTapped() {
+        guard let window = view.window else { return performRemove() }
+
+        let alert = NSAlert()
+        alert.messageText = "Remove your license key?"
+        alert.informativeText = "Audiout keeps working, but it will stop getting "
+            + "official updates until you enter a key again."
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        // Return keeps the key: the destructive button is never the one an
+        // absent-minded Return press hits.
+        alert.buttons[0].hasDestructiveAction = true
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.performRemove()
+        }
+    }
+
+    private func performRemove() {
         // The setter clears the stored verdict with the key (`AppSettings
         // .licenseKey`) — one write, both gone.
         settings.licenseKey = nil
+        Analytics.capture("license:removed")
         finish()
     }
 
@@ -184,6 +241,7 @@ public final class LicenseSheetViewController: NSViewController {
         // verdict must not stand in for it while the server is asked.
         if text != settings.licenseKey { settings.licenseStatus = nil }
         settings.licenseKey = text
+        refreshButtons()
         onStateChange?()
 
         keyField.isEnabled = false
@@ -194,6 +252,15 @@ public final class LicenseSheetViewController: NSViewController {
             ?? LicenseValidator(settings: settings)
         validator.validate { [weak self] result in
             guard let self else { return }
+            let outcome: String
+            switch result {
+            case .verified(.active): outcome = "active"
+            case .verified(let status): outcome = status.rawValue
+            case .unreachable: outcome = "unreachable"
+            case .noServer: outcome = "no_server"
+            case .noKey: outcome = "no_key"
+            }
+            Analytics.capture("license:key_submitted", ["outcome": outcome])
             switch result {
             case .verified(.active):
                 self.finish()
@@ -202,11 +269,12 @@ public final class LicenseSheetViewController: NSViewController {
                 self.registerButton.isEnabled = true
                 self.keyField.stringValue = self.settings.licenseKey ?? ""
                 self.show(result: Self.statusLine(for: status))
+                self.refreshButtons()
                 self.onStateChange?()
             case .unreachable, .noServer, .noKey:
                 // The key is SAVED; there is nothing more the user can do in
-                // here. The pane's status line owns the "will try again next
-                // launch" story.
+                // here. The pane's status line owns the rest — it says the key
+                // is saved and offers Check Again.
                 self.finish()
             }
         }
@@ -223,6 +291,19 @@ public final class LicenseSheetViewController: NSViewController {
         if presentingViewController != nil { dismiss(nil) }
         onComplete?()
         onComplete = nil
+    }
+
+    /// Fill the field with `key` and submit it, exactly as a paste followed by
+    /// a Register click would — the landing point for
+    /// `audiout://register?key=…`. The sheet stays up until the server answers,
+    /// so a rejected key lands in the result line rather than nowhere.
+    public func submit(key: String) {
+        _ = view
+        // Register is disabled for exactly the window a key is in flight, so a
+        // second link during it is dropped the same way a second click is.
+        guard registerButton.isEnabled else { return }
+        keyField.stringValue = key
+        registerTapped()
     }
 
     // MARK: Test-support hooks
@@ -261,5 +342,11 @@ public final class LicenseSheetViewController: NSViewController {
     public var test_removeIsVisible: Bool {
         _ = view
         return !removeButton.isHidden
+    }
+
+    /// Whether "Buy Audiout…" is offered (a registered customer never sees it).
+    public var test_buyIsVisible: Bool {
+        _ = view
+        return !buyButton.isHidden
     }
 }

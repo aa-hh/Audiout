@@ -11,12 +11,21 @@ import Testing
 @Suite struct StatusItemIconTests {
 
     @Test func idleIcon_isTemplate() {
-        let image = StatusItemIcon.make(isStreaming: false, masterVolume: 0.5)
+        let image = StatusItemIcon.make(state: .idle, masterVolume: 0.5, isMuted: false)
         #expect(image?.isTemplate == true)
     }
 
     @Test func streamingIcon_isTemplate() {
-        let image = StatusItemIcon.make(isStreaming: true, masterVolume: 0.5)
+        let image = StatusItemIcon.make(state: .streaming, masterVolume: 0.5, isMuted: false)
+        #expect(image?.isTemplate == true)
+    }
+
+    /// Non-nil is the real assertion here: it proves the badge symbol
+    /// (`speaker.badge.exclamationmark`) actually resolves on the runner's
+    /// macOS, so the failure state can never render as a blank menu bar.
+    @Test func failureIcon_isTemplate() {
+        let image = StatusItemIcon.make(state: .failure, masterVolume: 0.5, isMuted: false)
+        #expect(image != nil)
         #expect(image?.isTemplate == true)
     }
 }

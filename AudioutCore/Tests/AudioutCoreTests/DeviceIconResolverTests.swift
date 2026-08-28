@@ -133,4 +133,39 @@ import Testing
         let controller = DeviceIconController(store: DeviceIconStore(directory: directory))
         #expect(controller.overrides.isEmpty)
     }
+
+    // MARK: DeviceIcon.image — the row-build cache
+
+    /// Row builds are the hot path (sidebar, membership rows, the detail
+    /// pane's group rows), and they used to mint a fresh `NSImage` per row per
+    /// rebuild. The same request now comes back as the very same instance.
+    @Test func theSameSymbolRequestReturnsTheSameInstance() {
+        let first = DeviceIcon.image("speaker.wave.2.fill")
+        let second = DeviceIcon.image("speaker.wave.2.fill")
+        #expect(first != nil)
+        #expect(first === second, "one lookup, reused — that is the whole point of the cache")
+    }
+
+    /// The size is part of the key: a 13pt row glyph and an unconfigured one
+    /// are different images and must not collide.
+    @Test func adifferentPointSizeIsADifferentCacheEntry() {
+        let small = DeviceIcon.image("homepod.fill", pointSize: 13)
+        let large = DeviceIcon.image("homepod.fill", pointSize: 24)
+        #expect(small != nil)
+        #expect(large != nil)
+        #expect(small !== large)
+        #expect(small !== DeviceIcon.image("homepod.fill"),
+                "no point size at all is its own entry too")
+    }
+
+    /// Template, so every call site's `contentTintColor` is what colours it —
+    /// which is also why a SHARED image is safe to hand out.
+    @Test func cachedImagesAreTemplates() throws {
+        let image = try #require(DeviceIcon.image("appletv.fill", pointSize: 13))
+        #expect(image.isTemplate)
+    }
+
+    @Test func anUnknownSymbolIsNilAndNotCached() {
+        #expect(DeviceIcon.image("definitely.not.a.symbol.zzz") == nil)
+    }
 }

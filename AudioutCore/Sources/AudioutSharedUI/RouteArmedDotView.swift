@@ -62,6 +62,15 @@ public final class RouteArmedDotView: NSView {
             selector: #selector(accessibilityDisplayOptionsDidChange),
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
             object: nil)
+        // A layer-color instrument: `dotLayer.fillColor`/`shadowColor` are
+        // stamped once and won't re-resolve on their own, so the accent dial
+        // (AGENTS.md rule 36 / Tokens.swift's accentStyleDidChangeNotification
+        // doc) needs its own observer alongside the a11y one above.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(accentStyleDidChange),
+            name: Tokens.accentStyleDidChangeNotification,
+            object: nil)
     }
 
     /// Live accessibility-display reconcile: re-resolve colors (IC variants)
@@ -74,6 +83,12 @@ public final class RouteArmedDotView: NSView {
             dotLayer.removeAnimation(forKey: Self.bloomFillKey)
             dotLayer.removeAnimation(forKey: Self.bloomGlowKey)
         }
+    }
+
+    /// A live accent-dial change: re-stamp the layer so an armed dot follows
+    /// the dial in the same instant every other gold instrument does.
+    @objc private func accentStyleDidChange() {
+        updateLayerAppearance()
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

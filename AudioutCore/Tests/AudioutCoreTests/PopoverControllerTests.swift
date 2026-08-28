@@ -224,7 +224,6 @@ import AppKit
         // local-mix block. The Mac may now join a mixed Selected Devices set.
         let (popover, controller, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // mixed AirPlay set, local out
-        #expect(controller.canSelectLocalSpeaker("local-mac"))
         let result = popover.test_toggleDeviceEnabled(deviceID: "local-mac", on: true)
         #expect(result.applied, "adding local into a mixed set is now allowed")
         #expect(result.refusalReason == nil)
@@ -361,7 +360,7 @@ import AppKit
         #expect(row.test_isEnabledOn, "switch is ON")
         // The icon is neutral in BOTH states now (2026-07-17 redesign): identity
         // only, no accent-when-selected fill. Selection reads from the switch.
-        #expect(row.test_iconTint == .secondaryLabelColor, "icon is always neutral")
+        #expect(row.test_iconTint == Tokens.Color.secondaryLabel, "icon is always neutral")
 
         // Toggle it OFF — the row must return to the unselected appearance.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
@@ -369,7 +368,7 @@ import AppKit
         #expect(!(row.test_isShowingSelectedBackground), "deselected row paints NO selected background (no stale highlight)")
         #expect(!(row.test_isHovered), "no stale hover wash after deselect")
         #expect(!(row.test_isEnabledOn), "switch returned to OFF")
-        #expect(row.test_iconTint == .secondaryLabelColor, "icon tint stays neutral (always secondary)")
+        #expect(row.test_iconTint == Tokens.Color.secondaryLabel, "icon tint stays neutral (always secondary)")
     }
 
     /// T-U9a — the last-row sticky-highlight bug. A row hovered by the pointer
@@ -2668,6 +2667,191 @@ import AppKit
         #expect(popover.test_localFallbackBannerText == nil, "reconnect clears the banner")
     }
 
+    /// P2-8: the banner states a problem, so it must offer a way out of it.
+    /// "Try again" re-kicks every Main-Out member that isn't up, one at a time
+    /// through `requestReconnect` — never a broad routing re-apply.
+    @Test func theSilenceBannerOffersARetryThatReKicksFailedMembers() async throws {
+        let (popover, controller, backend) = try await makeScriptedPopover(scripts: [
+            // First attempt fails; the retry's fresh attempt connects.
+            "office": ConnectScript(attempts: [
+                .fail(after: 0.05, ConnectionFailure(cause: .notResponding)),
+                .connect(after: 0.05),
+            ]),
+        ])
+        _ = controller.setDeviceSelected("office", true)
+        try await waitForConnectionState(backend, id: "office") { self.isFailed($0) }
+        popover.update(devices: backend.devices)
+        #expect(controller.isMainOutMember("office"), "R12: a failure never drops the selection")
+
+        popover.setLocalFallbackActive(true)
+        #expect(popover.test_bannerHasActionButton, "the banner carries its Try again button")
+
+        popover.test_tapBannerAction()
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+    }
+
+    // MARK: Structural rebuild vs. a live slider drag (STABILITY D4)
+
+    /// A rebuild tears out and recreates every row, so one landing mid-drag
+    /// detaches the slider the mouse is tracking. While a drag is live the
+    /// structural change is DEFERRED (the repaint path runs instead) and paid
+    /// off by the next update once the drag ends.
+    @Test func aStructuralRebuildIsDeferredWhileASliderDragIsLive() async throws {
+        let (popover, _, backend) = try await makePopover()
+        let before = popover.test_rebuildCount
+        #expect(!popover.test_structuralRebuildDeferred, "nothing owed to start with")
+
+        popover.test_setLiveSliderDrag(true)
+        // A device leaving the fleet is a structural change.
+        popover.update(devices: backend.devices.filter { $0.id != "office" })
+        #expect(popover.test_rebuildCount == before,
+                "no rebuild may run under the user's finger")
+        #expect(popover.test_structuralRebuildDeferred, "the rebuild is owed")
+
+        popover.test_setLiveSliderDrag(false)
+        // Even a no-change update pays the debt — a drag always produces
+        // further backend echoes, so no timer is needed.
+        popover.update(devices: backend.devices.filter { $0.id != "office" })
+        #expect(popover.test_rebuildCount > before, "the deferred rebuild ran")
+        #expect(!popover.test_structuralRebuildDeferred, "and the debt cleared")
+    }
+
+    // MARK: "Save Selected Devices as group" reports its failures (hardening 11)
+
+    /// The success path stays exactly as it was, and reports no failure.
+    @Test func savingSelectedDevicesAsAGroupSucceedsQuietly() async throws {
+        let (popover, controller, _) = try await makePopover()
+        _ = controller.setDeviceSelected("office", true)
+        #expect(!popover.test_saveGroupFailureReported, "nothing has failed yet")
+
+        let menu = popover.test_outputDevicesPlusMenu()
+        let index = try #require(menu.items.firstIndex {
+            $0.title == "Save Selected Devices as group"
+        })
+        menu.performActionForItem(at: index)
+
+        #expect(controller.groups.count == 1, "the group was saved")
+        #expect(!popover.test_saveGroupFailureReported)
+    }
+
+    /// A save that CANNOT persist must not look like it worked. The store here
+    /// is pointed at a path whose parent is a regular file, so creating its
+    /// directory throws — a real `save` failure, no store mocking.
+    @Test func savingSelectedDevicesAsAGroupReportsAPersistenceFailure() async throws {
+        let blocker = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PopoverSaveBlocker-\(UUID().uuidString)")
+        try Data().write(to: blocker)
+        // The blocker is a FILE in the shared temp dir, not a `tempDirectory()`
+        // the fixture cleans up — remove it here or every run leaks one.
+        defer { try? FileManager.default.removeItem(at: blocker) }
+        let unwritable = blocker.appendingPathComponent("groups", isDirectory: true)
+
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        try await waitForFleet(backend, count: 7)
+        let controller = GroupController(backend: backend,
+                                         store: GroupStore(directory: unwritable),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        let popover = PopoverController()
+        popover.configure(groupController: controller)
+        controller.ensureDefaultSelection()
+        popover.test_isShownOverride = true
+        popover.update(devices: backend.devices)
+        _ = controller.setDeviceSelected("office", true)
+
+        let menu = popover.test_outputDevicesPlusMenu()
+        let index = try #require(menu.items.firstIndex {
+            $0.title == "Save Selected Devices as group"
+        })
+        menu.performActionForItem(at: index)
+
+        #expect(popover.test_saveGroupFailureReported,
+                "a save that never persisted is reported, not swallowed")
+    }
+
+    // MARK: The AirPlay section's empty state says what is going on (P1-1)
+
+    /// A popover over an ARBITRARY fleet — the shared fixture is pinned to the
+    /// 7-device demo fleet, and these tests are about what an EMPTY one says.
+    private func makeFleetPopover(_ devices: [Device]) -> (PopoverController, GroupController) {
+        let backend = MockBackend(fleet: [], staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        let controller = GroupController(backend: backend,
+                                         store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        let popover = PopoverController()
+        popover.configure(groupController: controller)
+        popover.test_isShownOverride = true
+        popover.update(devices: devices)
+        return (popover, controller)
+    }
+
+    private func localMac() -> Device {
+        Device(id: "mac", name: "This Mac", kind: .localMac, isLocalDevice: true)
+    }
+
+    /// An empty card used to point at Bluetooth and say nothing about the
+    /// speakers the user actually came for. It now says it is looking — WITHOUT
+    /// taking the Bluetooth Connect affordance away, because the two lines are
+    /// about different sections and never contradict.
+    @Test func anEmptyFleetSaysItIsLookingForSpeakers() {
+        let (popover, _) = makeFleetPopover([localMac()])
+        popover.rebuildForOpen()
+        #expect(popover.test_speakerSearchStateText == "Looking for speakers…")
+        #expect(popover.test_bluetoothConnectRowShown(),
+                "the Bluetooth affordance still stands beside it")
+        #expect(popover.test_subsectionTitles().contains("AirPlay Devices"),
+                "the state line is grouped under the header that names it")
+    }
+
+    /// Once the grace elapses, "looking" becomes an honest verdict plus the
+    /// thing the user can actually check.
+    @Test func afterTheGraceAnEmptyFleetSaysNoneWereFound() {
+        let (popover, _) = makeFleetPopover([localMac()])
+        popover.rebuildForOpen()
+        popover.test_fireSpeakerSearchGrace()
+        #expect(popover.test_speakerSearchStateText
+                == "No AirPlay speakers found on this network.")
+    }
+
+    /// A speaker arriving retires the state line entirely — nothing to explain
+    /// once the list has something in it.
+    @Test func anArrivingSpeakerRetiresTheStateLine() {
+        let (popover, _) = makeFleetPopover([localMac()])
+        popover.rebuildForOpen()
+        #expect(popover.test_speakerSearchStateText != nil)
+
+        popover.update(devices: [localMac(), Device(id: "office", name: "Office", kind: .homePod)])
+        #expect(popover.test_speakerSearchStateText == nil)
+        #expect(popover.test_subsectionTitles().contains("AirPlay Devices"))
+    }
+
+    /// When the host knows macOS denied Local Network access, an empty list is
+    /// not a search result — it is a permission problem, and saying "looking"
+    /// forever would be a lie. Dormant until a host wires the provider.
+    @Test func aDeniedLocalNetworkPermissionIsNamedInsteadOfSearching() {
+        let (popover, _) = makeFleetPopover([localMac()])
+        popover.localNetworkDeniedProvider = { true }
+        popover.rebuildForOpen()
+        #expect(popover.test_speakerSearchStateText
+                == "Audiout doesn’t have permission to see devices on this network.")
+    }
+
+    /// A fleet that HAS a speaker never renders a state line, and the AirPlay
+    /// header keeps its normal has-rows meaning.
+    @Test func aFleetWithASpeakerRendersNoStateLine() {
+        let (popover, _) = makeFleetPopover([
+            localMac(), Device(id: "office", name: "Office", kind: .homePod),
+        ])
+        popover.rebuildForOpen()
+        #expect(popover.test_speakerSearchStateText == nil)
+        #expect(popover.test_subsectionTitles()
+                == ["This Mac", "AirPlay Devices", "Bluetooth Devices"],
+                "no empty AirPlay header, no missing one")
+    }
+
     // MARK: System-AirPlay guard note (Wave 3 W3-T3)
 
     /// `setSystemAirPlayNoteActive(true)` shows the "double-path audio" note with
@@ -2757,6 +2941,37 @@ import AppKit
                 "with routing-blocked cleared, the takeover status shows through")
 
         popover.setTakeoverStatus(nil)
+        #expect(popover.test_systemAirPlayNoteText == nil, "clearing both empties the slot")
+    }
+
+    /// A dead capture tap means every speaker is silent while its row still
+    /// says "Connected" — nothing else the note slot carries is worse, so it
+    /// takes the slot from everything, including the routing-blocked warning.
+    @Test func captureFailureNoteOutranksRoutingBlockedAndClearsBackToIt() async throws {
+        let (popover, _, _) = try await makePopover()
+        #expect(popover.test_systemAirPlayNoteText == nil, "no note by default")
+
+        popover.setCaptureFailureMessage("Audiout lost access to system audio.")
+        #expect(popover.test_systemAirPlayNoteText == "Audiout lost access to system audio.",
+                "the capture error's own message renders verbatim")
+        #expect(!popover.test_systemAirPlayNoteHasActionButton,
+                "the message names its own remedy in prose — there is no button to add")
+
+        // A repeat of the same message changes nothing.
+        popover.setCaptureFailureMessage("Audiout lost access to system audio.")
+        #expect(popover.test_systemAirPlayNoteText == "Audiout lost access to system audio.")
+
+        // Precedence: even the routing-blocked warning loses to it.
+        popover.setRoutingBlockedNeedsDefault(true)
+        #expect(popover.test_systemAirPlayNoteText == "Audiout lost access to system audio.",
+                "capture-failed outranks routing-blocked")
+
+        // Clearing it reveals the still-set, lower-precedence warning.
+        popover.setCaptureFailureMessage(nil)
+        #expect(popover.test_systemAirPlayNoteText == "Audiout isn't your Mac's output device — audio won't play until you switch back.",
+                "with capture recovered, the routing-blocked warning shows through")
+
+        popover.setRoutingBlockedNeedsDefault(false)
         #expect(popover.test_systemAirPlayNoteText == nil, "clearing both empties the slot")
     }
 

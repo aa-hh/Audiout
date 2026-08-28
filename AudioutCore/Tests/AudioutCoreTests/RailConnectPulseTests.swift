@@ -414,4 +414,42 @@ import Testing
         #expect(!scene.overlay.test_isConnectPulsing,
                 "an idle (un-armed) wire carries nothing — no pulse")
     }
+
+    // MARK: Redraw skip (a layout pass that moved nothing)
+
+    /// Render once so the overlay records the input its committed contents were
+    /// drawn from. `dataWithPDF` runs a real `draw(_:)` without needing an
+    /// on-screen window, so the memo is primed deterministically.
+    ///
+    /// The observable afterwards is `test_redrawRequestCount`, not `needsDisplay`:
+    /// this view is layer-backed, and a layer-backed view's dirty flag stays set
+    /// once AppKit has set it, so reading the flag back can never show a skip.
+    private func prime(_ overlay: BusRailOverlayView) {
+        _ = overlay.dataWithPDF(inside: overlay.bounds)
+    }
+
+    @Test func anUnchangedLayoutPassSkipsTheRedraw() {
+        let scene = makeScene(nodes: [.member, .member])
+        prime(scene.overlay)
+        let baseline = scene.overlay.test_redrawRequestCount
+
+        scene.overlay.needsDisplay = true
+        #expect(scene.overlay.test_redrawRequestCount == baseline,
+                "same geometry ⇒ same figure: nothing to re-resolve or re-stroke")
+
+        scene.overlay.dormant = true
+        scene.overlay.needsDisplay = true
+        #expect(scene.overlay.test_redrawRequestCount == baseline + 1,
+                "a changed input is a different figure and must redraw")
+    }
+
+    @Test func anAccentChangeForcesTheRedrawThrough() {
+        let scene = makeScene(nodes: [.member, .member])
+        prime(scene.overlay)
+        let baseline = scene.overlay.test_redrawRequestCount
+
+        NotificationCenter.default.post(name: Tokens.accentStyleDidChangeNotification, object: nil)
+        #expect(scene.overlay.test_redrawRequestCount == baseline + 1,
+                "the geometry is unchanged but the TONES are not — the skip must not swallow it")
+    }
 }

@@ -68,6 +68,13 @@ per row inside a loop.
 hot repaint path; needs care that call sites don't rely on synchronous
 ordering.
 
+**Partially fixed (`claude/fix-data-safety`):** `GroupController` no longer
+reads through to `backend.devices` per call — the app layer pushes the
+snapshot it already builds (`updateDevices(_:)`), and `devices`/`device(_:)`
+read that, falling back to a live query only before the first push. The
+`GroupController` marker is deleted. The two `NativeBackend` sites are
+untouched and this entry stays open.
+
 When fixed: delete the STABILITY(C8) marker(s) at `NativeBackend.swift:482`,
 `NativeBackend.swift:220`, and `GroupController.swift:167` and move this
 entry to Resolved.
@@ -80,6 +87,13 @@ entry to Resolved.
   a UI gesture handler.
 - `AudioutCore/Sources/AudioutCore/GroupController.swift:155` —
   `persistRouting()`, same shape.
+
+**Both fixed (`claude/fix-data-safety`), markers deleted:** `persistRouting()`
+is now a latest-wins writer on a private serial queue (drained on quit via
+`flushPendingRoutingSave()`), and `AppRoutingController.persist()` reports its
+failure through `StoreRecovery` instead of swallowing it — it stays on main
+deliberately, since routes change at click frequency, not drag frequency. Every
+other D4 sub-item below is untouched and this entry stays open.
 
 **Blocking XPC on main:**
 - `AudioutCore/Sources/AudioutSettingsUI/GeneralSettingsViewController.swift:52`
@@ -119,11 +133,12 @@ carries N live monitors doing the same job — not about the pattern choice.
 Word any fix so it reduces churn (e.g. one shared monitor dispatching to
 rows) without reverting to `NSTrackingArea`.
 
-**Structural rebuild mid-drag detaches the tracked slider:**
-- `AudioutCore/Sources/AudioutPopoverUI/PopoverController.swift:343`
-  — when `deviceSetChanged` is true, the full `rebuild()` path runs even if
-  a slider drag is in progress, replacing the row (and its slider) the user
-  has the mouse down on.
+**Structural rebuild mid-drag detaches the tracked slider:** FIXED
+(controller-side defer, 2026-08-27). `update(devices:)` now records the live
+drag from the three volume delegate callbacks (a self-expiring deadline, not a
+flag) and, while one is live, takes the repaint path and remembers the debt;
+the next backend echo after the grace runs the rebuild. The row-side stuck-flag
+sub-item below is a SEPARATE fix and stays open.
 
 **Fix sketch (all sub-items):** persistence — hop `save` calls off main
 (existing `store` types are already narrow enough to wrap in an async

@@ -25,7 +25,7 @@ extension SerializedSharedState {
         /// case that never calls `unregister()`/`register()`. Reused verbatim
         /// from ``PTPHelperActivationTests``' fixture (same shape, this file's
         /// own copy since that one is private to its file).
-        private struct FakeHelperStatus: PTPHelperManaging {
+        private struct FakeHelperStatus: PTPHelperManaging, @unchecked Sendable {
             let status: PTPHelperStatus
             func register() throws {}
             func openSystemSettingsLoginItems() {}

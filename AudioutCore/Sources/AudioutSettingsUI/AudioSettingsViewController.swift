@@ -22,14 +22,16 @@ public struct LatencySettingModel {
     /// Whether any device is currently streaming — drives the reconnect status
     /// UI ("Reconnecting speakers…" / "Speakers reconnected" vs plain "Applied").
     public let isStreaming: @MainActor () -> Bool
-    /// Persist + apply the new value; returns when the reconnect pass is done.
-    public let apply: @MainActor (Int) async -> Void
+    /// Persist + apply the new value; returns when the reconnect pass is done,
+    /// with how many of the devices that were streaming actually came back
+    /// (`reconnected`) out of how many there were (`expected`).
+    public let apply: @MainActor (Int) async -> (reconnected: Int, expected: Int)
 
     public init(optionsMs: [Int],
                 initialMs: Int,
                 envOverrideMs: Int?,
                 isStreaming: @escaping @MainActor () -> Bool,
-                apply: @escaping @MainActor (Int) async -> Void) {
+                apply: @escaping @MainActor (Int) async -> (reconnected: Int, expected: Int)) {
         self.optionsMs = optionsMs
         self.initialMs = initialMs
         self.envOverrideMs = envOverrideMs
@@ -417,7 +419,9 @@ public final class AudioSettingsViewController: NSViewController {
                          .foregroundColor: Tokens.Color.secondaryLabel])
         advancedTitle.target = self
         advancedTitle.action = #selector(advancedTitleTapped)
-        advancedTitle.setAccessibilityLabel("Advanced")
+        // A click-target duplicate of the triangle beside it, which keeps the
+        // label — VoiceOver should hear "Advanced" once, not twice.
+        advancedTitle.setAccessibilityElement(false)
 
         let header = NSStackView(views: [advancedDisclosure, advancedTitle])
         header.orientation = .horizontal
@@ -589,10 +593,10 @@ public final class AudioSettingsViewController: NSViewController {
             let note = SettingsForm.label(
                 "Your buffer is locked to \(Self.msLabel(envMs)) by a launch option for this session.")
             note.font = Tokens.Font.caption
-            note.textColor = Tokens.Color.warning
+            note.textColor = Tokens.Color.warningText
             note.lineBreakMode = .byWordWrapping
             note.maximumNumberOfLines = 0
-            // Not `hintLabel` (wrong color: this one's `.warning`, not
+            // Not `hintLabel` (wrong color: this one's `.warningText`, not
             // `.secondaryLabel`) but it needs the SAME `preferredMaxLayoutWidth`
             // fix — see hintLabel's doc comment for why an unset one drags the
             // whole pane wider than the fixed content column.
@@ -645,6 +649,7 @@ public final class AudioSettingsViewController: NSViewController {
 
     @objc private func bufferOptionChanged() {
         guard let target = updateBufferHintAndResolveTarget() else { return }
+        Analytics.capture("settings:buffer_changed", ["ms": String(target)])
         Task { await applyBuffer(target) }
     }
 
@@ -677,13 +682,20 @@ public final class AudioSettingsViewController: NSViewController {
             applyStatusLabel.isHidden = false
         }
 
-        await latency.apply(target)
+        let result = await latency.apply(target)
 
         appliedMs = target
         isApplying = false
         bufferPopup.isEnabled = true
         applySpinner.stopAnimation(nil)
-        applyStatusLabel.stringValue = wasStreaming ? "Speakers reconnected" : "Applied"
+        // Only claim they all came back if they all came back — the re-add is
+        // best-effort per device (D4), and a silent speaker the pane called
+        // "reconnected" is the kind of lie this app doesn't tell.
+        applyStatusLabel.stringValue = wasStreaming
+            ? (result.reconnected == result.expected
+                ? "Speakers reconnected"
+                : "Some speakers didn't reconnect — check the mixer")
+            : "Applied"
         applyStatusLabel.isHidden = false
 
         // Transient confirmation: fades after a beat (cancelled by any newer
@@ -716,8 +728,13 @@ public final class AudioSettingsViewController: NSViewController {
             listStack.removeArrangedSubview(row)
             row.removeFromSuperview()
         }
+        // ONE snapshot for the whole rebuild: `runningAppsProvider()`
+        // materializes every running app's icon, so calling it per row made an
+        // n-row rebuild cost n full enumerations of the system's app list.
+        let running = Dictionary(runningAppsProvider().map { ($0.bundleID, $0) },
+                                 uniquingKeysWith: { first, _ in first })
         for app in excluded.excludedApps {
-            listStack.addArrangedSubview(makeExcludedRow(app))
+            listStack.addArrangedSubview(makeExcludedRow(app, running: running))
         }
         listStack.addArrangedSubview(makeAddRow())
         for row in listStack.arrangedSubviews {
@@ -727,14 +744,14 @@ public final class AudioSettingsViewController: NSViewController {
         republishFittedHeight()
     }
 
-    private func makeExcludedRow(_ app: ExcludedApp) -> NSView {
+    private func makeExcludedRow(_ app: ExcludedApp, running: [String: AppPickerItem]) -> NSView {
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
 
         let iconView = NSImageView()
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.imageScaling = .scaleProportionallyDown
-        iconView.image = icon(for: app.bundleID)
+        iconView.image = icon(for: app.bundleID, running: running)
 
         let nameLabel = SettingsForm.label(app.displayName)
         nameLabel.lineBreakMode = .byTruncatingTail
@@ -801,8 +818,10 @@ public final class AudioSettingsViewController: NSViewController {
     /// Resolve an excluded app's icon: the running app's icon if it's running,
     /// else a generic placeholder (an excluded app need not be running — it can
     /// be pre-excluded). Mirrors the popover's `appIcon`.
-    private func icon(for bundleID: String) -> NSImage? {
-        if let running = runningAppsProvider().first(where: { $0.bundleID == bundleID }), let icon = running.icon {
+    /// `running` is the caller's one snapshot of the running-apps list, so a
+    /// rebuild enumerates the system once rather than once per row.
+    private func icon(for bundleID: String, running: [String: AppPickerItem]) -> NSImage? {
+        if let icon = running[bundleID]?.icon {
             return icon
         }
         if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first,
@@ -818,6 +837,7 @@ public final class AudioSettingsViewController: NSViewController {
 
     @objc private func removeTapped(_ sender: NSButton) {
         guard let bundleID = sender.identifier?.rawValue else { return }
+        Analytics.capture("settings:excluded_app_removed")
         remove(bundleID: bundleID)
     }
 
@@ -859,6 +879,7 @@ public final class AudioSettingsViewController: NSViewController {
 
     private func add(bundleID: String, displayName: String) {
         excluded.exclude(bundleID: bundleID, displayName: displayName)
+        Analytics.capture("settings:excluded_app_added")
         rebuildList()
         onChange?()
     }

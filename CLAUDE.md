@@ -102,6 +102,33 @@ the same daemon identity and the loser's `register()` silently no-ops. Bare
 `make-app.sh` builds the DEFAULT `com.audiout.Audiout`, which is the live
 `/Applications` copy: never overwrite it for a test.
 
+### Hold the live-test slot before touching the dev id
+
+One agent at a time may build or launch `com.audiout.Audiout.dev`. Rebuilding
+it under Alec overwrites the `.app` he is testing and starts a second copy
+fighting the running one for the same daemon identity — both fail silently.
+`scripts/livetest.sh` is the machine-wide slot; `make-app.sh` refuses to build
+the dev id unless you hold it.
+
+```bash
+bash scripts/livetest.sh acquire --label <your branch>   # 0 = yours, 2 = busy
+bash scripts/livetest.sh status                          # who has it, who is waiting
+bash scripts/livetest.sh done                            # free it
+```
+
+- **Busy? Report and keep working.** `acquire` never blocks — exit 2 names the
+  holder, how long they have held it, and your place in line. Say that in your
+  next message, go do something else, retry later. Never sit in a wait loop.
+- **Release the moment Alec gives a verdict** on the build you handed over.
+  A slot nobody frees is 45 minutes of the machine's testing capacity gone.
+- **Expiry is 45 minutes**, after which the next agent takes it over with a
+  loud warning. That warning is not permission — if Alec may still be at the
+  speakers, ask before you build.
+- Only the shared dev id is gated. A **fresh handover id** is a different
+  bundle and a different daemon identity, so it needs no slot and cannot
+  clobber the dev build — reach for it when the slot is busy and you just need
+  a build in someone's hands.
+
 ## Tests
 
 ```bash

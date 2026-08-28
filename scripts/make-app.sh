@@ -12,6 +12,13 @@
 # Gatekeeper lets it launch.
 #
 # Usage: scripts/make-app.sh [output-dir]   (default output dir: ./build)
+# Env:
+#   AUDIOUT_BUILD_LOCAL=1       compile here, never on the second Mac
+#   AUDIOUT_BUNDLE_DYLIBS=1     bundle the Homebrew dylibs (Homebrew-less target)
+#   AUDIOUT_NO_LIVETEST_LOCK=1  skip the live-test slot gate on the shared dev id
+#                                 (see the "Live-test slot gate" section below, and
+#                                 scripts/livetest.sh) — for a deliberate build when
+#                                 you know nobody else is testing
 # Every command below is a paste-proof one-liner — no backslash continuations.
 
 set -euo pipefail
@@ -178,6 +185,37 @@ ICON_SOURCE="$SCRIPT_DIR/Audiout-MacOS-Default-1024x1024@1x.png"
 # Flattened 1024 "Dark" render from Icon Composer, paired with ICON_SOURCE to
 # build a light/dark appearance-aware icon (see the app-icon step below).
 ICON_SOURCE_DARK="$SCRIPT_DIR/Audiout-MacOS-Dark-1024x1024@1x.png"
+
+# --- Live-test slot gate ---------------------------------------------------
+# ONE agent at a time may build the SHARED dev id. Rebuilding it under a tester
+# overwrites the .app he is using and starts a second copy fighting the running
+# one for the same launchd daemon identity — see scripts/livetest.sh's header
+# for why both failures are silent. Agents run in parallel worktrees with no
+# shared memory, so this build script is the only place the rule can actually
+# be enforced: the last common choke point before the .app appears on disk.
+#
+# ONLY the shared dev id is gated. A fresh per-handover id is a different .app
+# in a different bundle and a different daemon identity, so it cannot clobber
+# anything, and the default production id is the /Applications copy nobody
+# should be rebuilding for a test anyway. Both paths run exactly as before —
+# the check below is one `ps` and one `stat`, and it is placed here so it costs
+# nothing when it refuses: before ffmpeg, before housekeeping, before any
+# compile.
+DEV_BUNDLE_ID="com.audiout.Audiout.dev"   # the standing dev id, CLAUDE.md "Build & run"
+if [ "$BUNDLE_ID" = "$DEV_BUNDLE_ID" ] && [ "${AUDIOUT_NO_LIVETEST_LOCK:-0}" != "1" ]; then
+  # Run the check from REPO_ROOT, not the caller's cwd: the slot is owned by a
+  # worktree, and this build belongs to the worktree this script lives in
+  # whatever directory it was invoked from.
+  if ! ( cd "$REPO_ROOT" && "$SCRIPT_DIR/livetest.sh" check ); then
+    echo "ERROR: refusing to build $DEV_BUNDLE_ID — you do not hold the live-test slot." >&2
+    echo "       Take it:      bash scripts/livetest.sh acquire --label <your branch or task>" >&2
+    echo "       Or check:     bash scripts/livetest.sh status" >&2
+    echo "       Or sidestep:  build a FRESH handover id instead, which cannot clobber the" >&2
+    echo "                     dev build — APP_NAME=\"Audiout <thing>\" BUNDLE_ID=\"com.audiout.Audiout.<thing>\" bash scripts/make-app.sh" >&2
+    echo "       (AUDIOUT_NO_LIVETEST_LOCK=1 skips this when you know no one else is testing.)" >&2
+    exit 1
+  fi
+fi
 
 # --- Build (release) ------------------------------------------------------
 # For a self-contained release bundle, build the minimal audio-only ffmpeg FIRST

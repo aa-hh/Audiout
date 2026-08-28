@@ -110,6 +110,21 @@ symbol you cannot find in source, believe the source and fix the doc.
   pushed), `touch .claude/worktrees/<slug>/.prunable` and let the system
   collect it. The flag is a request, not a command — a dirty or unpushed
   worktree is refused with the reason printed.
+- **Hold the live-test slot before building or launching the shared dev id.**
+  Only one native Audiout can run at a time (the PTP helper binds UDP 319/320
+  exclusively) and the dev loop reuses one bundle id,
+  `com.audiout.Audiout.dev`, so its permissions survive rebuilds. Two agents
+  therefore cannot both be live-testing: the second overwrites the first's
+  `.app` and its copy fights the running one for the same daemon identity,
+  and both failures are silent. `scripts/livetest.sh acquire --label <branch>`
+  takes the machine-wide slot, `status` says who holds it and who is waiting,
+  `done` frees it — and `scripts/make-app.sh` refuses to build that one bundle
+  id unless you hold it. **Acquisition never blocks**: exit 2 means busy, so
+  report your queue position and go do other work rather than waiting. Free it
+  as soon as Alec gives a verdict. Details and the 45-minute expiry rule are in
+  [CLAUDE.md](CLAUDE.md) under "Build & run"; the traps are in the script's own
+  header. A fresh per-handover bundle id is a different daemon identity and
+  needs no slot.
 - **Sweep stale PTP-helper daemons routinely — and always before a native live
   test.** Old dev builds and side-by-side copies leave `*.ptphelper` launchd
   jobs bound to UDP 319/320; a single stale one makes a healthy on-demand helper

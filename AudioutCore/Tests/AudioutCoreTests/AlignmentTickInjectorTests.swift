@@ -841,15 +841,20 @@ import AudioToolbox
         let epoch = Int(0.5 * rate)
         let down = SyncProbe.samples(.downSweep(sampleRate: rate, duration: 1.0))
         let up = SyncProbe.samples(.upSweep(sampleRate: rate, duration: 1.0))
-        func expected(_ sweep: [Float], _ i: Int) -> Int16 {
-            Int16(clamping: Int32((Double(sweep[i]) * amplitude * 32_767.0).rounded()))
+        func expected(_ sweep: [Float], _ i: Int, _ laneAmplitude: Double) -> Int16 {
+            Int16(clamping: Int32((Double(sweep[i]) * laneAmplitude * 32_767.0).rounded()))
         }
+        let engineAmplitude = amplitude * AlignmentTickInjector.probeEngineLaneScale
         #expect(engine[0..<epoch].allSatisfy { $0 == 0 },
                 "the lead-in is silent — the sweep never rides the gate's tail")
-        #expect((0..<down.count).allSatisfy { engine[epoch + $0] == expected(down, $0) },
+        #expect((0..<down.count).allSatisfy {
+                    engine[epoch + $0] == expected(down, $0, engineAmplitude) },
                 "the engine lane carries the DOWN sweep, sample for sample")
-        #expect((0..<up.count).allSatisfy { bluetooth[epoch + $0] == expected(up, $0) },
+        #expect((0..<up.count).allSatisfy {
+                    bluetooth[epoch + $0] == expected(up, $0, amplitude) },
                 "the Bluetooth lane carries the UP sweep, sample for sample")
+        #expect(engineAmplitude < amplitude,
+                "the lane next to the microphone is the quieter one")
         #expect(engine[(epoch + down.count)...].allSatisfy { $0 == 0 },
                 "after the sweep: silence — the tick grid is the coordinator's to arm")
 
@@ -902,9 +907,12 @@ import AudioToolbox
 
         let localDuringProbe = localSink.enqueued.flatMap { $0 }
         let btDuringProbe = btSink.enqueued.flatMap { $0 }
-        #expect(localDuringProbe.contains { abs($0) > 0.2 },
+        // Well clear of the keep-alive bed (≤ 0.015) but under the engine
+        // lane's own peak, which is deliberately the quieter of the two —
+        // `AlignmentTickInjector.probeEngineLaneScale`.
+        #expect(localDuringProbe.contains { abs($0) > 0.1 },
                 "the engine/Mac fan-out heard its sweep")
-        #expect(btDuringProbe.contains { abs($0) > 0.2 },
+        #expect(btDuringProbe.contains { abs($0) > 0.1 },
                 "the Bluetooth fan-out heard its sweep")
         #expect(localDuringProbe != btDuringProbe,
                 "two DIFFERENT sweeps — that is the whole separability")

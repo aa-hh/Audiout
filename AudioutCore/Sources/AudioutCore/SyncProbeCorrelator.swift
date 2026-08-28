@@ -132,6 +132,19 @@ public enum SyncProbe {
 /// needs (the 2026 TDOA-probing result: trained estimators learn
 /// magnitude-aware weighting and never learn PHAT).
 ///
+/// **Confidence is measured against the background's EXPECTED largest lag,
+/// never its observed one.** The observed maximum is one sample out of a
+/// quarter-million, and in any real room the arrival's own reverb tail owns
+/// it: the live 2026-08-28 captures put that tail 5% of peak height, so a
+/// flawless arrival scored 19 where its honest floor said 3824 — a 46 dB
+/// understatement, handed to a gate. Reverb is not evidence against the peak
+/// it is an echo of. So the background is summarised ROBUSTLY — a median,
+/// which a few percent of contaminated lags cannot move — and scaled to the
+/// largest value that many Gaussian lags would be expected to reach. Pure
+/// noise still scores ~1, because its best lag is exactly that expected best
+/// lag; what changes is that a quiet-but-real arrival is no longer refused
+/// for having echoed. Never reach for `max()` here, however natural it looks.
+///
 /// Everything here is pure and hardware-free; capture and probe playback live
 /// elsewhere.
 public struct SyncProbeCorrelator {
@@ -142,21 +155,29 @@ public struct SyncProbeCorrelator {
 
     /// Correlation peaks below this peak-to-sidelobe ratio are rejected as
     /// "probe not found" — the recording's best match is not convincingly
-    /// better than its own background. Pure noise correlates at ~2–3×;
-    /// a real arrival at sane SNR clears 10× easily.
+    /// better than its own background. Pure noise scores ~1 by construction
+    /// (its best lag IS the background's expected best lag); a real arrival
+    /// at sane SNR runs to the hundreds.
     public var minPeakToSidelobe: Double = 5
 
-    /// Sidelobe search excludes this much on either side of the peak, wide
+    /// Background estimate excludes this much on either side of the peak, wide
     /// enough to cover the sweep autocorrelation's own skirt.
     public var sidelobeExclusionSeconds: Double = 0.005
 
-    /// Sidelobe search also excludes this long AFTER the peak: a real room
-    /// answers a probe with its reflections, so the correlation legitimately
-    /// carries secondary peaks trailing the direct path — the impulse
-    /// response's tail, not evidence against the measurement. Nothing
+    /// The background estimate also excludes this long AFTER the peak: a real
+    /// room answers a probe with its reflections, so the correlation
+    /// legitimately carries secondary peaks trailing the direct path — the
+    /// impulse response's tail, not evidence against the measurement. Nothing
     /// physical arrives BEFORE the direct path, so the region ahead of the
-    /// peak (plus anything beyond this shadow) is the honest noise floor.
+    /// peak is honest background whatever the shadow's length.
+    ///
+    /// The shadow is a courtesy, not the guarantee: the estimator below is
+    /// what actually makes reverb harmless.
     public var reverbShadowSeconds: Double = 0.25
+
+    /// `median(|x|) = 0.6745 σ` for zero-mean Gaussian `x` — the constant that
+    /// turns a robust median into a standard deviation.
+    private static let medianOfHalfNormal = 0.674_489_750_196_081_7
 
     /// One probe's arrival in a recording.
     public struct Arrival: Equatable {
@@ -164,8 +185,13 @@ public struct SyncProbeCorrelator {
         /// from the recording's start — fractional, via parabolic
         /// interpolation on the correlation peak.
         public var sampleOffset: Double
-        /// Peak height over the strongest correlation outside the exclusion
-        /// window: the measurement's own confidence statement.
+        /// Peak height over what the background outside the exclusion window
+        /// is EXPECTED to reach: the measurement's own confidence statement.
+        ///
+        /// Expected, not observed — see ``SyncProbeCorrelator``'s note. The
+        /// observed maximum is a single worst sample and a real room hands it
+        /// to the arrival's own reverb, which reads as evidence against the
+        /// very peak it came from.
         public var peakToSidelobe: Double
     }
 
@@ -200,11 +226,16 @@ public struct SyncProbeCorrelator {
 
         let exclusion = max(1, Int(sidelobeExclusionSeconds * sampleRate))
         let shadow = max(exclusion, Int(reverbShadowSeconds * sampleRate))
-        var sidelobe: Float = 0
+        var background: [Float] = []
+        background.reserveCapacity(searchCount)
         for i in 0..<searchCount where i < peakIndex - exclusion || i > peakIndex + shadow {
-            sidelobe = max(sidelobe, abs(corr[i]))
+            background.append(abs(corr[i]))
         }
-        let psr = sidelobe > 0 ? Double(peakValue) / Double(sidelobe) : .infinity
+        guard background.count > 1 else { return nil }
+        background.sort()
+        let sigma = Double(background[background.count / 2]) / Self.medianOfHalfNormal
+        let sidelobe = (2 * log(Double(background.count))).squareRoot() * sigma
+        let psr = sidelobe > 0 ? Double(peakValue) / sidelobe : .infinity
         guard psr >= minPeakToSidelobe else { return nil }
 
         // Parabola through the peak and its neighbours: the sweep's main lobe

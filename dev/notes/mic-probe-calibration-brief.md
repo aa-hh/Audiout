@@ -27,6 +27,17 @@ unless the Mac sits far off-centre; one sentence of UX copy).
    the other, simultaneously; built-in mic capture; SNR-weighted matched
    filter; peak pair → offset. Also lands roadmap 062's reconnect-survival
    measurement as a superset.
+
+   **The probe rides the device's own volume.** Nothing normalises it: a
+   speaker turned well down, or far off across a room, simply arrives quiet
+   and the measurement's margin shrinks with it. The lane amplitudes are held
+   deliberately low — this is a chirp the user is sitting next to, and a
+   near-full-scale sweep is the "heavy static" complaint again — so margin is
+   bought from the *statistic* (see the confidence note in
+   `SyncProbeCorrelator`) rather than from loudness. If that ever runs out,
+   the option is briefly standardising output volume for the sweep the way an
+   AVR's room calibration does; it is NOT built, and it needs its own UX
+   decision before it is.
 2. **Wire into the wizard, don't replace it.** Measurement becomes the
    zero-click `openingProposalMs` (seam already exists end-to-end,
    `PopoverController.startBTAlignmentWizard` → `BTAlignmentWizardSession` →

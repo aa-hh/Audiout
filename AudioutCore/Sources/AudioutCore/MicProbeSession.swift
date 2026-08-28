@@ -7,6 +7,17 @@ import AVFoundation
 import CoreAudio
 import Foundation
 
+extension ISO8601DateFormatter {
+    /// Colons are legal in a macOS filename but the Finder shows them as `/`,
+    /// so the dump stamp drops them.
+    static let micProbeDumpStamp: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withYear, .withMonth, .withDay, .withTime,
+                           .withDashSeparatorInDate]
+        return f
+    }()
+}
+
 // MARK: - Mic permission
 
 /// The microphone TCC gate for the probe (roadmap 064). A denied or
@@ -235,11 +246,19 @@ public final class MicProbeSession {
         // (mono Float32) beside the telemetry, so a refused measurement can
         // be analysed offline instead of guessed at. Debug only, nothing
         // reads it in a shipping run.
+        //
+        // One file PER RUN. A fixed name cost a whole investigation on
+        // 2026-08-28: three runs failed, a fourth succeeded and overwrote
+        // them, and the surviving bytes were analysed for hours as though
+        // they were the failure. Refusals are exactly what a diagnosis hatch
+        // exists to preserve, and they are the runs a retry follows.
         if ProcessInfo.processInfo.environment["AUDIOUT_MIC_PROBE_DUMP"] == "1",
            !recording.isEmpty {
+            let stamp = ISO8601DateFormatter.micProbeDumpStamp.string(from: Date())
             let url = FileManager.default.urls(for: .libraryDirectory,
                                                in: .userDomainMask)[0]
-                .appendingPathComponent("Logs/Audiout/mic-probe-capture.f32")
+                .appendingPathComponent(
+                    "Logs/Audiout/mic-probe-\(stamp)-\(result != nil ? "ok" : "refused").f32")
             recording.withUnsafeBufferPointer { try? Data(buffer: $0).write(to: url) }
             Telemetry.log(.localPlayback, "mic_probe_dump", [
                 "path": url.path,

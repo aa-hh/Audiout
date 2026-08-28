@@ -365,15 +365,30 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// on the next block. Staging is separate from arming for the same reason
     /// ticks' arm is: rendering is done off the hot path, and the arm gate
     /// decides WHEN.
+    /// The engine/Mac lane plays QUIETER than the Bluetooth one. The mic is
+    /// the Mac's own, so that speaker is inches away and the other is metres
+    /// off: measured on the 2026-08-28 captures the Mac lane arrived 57 dB
+    /// above the room's floor with the gate needing 14, and it is also the
+    /// sweep the user has their face next to. Spending that surplus on
+    /// loudness buys nothing and the probe is meant to be unobtrusive.
+    /// Raising the Bluetooth lane instead was tried and rejected — a
+    /// near-full-scale sweep is the "heavy static" complaint again.
     func stageProbe(amplitude: Double = 0.35) {
-        let scale = amplitude * 32_767.0
-        probeEngineLane = SyncProbe.samples(
-            .downSweep(sampleRate: sampleRate, duration: Self.probeSweepSeconds))
-            .map { Int32((Double($0) * scale).rounded()) }
-        probeBTLane = SyncProbe.samples(
-            .upSweep(sampleRate: sampleRate, duration: Self.probeSweepSeconds))
-            .map { Int32((Double($0) * scale).rounded()) }
+        func lane(_ design: SyncProbe.SweepDesign, _ amplitude: Double) -> [Int32] {
+            let scale = amplitude * 32_767.0
+            return SyncProbe.samples(design).map { Int32((Double($0) * scale).rounded()) }
+        }
+        probeEngineLane = lane(
+            .downSweep(sampleRate: sampleRate, duration: Self.probeSweepSeconds),
+            amplitude * Self.probeEngineLaneScale)
+        probeBTLane = lane(
+            .upSweep(sampleRate: sampleRate, duration: Self.probeSweepSeconds),
+            amplitude)
     }
+
+    /// How much quieter the engine/Mac probe lane plays than the Bluetooth
+    /// one — −6 dB. See ``stageProbe(amplitude:)``.
+    static let probeEngineLaneScale = 0.5
 
     var probeStaged: Bool { !probeBTLane.isEmpty }
 

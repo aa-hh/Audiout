@@ -270,6 +270,31 @@ import Testing
                 "the quiet lane clears the shipping gate with margin, not barely: PSR \(m.arrivalB.peakToSidelobe)")
     }
 
+    @Test func aLateReflectionIsNotEvidenceAgainstTheArrivalItEchoes() throws {
+        // A live room, and the shape of the 2026-08-28 refusals: one clean
+        // arrival plus its own reflection at −10 dB, arriving 350 ms later —
+        // past the reverb shadow, so the old max-of-background estimator
+        // handed the gate the echo and scored the measurement at ~3, refusing
+        // a peak sitting 60 dB above the room's actual noise. Reverb is
+        // structure, not background; a robust estimate has to ignore it.
+        let up = SyncProbe.samples(Self.fastUp())
+        let reflection = 400.0 + 0.35 * Self.fastRate
+        let rec = renderScene(length: 24_000, sampleRate: Self.fastRate,
+                              probes: [
+                                PlacedProbe(design: Self.fastUp(), delaySamples: 400, gain: 0.8),
+                                PlacedProbe(design: Self.fastUp(), delaySamples: reflection,
+                                            gain: 0.25),
+                              ],
+                              noiseRMS: 0.001)
+        let correlator = SyncProbeCorrelator(sampleRate: Self.fastRate)
+        let arrival = try #require(correlator.arrival(of: up, in: rec),
+                                   "a reverberant room must not veto its own direct path")
+        #expect(abs(arrival.sampleOffset - 400) < 0.5,
+                "the direct path still wins: got \(arrival.sampleOffset)")
+        #expect(arrival.peakToSidelobe > 50,
+                "confidence reflects the noise floor, not the echo: got \(arrival.peakToSidelobe)")
+    }
+
     // MARK: noise weighting
 
     @Test func aLoudHumIsSurvivedWhenAmbientNoiseIsSupplied() throws {

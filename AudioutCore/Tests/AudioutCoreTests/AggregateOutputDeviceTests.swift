@@ -352,14 +352,19 @@ extension SerializedSharedState {
     /// Fakes the Mac's own default-output volume/mute with NO HAL reads/listeners,
     /// and lets a test fire `onExternalChange` on demand to simulate the
     /// default-output DEVICE switching — the only path T5's echo-guard/off-switch
-    /// classification reacts to. Trimmed to just that: no volume/mute scripting,
-    /// since none of these tests touch the volume-key mirror.
+    /// classification reacts to. No volume/mute scripting beyond recording the
+    /// levels written, which the deselect-restore's volume push asserts on.
     private final class FakeSystemVolume: SystemVolumeControlling, @unchecked Sendable {
         private let lock = NSLock()
         private var _onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)?
+        private var _setVolumeCalls: [Int] = []
+        var setVolumeCalls: [Int] { lock.lock(); defer { lock.unlock() }; return _setVolumeCalls }
         func currentVolume() -> Int? { nil }
         func currentMuted() -> Bool? { nil }
-        func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) { didWrite?(true) }
+        func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) {
+            lock.lock(); _setVolumeCalls.append(volume); lock.unlock()
+            didWrite?(true)
+        }
         func setMuted(_ muted: Bool) {}
         var onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)? {
             get { lock.lock(); defer { lock.unlock() }; return _onExternalChange }
@@ -1094,6 +1099,161 @@ extension SerializedSharedState {
 
         #expect(!backend.test_expectedSelected.contains(device.id),
                 "stop() clears the selection intent too — a fresh start() begins clean")
+    }
+
+    // MARK: - Deselect to Mac-only: hand the default output back
+
+    /// Activate routing (aggregate takes the default), then let the HAL switch
+    /// land, and return `backend`/`systemVolume` ready for a deselect. Every
+    /// caller scripts the same two devices: the aggregate (501) and the
+    /// pre-takeover built-in speakers (601).
+    private func makeRestoreBackend(
+        control: FakeAggregateControl, box: LockedBox<String?>
+    ) async -> (NativeBackend, FakeSystemVolume) {
+        let (backend, systemVolume) = makeBackend(aggregateControl: control, currentDefaultOutputUIDBox: box)
+        backend.start()
+        _ = await collectQuiescent(from: backend) { backend.setOutputSet(["some-airplay-device"]) }
+        // The HAL's switch to the aggregate has landed — the state a deselect
+        // actually finds.
+        box.set(AggregateOutputDevice.productUID)
+        return (backend, systemVolume)
+    }
+
+    private static let builtInSpeakers = "com.builtin.speakers"
+
+    /// Deselecting the last AirPlay device (Mac-only) must hand the Mac's default
+    /// output back to the pre-takeover device — otherwise the aggregate stays the
+    /// default until quit, silently swallowing every volume write. The aggregate
+    /// itself must SURVIVE (it is the app's Sound-settings entry, and a re-select
+    /// takes it over again), and `priorDefaultUID` is deliberately kept.
+    @Test func deselectToMacOnlyRestoresPriorDefaultAndKeepsTheAggregate() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501,
+            Self.builtInSpeakers: 601])
+        let box = LockedBox<String?>(Self.builtInSpeakers)
+        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        defer { backend.stop() }
+        #expect(control.setDefaultCalls == [501], "activation points the default at the aggregate")
+
+        backend.setOutputSet([])
+        await pollUntil { control.setDefaultCalls.count == 2 }
+
+        #expect(control.setDefaultCalls == [501, 601], "the deselect restores the pre-takeover output")
+        #expect(backend.test_aggregateDefaultActive == false, "we no longer hold the Mac's default")
+        #expect(backend.test_priorDefaultUID == Self.builtInSpeakers,
+                "the prior is KEPT — a re-select that outruns the HAL switch has nothing else to fall back on")
+        #expect(control.destroyCalls.isEmpty, "the aggregate must stay alive for the re-select and Sound settings")
+    }
+
+    /// The pre-takeover device can be gone by the time we hand the default back
+    /// (headphones unplugged mid-session), and a never-captured prior reads the
+    /// same way. Both fall back on the Mac's built-in output — the very
+    /// sub-device the aggregate wraps, so it is always there.
+    @Test func deselectFallsBackToBuiltInWhenPriorIsUnresolvable() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501,
+            "com.apple.builtin": 601])   // `FakeAggregateControl`'s default built-in UID
+        let box = LockedBox<String?>("com.usb.dac.unplugged-later")
+        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        defer { backend.stop() }
+
+        backend.setOutputSet([])
+        await pollUntil { control.setDefaultCalls.count == 2 }
+
+        #expect(control.setDefaultCalls == [501, 601], "an unresolvable prior falls back on the built-in output")
+        #expect(backend.test_aggregateDefaultActive == false)
+    }
+
+    /// The mirror of `stop()`'s guard: if the user picked their own output in
+    /// Sound settings mid-session, the default is THEIRS and `priorDefaultUID` is
+    /// stale — a deselect must write nothing at all rather than yank them back to
+    /// the pre-takeover device.
+    @Test func deselectDoesNotRestoreWhenUserAlreadyMovedTheDefaultAway() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501,
+            Self.builtInSpeakers: 601])
+        let box = LockedBox<String?>(Self.builtInSpeakers)
+        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        defer { backend.stop() }
+
+        box.set("com.airpods.whatever")   // the user's own later choice
+        _ = await collectQuiescent(from: backend) { backend.setOutputSet([]) }
+
+        #expect(control.setDefaultCalls == [501], "only the activation write ever happened")
+    }
+
+    /// Re-selecting an AirPlay device after a restore takes the default back with
+    /// a freshly captured prior — the restore left the machine in a state the
+    /// activation seam can drive again.
+    @Test func reselectAfterRestoreRetakesTheDefault() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501,
+            Self.builtInSpeakers: 601])
+        let box = LockedBox<String?>(Self.builtInSpeakers)
+        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        defer { backend.stop() }
+
+        backend.setOutputSet([])
+        await pollUntil { control.setDefaultCalls.count == 2 }
+        box.set(Self.builtInSpeakers)   // the restore's own HAL switch lands
+
+        backend.setOutputSet(["some-airplay-device"])
+        await pollUntil { control.setDefaultCalls.count == 3 }
+
+        #expect(control.setDefaultCalls == [501, 601, 501])
+        #expect(backend.test_aggregateDefaultActive == true)
+        #expect(backend.test_priorDefaultUID == Self.builtInSpeakers)
+    }
+
+    /// Why `priorDefaultUID` survives the restore: a re-select can outrun the
+    /// HAL's (asynchronous) switch away from the aggregate, so
+    /// `pointDefaultAtAggregate` still reads the aggregate as current and skips
+    /// its prior-capture — refusing, correctly, to remember the aggregate as a
+    /// prior. The kept value is then the only good one left; clearing it would
+    /// leave quit with nothing to restore.
+    @Test func fastReselectBeforeTheSwitchLandsKeepsTheStandingPrior() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501,
+            Self.builtInSpeakers: 601])
+        let box = LockedBox<String?>(Self.builtInSpeakers)
+        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        defer { backend.stop() }
+
+        backend.setOutputSet([])
+        await pollUntil { control.setDefaultCalls.count == 2 }
+
+        // The box still reports the aggregate: the restore write has not landed.
+        _ = await collectQuiescent(from: backend) { backend.setOutputSet(["some-airplay-device"]) }
+
+        #expect(control.setDefaultCalls == [501, 601], "the aggregate already reads as default — no third write")
+        #expect(backend.test_aggregateDefaultActive == true, "we own the default again")
+        #expect(backend.test_priorDefaultUID == Self.builtInSpeakers,
+                "the standing prior survives — the aggregate is never remembered as one")
+    }
+
+    /// VOLUME CONTINUITY: once the restore's own default-device change lands, the
+    /// restored device is finally the one `SystemOutputVolume` writes to, so Main
+    /// is pushed to it — without this the Mac jumps to whatever level that
+    /// hardware was left at.
+    @Test func restoreLandingPushesMainToTheRestoredDevice() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501,
+            Self.builtInSpeakers: 601])
+        let box = LockedBox<String?>(Self.builtInSpeakers)
+        let (backend, systemVolume) = await makeRestoreBackend(control: control, box: box)
+        defer { backend.stop() }
+
+        // `mirrorToSystemVolume: false` — the aggregate is the default here, so
+        // this must not write; the only write asserted below is the restore's.
+        backend.setMasterGain(mainOut: 42, group: 100, mirrorToSystemVolume: false)
+        backend.setOutputSet([])
+        await pollUntil { control.setDefaultCalls.count == 2 }
+
+        box.set(Self.builtInSpeakers)
+        systemVolume.fireExternalChange(volume: 7, muted: nil, defaultDeviceChanged: true)
+        await pollUntil { !systemVolume.setVolumeCalls.isEmpty }
+
+        #expect(systemVolume.setVolumeCalls == [42], "Main is pushed to the restored device, once")
     }
 }
 

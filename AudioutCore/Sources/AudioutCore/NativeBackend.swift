@@ -1898,6 +1898,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
                     if let pending = self.expectedDefaultWriteUID, pending == newDefaultUID {
                         self.expectedDefaultWriteUID = nil
+                        // VOLUME CONTINUITY. Only the deselect-to-Mac-only restore
+                        // (`restoreDefaultFromAggregate`) writes a default that
+                        // isn't the aggregate, and this echo is the first moment
+                        // that device is genuinely the current default — which is
+                        // the only device `systemVolume` can write to. Push Main to
+                        // it, or the Mac jumps to whatever level that hardware was
+                        // left at. Writing at restore time instead would race the
+                        // async switch and land on the aggregate, which reports
+                        // every volume write as taken and applies none.
+                        if pending != AggregateOutputDevice.productUID {
+                            let main = self.mainOutGain
+                            // Memoise only on a confirmed write, as `setMasterGain`
+                            // does — same unwritable-output trap.
+                            self.systemVolume.setVolume(main) { [weak self] wrote in
+                                guard let self, wrote else { return }
+                                self.stateQueue.async { self.lastSeenSystemVolume = main }
+                            }
+                        }
                     } else {
                         // A genuine change that does NOT match the pending write
                         // proves our echo is no longer the newest state — the HAL
@@ -6593,6 +6611,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// failed reconnect legitimately deselects the model row.
     var test_expectedSelected: Set<String> { stateQueue.sync { expectedSelected } }
 
+    /// Test-only (`@testable`): whether the app currently holds the Mac's default
+    /// output with its aggregate, and the pre-takeover output it remembers — the
+    /// two pieces of state the deselect-to-Mac-only restore turns over.
+    var test_aggregateDefaultActive: Bool { stateQueue.sync { aggregateDefaultActive } }
+    var test_priorDefaultUID: String? { stateQueue.sync { priorDefaultUID } }
+
     /// Test-only (`@testable`): whether the silence watchdog has un-gated capture
     /// (the Mac is audible as a fallback because zero desired devices are connected).
     var test_silenceFallbackActive: Bool { stateQueue.sync { silenceCaptureOverride } }
@@ -7134,8 +7158,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if !expectedSelected.isEmpty {
             takeOverDefaultAndReflect()
         } else {
-            // Not routing: never take the Mac's default output (Q1), and the
-            // warning is off by definition.
+            // Not routing: never take the Mac's default output (Q1) — and hand it
+            // back if we are still holding it, or the Mac keeps playing through our
+            // aggregate, which swallows every volume write. The slider and the
+            // hardware volume keys then move nothing the user can hear.
+            restoreDefaultFromAggregate()
+            // The warning is off by definition.
             evaluateRoutingBlocked()
         }
         // Seamless handoff T3.6: `expectedSelected` just settled — re-decide
@@ -7188,6 +7216,43 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         guard aggregateControl.setDefaultOutputDevice(aggregateID) else { return false }
         expectedDefaultWriteUID = AggregateOutputDevice.productUID
         return true
+    }
+
+    /// Give the Mac's default output back to a real device once whole-system
+    /// routing goes empty (the user deselected their last AirPlay speaker), leaving
+    /// the aggregate itself ALIVE — unlike `stop()`, which restores and then
+    /// destroys it. It has to stay: it is the app's entry in Sound settings, and a
+    /// re-select takes it over again.
+    ///
+    /// Same two guards `stop()`'s restore uses, for the same reason.
+    /// `aggregateDefaultActive` alone only means "we took the default over at some
+    /// point" — if the user has since picked their own output, that choice is
+    /// theirs and `priorDefaultUID` is stale, so writing it back would yank them
+    /// off it. Best-effort like `stop()`'s: nothing resolvable to restore to leaves
+    /// the default exactly where it is.
+    ///
+    /// `priorDefaultUID` is deliberately KEPT (`stop()` clears it). The HAL's
+    /// default-device change lands asynchronously, so a fast re-select can still
+    /// read the aggregate as the current default and skip
+    /// ``pointDefaultAtAggregate()``'s prior-capture — the standing value is then
+    /// the only good prior left. On `stateQueue`.
+    private func restoreDefaultFromAggregate() {   // on stateQueue
+        guard aggregateDefaultActive,
+              currentDefaultOutputUIDProvider() == AggregateOutputDevice.productUID else { return }
+        // What the user had, else the Mac's built-in output — the same sub-device
+        // the aggregate itself wraps, so it is the one target that is still there
+        // when the prior device was unplugged mid-session.
+        let prior = priorDefaultUID.flatMap { $0 == AggregateOutputDevice.productUID ? nil : $0 }
+        let candidates = [prior, aggregateControl.builtInOutputDeviceUID()].compactMap { $0 }
+        guard let target = candidates.lazy.compactMap({ uid in
+            self.aggregateControl.resolveDeviceID(forUID: uid).map { (uid: uid, id: $0) }
+        }).first else { return }
+        guard aggregateControl.setDefaultOutputDevice(target.id) else { return }
+        // Echo-guard our own write, exactly as the takeover does — and note that
+        // this is the ONE write that targets something other than the aggregate,
+        // which is what the volume push in the default-changed handler keys off.
+        expectedDefaultWriteUID = target.uid
+        aggregateDefaultActive = false
     }
 
     /// Compute the routing-blocked steady state — actively routing AND the current

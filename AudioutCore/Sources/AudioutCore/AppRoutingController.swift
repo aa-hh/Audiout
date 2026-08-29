@@ -223,12 +223,12 @@ public final class AppRoutingController {
     // MARK: Group resolution
 
     /// The ONE resolver from saved groups to the speakers they can currently
-    /// feed as per-app route targets: each group's members, minus this Mac,
-    /// minus AirPlay-1-only receivers, minus Bluetooth and Cast — exactly the
-    /// eligibility an individually-picked target already has (a per-app rebind
-    /// re-anchors an AP1 clock; BT/Cast ids never reach the AirPlay engine).
-    /// A member the fleet snapshot doesn't hold at all is dropped here too:
-    /// nothing is known about it to judge.
+    /// feed as per-app route targets: each group's member devices, filtered by
+    /// the shared kind rule, `Device.canBePerAppRouteTarget(allOutputs:)` —
+    /// exactly the eligibility an individually-picked target already has
+    /// (`PopoverController.availableAirPlayDestinations`). A member the fleet
+    /// snapshot doesn't hold at all is dropped here too: nothing is known
+    /// about it to judge.
     ///
     /// Deliberately NOT a reachability filter. A member that is discovered but
     /// unreachable — or currently claimed by the main output — survives this
@@ -239,7 +239,7 @@ public final class AppRoutingController {
         _ groups: [Group], devices: [Device]
     ) -> [String: GroupRouteTarget] {
         let eligible = Dictionary(
-            devices.filter { !$0.isLocalDevice && $0.supportsAirPlay2 && !$0.isBluetooth && !$0.isCast }
+            devices.filter { $0.canBePerAppRouteTarget(allOutputs: PerAppRouting.allOutputsEnabled) }
                 .map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first })
         var targets: [String: GroupRouteTarget] = [:]

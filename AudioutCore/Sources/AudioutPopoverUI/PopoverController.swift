@@ -3421,8 +3421,9 @@ public final class PopoverController: NSObject {
             // Devices, or the active group's members) is carrying the
             // whole-system mix, and a receiver holds ONE AirPlay session — it
             // can't ALSO carry a private per-app redirect. So it's simply not
-            // offered as a redirect target, the same way an AirPlay-1 device
-            // isn't (`availableAirPlayDestinations`). The reverse conflict —
+            // offered as a redirect target; which other device kinds are
+            // offered at all is decided by `availableAirPlayDestinations`
+            // (`Device.canBePerAppRouteTarget(allOutputs:)`). The reverse conflict —
             // selecting a speaker that already has a redirect — is resolved by
             // `AppRoutingController.clearRoutes(toDevices:)` (selection wins), so
             // by the time this renders, no kept route targets a Main Out member.
@@ -3527,9 +3528,11 @@ public final class PopoverController: NSObject {
     }
 
     /// The members of `group` that could carry this app's own stream right now:
-    /// discovered, reachable, AirPlay-2, and not already claimed by the main
-    /// output (one role per speaker — the main mix is the senior claim, and the
-    /// app plays on whatever is left).
+    /// discovered, reachable, and eligible per
+    /// `Device.canBePerAppRouteTarget(allOutputs:)` (`available` is already
+    /// filtered to that), and not already claimed by the main output (one role
+    /// per speaker — the main mix is the senior claim, and the app plays on
+    /// whatever is left).
     private func usableGroupMemberIDs(_ group: Group, available: [Device]) -> [String] {
         let availableIDs = Set(available.map(\.id))
         return group.memberIDs.filter {
@@ -3589,23 +3592,27 @@ public final class PopoverController: NSObject {
     /// meantime, not a claim the quality issue is solved.
     static let sameSpeakerQualitySubtitle = "Already in use — may reduce quality"
 
-    /// The available AirPlay redirect targets: present, reachable (`isAvailable`),
-    /// non-local devices, in the same stable order as the Selected Devices card.
+    /// The available per-app route targets: reachable (`isAvailable`) devices
+    /// whose KIND may carry a per-app stream, in the same stable order as the
+    /// Selected Devices card. The kind rule lives in
+    /// `Device.canBePerAppRouteTarget(allOutputs:)`, shared with
+    /// `AppRoutingController.resolveGroupTargets(_:devices:)` — this function
+    /// adds the reachability filter on top, which the shared predicate
+    /// deliberately omits (`resolveGroupTargets` needs an unreachable group
+    /// member to survive its own resolve).
+    ///
     /// This is what a row may newly be POINTED at; it is not the same question as
     /// what a row may keep SHOWING — a route whose target drops out of this set is
     /// kept and gets an injected offline entry (`appDestinations(devices:keeping:bundleID:)`),
     /// and only an outright disappearance resets it (R5, `update(devices:)`).
     ///
-    /// AirPlay-1-only (RAOP) devices are excluded (T4b, a deliberate product
-    /// call, not a bug): a per-app rebind (`removeOutput`+`addOutput` on a
-    /// route change, `NativeBackend.performBindOp`'s `.rebind`) re-anchors an
-    /// AirPlay-1 device's internal clock — it has no shared timing protocol
-    /// with AirPlay-2 — causing it to drift out of sync with the rest of a
-    /// group, plus some classic receivers briefly reject the RTSP reconnect.
-    /// AirPlay-1 speakers can't sync cleanly with per-app routing regardless,
-    /// so they're simply not offered as a target rather than worked around.
+    /// Readers: `appDestinations(devices:keeping:bundleID:)`,
+    /// `usableGroupMemberIDs(_:available:)`, `appRow(_:didSelectDestination:for:)`'s
+    /// group-analytics count, and `update(devices:)`'s R5 tracking. Widening the
+    /// shared predicate therefore also widens which group members an app can
+    /// play on, via `usableGroupMemberIDs`.
     private func availableAirPlayDestinations(devices: [Device]) -> [Device] {
-        devices.filter { !$0.isLocalDevice && $0.isAvailable && $0.supportsAirPlay2 }
+        devices.filter { $0.isAvailable && $0.canBePerAppRouteTarget(allOutputs: PerAppRouting.allOutputsEnabled) }
     }
 
     /// Title for the "Current Device" entry — the local device's own name when the

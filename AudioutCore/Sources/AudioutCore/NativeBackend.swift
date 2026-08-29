@@ -5676,21 +5676,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.routedAppNames = newAppNames
 
             // --- stream binding diff (engine ops; only for discovered devices) ---
-            // T4b defensive guard: AirPlay-1 (RAOP) devices are never offered as a
-            // per-app routing target in the UI (`supportsAirPlay2 == false` is
-            // filtered out of `PopoverController.availableAirPlayDestinations`),
-            // but a stale/racing UI state could still hand one down here. Refuse it
-            // rather than proceed into `.bind`/`.rebind` — a rebind on an AP1 device
-            // re-anchors its clock (no shared timing protocol with AP2) and drifts
-            // it out of sync with the rest of a group, and some classic receivers
-            // briefly reject the RTSP reconnect. Skip silently (no-op): the device
-            // just doesn't get a per-app stream, same as if it were never offered.
-            let ap1DeviceIDs = Set(self.known.keys.filter { !(self.known[$0]?.supportsAirPlay2 ?? true) })
+            // `outputIDs[deviceID] != nil` is the guard that does the work here: it
+            // is populated in exactly one place, the AirPlay discovery path, so it
+            // structurally keeps Bluetooth and Cast ids out of this bind path
+            // (neither kind's rows ever receive an entry — they're routed through
+            // their own sink managers, never the engine) regardless of what the UI
+            // hands down. It also defers, rather than drops, a target this backend
+            // hasn't discovered YET: `addOrUpdate` re-drives this same binding pass
+            // once the device shows up, so a route picked slightly ahead of
+            // discovery still resolves once discovery catches up.
             var newBindings: [String: UInt32] = [:]
             for set in sets {
                 let stream = UInt32(set.streamID)
                 for deviceID in set.deviceIDs
-                where self.outputIDs[deviceID] != nil && !ap1DeviceIDs.contains(deviceID) {
+                where self.outputIDs[deviceID] != nil {
                     newBindings[deviceID] = stream
                 }
             }

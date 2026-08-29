@@ -5595,33 +5595,25 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "the redirect must re-establish itself once the takeover succeeds, with no user action")
     }
 
-    /// T4b defensive guard: a per-app route that targets an AirPlay-1-only
-    /// (RAOP) device must never reach the engine's `addOutput`/`removeOutput`
-    /// — the UI already refuses to offer one as a destination
-    /// (`PopoverController.availableAirPlayDestinations`), but if a stale/racing
-    /// route table hands one down anyway, `NativeBackend` must refuse it rather
-    /// than proceed into the `.bind`/`.rebind` path (a rebind re-anchors an AP1
-    /// device's clock — no shared timing protocol with AP2 — drifting it out of
-    /// sync with the rest of a group, and some classic receivers briefly reject
-    /// the RTSP reconnect).
-    @Test func appRouteToAirPlay1OnlyDeviceIsRefused() async {
-        let recorder = ResolveAttemptRecorder()
-        let (backend, engine, discovery) = makeBackend(processResolver: AudioProcessResolver(enumerator: recorder))
+    /// An AirPlay 1 (RAOP) device is a per-app route target: a `.device`
+    /// route naming a discovered AP1 device binds a per-app stream to it
+    /// exactly like any other engine-driven device. This is safe because the
+    /// vendored RAOP sender keys its master sessions on
+    /// `(stream_id, quality, encrypt)`
+    /// (`AirPlayEngine/Sources/CAirPlayEngine/sender/raop.c:1888-1899`), so
+    /// distinct stream ids never share a master session — there is no shared
+    /// clock for a per-app rebind to desync.
+    @Test func appRouteToAirPlay1OnlyDeviceIsBound() async {
+        let (backend, engine, discovery) = makeBackend()
         defer { backend.stop() }
         let device = ap1Device()
         await startAndDiscover(backend, engine, discovery, device)
 
         backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
 
-        // Give the async bind-tail a moment to run, then assert it never touched
-        // the engine for this device — no bind, no rebind, no removeOutput.
-        await pollUntil(timeout: 1) { recorder.callCount > 0 }
-        // No scheduled interval here — pure async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        #expect(engine.streamAddCalls.filter { $0.0 == device.outputID }.isEmpty,
-                     "an AirPlay-1-only device must never be bound to a per-app stream")
-        #expect(!(engine.removedIDs.contains(device.outputID)),
-                       "an AirPlay-1-only device that was never bound should not be torn down either")
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        #expect(engine.streamAddCalls.contains { $0.0 == device.outputID },
+                     "an AirPlay-1 device must be bound to a per-app stream")
     }
 
     // MARK: Per-app routing to a saved GROUP

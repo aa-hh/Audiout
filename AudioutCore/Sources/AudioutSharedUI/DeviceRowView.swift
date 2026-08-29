@@ -1125,28 +1125,25 @@ public final class DeviceRowView: NSView {
         let tag = isOlderAirPlayReceiver ? Self.ap1FeedTag : nil
         setFeedSegments(segments, tag: tag)
         // Tooltip (P1-5): the FULL, uncapped feed list — the "+N" cap is a
-        // screen-only affordance — plus the Older-AirPlay consequence line
-        // when this device can't route single apps. Two lines max, joined by
-        // a newline; `nil` when there's nothing to say (mirrors the
-        // FEED column's own empty case). MUST be set AFTER `setFeedSegments`:
-        // it rebuilds the pills through `renderFeedPills` → `clearFeedPills()`,
-        // which unconditionally wipes `feedStack.toolTip` as part of tearing
-        // down the old pills — setting it before that call had it silently
-        // erased on every apply.
+        // screen-only affordance. `nil` when there's nothing to say (mirrors
+        // the FEED column's own empty case). MUST be set AFTER
+        // `setFeedSegments`: it rebuilds the pills through `renderFeedPills` →
+        // `clearFeedPills()`, which unconditionally wipes `feedStack.toolTip`
+        // as part of tearing down the old pills — setting it before that call
+        // had it silently erased on every apply.
         var tooltipLines: [String] = []
         let tooltipNames = feedNames(qualifiedByGroup: false)
         if !tooltipNames.isEmpty { tooltipLines.append("Feeding " + tooltipNames.joined(separator: ", ")) }
-        if isOlderAirPlayReceiver { tooltipLines.append("Older AirPlay — can't route single apps") }
         feedStack.toolTip = tooltipLines.isEmpty ? nil : tooltipLines.joined(separator: "\n")
     }
 
     /// A genuine AirPlay-1 receiver — the only rows the "Older AirPlay"
-    /// micro-tag and its tooltip consequence line may badge. The local Mac,
-    /// Bluetooth and Cast devices all carry `supportsAirPlay2 == false` too
-    /// (`Device.swift`: AirPlay-only paths must never key off that flag
-    /// alone), but none of them is AirPlay at all, so the tag would lie —
-    /// live on the This Mac row, whose sync-row feed slot also truncated
-    /// "Older AirPlay System" to a bare "Older".
+    /// micro-tag may badge. The local Mac, Bluetooth and Cast devices all
+    /// carry `supportsAirPlay2 == false` too (`Device.swift`: AirPlay-only
+    /// paths must never key off that flag alone), but none of them is
+    /// AirPlay at all, so the tag would lie — live on the This Mac row,
+    /// whose sync-row feed slot also truncated "Older AirPlay System" to a
+    /// bare "Older".
     private var isOlderAirPlayReceiver: Bool {
         !device.supportsAirPlay2 && !device.isLocalDevice && device.kind != .localMac
             && !device.isBluetooth && !device.isCast

@@ -166,7 +166,6 @@ import AudioutCore
         #expect(row.test_feedText == "Older AirPlay System")
         let tooltip = row.test_feedTooltip ?? ""
         #expect(tooltip.contains("Feeding System"))
-        #expect(tooltip.contains("Older AirPlay — can't route single apps"))
     }
 
     @Test func aP2DeviceNeverGetsATag() {

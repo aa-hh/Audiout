@@ -1050,6 +1050,31 @@ public final class PopoverController: NSObject {
         }
     }
 
+    /// The saved groups changed under us — created, renamed, deleted, or a
+    /// membership edit, all of which happen in the Groups window while this
+    /// surface may be on screen (pinned mode never self-dismisses). Both the
+    /// Main Out selector and every app row's destination menu are built from
+    /// `groupController.groups` at `rebuild()` time, and nothing else in
+    /// `update(devices:)`'s structural triggers notices a group edit — so
+    /// without this a group created next to an open surface is missing from the
+    /// App Exceptions menus until the next reopen. Called by the host
+    /// (`AppDelegate`), the owner of `GroupController.onGroupsDidChange`, the
+    /// same way `applyRoutedAppRunning` is.
+    ///
+    /// A closed surface needs nothing: every open goes through
+    /// `rebuildForOpen()`. Mid-drag it records the debt instead of rebuilding,
+    /// which would detach the slider the mouse is tracking (see
+    /// `update(devices:)`'s own drag gate).
+    public func groupsDidChange() {
+        guard isEffectivelyShown else { return }
+        guard !isSliderDragLive else {
+            structuralRebuildDeferred = true
+            return
+        }
+        rebuild()
+        panel.panelContentDidChangeHeight(animated: true)
+    }
+
     // MARK: Silence-fallback banner (Wave 2 W2-T2, R11)
 
     /// The exact banner copy from PLAN-RELIABILITY Wave 2.
@@ -3335,8 +3360,7 @@ public final class PopoverController: NSObject {
                   symbolName: Device.Kind.localMac.symbolName,
                   subtitle: "Plays locally with its own volume"),
         ])
-        entries.append(contentsOf: groupDestinations(devices: devices, keeping: current,
-                                                    bundleID: bundleID))
+        entries.append(contentsOf: groupDestinations(devices: devices, bundleID: bundleID))
         for device in available {
             // One role per speaker: a device currently in Main Out (Selected
             // Devices, or the active group's members) is carrying the
@@ -3413,25 +3437,26 @@ public final class PopoverController: NSObject {
         }
     }
 
-    /// The "Output Groups" section of one row's destination popup: every saved
-    /// group that has members, each disclosing what picking it would actually
-    /// do right now. Mirrors Main Out's own group list (same header, same
-    /// "→ <name>" collapsed title). PLAN-POPOVER-ROUTING decision 4, which kept
-    /// groups out of this menu, is reversed.
+    /// The "Output Groups" section of one row's destination popup: EVERY saved
+    /// group, each disclosing what picking it would actually do right now.
+    /// Mirrors Main Out's own group list (same header, same "→ <name>"
+    /// collapsed title). PLAN-POPOVER-ROUTING decision 4, which kept groups out
+    /// of this menu, is reversed.
     ///
-    /// The group the row is ALREADY on is listed even if it has been emptied
-    /// since, for the same reason a kept-but-unreachable device is
-    /// (`appDestinations`' `keeping` rule): an intact route whose entry is
-    /// missing renders as an unset row.
+    /// Unfiltered on purpose. A group the user saved must never look deleted
+    /// (`emptyGroupDestinationSubtitle`), so one with nothing free to play on
+    /// is listed greyed rather than dropped — and a group with no members at
+    /// all can't exist anyway (`GroupController.createGroup`/`saveGroup` both
+    /// throw `GroupError.emptyMembership`), so filtering empties out only ever
+    /// hid groups that were fine. That filter was the live "my new group isn't
+    /// in the per-app menu" report's prime suspect; the actual cause was the
+    /// surface not rebuilding on a group change (see `groupsDidChange()`).
     private func groupDestinations(
-        devices: [Device], keeping current: AppRouteDestination, bundleID: String
+        devices: [Device], bundleID: String
     ) -> [AppRowView.Destination] {
         guard let controller = groupController else { return [] }
         let available = availableAirPlayDestinations(devices: devices)
-        var currentGroupID: String?
-        if case .group(let id) = current { currentGroupID = id }
         return controller.groups
-            .filter { !$0.memberIDs.isEmpty || $0.id == currentGroupID }
             .map { group in
                 let usable = usableGroupMemberIDs(group, available: available)
                 return .init(id: Self.groupDestinationID(forGroupID: group.id),

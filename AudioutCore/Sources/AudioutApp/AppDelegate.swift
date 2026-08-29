@@ -782,6 +782,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             self.pushAppRoutesToBackend()
+            // The surface builds both the Main Out selector and every app row's
+            // destination menu from the saved groups, and a group edit happens
+            // in the OTHER window — which, pinned, leaves this one on screen
+            // with stale menus (the live "my new group isn't in the per-app
+            // menu" report). No-ops while the surface is closed.
+            self.popoverController.groupsDidChange()
         }
         popoverController = PopoverController(appRouting: appRouting)
         popoverController.deviceIconController = deviceIconController

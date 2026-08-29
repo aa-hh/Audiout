@@ -106,9 +106,23 @@ import Testing
     }
 
     /// Poll the coordinator's state until `predicate` is true or timeout.
+    ///
+    /// **The deadline is deliberately generous, and shortening it will make this
+    /// suite fail intermittently for no reason.** Every seam here is a fake, so
+    /// the state transition being waited on is not slow work — it is a hop that
+    /// lands the moment this task is scheduled again. That makes the wait a test
+    /// of how much CPU the poll loop gets, not of the coordinator: the whole
+    /// suite runs unserialised, so at full-suite size this loop competes with
+    /// ~3000 other tests and a short wall-clock deadline expires while the
+    /// transition is sitting there already satisfied. That is exactly how the
+    /// old 3-second default behaved — green at 3091 tests, then 6 and 11 issues
+    /// in the SAME run at 3169, all recorded here, on both the local and the
+    /// remote Mac. A slow deadline costs nothing on the happy path (the loop
+    /// returns on the first satisfied poll) and only spends real time when
+    /// something is genuinely wrong, which is the trade a test wants.
     private func waitForState(
         _ coordinator: CaptureCoordinator,
-        timeout: TimeInterval = 3,
+        timeout: TimeInterval = 30,
         _ predicate: @escaping (CaptureCoordinator.State) -> Bool,
         _ message: String = ""
     ) async {
@@ -189,7 +203,7 @@ import Testing
         // Never started playback — refusing, not silently pitch-shifting.
         #expect(!playback.callList().contains("play"), "must NOT play on a rate mismatch")
         // And it stopped the capture child.
-        await waitForState(coordinator, timeout: 1) { _ in process.stopped } // stop() called on the child
+        await waitForState(coordinator, timeout: 10) { _ in process.stopped } // stop() called on the child
         #expect(process.stopped, "capture must be stopped on a rate mismatch")
     }
 

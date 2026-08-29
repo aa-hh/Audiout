@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Buying, licences and refunds
+    url: https://audiout.app/contact
+    about: Anything about a purchase, a licence key or a refund — not a code issue.
+  - name: Audiout Remote for iPhone
+    url: https://audiout.app/remote
+    about: The iPhone companion is a separate app and isn't tracked in this repository.

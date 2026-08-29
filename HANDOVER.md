@@ -4,7 +4,88 @@ Written 2026-08-29. Single session, no prior handover exists for this branch.
 
 ---
 
-## 1. Where you are
+## 0. Status — LIVE-VERIFIED 2026-08-29
+
+Alec tested the finished branch on Move 2 and confirmed it: "amazing its
+perfect". Turning an app down keeps it playing on the speaker, quieter;
+dragging across 100 is smooth; returning to 100 is silent. What follows
+records how it got there, because the first design did not work at all and
+the reasons are not obvious from the code.
+
+**Awaiting Alec's go-ahead to merge.** Nothing has been merged to `main`, and
+no PR is open.
+
+### What the original commit got wrong
+
+`a0a74ba6` shipped with a green suite and a confident handover, and its
+central behaviour had never been heard. It did not work. Three findings, in
+the order they were proven:
+
+1. **The injector had no carrier.** `LeveledAppInjector.mix()` was only ever
+   called from inside the whole-system tap's buffer callback. Turning an app
+   down excludes it from that tap and mutes it — so when it is the ONLY thing
+   playing, the tap has nothing left to capture, Core Audio stops calling us,
+   and the app's audio piles into a full ring and is discarded. Silence
+   everywhere. Proven by `leveled_health` telemetry: the tap sat in
+   `capturing` while `mix_calls` read 0 for four consecutive windows against
+   a ring pinned at its 22050-sample capacity, with buffers arriving at the
+   correct rate throughout. Fixed in `42e8ddde` by giving the program feed
+   its own clock, modelled on the wizard pacer.
+2. **Crossing 100 thrashed.** Every slider tick across the boundary swapped
+   the app between the `.unmuted` metering tap and the `.mutedWhenTapped`
+   levelling one. `muteBehavior` is fixed at tap creation, so each crossing
+   destroyed and rebuilt two Core Audio aggregates — eight full cycles in
+   1.1 s of dragging, 18 exclusion changes, audibly dropping to the Mac each
+   time.
+3. **The exit blipped.** Leaving the levelled set destroys the app's tap and
+   rebuilds the whole-system tap; while that tap is down the Mac's own
+   speakers are unmuted, so the app is briefly heard on the Mac. Delaying the
+   exit only moved the blip.
+
+2 and 3 are both fixed by stickiness (`0ac856bc`): once turned down, an app
+stays intercepted for the session, injected at unity gain when the slider is
+back at 100. `scaledStereoSamples` is exact identity at 100, so it
+contributes sample-for-sample what the whole-system tap would have carried.
+There is no exit, so there is no transition to glitch.
+
+Note stickiness was tried FIRST (`885e92ab`) and reverted (`33ceb207`) —
+correctly, because finding 1 was still live and stickiness made the resulting
+silence permanent. It only became viable once the carrier was fixed.
+
+### Why the tests did not catch any of it
+
+They still pass with the feature completely silent. Every levelled test hands
+the tap a buffer first, so none of them can see a tap that never delivers.
+The one test that now covers it —
+`aLeveledAppIsStillHeardWhenTheTapItselfGoesSilent` — deliberately pushes
+NOTHING through the tap. Every fix on this branch was red-checked: the fix
+disabled, the test confirmed failing on the right assertion, then restored.
+Do that for anything you add here.
+
+### Diagnostics left in place
+
+- `leveled_health` (every 5 s while capturing) — `mix_calls` at 0 means the
+  tap never asked; `buffers_in` climbing with `samples_mixed` at 0 means the
+  rings fill and nothing reads them; `dropped_*` names the guard eating
+  buffers.
+- `engine_session_failed` — the AirPlay engine's own session death, which
+  produces the user-visible "engine state: failed". It logged nothing before
+  `5066ccc2`, which is why a dropped session had to be inferred and was
+  initially blamed on the wrong cause.
+
+### Two traps for whoever is next
+
+- **`main` had build-script fixes this branch lacked.** Remote builds died on
+  a missing resource bundle and silently fell back to compiling locally.
+  `5bd58060` and `feafaf45` bring `make-app.sh` and `livetest.sh` across.
+  Take them together — the first calls the second.
+- **The live-test slot is owned by a worktree path.** Acquire it from the
+  worktree you will build in, not from the main checkout, or `make-app.sh`
+  refuses the shared dev id even while you hold the slot.
+
+---
+
+## 1. Where you are (original, pre-fix — kept for the record)
 
 - **Worktree:** `.claude/worktrees/per-app-intercept-volume-aba1ad`.
 - **Branch:** `claude/per-app-intercept-volume-aba1ad`, pushed to origin.
@@ -147,7 +228,7 @@ in isolation afterward. It sits in the exact code path this branch widened
 (`wantsPerAppCaptureLocked`), so it's not automatically dismissible — but
 check machine load before suspecting a regression here.
 
-## 7. What's owed — nothing has made a sound
+## 7. What was owed — NOW DONE (live-verified 2026-08-29, see §0)
 
 **No `.app` has been built. No live hardware verification has happened.**
 Everything above is hermetic (unit/integration tests with mock backends and

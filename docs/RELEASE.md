@@ -152,3 +152,25 @@ copy of the app already installed — a one-time choice, not a per-release one,
 because changing it later strands existing installs (they keep checking the OLD
 URL forever unless a manual update ships a new one). Decide it before the first
 public release, not after; it is the license server's `PUBLIC_BASE_URL`.
+
+### g. Going public: upload the GitHub social preview
+
+The repo is private until launch day. **GitHub hides the Social preview
+setting entirely on a private repo that has never had an image uploaded** —
+the section is not there to find, which reads as a missing feature rather
+than a gate.
+
+So it can only be done *after* the repo goes public, and it is one click that
+is easy to forget once the release itself is out:
+
+1. Flip the repo public.
+2. Settings → General → **Social preview** → Edit → Upload an image…
+3. Choose `docs/media/social-preview.png` (1280×640, already the right size).
+
+Until that upload happens, every link to the repo — Hacker News, Reddit,
+Slack, Twitter — renders as a bare grey card instead of the product image,
+on exactly the day traffic is highest. Do it before announcing anywhere.
+
+Do not flip the repo public early just to get the upload done: GitHub's public
+event feed is archived by third parties, so even a brief window can surface an
+unannounced repo.

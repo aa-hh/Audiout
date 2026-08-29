@@ -1520,6 +1520,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onboardingPresentationGeneration += 1
         let presentationGeneration = onboardingPresentationGeneration
 
+        // A speaker on screen has already answered the Local Network question.
+        // That permission has no silent read — browsing IS the request — so a
+        // fresh model would otherwise open at `.unknown` and offer to ask for
+        // access this app is visibly already using, which is exactly what it
+        // did when the persisted proof had not been written yet (live report,
+        // 2026-08-29: "I had to click on the local network one"). Anything
+        // found over Bonjour is that proof, gathered by the app's ordinary
+        // discovery rather than by a check of its own. First run legitimately
+        // has no speakers yet, so it still asks properly.
+        if devicesByID.values.contains(where: { $0.kind.isDiscoveredOverLocalNetwork }) {
+            settings.localNetworkWasGranted = true
+        }
+
         let model = providedModel ?? SetupModel(
             providers: permissionProviders,
             settings: settings,

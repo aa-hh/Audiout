@@ -166,7 +166,12 @@ import CoreAudio
         func set(_ v: Bool) { lock.withLock { value = v } }
     }
 
-    private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {
+    /// Ceiling is a HANG-STOP, not a performance assertion — it returns on the
+    /// first satisfied tick, so a passing test pays nothing and only a genuinely
+    /// stuck condition waits it out. Was 2 s, which a full-suite run's shared
+    /// cooperative pool can exceed while the code is perfectly correct (the
+    /// roadmap-023 class; same reasoning as `CaptureCoordinatorTests.waitForState`).
+    private func waitFor(timeout: TimeInterval = 30, _ cond: @escaping () -> Bool) {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if cond() { return }

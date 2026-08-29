@@ -1020,13 +1020,6 @@ public final class DeviceRowView: NSView {
     /// already expects between segment WORDS.
     private static let feedSegmentSeparator = " · "
 
-    /// The one monochrome SF Mono uppercase micro-tag this column ever shows,
-    /// prefixed ahead of the FIRST visible pill's own text for a true
-    /// protocol exception. AP2 is the default and is never badged (spec item
-    /// 3 "attributes/flags"). Plain speech, not the protocol jargon "AP1" —
-    /// the tooltip carries the consequence (popover P1-5).
-    private static let ap1FeedTag = "Older AirPlay"
-
     /// Re-derive and push the FEED column's pills from the current device/
     /// mix/redirect state (``mainMixSourceName``/``feedAppNames``, set by
     /// ``apply``). No-op — hides `feedStack` — when this row hosts no FEED
@@ -1093,21 +1086,16 @@ public final class DeviceRowView: NSView {
             if controlsMuted { color = color.withAlphaComponent(Self.feedMutedTintAlpha) }
             segments.append(.init(text: name, color: color, hasChip: true))
         }
-        let tag = device.supportsAirPlay2 ? nil : Self.ap1FeedTag
-        setFeedSegments(segments, tag: tag)
+        setFeedSegments(segments)
         // Tooltip (P1-5): the FULL, uncapped feed list — the "+N" cap is a
-        // screen-only affordance — plus the Older-AirPlay consequence line
-        // when this device can't route single apps. Two lines max, joined by
-        // a newline; `nil` when there's nothing to say (mirrors the
-        // FEED column's own empty case). MUST be set AFTER `setFeedSegments`:
+        // screen-only affordance. `nil` when there's nothing to say (mirrors
+        // the FEED column's own empty case). MUST be set AFTER
+        // `setFeedSegments`:
         // it rebuilds the pills through `renderFeedPills` → `clearFeedPills()`,
         // which unconditionally wipes `feedStack.toolTip` as part of tearing
         // down the old pills — setting it before that call had it silently
         // erased on every apply.
-        var tooltipLines: [String] = []
-        if !feedNames.isEmpty { tooltipLines.append("Feeding " + feedNames.joined(separator: ", ")) }
-        if !device.supportsAirPlay2 { tooltipLines.append("Older AirPlay — can't route single apps") }
-        feedStack.toolTip = tooltipLines.isEmpty ? nil : tooltipLines.joined(separator: "\n")
+        feedStack.toolTip = feedNames.isEmpty ? nil : "Feeding " + feedNames.joined(separator: ", ")
     }
 
     /// The FEED column's spoken/tooltip names, in order: `mainMixSourceName`
@@ -1160,7 +1148,7 @@ public final class DeviceRowView: NSView {
         feedStack.toolTip = nil
     }
 
-    /// Render a SINGLE failure-red pill (no tag, no chip) — the "Couldn't
+    /// Render a SINGLE failure-red pill (no chip) — the "Couldn't
     /// connect" / "Unavailable" rungs.
     private func setFeedText(_ text: String, color: NSColor) {
         let attr = NSAttributedString(
@@ -1169,32 +1157,25 @@ public final class DeviceRowView: NSView {
     }
 
     /// Compose `segments` (main-mix + app tokens, already colored) into ONE
-    /// PILL EACH, prefixing `tag` (the AP1 micro-tag) onto the FIRST visible
-    /// pill's own text when present, with the spec item 3 STATIC overflow
+    /// PILL EACH, with the spec item 3 STATIC overflow
     /// rule: try showing every value's pill first; if the row of pills
     /// doesn't fit `PopoverColumnGrid.feedColumnWidth`, drop values from the
     /// TAIL one at a time (never cut a pill mid-string) and append a trailing
     /// "+N" pill for the dropped count — no interactive reveal, locked.
     /// Clears the pills when there is nothing to show at all.
-    private func setFeedSegments(_ segments: [FeedSegment], tag: String?) {
+    private func setFeedSegments(_ segments: [FeedSegment]) {
         guard !segments.isEmpty else {
             clearFeedPills()
             return
         }
         let font = Tokens.Font.caption
-        // Item 8: the "+N" overflow pill and the AP1 micro-tag dim in
-        // lockstep with the pills they sit beside — the same `controlsMuted`
-        // gate ``updateFeedText()`` used to build `segments`.
+        // Item 8: the "+N" overflow pill dims in lockstep with the pills it
+        // sits beside — the same `controlsMuted` gate ``updateFeedText()``
+        // used to build `segments`.
         let chromeColor = controlsMuted ? Tokens.Color.tertiaryLabel : Tokens.Color.feedPillText
 
-        func attributed(_ segment: FeedSegment, prefixTag: Bool) -> NSAttributedString {
+        func attributed(_ segment: FeedSegment) -> NSAttributedString {
             let result = NSMutableAttributedString()
-            if prefixTag, let tag {
-                result.append(NSAttributedString(string: tag + " ", attributes: [
-                    .font: Tokens.Font.microLabel,
-                    .foregroundColor: chromeColor,
-                ]))
-            }
             // The chip (Warm Signal v4.1 CORRECTIONS "[chip] Music," now
             // living INSIDE the pill beside the name) — an app segment only,
             // never the neutral main-mix segment.
@@ -1212,19 +1193,11 @@ public final class DeviceRowView: NSView {
             attr.size().width + PopoverColumnGrid.feedPillHorizontalPadding * 2
         }
 
-        /// The "+N" pill itself, optionally wearing the AP1 tag — used both
-        /// as the trailing pill alongside visible value pills and, when even
-        /// ONE value pill can't fit beside it, as the composite's SOLE pill.
-        func overflowPill(count: Int, prefixTag: Bool) -> NSAttributedString {
-            let result = NSMutableAttributedString()
-            if prefixTag, let tag {
-                result.append(NSAttributedString(string: tag + " ", attributes: [
-                    .font: Tokens.Font.microLabel,
-                    .foregroundColor: chromeColor,
-                ]))
-            }
-            result.append(NSAttributedString(string: "+\(count)", attributes: [.font: font, .foregroundColor: chromeColor]))
-            return result
+        /// The "+N" pill itself — used both as the trailing pill alongside
+        /// visible value pills and, when even ONE value pill can't fit beside
+        /// it, as the composite's SOLE pill.
+        func overflowPill(count: Int) -> NSAttributedString {
+            NSAttributedString(string: "+\(count)", attributes: [.font: font, .foregroundColor: chromeColor])
         }
 
         let available = PopoverColumnGrid.feedColumnWidth
@@ -1243,12 +1216,10 @@ public final class DeviceRowView: NSView {
         while true {
             let overflowCount = segments.count - visibleCount
             var trial: [NSAttributedString] = visibleCount > 0
-                ? segments.prefix(visibleCount).enumerated().map { index, segment in
-                    attributed(segment, prefixTag: index == 0)
-                  }
+                ? segments.prefix(visibleCount).map(attributed)
                 : []
             if overflowCount > 0 {
-                trial.append(overflowPill(count: overflowCount, prefixTag: visibleCount == 0))
+                trial.append(overflowPill(count: overflowCount))
             }
             let totalWidth = trial.map(pillWidth).reduce(0, +)
                 + CGFloat(max(0, trial.count - 1)) * PopoverColumnGrid.feedPillGap
@@ -2229,9 +2200,9 @@ public final class DeviceRowView: NSView {
     /// The FEED column's current plain-text content, or `nil` when it has
     /// nothing to show. Joins each pill's own text (chip object-replacement
     /// characters already stripped by `FeedPillView.test_text`) with the same
-    /// " · " a test already reads between values — including a static
-    /// "AP1 " prefix on the first pill, or a trailing "+N" pill, when
-    /// present — so a test can assert the rendered WORDS across the whole
+    /// " · " a test already reads between values — including a trailing
+    /// "+N" pill when present — so a test can assert the rendered WORDS
+    /// across the whole
     /// pill row without parsing per-pill color runs itself.
     public var test_feedText: String? {
         let pills = feedPills
@@ -2293,11 +2264,6 @@ public final class DeviceRowView: NSView {
         guard let text = test_feedText else { return false }
         return text.range(of: #"\+\d+$"#, options: .regularExpression) != nil
     }
-
-    /// Whether the FEED column is currently prefixed with the monochrome AP1
-    /// micro-tag (spec item 3 "attributes/flags" — the one true-exception tag;
-    /// AP2 is the default and is never badged).
-    public var test_feedHasAP1Tag: Bool { test_feedText?.hasPrefix("\(Self.ap1FeedTag) ") == true }
 
     /// The FEED stack's tooltip — the uncapped "Feeding …" line plus the
     /// Older-AirPlay consequence line, `nil` when neither applies (P1-5).

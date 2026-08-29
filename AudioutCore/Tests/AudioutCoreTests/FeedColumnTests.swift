@@ -138,31 +138,21 @@ import AudioutCore
         #expect(row.test_statusText == "Muted", "…it lives on the sublabel/mute-pill instead")
     }
 
-    // MARK: AP1 micro-tag — the one true exception, AP2 never badged
+    // MARK: No protocol badge — the FEED column shows feeds, never attributes
 
-    @Test func aP1DeviceGetsTheMicroTagPrefix() {
-        let row = makeBusRow()
-        row.apply(makeDevice(supportsAirPlay2: false), selected: true, controllable: true)
-        #expect(row.test_feedHasAP1Tag)
-        #expect(row.test_feedText == "Older AirPlay System")
-        let tooltip = row.test_feedTooltip ?? ""
-        #expect(tooltip.contains("Feeding System"))
-        #expect(tooltip.contains("Older AirPlay — can't route single apps"))
-    }
-
-    @Test func aP2DeviceNeverGetsATag() {
-        let row = makeBusRow()
-        row.apply(makeDevice(supportsAirPlay2: true), selected: true, controllable: true)
-        #expect(!(row.test_feedHasAP1Tag))
-    }
-
-    @Test func failedAP1DeviceShowsTheErrorWithNoTag() {
-        // The error override takes the WHOLE column — no tag mixed in.
-        let row = makeBusRow()
-        row.apply(makeDevice(connectionState: .failed(.init(cause: .vanished)), supportsAirPlay2: false),
-                  selected: true, controllable: true)
-        #expect(row.test_feedText == "Not on the network")
-        #expect(!(row.test_feedHasAP1Tag))
+    /// The retired "Older AirPlay" micro-tag. It read `supportsAirPlay2`,
+    /// which is false for Bluetooth, Cast AND the Mac's own row as well as a
+    /// genuine AP1 receiver — so it labelled a Chromecast as AirPlay. Alec
+    /// dropped it outright rather than narrowing it: the column carries what a
+    /// device is PLAYING, and a protocol attribute was never that.
+    @Test func noDeviceGetsAProtocolTagWhateverItsAirPlay2Flag() {
+        for supportsAirPlay2 in [true, false] {
+            let row = makeBusRow()
+            row.apply(makeDevice(supportsAirPlay2: supportsAirPlay2), selected: true, controllable: true)
+            #expect(row.test_feedText == "System")
+            #expect(row.test_feedTooltip == "Feeding System",
+                    "the tooltip keeps the feed line and loses the protocol consequence line")
+        }
     }
 
     // MARK: STATIC "+N" overflow — locked, no interactive reveal

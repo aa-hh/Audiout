@@ -156,6 +156,24 @@ import AudioutCore
         #expect(!(row.test_feedHasAP1Tag))
     }
 
+    @Test func nonAirPlayKindsNeverGetTheTagDespiteSharingTheFlag() {
+        // The local Mac, Bluetooth and Cast devices all carry
+        // `supportsAirPlay2 == false` yet are not AirPlay at all — badging
+        // them "Older AirPlay" lied on the This Mac row (and the sync-row
+        // feed slot truncated the pill to a bare "Older").
+        let kinds: [(Device.Kind, Bool)] = [(.localMac, true), (.bluetooth, false), (.cast, false)]
+        for (kind, isLocal) in kinds {
+            let device = Device(id: "dev-\(kind)", name: "Test Speaker", kind: kind,
+                                isAvailable: true, supportsAirPlay2: false,
+                                isLocalDevice: isLocal, connectionState: .connected)
+            let row = makeBusRow(device: device)
+            row.apply(device, selected: true, controllable: true)
+            #expect(!row.test_feedHasAP1Tag, "\(kind) is not an AirPlay receiver")
+            #expect(row.test_feedText == "System")
+            #expect(!(row.test_feedTooltip ?? "").contains("Older AirPlay"))
+        }
+    }
+
     @Test func failedAP1DeviceShowsTheErrorWithNoTag() {
         // The error override takes the WHOLE column — no tag mixed in.
         let row = makeBusRow()

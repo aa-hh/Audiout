@@ -78,8 +78,8 @@ import AppKit
         #expect(popover.test_deviceRow(for: "office") == nil)
         #expect(popover.test_cardChevronSymbolName(title: airPlayTitle) == "chevron.right")
         #expect(popover.test_subsectionTitles()
-                == ["This Mac", airPlayTitle, bluetoothTitle],
-                "a collapsed subsection keeps its header — only the rows go")
+                == [airPlayTitle, bluetoothTitle],
+                "a collapsed subsection keeps its header — only the rows go; the Mac row is pinned above the subsections, not one of them")
 
         popover.test_fireSubsectionHeaderClick(title: airPlayTitle)
         #expect(popover.test_deviceRow(for: "office") != nil)
@@ -185,7 +185,7 @@ import AppKit
                                  bt("bt-a:output", name: "Speaker A")])
 
         #expect(popover.test_subsectionTitles()
-                == ["This Mac", airPlayTitle, castTitle, bluetoothTitle])
+                == [airPlayTitle, castTitle, bluetoothTitle])
         #expect(popover.test_renderedDeviceIDs() == ["mac", "office", "c1", "bt-a:output"])
     }
 
@@ -196,7 +196,7 @@ import AppKit
         let (popover, _) = makePopover()
         popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Speaker A")])
 
-        #expect(popover.test_subsectionTitles() == ["This Mac", airPlayTitle, bluetoothTitle])
+        #expect(popover.test_subsectionTitles() == [airPlayTitle, bluetoothTitle])
     }
 
     @Test func castSectionCollapsesLikeAirPlay() {
@@ -211,7 +211,7 @@ import AppKit
         #expect(popover.test_renderedDeviceIDs() == ["mac", "office", "bt-a:output"])
         #expect(popover.test_cardChevronSymbolName(title: castTitle) == "chevron.right")
         #expect(popover.test_subsectionTitles()
-                == ["This Mac", airPlayTitle, castTitle, bluetoothTitle],
+                == [airPlayTitle, castTitle, bluetoothTitle],
                 "a collapsed subsection keeps its header — only the rows go")
 
         popover.test_fireSubsectionHeaderClick(title: castTitle)
@@ -235,7 +235,7 @@ import AppKit
         #expect(popover.test_renderedDeviceIDs() == ["mac", "bt-live:output"])
         #expect(popover.test_bluetoothRowOrder() == ["bt-live:output"])
         #expect(popover.test_subsectionTitles()
-                == ["This Mac", airPlayTitle, bluetoothTitle],
+                == [airPlayTitle, bluetoothTitle],
                 "the Bluetooth header still renders for the one listed row, and AirPlay's now carries its own search state (P1-1)")
     }
 
@@ -246,7 +246,7 @@ import AppKit
         let (popover, _) = makePopover()
         popover.update(devices: [local(), airplay()])
         #expect(popover.test_bluetoothConnectRowShown())
-        #expect(popover.test_subsectionTitles() == ["This Mac", airPlayTitle, bluetoothTitle])
+        #expect(popover.test_subsectionTitles() == [airPlayTitle, bluetoothTitle])
 
         // It has to LOOK actionable, not like a greyed-out placeholder line:
         // a leading "+" glyph is the half a headless run can see (the pointing
@@ -402,17 +402,19 @@ import AppKit
     /// The case that erased the rail outright: EVERY device inside the subsection
     /// being collapsed. No visible node is left for the channel to reach, so the
     /// rail is nothing BUT the cut — a dot at that subsection's header, never a
-    /// hook curling off Main Audio into mid-air.
+    /// hook curling off Main Audio into mid-air. (Fleet is a lone Bluetooth
+    /// speaker: the Mac row is pinned outside every subsection since 2026-08-28,
+    /// so a Mac in the fleet can never be hidden by a subsection collapse.)
     @Test func collapsingTheSubsectionHoldingEveryDeviceStillEndsInADot() throws {
-        let fleet = [local()]
+        let fleet = [bt("bt-z:output", name: "Zed Box")]
         let (popover, controller) = makePopover(fleet: fleet)
-        controller.setDeviceSelected("mac", true)   // …and nothing else
+        controller.setDeviceSelected("bt-z:output", true)   // …and nothing else
         popover.update(devices: fleet)
         popover.test_applyExactFitSize()
         #expect(!(try #require(popover.test_railPlan()).stops.isEmpty),
-                "expanded: the Mac's own node is on the rail")
+                "expanded: the speaker's node is on the rail")
 
-        popover.test_fireSubsectionHeaderClick(title: PopoverController.thisMacSubsectionTitle)
+        popover.test_fireSubsectionHeaderClick(title: bluetoothTitle)
         popover.test_applyExactFitSize()
 
         let plan = try #require(popover.test_railPlan())
@@ -424,8 +426,10 @@ import AppKit
     /// The invariant behind both cases above, stated once. With the origin
     /// resolved and devices in the mix, a rail plan may never be BOTH stop-less
     /// and dot-less — that pair IS the dangling hook, a rail that starts at
-    /// Main Audio and ends nowhere. Swept over every subsection, collapsing
-    /// them one after another until all three are shut.
+    /// Main Audio and ends nowhere. Swept over every collapsible subsection,
+    /// collapsing them one after another until both are shut (the pinned Mac
+    /// row has no subsection to collapse — its node can only fold with the
+    /// whole card).
     @Test func aRailWithDevicesInTheMixIsNeverBothStopLessAndDotLess() throws {
         let fleet = [local(), airplay(), bt("bt-z:output", name: "Zed Box")]
         let (popover, controller) = makePopover(fleet: fleet)
@@ -434,13 +438,44 @@ import AppKit
         controller.setDeviceSelected("bt-z:output", true)
         popover.update(devices: fleet)
 
-        for title in [PopoverController.thisMacSubsectionTitle, airPlayTitle, bluetoothTitle] {
+        for title in [airPlayTitle, bluetoothTitle] {
             popover.test_fireSubsectionHeaderClick(title: title)
             popover.test_applyExactFitSize()
             let plan = try #require(popover.test_railPlan())
             #expect(!(plan.stops.isEmpty && plan.terminusDotY == nil),
                     "collapsing \(title) left the rail with no stops AND no terminus")
         }
+    }
+
+    // MARK: The Mac row is pinned under the card header (2026-08-28)
+
+    /// The Mac row has no subsection of its own any more: it renders directly
+    /// under the "Output Devices" header, inside the card's COLLAPSIBLE body —
+    /// so collapsing the card folds it with everything else. Pinning it in the
+    /// header region instead (like the card note, which survives collapse)
+    /// would leave a device row standing on a card that claims to be shut.
+    @Test func thePinnedMacRowFoldsWithTheOutputDevicesCard() throws {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay()])
+        popover.test_applyExactFitSize()
+        let macRow = try #require(popover.test_deviceRow(for: "mac"))
+        #expect(popover.test_subsectionTitles() == [airPlayTitle, bluetoothTitle],
+                "no This Mac grouping header — AirPlay Devices is the first subsection")
+        #expect(macRow.frame.height > 0)
+
+        popover.test_toggleCard(title: PopoverController.outputDevicesCardTitle)
+        popover.test_applyExactFitSize()
+
+        // The row folded away inside the card's collapsed body clip — some
+        // ancestor between it and the panel is now laid out at height 0.
+        var ancestor = macRow.superview
+        var insideCollapsedClip = false
+        while let view = ancestor {
+            if view.frame.height == 0 { insideCollapsedClip = true; break }
+            ancestor = view.superview
+        }
+        #expect(insideCollapsedClip,
+                "collapsing Output Devices folds the pinned Mac row with the card body")
     }
 
     /// Re-expanding restores the exact rail it had before — the plan carries no

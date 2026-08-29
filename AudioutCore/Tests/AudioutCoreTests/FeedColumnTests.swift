@@ -143,8 +143,9 @@ import AudioutCore
     /// The retired "Older AirPlay" micro-tag. It read `supportsAirPlay2`,
     /// which is false for Bluetooth, Cast AND the Mac's own row as well as a
     /// genuine AP1 receiver — so it labelled a Chromecast as AirPlay. Alec
-    /// dropped it outright rather than narrowing it: the column carries what a
-    /// device is PLAYING, and a protocol attribute was never that.
+    /// dropped it outright rather than narrowing it to real AP1 receivers: the
+    /// column carries what a device is PLAYING, and a protocol attribute was
+    /// never that.
     @Test func noDeviceGetsAProtocolTagWhateverItsAirPlay2Flag() {
         for supportsAirPlay2 in [true, false] {
             let row = makeBusRow()
@@ -153,6 +154,30 @@ import AudioutCore
             #expect(row.test_feedTooltip == "Playing System",
                     "the tooltip keeps the feed line and loses the protocol consequence line")
         }
+    }
+
+    /// The kinds that shared the flag without being AirPlay at all — the Mac's
+    /// own row was the visible casualty, its narrow feed slot truncating
+    /// "Older AirPlay System" to a bare "Older".
+    @Test func nonAirPlayKindsShowTheirFeedAndNothingElse() {
+        let kinds: [(Device.Kind, Bool)] = [(.localMac, true), (.bluetooth, false), (.cast, false)]
+        for (kind, isLocal) in kinds {
+            let device = Device(id: "dev-\(kind)", name: "Test Speaker", kind: kind,
+                                isAvailable: true, supportsAirPlay2: false,
+                                isLocalDevice: isLocal, connectionState: .connected)
+            let row = makeBusRow(device: device)
+            row.apply(device, selected: true, controllable: true)
+            #expect(row.test_feedText == "System", "\(kind) shows its feed, unbadged")
+            #expect(!(row.test_feedTooltip ?? "").contains("Older AirPlay"))
+        }
+    }
+
+    @Test func failedDeviceShowsOnlyTheError() {
+        // The error override takes the WHOLE column.
+        let row = makeBusRow()
+        row.apply(makeDevice(connectionState: .failed(.init(cause: .vanished)), supportsAirPlay2: false),
+                  selected: true, controllable: true)
+        #expect(row.test_feedText == "Not on the network")
     }
 
     // MARK: STATIC "+N" overflow — locked, no interactive reveal

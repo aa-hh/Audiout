@@ -2848,8 +2848,8 @@ import AppKit
         popover.rebuildForOpen()
         #expect(popover.test_speakerSearchStateText == nil)
         #expect(popover.test_subsectionTitles()
-                == ["This Mac", "AirPlay Devices", "Bluetooth Devices"],
-                "no empty AirPlay header, no missing one")
+                == ["AirPlay Devices", "Bluetooth Devices"],
+                "no empty AirPlay header, no missing one (the Mac row is pinned above the subsections)")
     }
 
     // MARK: System-AirPlay guard note (Wave 3 W3-T3)

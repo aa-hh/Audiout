@@ -1258,7 +1258,7 @@ private final class SpyLocalPlayback: LocalPlaybackControlling, @unchecked Senda
 
 /// Records `.level`/`.appLevel` events (the two the other `collect` helpers
 /// deliberately skip) with sync accessors so `pollUntil` can inspect them.
-private final class LevelSink: @unchecked Sendable {
+final class LevelSink: @unchecked Sendable {
     private let lock = NSLock()
     private var _device: [(id: String, rms: Float)] = []
     private var _app: [(bundleID: String, rms: Float)] = []
@@ -1278,7 +1278,8 @@ private final class LevelSink: @unchecked Sendable {
 }
 
 /// Subscribe and record every `.level`/`.appLevel`. Caller cancels the task.
-private func subscribeLevels(_ backend: NativeBackend) -> (LevelSink, Task<Void, Never>) {
+/// Shared with the BT and Cast suites, which meter through the same channel.
+func subscribeLevels(_ backend: NativeBackend) -> (LevelSink, Task<Void, Never>) {
     let sink = LevelSink()
     let stream = backend.makeEventStream()
     let task = Task { for await event in stream { sink.record(event) } }
@@ -1363,7 +1364,14 @@ private func makeSyncedLocalBackend(macSelectedByDefault: Bool)
     return (backend, engine, discovery, capture, sink, macSelected)
 }
 
-private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async {
+/// Poll until `condition` holds or the ceiling elapses. The ceiling is a
+/// HANG-STOP, not a performance assertion: it costs a passing poll nothing
+/// (it returns on the first satisfied tick), so it only bounds how long a
+/// genuinely stuck condition takes to reach its assertion. Kept generous
+/// because a full-suite run shares one cooperative pool with ~3,000 tests,
+/// several of which block a thread outright — the roadmap-023 class of flake
+/// documented in `BTConnectionManagerTests` and `CastLiveAudioServerTests`.
+private func pollUntil(timeout: TimeInterval = 30, _ condition: @escaping () -> Bool) async {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
         if condition() { return }
@@ -1374,7 +1382,7 @@ private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> B
 /// Poll the spy until a `setVolume(outputID, value)` call lands (the push is
 /// fire-and-forget through a Task, so it's not synchronous with the apply).
 private func waitForVolumePush(
-    _ engine: SpyEngine, _ outputID: OutputID, _ value: Double, timeout: TimeInterval = 3
+    _ engine: SpyEngine, _ outputID: OutputID, _ value: Double, timeout: TimeInterval = 30
 ) async -> Bool {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
@@ -9382,7 +9390,7 @@ extension SerializedSharedState {
 
         backend.setOutputSet([])   // converge teardown: the removeOutput runs the hook
 
-        await pollUntil(timeout: 5) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
         let live = engine.liveStream(of: device.outputID)
         #expect(live != nil && live! >= 1,
                 "the re-driven bind must land after the whole-system release")
@@ -9542,7 +9550,7 @@ extension SerializedSharedState {
         // assign a FRESH stream id on re-engage — any per-app stream (>= 1) is
         // the ownership fact under test.)
         backend.setOutputSet([])
-        await pollUntil(timeout: 5) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
         #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
                 "the demoted route must re-engage the moment the device is deselected")
         await pollUntil { routedApps.last == ["Foo"] }
@@ -9684,7 +9692,7 @@ extension SerializedSharedState {
                 "the release must drop (loudly) a settle whose device the route table re-claimed")
 
         activator.release()
-        await pollUntil(timeout: 5) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
         #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
                 "the re-engaged per-app session must survive — a stale unbind here is silent stranding")
         let ops = engine.ops

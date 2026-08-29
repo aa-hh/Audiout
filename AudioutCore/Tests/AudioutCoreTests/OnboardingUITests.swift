@@ -1508,10 +1508,21 @@ import Testing
     /// pending, the offending step re-opens through the same snap-back
     /// machinery, and nothing payoff-ish ever appears.
     @Test func aFailedAutoCheckRevertsTheRowAndSnapsBack() async {
-        let vc = makeVC(model: makeGrantableModel(silentAudio: .denied))
+        // The revocation lands AFTER the rows are granted, the same shape the
+        // two sibling snap-back tests use. It used to be canned as denied from
+        // the start, which worked only while `refreshStatuses()` left an
+        // unengaged row unread — now that it always takes the silent read, a
+        // permission denied from the very first look is caught before the
+        // check ever runs, which is a different (and earlier) story than the
+        // one this test is about.
+        let audio = MutableSilentAudioProbe(silent: .granted)
+        let vc = makeVC(model: makeModel(audio: .granted, audioProbe: audio, foundSpeakers: 3,
+                                         ptpHelper: FakePTPHelper(status: .enabled)))
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
+
+        audio.silent = .denied   // revoked before the automatic check runs
 
         await vc.test_awaitFinalCheck()
 

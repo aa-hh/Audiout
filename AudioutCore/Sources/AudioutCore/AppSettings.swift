@@ -84,6 +84,7 @@ public struct AppSettings {
         static let startBufferMs = "audio.startBufferMs"
         static let hasCompletedSetup = "setup.hasCompleted"
         static let speakerSyncWasEnabled = "speakerSync.wasEnabled"
+        static let localNetworkWasGranted = "localNetwork.wasGranted"
         static let reconnectAtLaunch = "general.reconnectAtLaunch"
         static let wakeRestoreMinutes = "audio.wakeRestoreMinutes"
         static let connectVolume = "audio.connectVolume"
@@ -161,6 +162,23 @@ public struct AppSettings {
     public var speakerSyncWasEnabled: Bool {
         get { defaults.bool(forKey: Keys.speakerSyncWasEnabled) }
         nonmutating set { defaults.set(newValue, forKey: Keys.speakerSyncWasEnabled) }
+    }
+
+    /// Whether a Local Network browse has EVER reached the network — written by
+    /// ``SetupModel``'s one prime funnel the first time it proves the grant, and
+    /// cleared only by a real refusal (the mDNS policy error).
+    ///
+    /// It exists because Local Network is the one permission with no silent
+    /// read: browsing is what raises the system prompt, so a status of
+    /// `.unknown` — which every freshly built ``SetupModel`` starts at — cannot
+    /// be resolved by just looking. Without this bit, re-opening Setup showed a
+    /// long-granted permission as un-asked and invited the user to grant it
+    /// again (live report, 2026-08-29). With it, a fresh model starts from the
+    /// proven grant and re-verifies by browsing, which raises no prompt on a
+    /// permission already held.
+    public var localNetworkWasGranted: Bool {
+        get { defaults.bool(forKey: Keys.localNetworkWasGranted) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.localNetworkWasGranted) }
     }
 
     /// Settings › General "Reconnect last speakers when Audiout starts"

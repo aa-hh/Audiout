@@ -795,4 +795,54 @@ import CoreAudio
         waitFor { rig.capture.castSinkCalls.last?.isNil == true }
         #expect(rig.capture.castSinkCalls.last?.isNil == true)
     }
+
+    // MARK: - CAST-METER
+    //
+    // Cast is the third R-partition: the converge loop's `!device.isCast` guard
+    // keeps a Cast id out of the AirPlay engine, so `Device.isSelected` is never
+    // true for one and `isMeterable` — which asked exactly that — left every Cast
+    // bar dark. `castPlaying` is the Cast "rendering now" fact, the same shape as
+    // the local device's `syncedLocalSinkEnabled`.
+
+    /// A receiver that has reported PLAYING must be metered from the SAME
+    /// whole-system RMS every other output's bar is fed from — the Cast fan-out
+    /// is handed that identical buffer, so reusing it is exact, not an estimate.
+    @Test func playingCastReceiverReceivesTheWholeSystemLevel() {
+        let rig = makeBackend()
+        defer { rig.backend.stop() }
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { Self.device(rig.backend, Self.record.id)?.connectionState == .connecting }
+        rig.manager.fire(id: Self.record.id, state: .playing)
+        waitFor { Self.device(rig.backend, Self.record.id)?.connectionState == .connected }
+
+        let (levels, task) = subscribeLevels(rig.backend); defer { task.cancel() }
+        rig.backend.setMeteringActive(true)
+        // Re-fire while polling: one RMS sample is consumed by a single drain, so
+        // a sample dropped before the subscription registers must not fail the test.
+        waitFor { rig.capture.onLevel?(0.6); return (levels.lastDeviceLevel(Self.record.id) ?? 0) > 0 }
+
+        #expect(abs((levels.lastDeviceLevel(Self.record.id) ?? 0) - 0.6) <= 0.001,
+                "a PLAYING Cast receiver must be metered from the whole-system tap it is fanned out from")
+    }
+
+    /// A receiver that is selected but has not reported PLAYING is not yet making
+    /// sound, so its bar must stay empty. Pins `castPlaying` over mere selection.
+    @Test func selectedButNotPlayingCastReceiverIsNotMetered() {
+        let rig = makeBackend()
+        defer { rig.backend.stop() }
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { Self.device(rig.backend, Self.record.id)?.connectionState == .connecting }
+        // Deliberately never fire `.playing`.
+
+        let (levels, task) = subscribeLevels(rig.backend); defer { task.cancel() }
+        rig.backend.setMeteringActive(true)
+        waitFor(timeout: 0.3) { rig.capture.onLevel?(0.6); return false }
+
+        #expect(levels.lastDeviceLevel(Self.record.id) == nil,
+                "a selected-but-silent Cast receiver must not light its bar")
+    }
 }

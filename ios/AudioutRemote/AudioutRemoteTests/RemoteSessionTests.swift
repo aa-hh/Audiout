@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (c) 2026 ahh. All rights reserved.
 
 import Foundation
 import Testing

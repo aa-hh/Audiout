@@ -80,7 +80,7 @@ import AudioutCore
         #expect(row.test_feedHasOverflow)
         // The tooltip is uncapped (VoiceOver/hover have no viewport to
         // overflow) — every name, no "+N".
-        #expect(row.test_feedTooltip == "Feeding System, Music, Safari")
+        #expect(row.test_feedTooltip == "Playing System, Music, Safari")
     }
 
     @Test func neitherMainMixNorAppsShowsNothing() {
@@ -150,7 +150,7 @@ import AudioutCore
             let row = makeBusRow()
             row.apply(makeDevice(supportsAirPlay2: supportsAirPlay2), selected: true, controllable: true)
             #expect(row.test_feedText == "System")
-            #expect(row.test_feedTooltip == "Feeding System",
+            #expect(row.test_feedTooltip == "Playing System",
                     "the tooltip keeps the feed line and loses the protocol consequence line")
         }
     }
@@ -239,8 +239,8 @@ import AudioutCore
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
         let label = row.test_accessibilityLabel ?? ""
-        #expect(label.hasSuffix(", feeding System, Music"), "the feed clause trails the rest of the composed announcement")
-        #expect(label.components(separatedBy: "feeding").count - 1 == 1, "spoken exactly once")
+        #expect(label.hasSuffix(", playing System, Music"), "the feed clause trails the rest of the composed announcement")
+        #expect(label.components(separatedBy: "playing").count - 1 == 1, "spoken exactly once")
     }
 
     @Test func failedRowNeverSpeaksAFeedClauseSinceTheConnectionClauseAlreadyCoversIt() {
@@ -249,12 +249,12 @@ import AudioutCore
                   selected: true, controllable: true, routedAppNames: ["Music"])
         let label = row.test_accessibilityLabel ?? ""
         #expect(label.hasSuffix(", couldn't connect"), "no trailing feed clause — the connection clause already spoke the failure")
-        #expect(!(label.contains("feeding")))
+        #expect(!(label.contains("playing")))
     }
 
     @Test func nonBusRowNeverSpeaksAFeedClauseEither() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
-        #expect(!((row.test_accessibilityLabel ?? "").contains("feeding")), "a non-bus host has no FEED column, so nothing new to speak")
+        #expect(!((row.test_accessibilityLabel ?? "").contains("playing")), "a non-bus host has no FEED column, so nothing new to speak")
     }
 }

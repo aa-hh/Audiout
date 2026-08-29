@@ -1095,7 +1095,7 @@ public final class DeviceRowView: NSView {
         // which unconditionally wipes `feedStack.toolTip` as part of tearing
         // down the old pills — setting it before that call had it silently
         // erased on every apply.
-        feedStack.toolTip = feedNames.isEmpty ? nil : "Feeding " + feedNames.joined(separator: ", ")
+        feedStack.toolTip = feedNames.isEmpty ? nil : "Playing " + feedNames.joined(separator: ", ")
     }
 
     /// The FEED column's spoken/tooltip names, in order: `mainMixSourceName`
@@ -2265,8 +2265,8 @@ public final class DeviceRowView: NSView {
         return text.range(of: #"\+\d+$"#, options: .regularExpression) != nil
     }
 
-    /// The FEED stack's tooltip — the uncapped "Feeding …" line plus the
-    /// Older-AirPlay consequence line, `nil` when neither applies (P1-5).
+    /// The FEED stack's tooltip — the uncapped "Playing …" line, `nil` when
+    /// the column has nothing to show (P1-5).
     public var test_feedTooltip: String? { feedStack.toolTip }
 
     /// The color a FEED app-name segment for `appName` currently resolves to —
@@ -2936,7 +2936,7 @@ public final class DeviceRowView: NSView {
         if case .failed = device.connectionState { return nil }
         if !device.isAvailable { return nil }
         guard !feedNames.isEmpty else { return nil }
-        return "feeding " + feedNames.joined(separator: ", ")
+        return "playing " + feedNames.joined(separator: ", ")
     }
 
     /// The accessibility-label clause for the current connection state

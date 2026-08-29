@@ -139,6 +139,11 @@ let package = Package(
         // (T-NB-BACKEND-1) and NativeCaptureCoordinator (T-NB-CAPTURE-1) are
         // the consumers; the Mock/OwnTone backends do not import it.
         .package(path: "../AirPlayEngine"),
+        // The sync-probe DSP (sweep synthesis + matched filter), MIT and
+        // license-clean. Its own root package because the closed-source iPhone
+        // companion links the same code; before it existed the phone carried a
+        // hand-copy that had to be kept in step by hand.
+        .package(path: "../ProbeKit"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.
@@ -160,6 +165,7 @@ let package = Package(
             name: "AudioutCore",
             dependencies: [
                 .product(name: "AirPlayEngine", package: "AirPlayEngine"),
+                .product(name: "ProbeKit", package: "ProbeKit"),
                 "CastSender",
                 "ObjCExceptionShim",
             ],
@@ -322,7 +328,7 @@ let package = Package(
         // Mic-probe hardware spike — see the product comment above.
         .executableTarget(
             name: "mic-probe-spike",
-            dependencies: ["AudioutCore"],
+            dependencies: ["AudioutCore", .product(name: "ProbeKit", package: "ProbeKit")],
             // Info.plist is embedded into the Mach-O at link time (below), NOT
             // shipped as an SPM resource — exclude it so SPM stops warning.
             exclude: ["Info.plist"],
@@ -388,6 +394,7 @@ let package = Package(
                 "AudioutOnboardingUI",
                 "CastSender",
                 "CastFakeReceiver",
+                .product(name: "ProbeKit", package: "ProbeKit"),
             ],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),

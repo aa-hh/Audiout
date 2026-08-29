@@ -1,10 +1,11 @@
 // Copyright (C) 2026 ahh and contributors.
+// SPDX-License-Identifier: MIT
 //
-// LICENSE-CLEAN by design, like the file under test: no GPL SPDX header.
+// LICENSE-CLEAN by design, like the file under test: MIT, not GPL.
 
 import Foundation
 import Testing
-@testable import AudioutCore
+@testable import ProbeKit
 
 /// The matched filter behind mic-probe calibration: does it find a probe's
 /// arrival to a fraction of a sample, tell two simultaneous probes apart,

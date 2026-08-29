@@ -43,6 +43,10 @@ symbol you cannot find in source, believe the source and fix the doc.
   routing, the AppKit UI targets, and the shipping app target. This is the app.
 - [AirPlayEngine/](AirPlayEngine/AGENTS.md) — standalone package: a vendored
   AirPlay 2 sender wrapped in a Swift `actor`. No OwnTone runtime dependency.
+- [ProbeKit/](ProbeKit/AGENTS.md) — standalone package: the sync-probe DSP
+  (sweep synthesis + matched filter). MIT, not GPL, and depended on by both the
+  Mac app and the closed-source iPhone companion — that is why it sits here
+  rather than inside either one.
 - [dev/](dev/AGENTS.md) — offline dev tooling, plus `dev/notes/`, the home for
   research briefs and phase write-ups.
 - [scripts/make-app.sh](scripts/make-app.sh) — wraps the executable into a real

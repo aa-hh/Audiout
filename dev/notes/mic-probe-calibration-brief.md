@@ -59,7 +59,7 @@ unless the Mac sits far off-centre; one sentence of UX copy).
   trained estimators learn magnitude-aware frequency weighting and never
   learn PHAT; whitening throws away per-band SNR. Implemented as
   ambient-noise-spectrum division in `SyncProbeCorrelator` (license-clean,
-  `AudioutCore/Sources/AudioutCore/SyncProbeCorrelator.swift`).
+  `ProbeKit/Sources/ProbeKit/SyncProbeCorrelator.swift`).
 - **Audible-pleasant, not ultrasonic.** A2DP codecs roll off 14–18 kHz
   unpredictably per device; probes stay 500 Hz–10 kHz. A short branded chirp
   on connect is the accepted UX (AVRs trained everyone).

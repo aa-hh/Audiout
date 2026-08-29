@@ -3,6 +3,7 @@
 // LICENSE-CLEAN by design, like the files under test: no GPL SPDX header.
 
 import Foundation
+import ProbeKit
 import Testing
 @testable import AudioutCore
 

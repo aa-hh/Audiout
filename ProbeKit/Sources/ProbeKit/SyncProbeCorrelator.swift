@@ -1,11 +1,24 @@
 // Copyright (C) 2026 ahh and contributors.
+// SPDX-License-Identifier: MIT
 //
 // LICENSE-CLEAN by design (PLAN-UNIVERSAL-SYNC Decision 5 lineage): this file
-// carries NO GPL SPDX header, unlike most siblings. Everything in it is probe
-// synthesis and matched-filter math ORIGINAL to this project, written from the
-// published literature (Farina's exponential sine sweep; SNR-weighted
-// cross-correlation), so the Apple-only Bluetooth path can share it. Do not add
-// a GPL header to this file, and do not move GPL-derived code into it.
+// is MIT, NOT GPL, unlike most of the Mac app's sources. Everything in it is
+// probe synthesis and matched-filter math ORIGINAL to this project, written
+// from the published literature (Farina's exponential sine sweep; SNR-weighted
+// cross-correlation), so the Apple-only Bluetooth path can share it and the
+// closed-source iPhone companion can link it. Never put a GPL header on this
+// file, and never move GPL-derived code into it: either would relicense the
+// package out from under a consumer that cannot take GPL.
+//
+// ═══ ONE HOME. This file is not copied anywhere. ═══
+//
+// It lives in the root `ProbeKit` package and BOTH apps depend on that package:
+// the Mac's built-in-mic calibration (`AudioutCore`) and the iPhone companion's
+// phone-as-microphone measurement. The Mac stages the sweeps this file
+// describes, so the two ends have to agree on them exactly — a divergence would
+// not be a local bug, it would be a measurement of the wrong signal reported as
+// a confident number. The package is what makes agreement structural; it
+// replaced a hand-copy that had to be kept in step by hand.
 
 import Accelerate
 import Foundation

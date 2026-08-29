@@ -10,6 +10,7 @@ A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers
 |---|---|
 | `AudioutCore/` | The whole app: Swift package with the core library, AppKit UI targets, and the shipping menu-bar executable |
 | `AirPlayEngine/` | Standalone Swift package: vendored AirPlay 2 C sender wrapped in a Swift actor. Separate package on purpose — licensing boundary, no app concepts inside |
+| `ProbeKit/` | Standalone Swift package: the sync-probe DSP (sweep synthesis + matched filter). MIT, not GPL — the Mac app and the closed-source iPhone companion both depend on it, so the file has one home |
 | `dev/` | Offline dev tooling (fake speakers, dev scripts); `dev/notes/` holds research briefs |
 | `docs/SPEC.md` | Product spec — the source of truth for *what* to build |
 | `scripts/make-app.sh` | Wraps the executable into a signed `.app` bundle (required for TCC/process-tap) |

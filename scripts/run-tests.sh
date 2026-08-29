@@ -30,7 +30,13 @@
 set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
-core="$repo_root/AudioutCore"
+# Which package's tests to run. AudioutCore by default -- it is what Guard 4
+# and every inner-loop run mean by "the suite". ProbeKit is a DEPENDENCY of
+# it, and SwiftPM never runs a dependency's test targets, so ProbeKit's own
+# suite needs this override to run at all (mirrors AUDIOUT_BUILD_PACKAGE in
+# scripts/build.sh):  AUDIOUT_TEST_PACKAGE=ProbeKit scripts/run-tests.sh
+pkg=${AUDIOUT_TEST_PACKAGE:-AudioutCore}
+core="$repo_root/$pkg"
 
 # Disk housekeeping (prune .prunable-flagged worktrees, cap .build caches) at
 # the moment disk pressure actually appears: a build starting. Best-effort by
@@ -89,7 +95,7 @@ run_remote() {
     done
 
     rrc=0
-    remote_run "$repo_root" "cd AudioutCore && swift test $rargs$qargs" || rrc=$?
+    remote_run "$repo_root" "cd $pkg && swift test $rargs$qargs" || rrc=$?
     if [ "$rrc" -eq 2 ]; then
         # "Ran, but failed" — re-run locally rather than trusting the verdict. A
         # machine on a different Swift/SDK must never be what REFUSES a commit:
@@ -113,14 +119,15 @@ cache_dir=${AUDIOUT_TEST_CACHE_DIR:-/tmp/audiout-suite-cache}
 
 # --- content key ------------------------------------------------------------
 # Hash what the suite's result actually depends on: the Swift sources and tests
-# of the package under test, plus the engine package it links and both
-# manifests. Hashing files on disk (not the git index) is deliberate — it is
+# of the package under test, plus the engine and ProbeKit packages it links
+# and their manifests. Hashing files on disk (not the git index) is deliberate — it is
 # correct both for a pre-commit run, where the working tree IS what is about to
 # be committed, and for a manual run mid-edit.
 suite_key() {
     {
         find "$repo_root/AudioutCore/Sources" "$repo_root/AudioutCore/Tests" \
              "$repo_root/AirPlayEngine/Sources" \
+             "$repo_root/ProbeKit/Sources" "$repo_root/ProbeKit/Tests" \
              -type f \( -name '*.swift' -o -name '*.c' -o -name '*.h' \) \
              -exec shasum -a 256 {} + 2>/dev/null
         # The manifests MUST be in the key and are not under any Sources/ dir:
@@ -128,14 +135,17 @@ suite_key() {
         # so a manifest-only edit changes what the suite links and can flip a
         # result with every source file byte-identical.
         shasum -a 256 "$repo_root/AudioutCore/Package.swift" \
-                      "$repo_root/AirPlayEngine/Package.swift" 2>/dev/null
+                      "$repo_root/AirPlayEngine/Package.swift" \
+                      "$repo_root/ProbeKit/Package.swift" 2>/dev/null
     } | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}'
 }
 
 key=$(suite_key)
 # The cache records "these exact sources passed", so it must also be keyed on
-# the arguments — a `--filter Foo` pass says nothing about the full suite.
-args_key=$(printf '%s' "$*" | shasum -a 256 | awk '{print $1}')
+# the arguments — a `--filter Foo` pass says nothing about the full suite — and
+# on WHICH package ran: the source hash above spans every package, so a ProbeKit
+# pass would otherwise stamp the AudioutCore suite as green without running it.
+args_key=$(printf '%s\n%s' "$pkg" "$*" | shasum -a 256 | awk '{print $1}')
 stamp="$cache_dir/$key.$args_key"
 
 if [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ] && [ -f "$stamp" ]; then

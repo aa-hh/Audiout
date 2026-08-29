@@ -63,11 +63,17 @@ engine="--build-system native"
 
 workers=${AUDIOUT_TEST_WORKERS:-6}
 lock_timeout=${AUDIOUT_TEST_LOCK_TIMEOUT:-1800}
-# How many suite runs may proceed at once, machine-wide. Default 2: a single run
-# only reaches ~2.6 of 8 cores (it is wait-bound, not CPU-bound), so two overlap
-# comfortably while still leaving headroom for the developer's own machine.
-# Raise for a beefier box, set to 1 for strict one-at-a-time.
-slots=${AUDIOUT_TEST_SLOTS:-2}
+# How many suite runs may proceed at once, machine-wide. Default 4: the suite is
+# strongly WAIT-bound, not CPU-bound. A serial run burns only ~0.56 of 8 cores
+# (69.7 user-seconds over 124s wall); even the parallel path reaches only ~2.6.
+# Most of the wall clock is the process asleep on fixed timers, so concurrent
+# runs overlap almost for free -- four serial runs are ~2.2 cores, well inside
+# 8 with headroom for the editor and an app under live test. The cap exists to
+# stop unbounded pile-up (an agent typing `swift test` by hand, times N), not to
+# enforce single-file: throughput across many worktrees matters more here than
+# the latency of any one run.
+# Raise for a beefier box, lower for strict one-at-a-time.
+slots=${AUDIOUT_TEST_SLOTS:-4}
 
 # --- remote machine ---------------------------------------------------------
 # Host resolution, the local-vs-remote decision, sync and the run-there wrapper

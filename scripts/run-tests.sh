@@ -41,6 +41,26 @@ hk="$repo_root/scripts/housekeeping.sh"
 [ -x "$hk" ] || hk="$(cd "$(dirname "$0")" && pwd)/housekeeping.sh"
 if [ -x "$hk" ]; then "$hk" --current "$repo_root" || true; fi
 
+# Which build engine the suite compiles with. PINNED rather than defaulted,
+# because the two machines DISAGREE and an unpinned run silently uses a
+# different engine depending on where it lands: Swift 6.4 here defaults to
+# `swiftbuild`, while the remote's Swift 6.3.1 does not carry that engine at
+# all and offers only `native`. Same suite, two compilers, results that cannot
+# be compared -- and, locally, two full .build trees (`out` AND
+# `arm64-apple-macosx`) at ~1.3 GB apiece, since scripts/build.sh and
+# scripts/make-app.sh already pin native. That duplication is what filled this
+# disk: 10 of 33 worktrees were holding both.
+#
+# `native` is the only engine BOTH machines have, so it is the only available
+# choice today. scripts/build.sh pins it for the same reason.
+#
+# razor: `native` is deprecated in Swift 6.4 and will be removed eventually.
+# The ceiling is the remote Mac -- pinned to macOS 26, so it cannot reach a
+# toolchain where swiftbuild exists. Upgrade path: once the remote runs
+# macOS 27+/Swift 6.4+, move this and build.sh to swiftbuild together, or drop
+# the pin once both machines default to the same engine.
+engine="--build-system native"
+
 workers=${AUDIOUT_TEST_WORKERS:-6}
 lock_timeout=${AUDIOUT_TEST_LOCK_TIMEOUT:-1800}
 # How many suite runs may proceed at once, machine-wide. Default 2: a single run
@@ -75,8 +95,8 @@ run_remote() {
     # so the remote gets the fast parallel path (~1.8x quicker on an idle host).
     # An explicitly forced AUDIOUT_TEST_MODE is still honoured.
     case "${AUDIOUT_TEST_MODE:-auto}" in
-        serial) rargs="" ;;
-        *)      rargs="--parallel --num-workers $workers" ;;
+        serial) rargs="$engine" ;;
+        *)      rargs="$engine --parallel --num-workers $workers" ;;
     esac
 
     # The remote command is a STRING the far shell re-parses, so caller flags
@@ -349,7 +369,7 @@ set +e
 # to nothing at all in serial mode). "$@" stays quoted so caller arguments with
 # spaces survive.
 # shellcheck disable=SC2086
-( cd "$core" && swift test $test_args "$@" ) >&2
+( cd "$core" && swift test $engine $test_args "$@" ) >&2
 status=$?
 set -e
 

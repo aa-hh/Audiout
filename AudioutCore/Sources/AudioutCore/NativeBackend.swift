@@ -4230,34 +4230,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // volume, so a demotion never levels (see `leveledBundleIDs`).
             // Excluded apps are never leveled: the privacy denylist means "never
             // captured", which outranks a volume the user set earlier.
-            //
-            // STICKY AT 100: an app that is ALREADY leveled stays leveled when its
-            // slider returns to 100, injected at unity — `scaledStereoSamples` is
-            // exact identity at 100, so what the injector contributes is
-            // sample-for-sample what the system tap would have carried.
-            //
-            // Why: the 100 boundary swaps the app between the `.unmuted` metering
-            // tap and the `.mutedWhenTapped` leveling one, and `muteBehavior` is
-            // fixed when a tap is created — so every crossing would otherwise
-            // destroy and rebuild a Core Audio aggregate device on the app's LIVE
-            // output, which is plainly audible as a click. Sticky pays that once,
-            // on the first move below 100, instead of on every crossing.
-            //
-            // The previous set IS the memory — no extra state to keep in sync, and
-            // it self-clears exactly when it should: leaving `.noRedirect`, being
-            // excluded, or dropping out of the route table all fail the guards
-            // above and drop the app from the set.
-            //
-            // razor: session-scoped, and the bit survives a quit+relaunch, so a
-            // once-leveled app sitting at 100 is re-tapped at unity when it comes
-            // back. That is harmless (identical samples) and keeps the relaunch
-            // click-free too. If it ever needs to expire, prune it where the other
-            // per-bundle bookkeeping is dropped in `handleAppTerminated`.
             let newLeveled = Set(routes.compactMap { route -> String? in
-                guard route.destination == .noRedirect,
+                guard route.destination == .noRedirect, route.volume < 100,
                       !excludedBundleIDs.contains(route.bundleID) else { return nil }
-                guard route.volume < 100 || self.leveledBundleIDs.contains(route.bundleID)
-                else { return nil }
                 return route.bundleID
             })
             let previousRouted = self.routedBundleIDs

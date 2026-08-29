@@ -49,3 +49,44 @@ Design process: three divergent proposals (minimal/first-class/set-based) were d
 ## Docs updated in this commit
 
 `AudioutCore/AGENTS.md`, popover/shared/window `AGENTS.md` files, `docs/SPEC.md`, `docs/plans/PLAN-POPOVER-ROUTING.md` — all record the reversed decision and the new semantics inline.
+
+## Verification pass, 2026-08-29 (second session)
+
+- **Full suite re-run from a clean state and confirmed by hand: 3091 tests / 178
+  suites, exit 0** — the earlier "green" claim holds, and the `TCCProbeRunnerTests`
+  flake did not bite on this run.
+- **Signed build ready for the live check:**
+  `build/Audiout AppGroups.app` (bundle id `com.audiout.Audiout.appgroups`,
+  Developer ID signed, deep-verified). A fresh handover id, not the shared dev id:
+  the live-test slot was held by another branch, and this is not a permissions-path
+  test. Costs one "Allow in the Background" click on first launch.
+
+### Two things that had to be worked around to build (branch is behind main)
+
+`main` already fixes both; this branch predates them, so **merge `main` in before
+landing or live-testing anything further**:
+
+1. Remote build fails at `resource bundle not found …AudioutSharedUI.bundle`.
+   Fixed on main by `a03e3dd1`. Worked around with `AUDIOUT_BUILD_LOCAL=1`.
+2. `make-app.sh` looks for `.env` at the *worktree* root, which has none, so the
+   build dies on `POSTHOG_PROJECT_TOKEN is required`. Worked around by sourcing the
+   main checkout's `.env`. The real fix (`96a969f0`) is still unmerged on
+   `claude/foreman-roadmap-069-scope-02e6ce`.
+
+Also missing here: `scripts/livetest.sh` (the live-test slot) — it postdates this
+branch point, another reason to merge main in.
+
+### Two review findings — both judgement calls, neither fixed
+
+1. **Scope-conflict telemetry now overstates.** `effectiveAppRoutesLocked` records a
+   `scope_conflict` / `stage:"routeDemoted"` entry for *every* group member the main
+   mix has claimed, including when the route survives happily on the other members —
+   so the event says an app was demoted when it wasn't. The record is diagnostic only
+   (never read by a decision path; telemetry plus a test accessor), so nothing
+   misbehaves — but its own doc comment ("those routes are demoted … for the
+   duration") is no longer true for group routes. Either record it only on a genuine
+   demotion, or widen the record's wording to "some target contested".
+2. **Menu subtitle can mis-attribute an offline speaker.** `groupDestinationSubtitle`
+   shows "Plays on 2 of 4 — the rest are in the main mix" as soon as *any* member is
+   main-out-claimed. If some of the missing members are merely offline, they get
+   described as being in the main mix. Copy accuracy only — Alec owns the wording.

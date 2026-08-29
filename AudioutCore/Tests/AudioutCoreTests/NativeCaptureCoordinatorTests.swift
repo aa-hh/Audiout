@@ -2217,6 +2217,56 @@ extension SerializedSharedState {
         coordinator.stop()
     }
 
+    /// THE REGRESSION TEST FOR THE SILENT-LEVELED-APP BUG (live 2026-08-29).
+    ///
+    /// A leveled app is excluded from the whole-system tap and muted at its own
+    /// output. When it is the ONLY thing making sound, that exclusion leaves the
+    /// tap with nothing to capture, so Core Audio stops delivering buffers — and
+    /// the old design could only ADD to buffers the tap delivered. The app went
+    /// silent everywhere while its audio piled into a full ring.
+    ///
+    /// The feed now has its own clock: with the tap idle and a leveled app
+    /// holding audio, blocks must still reach the sink. Pushing NOTHING through
+    /// the tap is the whole point — this test would have failed before the fix,
+    /// where every other leveled test passes either way because they all hand the
+    /// tap a buffer first.
+    @Test func aLeveledAppIsStillHeardWhenTheTapItselfGoesSilent() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+        coordinator.setLeveledAppInjector(leveledInjector(value: 77, frames: 4_410))
+
+        coordinator.start()
+        // Deliberately no `tap.pushBuffer` — the tap is capturing but silent,
+        // exactly as Core Audio leaves it when every audible app is excluded.
+        waitFor(timeout: 2.0) { !sink.forwarded.isEmpty }
+
+        #expect(!sink.forwarded.isEmpty,
+                "the fallback clock must carry a leveled app when the tap delivers nothing")
+        let samples = s16Samples(sink.forwarded.map(\.pcm).reduce(Data(), +))
+        #expect(samples.contains { $0 == 77 },
+                "and what it carries must be the leveled app's own audio, not silence")
+
+        coordinator.stop()
+    }
+
+    /// The tap stays the only producer while it is actually producing: the
+    /// fallback must not double up on it and emit a second copy of the program.
+    @Test func theFallbackClockStaysParkedWhileTheTapIsProducing() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+        coordinator.setLeveledAppInjector(leveledInjector(value: 100, frames: 4))
+
+        coordinator.start()
+        tap.pushBuffer(buffer(hostTime: 1_000_000_000))
+        waitFor { sink.forwarded.count == 1 }
+        #expect(sink.forwarded.count == 1,
+                "one buffer in, one block out — the fallback added nothing of its own")
+
+        coordinator.stop()
+    }
+
     /// …and it goes in BEFORE the Main Out stage, because a leveled app is
     /// program material the user's tone must shape. A hard-left balance zeroes
     /// the right channel: if the injection landed after the EQ, the injected 100s

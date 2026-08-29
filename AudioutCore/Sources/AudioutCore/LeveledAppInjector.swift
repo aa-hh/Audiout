@@ -331,6 +331,17 @@ public final class LeveledAppInjector: @unchecked Sendable {
         diag.samplesMixed += mixed
     }
 
+    /// Whether any leveled app has audio waiting to be mixed. Read by the
+    /// whole-system coordinator's fallback clock to decide whether it must
+    /// produce a carrier block: the injector can only ADD to a block somebody
+    /// else emits, so when the tap that normally emits them falls silent this is
+    /// the only thing that says "there is audio here going nowhere".
+    var hasPendingAudio: Bool {
+        mixLock.lock(); defer { mixLock.unlock() }
+        guard active else { return false }
+        return rings.values.contains { $0.count > 0 }
+    }
+
     // MARK: Test seams (pure reads)
 
     /// How many samples are currently banked for `bundleID` (0 when it has no

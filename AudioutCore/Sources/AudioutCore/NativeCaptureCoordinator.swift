@@ -389,6 +389,37 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// The engine's fixed feed format, which the pacer synthesizes directly.
     private static let wizardFeedRate = 44_100.0
     private static let wizardFeedChannels = 2
+
+    // MARK: Leveled-app fallback clock
+
+    /// Fires on `leveledClockQueue`; created/cancelled under `queue`.
+    private var leveledClockTimer: DispatchSourceTimer?
+    private let leveledClockQueue = DispatchQueue(
+        label: "NativeCaptureCoordinator.leveledClock", qos: .userInitiated)
+
+    /// Monotonic nanos of the last block the TAP delivered, written on the
+    /// real-time delivery thread and read by the fallback clock. Guarded by its
+    /// own lock taken with `try()` on the RT side: a missed update just means one
+    /// late timestamp, which at worst lets the fallback engage a beat early —
+    /// strictly better than parking the audio thread.
+    private let leveledClockLock = NSLock()
+    private var lastTapDeliveryNanos: Int64 = 0
+
+    /// Where the fallback's own pts timeline started, and how far it has run.
+    /// `leveledClockQueue` only. Reset to 0 whenever the tap is producing, so a
+    /// fresh idle period always starts its clock from now.
+    private var leveledClockStartNanos: Int64 = 0
+    private var leveledClockEmittedFrames = 0
+
+    /// How long the tap must be silent before the fallback takes over. Two
+    /// ordinary block periods: long enough that normal jitter never triggers it,
+    /// short enough that the gap is inaudible as anything but a tiny hitch.
+    private static let leveledClockIdleThresholdNanos: Int64 = 24_000_000
+    /// How often the fallback checks whether it is needed.
+    private static let leveledClockInterval = DispatchTimeInterval.milliseconds(10)
+    /// Never synthesize more than a quarter second in one fire — a descheduled
+    /// timer must not dump a huge block into the engine.
+    private static let leveledClockMaxFramesPerFire = 11_025
     /// First fire sits this far after the snapshot publish, bounding the engage
     /// handoff: the only overlap left is one RT callback already in flight, and
     /// the wizard's re-anchor (`NativeBackend.setBTWizardTickActive`) voids its
@@ -648,6 +679,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // in `init`, keeps a coordinator that never starts from touching the HAL.
             installProcessListListenerLocked()
             #endif
+            // The fallback clock lives exactly as long as the tap does: it exists
+            // to cover the tap's silent windows, so it must be armed before the
+            // first buffer and gone before teardown.
+            startLeveledClockLocked()
             switch _state {
             case .idle, .failed:
                 self.transition(to: .creatingTap)
@@ -713,6 +748,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// from `.idle` is a no-op.
     public func stop() {
         let toTearDown: SystemAudioTap? = queue.sync {
+            stopLeveledClockLocked()
+            leveledClockLock.lock()
+            lastTapDeliveryNanos = 0
+            leveledClockLock.unlock()
             switch _state {
             case .idle:
                 return nil
@@ -1616,7 +1655,113 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             }
         }
 
+        // Tell the fallback clock the tap is alive. While this keeps updating,
+        // the fallback stays parked and this remains the only producer.
+        if leveledClockLock.try() {
+            lastTapDeliveryNanos = Self.monotonicNanos()
+            leveledClockLock.unlock()
+        }
+
         deliver(pcm, pts: buffer.pts, snapshot: snapshot)
+    }
+
+    // MARK: - Leveled-app fallback clock
+    //
+    // A leveled app is muted at its own output and excluded from the whole-system
+    // tap; its audio is meant to re-enter through `LeveledAppInjector` inside
+    // `handleBuffer` above. That works only while the tap is producing blocks to
+    // add to. When a leveled app is the ONLY thing making sound, excluding it
+    // leaves the tap with nothing to capture, Core Audio stops calling us, and
+    // the app's audio piles into the injector's ring and is thrown away — the
+    // app goes silent everywhere (live diagnosis 2026-08-29: the tap sat in
+    // `capturing` while `leveled_health` reported `mix_calls: 0` against a ring
+    // pinned at capacity).
+    //
+    // So the program feed gets its own clock. While the tap is idle AND a leveled
+    // app has audio waiting, this synthesizes the silent block the tap would have
+    // produced and runs the identical injector → EQ → tick → deliver chain over
+    // it. The tap remains the producer whenever it is producing; this only fills
+    // the hole its own exclusion creates.
+
+    /// Start the fallback clock. Must hold `queue`.
+    private func startLeveledClockLocked() {
+        guard leveledClockTimer == nil else { return }
+        leveledClockQueue.async { [weak self] in
+            self?.leveledClockStartNanos = 0
+            self?.leveledClockEmittedFrames = 0
+        }
+        let timer = DispatchSource.makeTimerSource(queue: leveledClockQueue)
+        timer.schedule(deadline: .now() + Self.leveledClockInterval,
+                       repeating: Self.leveledClockInterval,
+                       leeway: .milliseconds(2))
+        timer.setEventHandler { [weak self] in self?.pumpLeveledFallbackIfDue() }
+        timer.resume()
+        leveledClockTimer = timer
+    }
+
+    /// Cancel the fallback clock and drain its queue, so it is provably idle by
+    /// the time this returns. Must hold `queue`.
+    private func stopLeveledClockLocked() {
+        leveledClockTimer?.cancel()
+        leveledClockTimer = nil
+        leveledClockQueue.sync {}
+    }
+
+    /// One fallback fire. `leveledClockQueue` only.
+    private func pumpLeveledFallbackIfDue() {
+        let snapshot: BufferSnapshot
+        snapshotLock.lock()
+        snapshot = _bufferSnapshot
+        snapshotLock.unlock()
+
+        // The wizard replaces the program wholesale and drives its own pacer, so
+        // it owns the feed for the duration of a run.
+        guard !snapshot.wizardActive,
+              let injector = snapshot.leveledInjector,
+              snapshot.converter != nil,
+              injector.hasPendingAudio
+        else {
+            leveledClockStartNanos = 0
+            return
+        }
+
+        let now = Self.monotonicNanos()
+        leveledClockLock.lock()
+        let lastDelivery = lastTapDeliveryNanos
+        leveledClockLock.unlock()
+
+        // The tap is producing: it is the only producer, and a fresh idle period
+        // must start its clock from scratch rather than owing frames for the
+        // whole time the tap was healthy.
+        guard lastDelivery == 0 || now &- lastDelivery > Self.leveledClockIdleThresholdNanos else {
+            leveledClockStartNanos = 0
+            return
+        }
+
+        if leveledClockStartNanos == 0 {
+            leveledClockStartNanos = now
+            leveledClockEmittedFrames = 0
+        }
+        let owed = Int((Double(now &- leveledClockStartNanos)
+            * Self.wizardFeedRate / 1_000_000_000).rounded()) - leveledClockEmittedFrames
+        let frames = min(max(owed, 0), Self.leveledClockMaxFramesPerFire)
+        guard frames > 0 else { return }
+
+        // The silent carrier the tap would have handed us, then the SAME chain
+        // `handleBuffer` runs: leveled audio in before the Main Out tone stage
+        // (it is program material), the align tick after it (it is not).
+        var pcm = Data(count: frames * Self.wizardFeedChannels * MemoryLayout<Int16>.size)
+        injector.mix(into: &pcm, frameCount: frames)
+        if let main = snapshot.eqPlan.main { main.process(&pcm) }
+        if let tickInjector = snapshot.tickInjector { tickInjector.mix(into: &pcm) }
+
+        let ptsNanos = leveledClockStartNanos
+            &+ Int64((Double(leveledClockEmittedFrames) / Self.wizardFeedRate * 1_000_000_000)
+                .rounded())
+        leveledClockEmittedFrames += frames
+        deliver(pcm, pts: timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
+                                   tv_nsec: Int(ptsNanos % 1_000_000_000)),
+                snapshot: snapshot)
     }
 
     /// The delivery tail every producer shares — the engine write, both

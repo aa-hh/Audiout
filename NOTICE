@@ -4,6 +4,14 @@ Audiout (including AirPlayEngine) is licensed under the GNU General
 Public License, version 2 or later (GPL-2.0-or-later). See LICENSE for
 the full text.
 
+One exception: the `AudioutProtocol/` package — the wire protocol shared
+with the iPhone companion app — is MIT, under its own
+`AudioutProtocol/LICENSE`. It vendors no third-party code and has no
+dependencies, so nothing in it is bound by the GPL obligations the rest
+of the repo carries. MIT there is compatible with the GPL-2.0-or-later
+whole: the Mac app links it under GPL terms like any other MIT component
+listed below.
+
 The AirPlayEngine sender is derived in part from OwnTone
 (https://github.com/owntone/owntone-server) and bundles code under three
 licenses, all compatible with GPL-2.0-or-later:

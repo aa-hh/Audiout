@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 
 /// Bonjour + protocol-version constants shared by the Mac's `CompanionServer`
 /// and the iOS app's discovery/connection code. Kept in one place so both

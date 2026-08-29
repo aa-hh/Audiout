@@ -99,3 +99,7 @@ formula is the most common cause.
 GPL-2.0-or-later. See [LICENSE](LICENSE) and [NOTICE](NOTICE) — the
 AirPlay 2 sender is derived in part from OwnTone and bundles third-party
 code under GPL, BSD, and MIT terms.
+
+The one exception is the `AudioutProtocol/` package (the wire protocol
+shared with the iPhone companion app), which is MIT — see
+[AudioutProtocol/LICENSE](AudioutProtocol/LICENSE).

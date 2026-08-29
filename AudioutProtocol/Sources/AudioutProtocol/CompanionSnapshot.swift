@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 
 /// Where Main Out is currently pointed. `MainOutTarget` on the Mac side isn't
 /// directly `Codable` (associated value), so this flattens it to `kind` +

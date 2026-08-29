@@ -27,6 +27,20 @@ graph with none of that.
   talk to. This runs twice: once on the Bonjour TXT `proto` key before a
   socket even opens, again on `hello`/`welcome`'s `protoVersion` payload
   field once connected.
+- **MIT here, GPL next door — and that asymmetry is deliberate.** The rest
+  of the repo is GPL-2.0-or-later because `AirPlayEngine` vendors OwnTone;
+  this package vendors nothing, so it carries its own `LICENSE` (MIT). The
+  iPhone companion links only this package and is headed for a private repo
+  as a closed-source product — MIT is what makes that permanent. Nothing is
+  given away: the protocol ships inside the published GPL Mac source anyway,
+  so MIT only spares a reimplementer the retyping. **The freedom rests on
+  single authorship** — every line here is the owner's, so linking it from a
+  proprietary app is his call to make. One outside patch merged without a
+  licence agreement ends that, retroactively and permanently. So: no
+  third-party contributions to this package without a signed licence
+  assignment or grant, and no copying code in from a GPL sibling
+  (`AudioutCore`, `AirPlayEngine`) — retype the shape or move the type here
+  from scratch.
 - **This package's tests are NOT covered by the repo's Guard 4** test-runner
   wiring (that targets `AudioutCore`). Run them directly:
   `cd AudioutProtocol && swift test`.

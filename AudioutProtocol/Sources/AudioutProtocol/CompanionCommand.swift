@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 
 /// Every command the phone can send, 1:1 with an existing Mac controller
 /// method (`CompanionCommandDispatcher`, T4, calls the exact method the

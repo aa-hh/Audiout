@@ -1381,6 +1381,30 @@ private func makeSyncedLocalBackend(macSelectedByDefault: Bool)
     return (backend, engine, discovery, capture, sink, macSelected)
 }
 
+/// Ordered record of what the ring was told, across a whole scenario.
+private final class RingTrace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    private var states: [(device: String, state: ConnectionState)] = []
+    private var mark = 0
+    func add(_ line: String) { lock.withLock { lines.append(line) } }
+    func record(_ device: String, _ state: ConnectionState) {
+        lock.withLock { states.append((device, state)) }
+    }
+    /// Everything recorded from here on is what the CURRENT phase emitted.
+    func markPhase() { lock.withLock { mark = states.count } }
+    func statesSincePhase(_ device: String) -> [ConnectionState] {
+        lock.withLock { states[mark...].filter { $0.device == device }.map(\.state) }
+    }
+    var report: String { lock.withLock { lines.joined(separator: "\n") } }
+}
+
+/// What the connection ring would render for `id` right now — the ring is driven
+/// by `Device.connectionState` alone, so this IS the ring's input.
+private func ringState(_ backend: NativeBackend, _ id: String) -> ConnectionState? {
+    backend.devices.first { $0.id == id }?.connectionState
+}
+
 private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
@@ -5709,6 +5733,84 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { engine.streamAddCalls.contains { $0.0 == kitchen.outputID && $0.1 >= 1 } }
         #expect(engine.streamAddCalls.contains { $0.0 == kitchen.outputID && $0.1 >= 1 },
                 "the released speaker must pick the group route back up with no user action")
+    }
+
+    /// LIVE BUG (2026-08-29): the connection ring reports ONE fact — this
+    /// speaker is on and connected — so a routing change, which only ever moves
+    /// audio between the whole-system and per-app domains, must never darken it.
+    /// It did, twice over: Main Out claiming ONE member of a routed group put
+    /// the OTHER member (still streaming, untouched) back to `.off`, and once
+    /// Main Out let go, the re-established per-app sessions lit no ring at all —
+    /// audio playing out of two speakers wearing no connection light.
+    @Test func groupRouteMembersKeepTheirRingAcrossAMainOutClaimAndRelease() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let kitchen = ap2Device(id: "AA:BB:CC:DD:EE:01", name: "Kitchen")
+        let hall = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Hall")
+        await startAndDiscoverPair(backend, engine, discovery, kitchen, hall)
+
+        // Watch the EMITTED stream for the whole sequence: a ring that goes dark
+        // and is repaired before the next assertion is still a ring that went
+        // dark, and only the event trace can see that.
+        let trace = RingTrace()
+        let stream = backend.makeEventStream()
+        let tracer = Task {
+            for await event in stream {
+                guard case .deviceUpdated(let d) = event else { continue }
+                if d.id == kitchen.id || d.id == hall.id {
+                    trace.add("\(d.name) -> \(d.connectionState) sel=\(d.isSelected) avail=\(d.isAvailable)")
+                    trace.record(d.name, d.connectionState)
+                }
+            }
+        }
+        defer { tracer.cancel() }
+
+        trace.add("== route the group ==")
+        backend.updateAppRoutes(
+            [groupRoute("com.foo.player", name: "Foo", toGroup: "downstairs")],
+            groupTargets: ["downstairs": GroupRouteTarget(
+                memberVolumes: [kitchen.id: 100, hall.id: 100])])
+        await pollUntil {
+            engine.streamAddCalls.contains { $0.0 == kitchen.outputID && $0.1 >= 1 }
+                && engine.streamAddCalls.contains { $0.0 == hall.outputID && $0.1 >= 1 }
+        }
+        // The engine reporting its accepted session is the ONLY thing that ever
+        // lights a per-app target's ring — the bind path itself writes no state.
+        trace.add("== engine reports both sessions streaming ==")
+        engine.pushState(kitchen.outputID, .streaming)
+        engine.pushState(hall.outputID, .streaming)
+        await pollUntil {
+            ringState(backend, kitchen.id) == .connected && ringState(backend, hall.id) == .connected
+        }
+        #expect(ringState(backend, kitchen.id) == .connected, "both members start lit")
+        #expect(ringState(backend, hall.id) == .connected, "both members start lit")
+
+        // Main Out takes the kitchen. Nothing at all happens to the hall — so
+        // every state the hall emits from here must still be `.connected`. The
+        // settled value alone is too weak: a ring that goes dark and is repaired
+        // before the next assertion is still a ring that went dark.
+        trace.markPhase()
+        trace.add("== Main Out claims the kitchen ==")
+        backend.setOutputSet([kitchen.id])
+        await pollUntil { engine.addedIDs.contains(kitchen.outputID) }
+        #expect(trace.statesSincePhase("Hall").allSatisfy { $0 == .connected },
+                "the untouched member never disconnected, so it must never report anything but .connected\n\(trace.report)")
+        #expect(!engine.removedIDs.contains(hall.outputID),
+                "the untouched member's per-app session must not be torn down\n\(trace.report)")
+
+        // Main Out lets the kitchen go; the group route picks it back up.
+        trace.add("== Main Out releases the kitchen ==")
+        backend.setOutputSet([])
+        await pollUntil {
+            engine.streamAddCalls.filter { $0.0 == kitchen.outputID && $0.1 >= 1 }.count >= 2
+        }
+        engine.pushState(kitchen.outputID, .streaming)
+        await pollUntil { ringState(backend, kitchen.id) == .connected }
+        #expect(ringState(backend, kitchen.id) == .connected,
+                "a re-established per-app session must light the ring again\n\(trace.report)")
+        #expect(ringState(backend, hall.id) == .connected,
+                "the member that never moved is still lit at the end\n\(trace.report)")
     }
 
     /// Editing the group — here, dropping a member — re-runs the effective-route

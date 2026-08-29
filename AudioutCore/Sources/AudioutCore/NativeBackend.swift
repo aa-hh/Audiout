@@ -3146,7 +3146,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // "sticky failed survives deselect" behavior (its park is
                 // cleared on any toggle edge, above), so the connection dot
                 // follows suit and a deselect genuinely ENDS a failure episode.
-                if previous != wantOn {
+                // ...EXCEPT for a device the per-app domain is streaming to right
+                // now. This loop walks EVERY discovered id, so selecting one
+                // speaker writes `wantOn == false` over every other one — and a
+                // redirect target has not disconnected just because the
+                // whole-system set doesn't want it. Reporting `.off` there darkens
+                // the connection ring of a speaker that is still audibly playing
+                // (live 2026-08-29: claiming one member of a routed group put its
+                // untouched partner's ring out).
+                if previous != wantOn, wantOn || self.streamBindings[id] == nil {
                     self.setConnectionState(wantOn ? .connecting : .off, for: id)
                 }
                 // Kick iff the desired state changed AND no loop is already
@@ -8384,6 +8392,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             var eqNeedsReconcile = false
             switch state {
             case .streaming, .connected:
+                // A session the PER-APP domain owns (a redirect target whole-system
+                // routing doesn't want) is genuinely connected, and the ring reports
+                // connection alone — so record that and stop. Deliberately no
+                // `added`/`isSelected` write: those are the whole-system domain's
+                // claim (T7), and taking them here would make every later per-app op
+                // bow out of `perAppOpMayFire`. Without this the engine's own
+                // "connected" for a re-established redirect was swallowed whole, so
+                // audio came back from a speaker wearing no ring (live 2026-08-29).
+                if self.desiredOn[id] != true, self.streamBindings[id] != nil {
+                    device.connectionState = .connected
+                    device.isAvailable = true
+                    self.failedGate.remove(id)
+                    break
+                }
                 // Reconcile against the user's latest intent. If the device is
                 // desired OFF (a toggle-OFF that raced this queued good transition),
                 // do NOT insert `added` / select it — that would re-wedge a device

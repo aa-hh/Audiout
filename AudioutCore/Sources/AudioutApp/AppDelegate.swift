@@ -793,6 +793,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onReselectAudiout = { [weak self] in
             (self?.backend as? NativeBackend)?.reselectAggregateAsDefault()
         }
+        // T6 (takeover status strip, state 4's "Try Again" button): the same
+        // sanctioned single-device re-kick `retryUnreachableMembers()` already
+        // drives for the "Speakers unreachable" fallback banner (AudioutPopoverUI)
+        // — `GroupController.requestReconnect(for:)` per Main Out member that
+        // isn't up, never a broad routing re-apply (the 2026-08-06 retry storm).
+        // By the time this state shows, the device the strip was explaining is
+        // `.failed` (`enterFailure(_:cause:.timingUnavailable)`), so it's caught
+        // by the same `!= .connected && != .connecting` filter.
+        popoverController.onRetryTakeover = { [weak self] in
+            guard let self else { return }
+            for device in self.groupController.devices
+            where self.groupController.isMainOutMember(device.id)
+                && device.connectionState != .connected
+                && device.connectionState != .connecting {
+                self.groupController.requestReconnect(for: device.id)
+            }
+            Analytics.capture("takeover:retry_tapped")
+        }
         // The unregistered note's "Buy…" button. Nil URL (a build with no
         // `AudioutBuyURL`) never gets the note in the first place, since
         // `applyLicenseState()` needs a license server to arm it.

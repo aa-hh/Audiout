@@ -548,9 +548,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private var ptpClockAvailable = true
 
     /// Wakes the on-demand PTP helper and waits, bounded, for its clock
-    /// before a connect (T4). Defaults to the real `PTPHelperActivator`, so
-    /// every existing caller of the designated initializer compiles
-    /// unchanged; tests inject a fake.
+    /// before a connect (T4). Defaults to `PTPHelperSelfHealingActivator`
+    /// wrapping the real `PTPHelperActivator` (T9b: a repeated
+    /// `.timingPortsUnavailable` streak gets one password-free unregister/
+    /// re-register cycle before it reaches the user), so every existing
+    /// caller of the designated initializer compiles unchanged; tests inject
+    /// a fake.
     private let ptpHelperActivator: PTPHelperActivating
 
     /// Fire-and-forget "let go of the PTP ports now" verb (Seamless handoff T2/T3).
@@ -565,17 +568,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// one that builds over a fake `LogStreamSpawning`.
     private let handoffWatcherFactory: @Sendable (@escaping @Sendable () -> Void) -> AirPlayHandoffWatcher
 
-    /// Bind-retry budget T2 gives the helper itself (~10 s) plus the connect
-    /// click's own switch-away race — matches `AirPlayEngine/Sources/ptp-helper/main.c`'s
-    /// default `AUDIOUT_PTP_BIND_RETRY_SECS`.
-    private static let ptpActivationTimeout: TimeInterval = 10
+    /// App-side wait must STRICTLY EXCEED the helper's own bind-retry budget
+    /// (10 s, `AUDIOUT_PTP_BIND_RETRY_SECS` in `AirPlayEngine/Sources/ptp-helper/main.c`)
+    /// plus launchd spawn latency; the app waits `ptpActivationTimeout` seconds total.
+    /// If the app's wait equals or is shorter than the helper's budget, the helper's
+    /// late successes remain invisible — the app already returned failure. Invariant:
+    /// `ptpActivationTimeout > 10 s`. razor: upgrade path is in AirPlayEngine/docs/
+    /// when the helper's bind-retry budget changes.
+    private static let ptpActivationTimeout: TimeInterval = 14
 
-    /// How long a clock wait must actually run before the `.takingOver` strip
-    /// mounts (banner-flash fix, 2026-08-06): a wait that resolves inside this
-    /// window — the common case on a warm helper, including every failed manual
-    /// retry — shows NO transient blue strip and causes no double panel re-fit;
-    /// the strip only appears when the takeover is genuinely slow. `<= 0` keeps
-    /// the old synchronous emit (tests that pin the strip's ordering use that).
+    /// Debounce delay before the `.takingOver` strip appears. Only genuinely slow
+    /// clock waits (those still running after this many seconds) show the banner;
+    /// fast resolutions (common on a warm helper, including manual retries) are silent
+    /// and never trigger a double panel re-fit. `<= 0` emits synchronously (used by
+    /// tests that pin the strip's state-change ordering).
     private let takeoverStripDelay: TimeInterval
 
     /// Frees UDP 319/320 before a connect by moving the Mac's own default
@@ -1452,7 +1458,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         eqStore: DeviceEQStore? = nil,
         dacpEndpoint: DACPEndpoint = DACPServer(),
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
-        ptpHelperActivator: PTPHelperActivating = PTPHelperActivator(),
+        ptpHelperActivator: PTPHelperActivating = PTPHelperSelfHealingActivator(),
         connectVolume: @escaping @Sendable () -> Int = { AppSettings().connectVolume },
         processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses()),
         injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
@@ -1463,7 +1469,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         rebindRecoveryRetryDelay: TimeInterval = 0.5,
         captureRetryDelay: TimeInterval = 2.0,
         captureRetryMaxBackoff: TimeInterval = 10.0,
-        takeoverStripDelay: TimeInterval = 0.75,
+        takeoverStripDelay: TimeInterval = 3.0,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
         castAbsenceGrace: TimeInterval = NativeBackend.defaultCastAbsenceGrace,
@@ -5983,13 +5989,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// that was refused clockless re-binds by itself the moment a later
     /// connect wins the ports — no user re-pick.
     private func ensurePTPTakeover(telemetryDeviceID: String) async -> Bool {
+        var switchAwayOutcome: DefaultOutputSwitchOutcome?
         if let defaultOutputSwitcher {
             let takeover = defaultOutputSwitcher.switchAwayFromAirPlay()
-            if takeover != .notAirPlay {
-                Telemetry.log(.airplay, "takeover_switch_away", [
-                    "device": telemetryDeviceID, "outcome": "\(takeover)",
-                ])
-            }
+            switchAwayOutcome = takeover
+            Telemetry.log(.airplay, "takeover_switch_away", [
+                "device": telemetryDeviceID, "outcome": "\(takeover)",
+            ])
         }
         // Banner-flash fix (2026-08-06): the `.takingOver` strip is DEBOUNCED —
         // armed only after `takeoverStripDelay` of genuine waiting, cancelled if
@@ -5999,7 +6005,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // steady-state orange fallback banner. A wait that outlives the delay
         // still mounts it, and the `.timedOut` backstop is unaffected.
         var takingOverArm: DispatchWorkItem?
-        if ptpHelperActivator.willWaitForClock {
+        let willWaitForClock = ptpHelperActivator.willWaitForClock
+        if willWaitForClock {
             if takeoverStripDelay <= 0 {
                 stateQueue.sync { self.setTakeoverStatus(.takingOver) }
             } else {
@@ -6008,7 +6015,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 stateQueue.asyncAfter(deadline: .now() + takeoverStripDelay, execute: arm)
             }
         }
+        let activationStartUptime = ProcessInfo.processInfo.systemUptime
         let outcome = await ptpHelperActivator.activate(timeout: Self.ptpActivationTimeout)
+        let elapsedMs = Int(((ProcessInfo.processInfo.systemUptime - activationStartUptime) * 1000).rounded())
+        let outcomeName: String
+        switch outcome {
+        case .ready: outcomeName = "ready"
+        case .needsApproval: outcomeName = "needsApproval"
+        case .timingPortsUnavailable: outcomeName = "timingPortsUnavailable"
+        }
+        Telemetry.log(.airplay, "ptp_activate", [
+            "device": telemetryDeviceID,
+            "will_wait": willWaitForClock ? "true" : "false",
+            "outcome": outcomeName,
+            "elapsed_ms": "\(elapsedMs)",
+            "switch_away": switchAwayOutcome.map { "\($0)" } ?? "none",
+        ])
         let ready = (outcome == .ready)
         let becameAvailable: Bool = stateQueue.sync {
             // Cancel inside the critical section: the arm runs on `stateQueue`

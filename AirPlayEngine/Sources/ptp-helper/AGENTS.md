@@ -49,10 +49,10 @@ plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
   privilege boundary (design doc §4). This is a hard ceiling, not a start:
   never grow it into a general IPC channel — that would put a message parser
   in the one root process.
-- **XPC and libdispatch are libSystem, so they add no linked library** — the
-  Library Validation constraint below is unaffected. `otool -L` on the built
-  helper must keep showing `libSystem.B.dylib` and nothing else; treat any
-  growth as a release-blocking regression.
+- **XPC, libdispatch, and os_log are all libSystem, so none add a linked
+  library** — the Library Validation constraint below is unaffected. `otool
+  -L` on the built helper must keep showing `libSystem.B.dylib` and nothing
+  else; treat any growth as a release-blocking regression.
 - **`AUDIOUT_PTP_PORTS=EVENT,GENERAL` env override** lets the whole
   bind/start/find/peer path run unprivileged on high ports (CI/dev), applied
   via `airptp_ports_override()` before `airptp_daemon_bind()`. Parsed in
@@ -62,8 +62,18 @@ plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
   must publish under a different name or fail on any machine where the shipped
   daemon exists. The timing knobs (`AUDIOUT_PTP_BIND_RETRY_SECS`,
   `AUDIOUT_PTP_BIND_RETRY_INTERVAL_MS`, `AUDIOUT_PTP_IDLE_SECS`,
-  `AUDIOUT_PTP_IDLE_GRACE_SECS`) exist so tests can run in seconds; `main.c`'s
-  header comment is the authoritative list.
+  `AUDIOUT_PTP_IDLE_GRACE_SECS`, `AUDIOUT_PTP_WATCHDOG_SECS`) exist so tests
+  can run in seconds; `main.c`'s header comment is the authoritative list.
+- **A dead-man's watchdog backstops idle exit.** Idle exit only frees the
+  ports if the service loop (`ptp_helper_wait_until_idle_or_signal()`) is
+  still iterating to notice an empty peer table — observed live, the PTP
+  master loop wedged while still holding 319/320 bound, for over an hour,
+  with idle exit never firing because nothing was left running the code that
+  watches for it. An independent `dispatch` timer checks a heartbeat the
+  service loop updates every iteration and hard-exits non-zero (`_exit()`,
+  skipping normal teardown on purpose) if it goes stale past
+  `AUDIOUT_PTP_WATCHDOG_SECS` (default 30) — same exit-code contract as every
+  other genuine internal failure.
 - **Static-links libevent**, not the Homebrew dylib (see
   `AirPlayEngine/Package.swift`'s `ptp-helper` target `linkerSettings`, and
   design doc §6.1.1). Required because this is a hardened-runtime Developer-ID
@@ -97,7 +107,10 @@ plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
    `ptp_helper_apply_shm_name_override_if_set()` — apply the unprivileged
    test-path overrides before anything binds or publishes.
 2. `airptp_callbacks_register()` — wires `logmsg`/`hexdump`/`thread_name_set`
-   to stderr (which launchd redirects per the bundled plist).
+   to stderr (visible unprivileged in dev) and tees the same text to the
+   unified log via `os_log()` (`log show --predicate 'process ==
+   "ptp-helper"'`) — the plist sets no `StandardErrorPath`, so launchd does
+   NOT redirect stderr to a file on its own.
 3. Install SIGTERM/SIGINT handlers — **before** the bind retry, so a signal
    arriving while the ports are contended is not ignored for the whole budget.
 4. `ptp_helper_mach_checkin()` — hold the launchd Mach-service listener open

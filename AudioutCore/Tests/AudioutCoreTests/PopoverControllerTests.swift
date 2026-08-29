@@ -2977,12 +2977,14 @@ import AppKit
 
     // MARK: Takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md)
 
-    /// All four takeover states render their own copy, and the "Open Login
-    /// Items…" action button is present ONLY for state 1 (`.needsApproval`) —
-    /// states 2/3/4 have no remedy this button could offer (brief: state 2's
-    /// own doc says approval UX can't fix a missing bundle component, 3 is
-    /// transient, 4 needs a different app to yield).
-    @Test func takeoverStripRendersEachStateWithButtonOnlyForState1() async throws {
+    /// All four takeover states render their own copy, and the action button
+    /// is present ONLY for states 1 (`.needsApproval`) and 4 (`.timedOut`) —
+    /// states 2/3 have no remedy this button could offer (state 2's own doc
+    /// says approval UX can't fix a missing bundle component, 3 is
+    /// transient). State 4 is a genuine failure (WARNING severity, not the
+    /// other three states' info tier) and offers "Try Again" rather than the
+    /// old copy's unkept promise to retry on its own.
+    @Test func takeoverStripRendersEachStateWithButtonForStates1And4() async throws {
         let (popover, _, _) = try await makePopover()
 
         #expect(popover.test_systemAirPlayNoteText == nil, "no strip by default")
@@ -3000,11 +3002,26 @@ import AppKit
         #expect(!popover.test_systemAirPlayNoteHasActionButton, "the transient state has nothing to tap")
 
         popover.setTakeoverStatus(.timedOut)
-        #expect(popover.test_systemAirPlayNoteText == "Another app is using AirPlay's timing right now, so this connection couldn't complete. Try again in a moment.")
-        #expect(!popover.test_systemAirPlayNoteHasActionButton, "a different app must yield — no settings pane fixes that")
+        #expect(popover.test_systemAirPlayNoteText == "Speaker Sync couldn't get the speakers' clocks in step, so this connection couldn't complete.",
+                "honest about the outcome — the wait ran out and the connection genuinely failed")
+        #expect(popover.test_systemAirPlayNoteHasActionButton, "a failed connection offers Try Again")
 
         popover.setTakeoverStatus(nil)
         #expect(popover.test_systemAirPlayNoteText == nil, "clearing the status clears the strip")
+    }
+
+    /// Tapping state 4's action button invokes `onRetryTakeover`, wired by the
+    /// host (`AppDelegate`) to the same single-device re-kick the "Speakers
+    /// unreachable" fallback banner's own "Try again" already drives.
+    @Test func takeoverTimedOutActionButtonInvokesRetryCallback() async throws {
+        let (popover, _, _) = try await makePopover()
+
+        var retried = false
+        popover.onRetryTakeover = { retried = true }
+        popover.setTakeoverStatus(.timedOut)
+        popover.test_tapSystemAirPlayNoteAction()
+
+        #expect(retried, "tapping state 4's button must call onRetryTakeover")
     }
 
     /// Tapping state 1's action button invokes `onOpenPTPHelperLoginItems`,

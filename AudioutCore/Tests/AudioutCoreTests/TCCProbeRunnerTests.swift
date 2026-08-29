@@ -68,13 +68,15 @@ import Testing
         let runner = TCCProbeRunner(spawn: fakeSpawn { timeout, completion in
             DispatchQueue.global().async { completion(.output("audio=0 screen=0 control=1")) }
         })
+        let answered = Locked(0)
         try await confirmation(expectedCount: 1) { done in
             runner.requestResolution { result, raw in
                 #expect(result == .resolved(.granted))
                 #expect(raw?.audio == 0)
                 done()
+                _ = answered.increment()
             }
-            try await Task.sleep(for: .seconds(2))
+            await waitForCompletion { answered.value > 0 }
         }
     }
 
@@ -118,8 +120,10 @@ import Testing
         // the burst — finish it now.
         secondSpawnCompletion?(.output("audio=0 screen=0 control=1"))
 
-        // Give the completions a moment to run, then assert the totals.
-        try await Task.sleep(for: .milliseconds(200))
+        // Wait for the completions to run, then assert the totals. A fixed
+        // pause here would be the same wall-clock bet the other tests used to
+        // make: it passes on an idle machine and loses under a full run.
+        await waitForCompletion { completions.value == burstSize }
 
         #expect(spawnCount.value == 2, "a burst behind one in-flight spawn must coalesce into exactly one re-kick")
         #expect(completions.value == burstSize, "every queued caller must still get answered exactly once")
@@ -135,14 +139,15 @@ import Testing
             DispatchQueue.global().async { completion(.output("audio=0 screen=0 control=1")) }
         })
 
+        let answered = Locked(0)
         try await confirmation("first") { done in
-            runner.requestResolution { _, _ in done() }
-            try await Task.sleep(for: .seconds(2))
+            runner.requestResolution { _, _ in done(); _ = answered.increment() }
+            await waitForCompletion { answered.value > 0 }
         }
 
         try await confirmation("second") { done in
-            runner.requestResolution { _, _ in done() }
-            try await Task.sleep(for: .seconds(2))
+            runner.requestResolution { _, _ in done(); _ = answered.increment() }
+            await waitForCompletion { answered.value > 1 }
         }
 
         #expect(spawnCount.value == 2)
@@ -165,17 +170,42 @@ import Testing
                 completion(.timedOut)
             }
         })
+        let answered = Locked(0)
         try await confirmation("timed out") { done in
             runner.requestResolution { result, raw in
                 #expect(result == .unresolved(.timedOut))
                 #expect(raw == nil)
                 done()
+                _ = answered.increment()
             }
-            try await Task.sleep(for: .seconds(2))
+            await waitForCompletion { answered.value > 0 }
         }
     }
 
     // MARK: - Helpers
+
+    /// Generous ceiling, NOT an expected wait: returns the moment `cond()`
+    /// holds, so a high bound only ever costs time in the failure case.
+    ///
+    /// These tests hand their result back through `DispatchQueue.global()`, and
+    /// they used to hold the `confirmation` body open with a fixed
+    /// `Task.sleep(for: .seconds(2))`. That is a bet that the global queue will
+    /// schedule the block inside two seconds, and across a full ~3,000-test run
+    /// it loses: the callback lands after the window, the confirmation records
+    /// 0 of 1, and three tests fail for no reason but a busy machine. The
+    /// margin was never there to begin with — one of them measured 2.126 s on
+    /// an IDLE machine. Serial mode does not help, because the contention is
+    /// the global queue rather than the runner's workers.
+    private func waitForCompletion(
+        timeout: TimeInterval = 10,
+        _ cond: @escaping () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if cond() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
 
     /// Wraps a `SpawnHelper` closure with nothing extra — named purely so
     /// each test's spawn logic reads as "this is the fake" at the call site.

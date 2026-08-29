@@ -151,6 +151,10 @@ struct SnapshotWorld {
     /// opens for reading in the hero pane, a skipped one re-arms its ask.
     var press: SetupStep?
     var reason: OnboardingReason = .firstRun
+    /// Whether this build has an analytics sink, and therefore a sixth card to
+    /// offer. TRUE by default because that is the shipping build; the fixtures
+    /// that walk to the finale have to answer it like any other card.
+    var usageStatsAvailable = true
 }
 
 @MainActor
@@ -171,7 +175,8 @@ func makeViewController(_ world: SnapshotWorld) -> OnboardingViewController {
                            ptpHelper: SnapshotPTPHelper(statusToReport: world.ptpHelper),
                            bluetoothReader: bluetooth,
                            bluetoothPrimer: bluetooth,
-                           settings: AppSettings(defaults: suite))
+                           settings: AppSettings(defaults: suite),
+                           usageStatsAvailable: world.usageStatsAvailable)
     return OnboardingViewController(model: model,
                                     reason: world.reason,
                                     onOpenSettings: { _ in },
@@ -285,7 +290,7 @@ let completeWorld = SnapshotWorld(audio: .granted,
                                   remoteControlTrusted: true,
                                   bluetooth: .granted,
                                   ptpHelper: .enabled,
-                                  allow: [.audio, .localNetwork])
+                                  allow: [.audio, .localNetwork, .usageStats])
 
 @MainActor
 func run() async -> Int32 {
@@ -360,8 +365,19 @@ func run() async -> Int32 {
                        world: SnapshotWorld(remoteControlTrusted: true,
                                             bluetooth: .granted,
                                             ptpHelper: .enabled,
-                                            allow: [.audio, .localNetwork],
+                                            allow: [.audio, .localNetwork, .usageStats],
                                             waitingOnFinalCheck: true),
+                       outDir: outDir)
+        // The sixth card: the one stage that is not a rehearsal of a macOS
+        // surface, because this step raises none. The frame carries the LEDGER
+        // — what a yes would send, over what it never sends, each of those
+        // struck through — and the bar offers "No Thanks" rather than the
+        // shared "Skip for now", since this answer is final.
+        await snapshot(appearanceName: name, label: "\(tag)-step6-usagestats",
+                       world: SnapshotWorld(remoteControlTrusted: true,
+                                            bluetooth: .granted,
+                                            ptpHelper: .enabled,
+                                            allow: [.audio, .localNetwork]),
                        outDir: outDir)
         await snapshot(appearanceName: name, label: "\(tag)-complete",
                        world: completeWorld, outDir: outDir)

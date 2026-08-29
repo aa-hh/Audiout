@@ -541,7 +541,9 @@ public final class SetupModel {
                 bluetoothPrimer: BluetoothPermissionPriming = SimulatedBluetoothPermission(status: .unknown),
                 settings: AppSettings = AppSettings(),
                 localNetworkGated: Bool = true,
+                usageStatsAvailable: Bool = Analytics.isAvailable,
                 bluetoothPromptTimeout: TimeInterval = 10) {
+        self.usageStatsAreAvailable = usageStatsAvailable
         self.bluetoothPromptTimeout = bluetoothPromptTimeout
         self.audioProbe = audioProbe
         self.localNetwork = localNetwork
@@ -564,7 +566,8 @@ public final class SetupModel {
     /// the same set (real or simulated) into every construction site.
     public convenience init(providers: PermissionProviders,
                             settings: AppSettings = AppSettings(),
-                            localNetworkGated: Bool = true) {
+                            localNetworkGated: Bool = true,
+                            usageStatsAvailable: Bool = Analytics.isAvailable) {
         self.init(audioProbe: providers.audioProbe,
                   localNetwork: providers.localNetwork,
                   remoteControl: providers.remoteControl,
@@ -572,7 +575,8 @@ public final class SetupModel {
                   bluetoothReader: providers.bluetoothReader,
                   bluetoothPrimer: providers.bluetoothPrimer,
                   settings: settings,
-                  localNetworkGated: localNetworkGated)
+                  localNetworkGated: localNetworkGated,
+                  usageStatsAvailable: usageStatsAvailable)
     }
 
     /// Trigger + verify the audio-capture permission. On first run this surfaces
@@ -922,6 +926,55 @@ public final class SetupModel {
     /// where the user approves (or later revokes) the PTP helper.
     public func openPTPHelperLoginItems() {
         ptpHelper.openSystemSettingsLoginItems()
+    }
+
+    // MARK: Usage statistics
+
+    /// Whether the user has agreed to share anonymous usage counts
+    /// (`AppSettings.telemetryOptIn`, PRODUCT.md Data Collection stream 1).
+    /// The Setup step's completion condition.
+    public var usageStatsOptedIn: Bool { settings.telemetryOptIn }
+
+    /// Whether the one-time ask has already been answered — either way.
+    /// PRODUCT.md's rule for this stream is "asked once, never re-nagged", so
+    /// a DECLINE has to be as final as a grant: the Setup flow seeds it as
+    /// skipped rather than re-offering the step on every later presentation.
+    public var usageStatsWereAnswered: Bool { settings.telemetryAsked }
+
+    /// Whether there is anything to opt IN to. False in a build with no
+    /// analytics sink installed — run-from-source, `swift run`, headless —
+    /// where asking would promise a stream nothing can send. The step
+    /// auto-passes there, the same posture as `.unsupported` audio and a
+    /// `.notFound` helper: no grant exists to give.
+    ///
+    /// This is the ask's gate ONLY. Settings › General keeps its toggle either
+    /// way, exactly as it did when this ask was an alert on the first
+    /// menu-bar click.
+    public let usageStatsAreAvailable: Bool
+
+    /// Say yes: consent is persisted, the live sink is opted in, and the ask
+    /// is spent.
+    public func grantUsageStats() {
+        setUsageStats(true)
+    }
+
+    /// Say no. Spends the ask exactly like a grant does — see
+    /// ``usageStatsWereAnswered`` — and opts the sink out explicitly rather
+    /// than leaving it at whatever it was.
+    public func declineUsageStats() {
+        setUsageStats(false)
+    }
+
+    private func setUsageStats(_ granted: Bool) {
+        settings.telemetryOptIn = granted
+        settings.telemetryAsked = true
+        Analytics.setConsent(granted)
+        // AFTER the consent flip, never before: this is the first event a new
+        // opt-in can legitimately send, and it would be dropped on the floor
+        // if it ran a line earlier. A DECLINE deliberately sends nothing —
+        // `capture` no-ops without consent, which is exactly right.
+        Analytics.capture("onboarding:usage_stats_opted_in")
+        onChange?()
     }
 
     /// Re-read the PTP helper's live status WITHOUT re-registering, so the

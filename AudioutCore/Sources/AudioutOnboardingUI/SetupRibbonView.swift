@@ -50,6 +50,11 @@ struct RibbonContent {
     var body: NSAttributedString?
     var primary: (title: String, kind: PrimaryKind)?
     var showsSkip = false
+    /// Override for ``SetupRibbonView/skipTitle``, for the one step whose skip
+    /// is not a deferral. Usage Statistics is asked ONCE and never re-nagged
+    /// (PRODUCT.md), so "Skip for now" would promise a second ask that never
+    /// comes; its button says "No Thanks" instead. `nil` keeps the shared word.
+    var skipTitle: String?
     /// A demoted text-button path offered BESIDE the primary, never instead of
     /// it (Local Network's retry keeps its own browse; a browsed row offers its
     /// pane).
@@ -60,7 +65,7 @@ struct RibbonContent {
     /// entrance or steal the keyboard focus back off it.
     var buttonSignature: String {
         [primary.map { "\($0.title)|\($0.kind)" } ?? "-",
-         showsSkip ? "skip" : "-",
+         showsSkip ? "skip:\(skipTitle ?? "")" : "-",
          quietLink ?? "-"].joined(separator: "\u{1F}")
     }
 }
@@ -508,7 +513,8 @@ final class SetupRibbonView: NSView {
         if content.showsSkip {
             // Borderless and quiet: skipping is a real answer, but it is not
             // the one the step is asking for.
-            let skip = onboardingActionButton(title: Self.skipTitle, prominent: false,
+            let skip = onboardingActionButton(title: content.skipTitle ?? Self.skipTitle,
+                                              prominent: false,
                                               target: self, action: #selector(skipTapped))
             skip.isBordered = false
             skip.controlSize = .regular

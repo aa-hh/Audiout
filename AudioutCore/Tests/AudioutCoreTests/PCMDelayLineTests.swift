@@ -27,6 +27,24 @@ import Testing
         return data
     }
 
+    /// A steady level on both channels, for the tests that read the crossfade's
+    /// shape and so need the two sides of the join to be flat.
+    private func constant(_ value: Int16, frames: Int) -> Data {
+        var data = Data(count: frames * 4)
+        data.withUnsafeMutableBytes { raw in
+            let samples = raw.bindMemory(to: Int16.self)
+            for sample in 0..<(frames * 2) { samples[sample] = value }
+        }
+        return data
+    }
+
+    /// Run a block through the line and throw the output away — history is all
+    /// these callers are building.
+    private func feed(_ line: PCMDelayLine, _ pcm: Data) {
+        var block = pcm
+        line.exchange(&block)
+    }
+
     /// One value per frame, checked to be identical on both channels — a delay
     /// line that lost the interleave would show up here rather than as a
     /// mysterious byte mismatch.
@@ -148,11 +166,72 @@ import Testing
         line.setDelayFrames(500)
         var pcm = ramp(fromFrame: 20 * 512, frames: 512)
         line.exchange(&pcm)
-        let firstAfterChange = frameValues(pcm).first!
+        let afterChange = frameValues(pcm)
         #expect(line.delayFrames == 500)
         // A shrink jumps forward onto audio the line already holds: the 1000
         // frames between the old and new read positions are skipped outright.
-        #expect(firstAfterChange == lastBeforeChange + 1001)
+        // Measured past the 5 ms crossfade that hides the join — inside it the
+        // two positions are still mixed.
+        #expect(afterChange[220] == lastBeforeChange + 1001 + 220)
+        // And the join is a fade, not a cut: the first frame out is still the
+        // audio the OLD position was about to emit.
+        #expect(afterChange[0] == lastBeforeChange + 1)
+    }
+
+    /// The fade itself, on a signal built so its shape is readable: the old
+    /// read position sits in silence and the new one in a steady tone, so the
+    /// output IS the fade-in curve.
+    @Test func shrinkCrossfadesAcrossTheJoin() {
+        let line = PCMDelayLine(capacityFrames: 8192)
+        line.setDelayFrames(2000)
+        for _ in 0..<8 { feed(line, constant(0, frames: 512)) }
+        for _ in 0..<3 { feed(line, constant(1000, frames: 512)) }
+
+        line.setDelayFrames(500)
+        var pcm = constant(1000, frames: 512)
+        line.exchange(&pcm)
+        let values = frameValues(pcm)
+
+        #expect(line.delayFrames == 500)
+        expectEqualPowerFadeIn(values, to: 1000)
+    }
+
+    /// A block shorter than the 220-frame fade must not restart the fade every
+    /// block — the two counters have to carry it across the boundaries.
+    @Test func aShrinkFadeCarriesAcrossShortBlocks() {
+        let line = PCMDelayLine(capacityFrames: 8192)
+        line.setDelayFrames(2000)
+        for _ in 0..<64 { feed(line, constant(0, frames: 64)) }
+        for _ in 0..<24 { feed(line, constant(1000, frames: 64)) }
+
+        line.setDelayFrames(500)
+        var values: [Int16] = []
+        for _ in 0..<5 {
+            var pcm = constant(1000, frames: 64)
+            line.exchange(&pcm)
+            values += frameValues(pcm)
+        }
+
+        // A per-block restart would put the curve back at 0 on every boundary.
+        #expect(values[64] > 0)
+        expectEqualPowerFadeIn(values, to: 1000)
+    }
+
+    /// The fade the line is specified to run: equal power (`cos² + sin² = 1`)
+    /// over 220 frames — from the silent old side into `level` — and nothing
+    /// but `level` afterwards.
+    private func expectEqualPowerFadeIn(
+        _ values: [Int16], to level: Double, sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        for frame in 0..<220 {
+            let expected = (level * sin(Double.pi / 2 * Double(frame) / 220)).rounded()
+            #expect(abs(Double(values[frame]) - expected) <= 1,
+                    Comment(rawValue: "frame \(frame): \(values[frame]) vs \(expected)"),
+                    sourceLocation: sourceLocation)
+        }
+        #expect(values[220...].allSatisfy { Double($0) == level },
+                "past the fade the output is the new position, unmixed",
+                sourceLocation: sourceLocation)
     }
 
     @Test func delayIsClampedToCapacityMinusBlock() {

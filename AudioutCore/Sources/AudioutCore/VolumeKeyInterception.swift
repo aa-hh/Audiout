@@ -138,7 +138,7 @@ enum AuxModifierFlags {
 public enum VolumeStep {
 
     /// Detents across the full range for a normal press. macOS uses 16.
-    static let coarseDetents = 16.0
+    public static let coarseDetents = 16.0
     /// Detents for a `⇧⌥` quarter step — a quarter of each coarse detent.
     static let fineDetents = 64.0
 

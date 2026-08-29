@@ -310,7 +310,7 @@ public final class DeviceRowView: NSView {
     // MARK: Bluetooth SYNC chip (BT-OFFSET-UI → PLAN-BT-SYNC-DRAWER T6)
 
     /// Whether this row carries the SYNC control — the popover passes `true`
-    /// for `.bluetooth` rows only. The chip occupies the LEFT portion of the
+    /// for Bluetooth, Cast and the Mac's own rows. The chip occupies the LEFT portion of the
     /// reserved trailing slot; the FEED pill right-aligns into
     /// `PopoverColumnGrid.btFeedReserveWidth` beside it (feed pill far right,
     /// locked spec). Non-sync rows are byte-for-byte unchanged.
@@ -714,7 +714,7 @@ public final class DeviceRowView: NSView {
         // The chip is read-only, so unlike the field it replaced there is no
         // mid-edit state a repaint could stomp.
         if showsSyncControls {
-            self.syncTrimMs = BTSyncTrim.clamp(syncTrimMs)
+            self.syncTrimMs = BTSyncTrim.clamp(syncTrimMs, rangeMs: syncRangeMs)
             self.syncTrimIsSet = syncTrimIsSet
             self.syncMeasuredLatencyMs = syncMeasuredLatencyMs
             self.syncDrawerExpanded = syncDrawerExpanded
@@ -1758,6 +1758,16 @@ public final class DeviceRowView: NSView {
         "Fine-tune the delay on this Mac's own speakers when playing in sync with "
         + "other speakers. Raise it if the Mac plays ahead, lower it if it plays behind."
 
+    /// The Cast chip's own help, for the same reason the Mac's row has one:
+    /// this is the only place the app can say what the dial is FOR. Without it
+    /// the obvious reading is "this is where I take out the several seconds a
+    /// Cast receiver runs behind" — which is exactly the term Audiout already
+    /// removes on its own, and a user chasing it here would wind the control to
+    /// its stop and still hear the gap.
+    public static let castSyncHelpCopy =
+        "Audiout already lines up the delay a Cast receiver reports. Use this for the part "
+        + "it can't report — a TV's own speakers, or the soundbar behind it."
+
     private func configureSyncChip() {
         syncChipButton.translatesAutoresizingMaskIntoConstraints = false
         // Drawing-only cell swap FIRST, then configure the button — the same
@@ -1828,10 +1838,24 @@ public final class DeviceRowView: NSView {
         // home, so the "why would I touch this" sentence comes with it.
         // The chip's number is the TOTAL once a run has measured this speaker,
         // so only hover has room for the two halves it is made of.
-        syncChipButton.toolTip = device.isLocalDevice
-            ? "\(syncChipHelp) \(Self.localSyncHelpCopy)"
-            : syncChipHelp + syncMeasuredSplitCopy
+        if device.isLocalDevice {
+            syncChipButton.toolTip = "\(syncChipHelp) \(Self.localSyncHelpCopy)"
+        } else if device.isCast {
+            syncChipButton.toolTip = "\(syncChipHelp) \(Self.castSyncHelpCopy)"
+        } else {
+            syncChipButton.toolTip = syncChipHelp + syncMeasuredSplitCopy
+        }
         syncChipButton.setNeedsDisplay(syncChipButton.bounds)
+    }
+
+    /// This row's own bound on the SYNC value. A Cast receiver's correction has
+    /// to cover a TV's HDMI → soundbar chain, which no other transport carries,
+    /// so it gets ``BTSyncTrim/castRangeMs``; everything else keeps
+    /// ``BTSyncTrim/rangeMs``. Derived from the device rather than passed in —
+    /// the host already decides the DRAWER's usable range, and a second
+    /// hand-pushed copy of the same fact is one the two could disagree about.
+    private var syncRangeMs: Double {
+        device.isCast ? BTSyncTrim.castRangeMs : BTSyncTrim.rangeMs
     }
 
     /// What the chip's number says: the user's trim, plus — once the alignment
@@ -1848,7 +1872,7 @@ public final class DeviceRowView: NSView {
     /// wizard has never run against this speaker — there is no split then.
     private var syncMeasuredSplitCopy: String {
         guard let measured = syncMeasuredLatencyMs else { return "" }
-        let nudge = Int(BTSyncTrim.quantise(syncTrimMs))
+        let nudge = Int(BTSyncTrim.snap(syncTrimMs))
         return " Measured latency: \(Int(measured.rounded())) ms"
             + (nudge == 0 ? ", no nudge on top." : ", plus your \(BTSyncTrim.spokenOffset(syncTrimMs)) nudge.")
     }
@@ -1907,14 +1931,21 @@ public final class DeviceRowView: NSView {
     // never drift.
     //
     // Order: "Equalizer…" first (every speaker has tone), then "Align
-    // speaker…" (Bluetooth only). No separators — two items don't need
-    // grouping. This Mac gets NEITHER, so its menu would be empty: the row
+    // speaker…" (`supportsAlignmentWizard`). No separators — two items don't
+    // need grouping. A row entitled to NEITHER would have an empty menu: it
     // returns no menu at all and its icon stays inert, rather than offering a
     // door onto nothing.
 
     /// This Mac is not an Equalizer target — per-device EQ covers AirPlay and
     /// Bluetooth only, and the backend rejects the local id.
     private var supportsEqualizer: Bool { !device.isLocalDevice && device.kind != .localMac }
+
+    /// A CAST row carries the SYNC chip and drawer but NOT the guided wizard:
+    /// that run bisects a ±500 ms window by ear, and a Cast receiver plays
+    /// seconds behind live, so it has nothing to converge on. Its offset is set
+    /// by hand in the drawer instead, which is why the menu item is absent
+    /// rather than disabled — there is no state in which it would work.
+    private var supportsAlignmentWizard: Bool { showsSyncControls && !device.isCast }
 
     public override func menu(for event: NSEvent) -> NSMenu? {
         return buildContextMenu() ?? super.menu(for: event)
@@ -1931,7 +1962,7 @@ public final class DeviceRowView: NSView {
             eq.target = self
             menu.addItem(eq)
         }
-        if showsSyncControls {
+        if supportsAlignmentWizard {
             let align = NSMenuItem(title: "Align speaker…",
                                    action: #selector(alignSpeakerMenuItemSelected(_:)),
                                    keyEquivalent: "")

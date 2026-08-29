@@ -69,12 +69,20 @@ import Testing
     @available(macOS 15, *)
     private func startFake(fetchBytes: Int = 65_536) throws -> (fake: FakeCastReceiver, endpoint: NWEndpoint) {
         let fake = FakeCastReceiver(fetchBytes: fetchBytes)
+        return (fake, try start(fake))
+    }
+
+    /// Binds a receiver built by the caller — the timing tests below each need
+    /// their own buffer model, and defaults repeated here would be a second
+    /// copy of the measured numbers to keep in step.
+    @available(macOS 15, *)
+    private func start(_ fake: FakeCastReceiver) throws -> NWEndpoint {
         let box = Box<NWEndpoint>()
         fake.start { result in
             if case .success(let endpoint) = result { box.set(endpoint) }
         }
         try #require(waitUntil(timeout: 5) { box.value != nil }, "the fake receiver never bound a loopback port")
-        return (fake, try #require(box.value))
+        return try #require(box.value)
     }
 
     /// A connected sender. `heartbeatInterval` is short so a test can watch
@@ -329,6 +337,133 @@ import Testing
         ] {
             let measured = try #require(value, Comment(rawValue: "\(name) was never measured:\n" + lines.joined))
             #expect(measured >= 0, Comment(rawValue: "\(name) is negative"))
+        }
+    }
+
+    // MARK: - The timing the receiver models
+
+    /// Every `playerState` the receiver reported, in order.
+    private final class StateLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var states: [String] = []
+        func append(_ state: String) { lock.withLock { states.append(state) } }
+        var all: [String] { lock.withLock { states } }
+        func count(of state: String) -> Int { lock.withLock { states.filter { $0 == state }.count } }
+    }
+
+    /// Loads the live stream into `fake` and runs `body` once it is playing.
+    ///
+    /// `lead` is the number the whole sync design turns on, measured exactly
+    /// as the sender measures it: audio seconds handed over, minus the
+    /// position the receiver reports. `nil` means the receiver never answered.
+    @available(macOS 15, *)
+    private func withPlayingSession(
+        on endpoint: NWEndpoint,
+        _ body: (_ lead: () -> Double?, _ states: StateLog) throws -> Void
+    ) throws {
+        let server = try startAudioServer()
+        defer { server.stop() }
+        let (channel, client) = try connect(to: endpoint)
+        defer { channel.close() }
+        let app = try launchedApplication(client)
+
+        let states = StateLog()
+        let playing = Signal()
+        client.onMediaStatus = { status in
+            states.append(status.playerState)
+            if status.playerState == "PLAYING" { playing.fire() }
+        }
+        let loaded = Box<Result<CastMediaStatus, Error>>()
+        client.load(url: server.url(host: "127.0.0.1"), contentType: "audio/wav", app: app) { loaded.set($0) }
+        try #require(waitUntil(timeout: 5) { loaded.value != nil }, "LOAD never answered")
+        try #require(waitFor([playing], timeout: 5), "the receiver never reached PLAYING")
+
+        try body({
+            let box = Box<CastMediaStatus>()
+            client.getMediaStatus(app: app) { result in
+                if case .success(let status) = result { box.set(status) }
+            }
+            // Read the sender's side right after asking, so the two halves of
+            // the subtraction are a loopback round trip apart at worst.
+            let sent = server.secondsSent
+            guard self.waitUntil(timeout: 3, { box.value != nil }), let time = box.value?.currentTime else { return nil }
+            return sent - time
+        }, states)
+    }
+
+    /// The receiver starts playing once it holds `startupLead` seconds, and
+    /// the sender paces at exactly real time — so that buffer level is the
+    /// lead, and it stays put.
+    @Test func theLeadSettlesAtTheStartupBuffer() throws {
+        guard #available(macOS 15, *) else { return }
+        let fake = FakeCastReceiver(startupLead: 1, steadyLead: 1)
+        defer { fake.stop() }
+        try withPlayingSession(on: try start(fake)) { lead, _ in
+            // PLAYING is announced at `fetchBytes`, well before the buffer is
+            // full, so the first second of the session is still filling.
+            Thread.sleep(forTimeInterval: 1.3)
+            let first = try #require(lead())
+            Thread.sleep(forTimeInterval: 1)
+            let second = try #require(lead())
+            #expect(abs(first - 1) < 0.15, Comment(rawValue: "expected a 1 s lead, measured \(first)"))
+            #expect(abs(second - first) < 0.1,
+                    Comment(rawValue: "the lead did not hold flat: \(first) then \(second)"))
+        }
+    }
+
+    /// The event the whole room-delay policy exists for: the clock stands
+    /// still while the stream keeps arriving, and the sender — pacing at
+    /// exactly real time — can never give the difference back.
+    @Test func aStallLeavesTheLeadPermanentlyHigher() throws {
+        guard #available(macOS 15, *) else { return }
+        let fake = FakeCastReceiver(startupLead: 1, steadyLead: 1)
+        defer { fake.stop() }
+        try withPlayingSession(on: try start(fake)) { lead, states in
+            Thread.sleep(forTimeInterval: 1.3)
+            let before = try #require(lead())
+            let buffering = states.count(of: "BUFFERING")
+
+            fake.stall(after: 0, duration: 0.5)
+            Thread.sleep(forTimeInterval: 1.5)
+            let after = try #require(lead())
+
+            #expect(states.count(of: "BUFFERING") > buffering,
+                    Comment(rawValue: "the stall never showed as BUFFERING: \(states.all)"))
+            #expect(abs((after - before) - 0.5) < 0.15,
+                    Comment(rawValue: "expected the stall's 0.5 s to stick: \(before) then \(after)"))
+        }
+    }
+
+    /// The measured session shape: it does not start at its steady value, it
+    /// steps up there on one early rebuffer.
+    @Test func theStartupProfileStepsUpOnce() throws {
+        guard #available(macOS 15, *) else { return }
+        let fake = FakeCastReceiver(startupLead: 0.5, steadyLead: 1, startupRebufferAfter: 1)
+        defer { fake.stop() }
+        try withPlayingSession(on: try start(fake)) { lead, _ in
+            Thread.sleep(forTimeInterval: 0.7)
+            let started = try #require(lead())
+            Thread.sleep(forTimeInterval: 1.6)
+            let settled = try #require(lead())
+            #expect(abs(started - 0.5) < 0.15, Comment(rawValue: "expected the 0.5 s startup lead, measured \(started)"))
+            #expect(abs(settled - 1) < 0.15, Comment(rawValue: "expected the step to 1 s, measured \(settled)"))
+        }
+    }
+
+    /// The receiver's crystal against the Mac's. 100 000 ppm is a clock 10 %
+    /// fast, which shows in two seconds; the ~100 ppm a real one might drift
+    /// would take an hour to move the lead 360 ms, and that is not a test.
+    @Test func theReceiverClockDrifts() throws {
+        guard #available(macOS 15, *) else { return }
+        let fake = FakeCastReceiver(startupLead: 1, steadyLead: 1, clockDriftPPM: 100_000)
+        defer { fake.stop() }
+        try withPlayingSession(on: try start(fake)) { lead, _ in
+            Thread.sleep(forTimeInterval: 1.3)
+            let early = try #require(lead())
+            Thread.sleep(forTimeInterval: 2)
+            let late = try #require(lead())
+            #expect(abs((early - late) - 0.2) < 0.1,
+                    Comment(rawValue: "a fast clock must eat 200 ms of lead in two seconds: \(early) then \(late)"))
         }
     }
 

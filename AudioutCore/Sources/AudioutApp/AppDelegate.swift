@@ -97,10 +97,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.getAnonymousId = { UUID(uuidString: installID) ?? $0 }
         PostHogSDK.shared.setup(config)
         analyticsAvailable = true
+        // GeoIP is enrichment PostHog does SERVER-side from the request IP, so
+        // it lands on every event unless each one opts out — which put a city,
+        // a postal code and a lat/long on every feature count. Registering the
+        // opt-out as a super property turns it off for everything, and
+        // `captureCoarseLocationOnce()` is then the ONE event per launch that
+        // allows it (Alec, 2026-08-29: "get the geoip on load or something,
+        // not with every event").
+        PostHogSDK.shared.register([Self.geoipDisableKey: true])
         Analytics.install(Analytics.Sink(
             capture: { PostHogSDK.shared.capture($0, properties: $1) },
-            consentChanged: { $0 ? PostHogSDK.shared.optIn() : PostHogSDK.shared.optOut() }
+            consentChanged: { granted in
+                guard granted else { PostHogSDK.shared.optOut(); return }
+                PostHogSDK.shared.optIn()
+                // Consent given DURING this launch — the location event that
+                // normally rides startup was suppressed by the opt-out, so it
+                // fires here instead. Without this, anyone who opts in from
+                // the Setup card would never contribute one.
+                Self.captureCoarseLocationOnce()
+            }
         ), consent: settings.telemetryOptIn)
+        if settings.telemetryOptIn { Self.captureCoarseLocationOnce() }
+    }
+
+    /// PostHog's per-event escape hatch from server-side GeoIP enrichment.
+    private static let geoipDisableKey = "$geoip_disable"
+
+    /// The one event per launch that carries coarse location. It overrides the
+    /// registered opt-out for itself only; every other event stays clean.
+    ///
+    /// Called directly rather than through ``Analytics`` because the facade
+    /// carries `[String: String]` and this property has to reach PostHog as a
+    /// real `false` — and because `AppDelegate` is the one place allowed to
+    /// touch `PostHogSDK`. The SDK's own opt-out still gates it, so a build
+    /// without consent sends nothing.
+    private nonisolated static func captureCoarseLocationOnce() {
+        PostHogSDK.shared.capture("app:launched", properties: [geoipDisableKey: false])
     }
 
     /// True once `configurePostHog()` has successfully called `setup(_:)` —
@@ -336,16 +368,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // This path never enters the backend event stream, so nothing else
             // will repaint the master readout for it.
             self.repaintFromCurrentState()
-            // We swallowed the key, so macOS drew no HUD of its own — the press
-            // would otherwise land with no visible feedback at all. Show it on
-            // the status item's own screen, which is where the user's eyes are.
-            let anchor = self.statusAnchorRect()
-            let screen = anchor.flatMap { rect in
-                NSScreen.screens.first { $0.frame.intersects(rect) }
-            }
-            self.volumeHUD.show(volumePercent: self.groupController.mainOutMasterVolume,
-                                isMuted: self.groupController.isMainOutMuted,
-                                on: screen)
+            self.showVolumeHUD()
         }
         interceptor.onAccessibilityMissing = { [weak self] in
             guard let self else { return }
@@ -384,21 +407,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 from: self.groupController.mainOutMasterVolume, up: up, fineStep: false)
             self.groupController.applyExternalSystemVolume(target)
             self.repaintFromCurrentState()
+            self.showVolumeHUD()
         }
         bar.onToggleMute = { [weak self] in
             guard let self else { return }
             self.groupController.setMainOutMuted(!self.groupController.isMainOutMuted)
             self.repaintFromCurrentState()
+            self.showVolumeHUD()
         }
         return bar
     }()
 
-    /// The volume readout shown when we consume a hardware volume/mute key.
-    /// macOS draws no HUD for a key we swallowed, so without this the press
-    /// has no visible feedback at all. Driven from exactly one place — the
-    /// interceptor's `onAction` — never from the Touch Bar or a slider, which
-    /// both already show the user what they moved.
+    /// The volume readout shown for every input this app drives that has no
+    /// value readout of its own — the swallowed hardware keys and the Touch
+    /// Bar's volume/mute buttons — because macOS draws its own HUD for the
+    /// brightness and keyboard-backlight buttons sitting beside them and
+    /// would otherwise leave Audiout's the only silent ones. The row
+    /// sliders do NOT show it — they already display the value they moved.
     private lazy var volumeHUD = VolumeHUDPanel()
+
+    /// Show the volume HUD, anchored to the status item's own screen (where
+    /// the user's eyes are). Called for every input this app drives that has
+    /// no value readout of its own — a hardware volume/mute key we swallowed
+    /// (macOS draws no HUD for a key it never saw) and the Touch Bar's
+    /// volume/mute buttons — so the press isn't left with no visible
+    /// feedback at all.
+    private func showVolumeHUD() {
+        let anchor = statusAnchorRect()
+        let screen = anchor.flatMap { rect in
+            NSScreen.screens.first { $0.frame.intersects(rect) }
+        }
+        volumeHUD.show(volumePercent: groupController.mainOutMasterVolume,
+                        isMuted: groupController.isMainOutMuted,
+                        on: screen)
+    }
 
     /// True once we've sent the user to the permission rows over a missing
     /// Accessibility grant this launch, so repeated ownership changes can't
@@ -594,17 +636,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                self.presentSetupForUndeterminedIfNeeded() {
                 return
             }
-            if self.analyticsAvailable && !self.settings.telemetryAsked {
-                let alert = NSAlert()
-                alert.messageText = "Share anonymous usage statistics?"
-                alert.informativeText = "Audiout counts which features are used, anonymously. No audio, speaker names, network details, or license keys are ever collected. You can change this anytime in Settings › General."
-                alert.addButton(withTitle: "Share")
-                alert.addButton(withTitle: "Don't Share")
-                let granted = alert.runModal() == .alertFirstButtonReturn
-                self.settings.telemetryAsked = true
-                self.settings.telemetryOptIn = granted
-                Analytics.setConsent(granted)
-            }
+            // NOTHING asks about usage statistics on this click. That ask is
+            // `SetupStep.usageStats`, the Setup window's last card, and a
+            // modal alert here would interrupt the user at the exact moment
+            // they are reaching for the mixer. The Setup flow spends
+            // `settings.telemetryAsked` whichever way it is answered, so
+            // nothing re-asks anywhere; Settings › General is the way back.
             self.surface.perform(action, anchorRect: self.statusAnchorRect())
         }
 
@@ -892,6 +929,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onBTWizardEndLatencyPreview = { [weak self] deviceID, keepMs in
             (self?.backend as? BTOutputControlling)?
                 .endBTWizardLatencyPreview(forDevice: deviceID, keepMs: keepMs)
+        }
+        // CAST-SYNC: a Cast row gets the same SYNC chip and drawer, over its
+        // own store. Capability-gated like the Bluetooth hooks above, so a
+        // mock/dev popover keeps every Cast chip on "Not set" and only the
+        // session's own edits move it.
+        popoverController.castOffsetProvider = { [weak self] deviceID in
+            (self?.backend as? CastSyncOffsetControlling)?.castUserOffsetMs(forDevice: deviceID) ?? 0
+        }
+        popoverController.castOffsetIsSetProvider = { [weak self] deviceID in
+            (self?.backend as? CastSyncOffsetControlling)?
+                .castHasUserOffset(forDevice: deviceID) ?? false
+        }
+        popoverController.onSetCastOffset = { [weak self] ms, deviceID in
+            (self?.backend as? CastSyncOffsetControlling)?
+                .setCastUserOffsetMs(ms, forDevice: deviceID)
+        }
+        popoverController.onResetCastOffset = { [weak self] deviceID in
+            (self?.backend as? CastSyncOffsetControlling)?.clearCastUserOffset(forDevice: deviceID)
         }
         // Roadmap 056 Part 1: the Mac's own row gets the identical SYNC
         // surface. The value lives in `AppSettings`, so reading and writing it

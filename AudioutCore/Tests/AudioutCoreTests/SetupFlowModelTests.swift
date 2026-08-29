@@ -4,7 +4,7 @@ import Foundation
 import Testing
 @testable import AudioutCore
 
-/// `SetupFlowModel` sequences the five permission cards over `SetupModel`'s
+/// `SetupFlowModel` sequences the six permission cards over `SetupModel`'s
 /// statuses. These pin the things the UI can't be trusted to re-derive: the
 /// advance order, that skipping records without granting, the two auto-passes (a
 /// hard gate must never demand what the OS can't give), the Done gate, the
@@ -124,7 +124,8 @@ import Testing
         ptpHelper: PTPHelperStatus = .notRegistered,
         ptpHelperManager: PTPHelperManaging? = nil,
         remoteControlTrusted: Bool = false,
-        localNetworkGated: Bool = true
+        localNetworkGated: Bool = true,
+        usageStatsAvailable: Bool = false
     ) -> SetupModel {
         SetupModel(audioProbe: CannedAudioProbe(result: audio),
                    localNetwork: localNetwork ?? CannedLocalNetwork(reachable: localNetworkReachable),
@@ -134,6 +135,7 @@ import Testing
                    bluetoothPrimer: bluetoothPrimer ?? SimulatedBluetoothPermission(status: bluetooth),
                    settings: AppSettings(defaults: isolatedDefaults),
                    localNetworkGated: localNetworkGated,
+                   usageStatsAvailable: usageStatsAvailable,
                    bluetoothPromptTimeout: bluetoothPromptTimeout)
     }
 
@@ -159,8 +161,10 @@ import Testing
     // MARK: Order + advance
 
     @Test func stepOrderIsTheSpecOrder() {
-        #expect(SetupFlowModel.steps == [.audio, .localNetwork, .bluetooth, .speakerSync, .remoteControl])
-        #expect(SetupFlowModel.skippableSteps == [.bluetooth, .remoteControl, .speakerSync])
+        #expect(SetupFlowModel.steps == [.audio, .localNetwork, .bluetooth, .speakerSync,
+                                         .remoteControl, .usageStats])
+        #expect(SetupFlowModel.skippableSteps == [.bluetooth, .remoteControl, .speakerSync,
+                                                  .usageStats])
     }
 
     @Test func freshFlowStartsOnSystemAudio() {
@@ -182,7 +186,7 @@ import Testing
 
         #expect(flow.display(.audio) == .completed)
         #expect(flow.activeStep == .localNetwork)
-        #expect(SetupFlowModel.steps.filter { flow.display($0) == .active }.count == 1)
+        #expect(flow.steps.filter { flow.display($0) == .active }.count == 1)
     }
 
     /// Local Network completes on `.granted` ONLY. `.requested` is the honest
@@ -206,7 +210,7 @@ import Testing
         await prime(setup)
 
         #expect(flow.activeStep == nil)
-        #expect(SetupFlowModel.steps.allSatisfy { flow.display($0) == .completed })
+        #expect(flow.steps.allSatisfy { flow.display($0) == .completed })
         #expect(flow.isReadyForFinalCheck, "every card decided by a grant readies the check")
         #expect(!flow.isDoneAvailable, "the gate waits for the check itself")
 

@@ -12,6 +12,13 @@
 # Gatekeeper lets it launch.
 #
 # Usage: scripts/make-app.sh [output-dir]   (default output dir: ./build)
+# Env:
+#   AUDIOUT_BUILD_LOCAL=1       compile here, never on the second Mac
+#   AUDIOUT_BUNDLE_DYLIBS=1     bundle the Homebrew dylibs (Homebrew-less target)
+#   AUDIOUT_NO_LIVETEST_LOCK=1  skip the live-test slot gate on the shared dev id
+#                                 (see the "Live-test slot gate" section below, and
+#                                 scripts/livetest.sh) — for a deliberate build when
+#                                 you know nobody else is testing
 # Every command below is a paste-proof one-liner — no backslash continuations.
 
 set -euo pipefail
@@ -180,6 +187,37 @@ ICON_SOURCE="$SCRIPT_DIR/Audiout-MacOS-Default-1024x1024@1x.png"
 # build a light/dark appearance-aware icon (see the app-icon step below).
 ICON_SOURCE_DARK="$SCRIPT_DIR/Audiout-MacOS-Dark-1024x1024@1x.png"
 
+# --- Live-test slot gate ---------------------------------------------------
+# ONE agent at a time may build the SHARED dev id. Rebuilding it under a tester
+# overwrites the .app he is using and starts a second copy fighting the running
+# one for the same launchd daemon identity — see scripts/livetest.sh's header
+# for why both failures are silent. Agents run in parallel worktrees with no
+# shared memory, so this build script is the only place the rule can actually
+# be enforced: the last common choke point before the .app appears on disk.
+#
+# ONLY the shared dev id is gated. A fresh per-handover id is a different .app
+# in a different bundle and a different daemon identity, so it cannot clobber
+# anything, and the default production id is the /Applications copy nobody
+# should be rebuilding for a test anyway. Both paths run exactly as before —
+# the check below is one `ps` and one `stat`, and it is placed here so it costs
+# nothing when it refuses: before ffmpeg, before housekeeping, before any
+# compile.
+DEV_BUNDLE_ID="com.audiout.Audiout.dev"   # the standing dev id, CLAUDE.md "Build & run"
+if [ "$BUNDLE_ID" = "$DEV_BUNDLE_ID" ] && [ "${AUDIOUT_NO_LIVETEST_LOCK:-0}" != "1" ]; then
+  # Run the check from REPO_ROOT, not the caller's cwd: the slot is owned by a
+  # worktree, and this build belongs to the worktree this script lives in
+  # whatever directory it was invoked from.
+  if ! ( cd "$REPO_ROOT" && "$SCRIPT_DIR/livetest.sh" check ); then
+    echo "ERROR: refusing to build $DEV_BUNDLE_ID — you do not hold the live-test slot." >&2
+    echo "       Take it:      bash scripts/livetest.sh acquire --label <your branch or task>" >&2
+    echo "       Or check:     bash scripts/livetest.sh status" >&2
+    echo "       Or sidestep:  build a FRESH handover id instead, which cannot clobber the" >&2
+    echo "                     dev build — APP_NAME=\"Audiout <thing>\" BUNDLE_ID=\"com.audiout.Audiout.<thing>\" bash scripts/make-app.sh" >&2
+    echo "       (AUDIOUT_NO_LIVETEST_LOCK=1 skips this when you know no one else is testing.)" >&2
+    exit 1
+  fi
+fi
+
 # --- Build (release) ------------------------------------------------------
 # For a self-contained release bundle, build the minimal audio-only ffmpeg FIRST
 # (idempotent — skips if already built; set FFMPEG_MIN_FORCE=1 to rebuild), so the
@@ -257,10 +295,18 @@ cp -R \"\$BIN/$RESOURCE_BUNDLE_NAME\" .remote-products/"
     if remote_fetch "$REPO_ROOT" ".remote-products/$EXECUTABLE" "$STAGE/$EXECUTABLE" &&
        remote_fetch "$REPO_ROOT" ".remote-products/$TCC_PROBE_EXECUTABLE" "$STAGE/$TCC_PROBE_EXECUTABLE" &&
        remote_fetch "$REPO_ROOT" ".remote-products/$HELPER_EXECUTABLE" "$STAGE/$HELPER_EXECUTABLE" &&
-       remote_fetch "$REPO_ROOT" ".remote-products/$RESOURCE_BUNDLE_NAME/" "$STAGE/$RESOURCE_BUNDLE_NAME"; then
-      # Trailing slash on the source is load-bearing: without it rsync places
-      # the directory INSIDE the destination, nesting the bundle in itself and
-      # silently losing every resource (the brand mark ships as nil).
+       remote_fetch "$REPO_ROOT" ".remote-products/$RESOURCE_BUNDLE_NAME" "$STAGE/$RESOURCE_BUNDLE_NAME" &&
+       test -d "$STAGE/$RESOURCE_BUNDLE_NAME"; then
+      # NO trailing slash on the bundle source, and the `test -d` above is part
+      # of the fetch condition rather than a later assertion. Both are the same
+      # rsync rule seen from two sides: a trailing slash means "copy the
+      # CONTENTS of this directory", so with it the bundle's files land loose in
+      # $STAGE and $STAGE/<bundle> is never created. rsync still reports
+      # SUCCESS, so without the `test -d` the fetch condition passes, the
+      # graceful local-build fallback below is skipped, and the run dies ~70
+      # lines on at the hard `test -d "$BUILT_RESOURCE_BUNDLE"` exit instead.
+      # (`remote_fetch` hands rsync the destination's PARENT — see its own
+      # contract — which is what makes the slash-free form correct here.)
       BUILT_BINARY="$STAGE/$EXECUTABLE"
       BUILT_TCC_PROBE="$STAGE/$TCC_PROBE_EXECUTABLE"
       BUILT_HELPER="$STAGE/$HELPER_EXECUTABLE"

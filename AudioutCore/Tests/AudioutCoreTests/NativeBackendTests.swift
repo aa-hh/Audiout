@@ -463,6 +463,8 @@ private final class FakeSystemVolume: SystemVolumeControlling, @unchecked Sendab
     private var _muted: Bool?
     private var _volumeCalls: [Int] = []
     private var _mutedCalls: [Bool] = []
+    private var _setVolumeToDeviceCalls: [(level: Int, deviceID: AudioObjectID?)] = []
+    private var _setMutedToDeviceCalls: [(muted: Bool, deviceID: AudioObjectID?)] = []
     private var _onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)?
     private var _startCount = 0
     private var _stopCount = 0
@@ -499,6 +501,19 @@ private final class FakeSystemVolume: SystemVolumeControlling, @unchecked Sendab
     func setMuted(_ muted: Bool) {
         lock.withLock { _mutedCalls.append(muted) }
     }
+    /// Target-resolving pair. The resolver is CALLED and its answer recorded
+    /// alongside the level, so a test can see WHICH device a write was aimed at;
+    /// `writable` is honoured exactly as above.
+    func setVolume(_ volume: Int, resolvingTarget: @escaping @Sendable () -> AudioObjectID?,
+                   didWrite: (@Sendable (Bool) -> Void)?) {
+        let resolved = resolvingTarget()
+        let wrote = lock.withLock { _setVolumeToDeviceCalls.append((volume, resolved)); return _writable }
+        didWrite?(wrote)
+    }
+    func setMuted(_ muted: Bool, resolvingTarget: @escaping @Sendable () -> AudioObjectID?) {
+        let resolved = resolvingTarget()
+        lock.withLock { _setMutedToDeviceCalls.append((muted, resolved)) }
+    }
 
     var onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)? {
         get { lock.withLock { _onExternalChange } }
@@ -511,6 +526,8 @@ private final class FakeSystemVolume: SystemVolumeControlling, @unchecked Sendab
     // Thread-safe snapshots for assertions.
     var volumeCalls: [Int] { lock.withLock { _volumeCalls } }
     var mutedCalls: [Bool] { lock.withLock { _mutedCalls } }
+    var setVolumeToDeviceCalls: [(level: Int, deviceID: AudioObjectID?)] { lock.withLock { _setVolumeToDeviceCalls } }
+    var setMutedToDeviceCalls: [(muted: Bool, deviceID: AudioObjectID?)] { lock.withLock { _setMutedToDeviceCalls } }
     var startCount: Int { lock.withLock { _startCount } }
     var stopCount: Int { lock.withLock { _stopCount } }
 
@@ -1787,7 +1804,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.setMuted(true, for: NativeBackend.localDeviceID)
         await pollUntil { backend.devices.first { $0.isLocalDevice }?.isMuted == true }
 
-        #expect(volume.mutedCalls == [true], "local mute must go through the real hardware mute path")
+        // The target-resolving spelling: same real hardware mute, aimed at a named
+        // device rather than at whatever is currently the default output.
+        #expect(volume.setMutedToDeviceCalls.map(\.muted) == [true],
+                "local mute must go through the real hardware mute path")
         let d = backend.devices.first { $0.isLocalDevice }
         #expect(d?.isMuted == true)
         #expect(d?.volume == 100, "local mute must NOT run the engine's volume-0 shim — the row stays at its unity seed, untouched")

@@ -4,13 +4,15 @@ import Foundation
 
 /// One card in the sequential permission flow, in the order they are asked.
 /// `speakerSync` is the PTP helper's user-facing name (Login Items approval,
-/// not a TCC grant).
+/// not a TCC grant); `usageStats` is not an OS grant at all — it is Audiout's
+/// own opt-in, asked here rather than ambushing the first menu-bar click.
 public enum SetupStep: CaseIterable, Sendable {
     case audio
     case localNetwork
     case bluetooth
     case speakerSync
     case remoteControl
+    case usageStats
 }
 
 /// How a step renders. Exactly one step is ``active`` at a time; everything else
@@ -50,6 +52,10 @@ public enum SetupAllowOutcome: String, Equatable, Sendable {
     /// row in the spine) — the skip never spent a prompt, so the step goes
     /// back to being undecided.
     case skipReopened = "skip_reopened"
+    /// Usage Statistics' only path: no OS is asked, so the click raises
+    /// Audiout's OWN consent sheet. The answer lands when that sheet is
+    /// answered, never on the click itself.
+    case consentSheetRaised = "consent_sheet_raised"
 }
 
 /// Where an Allow click sends the user, when it sends them anywhere. The flow
@@ -63,6 +69,11 @@ public enum SetupAllowDestination: Equatable, Sendable {
     case settingsPane(SystemSettingsPane)
     /// Open System Settings ▸ General ▸ Login Items & Extensions.
     case loginItems
+    /// Raise Audiout's own Share / Don't Share sheet. The one destination that
+    /// is not another app: Usage Statistics is our ask, so the surface it
+    /// raises is ours too — and it exists so that a click can never BE the
+    /// consent, only the thing that asks for it.
+    case usageStatsConsent
 }
 
 /// The full answer to one Allow click.
@@ -115,10 +126,15 @@ public enum SetupFinalCheckState: Equatable, Sendable {
 public final class SetupFlowModel {
 
     /// The card order the flow asks in — scariest grant first (System Audio),
-    /// optional last, per `dev/notes/wispr-permissions-brief.md`.
-    public static let steps: [SetupStep] = [.audio, .localNetwork, .bluetooth, .speakerSync, .remoteControl]
+    /// optional last, per `dev/notes/wispr-permissions-brief.md`. Usage
+    /// Statistics sits at the very END, after every real OS grant: it is the
+    /// only card that asks for something the user gives US rather than
+    /// something macOS gives Audiout, and putting that between two permission
+    /// asks would blur the difference the whole window is teaching.
+    public static let steps: [SetupStep] = [.audio, .localNetwork, .bluetooth, .speakerSync,
+                                            .remoteControl, .usageStats]
 
-    /// The three steps a user may pass on. An UNDECIDED one holds Done shut:
+    /// The four steps a user may pass on. An UNDECIDED one holds Done shut:
     /// the gate waits for every card to be decided, and a skip is the decision
     /// that clears it (see ``isDoneAvailable``).
     ///
@@ -131,12 +147,29 @@ public final class SetupFlowModel {
     /// and without a skip an unapproved helper locked this gate forever with
     /// nothing on screen to press. ``unmetRequiredSteps()`` is what filters a
     /// skipped Speaker Sync out of the gate.
-    public static let skippableSteps: Set<SetupStep> = [.bluetooth, .remoteControl, .speakerSync]
+    ///
+    /// **Usage Statistics is skippable in a fourth sense again:** its skip is
+    /// the DECLINE, not a deferral. PRODUCT.md's rule for that stream is
+    /// "asked once, never re-nagged", so passing on it is an answer the app
+    /// keeps (``SetupModel/declineUsageStats()``) and never puts back on
+    /// screen. Its button says so — "No Thanks", not "Skip for now".
+    public static let skippableSteps: Set<SetupStep> = [.bluetooth, .remoteControl, .speakerSync,
+                                                        .usageStats]
 
     /// Steps the user explicitly passed on. Skipped is NOT granted: such a step
     /// stays unchecked, and the app asks again the next time it genuinely needs
-    /// the capability.
+    /// the capability. (Usage Statistics is the exception — see
+    /// ``skippableSteps`` — and it is also the only step that can arrive here
+    /// pre-seeded, from an answer given in an earlier presentation.)
     public private(set) var skippedSteps: Set<SetupStep> = []
+
+    /// The card order THIS presentation walks. Normally ``steps``; a build with
+    /// no analytics sink drops Usage Statistics entirely rather than showing a
+    /// row for an ask that can't appear (``SetupModel/usageStatsAreAvailable``).
+    /// Dropped, not auto-passed: a checkmark beside "Usage statistics" in a
+    /// build that sends nothing would be the one thing this window must never
+    /// do — claim a state that isn't real.
+    public let steps: [SetupStep]
 
     private let setup: SetupModel
 
@@ -147,12 +180,22 @@ public final class SetupFlowModel {
 
     public init(setup: SetupModel) {
         self.setup = setup
-        self.startIndex = Self.firstUnmetRequiredIndex(in: setup) ?? 0
+        let steps = setup.usageStatsAreAvailable
+            ? Self.steps : Self.steps.filter { $0 != .usageStats }
+        self.steps = steps
+        self.startIndex = Self.firstUnmetRequiredIndex(in: setup, among: steps) ?? 0
+        // An answer already given is an answer: PRODUCT.md asks once. A DECLINE
+        // leaves no other trace — `usageStatsOptedIn` is false either way — so
+        // the flow seeds it skipped here rather than re-offering the card on
+        // every re-entry. A grant needs nothing: `isComplete` reads it.
+        if setup.usageStatsWereAnswered, !setup.usageStatsOptedIn {
+            skippedSteps.insert(.usageStats)
+        }
     }
 
     /// The one expanded card, or `nil` once every step is completed or skipped.
     public var activeStep: SetupStep? {
-        Self.steps[startIndex...].first { !isComplete($0) && !skippedSteps.contains($0) }
+        steps[startIndex...].first { !isComplete($0) && !skippedSteps.contains($0) }
     }
 
     /// Whether this step counts as done — either its own permission verified, or
@@ -178,6 +221,10 @@ public final class SetupFlowModel {
                 || setup.ptpHelperStatus == .notFound
                 || setup.ptpHelperRegistrationFailed
         case .remoteControl: return setup.remoteControlStatus == .granted
+        // Ours, not macOS's: complete means the user said yes. Saying no is a
+        // DECISION, not a completion — it lands in `skippedSteps` like every
+        // other pass, and the row stays honestly unchecked.
+        case .usageStats: return setup.usageStatsOptedIn
         }
     }
 
@@ -218,6 +265,8 @@ public final class SetupFlowModel {
         // Not a privacy pane at all — approval only exists in Login Items.
         case .speakerSync: return .loginItems
         case .remoteControl: return .settingsPane(.accessibility)
+        // Not a System Settings pane at all — our own sheet.
+        case .usageStats: return .usageStatsConsent
         }
     }
 
@@ -311,6 +360,14 @@ public final class SetupFlowModel {
             }
             setup.primeRemoteControl()
             return SetupAllowResult(setup.remoteControlStatus == .granted ? .promptTriggered : .probeTimeout)
+
+        case .usageStats:
+            // Raises a surface and grants NOTHING. Every other step's Allow
+            // hands the decision to a dialog the user still has to answer, and
+            // this one now does the same — with our sheet rather than macOS's.
+            // Granting here instead is what let a click on the spine row opt a
+            // user in without showing them anything (owner, live).
+            return SetupAllowResult(.consentSheetRaised, .usageStatsConsent)
         }
     }
 
@@ -324,6 +381,7 @@ public final class SetupFlowModel {
         case .bluetooth: return "bluetooth"
         case .speakerSync: return "speaker_sync"
         case .remoteControl: return "remote_control"
+        case .usageStats: return "usage_stats"
         }
     }
 
@@ -338,6 +396,10 @@ public final class SetupFlowModel {
         // `reopen(_:)` needs no counterpart — the flag only re-arms on a real
         // `.enabled`.
         if step == .speakerSync { setup.noteSpeakerSyncSkipped() }
+        // The one skip that is a final ANSWER rather than a deferral: record
+        // it so the ask is spent and no later presentation re-offers it, and
+        // so a sink installed at launch is opted out rather than left as-is.
+        if step == .usageStats { setup.declineUsageStats() }
     }
 
     /// Re-open a previously skipped step so it can be decided again. A skip
@@ -505,7 +567,8 @@ public final class SetupFlowModel {
         setup.requiredPermissionsNotGranted().first.map(step(for:))
     }
 
-    private static func firstUnmetRequiredIndex(in setup: SetupModel) -> Int? {
+    private static func firstUnmetRequiredIndex(in setup: SetupModel,
+                                                among steps: [SetupStep]) -> Int? {
         firstUnmetRequiredStep(in: setup).flatMap { steps.firstIndex(of: $0) }
     }
 }

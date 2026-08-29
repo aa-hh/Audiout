@@ -320,6 +320,25 @@ public final class PopoverController: NSObject {
     /// End a local preview: non-nil keeps (and persists) it, `nil` restores.
     public var onLocalTrimEndPreview: ((_ keepMs: Double?) -> Void)?
 
+    /// A CAST receiver's BY-EAR offset (CAST-SYNC). Third store, same
+    /// affordance: the chip and drawer are the Bluetooth ones, the value lives
+    /// in its own file keyed by receiver id, and the range is
+    /// `BTSyncTrim.castRangeMs` rather than `rangeMs` — a Cast row corrects
+    /// what the protocol cannot report (the receiver's output stage, its DAC,
+    /// and a TV's HDMI → soundbar chain), not the receiver's own buffer, which
+    /// is measured and removed automatically. No `persist` flag, for the same
+    /// reason the local closures have none: the drawer emits committed
+    /// gestures only. Wired to `(backend as? CastSyncOffsetControlling)`.
+    public var onSetCastOffset: ((_ ms: Double, _ deviceID: String) -> Void)?
+    /// The Cast twin of ``btTrimProvider``.
+    public var castOffsetProvider: ((_ deviceID: String) -> Double)?
+    /// The Cast twin of ``btTrimIsSetProvider`` — "tuned or never tuned?".
+    public var castOffsetIsSetProvider: ((_ deviceID: String) -> Bool)?
+    /// The Cast twin of ``onResetBTAlignment``: delete the stored entry (never
+    /// write 0 — that is a tuned value) and put the live feed back on no
+    /// correction.
+    public var onResetCastOffset: ((_ deviceID: String) -> Void)?
+
     /// Delete a Bluetooth device's STORED alignment — its measured latency AND
     /// its trim — and re-push the live sink so a playing speaker reverts
     /// audibly to unaligned scheduling. The drawer's "Reset alignment" (roadmap
@@ -1539,9 +1558,10 @@ public final class PopoverController: NSObject {
             // card keeps its own column titles.
             // Roadmap 056: the This Mac subsection's row carries the same SYNC
             // chip, so it takes the same column title under the same has-rows
-            // gate.
+            // gate. CAST-SYNC brings the Cast subsection in on the same terms.
             let syncSubsection = section.title == Self.bluetoothSubsectionTitle
                 || section.title == Self.thisMacSubsectionTitle
+                || section.title == Self.castSubsectionTitle
             let showsSync = syncSubsection && !section.devices.isEmpty
             if showsSync { renderedSyncColumnTitles.insert(section.title) }
             let collapsed = addSubsection(
@@ -2416,8 +2436,9 @@ public final class PopoverController: NSObject {
                                  paintsSelectionBackground: false, showsMeter: true, showsBus: true,
                                  // Roadmap 056 Part 1: the Mac's own output is
                                  // a trimmable device too, and gets the identical
-                                 // chip/drawer/wizard surface.
-                                 showsSyncControls: device.isBluetooth || device.isLocalDevice)
+                                 // chip/drawer/wizard surface. CAST-SYNC adds
+                                 // Cast rows — chip and drawer, no wizard.
+                                 showsSyncControls: isTrimmable(device))
         view.delegate = self
         applySelectionState(to: view, device: device)
         deviceRowsByID[device.id] = view
@@ -2628,20 +2649,35 @@ public final class PopoverController: NSObject {
 
     /// A trimmable row's current Sync trim: the session cache first (the
     /// user's freshest edit), else the persisted value — via `btTrimProvider`
-    /// for a Bluetooth row, `localTrimProvider` for the Mac's own. Rows with no
-    /// Sync chip short-circuit to 0 (they ignore the value anyway).
+    /// for a Bluetooth row, `localTrimProvider` for the Mac's own,
+    /// `castOffsetProvider` for a Cast receiver. Rows with no Sync chip
+    /// short-circuit to 0 (they ignore the value anyway).
     private func btSyncTrim(for device: Device) -> Double {
-        guard device.isBluetooth || device.isLocalDevice else { return 0 }
+        guard isTrimmable(device) else { return 0 }
         if let cached = btTrimsByID[device.id] { return cached }
-        let persisted = device.isLocalDevice
-            ? (localTrimProvider?() ?? 0)
-            : (btTrimProvider?(device.id) ?? 0)
+        let persisted: Double
+        let isSet: Bool
+        if device.isLocalDevice {
+            persisted = localTrimProvider?() ?? 0
+            isSet = localTrimIsSetProvider?() ?? false
+        } else if device.isCast {
+            persisted = castOffsetProvider?(device.id) ?? 0
+            isSet = castOffsetIsSetProvider?(device.id) == true
+        } else {
+            persisted = btTrimProvider?(device.id) ?? 0
+            isSet = btTrimIsSetProvider?(device.id) == true
+        }
         btTrimsByID[device.id] = persisted
-        let isSet = device.isLocalDevice
-            ? (localTrimIsSetProvider?() ?? false)
-            : (btTrimIsSetProvider?(device.id) == true)
         if isSet { btTunedDeviceIDs.insert(device.id) }
         return persisted
+    }
+
+    /// Which rows carry the SYNC chip and drawer: every Bluetooth speaker, the
+    /// Mac's own output (roadmap 056), and every Cast receiver (CAST-SYNC).
+    /// AirPlay rows still carry none, by locked Decision 1 — their timing is
+    /// the reference everything else is aligned to.
+    private func isTrimmable(_ device: Device) -> Bool {
+        device.isBluetooth || device.isLocalDevice || device.isCast
     }
 
     /// A Bluetooth row's MEASURED latency (roadmap 056 Part A): the session
@@ -2657,7 +2693,7 @@ public final class PopoverController: NSObject {
     /// Whether this device has been tuned at all (D10 — "Not set" otherwise).
     /// Reads the trim first so both caches seed together on a row's first paint.
     private func btSyncTrimIsSet(for device: Device) -> Bool {
-        guard device.isBluetooth || device.isLocalDevice else { return false }
+        guard isTrimmable(device) else { return false }
         _ = btSyncTrim(for: device)
         return btTunedDeviceIDs.contains(device.id)
     }
@@ -2714,7 +2750,7 @@ public final class PopoverController: NSObject {
         if let id = expandedSyncDeviceID {
             let selected = groupController?.isSpeakerSelected(id) ?? false
             let rowIsLive = devicesByID[id]
-                .map { ($0.isBluetooth || $0.isLocalDevice) && $0.isAvailable } == true
+                .map { isTrimmable($0) && $0.isAvailable } == true
                 && deviceRowsByID[id] != nil
             if !rowIsLive || (expandedSyncDeviceWasSelected && !selected) {
                 closeSyncDrawerIntent()
@@ -2770,7 +2806,11 @@ public final class PopoverController: NSObject {
     /// only — a measured latency from an alignment run.
     private func canResetAlignment(for device: Device) -> Bool {
         if btSyncTrimIsSet(for: device) { return true }
-        return !device.isLocalDevice && btMeasuredLatency(for: device.id) != nil
+        // Only a wizard run leaves a measured latency, and only Bluetooth rows
+        // get one — the Mac's is the zero it is measured from, and Cast has no
+        // run at all.
+        guard !device.isLocalDevice, !device.isCast else { return false }
+        return btMeasuredLatency(for: device.id) != nil
     }
 
     private func unmountSyncDrawer(animated: Bool) {
@@ -2789,6 +2829,14 @@ public final class PopoverController: NSObject {
         if devicesByID[id]?.isLocalDevice == true {
             return -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
         }
+        // A Cast receiver's own buffer is measured and removed on the wire, so
+        // this control is left with the residue AFTER its media clock — the
+        // output stage, the DAC, and a TV's HDMI → soundbar chain, which alone
+        // can pass 400 ms. Its whole range is usable: there is no per-device
+        // zero clamp to solve against, so the BT provider is not consulted.
+        if devicesByID[id]?.isCast == true {
+            return -BTSyncTrim.castRangeMs...BTSyncTrim.castRangeMs
+        }
         return btTrimRangeProvider?(id) ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
     }
 
@@ -2797,10 +2845,9 @@ public final class PopoverController: NSObject {
     /// session cache updates either way, so the row's chip tracks the scrub
     /// digit by digit.
     private func applyBTTrim(_ ms: Double, deviceID id: String, persist: Bool) {
-        if persist {
-            Analytics.capture("bt_sync:trim_committed")
-        }
-        let value = BTSyncTrim.quantise(ms)
+        let isCast = devicesByID[id]?.isCast == true
+        let value = BTSyncTrim.quantise(
+            ms, rangeMs: isCast ? BTSyncTrim.castRangeMs : BTSyncTrim.rangeMs)
         btTrimsByID[id] = value
         // Editing a device IS tuning it — a scrub that passes through exactly
         // 0.0 must read "0.0 ms", never flip the chip back to "Not set".
@@ -2810,8 +2857,14 @@ public final class PopoverController: NSObject {
             // gestures, and the one closure both stores the value and triggers
             // the live apply.
             onSetLocalTrim?(value)
+        } else if isCast {
+            // Same posture as the local closure, and for the same reason.
+            onSetCastOffset?(value, id)
         } else {
             onSetBTTrim?(value, id, persist)
+        }
+        if persist {
+            Analytics.capture(isCast ? "cast_sync:offset_committed" : "bt_sync:trim_committed")
         }
         // Repaint just this one row's chip. A scrub arrives dozens of times a
         // second and `refreshDeviceRows()` would drag the rail extents and
@@ -4457,6 +4510,12 @@ extension PopoverController: DeviceRowView.Delegate {
     /// — the same conditions that tear an open wizard down.
     func startBTAlignmentWizard(deviceID: String) {
         guard let device = devicesByID[deviceID], btAlignmentTargetIsLive(deviceID) else { return }
+        // A Cast receiver has no run to give: it plays seconds behind live, and
+        // no ±500 ms bisection converges on that. Its row's own doors are
+        // absent (`DeviceRowView.supportsAlignmentWizard`); this refuses the
+        // drawer's hidden ⌥-click, the one entry point with no visible
+        // affordance to hide.
+        guard !device.isCast else { return }
         tearDownBTWizard()
         let isLocalTarget = device.isLocalDevice
         // The Mac's run still measures its own sync OFFSET; a Bluetooth run now
@@ -4886,6 +4945,9 @@ extension PopoverController: BTSyncDrawerViewDelegate {
         guard let id = expandedSyncDeviceID else { return }
         if devicesByID[id]?.isLocalDevice == true {
             onResetLocalTrim?()
+        } else if devicesByID[id]?.isCast == true {
+            onResetCastOffset?(id)
+            Analytics.capture("cast_sync:offset_reset")
         } else {
             onResetBTAlignment?(id)
         }

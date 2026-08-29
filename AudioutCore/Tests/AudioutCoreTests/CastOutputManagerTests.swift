@@ -69,12 +69,19 @@ import Testing
         fetchDelay: TimeInterval = 0
     ) throws -> (fake: FakeCastReceiver, endpoint: NWEndpoint) {
         let fake = FakeCastReceiver(fetchBytes: fetchBytes, controlType: controlType, fetchDelay: fetchDelay)
+        return (fake, try start(fake))
+    }
+
+    /// Binds a receiver built by the caller, for the tests that need their own
+    /// buffer model rather than the measured device's.
+    @available(macOS 15, *)
+    private func start(_ fake: FakeCastReceiver) throws -> NWEndpoint {
         let box = Box<NWEndpoint>()
         fake.start { result in
             if case .success(let endpoint) = result { box.set(endpoint) }
         }
         try #require(waitUntil(timeout: 5) { box.value != nil }, "the fake receiver never bound a loopback port")
-        return (fake, try #require(box.value))
+        return try #require(box.value)
     }
 
     private func makeManager(playDeadline: TimeInterval = CastOutputManager.defaultPlayDeadline) -> CastOutputManager {
@@ -383,8 +390,12 @@ import Testing
 
     @Test func fixedReceiverReportsVolumeLagThenNilOnDeselect() throws {
         guard #available(macOS 15, *) else { return }
-        let (fake, endpoint) = try startFake(controlType: "fixed")
+        // A 2 s buffer with no early rebuffer: the receiver settles a whole
+        // number of seconds behind, which is what the reported lag rounds to.
+        // The measured device's 4.6 → 5.5 s would only make the test longer.
+        let fake = FakeCastReceiver(fetchBytes: 16_384, controlType: "fixed", startupLead: 2, steadyLead: 2)
         defer { fake.stop() }
+        let endpoint = try start(fake)
         let manager = makeManager()
         defer { manager.stopAll() }
         let log = watch(manager, deviceID: "dev1")
@@ -394,25 +405,14 @@ import Testing
             lagLog.append(lag)
         }
 
-        // Keep the ring fed in real time so `secondsSent` keeps advancing past
-        // the fake's fixed `currentTime: 0` — the same real-time feed the
-        // streaming test above uses, so the measured lead has something to
-        // grow from instead of plateauing after the initial prime.
-        let feed = manager.feed
-        let writer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "CastOutputManagerTests.lagFeed"))
-        writer.schedule(deadline: .now(), repeating: 0.020)
-        let block = tone(frames: 882)
-        writer.setEventHandler { feed.write(pcm: block, pts: timespec(tv_sec: 0, tv_nsec: 0)) }
-        writer.resume()
-        defer { writer.cancel() }
-
         manager.setDevices([record(endpoint)])
         try #require(waitUntil(timeout: 10) { log.contains(.playing) },
                      Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
 
-        // The poll is 1 Hz, so budget generously for the first non-nil report.
-        try #require(waitUntil(timeout: 15) { lagLog.all.contains { $0 != nil } },
-                     Comment(rawValue: "never reported a non-nil lag, saw \(lagLog.all)"))
+        // The poll is 1 Hz, and the lead climbs to the buffer's 2 s before it
+        // settles there, so budget generously for the settled report.
+        try #require(waitUntil(timeout: 15) { lagLog.all.last == .some(2) },
+                     Comment(rawValue: "the reported lag never settled at the receiver's 2 s buffer, saw \(lagLog.all)"))
 
         manager.setDevices([])
         #expect(waitUntil(timeout: 5) { lagLog.all.last == .some(nil) },

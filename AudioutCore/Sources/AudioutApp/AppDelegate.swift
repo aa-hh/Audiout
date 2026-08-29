@@ -75,16 +75,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configurePostHog() {
         guard !HeadlessRuntime.isActive else { return }
 
+        // A missing variable WARNS rather than asserts. `assertionFailure` traps
+        // in debug, and both variables come from the gitignored root `.env` that
+        // only `make-app.sh` sources — so asserting here kills every bare
+        // `swift run`, and every run from a worktree, on an EXC_BREAKPOINT that
+        // reads like a real crash. Analytics is optional and consent-gated; it
+        // has no business bricking a dev run, and stderr serves the same stated
+        // purpose: say loudly that events are being missed.
         let environment = ProcessInfo.processInfo.environment
         guard let projectToken = environment["POSTHOG_PROJECT_TOKEN"], !projectToken.isEmpty else {
 #if DEBUG
-            assertionFailure("POSTHOG_PROJECT_TOKEN variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once POSTHOG_PROJECT_TOKEN is configured")
+            log("POSTHOG_PROJECT_TOKEN is missing or empty — analytics is OFF and events are being silently missed. Set it (the repo root's .env carries it) to silence this.")
 #endif
             return
         }
         guard let host = environment["POSTHOG_HOST"], !host.isEmpty else {
 #if DEBUG
-            assertionFailure("POSTHOG_HOST variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once POSTHOG_HOST is configured")
+            log("POSTHOG_HOST is missing or empty — analytics is OFF and events are being silently missed. Set it (the repo root's .env carries it) to silence this.")
 #endif
             return
         }

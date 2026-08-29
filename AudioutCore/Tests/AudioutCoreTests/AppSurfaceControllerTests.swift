@@ -1000,6 +1000,47 @@ import AppKit
         }
     }
 
+    /// The settle wait exists to front the window once, already settled — so a
+    /// fleet that ALREADY settled before the click (the app running for a
+    /// while, discovery long finished) has nothing to wait out: the first
+    /// click fronts the surface in the same turn, splash over it.
+    @Test func anAlreadySettledFleetRevealsOnTheFirstClickAtOnce() throws {
+        try asAFirstRealLaunch {
+            let (surface, popover, _, _) = makeSurface()
+            let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            popover.update(devices: backend.devices)
+            surface.test_backdateDiscoveryQuiet()
+
+            surface.show(anchorRect: nil)
+            #expect(!surface.test_isRevealPending,
+                    "a settled fleet skips the wait — the click fronts the surface now")
+            #expect(surface.test_settleTracker == nil)
+            let splash = try #require(surface.test_splash,
+                                      "the branded hold still covers the instant reveal")
+            #expect(splash.test_isVisible)
+        }
+    }
+
+    /// A fleet still changing at click time keeps the deferred reveal: quiet
+    /// is measured from the last device-set CHANGE, not from mere knowledge of
+    /// the fleet.
+    @Test func aFreshFleetChangeStillDefersTheFirstReveal() throws {
+        try asAFirstRealLaunch {
+            let (surface, popover, _, _) = makeSurface()
+            let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            popover.update(devices: backend.devices)
+
+            surface.show(anchorRect: nil)
+            #expect(surface.test_isRevealPending,
+                    "a change inside the quiet window still waits for discovery to settle")
+            #expect(surface.test_splash == nil)
+        }
+    }
+
     @Test func aClickTakesTheSplashAwayAtOnce() throws {
         try asAFirstRealLaunch {
             let (surface, _, _, _) = makeSurface()

@@ -125,6 +125,14 @@ final class StatusItemController {
         onButtonClicked?(sender)
     }
 
+    /// Draw the button in its pressed state, the menu-bar convention for "this
+    /// item's window is open." Dumb plumbing: the caller decides when the
+    /// surface counts as open (R9 — policy lives in the library, this target
+    /// is invisible to the test suite).
+    func setHighlighted(_ flag: Bool) {
+        statusItem.button?.highlight(flag)
+    }
+
     /// Update the master-volume level (0…1) the status symbol reflects, then
     /// rebuild the button image with the new `variableValue`. Rebuilding is the
     /// documented way to change an SF Symbol's variable value (brief gotcha #9).

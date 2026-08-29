@@ -80,6 +80,19 @@ symbol you cannot find in source, believe the source and fix the doc.
   look as though it had never existed. Also check `git fsck --unreachable`,
   `git stash list`, the reflog, and the other worktrees. Quote every path: this
   repo's own path contains a space, which silently breaks unquoted loops.
+- **When a fix rests on a claim about live system state, verify that claim with a
+  real command before writing the fix.** Much of what decides behavior here lives
+  outside the code — which device macOS currently treats as the default output,
+  what the public aggregate device is made of, which permissions are granted. The
+  tests that run routinely cannot see any of it (the real-hardware suite is
+  opt-in and skips by default), so they encode what you believed rather than
+  what is true, and the suite stays green while the app is broken. Check against
+  a running system sitting in the failing state instead of inferring from source:
+  `system_profiler SPAudioDataType | grep -B3 "Default Output Device: Yes"` names
+  the device macOS is really playing through, and
+  `AUDIOUT_CORE_AUDIO_DIAGNOSTIC=1 swift run --package-path AudioutCore
+  core-audio-diagnostic` lists the Core Audio process objects behind per-app
+  routing.
 - **Inner-loop test command:** see [AudioutCore/AGENTS.md](AudioutCore/AGENTS.md) for
   guidance on scoping tests with `--filter`, and for the "tests must stay
   invisible" rule every UI test has to obey.

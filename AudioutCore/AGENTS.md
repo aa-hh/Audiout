@@ -662,6 +662,16 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   committed through this gate, so `main` stays green. Filtering in the loop is
   a convention (this doc), not machine-enforced; `--no-verify` skips the gate
   for a deliberate emergency.
+- **A new regression test must be watched to FAIL before you trust it.** A test
+  that has never been seen to fail proves nothing about the bug it claims to
+  cover. Take the fix back out — revert it, or comment out the fixing line — run
+  `bash scripts/run-tests.sh --filter <YourNewTests>`, confirm it fails for the
+  reason you expect, then restore the fix. A green suite is not evidence until
+  you have seen the red. Honest exception: some tests legitimately pass both
+  ways — an assertion that something must NOT happen, guarding against
+  over-correction, is green before the fix and after. Those are worth keeping,
+  but say so in the report rather than letting them pad the count of tests that
+  actually demonstrate the fix.
 - **Real-audio-hardware tests are opt-in via `AIRPLAY_AUDIO_HARDWARE_TESTS=1`.**
   `LocalPlaybackEngineTests` drives the concrete `LocalPlaybackEngine` (a real
   `AVAudioEngine`) against the Mac's actual output. **The reason is determinism,
@@ -796,7 +806,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `MockBackend` | Fully-working offline backend for tests/demos. |
 | `OwnToneBackend` | HTTP-polling backend against OwnTone; superseded. |
 | `NativeBackend` | Shipping backend; drives `AirPlayEngine`, owns capture gate, owns aggregate device lifecycle. |
-| `AggregateOutputDevice` | Lifecycle owner (adopt-or-create/off-switch/orphan sweep) for the PUBLIC, Sound-settings-visible "Audiout" aggregate (UID `com.audiout.Audiout.aggregate`); thin CoreAudio shell wired by `NativeBackend`. Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit; echo-guarded. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` signals when the app can't route because its aggregate isn't the Mac's default output. |
+| `AggregateOutputDevice` | Lifecycle owner (adopt-or-create/off-switch/orphan sweep) for the PUBLIC, Sound-settings-visible "Audiout" aggregate (UID `com.audiout.Audiout.aggregate`); thin CoreAudio shell wired by `NativeBackend`. Becomes Mac default when whole-system routing arms. With nothing routing it hands the default back whenever the default IS the aggregate — including one this process never wrote, since a flag cannot see a system-wide default that outlives the app — keeping the device itself alive; the write is READ BACK, because this HAL accepts operations on the current system output and does nothing. Restore-prior-default-then-destroy on quit; echo-guarded. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` signals when the app can't route because its aggregate isn't the Mac's default output. |
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
 | `CastSender` | Hand-rolled Google Cast v2 sender: browse, control channel, live WAV server; driven by `CastOutputManager`. |
 | `CastOutputManager` | Per-Cast-device session recipe (connect → launch DMR → LOAD no-autoplay → PLAY), 1 s status poll, composed level, one automatic reconnect policy; feeds each receiver from `CastFeedRing` via the capture fan-out. |

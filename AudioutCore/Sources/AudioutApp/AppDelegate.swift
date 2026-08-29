@@ -368,16 +368,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // This path never enters the backend event stream, so nothing else
             // will repaint the master readout for it.
             self.repaintFromCurrentState()
-            // We swallowed the key, so macOS drew no HUD of its own — the press
-            // would otherwise land with no visible feedback at all. Show it on
-            // the status item's own screen, which is where the user's eyes are.
-            let anchor = self.statusAnchorRect()
-            let screen = anchor.flatMap { rect in
-                NSScreen.screens.first { $0.frame.intersects(rect) }
-            }
-            self.volumeHUD.show(volumePercent: self.groupController.mainOutMasterVolume,
-                                isMuted: self.groupController.isMainOutMuted,
-                                on: screen)
+            self.showVolumeHUD()
         }
         interceptor.onAccessibilityMissing = { [weak self] in
             guard let self else { return }
@@ -416,21 +407,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 from: self.groupController.mainOutMasterVolume, up: up, fineStep: false)
             self.groupController.applyExternalSystemVolume(target)
             self.repaintFromCurrentState()
+            self.showVolumeHUD()
         }
         bar.onToggleMute = { [weak self] in
             guard let self else { return }
             self.groupController.setMainOutMuted(!self.groupController.isMainOutMuted)
             self.repaintFromCurrentState()
+            self.showVolumeHUD()
         }
         return bar
     }()
 
-    /// The volume readout shown when we consume a hardware volume/mute key.
-    /// macOS draws no HUD for a key we swallowed, so without this the press
-    /// has no visible feedback at all. Driven from exactly one place — the
-    /// interceptor's `onAction` — never from the Touch Bar or a slider, which
-    /// both already show the user what they moved.
+    /// The volume readout shown for every input this app drives that has no
+    /// value readout of its own — the swallowed hardware keys and the Touch
+    /// Bar's volume/mute buttons — because macOS draws its own HUD for the
+    /// brightness and keyboard-backlight buttons sitting beside them and
+    /// would otherwise leave Audiout's the only silent ones. The row
+    /// sliders do NOT show it — they already display the value they moved.
     private lazy var volumeHUD = VolumeHUDPanel()
+
+    /// Show the volume HUD, anchored to the status item's own screen (where
+    /// the user's eyes are). Called for every input this app drives that has
+    /// no value readout of its own — a hardware volume/mute key we swallowed
+    /// (macOS draws no HUD for a key it never saw) and the Touch Bar's
+    /// volume/mute buttons — so the press isn't left with no visible
+    /// feedback at all.
+    private func showVolumeHUD() {
+        let anchor = statusAnchorRect()
+        let screen = anchor.flatMap { rect in
+            NSScreen.screens.first { $0.frame.intersects(rect) }
+        }
+        volumeHUD.show(volumePercent: groupController.mainOutMasterVolume,
+                        isMuted: groupController.isMainOutMuted,
+                        on: screen)
+    }
 
     /// True once we've sent the user to the permission rows over a missing
     /// Accessibility grant this launch, so repeated ownership changes can't

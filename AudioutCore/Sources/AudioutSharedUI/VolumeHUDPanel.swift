@@ -30,6 +30,9 @@ public final class VolumeHUDPanel: NSPanel {
         /// The SF Symbol's `variableValue` (0…1) — the filled-wave level.
         public let variableValue: Double
         public let text: String
+        /// The VoiceOver announcement — worded in full sentences, unlike
+        /// `text`, since it is spoken rather than read off a HUD.
+        public let spokenDescription: String
     }
 
     /// Muted reads as muted, full stop: the level is beside the point when
@@ -37,11 +40,34 @@ public final class VolumeHUDPanel: NSPanel {
     /// to match.
     public static func content(volumePercent: Int, isMuted: Bool) -> Content {
         if isMuted {
-            return Content(symbolName: "speaker.slash.fill", variableValue: 0, text: "Muted")
+            // SharedUI rule S3 ("glyph NEVER swaps to a slash",
+            // `AudioutSharedUI/AGENTS.md`) governs a row's mute BUTTON, which
+            // is a control; this HUD is a transient readout carrying no
+            // number, and the slash is what macOS's own volume HUD shows.
+            return Content(symbolName: "speaker.slash.fill", variableValue: 0, text: "Muted",
+                           spokenDescription: "Volume muted")
         }
         return Content(symbolName: "speaker.wave.3.fill",
                        variableValue: Double(volumePercent) / 100,
-                       text: "\(volumePercent)%")
+                       text: "\(volumePercent)%",
+                       spokenDescription: "Volume \(volumePercent)%")
+    }
+
+    /// The bar's fill, in segments (`0...VolumeStep.coarseDetents`). Muted
+    /// reads as empty. Otherwise the percent is scaled to the segment count
+    /// and quantised to the nearest QUARTER segment rather than filled
+    /// proportionally: `VolumeStep.next` snaps to a detent grid in INTEGER
+    /// space (`round(i × 6.25)`), which is not an exact multiple of
+    /// `100 / coarseDetents` — a raw proportional fill would visibly miss a
+    /// whole segment on the first press. Quarter-quantising lands every
+    /// coarse detent on a whole segment and every `⇧⌥` fine detent on an
+    /// exact quarter.
+    public static func filledSegments(volumePercent: Int, isMuted: Bool) -> Double {
+        guard !isMuted else { return 0 }
+        let clamped = Double(min(max(volumePercent, 0), 100))
+        let raw = clamped / 100 * VolumeStep.coarseDetents
+        let quarterQuantised = (raw * 4).rounded() / 4
+        return min(max(quarterQuantised, 0), VolumeStep.coarseDetents)
     }
 
     private static let panelSize = NSSize(width: 200, height: 44)
@@ -51,11 +77,20 @@ public final class VolumeHUDPanel: NSPanel {
     private static let fadeDuration: TimeInterval = 0.25
     /// Inset from the screen's visible corner.
     private static let screenInset: CGFloat = 16
+    /// Segment-bar geometry: the bar's height, the gap between segments, and
+    /// each segment's corner radius.
+    fileprivate static let barHeight: CGFloat = 6
+    fileprivate static let segmentGap: CGFloat = 2
+    fileprivate static let segmentCornerRadius: CGFloat = 1
 
     private let imageView = NSImageView()
-    private let label = NSTextField(labelWithString: "")
+    private let segmentBar = VolumeSegmentBarView()
     private var dismissTimer: Timer?
     private var appliedSymbolName: String?
+    /// The text the last `show(...)` applied. The label view is gone (step 12
+    /// replaced it with the segment bar), so `test_text` has nothing left to
+    /// read back from — this stores it directly instead.
+    private var appliedText = ""
     private var shown = false
 
     /// `nil` = read the live `accessibilityDisplayShouldReduceMotion`. Tests
@@ -63,18 +98,29 @@ public final class VolumeHUDPanel: NSPanel {
     /// rule).
     public var test_reduceMotionOverride: Bool?
 
-    /// The text the label is actually carrying.
-    public var test_text: String { label.stringValue }
+    /// The text the last `show(...)` applied.
+    public var test_text: String { appliedText }
 
     /// The symbol name last applied, or `nil` when the image view holds no
     /// image (`NSImage` only reports its own `symbolName` above our
     /// deployment floor, so the applied name is remembered alongside it).
     public var test_symbolName: String? { imageView.image == nil ? nil : appliedSymbolName }
 
+    /// The segment count the bar is currently showing.
+    public var test_filledSegments: Double { segmentBar.filledSegments }
+
     /// Whether the HUD is currently up. Model state, not `isVisible`, so it
     /// stays true under `HeadlessRuntime` — where no window is ever ordered on
     /// screen.
     public var test_isShown: Bool { shown }
+
+    /// The announcement string the last `show(...)` COMPUTED — not proof that
+    /// anything reached VoiceOver. It is set beside the `NSAccessibility.post`
+    /// rather than by it, so deleting that call leaves this, and the test that
+    /// reads it, green while the HUD goes silent. Observing the post itself
+    /// would mean a seam existing only for the test, which a one-line platform
+    /// call does not earn.
+    public private(set) var test_lastAnnouncement: String?
 
     /// Test-only: runs the private dismiss path directly, without waiting on
     /// the real hold timer — simulates a fade-out already in flight.
@@ -113,10 +159,9 @@ public final class VolumeHUDPanel: NSPanel {
         ReduceTransparencyFallbackView.install(in: effectView)
 
         imageView.imageScaling = .scaleProportionallyUpOrDown
-        label.font = .systemFont(ofSize: 15, weight: .medium)
-        label.textColor = .labelColor
+        segmentBar.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let stack = NSStackView(views: [imageView, label])
+        let stack = NSStackView(views: [imageView, segmentBar])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 8
@@ -124,8 +169,9 @@ public final class VolumeHUDPanel: NSPanel {
         effectView.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: effectView.trailingAnchor, constant: -16),
+            stack.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -16),
             stack.centerYAnchor.constraint(equalTo: effectView.centerYAnchor),
+            segmentBar.heightAnchor.constraint(equalToConstant: Self.barHeight),
         ])
 
         contentView = effectView
@@ -146,7 +192,8 @@ public final class VolumeHUDPanel: NSPanel {
         image?.isTemplate = true
         imageView.image = image
         appliedSymbolName = content.symbolName
-        label.stringValue = content.text
+        appliedText = content.text
+        segmentBar.filledSegments = Self.filledSegments(volumePercent: volumePercent, isMuted: isMuted)
 
         if let visibleFrame = (screen ?? NSScreen.main)?.visibleFrame {
             setFrameOrigin(NSPoint(
@@ -168,6 +215,19 @@ public final class VolumeHUDPanel: NSPanel {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.dismiss() }
         }
+
+        // VoiceOver announcement (same idiom as `PopoverController
+        // .postAnnouncement`). Not gated on `HeadlessRuntime.isActive` — this
+        // is not on-screen presentation, it reaches no assistive technology
+        // under test, and neither existing announcement site gates it either.
+        test_lastAnnouncement = content.spokenDescription
+        NSAccessibility.post(
+            element: self,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: content.spokenDescription,
+                .priority: NSAccessibilityPriorityLevel.high.rawValue,
+            ])
     }
 
     private var reduceMotion: Bool {
@@ -203,5 +263,69 @@ public final class VolumeHUDPanel: NSPanel {
         guard !shown else { return }
         orderOut(nil)
         alphaValue = 1
+    }
+}
+
+/// The sixteen-segment level bar that replaces the HUD's old percentage
+/// label. Custom-drawn: the stock discrete-segment control,
+/// `NSLevelIndicator` with `.discreteCapacity` — this repo's prescribed
+/// control for level meters (`OutputBackend.swift`, `docs/SPEC.md` §9) —
+/// floors a fractional `doubleValue` to the nearest whole segment instead of
+/// rendering it (verified by rendering one offscreen: an 8.25-of-16 value
+/// painted 8 solid segments and an empty 9th, no partial fill anywhere), and
+/// a visible quarter-fill on a `⇧⌥` fine step is this bar's whole point.
+private final class VolumeSegmentBarView: NSView {
+
+    /// One press should move exactly one segment, one `⇧⌥` fine step exactly
+    /// a quarter of one — so setting this always comes from
+    /// `VolumeHUDPanel.filledSegments(volumePercent:isMuted:)`, never a raw
+    /// percentage.
+    var filledSegments: Double = 0 {
+        didSet { needsDisplay = true }
+    }
+
+    /// Non-interactive: a HUD readout takes no click, and the real control is
+    /// wherever the volume actually got moved (a key, the Touch Bar, a row
+    /// slider).
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    /// Colours are resolved fresh on every pass here, never cached at
+    /// construction — unlike this file's label-era pattern (`label.textColor
+    /// = .labelColor`, safe only for a system dynamic color), caching a
+    /// `Tokens` value would freeze it. That makes `needsDisplay = true` on
+    /// every `filledSegments` push the ONLY invalidation this view needs: no
+    /// `accessibilityDisplayOptionsDidChangeNotification` or
+    /// `Tokens.accentStyleDidChangeNotification` observer is added, because
+    /// `VolumeHUDPanel` is a reused singleton for the app's whole life
+    /// (`AppDelegate`) whose `show(...)` pushes a fresh value on every
+    /// appearance, and the HUD's entire visible life is under 1.75 s from
+    /// that push — a stale render between pushes is unreachable.
+    override func draw(_ dirtyRect: NSRect) {
+        let count = Int(VolumeStep.coarseDetents)
+        guard count > 0 else { return }
+        let totalGap = VolumeHUDPanel.segmentGap * CGFloat(count - 1)
+        let segmentWidth = (bounds.width - totalGap) / CGFloat(count)
+        guard segmentWidth > 0 else { return }
+
+        let filledColor = Tokens.Color.label
+        let emptyColor = Tokens.Color.tertiaryLabel
+
+        for i in 0..<count {
+            let x = CGFloat(i) * (segmentWidth + VolumeHUDPanel.segmentGap)
+            let segmentRect = NSRect(x: x, y: 0, width: segmentWidth, height: bounds.height)
+            let segmentPath = NSBezierPath(roundedRect: segmentRect,
+                                           xRadius: VolumeHUDPanel.segmentCornerRadius,
+                                           yRadius: VolumeHUDPanel.segmentCornerRadius)
+            emptyColor.setFill()
+            segmentPath.fill()
+
+            let fillFraction = min(max(filledSegments - Double(i), 0), 1)
+            guard fillFraction > 0 else { continue }
+            NSGraphicsContext.current?.saveGraphicsState()
+            segmentPath.addClip()
+            filledColor.setFill()
+            NSRect(x: x, y: 0, width: segmentWidth * fillFraction, height: bounds.height).fill()
+            NSGraphicsContext.current?.restoreGraphicsState()
+        }
     }
 }

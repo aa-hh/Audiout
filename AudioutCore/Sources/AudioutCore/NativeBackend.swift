@@ -1918,7 +1918,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // dead through the whole takeover we just performed.
                     self.publishVolumeOwnershipLocked(defaultOutputUID: newDefaultUID)
 
-                    if let pending = self.expectedDefaultWriteUID, pending == newDefaultUID {
+                    // No volume push here any more: the Main mirror now names its
+                    // target device instead of writing "whatever is default", so it
+                    // does not race this async default switch and there is nothing
+                    // left to correct after the fact.
+                    if self.expectedDefaultWriteUID == newDefaultUID, newDefaultUID != nil {
                         self.expectedDefaultWriteUID = nil
                     } else {
                         // A genuine change that does NOT match the pending write
@@ -2474,7 +2478,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // only mute state, and `applyLocal` suppresses the emit when it's unchanged.
         if id == Self.localDeviceID {
             stateQueue.async { self.applyLocal(id) { $0.isMuted = muted } }
-            systemVolume.setMuted(muted)   // off `stateQueue`, as in `setVolume`
+            // Off `stateQueue`, as in `setVolume`, and aimed at the same device the
+            // Main mirror is — see ``builtInOutputTargetResolver()``.
+            systemVolume.setMuted(muted, resolvingTarget: builtInOutputTargetResolver())
             return
         }
         stateQueue.async {
@@ -2582,7 +2588,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
         // The hardware system-volume write is now the Main path's ALONE
         // (`setVolume`'s local branch no longer does it), and only when the caller
-        // asked to mirror. Off `stateQueue`, like every other `systemVolume` write.
+        // asked to mirror. Off `stateQueue`, like every other `systemVolume` write —
+        // and the target resolver below runs on `SystemOutputVolume`'s own write
+        // queue, never here: this is a fader drag taking dozens of writes a second,
+        // and resolving the built-in output enumerates every HAL device.
         if mirrorToSystemVolume {
             // Memoise the system level ONLY once the hardware confirms it took the
             // write. `SystemOutputVolume` suppresses the echo of its own writes, so
@@ -2593,10 +2602,37 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // genuine external change *to* that level compares equal and is silently
             // dropped. The callback runs on the helper's own queue before any
             // notification the write provoked, so this can't be overtaken by it.
-            systemVolume.setVolume(main) { [weak self] wrote in
+            systemVolume.setVolume(main, resolvingTarget: builtInOutputTargetResolver()) { [weak self] wrote in
                 guard let self, wrote else { return }
                 self.stateQueue.async { self.lastSeenSystemVolume = main }
             }
+        }
+    }
+
+    /// Where the Main mirror and the local row's mute actually aim: the Mac's
+    /// BUILT-IN output device, but only while our own aggregate is the current
+    /// default output.
+    ///
+    /// The aggregate wraps the built-in as its sole sub-device
+    /// (``AggregateOutputDevice``) and ACCEPTS volume writes while discarding them,
+    /// so a write aimed at "whatever is currently default" during a routing session
+    /// leaves the real speakers' hardware knob stale — and the user hears the jump
+    /// on deselect. The built-in is the knob that changes what is heard.
+    ///
+    /// Deliberately NOT ``weOwnSystemVolume``: that is also true for a real output
+    /// with an unreadable volume (HDMI), where writing the built-in would move
+    /// speakers nobody is listening to.
+    ///
+    /// The returned closure captures only the two injected seams — never `self`,
+    /// never `stateQueue`-confined state — and is evaluated on
+    /// `SystemOutputVolume`'s own write queue.
+    private func builtInOutputTargetResolver() -> @Sendable () -> AudioObjectID? {
+        let control = aggregateControl
+        let provider = currentDefaultOutputUIDProvider
+        return {
+            guard provider() == AggregateOutputDevice.productUID else { return nil }
+            return Self.firstResolvableDevice(
+                uids: [control.builtInOutputDeviceUID()], using: control)?.id
         }
     }
 
@@ -6812,6 +6848,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// failed reconnect legitimately deselects the model row.
     var test_expectedSelected: Set<String> { stateQueue.sync { expectedSelected } }
 
+    /// Test-only (`@testable`): whether the app currently holds the Mac's default
+    /// output with its aggregate, and the pre-takeover output it remembers — the
+    /// two pieces of state the deselect-to-Mac-only restore turns over.
+    var test_aggregateDefaultActive: Bool { stateQueue.sync { aggregateDefaultActive } }
+    var test_priorDefaultUID: String? { stateQueue.sync { priorDefaultUID } }
+
     /// Test-only (`@testable`): whether the silence watchdog has un-gated capture
     /// (the Mac is audible as a fallback because zero desired devices are connected).
     var test_silenceFallbackActive: Bool { stateQueue.sync { silenceCaptureOverride } }
@@ -7353,8 +7395,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if !expectedSelected.isEmpty {
             takeOverDefaultAndReflect()
         } else {
-            // Not routing: never take the Mac's default output (Q1), and the
-            // warning is off by definition.
+            // Not routing: never take the Mac's default output (Q1) — and hand it
+            // back whenever it IS our aggregate, however it got there, or the Mac
+            // keeps playing through a device that swallows every volume write. The
+            // slider and the hardware volume keys then move nothing the user can hear.
+            restoreDefaultFromAggregate()
+            // The warning is off by definition.
             evaluateRoutingBlocked()
         }
         // Seamless handoff T3.6: `expectedSelected` just settled — re-decide
@@ -7407,6 +7453,139 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         guard aggregateControl.setDefaultOutputDevice(aggregateID) else { return false }
         expectedDefaultWriteUID = AggregateOutputDevice.productUID
         return true
+    }
+
+    /// First UID in `uids` (nils dropped, order preserved) that `control` can
+    /// resolve to a live device id right now.
+    ///
+    /// Callable from any queue, but EXPENSIVE — `resolveDeviceID(forUID:)` may
+    /// enumerate the HAL, and `builtInOutputDeviceUID()` certainly does — so never
+    /// run it on the main queue or a fader-drag thread.
+    ///
+    /// `static` so a resolver closure built from it holds no reference to the
+    /// backend and cannot keep it alive.
+    private static func firstResolvableDevice(
+        uids: [String?], using control: AggregateDeviceControlling
+    ) -> (uid: String, id: AudioObjectID)? {
+        uids.compactMap { $0 }.lazy.compactMap { uid in
+            control.resolveDeviceID(forUID: uid).map { (uid: uid, id: $0) }
+        }.first
+    }
+
+    /// Give the Mac's default output back to a real device once whole-system
+    /// routing goes empty (the user deselected their last AirPlay speaker), leaving
+    /// the aggregate itself ALIVE — unlike `stop()`, which restores and then
+    /// destroys it. It has to stay: it is the app's entry in Sound settings, and a
+    /// re-select takes it over again.
+    ///
+    /// The ONLY entry condition is that the default output IS our aggregate.
+    /// Deliberately NOT also `aggregateDefaultActive`,
+    /// the way `stop()`'s restore is: that flag is process-local while the
+    /// aggregate's default-ness is system-wide and survives a relaunch, so a
+    /// default this process never wrote — left by a previous session, auto-picked
+    /// by macOS when the device appeared, or chosen by the user in Sound settings
+    /// — would never be handed back, and Mac-only through the aggregate is pure
+    /// passthrough with dead volume control. Best-effort like `stop()`'s: nothing
+    /// resolvable to restore to leaves the default exactly where it is.
+    ///
+    /// `priorDefaultUID` is deliberately KEPT (`stop()` clears it). The HAL's
+    /// default-device change lands asynchronously, so a fast re-select can still
+    /// read the aggregate as the current default and skip
+    /// ``pointDefaultAtAggregate()``'s prior-capture — the standing value is then
+    /// the only good prior left. On `stateQueue`.
+    private func restoreDefaultFromAggregate(attempt: Int = 1) {   // on stateQueue
+        guard currentDefaultOutputUIDProvider() == AggregateOutputDevice.productUID else { return }
+        // What the user had, else the Mac's built-in output — the same sub-device
+        // the aggregate itself wraps, so it is the one target that is still there
+        // when the prior device was unplugged mid-session.
+        let prior = priorDefaultUID.flatMap { $0 == AggregateOutputDevice.productUID ? nil : $0 }
+        guard let target = Self.firstResolvableDevice(
+            uids: [prior, aggregateControl.builtInOutputDeviceUID()], using: aggregateControl) else {
+            Telemetry.log(.airplay, "aggregate_default_restore", [
+                "outcome": "no_target", "prior": prior ?? "none", "attempt": "\(attempt)"])
+            return
+        }
+        // Written inline on `stateQueue`, the same way `pointDefaultAtAggregate()`
+        // writes its own default.
+        restoreWriteReturned(aggregateControl.setDefaultOutputDevice(target.id),
+                             target: target, attempt: attempt)
+    }
+
+    /// VOLUME CONTINUITY: bring the device we just handed the default back to up
+    /// to Main, or the Mac jumps to whatever level that hardware was left at.
+    ///
+    /// The Main mirror (``builtInOutputTargetResolver()``) keeps only the BUILT-IN
+    /// output in step during a session, so a prior default that was anything else
+    /// — AirPods, a USB DAC, external speakers — has been sitting untouched at its
+    /// pre-session level the whole time. Addressed by the device id already
+    /// resolved here rather than by "whatever is default", because the HAL's switch
+    /// lands asynchronously and a resolve-the-default write would still hit the
+    /// aggregate, which takes every volume write and applies none. On `stateQueue`.
+    private func pushMainToRestoredDevice(_ target: (uid: String, id: AudioObjectID)) {   // on stateQueue
+        let main = mainOutGain
+        let id = target.id
+        // Memoise only on a confirmed write, as `setMasterGain` does — same
+        // readable-but-unwritable-output trap.
+        systemVolume.setVolume(main, resolvingTarget: { id }) { [weak self] wrote in
+            guard let self, wrote else { return }
+            self.stateQueue.async { self.lastSeenSystemVolume = main }
+        }
+    }
+
+    /// How long to wait before reading back whether the restore write actually
+    /// moved the default. Not a sleep and not a guess at HAL latency: a write the
+    /// HAL ACCEPTS AND IGNORES raises no change notification at all, so there is no
+    /// event to wait on and a scheduled read-back is the only way to tell it apart
+    /// from one still in flight (the same reason the takeover reflects
+    /// optimistically instead of reading straight back).
+    private static let restoreLandingCheckDelay: TimeInterval = 0.5
+
+    /// The restore write came back. `true` only means the HAL accepted it — the
+    /// documented failure mode in this area is acceptance without effect (root
+    /// AGENTS.md: a destroy of the current system output returns `noErr` and does
+    /// nothing), so schedule a read-back rather than believing it. On `stateQueue`.
+    private func restoreWriteReturned(_ wrote: Bool, target: (uid: String, id: AudioObjectID),
+                                      attempt: Int) {   // on stateQueue
+        Telemetry.log(.airplay, "aggregate_default_restore", [
+            "outcome": wrote ? "wrote" : "write_refused",
+            "target": target.uid, "attempt": "\(attempt)"])
+        guard wrote else { return }
+        // Echo-guard our own write, exactly as the takeover does. This is the ONE
+        // write that targets something other than the aggregate; the
+        // default-changed handler only clears the guard, it pushes no volume.
+        expectedDefaultWriteUID = target.uid
+        aggregateDefaultActive = false
+        pushMainToRestoredDevice(target)
+        stateQueue.asyncAfter(deadline: .now() + Self.restoreLandingCheckDelay) { [weak self] in
+            self?.verifyRestoreLanded(target: target, attempt: attempt)
+        }
+    }
+
+    /// Read the default back: did the write we were told succeeded actually move
+    /// it? On `stateQueue`.
+    ///
+    /// razor: exactly ONE retry. A write ignored twice is a HAL state this app
+    /// cannot argue with, and a loop here would fight the user; the telemetry line
+    /// is what a live session is meant to leave behind. Upgrade path if the log
+    /// ever shows a second attempt landing: schedule off the capture-stopped edge
+    /// instead of a fixed delay.
+    private func verifyRestoreLanded(target: (uid: String, id: AudioObjectID), attempt: Int) {   // on stateQueue
+        let current = currentDefaultOutputUIDProvider()
+        guard current == AggregateOutputDevice.productUID else {
+            Telemetry.log(.airplay, "aggregate_default_restore", [
+                "outcome": "landed", "default": current ?? "unreadable", "attempt": "\(attempt)"])
+            return
+        }
+        Telemetry.log(.airplay, "aggregate_default_restore", [
+            "outcome": "did_not_land", "target": target.uid, "attempt": "\(attempt)"])
+        // The aggregate is still the Mac's default, so we still hold it whatever
+        // the write reported.
+        aggregateDefaultActive = true
+        expectedDefaultWriteUID = nil
+        // A re-select in the meantime is the user asking for the aggregate back —
+        // never fight it.
+        guard attempt == 1, expectedSelected.isEmpty else { return }
+        restoreDefaultFromAggregate(attempt: 2)
     }
 
     /// Compute the routing-blocked steady state — actively routing AND the current

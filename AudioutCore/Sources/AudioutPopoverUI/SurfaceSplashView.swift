@@ -32,7 +32,7 @@ import AudioutSharedUI
 final class SurfaceSplashView: NSView {
 
     /// The MINIMUM the mark holds before it may start leaving.
-    static let holdDuration: TimeInterval = 0.7
+    static let holdDuration: TimeInterval = 0.5
     /// The backstop: it fades at this point whatever else has happened. Raised
     /// from 1.2 s so a cold open's discovery (Bonjour/AirPlay/Cast/BT, which
     /// streams in over ~1–2 s) has room to quiet behind the cover before the

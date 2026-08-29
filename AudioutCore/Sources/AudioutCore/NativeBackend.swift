@@ -8910,9 +8910,26 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// (T-FANOUT), so reusing it is exact, not an approximation. This was a
     /// pre-existing gap (the synced-local sink and per-device metering shipped
     /// in separate phases; neither retrofitted the other), not a regression
-    /// from the T1-T3 dropout fixes. Must run on `stateQueue`, like every caller.
+    /// from the T1-T3 dropout fixes. BLUETOOTH and CAST ids are excluded from the
+    /// engine for the same structural reason (`setOutputSet`'s converge loop guards
+    /// on `!device.isBluetooth`/`!device.isCast`), so `isSelected` is never true for
+    /// either — asking it would leave both bars permanently dark. Each has
+    /// its own "rendering now" fact: a BT row's `.connected`, which means that
+    /// device's delay gate has opened (`BTDeviceSink.hasStartedRendering`) and is the
+    /// same state that arms its dot — NOT `btSelectedUIDs`, which is intent and would
+    /// light the bar on a selected-but-silent speaker; and `castPlaying` for a
+    /// receiver that has reported PLAYING. Both sinks are handed the identical
+    /// captured PCM this RMS was measured from (BT-FANOUT / CAST-FANOUT in
+    /// `NativeCaptureCoordinator.deliver`), so reusing it is exact for them too.
+    /// TRAP: the bar therefore shows the UNDELAYED source. A BT sync trim moves that
+    /// device's own delay line, which sits DOWNSTREAM of this measurement, so
+    /// changing a trim changes when the speaker sounds and never when the bar moves;
+    /// one system RMS feeds every device's bar and no per-device delay can reach it.
+    /// Must run on `stateQueue`, like every caller.
     private func isMeterable(_ device: Device) -> Bool {
-        device.isLocalDevice ? syncedLocalSinkEnabled : device.isSelected
+        if device.isBluetooth { return device.connectionState == .connected }
+        if device.isCast { return castPlaying.contains(device.id) }
+        return device.isLocalDevice ? syncedLocalSinkEnabled : device.isSelected
     }
 
     /// Read whatever `noteSystemRMS` last stored (stream_id 0) and, if it is

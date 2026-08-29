@@ -125,9 +125,12 @@ import CoreAudio
     private final class FakeCapture: CaptureControlling, @unchecked Sendable {
         private let lock = NSLock()
         private var _ops: [String] = []
+        private var _onLevel: (@Sendable (_ rms: Float) -> Void)?
+        /// Stored, not discarded: the BT-METER tests call it to push one RMS
+        /// sample down the real metering path.
         var onLevel: (@Sendable (_ rms: Float) -> Void)? {
-            get { nil }
-            set { }
+            get { lock.withLock { _onLevel } }
+            set { lock.withLock { _onLevel = newValue } }
         }
         var onStateChange: (@Sendable (_ state: NativeCaptureCoordinator.State) -> Void)? {
             get { nil }
@@ -1044,5 +1047,61 @@ import CoreAudio
         #expect(capture.ops.contains("tickOn"))
         backend.setBTAlignTickActive(false)
         #expect(capture.ops.last == "tickOff")
+    }
+
+    // MARK: - BT-METER (roadmap 038)
+    //
+    // A BT id is excluded from the AirPlay engine by the converge loop's
+    // `!device.isBluetooth` guard, so `Device.isSelected` is structurally never
+    // true for one — and `isMeterable` asked exactly that, which is why every BT
+    // row's bar was dark from the day the meter shipped. The fix substitutes the
+    // BT "rendering now" fact, `.connected`, the same way the local device
+    // substitutes `syncedLocalSinkEnabled`.
+
+    /// The core fix: a BT device whose delay gate has opened must receive the
+    /// SAME whole-system-tap RMS that feeds every other output's bar — the BT
+    /// fan-out is handed that identical buffer, so reusing it is exact.
+    @Test func connectedBTDeviceReceivesTheWholeSystemLevel() {
+        let (backend, _, _, bt, sink, capture) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.calls.contains("start") }
+        sink.renderingUIDs = [btMove.id]
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+
+        let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
+        backend.setMeteringActive(true)
+        // Re-fire while polling: one RMS sample is consumed by a single drain, so
+        // a sample dropped before the subscription registers must not fail the test.
+        waitFor { capture.onLevel?(0.6); return (levels.lastDeviceLevel(self.btMove.id) ?? 0) > 0 }
+
+        #expect(abs((levels.lastDeviceLevel(btMove.id) ?? 0) - 0.6) <= 0.001,
+                "a rendering BT device must be metered from the whole-system tap it is fanned out from")
+    }
+
+    /// Selection is INTENT, not audio: a BT device that is selected but has not
+    /// yet started rendering must stay unmetered, or the bar moves while the
+    /// speaker is still silent. Pins the choice of `.connected` over
+    /// `btSelectedUIDs`.
+    @Test func selectedButNotYetRenderingBTDeviceIsNotMetered() {
+        let (backend, _, _, bt, sink, capture) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.calls.contains("start") }
+        // Deliberately never announce render start: the row stays `.connecting`.
+        #expect(device(backend, btMove.id)?.connectionState != .connected)
+
+        let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
+        backend.setMeteringActive(true)
+        waitFor(timeout: 0.3) { capture.onLevel?(0.6); return false }
+
+        #expect(levels.lastDeviceLevel(btMove.id) == nil,
+                "a selected-but-silent BT speaker must not light its bar")
     }
 }

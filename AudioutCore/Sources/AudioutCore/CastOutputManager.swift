@@ -85,6 +85,12 @@ struct CastFeedStats: Sendable, Equatable {
     /// Whole producer blocks the ring refused, for lock contention or for want
     /// of room. Live audio that never reached the receiver.
     let droppedBlocks: Int
+    /// The share of ``droppedBlocks`` refused because the lock was busy rather
+    /// than because the ring was full. The two mean opposite things: lock-busy
+    /// says the consumer (or a stats read) held the ring while the IOProc had
+    /// audio to hand over, and ring-full says the consumer stopped draining.
+    /// Diagnosing a stutter without this split is guesswork.
+    let droppedLockBusy: Int
     /// Frames the consumer had to invent because the ring was short. The 1 s
     /// prime each GET renders from a just-emptied ring lands here too — that
     /// one is the silent join gap, by design.
@@ -97,7 +103,9 @@ struct CastFeedStats: Sendable, Equatable {
 /// One Cast receiver's feed: the 2-second hand-off between the capture IOProc
 /// (producer) and the HTTP server's pacing timer (consumer).
 ///
-/// The producer never blocks and never allocates — a failed `try()` or a block
+/// The producer never blocks. It also never allocated, until a feed delay line
+/// was put in front of it: ``PCMDelayLine/exchange(_:)-> Data`` takes a copy per
+/// block, on the IOProc, whenever a line is live — a failed `try()` or a block
 /// that does not fit is dropped whole, because a late buffer is worse than a
 /// missing one on a stream the receiver is already 5.5 s behind. The consumer
 /// zero-fills whatever is missing, so a starved ring plays silence rather than
@@ -142,7 +150,13 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     private var delayLine: PCMDelayLine?
     /// Producer-owned: incremented only by ``push(_:)``, which cannot take the
     /// lock on the path that matters (a failed `try()` IS one of the drops).
+    /// How many times the producer re-tries the ring's lock before it gives up
+    /// and drops the block. Small: the holder is only ever a memcpy away from
+    /// releasing, and an IOProc must not spin on a thread it does not control.
+    static let lockRetries = 64
+
     private let droppedBlocksWord: UnsafeMutablePointer<Int>
+    private let droppedLockBusyWord: UnsafeMutablePointer<Int>
     private var underrunFrames = 0                          // lock-guarded (consumer)
     private var feedResets = 0                              // lock-guarded
 
@@ -151,19 +165,43 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         storage.initialize(repeating: 0, count: Self.capacityFrames * 2)
         droppedBlocksWord = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         droppedBlocksWord.initialize(to: 0)
+        droppedLockBusyWord = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        droppedLockBusyWord.initialize(to: 0)
     }
 
     deinit {
         storage.deinitialize(count: Self.capacityFrames * 2)
         storage.deallocate()
         droppedBlocksWord.deallocate()
+        droppedLockBusyWord.deallocate()
     }
 
     /// Producer side (capture IOProc). Interleaved S16LE stereo, 4 bytes/frame.
     func push(_ pcm: Data) {
         let frames = pcm.count / 4
         guard frames > 0 else { return }
-        guard lock.try() else { countDroppedBlock(); return }
+        // Retry before giving up. The consumer's critical section is a memcpy
+        // and the once-a-second stats read is shorter still, so a handful of
+        // attempts covers essentially every collision — and the alternative is
+        // not "a late block", it is 11 ms of audio deleted from the timeline
+        // for good. Live 2026-08-29: at roughly one lost block every five
+        // seconds the feed cushion drained 226 ms in 100 s and the stutter
+        // came back a few minutes in.
+        //
+        // Bounded on purpose: this is the capture IOProc, so it must never
+        // wait on a thread it does not control. Exhausting the retries drops
+        // the block exactly as before.
+        var acquired = lock.try()
+        var attempt = 0
+        while !acquired, attempt < Self.lockRetries {
+            attempt += 1
+            acquired = lock.try()
+        }
+        guard acquired else {
+            droppedLockBusyWord.pointee &+= 1
+            countDroppedBlock()
+            return
+        }
         defer { lock.unlock() }
         // The line runs before the room check: its clock is the producer's, so
         // a block the ring then has no space for still has to go through it,
@@ -218,6 +256,7 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     var stats: CastFeedStats {
         OSMemoryBarrier()                       // acquire: see the producer's word
         let dropped = droppedBlocksWord.pointee
+        let lockBusy = droppedLockBusyWord.pointee
         lock.lock()
         defer { lock.unlock() }
         // The APPLIED delay, not the requested one: with the IOProc stopped the
@@ -226,9 +265,14 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         return CastFeedStats(
             achievedDelayMs: heldFrames * 1000 / Self.sampleRate,
             droppedBlocks: dropped,
+            droppedLockBusy: lockBusy,
             underrunFrames: underrunFrames,
             feedResets: feedResets)
     }
+
+    /// How much audio is queued right now. The server's pacing clock waits on
+    /// this before it starts, so it never paces against an empty ring.
+    var bufferedFrames: Int? { lock.withLock { availableFrames } }
 
     /// Consumer side (the server's pacing timer). Always exactly `frames * 4`
     /// bytes; anything the ring is short of is silence.
@@ -812,11 +856,22 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         guard let seconds = Self.leadSeconds(session, status) else { return }
         let leadMs = Int((seconds * 1_000).rounded())
         let kept = roundTripMs < Self.leadRoundTripLimitMs
+        // Ride the 1 Hz sample with the feed's own health. `droppedBlocks`
+        // rising means the hand-off ring refused whole blocks — audible as
+        // stutter on the receiver and invisible everywhere else, since neither
+        // the lead nor the room delay moves when it happens. Read
+        // `session.ring.stats` directly, NOT `castFeedStats`: that one takes
+        // `queue.sync` and this is already running ON `queue`.
+        let feed = session.ring.stats
         Telemetry.log(.cast, "cast_lead_sample", [
             "device": id,
             "lead_ms": String(leadMs),
             "rtt_ms": String(roundTripMs),
             "kept": kept ? "1" : "0",
+            "dropped_blocks": String(feed.droppedBlocks),
+            "dropped_lock_busy": String(feed.droppedLockBusy),
+            "underrun_frames": String(feed.underrunFrames),
+            "achieved_delay_ms": String(feed.achievedDelayMs),
         ])
         guard kept else { return }
         onLeadSample?(id, leadMs)

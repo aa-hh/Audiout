@@ -3593,8 +3593,51 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             "refused": settlement.refused ? "1" : "0",
             "term_ms": _castTermMs.map(String.init) ?? "nil",
         ])
-        guard settlement.termMoved else { return }
+        guard settlement.termMoved else {
+            // The term stayed put, so the ROOM did not move — but this
+            // receiver's share of it just did, and it is the only output that
+            // needs telling. Pushing the whole room fan-out here would
+            // re-anchor every Bluetooth and local sink for a change none of
+            // them can see.
+            pushCastFeedDelaysLocked()
+            return
+        }
         roomDelayChangedLocked(cause: "cast_lead")
+    }
+
+    /// CAST-SYNC: hand every settled receiver the part of the room delay it
+    /// does not already produce by itself. On `stateQueue`.
+    ///
+    /// Called on BOTH edges that can change a receiver's share: the room delay
+    /// moving, and a receiver settling. The second one is easy to miss — a
+    /// receiver that settles BELOW the current term leaves `R` alone, so
+    /// nothing about the room changed, but that receiver's own share just went
+    /// UP by the difference. Live 2026-08-29: a reselect restored a remembered
+    /// term of 5916 ms while the receiver settled at 5462, and with this
+    /// keyed off the room alone the 454 ms never got inserted — the Cast leg
+    /// ran that much ahead of everything else, which is plainly audible.
+    private func pushCastFeedDelaysLocked() {   // on stateQueue
+        // The per-receiver Cast feed lines are the fourth leg of this fan-out.
+        // Each receiver's feed is held back by `room − settledLeadMs`, the part
+        // of the room delay it does not already produce by itself. For the
+        // furthest-behind receiver — the one that SET the term — that remainder
+        // is a few tens of ms; for a SECOND, faster receiver it is seconds, and
+        // it is the whole reason this leg exists.
+        //
+        // Three receivers are deliberately skipped, and in every case the point
+        // is that no delay line gets allocated: one still settling has no
+        // trustworthy lead to subtract, one refused for exceeding `R_max` plays
+        // unsynced by policy, and one whose remainder is zero already meets the
+        // room. `setCastRoomDelayMs` hops to the manager's own queue, so this
+        // stays a plain call from `stateQueue`.
+        let room = roomDelayLocked()
+        let refusedIDs = castRoomDelay.refusedIDs
+        for id in castSelectedIDs where !refusedIDs.contains(id) {
+            guard let settled = castRoomDelay.settledLeadMs(forID: id) else { continue }
+            let remainder = room - settled
+            guard remainder > 0 else { continue }
+            castOutputManager?.setCastRoomDelayMs(remainder, forDeviceID: id)
+        }
     }
 
     /// CAST-SYNC (brief §3): the room delay moved — hand `R` to every output
@@ -3619,27 +3662,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             if btRides { self.btSink?.reanchorAll(cause: "room_delay_change") }
             if macRides { self.syncedLocalSink?.requestReanchor(cause: "room_delay_change") }
         }
-        // The per-receiver Cast feed lines are the fourth leg of this fan-out.
-        // Each receiver's feed is held back by `room − settledLeadMs`, the part
-        // of the room delay it does not already produce by itself. For the
-        // furthest-behind receiver — the one that SET the term — that remainder
-        // is a few tens of ms; for a SECOND, faster receiver it is seconds, and
-        // it is the whole reason this leg exists.
-        //
-        // Three receivers are deliberately skipped, and in every case the point
-        // is that no delay line gets allocated: one still settling has no
-        // trustworthy lead to subtract, one refused for exceeding `R_max` plays
-        // unsynced by policy, and one whose remainder is zero already meets the
-        // room. `setCastRoomDelayMs` hops to the manager's own queue, so this
-        // stays a plain call from `stateQueue`.
-        let room = roomDelayLocked()
-        let refusedIDs = castRoomDelay.refusedIDs
-        for id in castSelectedIDs where !refusedIDs.contains(id) {
-            guard let settled = castRoomDelay.settledLeadMs(forID: id) else { continue }
-            let remainder = room - settled
-            guard remainder > 0 else { continue }
-            castOutputManager?.setCastRoomDelayMs(remainder, forDeviceID: id)
-        }
+        pushCastFeedDelaysLocked()
         Telemetry.log(.cast, "room_delay_changed", [
             "cause": cause,
             "room_ms": String(roomDelayLocked()),

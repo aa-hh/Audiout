@@ -53,7 +53,8 @@ import Testing
         ring.push(block)
         #expect(ring.render(frames: 882) == block)
         #expect(ring.stats == CastFeedStats(
-            achievedDelayMs: 0, droppedBlocks: 0, underrunFrames: 0, feedResets: 0))
+            achievedDelayMs: 0, droppedBlocks: 0, droppedLockBusy: 0,
+            underrunFrames: 0, feedResets: 0))
     }
 
     // MARK: - Delaying by inserting zeros in FRONT of the ring

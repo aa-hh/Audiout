@@ -7029,16 +7029,34 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(capture.lastExcludedBundleIDs?.contains("com.level") == true,
                 "and the app stays out of the whole-system tap for the whole drag")
 
-        // Back to 100 and LEFT there: the intercept disengages once it settles.
+        // Back to 100 and LEFT there: the intercept STAYS engaged, at unity gain.
+        // Disengaging would destroy the app's tap and rebuild the whole-system
+        // tap, and while that tap is down the Mac's own speakers are unmuted —
+        // the app is briefly heard on the Mac before the speaker takes over
+        // again (live 2026-08-29). Staying put removes the transition entirely.
+        let routingUpdatesBefore = capture.routingUpdates.count
         backend.updateAppRoutes([
             AppRoute(bundleID: "com.level", displayName: "Level", destination: .noRedirect),
         ])
+        await pollUntil { capture.routingUpdates.count > routingUpdatesBefore }
+        if case .capturing = perAppCapture.state(for: "com.level") {} else {
+            Issue.record("a once-leveled app keeps its tap at 100 rather than rebuilding")
+        }
+        #expect(capture.lastExcludedBundleIDs?.contains("com.level") == true,
+                "and stays out of the whole-system tap — the injector carries it at unity")
+
+        // The memory is the previous set, so it self-clears with the route: drop
+        // the app from the table and re-add it at 100.
+        backend.updateAppRoutes([])
         await pollUntil { perAppCapture.state(for: "com.level") == .idle }
-        #expect(perAppCapture.state(for: "com.level") == .idle,
-                "returning to 100 stops the tap")
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.level", displayName: "Level", destination: .noRedirect),
+        ])
         await pollUntil { capture.lastExcludedBundleIDs?.contains("com.level") == false }
+        #expect(perAppCapture.state(for: "com.level") == .idle,
+                "a route that left the table forgets it was ever leveled")
         #expect(capture.lastExcludedBundleIDs?.contains("com.level") == false,
-                "and puts the app back in the whole-system mix")
+                "so a fresh No Redirect route at 100 is untouched again")
     }
 
     /// A leveled app is metered by the injector / local engine, so it must NOT

@@ -6978,9 +6978,11 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     // playback engine (while it doesn't). At exactly 100 none of that happens.
 
     /// Volume < 100 on a No Redirect route starts the per-app tap and takes the
-    /// app out of the whole-system tap; returning to 100 undoes both, restoring
-    /// the byte-identical untouched path.
-    @Test func leveledNoRedirectRouteTapsAndExcludesUntilVolumeReturnsTo100() async {
+    /// app out of the whole-system tap. Returning to 100 KEEPS both: the app
+    /// stays intercepted at unity gain rather than swapping tap kinds, because
+    /// crossing that boundary rebuilds a Core Audio aggregate on the app's live
+    /// output and is audible as a click. The memory drops when the route does.
+    @Test func aLeveledAppStaysInterceptedWhenItsVolumeReturnsTo100() async {
         let perAppCapture = workingPerAppCapture(bundleIDs: ["com.level"])
         let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
         let capture = FakeCapture()
@@ -7011,16 +7013,33 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(capture.lastExcludedBundleIDs?.contains("com.level") == true,
                 "a leveled app must leave the whole-system tap — its audio comes back scaled")
 
-        // Back to 100: the intercept disengages.
+        // Back to 100: the intercept STAYS engaged, now at unity gain. Swapping
+        // back would tear down the `.mutedWhenTapped` tap and build the
+        // `.unmuted` metering one in its place — a Core Audio aggregate
+        // destroy/create on live output, which clicks.
+        let routingUpdatesBefore = capture.routingUpdates.count
         backend.updateAppRoutes([
             AppRoute(bundleID: "com.level", displayName: "Level", destination: .noRedirect),
         ])
+        await pollUntil { capture.routingUpdates.count > routingUpdatesBefore }
+        if case .capturing = perAppCapture.state(for: "com.level") {} else {
+            Issue.record("a once-leveled app must keep its tap at 100, not rebuild it")
+        }
+        #expect(capture.lastExcludedBundleIDs?.contains("com.level") == true,
+                "and must stay out of the whole-system tap — the injector carries it at unity")
+
+        // The stickiness is the previous leveled set, so it self-clears with the
+        // route: drop the app from the table and re-add it at 100.
+        backend.updateAppRoutes([])
         await pollUntil { perAppCapture.state(for: "com.level") == .idle }
-        #expect(perAppCapture.state(for: "com.level") == .idle,
-                "returning to 100 stops the tap")
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.level", displayName: "Level", destination: .noRedirect),
+        ])
         await pollUntil { capture.lastExcludedBundleIDs?.contains("com.level") == false }
+        #expect(perAppCapture.state(for: "com.level") == .idle,
+                "a route that left the table forgets it was ever leveled")
         #expect(capture.lastExcludedBundleIDs?.contains("com.level") == false,
-                "and puts the app back in the whole-system mix")
+                "so a fresh No Redirect route at 100 is untouched again")
     }
 
     /// A leveled app is metered by the injector / local engine, so it must NOT

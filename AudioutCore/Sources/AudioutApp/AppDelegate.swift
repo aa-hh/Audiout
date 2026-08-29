@@ -826,10 +826,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onMeteringActiveChange = { [weak self] active in
             (self?.backend as? MeteringControlling)?.setMeteringActive(active)
         }
-        // Bug T2: an Applications-card slider drive on a `.currentDevice` app must
-        // reach its LOCAL playback stream immediately (low latency), not only after
-        // the persisted route round-trips through `updateAppRoutes`. No-ops on
-        // backends without per-app local playback (`MockBackend`/`OwnToneBackend`).
+        // Bug T2: an Applications-card slider drive must reach the app's own
+        // renderer immediately (low latency) — a `.currentDevice` app's LOCAL
+        // playback stream, or an un-redirected app's leveled intercept — not only
+        // after the persisted route round-trips through `updateAppRoutes`. No-ops
+        // on backends without per-app rendering (`MockBackend`/`OwnToneBackend`).
         popoverController.onSetLocalPlaybackVolume = { [weak self] volume, bundleID in
             (self?.backend as? AppRouteConfiguring)?.setLocalPlaybackVolume(
                 volume: volume, bundleID: bundleID)

@@ -1347,10 +1347,10 @@ import AppKit
     /// (no header — the new default/neutral choice), then splits into a
     /// "Current Device" section (the local device) and an "AirPlay Devices"
     /// section (the available non-local fleet). A freshly-added route selects
-    /// the "No Redirect" sentinel and dims the slider; an explicit "Current
-    /// Device" pick keeps the slider LIVE (Bug T2 — it's its own local stream),
-    /// so only "No Redirect" dims.
-    @Test func appRowDestinationMenuStructureAndLocalDimming() async throws {
+    /// the "No Redirect" sentinel; every destination — that one included — keeps
+    /// the slider LIVE, since an un-redirected app below 100 is levelled inside
+    /// the whole-system mix.
+    @Test func appRowDestinationMenuStructureAndSliderStaysLive() async throws {
         let appRouting = tempAppRoutingController()
         appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
         let (popover, _, _) = try await makePopover(appRouting: appRouting,
@@ -1373,11 +1373,11 @@ import AppKit
 
         // A freshly-added (never-touched) route defaults to No Redirect.
         #expect(popover.test_appRowSelectedDestinationID(for: "com.example.music") == PopoverController.noRedirectDestinationID, "a fresh route selects the sentinel No Redirect entry")
-        #expect(popover.test_appRowSliderDimmed(for: "com.example.music") == true, "the slider is dimmed on No Redirect (no independent stream to level)")
+        #expect(popover.test_appRowSliderDimmed(for: "com.example.music") == false, "the slider is live on No Redirect — below 100 the app is levelled inside the mix")
 
         // Bug T2: explicitly picking Current Device gives the app its OWN local
-        // stream (played on the Mac's built-in speakers), so its slider is LIVE —
-        // only No Redirect stays dimmed.
+        // stream (played on the Mac's built-in speakers), and its slider is LIVE
+        // too.
         let row = try #require(popover.test_appRow(for: "com.example.music"))
         row.test_selectDestination(PopoverController.currentDeviceDestinationID)
         #expect(popover.test_appRowSelectedDestinationID(for: "com.example.music") == PopoverController.currentDeviceDestinationID, "an explicit Current Device pick selects its own sentinel entry")
@@ -1440,8 +1440,8 @@ import AppKit
     }
 
     /// Selecting an AirPlay destination on a row calls through to
-    /// `AppRoutingController.setDestination` and repaints: the route is redirected,
-    /// the row's selected id updates, and the slider un-dims.
+    /// `AppRoutingController.setDestination` and repaints: the route is redirected
+    /// and the row's selected id updates.
     @Test func appRowDestinationChangeCallsThroughAndRepaints() async throws {
         let appRouting = tempAppRoutingController()
         appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
@@ -1677,7 +1677,7 @@ import AppKit
         #expect(popover.test_appRowSelectedDestinationID(for: "com.example.music") == "office",
                 "the row still selects the kept target, not the No Redirect sentinel")
         #expect(popover.test_appRowSliderDimmed(for: "com.example.music") == false,
-                "the row must not render as an unset No Redirect row (dimmed slider)")
+                "the row keeps a live slider for its kept target")
 
         let titles = try #require(popover.test_appRowDestinationTitles(for: "com.example.music"))
         #expect(titles.contains("Office"),

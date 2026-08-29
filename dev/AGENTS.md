@@ -40,6 +40,7 @@ not the primary offline tool, which is the in-app `MockBackend` in
 | `stop-fake-speakers.sh` | Kills every process tracked by a pidfile in `.run/`. |
 | `audiocap/` | Standalone Core Audio process-tap capture CLI; independent tool. |
 | `README.md` | Setup/rationale for the mock, fake-speaker, and `native` backends. |
+| `BUILD.md` | Source build: Homebrew deps, compile, `.app` bundle. |
 | `notes/p2b-nativebackend-runbook.md` | How to run `native`: build/test, TCC grant, verification. |
 | `notes/onboarding-setup-brief.md` | First-run permission-priming flow: design + gated live-verify recipe for the audio self-test tone. |
 | `notes/p2b-nativebackend-seam-brief.md` | Gap analysis behind `NativeBackend`'s design. |

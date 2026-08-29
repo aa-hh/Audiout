@@ -1,5 +1,8 @@
 # Dummy setup for offline development
 
+**Building from source** (Homebrew deps, compile, `.app` bundle): see
+[BUILD.md](BUILD.md).
+
 You don't need any AirPlay speakers to build and test most of this app. There are
 two layers of "dummy," solving two different problems.
 

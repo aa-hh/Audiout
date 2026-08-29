@@ -749,9 +749,11 @@ extension SerializedSharedState {
     }
 
     @Test func refreshNeverPromptsUntouchedRows() async {
-        // A refresh on a fresh screen (all unknown) must not probe audio or the
-        // network — probing either would spring a system prompt the user hasn't
-        // engaged. Only the silent Accessibility read runs.
+        // A refresh on a fresh screen (all unknown) must not fire either
+        // PROMPTING read — the audible audio probe or a network browse — since
+        // both spring a system dialog the user hasn't engaged. The silent reads
+        // (Accessibility, and audio's `currentStatusSilently()`, which this
+        // fake leaves `nil`) are free and are not what this pins.
         let audio = CountingAudioProbe(result: .granted)
         let net = SpyLocalNetwork()
         let model = SetupModel(audioProbe: audio, localNetwork: net,
@@ -805,6 +807,117 @@ extension SerializedSharedState {
         await model.refreshStatuses()
         #expect(model.audioStatus == .denied, "unchanged — nil silent read must not clobber the cached status")
         #expect(audio.probeCallCount == 1, "still never falls back to the audible probe")
+    }
+
+    @Test func refreshReadsAudioOnAnUnengagedRow() async {
+        // Live report, 2026-08-29: "Open Setup…" showed System Audio as
+        // un-granted although the grant was in place. Every re-open builds a
+        // FRESH model, so `audioStatus` is `.unknown` — and the refresh used to
+        // read audio only on an ALREADY-ENGAGED row (`.denied`/`.requested`),
+        // so it skipped the one read that would have shown the truth. The
+        // silent read raises no prompt, so there is nothing to protect the user
+        // from by skipping it.
+        let audio = SilentAudioProbe(probeResult: .denied, silentResult: .granted)
+        let model = SetupModel(audioProbe: audio,
+                               localNetwork: SpyLocalNetwork(),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        #expect(model.audioStatus == .unknown, "a fresh model has never asked")
+
+        await model.refreshStatuses()
+
+        #expect(model.audioStatus == .granted, "an existing grant shows without being re-granted by hand")
+        #expect(audio.probeCallCount == 0, "and still never through the audible probe")
+    }
+
+    @Test func refreshNeverUnsaysAProvenAudioGrant() async {
+        // The other half of always-reading: `requestAudioCapture()` proves a
+        // grant FUNCTIONALLY (it hears its own tone through the tap) without
+        // writing `SystemAudioCaptureTCC`'s fresh-grant latch, while the silent
+        // read is the process-lifetime-cached TCC read that keeps reporting
+        // undetermined (⇒ `.unknown`) after that same grant. Adopting it
+        // blindly would flip a just-proven row back to "not asked" on the next
+        // Cmd+Tab — so `.unknown` must never unsay `.granted`.
+        let audio = SilentAudioProbe(probeResult: .granted, silentResult: .unknown)
+        let model = SetupModel(audioProbe: audio,
+                               localNetwork: SpyLocalNetwork(),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        await model.requestAudioCapture()
+        #expect(model.audioStatus == .granted)
+
+        await model.refreshStatuses()
+
+        #expect(model.audioStatus == .granted, "an undetermined re-read is an absence, not a refusal")
+    }
+
+    @Test func refreshStillDowngradesAudioOnARealDenial() async {
+        // The stickiness above is scoped to `.unknown`. A refusal read back
+        // from TCC is real information and must still take the grant away,
+        // exactly as it did before.
+        let audio = SilentAudioProbe(probeResult: .granted, silentResult: .denied)
+        let model = SetupModel(audioProbe: audio,
+                               localNetwork: SpyLocalNetwork(),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        await model.requestAudioCapture()
+        #expect(model.audioStatus == .granted)
+
+        await model.refreshStatuses()
+
+        #expect(model.audioStatus == .denied)
+    }
+
+    @Test func freshModelStartsFromAProvenLocalNetworkGrant() async {
+        // The Local Network half of the same live report. This permission has
+        // no silent read — browsing is what raises the prompt — so a fresh
+        // `.unknown` can never be resolved by looking, and the row asked again
+        // for a permission held for weeks. The persisted proof is what a new
+        // model starts from; the re-browse that follows is prompt-free because
+        // the permission is already granted (no self-discovery publish).
+        let settings = AppSettings(defaults: defaults)
+        settings.localNetworkWasGranted = true
+        let net = SpyLocalNetwork()
+        net.reachable = true
+        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                               localNetwork: net,
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: settings)
+
+        #expect(model.localNetworkStatus == .granted, "starts from the proof, not from scratch")
+
+        await model.refreshStatuses()
+
+        #expect(model.localNetworkStatus == .granted)
+        #expect(net.selfDiscoveryFlags == [false],
+                "a permission already granted is re-checked by browsing only — never by republishing")
+    }
+
+    @Test func provingLocalNetworkPersistsTheGrantAndARefusalClearsIt() async {
+        // The one prime funnel owns the bit, so it can never drift from the
+        // status the same funnel returns.
+        let (model, net, _, _) = makeModel(audio: .granted)
+        net.reachable = true
+        await model.primeLocalNetwork()
+        #expect(model.localNetworkStatus == .granted)
+        #expect(AppSettings(defaults: defaults).localNetworkWasGranted,
+                "the proof outlives this session, for the next fresh model")
+
+        // A refusal is the one thing that takes it back — the same event that
+        // is allowed to downgrade the status itself.
+        let settings = AppSettings(defaults: defaults)
+        let refused = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                                 localNetwork: CannedOutcomeLocalNetwork(outcome: .denied),
+                                 remoteControl: SpyRemoteControl(),
+                                 ptpHelper: FakePTPHelper(),
+                                 settings: settings)
+        await refused.primeLocalNetwork()
+        #expect(refused.localNetworkStatus == .denied)
+        #expect(!settings.localNetworkWasGranted, "a refusal clears the proof, so the next session asks again")
     }
 
     @Test func refreshReprobesAlreadyAskedNetwork() async {

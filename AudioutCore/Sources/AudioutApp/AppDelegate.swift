@@ -1191,6 +1191,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.auditRequiredPermissionsIfNeeded()
+                // Re-check the grant out-of-process, exactly as the wake
+                // handler below does — and for a sharper reason here. Coming
+                // back from System Settings IS the reactivation: it is the one
+                // moment the user has just granted System Audio, and this
+                // process's own TCC read is cached for its whole life, so the
+                // audit that just ran cannot see the grant it is looking for.
+                // Only a freshly spawned `tcc-probe` can (see
+                // `PermissionStateObserver`), and its verdict sets the latch
+                // that makes `isGranted()` — and the Setup screen's own silent
+                // read — finally answer honestly. Cheap and self-limiting: the
+                // runner single-flights, and the observer goes inert for good
+                // once the grant lands.
+                self.permissionObserver.kick(source: "reactivate")
                 // A fast user switch or a login-window trip can leave the
                 // volume-key tap installed but disabled, which reads as the
                 // keys silently dying. No-op unless we own the volume.

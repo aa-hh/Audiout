@@ -48,6 +48,7 @@ not the primary offline tool, which is the in-app `MockBackend` in
 | `notes/p2b-helper-productionization-brief.md` | PTP helper review, needs paid Developer ID (deferred). |
 | `notes/p2b-v2-smallwork-brief.md` | Smaller v2 backlog items (deferred). |
 | `notes/playback-meter-research.md` | Level-meter design research (not built). |
+| `notes/ios-chirp-probe-brief.md` | Porting the Mac's chirp sync probe to the phone: what it replaces, the moving-microphone risk, the hand-copy hazards, and why the Mac half is branch-blocked. |
 | `notes/stability-audit-2026-07-18.md` | Crash/freeze audit ledger: findings, marker convention, resolved list. |
 | `notes/objc-exception-shim-handoff.md` | ObjC exception shim adoption brief for the per-app-routing branch. |
 | `notes/p1-*.md` | Phase 1 UI/API research. |

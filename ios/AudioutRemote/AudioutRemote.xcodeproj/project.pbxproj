@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		D27EC48C84E7EC7A521F1901 /* AudioutProtocol in Frameworks */ = {isa = PBXBuildFile; productRef = 47879C7DBE5A2AB3C458FDB5 /* AudioutProtocol */; };
 		A9342EE8EE8ED5B6A088BE38 /* AudioutProtocol in Frameworks */ = {isa = PBXBuildFile; productRef = D17CE81AFDFAAC9914ADFEA5 /* AudioutProtocol */; };
+		3F0B71C4A82D65E9147CB03A /* ProbeKit in Frameworks */ = {isa = PBXBuildFile; productRef = 6D25E9A0FB43718C25D0E4B7 /* ProbeKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -71,6 +72,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				D27EC48C84E7EC7A521F1901 /* AudioutProtocol in Frameworks */,
+				3F0B71C4A82D65E9147CB03A /* ProbeKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -133,6 +135,7 @@
 			name = AudioutRemote;
 			packageProductDependencies = (
 				47879C7DBE5A2AB3C458FDB5 /* AudioutProtocol */,
+				6D25E9A0FB43718C25D0E4B7 /* ProbeKit */,
 			);
 			productName = AudioutRemote;
 			productReference = B42E81F15DA4019ABE458AFB /* AudioutRemote.app */;
@@ -217,6 +220,7 @@
 			mainGroup = A5E2A531F4A743AC20CE6879;
 			packageReferences = (
 				C573F4B6DFBD489ED50388BA /* XCLocalSwiftPackageReference "../../AudioutProtocol" */,
+				9C84A2F16B0E37DA5148CE72 /* XCLocalSwiftPackageReference "ProbeKit" */,
 			);
 			productRefGroup = DDD90B53E4C5AC880D93350C /* Products */;
 			projectDirPath = "";
@@ -600,6 +604,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../../AudioutProtocol;
 		};
+		9C84A2F16B0E37DA5148CE72 /* XCLocalSwiftPackageReference "ProbeKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ProbeKit;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -610,6 +618,10 @@
 		D17CE81AFDFAAC9914ADFEA5 /* AudioutProtocol */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = AudioutProtocol;
+		};
+		6D25E9A0FB43718C25D0E4B7 /* ProbeKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ProbeKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

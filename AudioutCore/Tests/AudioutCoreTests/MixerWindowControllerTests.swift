@@ -828,6 +828,74 @@ import AppKit
         #expect(sheet.test_checkedDeviceIDs == ["homepod-bed"], "the selection survives the refusal")
     }
 
+    /// Only Return and the Create button may commit the sheet. `NSTextField`
+    /// sends its action on EVERY end of editing, so wiring the commit to the
+    /// field's `target`/`action` runs it whenever focus leaves — clicking the
+    /// icon well, the window resigning key. With a taken name in the field
+    /// each one raises its own refusal alert, and alerts QUEUE on the sheet's
+    /// window: dismissing one uncovers an identical one, and OK reads as dead.
+    ///
+    /// The editing session is real: a host window (built, NEVER ordered in —
+    /// AGENTS.md "tests stay invisible") is what vends the field editor, and
+    /// `makeFirstResponder(nil)` ends it through AppKit's own dispatch rather
+    /// than a stand-in.
+    @Test func endingTheNameFieldsEditingSessionNeverCommits() async throws {
+        let (window, controller, _) = try await makeWindow()
+        _ = try makeGroup1(controller)   // "Group 1"
+        let (sheet, host) = try await hostedCreateSheet(window)
+        var completed = false
+        sheet.onComplete = { _ in completed = true }
+        sheet.test_setName("group 1")
+        sheet.test_setMembership(deviceID: "homepod-bed", isChecked: true)
+
+        sheet.test_focusNameField()
+        host.makeFirstResponder(nil)     // the user clicks away / the window resigns key
+        await drain()
+
+        #expect(!sheet.test_duplicateNameRefused,
+                "losing focus is not a commit, so it can never raise the refusal alert")
+        #expect(controller.groups.count == 1, "and nothing was created behind the user's back")
+        #expect(!completed, "the sheet stays up, form intact")
+    }
+
+    /// The other half of the same wiring: Return in the field still commits.
+    /// AppKit hands an unmodified Return to the field editor, which asks the
+    /// field's delegate through `doCommand(by:)` — the live path. The name is
+    /// a TAKEN one on purpose: the refusal flag proves the keystroke reached
+    /// `commit()` while stopping it at the name check, so the sheet is never
+    /// asked to dismiss a presentation this host window never made.
+    @Test func returnInTheNameFieldStillCommits() async throws {
+        let (window, controller, _) = try await makeWindow()
+        _ = try makeGroup1(controller)   // "Group 1"
+        let (sheet, host) = try await hostedCreateSheet(window)
+        sheet.test_setName("group 1")
+        sheet.test_setMembership(deviceID: "homepod-bed", isChecked: true)
+
+        sheet.test_focusNameField()
+        let fieldEditor = try #require(host.firstResponder as? NSTextView,
+                                       "focusing the field must start a real editing session")
+        fieldEditor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        await drain()
+
+        #expect(sheet.test_duplicateNameRefused, "Return commits exactly like clicking Create")
+        #expect(controller.groups.count == 1, "and the taken name is still refused")
+    }
+
+    /// The create sheet in a host window that is built but NEVER ordered in —
+    /// the sanctioned way to give a pane a real window (AGENTS.md "tests stay
+    /// invisible"). A window is required for a field editor to exist at all.
+    private func hostedCreateSheet(_ window: MixerWindowController) async throws
+        -> (GroupCreationSheetController, NSWindow) {
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 460),
+                            styleMask: [.titled], backing: .buffered, defer: false)
+        host.contentViewController = sheet
+        host.layoutIfNeeded()
+        return (sheet, host)
+    }
+
     // MARK: The creation sheet reports a failed save (P1-4)
 
     @Test func createSheetReportsAFailedSaveAndKeepsTheForm() async throws {

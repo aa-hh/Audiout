@@ -45,6 +45,11 @@ All group logic goes through the shared
   (`splitViewController.view.window?.isVisible`), never this
   controller's window. Headless runs keep the sheet reference and
   drive it via `test_createSheet`/`test_commit()`/`test_cancel()`.
+  **Only Return and the Create button may commit it**, so the name field
+  carries a DELEGATE and never `target`/`action`: `NSTextField` sends its
+  action on every end of editing, not just Return, so that wiring commits the
+  whole sheet on any focus change — and a taken name then queues one refusal
+  alert per change, which reads on screen as an alert whose OK does nothing.
 - **All three panes SCROLL — the editor included (roadmap 039).** The surface
   frame is FIXED, so a fleet the editor cannot fit used to have to be paid for
   by raising `AppSurfaceController.minimumContentSize`; it overflows into its

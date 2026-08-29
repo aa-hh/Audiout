@@ -26,8 +26,6 @@ AudiouterProtocol/.build/
 AudiouterCore/.swiftpm/
 dev/audiocap/.build/
 dev/audiocap/.swiftpm/
-ios/AudiouterRemote/ProbeKit/.build/
-ios/AudiouterRemote/ProbeKit/.swiftpm/
 
 # Xcode / SwiftPM local state, in case anyone opens this via Xcode.
 xcuserdata/
@@ -36,12 +34,6 @@ xcuserdata/
 DerivedData/
 .swiftpm/xcode/
 *.xcuserstate
-
-# iOS app (ios/AudiouterRemote) build artifacts — DerivedData defaults to
-# ~/Library/Developer/Xcode/DerivedData, but xcodebuild can be pointed at an
-# in-tree build dir with -derivedDataPath; ignore that case too.
-ios/DerivedData/
-ios/**/DerivedData/
 
 # Impeccable design-skill scratch state (local config + generated critique notes).
 .impeccable/

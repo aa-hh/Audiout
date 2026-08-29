@@ -1258,7 +1258,7 @@ private final class SpyLocalPlayback: LocalPlaybackControlling, @unchecked Senda
 
 /// Records `.level`/`.appLevel` events (the two the other `collect` helpers
 /// deliberately skip) with sync accessors so `pollUntil` can inspect them.
-private final class LevelSink: @unchecked Sendable {
+final class LevelSink: @unchecked Sendable {
     private let lock = NSLock()
     private var _device: [(id: String, rms: Float)] = []
     private var _app: [(bundleID: String, rms: Float)] = []
@@ -1278,7 +1278,8 @@ private final class LevelSink: @unchecked Sendable {
 }
 
 /// Subscribe and record every `.level`/`.appLevel`. Caller cancels the task.
-private func subscribeLevels(_ backend: NativeBackend) -> (LevelSink, Task<Void, Never>) {
+/// Shared with the BT and Cast suites, which meter through the same channel.
+func subscribeLevels(_ backend: NativeBackend) -> (LevelSink, Task<Void, Never>) {
     let sink = LevelSink()
     let stream = backend.makeEventStream()
     let task = Task { for await event in stream { sink.record(event) } }

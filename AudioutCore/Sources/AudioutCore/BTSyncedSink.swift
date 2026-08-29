@@ -1401,13 +1401,14 @@ final class BTSyncedSink: @unchecked Sendable {
     /// it, so this re-anchors them all through the SAME path a composition
     /// change uses — the reference moved, which is exactly what
     /// `composition_change` means, and it is deliberately not a new rebuild
-    /// kind. No-op with AirPlay present (the presentation delay is the
-    /// reference then), and a same-value write costs nothing.
+    /// kind. No-op when the group renders against a presentation timeline
+    /// (AirPlay's or a Cast receiver's) instead, and a same-value write costs
+    /// nothing.
     func setBTOnlyBufferMs(_ ms: Int) {
         let sinks = tableLock.withLock { () -> [BTDeviceSink] in
             guard btOnlyBufferMs != ms else { return [] }
             btOnlyBufferMs = ms
-            return composition.airPlayPresent ? [] : Array(sinksByUID.values)
+            return composition.usesPresentationReference ? [] : Array(sinksByUID.values)
         }
         for sink in sinks { sink.requestRebuild(cause: "composition_change") }
     }

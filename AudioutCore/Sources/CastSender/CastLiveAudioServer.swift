@@ -12,6 +12,19 @@ import Network
 /// stereo at 44 100 Hz — 4 bytes per frame.
 public protocol CastPCMSource: AnyObject {
     func render(frames: Int) -> Data
+    /// Frames the source can hand over right now, or `nil` for a source that
+    /// generates rather than buffers and is therefore never short.
+    ///
+    /// The pacing clock below refuses to start until a buffering source has a
+    /// cushion. Without that, producer and consumer both run at exactly 1x
+    /// with nothing between them: the ring sits at zero, every scheduling
+    /// wobble on the capture side becomes silence the listener hears, and
+    /// `streamedFrames` advances past it so the audio is not late, it is gone.
+    var bufferedFrames: Int? { get }
+}
+
+public extension CastPCMSource {
+    var bufferedFrames: Int? { nil }
 }
 
 /// A continuous test tone. Phase carries across calls, so the stream has no
@@ -224,17 +237,44 @@ public final class CastLiveAudioServer: @unchecked Sendable {
         }
     }
 
+    /// How much the ring must hold before the pacing clock starts. Generous on
+    /// purpose: the room-delay controller MEASURES whatever lead this produces
+    /// and takes it out of the other outputs, so a cushion costs nothing in
+    /// sync terms — only a little more total latency on a leg already seconds
+    /// deep. The ring holds 2 s, so this leaves ample headroom.
+    static let cushionFrames = sampleRate / 2          // 500 ms
+
+    /// How long the clock will wait for that cushion before starting anyway.
+    /// A cushion that never arrives must degrade to today's behaviour, not to
+    /// silence: a source that cannot fill the ring is a reason to stream badly
+    /// and log it, never a reason to stream nothing at all.
+    static let cushionDeadline: TimeInterval = 2
+
     private func startStreaming(on connection: NWConnection) {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + Self.chunkInterval, repeating: Self.chunkInterval, leeway: .milliseconds(1))
         // Pace by the wall clock, not by tick count: a 20 ms timer fires a
         // little under 50 Hz (measured 0.44 % slow on a 3-minute soak), and a
         // fixed 882 frames per tick then falls behind real time for good.
-        let startedAt = DispatchTime.now()
+        // Start the clock on the first tick that finds a cushion, NOT on the
+        // GET. A buffering source is empty at this point — the ring was reset
+        // to the live edge moments ago — so starting here means demanding
+        // audio nobody has produced yet, forever.
+        var startedAt: DispatchTime?
         var streamedFrames = 0
+        let waitingSince = DispatchTime.now()
         timer.setEventHandler { [weak self] in
             guard let self else { return }
-            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt.uptimeNanoseconds) / 1_000_000_000
+            guard let clockStart = startedAt else {
+                let waited = Double(DispatchTime.now().uptimeNanoseconds
+                    - waitingSince.uptimeNanoseconds) / 1_000_000_000
+                if waited < Self.cushionDeadline,
+                   let buffered = self.source.bufferedFrames,
+                   buffered < Self.cushionFrames { return }
+                startedAt = DispatchTime.now()
+                return
+            }
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - clockStart.uptimeNanoseconds) / 1_000_000_000
             let due = Int(elapsed * Double(Self.sampleRate)) - streamedFrames
             guard due > 0 else { return }
             self.sendChunk(self.source.render(frames: due), on: connection)

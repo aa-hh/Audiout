@@ -905,6 +905,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? BTOutputControlling)?
                 .endBTWizardLatencyPreview(forDevice: deviceID, keepMs: keepMs)
         }
+        // CAST-SYNC: a Cast row gets the same SYNC chip and drawer, over its
+        // own store. Capability-gated like the Bluetooth hooks above, so a
+        // mock/dev popover keeps every Cast chip on "Not set" and only the
+        // session's own edits move it.
+        popoverController.castOffsetProvider = { [weak self] deviceID in
+            (self?.backend as? CastSyncOffsetControlling)?.castUserOffsetMs(forDevice: deviceID) ?? 0
+        }
+        popoverController.castOffsetIsSetProvider = { [weak self] deviceID in
+            (self?.backend as? CastSyncOffsetControlling)?
+                .castHasUserOffset(forDevice: deviceID) ?? false
+        }
+        popoverController.onSetCastOffset = { [weak self] ms, deviceID in
+            (self?.backend as? CastSyncOffsetControlling)?
+                .setCastUserOffsetMs(ms, forDevice: deviceID)
+        }
+        popoverController.onResetCastOffset = { [weak self] deviceID in
+            (self?.backend as? CastSyncOffsetControlling)?.clearCastUserOffset(forDevice: deviceID)
+        }
         // Roadmap 056 Part 1: the Mac's own row gets the identical SYNC
         // surface. The value lives in `AppSettings`, so reading and writing it
         // work under ANY backend — only the live apply is native-gated, exactly

@@ -106,9 +106,23 @@ import Testing
     }
 
     /// Poll the coordinator's state until `predicate` is true or timeout.
+    ///
+    /// The ceiling is a HANG-STOP, not a performance assertion — it exists so a
+    /// state that never arrives fails instead of wedging the run, and it costs a
+    /// passing test nothing (the poll returns on the first tick the predicate
+    /// holds). It was 3 s, which measured the machine rather than the code: every
+    /// seam here is a fake, so the work being awaited is pure Swift concurrency,
+    /// and in a full-suite run that pool is shared with ~3,000 other tests —
+    /// several of which block their thread outright with `Thread.sleep`. Starved
+    /// that way, arrival is routinely later than 3 s while remaining perfectly
+    /// correct, which failed eleven tests in this file at once on an unmodified
+    /// `main` while the same tests passed in isolation. Same reasoning the
+    /// roadmap-023 comments in `BTConnectionManagerTests` and
+    /// `CastLiveAudioServerTests` already record: scheduler jitter under load
+    /// must not be able to fail an assertion about behaviour.
     private func waitForState(
         _ coordinator: CaptureCoordinator,
-        timeout: TimeInterval = 3,
+        timeout: TimeInterval = 30,
         _ predicate: @escaping (CaptureCoordinator.State) -> Bool,
         _ message: String = ""
     ) async {

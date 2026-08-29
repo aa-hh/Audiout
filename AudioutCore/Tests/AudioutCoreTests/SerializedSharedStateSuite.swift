@@ -75,14 +75,15 @@ import Testing
 ///                                    OUTSIDE this parent — a live collision
 ///                                    caught 2026-08-11)
 ///
-/// `NativeBackendTests` itself is deliberately NOT here: 183 of its 200 tests
+/// `NativeBackendTests` itself is deliberately NOT here: most of its tests
 /// touch no process-global state, and holding them in this chain made it the
-/// second-longest pole in the suite. Only the 17 that do were split out into
+/// second-longest pole in the suite. Only the ones that do were split out into
 /// `NativeBackendGlobalStateTests` — 15 for `_installTestSink`, plus 2 that
 /// construct `NativeBackend` without `aggregateControl:` and so drive the REAL
 /// macOS-wide aggregate device on a fixed UID, which two tests cannot share.
-/// Note `--filter NativeBackendTests` no longer matches those 17; use
-/// `--filter NativeBackend` to catch both.
+/// `--filter NativeBackendTests` reaches all three suites nested under this
+/// parent — `NativeBackendGlobalStateTests`, `SerializedSharedState`, and
+/// `NativeBackendTests` itself — 227 tests total.
 ///
 /// Add a suite here when — and only when — it mutates state that outlives the
 /// test instance and is shared process-wide. Per-test temp dirs and

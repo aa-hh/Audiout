@@ -1306,6 +1306,10 @@ final class BTSyncedSink: @unchecked Sendable {
 
     private let tableLock = NSLock()
     private var sinksByUID: [String: BTDeviceSink] = [:]
+    /// UIDs fed by per-app routing rather than the whole-system fan-out — it
+    /// exists so `enqueue` never hands the whole-system mix to a speaker
+    /// that is already carrying one app's audio.
+    private var perAppClaimedUIDs: Set<String> = []
     private var composition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
     private var offsetMsByUID: [String: Int] = [:]
     private var trimMsByUID: [String: Double] = [:]
@@ -1572,13 +1576,39 @@ final class BTSyncedSink: @unchecked Sendable {
         return Set(sinks.lazy.filter(\.hasAnchored).map(\.deviceUID))
     }
 
+    /// Per-app routing's claim list, replaced wholesale on every call. A
+    /// same-value write costs nothing and touches no sink — claiming or
+    /// releasing a UID changes no timing term, only who feeds it next.
+    func setPerAppClaimedUIDs(_ uids: Set<String>) {
+        tableLock.withLock { perAppClaimedUIDs = uids }
+    }
+
     // MARK: Feed
 
-    /// Fan one captured block to every device's delay line. Called on the tap
-    /// delivery thread; the sink list is snapshotted under `tableLock`, the
-    /// per-sink work happens after it drops (lock-order rule above).
+    /// Fan one captured block to every UNCLAIMED device's delay line — a UID
+    /// in `perAppClaimedUIDs` is fed directly by per-app routing instead, so
+    /// it is skipped here to avoid a double feed. Called on the tap delivery
+    /// thread; the sink list is snapshotted (and filtered) under `tableLock`,
+    /// the per-sink work happens after it drops (lock-order rule above).
     func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {
-        let sinks = tableLock.withLock { Array(sinksByUID.values) }
+        let sinks = tableLock.withLock { () -> [BTDeviceSink] in
+            sinksByUID.values.filter { !perAppClaimedUIDs.contains($0.deviceUID) }
+        }
+        for sink in sinks {
+            sink.enqueue(interleavedFrames: interleavedFrames, frameCount: frameCount, pts: pts)
+        }
+    }
+
+    /// Feed exactly the named devices — the per-app path. Bypasses both the
+    /// whole-system fan-out above and the claim set: the caller already knows
+    /// who this stream belongs to. A UID with no sink is silently skipped,
+    /// same posture as `setGain(_:forDeviceUID:)`. Snapshotted under
+    /// `tableLock`, delivered after it drops (lock-order rule above).
+    func enqueue(
+        interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec,
+        forDeviceUIDs uids: [String]
+    ) {
+        let sinks = tableLock.withLock { uids.compactMap { sinksByUID[$0] } }
         for sink in sinks {
             sink.enqueue(interleavedFrames: interleavedFrames, frameCount: frameCount, pts: pts)
         }

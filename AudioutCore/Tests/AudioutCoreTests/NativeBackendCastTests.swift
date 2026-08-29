@@ -262,11 +262,26 @@ import CoreAudio
             systemVolume: NoOpSystemVolume(),
             silenceFallbackDelay: silenceFallbackDelay,
             castAbsenceGrace: castAbsenceGrace,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            // D7 (adversarial review, Seamless handoff T3): this suite drives
+            // `expectedSelected` non-empty via `setOutputSet` — without this
+            // override the real default factory would posix_spawn
+            // `/usr/bin/log stream` here too. Same fix as `NativeBackendTests`.
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         backend.captureCoordinator = capture
         backend.start()
         return Rig(backend: backend, cast: cast, manager: manager, capture: capture, bt: bt,
                    discovery: discovery)
+    }
+
+    /// Inert `LogStreamSpawning` stand-in (D7) — see `NativeBackendTests`' twin.
+    private final class NoOpLogStream: LogStreamSpawning, @unchecked Sendable {
+        func start(onLine: @escaping @Sendable (String) -> Void,
+                    onTermination: @escaping @Sendable () -> Void) throws {}
+        func stop() {}
+        var isRunning: Bool { false }
     }
 
     private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {

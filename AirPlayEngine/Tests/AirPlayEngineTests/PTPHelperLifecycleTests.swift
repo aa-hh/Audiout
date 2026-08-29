@@ -129,6 +129,28 @@ final class PTPHelperLifecycleTests {
         #expect(status == 0, "helper should have idle-exited with status 0 after the peer went away, got \(String(describing: status)):\n\(run.log)")
     }
 
+    /// (iii) T9a — the dead-man's watchdog must not mistake ordinary quiet
+    /// operation for a wedge. A watchdog threshold comfortably longer than
+    /// the idle+grace window below still lets idle exit fire first; if the
+    /// watchdog's heartbeat were somehow not kept fresh by a live (not
+    /// wedged) service loop, this would hard-exit 1 instead of idle-exiting
+    /// 0. Actually inducing a genuine wedge to prove the watchdog fires isn't
+    /// expressible here: the PTP master loop that could wedge lives inside
+    /// vendored libairptp on its own thread, out of an unprivileged test's
+    /// reach without a test-only hook into the root-daemon binary.
+    @Test func watchdogDoesNotMisfireDuringNormalIdleOperation() throws {
+        guard let binary = ptpHelperBinaryURL else {
+            Issue.record("ptp-helper binary not found next to the test bundle; set AUDIOUT_PTP_HELPER_BINARY to point at it")
+            return
+        }
+
+        let run = try HelperRun(binary: binary, idleSecs: 2, graceSecs: 2, watchdogSecs: 8)
+        defer { run.cleanUp() }
+
+        let status = run.waitForExit(timeout: 15)
+        #expect(status == 0, "helper should have idle-exited with status 0 (not a watchdog hard-exit 1), got \(String(describing: status)):\n\(run.log)")
+    }
+
     /// Polls `airptp_daemon_find()` until the subprocess has published its
     /// clock record. The helper binds, starts and publishes asynchronously
     /// relative to `Process.run()`, so there is nothing to synchronize on but
@@ -178,7 +200,10 @@ final class HelperRun {
     /// callbacks log freely, and an undrained pipe buffer would deadlock the
     /// subprocess mid-test. A file also survives to be quoted in a failure
     /// message.
-    init(binary: URL, idleSecs: Int, graceSecs: Int) throws {
+    /// `watchdogSecs` is nil by default (AUDIOUT_PTP_WATCHDOG_SECS unset,
+    /// so main.c's own default applies) - only PTPHelperLifecycleTests'
+    /// T9a watchdog test needs to turn the threshold down to test scale.
+    init(binary: URL, idleSecs: Int, graceSecs: Int, watchdogSecs: Int? = nil) throws {
         logURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("ptp-helper-lifecycle-\(UUID().uuidString).log")
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
@@ -187,7 +212,7 @@ final class HelperRun {
         // A wholesale environment, so AUDIOUT_PTP_MACH_SERVICE is
         // definitively unset (the "no launchd, no check-in" path) whatever the
         // test runner inherited.
-        process.environment = [
+        var environment = [
             "AUDIOUT_PTP_PORTS": "\(ptpLifecycleEventPort),\(ptpLifecycleGeneralPort)",
             "AUDIOUT_PTP_SHM_NAME": ptpLifecycleShmName,
             "AUDIOUT_PTP_IDLE_SECS": "\(idleSecs)",
@@ -196,6 +221,10 @@ final class HelperRun {
             // the shipping 10 s budget before reporting a surprise.
             "AUDIOUT_PTP_BIND_RETRY_SECS": "2",
         ]
+        if let watchdogSecs {
+            environment["AUDIOUT_PTP_WATCHDOG_SECS"] = "\(watchdogSecs)"
+        }
+        process.environment = environment
         process.standardOutput = FileHandle.nullDevice
         process.standardError = try FileHandle(forWritingTo: logURL)
 

@@ -156,6 +156,25 @@ for wt in "$worktrees_dir"/*/; do
     fi
 done
 
+# --- C. PTP-helper daemon check (best-effort) -----------------------------------
+#
+# Stale *.ptphelper launchd daemons pile up from old/side-by-side dev builds and
+# can block live testing by holding UDP 319/320. purge-stale-ptp-helpers.sh's dry
+# run enumerates them, but includes override-only GHOSTS (no loaded job, harmless,
+# unremovable by bootout). We count only LOADED jobs: when > 1, a stale helper
+# is squatting on the ports. Threshold is >1 because one loaded helper is legit
+# (the current dev build). When exceeded, nag with the fix. Best-effort: any
+# error is silent, never blocks the build.
+stale_helpers_output=$(bash scripts/purge-stale-ptp-helpers.sh 2>/dev/null || true)
+stale_helpers_total=$(printf '%s\n' "$stale_helpers_output" | grep -oE 'Found [0-9]+' | grep -oE '[0-9]+')
+[ -z "$stale_helpers_total" ] && stale_helpers_total=0
+stale_helpers_ghosts=$(printf '%s\n' "$stale_helpers_output" | grep -c "unknown (override-only entry, no loaded job)")
+stale_helpers_loaded=$((stale_helpers_total - stale_helpers_ghosts))
+if [ "$stale_helpers_loaded" -gt 1 ]; then
+    say "WARNING: $stale_helpers_loaded stale PTP-helper(s) with loaded jobs — run to clean up:"
+    say "    bash scripts/purge-stale-ptp-helpers.sh --apply"
+fi
+
 # --- B. build caches: staleness sweep + disk-pressure floor ------------------
 # NOT a fixed count. Caches on a roomy disk cost nothing, and a count cap
 # forces cold rebuilds (minutes of heavy compile per Guard-4 commit) exactly

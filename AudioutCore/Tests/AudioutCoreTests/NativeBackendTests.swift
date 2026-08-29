@@ -5039,7 +5039,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Single-Flight Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -5105,7 +5108,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -5166,7 +5172,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Reverse-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -5234,7 +5243,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Sleep-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -5285,7 +5297,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Sleep-Badge Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -6250,7 +6265,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6289,7 +6307,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:85", name: "Unbounded Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6324,7 +6345,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:86", name: "De-routed Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6387,7 +6411,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             // sub-millisecond de-route call below) so the de-route deterministically
             // lands before the timer fires, rather than racing it.
             processNotYetAudibleRetryDelay: 0.3, processNotYetAudibleMaxBackoff: 0.6,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:8A", name: "Orphan Race Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6456,7 +6483,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:8C", name: "Toggle Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6534,7 +6564,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Terminate Relaunch Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6572,7 +6605,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:87", name: "Rebind Recovery Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6632,7 +6668,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:88", name: "Gone Receiver")
         await startAndDiscover(backend, engine, discovery, device)
@@ -8451,7 +8490,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.5, processNotYetAudibleMaxBackoff: 1.0,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         defer { backend.stop() }
@@ -9149,7 +9191,10 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: activator,
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.02,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Reanchor Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -9188,7 +9233,10 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: activator,
             maxRebindRecoveryAttempts: 1, rebindRecoveryRetryDelay: 0.02,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Clockless Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -9424,7 +9472,10 @@ extension SerializedSharedState {
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]),
             maxRebindRecoveryAttempts: 6, rebindRecoveryRetryDelay: 0.25,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:A5", name: "Backoff Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -9794,7 +9845,10 @@ extension SerializedSharedState {
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:89", name: "Telemetry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -9896,6 +9950,51 @@ extension SerializedSharedState {
         // Gen 2's trail ends in a real terminal outcome, not a lone "scheduled"
         // or "retry_scheduled" line with no resolution.
         #expect(rebindLines(gen: 2).contains { $0["outcome"] as? String == "succeeded" })
+    }
+
+    /// `ensurePTPTakeover`'s new `ptp_activate` telemetry (audio-reclaim
+    /// instrumentation): fires exactly once per gate run, carrying the
+    /// resolved outcome. A `.timingPortsUnavailable` script (same fake +
+    /// `willWaitForClock: true` shape as `takeoverStatusTakingOverThenTimesOut`
+    /// above) exercises the debounced-wait branch so `will_wait` is asserted
+    /// non-trivially too, not just the always-`false` short-circuit case.
+    /// Uses `Telemetry._installTestSink` (the documented capture seam,
+    /// `Telemetry.swift`), same pattern as `failedBindLogsTelemetry` above.
+    @Test func ptpActivateTelemetryFiresOncePerGateRun() async {
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: true, outcome: .timingPortsUnavailable)
+        let (backend, engine, discovery) = makeBackend(ptpHelperActivator: activator)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C0", name: "Ptp Activate Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState
+            == .failed(ConnectionFailure(cause: .timingUnavailable)) }
+
+        func parsed(_ line: String) -> [String: Any]? {
+            guard let data = line.data(using: .utf8),
+                  let raw = try? JSONSerialization.jsonObject(with: data),
+                  let obj = raw as? [String: Any]
+            else { return nil }
+            return obj
+        }
+        func ptpActivateLines() -> [[String: Any]] {
+            box.snapshot().compactMap(parsed).filter {
+                $0["cat"] as? String == "airplay" && $0["evt"] as? String == "ptp_activate"
+                    && $0["device"] as? String == device.id
+            }
+        }
+        await pollUntil(timeout: 5) { !ptpActivateLines().isEmpty }
+        let lines = ptpActivateLines()
+        #expect(lines.count == 1, "ptp_activate must fire exactly once per gate run")
+        #expect(lines.first?["outcome"] as? String == "timingPortsUnavailable")
+        #expect(lines.first?["will_wait"] as? String == "true")
+        #expect(lines.first?["switch_away"] as? String == "none", "no defaultOutputSwitcher was injected")
+        #expect(Int(lines.first?["elapsed_ms"] as? String ?? "") != nil, "elapsed_ms must be an integer")
     }
 
 }

@@ -145,6 +145,14 @@ import CoreAudio
             aggregateControl: NoOpAggregateControl(),
             currentDefaultOutputUID: {
                 weOwnVolume ? AggregateOutputDevice.productUID : "BuiltInSpeakerDevice"
+            },
+            // D7 (adversarial review, Seamless handoff T3): the tests that call
+            // `.start()` on this backend then drive `expectedSelected` non-empty
+            // via `setOutputSet` — without this override the real default factory
+            // would posix_spawn `/usr/bin/log stream` here too. Same fix as
+            // `NativeBackendTests`.
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
             })
         let sink = SpySyncedLocalSink()
         backend.syncedLocalSinkFactory = { sink }
@@ -153,6 +161,14 @@ import CoreAudio
             id == NativeBackend.localDeviceID ? macSelected.get() : false
         }
         return (backend, sink, macSelected)
+    }
+
+    /// Inert `LogStreamSpawning` stand-in (D7) — see `NativeBackendTests`' twin.
+    private final class NoOpLogStream: LogStreamSpawning, @unchecked Sendable {
+        func start(onLine: @escaping @Sendable (String) -> Void,
+                    onTermination: @escaping @Sendable () -> Void) throws {}
+        func stop() {}
+        var isRunning: Bool { false }
     }
 
     /// A tiny thread-safe `Bool` box so a test can flip "is the Mac in Selected

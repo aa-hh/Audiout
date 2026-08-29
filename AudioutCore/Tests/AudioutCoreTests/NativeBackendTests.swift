@@ -9148,7 +9148,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: activator,
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.02)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.02,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Reanchor Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -9186,7 +9187,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: activator,
-            maxRebindRecoveryAttempts: 1, rebindRecoveryRetryDelay: 0.02)
+            maxRebindRecoveryAttempts: 1, rebindRecoveryRetryDelay: 0.02,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Clockless Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -9421,7 +9423,8 @@ extension SerializedSharedState {
             systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]),
-            maxRebindRecoveryAttempts: 6, rebindRecoveryRetryDelay: 0.25)
+            maxRebindRecoveryAttempts: 6, rebindRecoveryRetryDelay: 0.25,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:A5", name: "Backoff Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)

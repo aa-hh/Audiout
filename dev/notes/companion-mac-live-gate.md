@@ -183,9 +183,12 @@ live 2026-07-27: this is exactly how the gate was passed.)*
   connection drop — the phone uses this to settle quietly instead of redialling).
 
 **Supplement (does NOT replace the live poke above):** the AudioutProtocol suite
-proves the wire format round-trips, but exercises no socket and no approval alert:
+proves the wire format round-trips, but exercises no socket and no approval alert.
+It is no longer in this repo — `AudioutProtocol` is an external package dependency
+now (`aa-hh/audiout-shared`), and SwiftPM never runs a *dependency's* tests, so
+this step cannot be run from here at all. Run it in a checkout of that repo:
 ```bash
-cd AudioutProtocol && swift test
+git clone https://github.com/aa-hh/audiout-shared.git && cd audiout-shared && swift test
 ```
 Expected: all CompanionMessageTests pass (hello, welcome, awaitingApproval, command,
 state, goodbye + every command case).
@@ -237,9 +240,11 @@ CompanionSnapshotBuilder logs.
   Expected: a `{"schemaVersion":1,...}` envelope. It should be EMPTY of entries if you
   revoked everything in step 6b.
 
-- [ ] **Run AudioutProtocol tests** explicitly (not in the standard suite)
+- [ ] **Run AudioutProtocol tests** explicitly — they are NOT in this repo's suite
+  and cannot be: the package is an external dependency (`aa-hh/audiout-shared`),
+  and SwiftPM does not run a dependency's tests.
   ```bash
-  cd AudioutProtocol && swift test
+  git clone https://github.com/aa-hh/audiout-shared.git && cd audiout-shared && swift test
   ```
 
 - [ ] **Quit Audiout** (Cmd+Q)

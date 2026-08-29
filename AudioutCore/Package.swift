@@ -126,11 +126,15 @@ let package = Package(
         // (T-NB-BACKEND-1) and NativeCaptureCoordinator (T-NB-CAPTURE-1) are
         // the consumers; the Mock/OwnTone backends do not import it.
         .package(path: "../AirPlayEngine"),
-        // The companion (iPhone app) wire protocol — sibling package, zero
-        // deps, no shell-outs (PLAN-COMPANION-APP.md T1). CompanionServer /
+        // The companion (iPhone app) wire protocol: CompanionServer /
         // CompanionSnapshotBuilder / CompanionCommandDispatcher are the
-        // consumers.
-        .package(path: "../AudioutProtocol"),
+        // consumers. MIT, so the closed-source iPhone companion can link the
+        // same code, and a repository of its own because SwiftPM cannot
+        // depend on a package that lives inside a subdirectory of another
+        // repo — and the phone now lives in `aa-hh/audiout-remote`. Pinned
+        // by range: this app chooses when to follow the shared package, and
+        // `Package.resolved` records which tag it is actually on.
+        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.1.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.
@@ -150,7 +154,7 @@ let package = Package(
             name: "AudioutCore",
             dependencies: [
                 .product(name: "AirPlayEngine", package: "AirPlayEngine"),
-                .product(name: "AudioutProtocol", package: "AudioutProtocol"),
+                .product(name: "AudioutProtocol", package: "audiout-shared"),
                 "CastSender",
                 "ObjCExceptionShim",
             ],

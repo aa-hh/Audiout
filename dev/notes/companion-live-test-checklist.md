@@ -17,8 +17,8 @@ states the expected result so a deviation is unmistakable.*
 No TestFlight build exists yet — Xcode direct-install is the only path today.
 
 - [ ] **Cable the iPhone to the Mac** (or use wireless debugging if already paired),
-  open `ios/AudioutRemote/AudioutRemote.xcodeproj` in Xcode, select the iPhone as
-  the run destination.
+  open `AudioutRemote.xcodeproj` in Xcode from a checkout of `aa-hh/audiout-remote`
+  (private repo), select the iPhone as the run destination.
 - [ ] **Set a signing team** in Signing & Capabilities. A free Apple ID works — it
   issues a 7-day provisioning profile, so re-install weekly during this test round.
   Expected: no paid Developer Program membership required for this phase.

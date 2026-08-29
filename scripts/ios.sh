@@ -7,7 +7,7 @@
 #   scripts/ios.sh shot   [--root DIR] [--out DIR] [--appearance dark|light|both]
 #
 # `device` is the one that puts the app on Alec's actual iPhone, which is the
-# only way the companion app is ever verified (ios/AGENTS.md). Prefer it over
+# only way the companion app is ever verified (audiout-remote's AGENTS.md). Prefer it over
 # `test`/`shot`: those drive a Simulator, and simulator DEVICES are disk the
 # machine does not have to spare -- the runtime image alone is ~7.5G and the
 # devices were deleted on purpose. `build` is safe either way; it targets
@@ -24,19 +24,18 @@
 # AUDIOUT_IOS_REMOTE_ONLY=1 turns the local fallback into a hard stop, for
 # when running here is the thing being ruled out. Off by default.
 #
-# --root exists because `ios/` and this script currently live on DIFFERENT
-# branches: the companion app is on claude/companion-app-phase2-ios, which
-# predates scripts/lib/ entirely. Point --root at that worktree to use this
-# before the two meet on main. After they merge it can be omitted.
+# --root exists because the companion app lives in its own repository now,
+# aa-hh/audiout-remote, not under this checkout. Point --root at that
+# checkout to use this script against it.
 #
 # THE DESTINATION IS RESOLVED, NEVER NAMED. The two machines carry different
 # Xcode versions and therefore different simulator runtimes, so any hard-coded
 # `name=iPhone <model>` is wrong on one of them, and goes stale on both at the
-# next Xcode update. ios/AGENTS.md already documented a device that stopped
+# next Xcode update. audiout-remote's AGENTS.md already documented a device that stopped
 # existing. Ask the machine instead.
 #
 # AND NOTE WHAT THIS SCRIPT IS NOT. The companion app is VERIFIED on Alec's
-# physical iPhone 15 Pro, always — see ios/AGENTS.md. `test` and `shot` below
+# physical iPhone 15 Pro, always — see audiout-remote's AGENTS.md. `test` and `shot` below
 # drive a resolved simulator, which makes them a compile-and-smoke signal and
 # nothing more: device and Simulator builds are separate paths, and the
 # Simulator cannot discover a real Mac over Bonjour, raise the local-network
@@ -88,10 +87,10 @@ if [ "$mode" = shot ]; then
     done
 fi
 
-project="ios/AudioutRemote/AudioutRemote.xcodeproj"
+project="AudioutRemote.xcodeproj"
 [ -e "$root/$project" ] || {
     echo "ios.sh: no $project under $root" >&2
-    echo "        (the companion app lives on claude/companion-app-phase2-ios — pass --root <that worktree>)" >&2
+    echo "        (the companion app lives in aa-hh/audiout-remote — pass --root <that checkout>)" >&2
     exit 66
 }
 

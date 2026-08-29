@@ -22,7 +22,6 @@ AirPlayEngine/vendor/
 
 # SwiftPM build artifacts for the other local packages (same reasoning).
 AudioutCore/.build/
-AudioutProtocol/.build/
 AudioutCore/.swiftpm/
 dev/audiocap/.build/
 dev/audiocap/.swiftpm/
@@ -34,12 +33,6 @@ xcuserdata/
 DerivedData/
 .swiftpm/xcode/
 *.xcuserstate
-
-# iOS app (ios/AudioutRemote) build artifacts — DerivedData defaults to
-# ~/Library/Developer/Xcode/DerivedData, but xcodebuild can be pointed at an
-# in-tree build dir with -derivedDataPath; ignore that case too.
-ios/DerivedData/
-ios/**/DerivedData/
 
 # Impeccable design-skill scratch state (local config + generated critique notes).
 .impeccable/

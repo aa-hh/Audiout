@@ -45,7 +45,7 @@ Design tension to protect, not resolve by accident: mixer-grade capability with 
 - Volume model: sent level = Main × Group × Device (Main acts as ceiling).
 - License: GPL-2.0-or-later (forced by the vendored GPL sender). AirPlayEngine is a separate package as a licensing boundary — no app concepts inside it. This licence is what makes paid enforcement unavailable — see Business Model.
 - Distribution: open source, direct download for the Mac app. The Mac App Store is **foreclosed, not merely declined**: detecting the system-audio grant needs a private path with no public API, and Alec confirmed Developer ID only. Alec personally owns App Store Connect/TestFlight for the iOS companion.
-- **iPhone companion is mid-build (2026-08-12):** connection and core control work end to end; several screens are still being built. It merges into `main` as one unit from `claude/ios-staging`, on Alec's go-ahead — never per-branch. `main` has no `ios/` directory.
+- **iPhone companion is mid-build (2026-08-12):** connection and core control work end to end; several screens are still being built. It now ships from its own repository, `aa-hh/audiout-remote`.
 - Terminology in product: "Main Out" (master output), "groups" (saved named speaker sets), "per-app routing". The Mac's snapshot is the single source of truth; the phone renders it and never invents state.
 
 ## Business Model

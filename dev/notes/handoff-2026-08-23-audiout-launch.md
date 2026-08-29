@@ -15,7 +15,7 @@ current as of the merge of `claude/license-key-backend-cb2e78` into `main`.
 | App: soft license check | Built + tested: Settings › General key field with status line, "Buy Audiout…" button, lowest-priority "unregistered" note in the popover, Sparkle sends the key as a bearer header, check-in client live. All switched on by one Info.plist key (`AudioutLicenseServerURL`) that only a release build carries | `AudioutCore/Sources/AudioutCore/LicenseValidator.swift`, `LicenseCheckIn.swift`, `GeneralSettingsViewController.swift`, `PopoverController.swift`, `AppDelegate.swift` |
 | Release pipeline | `scripts/make-release.sh` + `docs/RELEASE.md` exist, **never run end-to-end** (needs Apple credentials) | this repo |
 | Website | Buy page + `/thanks` key handover built on branch `claude/buy-page-paddle-c3b002`, **unmerged**, all placeholders, still says "Audiouter" | `~/Projects/Audiouter Website` |
-| iPhone app | Still looks for `_audiouter-pf._tcp` — **cannot find a renamed Mac build** until renamed | branch `claude/ios-staging` |
+| iPhone app | Still looks for `_audiouter-pf._tcp` — **cannot find a renamed Mac build** until renamed | `aa-hh/audiout-remote` (private repo) |
 
 ## Next steps, in order
 
@@ -33,10 +33,10 @@ session with this file; "Alec" steps need credentials or a decision.
    (dry run), check the display-name sites it lists (marketing copy — the
    wordmark, `<title>`, package name), then `--apply`, `npm run build`,
    verify both pages in the browser. Rename the folder to `Audiout Website`.
-2. **iOS** (`.claude/worktrees/ios-staging`, branch `claude/ios-staging`):
-   `git merge main` first (brings the Mac rename in — expect a conflict-free
-   merge since `ios/` is disjoint), then the same script inside the worktree
-   for the `ios/` tree. The one thing that MUST match is
+2. **iOS** (`aa-hh/audiout-remote`, private repo): pull `main` first (brings
+   the Mac rename in — expect a conflict-free merge since the repos are
+   disjoint), then the same script inside that checkout. The one thing that
+   MUST match is
    `_audiout-pf._tcp` in the phone's Bonjour browser. Phone test on the real
    iPhone (never the Simulator — see memory) against an Audiout Mac build.
 3. Update the website's `thanks.js` `razor:` comment: the lookup contract is

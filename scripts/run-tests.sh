@@ -118,8 +118,13 @@ suite_key() {
         # they carry the target graph, dependencies and the brew include flags,
         # so a manifest-only edit changes what the suite links and can flip a
         # result with every source file byte-identical.
+        # Package.resolved earns its place for the same reason the manifests
+        # do: the shared package is pinned by RANGE, so resolution can land on
+        # a new tag with every file in this repo byte-identical. Without it a
+        # suite that linked different code would be handed the old pass.
         shasum -a 256 "$repo_root/AudioutCore/Package.swift" \
-                      "$repo_root/AirPlayEngine/Package.swift" 2>/dev/null
+                      "$repo_root/AirPlayEngine/Package.swift" \
+                      "$repo_root/AudioutCore/Package.resolved" 2>/dev/null
     } | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}'
 }
 

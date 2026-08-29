@@ -144,8 +144,7 @@ public final class GroupCreationSheetController: NSViewController {
         nameField.translatesAutoresizingMaskIntoConstraints = false
         nameField.placeholderString = "Group name"
         nameField.setAccessibilityLabel("Group name")
-        nameField.target = self
-        nameField.action = #selector(nameFieldReturnPressed(_:))
+        nameField.delegate = self
 
         iconWellButton.translatesAutoresizingMaskIntoConstraints = false
         iconWellButton.widthAnchor.constraint(equalToConstant: Self.iconWellSize).isActive = true
@@ -347,13 +346,6 @@ public final class GroupCreationSheetController: NSViewController {
 
     // MARK: Actions
 
-    @objc private func nameFieldReturnPressed(_ sender: NSTextField) {
-        // Return in the name field commits the sheet exactly like clicking
-        // Create — but only when Create would itself be enabled.
-        guard isCreateEnabled else { return }
-        commit()
-    }
-
     @objc private func createTapped(_ sender: NSButton) {
         commit()
     }
@@ -452,9 +444,11 @@ public final class GroupCreationSheetController: NSViewController {
 
     /// A window-guarded warning sheet on this sheet's own window — mirrors
     /// `GroupEditorViewController.presentPersistFailureAlert`. Headless runs
-    /// have no window; the `test_*` seams observe the outcome instead.
+    /// must not raise it at all (`HeadlessRuntime.isActive`, not
+    /// `view.window != nil` — suites host panes in real, ordered-out windows);
+    /// the `test_*` seams observe the outcome instead.
     private func presentSheetAlert(messageText: String, informativeText: String) {
-        guard let window = view.window else { return }
+        guard !HeadlessRuntime.isActive, let window = view.window else { return }
         let alert = NSAlert()
         alert.messageText = messageText
         alert.informativeText = informativeText
@@ -545,6 +539,14 @@ public final class GroupCreationSheetController: NSViewController {
     /// Simulate clicking Cancel.
     public func test_cancel() { cancel() }
 
+    /// Put keyboard focus in the name field, exactly as ``viewDidAppear()``
+    /// does on a real presentation. Needs a host window — only a window vends
+    /// a field editor — and a real editing session is the only thing a test
+    /// can then END through AppKit's own dispatch.
+    public func test_focusNameField() {
+        view.window?.makeFirstResponder(nameField)
+    }
+
     /// The icon well's currently-resolved symbol name (``Group/defaultIconSymbolName``
     /// until a pick overrides it, resolved through ``DeviceIcon/resolve(_:default:)``
     /// exactly like the rendered glyph).
@@ -630,4 +632,32 @@ private final class PencilBadgeView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+// MARK: - NSTextFieldDelegate
+
+extension GroupCreationSheetController: NSTextFieldDelegate {
+
+    /// RETURN in the name field commits the sheet, exactly like clicking
+    /// Create — and NOTHING ELSE does.
+    ///
+    /// **TRAP: the field's `target`/`action` is NOT a Return hook.**
+    /// `NSTextField` sends its action on EVERY end of editing — clicking the
+    /// icon well, the window resigning key, even a redundant
+    /// `makeFirstResponder` on the field that already holds focus — so wiring
+    /// ``commit()`` there commits the whole sheet on a focus change. With a
+    /// name some other group already has, each one raises its own refusal
+    /// alert, and alerts QUEUE on the sheet's window: dismissing one uncovers
+    /// an identical one, so OK reads as dead.
+    ///
+    /// AppKit delivers an unmodified Return straight to the first responder —
+    /// the field editor — so this is its live path, and consuming it (`true`)
+    /// keeps the field from also ending editing behind our back.
+    public func control(_ control: NSControl, textView: NSTextView,
+                        doCommandBy commandSelector: Selector) -> Bool {
+        guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
+        guard isCreateEnabled else { return true }
+        commit()
+        return true
+    }
 }

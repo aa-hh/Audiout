@@ -97,10 +97,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.getAnonymousId = { UUID(uuidString: installID) ?? $0 }
         PostHogSDK.shared.setup(config)
         analyticsAvailable = true
+        // GeoIP is enrichment PostHog does SERVER-side from the request IP, so
+        // it lands on every event unless each one opts out — which put a city,
+        // a postal code and a lat/long on every feature count. Registering the
+        // opt-out as a super property turns it off for everything, and
+        // `captureCoarseLocationOnce()` is then the ONE event per launch that
+        // allows it (Alec, 2026-08-29: "get the geoip on load or something,
+        // not with every event").
+        PostHogSDK.shared.register([Self.geoipDisableKey: true])
         Analytics.install(Analytics.Sink(
             capture: { PostHogSDK.shared.capture($0, properties: $1) },
-            consentChanged: { $0 ? PostHogSDK.shared.optIn() : PostHogSDK.shared.optOut() }
+            consentChanged: { granted in
+                guard granted else { PostHogSDK.shared.optOut(); return }
+                PostHogSDK.shared.optIn()
+                // Consent given DURING this launch — the location event that
+                // normally rides startup was suppressed by the opt-out, so it
+                // fires here instead. Without this, anyone who opts in from
+                // the Setup card would never contribute one.
+                Self.captureCoarseLocationOnce()
+            }
         ), consent: settings.telemetryOptIn)
+        if settings.telemetryOptIn { Self.captureCoarseLocationOnce() }
+    }
+
+    /// PostHog's per-event escape hatch from server-side GeoIP enrichment.
+    private static let geoipDisableKey = "$geoip_disable"
+
+    /// The one event per launch that carries coarse location. It overrides the
+    /// registered opt-out for itself only; every other event stays clean.
+    ///
+    /// Called directly rather than through ``Analytics`` because the facade
+    /// carries `[String: String]` and this property has to reach PostHog as a
+    /// real `false` — and because `AppDelegate` is the one place allowed to
+    /// touch `PostHogSDK`. The SDK's own opt-out still gates it, so a build
+    /// without consent sends nothing.
+    private nonisolated static func captureCoarseLocationOnce() {
+        PostHogSDK.shared.capture("app:launched", properties: [geoipDisableKey: false])
     }
 
     /// True once `configurePostHog()` has successfully called `setup(_:)` —
@@ -594,17 +626,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                self.presentSetupForUndeterminedIfNeeded() {
                 return
             }
-            if self.analyticsAvailable && !self.settings.telemetryAsked {
-                let alert = NSAlert()
-                alert.messageText = "Share anonymous usage statistics?"
-                alert.informativeText = "Audiout counts which features are used, anonymously. No audio, speaker names, network details, or license keys are ever collected. You can change this anytime in Settings › General."
-                alert.addButton(withTitle: "Share")
-                alert.addButton(withTitle: "Don't Share")
-                let granted = alert.runModal() == .alertFirstButtonReturn
-                self.settings.telemetryAsked = true
-                self.settings.telemetryOptIn = granted
-                Analytics.setConsent(granted)
-            }
+            // NOTHING asks about usage statistics on this click. That ask is
+            // `SetupStep.usageStats`, the Setup window's last card, and a
+            // modal alert here would interrupt the user at the exact moment
+            // they are reaching for the mixer. The Setup flow spends
+            // `settings.telemetryAsked` whichever way it is answered, so
+            // nothing re-asks anywhere; Settings › General is the way back.
             self.surface.perform(action, anchorRect: self.statusAnchorRect())
         }
 

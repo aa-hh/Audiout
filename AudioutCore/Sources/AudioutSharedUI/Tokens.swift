@@ -1019,6 +1019,34 @@ public enum Tokens {
                                                    light: 0x796356, lightHighContrast: 0x524036))
         }
 
+        /// Usage Statistics' hue — a deep "verdigris," the FIFTH member of the
+        /// family and the only one that isn't a macOS permission at all (the
+        /// answer is Audiout's own, kept in `AppSettings.telemetryOptIn`). It
+        /// still wears a family hue rather than a neutral grey: a colourless
+        /// tile among five would read as disabled, and the setup row IS asking
+        /// for a grant, just ours. Hue ~160° in every column/appearance —
+        /// clear of both reserved bands (gold/amber `[28°,68°)`, failure-red
+        /// `[0°,12°)∪[350°,360°)`) and ≥47° from the other four (~208°/~271°/
+        /// ~320°/~23°; the nearest is System Audio at 48°). It sits ~20° off
+        /// ``success`` (~138-141°) on purpose and reads unmistakably apart from
+        /// it: this is a deep sea-green, that is a bright grass green, and the
+        /// two never share a slot — the identity hue is the tile's glyph, the
+        /// earned green is the checkmark beside it. CONTRAST RATIONALE
+        /// (measured): Full dark `#3F977A` = 4.92:1 vs `panel` / 4.60:1 vs
+        /// `raised`; Full light `#167656` = 5.39:1 vs `panel` / 4.90:1 vs
+        /// `raised`. Subtle (authored): dark `#557C6F` = 3.74:1 vs `panel` /
+        /// 3.50:1 vs `raised`; light `#5A6A65` = 5.50:1 vs `panel` / 5.00:1 vs
+        /// `raised`. IC variants: Full dark `#7BBEA8` = 8.13:1 vs `panel`,
+        /// Full light `#0F573F` = 8.25:1 vs `panel`; Subtle dark `#889893` =
+        /// 5.79:1 vs `panel`, Subtle light `#314E45` = 8.79:1 vs `panel`.
+        public static var permissionUsageStats: NSColor {
+            permissionDynamic(name: "permissionUsageStats",
+                              full: WarmVariants(dark: 0x3F977A, darkHighContrast: 0x7BBEA8,
+                                                 light: 0x167656, lightHighContrast: 0x0F573F),
+                              subtle: WarmVariants(dark: 0x557C6F, darkHighContrast: 0x889893,
+                                                   light: 0x5A6A65, lightHighContrast: 0x314E45))
+        }
+
         /// Bluetooth SIG brand blue `#0082FC` — the Bluetooth setup row's
         /// glyph tint (Alec, 2026-08-23: the rune wears its official colour).
         /// A BRAND MARK, so one fixed hex in every appearance/contrast

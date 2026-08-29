@@ -44,6 +44,28 @@ public protocol SystemVolumeControlling: Sendable {
     /// control.
     func setMuted(_ muted: Bool)
 
+    /// Set the output volume on a caller-chosen device rather than whatever is
+    /// currently the default output.
+    ///
+    /// `resolvingTarget` is evaluated on the implementation's OWN write queue,
+    /// never on the caller's thread: resolving a device can mean enumerating every
+    /// object the HAL publishes, and the fader-drag path that calls this must not
+    /// pay for that per frame.
+    ///
+    /// Returning an `AudioObjectID` writes THAT device whatever the current default
+    /// output is. Returning `nil` means "no specific target" and behaves exactly
+    /// like ``setVolume(_:didWrite:)``, memoisation included.
+    ///
+    /// `didWrite` reports the real hardware outcome, on the same queue and with the
+    /// same ordering guarantee as ``setVolume(_:didWrite:)``.
+    func setVolume(_ volume: Int,
+                   resolvingTarget: @escaping @Sendable () -> AudioObjectID?,
+                   didWrite: (@Sendable (Bool) -> Void)?)
+
+    /// Set the mute state on a caller-chosen device. `resolvingTarget` follows the
+    /// same contract as ``setVolume(_:resolvingTarget:didWrite:)``.
+    func setMuted(_ muted: Bool, resolvingTarget: @escaping @Sendable () -> AudioObjectID?)
+
     /// Fired when volume/mute changed **outside this app** (the user hit the
     /// media keys, moved the Sound menu slider, …) or when the default output
     /// device itself switched (speakers → AirPods), which usually means a
@@ -381,19 +403,51 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
     // MARK: Writes (serialized on `queue`)
 
     public func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) {
+        setVolume(volume, resolvingTarget: { nil }, didWrite: didWrite)
+    }
+
+    public func setMuted(_ muted: Bool) {
+        setMuted(muted, resolvingTarget: { nil })
+    }
+
+    /// The one write body for both spellings. `resolvingTarget` is evaluated here,
+    /// on `queue`, and never on the caller's thread — see the protocol requirement.
+    ///
+    /// ## Why the memo is conditional
+    ///
+    /// ``lastKnownVolume``/``lastKnownMuted`` are echo-suppression state for the
+    /// device that is CURRENTLY the default — the only device whose listeners
+    /// ``handleDeviceChangeLocked()`` compares against.
+    ///
+    /// - Writing a device that is NOT the default must leave the memo alone.
+    ///   Stamping it with another device's level would make a later genuine
+    ///   external change *to that value* on the default compare equal and be
+    ///   silently swallowed.
+    /// - Writing the device that IS the default must update it, exactly as the
+    ///   plain path does: that write raises this object's own listeners, and
+    ///   ``handleDeviceChangeLocked()`` would otherwise report our own write as a
+    ///   user gesture with `defaultDeviceChanged: false`.
+    ///
+    /// The two cases are disjoint, so neither protection is traded away.
+    public func setVolume(_ volume: Int,
+                          resolvingTarget: @escaping @Sendable () -> AudioObjectID?,
+                          didWrite: (@Sendable (Bool) -> Void)?) {
         let clamped = volume.clampedToVolume
         queue.async {
-            let deviceID = Self.currentDefaultOutputDevice()
+            let target = resolvingTarget()
+            let currentDefault = Self.currentDefaultOutputDevice()
+            let deviceID = target ?? currentDefault
             guard deviceID != AudioObjectID(kAudioObjectUnknown) else {
                 didWrite?(false)
                 return
             }
+            let isDefaultDevice = deviceID == currentDefault
             // Record the intended value before writing: the notifications this
             // write provokes are dispatched to this same serial queue, so they
             // cannot be observed before `lastKnownVolume` is in place.
-            self.lastKnownVolume = clamped
+            if isDefaultDevice { self.lastKnownVolume = clamped }
             let wrote = Self.writeVolume(clamped, to: deviceID)
-            if !wrote {
+            if isDefaultDevice, !wrote {
                 // Nothing was written (read-only/absent control), so the system is
                 // NOT at `clamped`. Re-seed from the hardware — leaving the wishful
                 // value here would make us mistake a later genuine external change
@@ -407,12 +461,16 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
         }
     }
 
-    public func setMuted(_ muted: Bool) {
+    public func setMuted(_ muted: Bool, resolvingTarget: @escaping @Sendable () -> AudioObjectID?) {
         queue.async {
-            let deviceID = Self.currentDefaultOutputDevice()
+            let target = resolvingTarget()
+            let currentDefault = Self.currentDefaultOutputDevice()
+            let deviceID = target ?? currentDefault
             guard deviceID != AudioObjectID(kAudioObjectUnknown) else { return }
-            self.lastKnownMuted = muted
-            if !Self.writeMuted(muted, to: deviceID) {
+            let isDefaultDevice = deviceID == currentDefault
+            if isDefaultDevice { self.lastKnownMuted = muted }
+            let wrote = Self.writeMuted(muted, to: deviceID)
+            if isDefaultDevice, !wrote {
                 self.lastKnownMuted = Self.readMuted(deviceID)
             }
         }

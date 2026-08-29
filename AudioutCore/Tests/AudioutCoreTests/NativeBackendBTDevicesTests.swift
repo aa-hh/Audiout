@@ -87,6 +87,16 @@ import CoreAudio
         // settable output, not the unwritable case the flag exists for.
         func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) { didWrite?(true) }
         func setMuted(_ muted: Bool) {}
+        // Target-resolving pair: the resolver is CALLED (a test can observe what
+        // was resolved) and the outcome then matches the plain writes above.
+        func setVolume(_ volume: Int, resolvingTarget: @escaping @Sendable () -> AudioObjectID?,
+                       didWrite: (@Sendable (Bool) -> Void)?) {
+            _ = resolvingTarget()
+            didWrite?(true)
+        }
+        func setMuted(_ muted: Bool, resolvingTarget: @escaping @Sendable () -> AudioObjectID?) {
+            _ = resolvingTarget()
+        }
         func start() {}
         func stop() {}
     }

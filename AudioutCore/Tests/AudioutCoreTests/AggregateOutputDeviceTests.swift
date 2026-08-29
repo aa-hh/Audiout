@@ -359,6 +359,16 @@ extension SerializedSharedState {
         private var _onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)?
         private var _setVolumeCalls: [Int] = []
         var setVolumeCalls: [Int] { lock.lock(); defer { lock.unlock() }; return _setVolumeCalls }
+        private var _setVolumeToDeviceCalls: [(level: Int, deviceID: AudioObjectID?)] = []
+        /// The target-resolving writes, each paired with what its resolver answered
+        /// — so a test can see WHICH device a write was aimed at.
+        var setVolumeToDeviceCalls: [(level: Int, deviceID: AudioObjectID?)] {
+            lock.lock(); defer { lock.unlock() }; return _setVolumeToDeviceCalls
+        }
+        private var _setMutedToDeviceCalls: [(muted: Bool, deviceID: AudioObjectID?)] = []
+        var setMutedToDeviceCalls: [(muted: Bool, deviceID: AudioObjectID?)] {
+            lock.lock(); defer { lock.unlock() }; return _setMutedToDeviceCalls
+        }
         func currentVolume() -> Int? { nil }
         func currentMuted() -> Bool? { nil }
         func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) {
@@ -366,6 +376,16 @@ extension SerializedSharedState {
             didWrite?(true)
         }
         func setMuted(_ muted: Bool) {}
+        func setVolume(_ volume: Int, resolvingTarget: @escaping @Sendable () -> AudioObjectID?,
+                       didWrite: (@Sendable (Bool) -> Void)?) {
+            let resolved = resolvingTarget()
+            lock.lock(); _setVolumeToDeviceCalls.append((volume, resolved)); lock.unlock()
+            didWrite?(true)
+        }
+        func setMuted(_ muted: Bool, resolvingTarget: @escaping @Sendable () -> AudioObjectID?) {
+            let resolved = resolvingTarget()
+            lock.lock(); _setMutedToDeviceCalls.append((muted, resolved)); lock.unlock()
+        }
         var onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)? {
             get { lock.lock(); defer { lock.unlock() }; return _onExternalChange }
             set { lock.lock(); _onExternalChange = newValue; lock.unlock() }
@@ -1236,29 +1256,72 @@ extension SerializedSharedState {
                 "the standing prior survives — the aggregate is never remembered as one")
     }
 
-    /// VOLUME CONTINUITY: once the restore's own default-device change lands, the
-    /// restored device is finally the one `SystemOutputVolume` writes to, so Main
-    /// is pushed to it — without this the Mac jumps to whatever level that
-    /// hardware was left at.
-    @Test func restoreLandingPushesMainToTheRestoredDevice() async {
-        let control = FakeAggregateControl(resolvable: [
-            AggregateOutputDevice.productUID: 501,
-            Self.builtInSpeakers: 601])
+    /// While our aggregate is the Mac's default output, a write aimed at "whatever
+    /// is currently default" lands on the aggregate — which accepts every volume
+    /// write and applies none, leaving the real speakers' hardware knob stale and
+    /// the user hearing the jump on deselect. The Main mirror therefore NAMES the
+    /// built-in output (the aggregate's sole sub-device) as its target.
+    @Test func mainMirrorWritesTheBuiltInOutputWhileTheAggregateIsDefault() async {
+        let control = FakeAggregateControl(
+            resolvable: [AggregateOutputDevice.productUID: 501, Self.builtInSpeakers: 601],
+            builtInUID: Self.builtInSpeakers)
         let box = LockedBox<String?>(Self.builtInSpeakers)
         let (backend, systemVolume) = await makeRestoreBackend(control: control, box: box)
         defer { backend.stop() }
 
-        // `mirrorToSystemVolume: false` — the aggregate is the default here, so
-        // this must not write; the only write asserted below is the restore's.
+        backend.setMasterGain(mainOut: 42, group: 100, mirrorToSystemVolume: true)
+        await pollUntil { !systemVolume.setVolumeToDeviceCalls.isEmpty }
+
+        #expect(systemVolume.setVolumeToDeviceCalls.map(\.level) == [42])
+        #expect(systemVolume.setVolumeToDeviceCalls.map(\.deviceID) == [601],
+                "aimed at the built-in output, not at the aggregate")
+        #expect(systemVolume.setVolumeCalls.isEmpty,
+                "never the resolve-the-current-default write")
+    }
+
+    /// The sibling case: an ordinary device is the default, nothing swallows the
+    /// write, and the mirror names no target at all — the resolver answers `nil`,
+    /// which means "write whatever is currently default", the original behaviour.
+    @Test func mainMirrorNamesNoTargetWhenAnOrdinaryDeviceIsDefault() async {
+        let control = FakeAggregateControl(
+            resolvable: [AggregateOutputDevice.productUID: 501, Self.builtInSpeakers: 601],
+            builtInUID: Self.builtInSpeakers)
+        let box = LockedBox<String?>(Self.builtInSpeakers)
+        let (backend, systemVolume) = makeBackend(aggregateControl: control, currentDefaultOutputUIDBox: box)
+        backend.start(); defer { backend.stop() }
+
+        backend.setMasterGain(mainOut: 42, group: 100, mirrorToSystemVolume: true)
+        await pollUntil { !systemVolume.setVolumeToDeviceCalls.isEmpty }
+
+        #expect(systemVolume.setVolumeToDeviceCalls.map(\.level) == [42])
+        #expect(systemVolume.setVolumeToDeviceCalls.allSatisfy { $0.deviceID == nil },
+                "an ordinary default is written as-is, never retargeted")
+    }
+
+    /// The mirror above only ever keeps the BUILT-IN output in step, so a prior
+    /// default that was something else — a USB DAC here — sat at its pre-session
+    /// level all session. Handing the default back to it must bring it up to Main,
+    /// or the Mac jumps to whatever level that hardware was left at.
+    @Test func restoreLandingPushesMainToTheRestoredDevice() async {
+        let usbDAC = "com.usb.dac"
+        let control = FakeAggregateControl(
+            resolvable: [AggregateOutputDevice.productUID: 501, Self.builtInSpeakers: 601, usbDAC: 701],
+            builtInUID: Self.builtInSpeakers)
+        let box = LockedBox<String?>(usbDAC)
+        let (backend, systemVolume) = await makeRestoreBackend(control: control, box: box)
+        defer { backend.stop() }
+
+        // `mirrorToSystemVolume: false` — the only write asserted below is the
+        // restore's own.
         backend.setMasterGain(mainOut: 42, group: 100, mirrorToSystemVolume: false)
         backend.setOutputSet([])
-        await pollUntil { control.setDefaultCalls.count == 2 }
+        await pollUntil { !systemVolume.setVolumeToDeviceCalls.isEmpty }
+        box.set(usbDAC)   // the HAL switch lands, so no retry is due
 
-        box.set(Self.builtInSpeakers)
-        systemVolume.fireExternalChange(volume: 7, muted: nil, defaultDeviceChanged: true)
-        await pollUntil { !systemVolume.setVolumeCalls.isEmpty }
-
-        #expect(systemVolume.setVolumeCalls == [42], "Main is pushed to the restored device, once")
+        #expect(control.setDefaultCalls == [501, 701], "the deselect restores the DAC, not the built-in")
+        #expect(systemVolume.setVolumeToDeviceCalls.map(\.level) == [42])
+        #expect(systemVolume.setVolumeToDeviceCalls.map(\.deviceID) == [701],
+                "Main lands on the RESTORED device, addressed by id")
     }
 
     // MARK: - A default we never took, and writes that don't land

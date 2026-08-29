@@ -25,7 +25,7 @@ volume fader for each room, saved groups, and a phone remote.
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/popover-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/media/popover-light.png">
-  <img src="docs/media/popover-dark.png" alt="The Audiout menu-bar mixer: Main Audio at the top, then a fader, mute and output picker for each speaker in the house." width="720">
+  <img src="docs/media/popover-dark.png" alt="The Audiout menu-bar mixer: Main Audio at the top, then a fader, mute and output picker for each speaker in the house." width="623">
 </picture>
 
 </div>

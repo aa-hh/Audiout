@@ -12,6 +12,24 @@ import Testing
 /// back asynchronously.
 @Suite struct TCCProbeRunnerTests {
 
+    /// Every fake spawn hands its result back through THIS queue, never
+    /// `DispatchQueue.global()`.
+    ///
+    /// The global concurrent queue is a fixed-width, non-overcommit pool shared
+    /// by the whole process. A full ~3,000-test run executes in parallel and
+    /// saturates it, so a `global().async` block can wait a very long time for a
+    /// worker — long enough that these callbacks missed even a TEN SECOND poll
+    /// and three tests failed with "confirmed 0 times". It reproduces on a
+    /// completely idle machine, because the suite generates that contention
+    /// itself; that is why raising the timeout did not fix it, and why serial
+    /// mode does not either.
+    ///
+    /// A private queue is created with overcommit, so Dispatch gives it a thread
+    /// even when the global pool's width is exhausted. Each test gets its own
+    /// (swift-testing builds one suite value per test), so no test waits behind
+    /// another's callback.
+    private let callbackQueue = DispatchQueue(label: "TCCProbeRunnerTests.callback")
+
     // MARK: - Parsing / interpretation (pure — no runner instance needed)
 
     @Test func interpret_grantedLine_resolvesGranted() {
@@ -66,7 +84,7 @@ import Testing
 
     @Test func requestResolution_singleCall_deliversResolvedResult() async throws {
         let runner = TCCProbeRunner(spawn: fakeSpawn { timeout, completion in
-            DispatchQueue.global().async { completion(.output("audio=0 screen=0 control=1")) }
+            callbackQueue.async { completion(.output("audio=0 screen=0 control=1")) }
         })
         let answered = Locked(0)
         try await confirmation(expectedCount: 1) { done in
@@ -97,7 +115,7 @@ import Testing
         let runner = TCCProbeRunner(spawn: { _, completion in
             let n = spawnCount.increment()
             if n == 1 {
-                DispatchQueue.global().async {
+                callbackQueue.async {
                     releaseFirstSpawn.wait()
                     completion(.output("audio=2 screen=2 control=1"))
                 }
@@ -136,7 +154,7 @@ import Testing
         let spawnCount = Locked(0)
         let runner = TCCProbeRunner(spawn: { _, completion in
             _ = spawnCount.increment()
-            DispatchQueue.global().async { completion(.output("audio=0 screen=0 control=1")) }
+            callbackQueue.async { completion(.output("audio=0 screen=0 control=1")) }
         })
 
         let answered = Locked(0)
@@ -166,7 +184,7 @@ import Testing
             // `DispatchWorkItem` + `Process.terminate()` (see
             // `TCCProbeRunner.swift`) — not re-tested here since that would
             // require an actual process.
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout + 0.05) {
+            callbackQueue.asyncAfter(deadline: .now() + timeout + 0.05) {
                 completion(.timedOut)
             }
         })
@@ -187,15 +205,14 @@ import Testing
     /// Generous ceiling, NOT an expected wait: returns the moment `cond()`
     /// holds, so a high bound only ever costs time in the failure case.
     ///
-    /// These tests hand their result back through `DispatchQueue.global()`, and
-    /// they used to hold the `confirmation` body open with a fixed
-    /// `Task.sleep(for: .seconds(2))`. That is a bet that the global queue will
-    /// schedule the block inside two seconds, and across a full ~3,000-test run
-    /// it loses: the callback lands after the window, the confirmation records
-    /// 0 of 1, and three tests fail for no reason but a busy machine. The
-    /// margin was never there to begin with — one of them measured 2.126 s on
-    /// an IDLE machine. Serial mode does not help, because the contention is
-    /// the global queue rather than the runner's workers.
+    /// Polls rather than sleeping a fixed interval, so a slow callback costs
+    /// time instead of a false failure.
+    ///
+    /// This replaced a fixed `Task.sleep(for: .seconds(2))` and, on its own, was
+    /// NOT enough — the tests still failed against a ten-second timeout, because
+    /// the callbacks sat on the saturated global pool and were not late so much
+    /// as unscheduled. `callbackQueue` above is the actual fix; this timeout is
+    /// now just belt and braces.
     private func waitForCompletion(
         timeout: TimeInterval = 10,
         _ cond: @escaping () -> Bool

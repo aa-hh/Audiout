@@ -230,8 +230,8 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   `localPlaybackEngine`, and drives the metering-only tap lifecycle below. Each
   device's `.level` is the MAX of its whole-system-tap contribution (only if it's
   a Selected Device, unmuted) and the loudest PRE-volume SOURCE level among the
-  apps `.device`-routed to it (`latestAppLevel`) — a device fed by both shows the
-  larger. Every meter is a SOURCE/program level (PRE any routing/output volume), so
+  apps redirected to it — named by a `.device` route OR a member of a routed
+  GROUP (`latestAppLevel`) — a device fed by both shows the larger. Every meter is a SOURCE/program level (PRE any routing/output volume), so
   a low slider never empties a bar. Each listed app's `.appLevel` comes from exactly
   one source by route kind: `.device` → `routeMixer.onAppLevel` (PRE-volume source),
   `.currentDevice` → `localPlaybackEngine.onAppLevel` (PRE-volume, emitted raw),

@@ -558,6 +558,17 @@ public final class SetupModel {
         // and never opens the Settings pane that doesn't exist on that OS.
         if !localNetworkGated {
             self.localNetworkStatus = .granted
+        } else if settings.localNetworkWasGranted {
+            // Start from a grant this app already PROVED in an earlier session
+            // (``AppSettings/localNetworkWasGranted``). Every "Open Setup…"
+            // builds a fresh model, and a fresh `.unknown` is the one status
+            // `refreshStatuses()` cannot resolve — browsing is what raises the
+            // prompt, so it deliberately refuses to browse blind. That left a
+            // re-opened Setup screen asking for a permission the user had held
+            // for weeks. Seeding it here does NOT skip verification: the very
+            // next refresh re-browses, which is prompt-free on a permission
+            // already granted, and a real refusal still downgrades the row.
+            self.localNetworkStatus = .granted
         }
     }
 
@@ -681,9 +692,15 @@ public final class SetupModel {
                 // permission event. Only a browse that actually saw something
                 // rewrites the count a granted card is showing.
                 if found > 0 || !wasGranted { self?.localNetworkFoundSpeakers = found }
+                // Remember the proof for the next session's fresh model — see
+                // `AppSettings.localNetworkWasGranted`. This funnel is the one
+                // place the grant is ever established, so the bit cannot drift
+                // from the status.
+                self?.settings.localNetworkWasGranted = true
                 return .granted
             case .denied:
                 self?.localNetworkFoundSpeakers = 0
+                self?.settings.localNetworkWasGranted = false
                 return .denied
             case .undecided:
                 // GRANTED IS PROVEN AND STICKY. Self-discovery proved the
@@ -813,8 +830,8 @@ public final class SetupModel {
     /// - **Remote Control** always refreshes: `isTrusted()` is a silent read, so a
     ///   grant made in System Settings shows up the moment the window regains key
     ///   (and a revocation downgrades a prior `.granted` back to `.requested`).
-    /// - **System Audio** re-reads ONLY if already asked (`.denied`/`.requested`),
-    ///   and does so via the SILENT ``AudioCapturePermissionProbing/currentStatusSilently()``
+    /// - **System Audio** always re-reads, via the SILENT
+    ///   ``AudioCapturePermissionProbing/currentStatusSilently()``
     ///   — never the audible tone/tap ``AudioCapturePermissionProbing/probe()``,
     ///   which is reserved for the explicit "Allow…" tap (``requestAudioCapture()``).
     ///   This method runs on every plain app reactivation while onboarding is open
@@ -841,14 +858,35 @@ public final class SetupModel {
             remoteControlStatus = .requested   // revoked in Settings since
         }
 
-        // System Audio — re-read only a row the user has already engaged, and do
-        // it SILENTLY: this runs on every plain app reactivation (not just an
-        // explicit gesture), so it must never replay the audible tone/tap probe
-        // — that stays reserved for `requestAudioCapture()`.
-        if audioStatus == .denied || audioStatus == .requested,
-           let silentAudio = audioProbe.currentStatusSilently() {
+        // System Audio — always re-read, and do it SILENTLY: this runs on every
+        // plain app reactivation (not just an explicit gesture), so it must
+        // never replay the audible tone/tap probe — that stays reserved for
+        // `requestAudioCapture()`.
+        //
+        // The read used to be gated on an already-engaged row
+        // (`.denied`/`.requested`). That hid a real grant: every "Open Setup…"
+        // builds a FRESH model, whose `audioStatus` starts `.unknown`, so the
+        // gate skipped the read and the row offered to ask for a permission the
+        // user already held (live report, 2026-08-29). The silent read raises no
+        // prompt — the same property that lets Remote Control and Bluetooth
+        // below re-read unconditionally — so gating it bought nothing, and
+        // `auditRequiredPermissions()` never gated it, leaving two paths over
+        // one seam disagreeing.
+        if let silentAudio = audioProbe.currentStatusSilently() {
             logReportedVsActual(site: "SetupModel.refreshStatuses", reported: audioStatus, silent: silentAudio)
-            audioStatus = silentAudio
+            // GRANTED IS PROVEN AND STICKY — the same rule
+            // `probeLocalNetwork(onReachable:)` states for its own grant, and it
+            // is load-bearing here for a specific reason: `requestAudioCapture()`
+            // proves a grant FUNCTIONALLY (it hears its own tone through the
+            // tap) without writing `SystemAudioCaptureTCC`'s fresh-grant latch,
+            // while the silent read is the process-lifetime-cached TCC read that
+            // keeps saying "undetermined" (⇒ `.unknown`) after the very grant it
+            // missed. Adopting that blindly would flip a just-proven row back to
+            // "not asked" on the next Cmd+Tab. A real `.denied` is a refusal, not
+            // an absence, so it still downgrades.
+            if !(audioStatus == .granted && silentAudio == .unknown) {
+                audioStatus = silentAudio
+            }
         }
 
         // Local Network — re-probe only if already asked (else browsing prompts),

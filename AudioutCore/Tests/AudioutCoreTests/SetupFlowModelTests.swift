@@ -465,7 +465,7 @@ import Testing
     /// the verdict names the step, the state reverts to pending, and the gate
     /// stays shut.
     @Test func aRefusedFinalCheckRevertsToPendingAndNamesTheStep() async {
-        let audio = TwoFacedAudioProbe(probed: .granted, silent: .denied)
+        let audio = TwoFacedAudioProbe(probed: .granted, silent: .granted)
         let setup = SetupModel(audioProbe: audio,
                                localNetwork: CannedLocalNetwork(reachable: true),
                                remoteControl: CannedRemoteControl(trusted: false),
@@ -473,10 +473,12 @@ import Testing
                                settings: AppSettings(defaults: isolatedDefaults))
         await setup.requestAudioCapture()
         await setup.primeLocalNetwork()
-        // The plain refresh leaves a cached GRANTED audio alone (it only
-        // silently re-reads engaged-and-unhappy rows), so readiness holds
-        // until the audit's own silent read finds the revocation.
-        await setup.refreshStatuses()
+        await setup.refreshStatuses()   // settles the helper row, so the gate can be ready
+        // The revocation lands AFTER the last refresh: `refreshStatuses()` now
+        // takes the silent read on every row, so a permission already denied
+        // when it runs is caught there instead — an earlier, different story
+        // than the audit-catches-it one this test pins.
+        audio.silent = .denied
         let flow = SetupFlowModel(setup: setup)
         flow.skip(.bluetooth)
         flow.skip(.remoteControl)
@@ -532,9 +534,16 @@ import Testing
 
     /// Reports `probed` to the tone probe and `silent` to the silent read —
     /// how a mid-presentation revocation reaches the audit.
-    private struct TwoFacedAudioProbe: AudioCapturePermissionProbing {
+    /// A probe whose two faces disagree, and whose silent face can be changed
+    /// mid-test — the revocation has to land at a chosen moment now that
+    /// `refreshStatuses()` reads every row, not just engaged ones.
+    private final class TwoFacedAudioProbe: AudioCapturePermissionProbing, @unchecked Sendable {
         let probed: PermissionStatus
-        let silent: PermissionStatus
+        var silent: PermissionStatus
+        init(probed: PermissionStatus, silent: PermissionStatus) {
+            self.probed = probed
+            self.silent = silent
+        }
         func probe() async -> PermissionStatus { probed }
         func currentStatusSilently() -> PermissionStatus? { silent }
     }

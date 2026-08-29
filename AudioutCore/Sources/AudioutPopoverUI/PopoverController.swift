@@ -77,7 +77,13 @@ private final class CardFooterView: NSView {
         }
         segmented.target = self
         segmented.action = #selector(segmentTapped(_:))
-        segmented.setAccessibilityLabel(showsRemove ? "Add or remove application" : "Add a device")
+        // The devices "+" (showsRemove: false) fronts a MENU — save the
+        // selected devices as a group, pair a Bluetooth speaker, connect a
+        // known one — so its spoken name and tooltip must cover saving too,
+        // not just "add a device".
+        let label = showsRemove ? "Add or remove application" : "Add or save devices"
+        segmented.setAccessibilityLabel(label)
+        if !showsRemove { segmented.toolTip = label }
 
         addSubview(segmented)
 
@@ -1488,7 +1494,7 @@ public final class PopoverController: NSObject {
         // slider column, so a title over it prints the same word three times —
         // and a horizontal fader with a live `%` beside it is the most
         // self-evident control on the surface. The TRAILING titles stay: Output /
-        // Feed / Sync / Redirect each name a different, genuinely non-obvious
+        // Source / Offset / Redirect each name a different, genuinely non-obvious
         // thing occupying one shared column. The asymmetry is the point; don't
         // restore a slider title for symmetry.
         //
@@ -1514,7 +1520,6 @@ public final class PopoverController: NSObject {
         renderedSubsectionTitles = []
         renderedBluetoothOrder = []
         renderedBTConnectShown = false
-        renderedSyncColumnTitles = []
         renderedSpeakerSearchText = nil
         bluetoothConnectButton = nil
         // Combined header row: "Output Devices" title on the left. The
@@ -1522,11 +1527,36 @@ public final class PopoverController: NSObject {
         // (v4 §Call-1), so this card no longer heads a membership column — but
         // its device rows' trailing dropdown column, once left empty, now
         // fills the FEED composite (v4.1 item 3), so the header names it
-        // "Feed" (`DeviceRowView.updateFeedText`/`feedStack`). The header row
-        // carries NO accessory: the "+" that fronts the add MENU is the card's
-        // bottom footer strip now (`devicesFooter`, added after every
-        // subsection below).
-        panel.beginCard(header: Self.outputDevicesCardTitle, trailingTitle: "Feed",
+        // "Source" (renamed from "Feed", 2026-08-28 — the column carries
+        // `DeviceRowView.updateFeedText`/`feedStack`; the internal FEED
+        // vocabulary stays). The header row carries NO accessory: the "+"
+        // that fronts the add MENU is the card's bottom footer strip now
+        // (`devicesFooter`, added after every subsection below).
+        // The FEED pills are LEFT-ALIGNED in their slot, so the "Source"
+        // title left-aligns on the same leading anchor the pills use
+        // (`feedColumnLeadingFromTrailing`) — centered over the whole reserved
+        // column it floated ~46 pt right of a single pill.
+        //
+        // The "Offset" column legend (renamed from "Sync", 2026-08-28) rides
+        // this SAME header line — moved up from the subsection header lines
+        // when the This Mac subsection was dissolved, and printed exactly
+        // once. Same has-rows gate as before, now card-wide: only when a row
+        // carrying the sync chip (`showsSyncControls`: the Mac's own row, or
+        // a listed Bluetooth row) actually renders under it — chrome must
+        // never name absent content. Gated on the SECTIONS, not on collapse
+        // (a collapsed subsection still has its rows, exactly as a collapsed
+        // card keeps its own column titles).
+        let showsOffsetTitle = sections.contains {
+            ($0.title == Self.thisMacSubsectionTitle
+                || $0.title == Self.bluetoothSubsectionTitle) && !$0.devices.isEmpty
+        }
+        renderedOffsetColumnTitle = showsOffsetTitle
+        panel.beginCard(header: Self.outputDevicesCardTitle, trailingTitle: "Source",
+                        trailingTitleLeadingFromTrailing:
+                            PopoverColumnGrid.feedColumnLeadingFromTrailing,
+                        secondTrailingTitle: showsOffsetTitle ? "Offset" : nil,
+                        secondTrailingTitleTrailing:
+                            PopoverColumnGrid.offsetTitleTrailingFromTrailing,
                         collapsible: true,
                         collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
                         onToggle: { [weak self] in self?.toggleCard(Self.outputDevicesCardTitle) })
@@ -1541,38 +1571,34 @@ public final class PopoverController: NSObject {
         if let note = devicesCardNote {
             panel.addCardNote(note)
         }
+        // The Mac's own row is PINNED directly under the card header (header
+        // decision 2026-08-28): no "This Mac" subsection wrapper any more — no
+        // grouping label, no chevron, no per-subsection collapse. The row
+        // lands in the CARD's body (`currentSubsectionStack` is nil here), so
+        // collapsing "Output Devices" still folds it with everything else,
+        // and the rail's order is untouched (`deviceSections()` still lists
+        // it first). "AirPlay Devices" is therefore the first subsection.
+        if let macSection = sections.first(where: { $0.title == Self.thisMacSubsectionTitle }) {
+            for device in macSection.devices {
+                panel.addRow(makeDeviceRow(device, indented: false))
+            }
+        }
         // A subsection is HIDDEN entirely when it has no rows to show — never
         // an empty grouping label — except Bluetooth, whose header always
         // renders (BT-LIST): its empty body IS content, the Connect
         // affordance (`rendersHeader`). A COLLAPSED one keeps its header and
-        // renders no rows.
+        // renders no rows. Subsection headers carry no column titles — the
+        // "Offset" legend lives on the card header line above (printed once).
+        // `rendersHeader` is also `update(devices:)`'s structural-compare
+        // filter, so what renders and what is expected can't drift — This Mac
+        // answers false there (pinned row, never a grouping header).
         for section in sections where rendersHeader(section) {
-            // The SYNC column title lives in the Bluetooth subsection's header
-            // line only (BT-OFFSET-UI) — and ONLY when that subsection actually
-            // has rows carrying a sync chip. The Bluetooth header renders even
-            // with nothing listed (its empty body IS the Connect affordance), so
-            // ungating this leaves "Sync" floating over a column that does not
-            // exist: chrome naming absent content, the one thing a legend line
-            // must never do. Gated on the SECTION, not on `collapsed` — a
-            // collapsed subsection still HAS its rows, exactly as a collapsed
-            // card keeps its own column titles.
-            // Roadmap 056: the This Mac subsection's row carries the same SYNC
-            // chip, so it takes the same column title under the same has-rows
-            // gate. CAST-SYNC brings the Cast subsection in on the same terms.
-            let syncSubsection = section.title == Self.bluetoothSubsectionTitle
-                || section.title == Self.thisMacSubsectionTitle
-                || section.title == Self.castSubsectionTitle
-            let showsSync = syncSubsection && !section.devices.isEmpty
-            if showsSync { renderedSyncColumnTitles.insert(section.title) }
-            let collapsed = addSubsection(
-                section.title,
-                columnTitle: showsSync ? "Sync" : nil,
-                columnCenterFromTrailing: showsSync ? PopoverColumnGrid.syncCenterFromTrailing : 0)
+            let collapsed = addSubsection(section.title)
             guard !collapsed else { continue }
             addSubsectionRows(section)
         }
         // The "+" footer belongs to the CARD, not to any one subsection, so it
-        // is added after ALL of them (This Mac / AirPlay / Bluetooth) — last
+        // is added after ALL of them (AirPlay / Cast / Bluetooth) — last
         // thing in the card body, and hidden with it when the card collapses.
         // `endSubsection()` is what keeps it out of the last subsection's clip,
         // where collapsing Bluetooth would take the strip with it. A sync drawer
@@ -1660,10 +1686,10 @@ public final class PopoverController: NSObject {
 
     /// The device-type subsection labels — constants because, like the card
     /// titles, the string IS the collapse key and tests assert the rendered
-    /// text. "This Mac", not "Current Device": once the app inserts its own
-    /// aggregate ("Audiout") as the default output, the literal "current
-    /// device" is the aggregate — a plumbing artifact the user shouldn't see.
-    /// The row under it still shows the real underlying device name.
+    /// text. "This Mac" is no longer a RENDERED header (its row is pinned
+    /// directly under the card header since 2026-08-28) — the constant
+    /// survives as `deviceSections()`'s grouping key for the local band, which
+    /// keeps the rail's full order and the section machinery on one list.
     static let thisMacSubsectionTitle = "This Mac"
     static let airPlaySubsectionTitle = "AirPlay Devices"
     static let bluetoothSubsectionTitle = "Bluetooth Devices"
@@ -1680,8 +1706,13 @@ public final class PopoverController: NSObject {
     /// state IS content (the Connect affordance). AirPlay does the same while a
     /// search state is active: the state line needs the "AirPlay Devices"
     /// grouping label above it to say WHAT was not found. The rest stay
-    /// hidden-when-empty.
+    /// hidden-when-empty — and This Mac NEVER renders one (2026-08-28: its row
+    /// is pinned directly under the card header, no subsection). This answer
+    /// is shared by `rebuild()`'s section loop and `update(devices:)`'s
+    /// structural compare; splitting them made every backend event read as a
+    /// structural change and rebuild the whole panel.
     private func rendersHeader(_ section: DeviceSection) -> Bool {
+        if section.title == Self.thisMacSubsectionTitle { return false }
         if !section.devices.isEmpty { return true }
         if section.title == Self.bluetoothSubsectionTitle { return true }
         return section.title == Self.airPlaySubsectionTitle && speakerSearchState() != nil
@@ -1901,15 +1932,14 @@ public final class PopoverController: NSObject {
     /// row (BT-LIST) — `test_bluetoothConnectRowShown()`.
     private var renderedBTConnectShown = false
 
-    /// Which subsections the LAST `rebuild()` printed the "Sync" column title
-    /// on — `test_syncColumnTitleShown(in:)`. Recorded rather than derived
+    /// Whether the LAST `rebuild()` printed the card header's "Offset" column
+    /// title — `test_offsetColumnTitleShown()`. Recorded rather than derived
     /// because the title is a RENDER decision (it must never name a column with
     /// no rows under it), and nothing else on this surface would notice it
-    /// silently going missing. Keyed by subsection since roadmap 060: TWO
-    /// subsections can print it now, so a bare Bool could no longer tell "the
-    /// Bluetooth header printed it with nothing under it" from "the Mac's did,
-    /// correctly".
-    private var renderedSyncColumnTitles: Set<String> = []
+    /// silently going missing. One card-level Bool since the 2026-08-28 header
+    /// decision moved the legend off the subsection header lines: it prints on
+    /// the card header, exactly once.
+    private var renderedOffsetColumnTitle = false
 
     /// The mounted Bluetooth empty-state Connect button, for
     /// `test_fireBluetoothConnectClick()` to drive real target/action dispatch.
@@ -1924,14 +1954,10 @@ public final class PopoverController: NSObject {
     /// transient within one open and `rebuildForOpen()` resets it to the
     /// expanded default, identically to a card.
     @discardableResult
-    private func addSubsection(_ title: String,
-                               columnTitle: String? = nil,
-                               columnCenterFromTrailing: CGFloat = 0) -> Bool {
+    private func addSubsection(_ title: String) -> Bool {
         renderedSubsectionTitles.append(title)
         let collapsed = collapsedState(for: title, default: false)
-        panel.addSubsectionHeader(title, columnTitle: columnTitle,
-                                  columnCenterFromTrailing: columnCenterFromTrailing,
-                                  collapsible: true, collapsed: collapsed,
+        panel.addSubsectionHeader(title, collapsible: true, collapsed: collapsed,
                                   onToggle: { [weak self] in self?.toggleSubsection(title) })
         return collapsed
     }
@@ -4145,14 +4171,10 @@ public final class PopoverController: NSObject {
     /// (BT-LIST).
     public func test_bluetoothConnectRowShown() -> Bool { renderedBTConnectShown }
 
-    /// Whether the last rebuild printed the "Sync" column title anywhere.
-    public func test_syncColumnTitleShown() -> Bool { !renderedSyncColumnTitles.isEmpty }
-
-    /// Whether it printed on ONE named subsection (`"Bluetooth Devices"` /
-    /// `"This Mac"`).
-    public func test_syncColumnTitleShown(in subsection: String) -> Bool {
-        renderedSyncColumnTitles.contains(subsection)
-    }
+    /// Whether the last rebuild printed the card header's "Offset" column
+    /// title (2026-08-28: the legend lives on the card header line, once —
+    /// never on a subsection header).
+    public func test_offsetColumnTitleShown() -> Bool { renderedOffsetColumnTitle }
 
     /// Fire the Bluetooth empty-state Connect button through real AppKit
     /// target/action dispatch (never a bypass seam).

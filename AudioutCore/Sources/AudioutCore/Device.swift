@@ -31,6 +31,29 @@ public struct Device: Identifiable, Equatable, Sendable {
         /// engine-driven (it is the third routing partition, like `.bluetooth`).
         case cast
 
+        /// Whether a device of this kind can ONLY have been found by browsing
+        /// the local network over Bonjour — which makes its presence proof that
+        /// macOS granted this app Local Network access, established by the app's
+        /// own everyday traffic rather than by a separate check.
+        ///
+        /// That matters because Local Network is the one permission with no
+        /// silent read: browsing IS the request, so asking costs a system
+        /// prompt (see `AppSettings.localNetworkWasGranted`). A speaker already
+        /// on screen answers the question for free.
+        ///
+        /// `localMac` is this machine's own hardware and `bluetooth` comes from
+        /// Core Audio plus the paired list — neither touches the network, so
+        /// neither proves anything. Exhaustive on purpose: a new kind has to
+        /// state which side it is on.
+        public var isDiscoveredOverLocalNetwork: Bool {
+            switch self {
+            case .homePod, .appleTV, .airportExpress, .sonos, .generic, .cast:
+                return true
+            case .localMac, .bluetooth:
+                return false
+            }
+        }
+
         /// SF Symbol name for the row icon (all are documented AppKit-usable
         /// symbols — see SPEC.md §9 "Device row").
         public var symbolName: String {

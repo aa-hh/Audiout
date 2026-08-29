@@ -166,12 +166,10 @@ import CoreAudio
         func set(_ v: Bool) { lock.withLock { value = v } }
     }
 
-    private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     // MARK: Tests
@@ -297,7 +295,7 @@ import CoreAudio
 
         backend.setOutputSet(["airplay-1", "airplay-2"])   // a second AirPlay device joins
         // Give any (incorrect) redundant work a moment to show up.
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
 
         #expect(sink.calls == ["start", "startObserving"],
                 "adding a second AirPlay device to an already-enabled selection must not re-attach/re-start the sink")
@@ -311,7 +309,7 @@ import CoreAudio
 
         backend.setOutputSet(["airplay-1"])
         backend.setOutputSet(["airplay-1", "airplay-2"])
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
 
         #expect(sink.calls.isEmpty, "AirPlay selected with the Mac NOT selected must never enable the sink")
     }
@@ -433,7 +431,7 @@ import CoreAudio
         try controller.saveGroup(Group(id: "g1", name: "Patio",
                                        memberIDs: ["airplay-1"], memberVolumes: [:]))
         controller.setMainOut(.group(id: "g1"))
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
 
         #expect(router.lastOutputSet == ["airplay-1"])
         #expect(sink.calls.isEmpty,
@@ -453,7 +451,7 @@ import CoreAudio
         defer { backend.stop() }
 
         backend.setOutputSet(["airplay-1"])   // Mac + AirPlay, but no syncedLocalSinkFactory
-        waitFor(timeout: 0.2) { false }
+        SuiteWait.settle(0.2)
         // No crash, nothing to observe — this test passes by not throwing.
     }
 
@@ -517,7 +515,7 @@ import CoreAudio
         waitFor { !sink.calls.isEmpty }
 
         backend.noteLocalSyncOffsetChanged()
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(sink.offsetDeltas.isEmpty, "got: \(sink.offsetDeltas)")
         #expect(sink.reanchorCauses.isEmpty)
     }

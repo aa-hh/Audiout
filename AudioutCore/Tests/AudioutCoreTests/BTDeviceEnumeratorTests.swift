@@ -214,12 +214,10 @@ import Testing
             asksAuthorizationOnEnumeration: asksAuthorizationOnEnumeration)
     }
 
-    private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     /// The live root cause this seam exists for: `.notDetermined` never
@@ -262,7 +260,7 @@ import Testing
         enumerator.refresh()
         script.undetermined = false   // the user denied; authorized stays false
         script.decide()
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         enumerator.refresh()
         #expect(!pairedTouched.isSet, "denied ⇒ IOBluetooth is never touched")
         #expect(received.all.last?.map(\.id) == [sonosUID], "still Core-Audio-only")
@@ -320,7 +318,7 @@ import Testing
         #expect(script.requestCount == 1)
 
         enumerator.requestAuthorizationForUserAction()
-        waitFor(timeout: 0.2) { false }
+        SuiteWait.settle(0.2)
         #expect(script.requestCount == 1, "one prompt per process, however often the user taps")
 
         script.authorized = true
@@ -340,7 +338,7 @@ import Testing
         enumerator.onSnapshot = { _ in }
 
         enumerator.requestAuthorizationForUserAction()
-        waitFor(timeout: 0.2) { false }
+        SuiteWait.settle(0.2)
         #expect(script.requestCount == 0)
     }
 

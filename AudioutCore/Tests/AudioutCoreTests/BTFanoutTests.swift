@@ -113,12 +113,10 @@ import AVFoundation
 
     // MARK: Helpers
 
-    private func waitFor(timeout: TimeInterval = 8, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     private func waitForCapturing(_ c: NativeCaptureCoordinator) {
@@ -315,7 +313,7 @@ import AVFoundation
         #expect(tap.excludes(pid: syncedRenderPID))
 
         coordinator.setBTSink(SpyFanoutSink(), renderProcessPID: syncedRenderPID)
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(tap.creates == 1,
                 "an already-excluded render pid must not force a tap recreate (no per-toggle rebuild storm)")
     }

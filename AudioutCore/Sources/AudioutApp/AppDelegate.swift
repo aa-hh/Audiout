@@ -220,6 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The first-run onboarding/permission-priming window, retained while open
     /// (first launch, or "Open Setup…" from Settings ▸ General).
     private var onboardingWindowController: OnboardingWindowController?
+    private var licenseGateWindowController: LicenseGateWindowController?
 
     /// The `SetupModel` behind the last-presented onboarding window, kept alive
     /// after the window closes and REUSED by every subsequent automatic
@@ -532,6 +533,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Bring up Settings ▸ General with the license sheet open on `key`.
     @MainActor
     private func openLicenseSheet(registering key: String) {
+        // While the first-open gate is up it IS the licence surface: the
+        // purchase link lands straight in its field.
+        if let gate = licenseGateWindowController {
+            gate.submit(key: key)
+            return
+        }
         guard surface != nil else {
             pendingLicenseKeyFromURL = key
             return
@@ -567,6 +574,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Returns `false` either way: we have opened what there is to open, and
     /// AppKit must not go looking for an untitled window to make.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if let gate = licenseGateWindowController {
+            gate.present()
+            return false
+        }
         if onboardingWindowController != nil {
             onboardingWindowController?.present()
             return false
@@ -614,6 +625,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItemController = StatusItemController()
         statusItemController.onButtonClicked = { [weak self] _ in
             guard let self else { return }
+            // The licence gate, while open, owns the click outright — it is
+            // the only thing the app is until it is answered.
+            if let gate = self.licenseGateWindowController {
+                gate.present()
+                return
+            }
             let action = self.surface.clickAction(
                 setupIsOpen: self.onboardingWindowController != nil)
             if action == .refrontSetup {
@@ -1082,80 +1099,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // can ever wake; the Settings pane re-pushes on change.
         pushWakeRestoreSetting()
 
-        // First-run priming: on the native path, explain BOTH permissions before
-        // either system prompt fires. We hold the backend (its discovery triggers
-        // the Local Network prompt) until the user has seen the setup screen —
-        // otherwise the OS dialog would be their first exposure to the ask, which
-        // is the exact thing this flow exists to prevent. Every other launch (and
-        // every non-native backend) starts immediately.
-        let presentOnLaunch = SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: backendKind)
-        // T5: the onboarding-presentation gate's decision + the inputs behind
-        // it. `hasCompletedSetup` is the "setup says done/granted" side of
-        // tonight's bug; the live `SystemAudioCaptureTCC.isGranted()` read
-        // just below (logged separately) is the "real gate" side — together
-        // they let a reader see the exact moment those two disagree.
-        Telemetry.log(.permission, "onboarding_gate", [
-            "site": "AppDelegate.launch.shouldPresentOnLaunch",
-            "decision": presentOnLaunch ? "present" : "skip",
-            "hasCompletedSetup": "\(settings.hasCompletedSetup)",
-            "backendKind": "\(backendKind)",
-        ])
-        if presentOnLaunch {
-            log("Audiout launched (backend: \(type(of: backend))) — first-run setup")
-            presentSetup()
+        // First-open licence gate (owner decision 2026-08-30): a purchased
+        // build (`AudioutLicenseServerURL` in Info.plist) links itself to a
+        // licence before anything else runs. Its pass runs the exact first-run
+        // block this used to be, so Setup's permission priming and the backend
+        // deferral are preserved behind it; its abort quits. A build from
+        // source carries no server URL and never gates (`LicenseGate`).
+        if LicenseGate.shouldPresent(settings: settings) {
+            log("Audiout launched — first-open license gate")
+            presentLicenseGate()
         } else {
-            startBackendIfNeeded()
-            log("Audiout launched (backend: \(type(of: backend)))")
-            // Existing users who completed onboarding before the PTP helper
-            // daemon existed never got `register()` called — it previously only
-            // ran from `OnboardingViewController.viewDidLoad`, which this launch
-            // path skips entirely. Give every native-backend launch one silent
-            // registration attempt so their Login Items entry appears too.
-            registerPTPHelperIfNeeded()
-            healPTPHelperZombieIfNeeded()
-            // If audio capture is already NOT granted at launch (revoked or reset
-            // since setup completed), present setup NOW — synchronously, since the
-            // grant is a silent read — so it's the first thing on screen. Without
-            // this, setup only reappeared via the async reactivate/wake audit,
-            // which lagged the launch: the user saw the popover first (a menu-bar
-            // click, `onboardingWindowController` still nil) and setup flashed in
-            // after. Local Network / PTP gaps are still caught by that audit.
-            //
-            // T4 (B1): reads `effectiveStatus()`, NOT `isGranted()` — `isGranted()`
-            // collapses `.undetermined` to `false`, which used to fire the
-            // alarming `.permissionLost` "your permission was turned off" banner
-            // for a user who simply never granted it yet (Done doesn't require a
-            // grant — see `OnboardingViewController`'s Done handler), a SECOND
-            // false-banner path that never showed up in the probe telemetry at
-            // all. Only an explicit `.denied` — something WAS decided and is now
-            // off — gets the alarm; `.undetermined` takes the same friendly
-            // `.firstRun` path the popover-open check below uses, one-shot-gated
-            // by `presentSetupForUndeterminedIfNeeded()` so the two call sites
-            // can't double-present.
-            let effectiveAudioStatus = SystemAudioCaptureTCC.effectiveStatus()
-            // T5: the live-permission-triggered half of the gate. Logged
-            // unconditionally (not only when it re-presents) so the common
-            // "still granted" case is on record too, not just the exception —
-            // and `backendKind` is included because this specific check, unlike
-            // `shouldPresentOnLaunch` above, runs regardless of backend kind.
-            Telemetry.log(.permission, "onboarding_gate", [
-                "site": "AppDelegate.launch.liveAudioCaptureCheck",
-                "decision": (onboardingWindowController == nil && effectiveAudioStatus != .granted) ? "present" : "skip",
-                "hasCompletedSetup": "\(settings.hasCompletedSetup)",
-                "backendKind": "\(backendKind)",
-                "effectiveStatus": "\(effectiveAudioStatus)",
-            ])
-            switch effectiveAudioStatus {
-            case .denied:
-                if onboardingWindowController == nil {
-                    log("Audio capture explicitly denied at launch — presenting setup")
-                    presentSetup(reason: .permissionLost([.audioCapture]))
-                }
-            case .undetermined:
-                presentSetupForUndeterminedIfNeeded()
-            case .granted:
-                break
-            }
+            runFirstRunGateAndStartBackend()
         }
 
         // T6-rev: arm the mid-session grant detector. Both launch branches above
@@ -1262,6 +1216,117 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         warnIfTranslocated()
+    }
+
+    /// The launch step the licence gate defers: the first-run Setup gate
+    /// (permission priming defers the backend) or the immediate backend start
+    /// with its live TCC re-checks. Extracted verbatim from
+    /// `applicationDidFinishLaunching`; both the gate's pass and the ungated
+    /// launch run it exactly once.
+    @MainActor
+    private func runFirstRunGateAndStartBackend() {
+        // First-run priming: on the native path, explain BOTH permissions before
+        // either system prompt fires. We hold the backend (its discovery triggers
+        // the Local Network prompt) until the user has seen the setup screen —
+        // otherwise the OS dialog would be their first exposure to the ask, which
+        // is the exact thing this flow exists to prevent. Every other launch (and
+        // every non-native backend) starts immediately.
+        let presentOnLaunch = SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: backendKind)
+        // T5: the onboarding-presentation gate's decision + the inputs behind
+        // it. `hasCompletedSetup` is the "setup says done/granted" side of
+        // tonight's bug; the live `SystemAudioCaptureTCC.isGranted()` read
+        // just below (logged separately) is the "real gate" side — together
+        // they let a reader see the exact moment those two disagree.
+        Telemetry.log(.permission, "onboarding_gate", [
+            "site": "AppDelegate.launch.shouldPresentOnLaunch",
+            "decision": presentOnLaunch ? "present" : "skip",
+            "hasCompletedSetup": "\(settings.hasCompletedSetup)",
+            "backendKind": "\(backendKind)",
+        ])
+        if presentOnLaunch {
+            log("Audiout launched (backend: \(type(of: backend))) — first-run setup")
+            presentSetup()
+        } else {
+            startBackendIfNeeded()
+            log("Audiout launched (backend: \(type(of: backend)))")
+            // Existing users who completed onboarding before the PTP helper
+            // daemon existed never got `register()` called — it previously only
+            // ran from `OnboardingViewController.viewDidLoad`, which this launch
+            // path skips entirely. Give every native-backend launch one silent
+            // registration attempt so their Login Items entry appears too.
+            registerPTPHelperIfNeeded()
+            healPTPHelperZombieIfNeeded()
+            // If audio capture is already NOT granted at launch (revoked or reset
+            // since setup completed), present setup NOW — synchronously, since the
+            // grant is a silent read — so it's the first thing on screen. Without
+            // this, setup only reappeared via the async reactivate/wake audit,
+            // which lagged the launch: the user saw the popover first (a menu-bar
+            // click, `onboardingWindowController` still nil) and setup flashed in
+            // after. Local Network / PTP gaps are still caught by that audit.
+            //
+            // T4 (B1): reads `effectiveStatus()`, NOT `isGranted()` — `isGranted()`
+            // collapses `.undetermined` to `false`, which used to fire the
+            // alarming `.permissionLost` "your permission was turned off" banner
+            // for a user who simply never granted it yet (Done doesn't require a
+            // grant — see `OnboardingViewController`'s Done handler), a SECOND
+            // false-banner path that never showed up in the probe telemetry at
+            // all. Only an explicit `.denied` — something WAS decided and is now
+            // off — gets the alarm; `.undetermined` takes the same friendly
+            // `.firstRun` path the popover-open check below uses, one-shot-gated
+            // by `presentSetupForUndeterminedIfNeeded()` so the two call sites
+            // can't double-present.
+            let effectiveAudioStatus = SystemAudioCaptureTCC.effectiveStatus()
+            // T5: the live-permission-triggered half of the gate. Logged
+            // unconditionally (not only when it re-presents) so the common
+            // "still granted" case is on record too, not just the exception —
+            // and `backendKind` is included because this specific check, unlike
+            // `shouldPresentOnLaunch` above, runs regardless of backend kind.
+            Telemetry.log(.permission, "onboarding_gate", [
+                "site": "AppDelegate.launch.liveAudioCaptureCheck",
+                "decision": (onboardingWindowController == nil && effectiveAudioStatus != .granted) ? "present" : "skip",
+                "hasCompletedSetup": "\(settings.hasCompletedSetup)",
+                "backendKind": "\(backendKind)",
+                "effectiveStatus": "\(effectiveAudioStatus)",
+            ])
+            switch effectiveAudioStatus {
+            case .denied:
+                if onboardingWindowController == nil {
+                    log("Audio capture explicitly denied at launch — presenting setup")
+                    presentSetup(reason: .permissionLost([.audioCapture]))
+                }
+            case .undetermined:
+                presentSetupForUndeterminedIfNeeded()
+            case .granted:
+                break
+            }
+        }
+    }
+
+    /// Present (or re-front) the first-open licence gate. The gate owns the
+    /// launch until it is answered: pass re-applies licence state and runs
+    /// the deferred first-run block; abort (✕ or Quit) terminates — a hard
+    /// gate's close IS declining to run the paid build.
+    @MainActor
+    private func presentLicenseGate() {
+        if let gate = licenseGateWindowController {
+            gate.present()
+            return
+        }
+        let gate = LicenseGateWindowController(
+            settings: settings,
+            openURL: { NSWorkspace.shared.open($0) },
+            onPassed: { [weak self] in
+                guard let self else { return }
+                self.licenseGateWindowController = nil
+                self.applyLicenseState()
+                self.runFirstRunGateAndStartBackend()
+            },
+            onAbort: { [weak self] in
+                self?.licenseGateWindowController = nil
+                NSApp?.terminate(nil)
+            })
+        licenseGateWindowController = gate
+        gate.present()
     }
 
     /// Tell the user when Gatekeeper is running us from its randomized

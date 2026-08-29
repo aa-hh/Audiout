@@ -191,7 +191,7 @@ import AudioutSharedUI
                                                     settings: settings)
         general.licenseTransport = transport.closure
 
-        #expect(general.test_licenseStatusText == "Unregistered. Audiout is fully functional without a license — buying one funds development and unlocks official downloads and updates.")
+        #expect(general.test_licenseStatusText == "Unregistered. Audiout keeps working for this session, and asks for a license key the next time it opens.")
         #expect(general.test_enterLicenseButtonTitle == "Enter License…")
 
         transport.replies(#"{"status":"active"}"#)

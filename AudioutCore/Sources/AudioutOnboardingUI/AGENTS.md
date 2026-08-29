@@ -1168,11 +1168,44 @@ gate/motion/demo/selection rules change.
 7. `finish()`/`dismiss()` fire `onFinished` exactly once, unbind `model.onChange`,
    and close the window — the app starts the (deferred) backend from `onFinished`.
 
+## The first-open licence gate (sibling window, not a Setup step)
+
+`LicenseGateWindowController` is the OTHER window in this folder: on a
+purchased build (`LicenseGate.shouldPresent`, Core) it precedes Setup, the
+backend, and the surface — its pass runs the launch block `AppDelegate`
+deferred; its abort (✕ or Quit) terminates the app via the injected closure,
+never from this target. Rules that hold it together:
+
+- **Register mirrors `LicenseSheetViewController`'s contract** — trim, a
+  changed key clears the stored verdict, and the key is SAVED even when the
+  server is unreachable, in which case the gate also OPENS (`pass`): "couldn't
+  verify" must never read as "not yours", least of all on a blocking window.
+  Every verdict's wording is `LicenseCopy` (Core), shared with the Settings
+  sheet — never fork a string here.
+- **`EmitterFieldView` is a port of the marketing site's hero field**
+  (`fields/emitters.js` in the website repo): the MECHANISM — orbit, squash,
+  ring shape, falloff, breathing, masks, tone map — is the site's shipped
+  DEFAULTS remapped to the warm gold ramp, and must move together with the
+  site. Four values are deliberate stage tunings for the small window (marked
+  `STAGE TUNING` in the shader): emitter centres, density ×1.7, speed ×1.4,
+  paper lift. Don't "fix" those back to the site's numbers — at 440 pt the
+  site's wavelength reads as blobs. Colors resolve from
+  `Tokens` per frame (bg=`canvas`, lo=`ember`, mid=`accent`, peak=blend), so
+  the accent dial and Increase Contrast land free; the MSL source compiles at
+  RUNTIME (`makeLibrary(source:)`) because SwiftPM cannot build `.metal`
+  files. Reduce Motion = one still at t=40; headless or any Metal failure =
+  flat `canvas`, never a crash, never a display loop.
+- **`surge()` is the window's ONE authored motion moment** (an `active`
+  verdict); don't add entrances or scatter effects around it.
+
 ## Map
 
 | Type | What it is |
 |---|---|
 | `OnboardingWindowController` | Owns the window; lazy-create-then-reuse lifecycle; Done-vs-✕ dismissal contract; reactivate re-front; the floating level and its yield-to-Settings amendment. |
+| `LicenseGateWindowController` | The first-open licence gate window: full-bleed field, hidden title, pass/abort single-fire contract. |
+| `LicenseGateViewController` | The gate's content: mark + welcome + key field + gold Register over the field's calm centre; Register mirrors the Settings sheet. |
+| `EmitterFieldView` | Metal port of the site's hero emitter field, gold ramp, 30 fps, still under Reduce Motion, flat `canvas` headless. |
 | `OnboardingViewController` | Assembles the spine and the hero; turns `SetupModel` + `SetupFlowModel` into row states and ribbon content; owns `browseStep`, the press dispatch, the grant choreography, the Done gate, the announcements, the header message and both polling timers. |
 | `OnboardingReason` | `.firstRun` vs `.permissionLost([RequiredPermission])` — drives the header message. |
 | `SetupSpineRowView` / `SetupCardContent` / `SetupCardState` | One SPINE row: the compact status strip, its one trailing marker, the live/broken/browsed surface treatment, and the whole-row press target. Both per-state title tables (ribbon sentence and spine short form) live on `SetupCardContent`. |

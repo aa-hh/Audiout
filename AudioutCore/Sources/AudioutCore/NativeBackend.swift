@@ -3087,7 +3087,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
             // Roadmap 008 (selection-edge replay): a device flipping into or out of
             // the whole-system claim changes route-target ELIGIBILITY exactly like a
-            // reachability edge does. If any `.device` route targets a flipped id,
+            // reachability edge does. If any route targets a flipped id (directly,
+            // or through a group's membership — `routesTargetDeviceLocked`),
             // replay the (unedited) route table so `effectiveAppRoutesLocked`
             // re-resolves it — select demotes the route (the app audibly rejoins the
             // whole-system mix), deselect restores it, with no route-table edit in
@@ -3095,10 +3096,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // `rerunAppRoutesIfTargeted`: `rerunAppRoutesForReachabilityChange` is
             // documented safe to call with `stateQueue` held.
             let claimFlips = previouslySelected.symmetricDifference(ids)
-            if !claimFlips.isEmpty, self.lastRoutes.contains(where: {
-                if case .device(let deviceID) = $0.destination { return claimFlips.contains(deviceID) }
-                return false
-            }) {
+            if claimFlips.contains(where: { self.routesTargetDeviceLocked($0) }) {
                 self.rerunAppRoutesForReachabilityChange()
             }
 
@@ -4252,6 +4250,25 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// reachability helper above stays pure on purpose. On `stateQueue`.
     private func isRouteTargetEligibleLocked(_ id: String) -> Bool {   // on stateQueue
         isRouteTargetReachableLocked(id) && !isWholeSystemClaimedLocked(id)
+    }
+
+    /// Whether any per-app route currently AIMS at `id` — a `.device` route
+    /// naming it, or a `.group` route whose resolved membership contains it.
+    /// The two eligibility replays below (R5's reachability edge, roadmap 008's
+    /// selection edge) both key on this, and both used to match `.device` only:
+    /// a group-routed app whose member went briefly unreachable — or was
+    /// released by Main Out — was then never re-resolved, so it stayed excluded
+    /// from the whole-system mix with its stream bound to a speaker that had
+    /// gone away. Routed in the UI, silent at every speaker, and unrecoverable
+    /// short of re-picking the destination by hand. On `stateQueue`.
+    private func routesTargetDeviceLocked(_ id: String) -> Bool {   // on stateQueue
+        lastRoutes.contains { route in
+            switch route.destination {
+            case .device(let deviceID):        return deviceID == id
+            case .group(let groupID):          return lastGroupTargets[groupID]?.memberVolumes[id] != nil
+            case .noRedirect, .currentDevice:  return false
+            }
+        }
     }
 
     /// `routes` with every `.device` route whose target is unreachable right now
@@ -8042,9 +8059,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `stateQueue` (the replay itself hops off it).
     private func rerunAppRoutesIfTargeted(_ id: String, wasEligible: Bool) {   // on stateQueue
         let isEligible = isRouteTargetEligibleLocked(id)
-        guard isEligible != wasEligible,
-              lastRoutes.contains(where: { $0.destination == .device(id: id) })
-        else { return }
+        guard isEligible != wasEligible, routesTargetDeviceLocked(id) else { return }
         AudioDiag.log(
             "app routes: redirect target \(id) became \(isEligible ? "ELIGIBLE" : "INELIGIBLE")"
             + " — re-resolving effective routes (route table unchanged)")

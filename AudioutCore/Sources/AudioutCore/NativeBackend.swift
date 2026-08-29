@@ -7488,6 +7488,29 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
         // Format and log the three metric families (each with count, p50/p95/p99/max).
         // Using snake_case to match existing telemetry key conventions in this file.
+        // Leveled-intercept health, on the same 5 s cadence: exactly where the
+        // leveled path is losing audio. `mix_calls` at 0 means the whole-system
+        // tap never asked (nothing is driving the delivery thread); `samples_mixed`
+        // at 0 with `buffers_in` climbing means the rings fill but nothing reads
+        // them; `dropped_*` names the guard that is eating the buffers.
+        let leveled = self.leveledInjector.takeDiagnostics()
+        if leveled.mixCalls > 0 || leveled.buffersIn > 0 || leveled.ringCount > 0 {
+            Telemetry.log(.captureWS, "leveled_health", [
+                "active": leveled.isActive ? "true" : "false",
+                "rings": "\(leveled.ringCount)",
+                "pending_samples": "\(leveled.pendingSamples)",
+                "mix_calls": "\(leveled.mixCalls)",
+                "mix_inactive": "\(leveled.mixInactive)",
+                "mix_no_rings": "\(leveled.mixNoRings)",
+                "samples_mixed": "\(leveled.samplesMixed)",
+                "buffers_in": "\(leveled.buffersIn)",
+                "dropped_inactive": "\(leveled.droppedInactive)",
+                "dropped_not_leveled": "\(leveled.droppedNotLeveled)",
+                "dropped_no_converter": "\(leveled.droppedNoConverter)",
+                "dropped_convert_failed": "\(leveled.droppedConvertFailed)",
+            ])
+        }
+
         self.schedulingSnapshotLogCount &+= 1
         Telemetry.log(.airplay, "send_sched", [
             "wake_count": "\(snapshot.wakeLatency.count)",
@@ -8146,6 +8169,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     device.connectionState = .failed(
                         ConnectionFailure(cause: cause, detail: "engine state: \(state)")
                     )
+                    // The ONE event that explains the user-visible "engine state:
+                    // failed" — a live AirPlay session dying. It was invisible in
+                    // telemetry until now, so a dropped session had to be inferred
+                    // from the absence of other events (live debug 2026-08-29,
+                    // where that inference cost an afternoon and still landed on
+                    // the wrong cause). Cleartext device id, same rationale as
+                    // `exclusion_changed`: this is what makes "why did it stop"
+                    // legible.
+                    Telemetry.log(.airplay, "engine_session_failed", [
+                        "device": id,
+                        "state": "\(state)",
+                        "cause": "\(cause)",
+                        "wasStreaming": wasStreaming ? "true" : "false",
+                    ])
                 }
             case .stopped:
                 device.isSelected = false

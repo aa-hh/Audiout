@@ -109,6 +109,65 @@ public final class LeveledAppInjector: @unchecked Sendable {
     /// for the next start.
     private var active = false
 
+    // MARK: Diagnostic counters
+
+    /// Where the leveled path is losing audio, counted rather than guessed. All
+    /// are monotonic since the last ``takeDiagnostics()``; the RT-thread ones are
+    /// touched only while `mixLock` is already held, so they cost nothing extra.
+    struct Diagnostics {
+        var mixCalls = 0
+        var mixInactive = 0
+        var mixNoRings = 0
+        var samplesMixed = 0
+        var buffersIn = 0
+        var droppedInactive = 0
+        var droppedNotLeveled = 0
+        var droppedNoConverter = 0
+        var droppedConvertFailed = 0
+        var pendingSamples = 0
+        var ringCount = 0
+        var isActive = false
+    }
+
+    private var diag = Diagnostics()
+
+    /// The write-side counters, confined to `queue` like every other field the
+    /// buffer path touches. Deliberately NOT under `mixLock`: counting a dropped
+    /// buffer must not lengthen the critical section the real-time `mix(into:)`
+    /// is trying to take, or the instrument starts causing the contention it is
+    /// there to measure.
+    private var buffersIn = 0
+    private var droppedInactive = 0
+    private var droppedNotLeveled = 0
+    private var droppedNoConverter = 0
+    private var droppedConvertFailed = 0
+
+    /// Read the counters and reset them. Called off the audio thread (the 5 s
+    /// telemetry poll), under `mixLock` so the RT increments are not torn.
+    func takeDiagnostics() -> Diagnostics {
+        queue.sync {
+            mixLock.lock()
+            var out = diag
+            out.isActive = active
+            out.ringCount = rings.count
+            out.pendingSamples = rings.values.reduce(0) { $0 + $1.count }
+            diag = Diagnostics()
+            mixLock.unlock()
+
+            out.buffersIn = buffersIn
+            out.droppedInactive = droppedInactive
+            out.droppedNotLeveled = droppedNotLeveled
+            out.droppedNoConverter = droppedNoConverter
+            out.droppedConvertFailed = droppedConvertFailed
+            buffersIn = 0
+            droppedInactive = 0
+            droppedNotLeveled = 0
+            droppedNoConverter = 0
+            droppedConvertFailed = 0
+            return out
+        }
+    }
+
     // MARK: Init
 
     /// Injectable initializer. Production supplies an `AVFormatConverter`
@@ -207,15 +266,22 @@ public final class LeveledAppInjector: @unchecked Sendable {
             mixLock.lock()
             let isActive = active
             mixLock.unlock()
-            guard isActive,
-                  let volume = volumeForBundle[bundleID],
-                  let converter = converterForBundle[bundleID],
-                  let pcm = converter.convertToAirPlayPCM(buffer),
-                  !pcm.isEmpty
-            else { return nil }
+            guard isActive else { droppedInactive += 1; return nil }
+            guard let volume = volumeForBundle[bundleID] else {
+                droppedNotLeveled += 1; return nil
+            }
+            guard let converter = converterForBundle[bundleID] else {
+                droppedNoConverter += 1; return nil
+            }
+            guard let pcm = converter.convertToAirPlayPCM(buffer), !pcm.isEmpty else {
+                droppedConvertFailed += 1; return nil
+            }
 
             let scaled = AppRouteMixer.scaledStereoSamples(pcm, volumePercent: volume)
-            guard !scaled.isEmpty else { return nil }
+            guard !scaled.isEmpty else {
+                droppedConvertFailed += 1; return nil
+            }
+            buffersIn += 1
             mixLock.lock()
             rings[bundleID]?.write(scaled)
             mixLock.unlock()
@@ -238,19 +304,31 @@ public final class LeveledAppInjector: @unchecked Sendable {
     /// descheduled writer. A ring with fewer samples than asked for contributes
     /// silence for the remainder.
     public func mix(into pcm: inout Data, frameCount: Int) {
-        guard frameCount > 0, mixLock.try() else { return }
+        guard frameCount > 0 else { return }
+        // razor: a try-miss is deliberately NOT counted here — the only way to
+        // record it is to take the very lock that just refused, which fails again
+        // and reports a flat zero however bad contention gets. Derive misses
+        // instead: the whole-system tap calls this exactly once per delivered
+        // buffer, so `mix_calls` short of the coordinator's delivered count IS
+        // the miss count.
+        guard mixLock.try() else { return }
         defer { mixLock.unlock() }
-        guard active, !rings.isEmpty else { return }
+        diag.mixCalls += 1
+        guard active else { diag.mixInactive += 1; return }
+        guard !rings.isEmpty else { diag.mixNoRings += 1; return }
         let sampleCount = Swift.min(frameCount * Self.outputChannels, pcm.count / 2)
         guard sampleCount > 0 else { return }
+        var mixed = 0
         pcm.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
             let samples = raw.bindMemory(to: Int16.self)
             for ring in rings.values {
                 ring.read(sampleCount) { index, sample in
                     samples[index] = AppRouteMixer.clip(Int32(samples[index]) + Int32(sample))
+                    mixed += 1
                 }
             }
         }
+        diag.samplesMixed += mixed
     }
 
     // MARK: Test seams (pure reads)

@@ -1191,6 +1191,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.auditRequiredPermissionsIfNeeded()
+                // Re-check the grant out-of-process, exactly as the wake
+                // handler below does — and for a sharper reason here. Coming
+                // back from System Settings IS the reactivation: it is the one
+                // moment the user has just granted System Audio, and this
+                // process's own TCC read is cached for its whole life, so the
+                // audit that just ran cannot see the grant it is looking for.
+                // Only a freshly spawned `tcc-probe` can (see
+                // `PermissionStateObserver`), and its verdict sets the latch
+                // that makes `isGranted()` — and the Setup screen's own silent
+                // read — finally answer honestly. Cheap and self-limiting: the
+                // runner single-flights, and the observer goes inert for good
+                // once the grant lands.
+                self.permissionObserver.kick(source: "reactivate")
                 // A fast user switch or a login-window trip can leave the
                 // volume-key tap installed but disabled, which reads as the
                 // keys silently dying. No-op unless we own the volume.
@@ -1506,6 +1519,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // if a future caller reintroduces re-entrancy past the guard above.
         onboardingPresentationGeneration += 1
         let presentationGeneration = onboardingPresentationGeneration
+
+        // A speaker on screen has already answered the Local Network question.
+        // That permission has no silent read — browsing IS the request — so a
+        // fresh model would otherwise open at `.unknown` and offer to ask for
+        // access this app is visibly already using, which is exactly what it
+        // did when the persisted proof had not been written yet (live report,
+        // 2026-08-29: "I had to click on the local network one"). Anything
+        // found over Bonjour is that proof, gathered by the app's ordinary
+        // discovery rather than by a check of its own. First run legitimately
+        // has no speakers yet, so it still asks properly.
+        if devicesByID.values.contains(where: { $0.kind.isDiscoveredOverLocalNetwork }) {
+            settings.localNetworkWasGranted = true
+        }
 
         let model = providedModel ?? SetupModel(
             providers: permissionProviders,

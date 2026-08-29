@@ -1977,6 +1977,11 @@ import AppKit
         let groupID = try seedGroup(groups)
         appRouting.setDestination(.group(id: groupID), for: "com.example.music")
         popover.test_simulateOpen()
+        // FEED states CONFIRMED playback, so the fan-out is asserted from the
+        // live signal the backend emits per member, not from the route alone.
+        popover.applyRoutedApps(deviceID: "homepod-bed", appNames: ["Music"])
+        popover.applyRoutedApps(deviceID: "office", appNames: ["Music"])
+        popover.update(devices: backend.devices)
 
         #expect(popover.test_deviceRow(for: "homepod-bed")?.test_feedText?.contains("Music") == true)
         #expect(popover.test_deviceRow(for: "office")?.test_feedText?.contains("Music") == true)
@@ -2261,7 +2266,8 @@ import AppKit
         // check below re-fetches the row rather than holding a reference across
         // a call — a held reference would go stale the moment rebuild() swaps
         // in a fresh `DeviceRowView` instance.
-        #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Music", "intent-based label before any live signal arrives")
+        #expect(popover.test_deviceRow(for: "office")?.test_feedText == nil,
+                "intent alone draws NO feed — FEED states confirmed playback only")
 
         // A confirmed live signal takes over, even though it carries a
         // different string, to make the precedence unambiguous in the assertion.
@@ -2270,9 +2276,11 @@ import AppKit
         #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Music (confirmed)", "the confirmed live set takes precedence over the intent-based label")
     }
 
-    /// An empty `appNames` (mapping cleared) reverts the row to the
-    /// intent-based label rather than leaving it blank.
-    @Test func applyRoutedAppsWithEmptyListRevertsToIntentLabel() async throws {
+    /// An empty `appNames` (mapping cleared) CLEARS the feed. It used to revert
+    /// to the intent-based label; it must not, because "capture stopped" and
+    /// "the route left this device" are exactly the cases where a pill drawn
+    /// from intent claims audio that is no longer flowing.
+    @Test func applyRoutedAppsWithEmptyListClearsTheFeed() async throws {
         let appRouting = tempAppRoutingController()
         seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
                   destination: .device(id: "office"))
@@ -2286,10 +2294,12 @@ import AppKit
         #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Music (confirmed)")
 
         // The live mapping clears (capture stopped, or the route left this
-        // device) — falls back to the intent-based label, not a blank row.
+        // device) — the feed goes with it. The route itself is untouched; the
+        // app row still shows where the app is pointed.
         popover.applyRoutedApps(deviceID: "office", appNames: [])
         popover.update(devices: backend.devices)
-        #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Music", "an empty live mapping reverts to the intent-based label")
+        #expect(popover.test_deviceRow(for: "office")?.test_feedText == nil,
+                "an empty live mapping clears the feed rather than reverting to intent")
     }
 
     /// A device that drops out of the snapshot entirely and later reappears

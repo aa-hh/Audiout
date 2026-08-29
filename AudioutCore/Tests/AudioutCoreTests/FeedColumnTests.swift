@@ -46,19 +46,19 @@ import AudioutCore
 
     @Test func appRedirectAloneWithNoMainMixMembership() {
         let row = makeBusRow()
-        row.apply(makeDevice(), selected: false, controllable: true, routedAppNames: ["Safari"])
+        row.apply(makeDevice(), selected: false, controllable: true, liveAppNames: ["Safari"])
         #expect(row.test_feedText == "Safari", "app-only: no main-mix segment at all")
     }
 
     @Test func manualMemberPlusOneApp() {
         let row = makeBusRow()
-        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
+        row.apply(makeDevice(), selected: true, controllable: true, liveAppNames: ["Music"])
         #expect(row.test_feedText == "System · Music")
     }
 
     @Test func groupMemberPlusOneApp() {
         let row = makeBusRow()
-        row.apply(makeDevice(), selected: false, routedAppNames: ["Music"],
+        row.apply(makeDevice(), selected: false, liveAppNames: ["Music"],
                   inActiveTarget: true, mainOutTargetsGroupName: "Downstairs")
         #expect(row.test_feedText == "Downstairs · Music")
     }
@@ -69,7 +69,7 @@ import AudioutCore
     @Test func aGroupRoutedAppReadsAsThroughItsGroup() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true,
-                  routedAppNames: ["Music"], appRouteGroupNames: ["Music": "Downstairs"])
+                  liveAppNames: ["Music"], appRouteGroupNames: ["Music": "Downstairs"])
 
         #expect(row.test_feedText == "System · Music", "the pills are unchanged")
         #expect(row.test_accessibilityLabel?.contains("feeding System, Music, through Downstairs") == true)
@@ -77,7 +77,7 @@ import AudioutCore
 
     @Test func aDirectlyRoutedAppNamesNoGroup() {
         let row = makeBusRow()
-        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
+        row.apply(makeDevice(), selected: true, controllable: true, liveAppNames: ["Music"])
         #expect(row.test_accessibilityLabel?.contains("feeding System, Music") == true)
         #expect(row.test_accessibilityLabel?.contains("through") != true)
     }
@@ -94,7 +94,7 @@ import AudioutCore
         // still-uncapped two-pill case.
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true,
-                  routedAppNames: ["Music", "Safari"])
+                  liveAppNames: ["Music", "Safari"])
         #expect(row.test_feedText == "System · Music · +1")
         #expect(row.test_feedHasOverflow)
         // The tooltip is uncapped (VoiceOver/hover have no viewport to
@@ -108,11 +108,19 @@ import AudioutCore
         #expect(row.test_feedText == nil)
     }
 
-    @Test func liveAppNamesTakePrecedenceOverRoutedAppNamesInFeed() {
+    /// FEED does not RANK intent below the live signal — it ignores intent
+    /// outright. A route that is configured but not confirmed streaming draws
+    /// no pill at all, so the column can never claim audio that isn't flowing.
+    @Test func feedIgnoresIntentEntirelyAndShowsOnlyTheLiveSignal() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false, controllable: true,
                   routedAppNames: ["Spotify"], liveAppNames: ["Music"])
-        #expect(row.test_feedText == "Music", "the FEED column mirrors the same T9 live-over-intent precedence")
+        #expect(row.test_feedText == "Music", "the live signal is the only source the FEED column reads")
+
+        let intentOnly = makeBusRow()
+        intentOnly.apply(makeDevice(), selected: false, controllable: true,
+                         routedAppNames: ["Spotify"])
+        #expect(intentOnly.test_feedText == nil, "intent alone draws no feed")
     }
 
     // MARK: Error overrides the feed (failure-red words)
@@ -120,7 +128,7 @@ import AudioutCore
     @Test func failedOverridesTheFeedWithCouldntConnect() {
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
-                  selected: true, controllable: true, routedAppNames: ["Music"])
+                  selected: true, controllable: true, liveAppNames: ["Music"])
         #expect(row.test_feedText == "Didn't respond", "failure overrides the composite entirely — never both — with the failure's own headline")
         #expect(row.test_feedIsErrorColored)
         #expect(row.test_statusText == nil, "the sublabel carries no words for a failed bus row")
@@ -130,7 +138,7 @@ import AudioutCore
 
     @Test func unavailableOverridesTheFeed() {
         let row = makeBusRow()
-        row.apply(makeDevice(isAvailable: false), selected: true, routedAppNames: ["Music"])
+        row.apply(makeDevice(isAvailable: false), selected: true, liveAppNames: ["Music"])
         #expect(row.test_feedText == "Unavailable")
         #expect(row.test_feedIsErrorColored)
         #expect(row.test_feedErrorPillHasGlyph)
@@ -152,7 +160,7 @@ import AudioutCore
         var muted = makeDevice()
         muted.isMuted = true
         let row = makeBusRow()
-        row.apply(muted, selected: true, controllable: true, routedAppNames: ["Music"])
+        row.apply(muted, selected: true, controllable: true, liveAppNames: ["Music"])
         #expect(row.test_feedText == "System · Music", "muted is not represented in the FEED column at all")
         #expect(row.test_statusText == "Muted", "…it lives on the sublabel/mute-pill instead")
     }
@@ -189,7 +197,7 @@ import AudioutCore
     @Test func manySegmentsOverflowToAStaticPlusN() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true,
-                  routedAppNames: ["Alpha Streaming App", "Bravo Streaming App",
+                  liveAppNames: ["Alpha Streaming App", "Bravo Streaming App",
                                    "Charlie Streaming App", "Delta Streaming App",
                                    "Echo Streaming App"])
         #expect(row.test_feedHasOverflow, "a long composite caps visible segments with +N")
@@ -199,7 +207,7 @@ import AudioutCore
 
     @Test func shortCompositeNeverOverflows() {
         let row = makeBusRow()
-        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
+        row.apply(makeDevice(), selected: true, controllable: true, liveAppNames: ["Music"])
         #expect(!(row.test_feedHasOverflow))
     }
 
@@ -208,7 +216,7 @@ import AudioutCore
 
     @Test func nonBusRowNeverShowsFeedText() {
         let row = DeviceRowView(device: makeDevice())   // default showsBus: false
-        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
+        row.apply(makeDevice(), selected: true, controllable: true, liveAppNames: ["Music"])
         #expect(row.test_feedText == nil, "a non-bus host has no free trailing slot to draw into")
     }
 
@@ -217,7 +225,7 @@ import AudioutCore
     @Test func appSegmentColorUsesTheHostSuppliedTetherTintNotFlatSecondaryLabel() {
         let row = makeBusRow()
         let tint = NSColor(srgbRed: 0.42, green: 0.58, blue: 0.47, alpha: 1)
-        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"],
+        row.apply(makeDevice(), selected: true, controllable: true, liveAppNames: ["Music"],
                   appTintColors: ["Music": tint])
         #expect(row.test_feedAppSegmentColor(for: "Music") == tint, "T7 rewired this seam to the host-supplied AppTetherColor tint")
         #expect(row.test_feedAppSegmentColor(for: "Music") != Tokens.Color.secondaryLabel, "no longer the flat secondaryLabel it was before T7")
@@ -239,7 +247,7 @@ import AudioutCore
         // separately covers a chip surviving as the SOLE visible app pill.
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true,
-                  routedAppNames: ["Music", "Safari"],
+                  liveAppNames: ["Music", "Safari"],
                   appTintColors: ["Music": .systemGreen, "Safari": .systemTeal])
         #expect(row.test_feedText == "System · Music · +1")
         #expect(row.test_feedChipCount == 1, "one chip per VISIBLE app segment; the neutral 'System' segment wears none")
@@ -247,7 +255,7 @@ import AudioutCore
 
     @Test func appOnlyRedirectFeedStillWearsItsChip() {
         let row = makeBusRow()
-        row.apply(makeDevice(), selected: false, controllable: true, routedAppNames: ["Safari"],
+        row.apply(makeDevice(), selected: false, controllable: true, liveAppNames: ["Safari"],
                   appTintColors: ["Safari": .systemTeal])
         #expect(row.test_feedText == "Safari")
         #expect(row.test_feedChipCount == 1)
@@ -256,7 +264,7 @@ import AudioutCore
     @Test func errorOverrideFeedNeverWearsAChip() {
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
-                  selected: true, controllable: true, routedAppNames: ["Music"],
+                  selected: true, controllable: true, liveAppNames: ["Music"],
                   appTintColors: ["Music": .systemGreen])
         #expect(row.test_feedText == "Didn't respond")
         #expect(row.test_feedChipCount == 0)
@@ -266,7 +274,7 @@ import AudioutCore
 
     @Test func accessibilityLabelSpeaksTheFeedAsATrailingClause() {
         let row = makeBusRow()
-        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
+        row.apply(makeDevice(), selected: true, controllable: true, liveAppNames: ["Music"])
         let label = row.test_accessibilityLabel ?? ""
         #expect(label.hasSuffix(", feeding System, Music"), "the feed clause trails the rest of the composed announcement")
         #expect(label.components(separatedBy: "feeding").count - 1 == 1, "spoken exactly once")
@@ -275,7 +283,7 @@ import AudioutCore
     @Test func failedRowNeverSpeaksAFeedClauseSinceTheConnectionClauseAlreadyCoversIt() {
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
-                  selected: true, controllable: true, routedAppNames: ["Music"])
+                  selected: true, controllable: true, liveAppNames: ["Music"])
         let label = row.test_accessibilityLabel ?? ""
         #expect(label.hasSuffix(", couldn't connect"), "no trailing feed clause — the connection clause already spoke the failure")
         #expect(!(label.contains("feeding")))
@@ -283,7 +291,7 @@ import AudioutCore
 
     @Test func nonBusRowNeverSpeaksAFeedClauseEither() {
         let row = DeviceRowView(device: makeDevice())
-        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
+        row.apply(makeDevice(), selected: true, controllable: true, liveAppNames: ["Music"])
         #expect(!((row.test_accessibilityLabel ?? "").contains("feeding")), "a non-bus host has no FEED column, so nothing new to speak")
     }
 }

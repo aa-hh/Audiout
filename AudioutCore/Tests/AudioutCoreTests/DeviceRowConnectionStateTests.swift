@@ -245,34 +245,34 @@ import AudioutCore
 
     @Test func sourceLineIsSystemOnlyWhenSelectedWithNoRoutedApps() {
         let row = DeviceRowView(device: makeDevice())
-        row.apply(makeDevice(), selected: true, routedAppNames: [])
+        row.apply(makeDevice(), selected: true, liveAppNames: [])
         #expect(row.test_statusText == "System")
     }
 
     @Test func sourceLineIsSystemPlusAppsWhenSelectedWithRoutedApps() {
         let row = DeviceRowView(device: makeDevice())
-        row.apply(makeDevice(), selected: true, routedAppNames: ["Music", "Safari"])
+        row.apply(makeDevice(), selected: true, liveAppNames: ["Music", "Safari"])
         #expect(row.test_statusText == "System · Music · Safari",
                        "System always leads, tokens joined by ' · '")
     }
 
     @Test func sourceLineIsBareAppNamesWhenNotSelectedWithRoutedApps() {
         let row = DeviceRowView(device: makeDevice())
-        row.apply(makeDevice(), selected: false, routedAppNames: ["Spotify"])
+        row.apply(makeDevice(), selected: false, liveAppNames: ["Spotify"])
         #expect(row.test_statusText == "Spotify",
                        "not selected: no 'System' token, just the bypassed app(s)")
     }
 
     @Test func sourceLineIsHiddenWhenNotSelectedWithNoRoutedApps() {
         let row = DeviceRowView(device: makeDevice())
-        row.apply(makeDevice(), selected: false, routedAppNames: [])
+        row.apply(makeDevice(), selected: false, liveAppNames: [])
         #expect(row.test_statusText == nil, "empty routing set: no sublabel, single-line row")
     }
 
     @Test func sourceLineShowsUnavailableWhenDeviceUnreachable() {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isAvailable: false)
         let row = DeviceRowView(device: device)
-        row.apply(device, selected: true, routedAppNames: ["Music"])
+        row.apply(device, selected: true, liveAppNames: ["Music"])
         #expect(row.test_statusText == "Unavailable",
                        "unavailable wins over the routing line even with a non-empty routing set")
     }
@@ -281,14 +281,14 @@ import AudioutCore
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod,
                             isAvailable: false, connectionState: .failed(.init(cause: .notResponding)))
         let row = DeviceRowView(device: device)
-        row.apply(device, selected: true, routedAppNames: ["Music", "Safari"])
+        row.apply(device, selected: true, liveAppNames: ["Music", "Safari"])
         #expect(row.test_statusText == "Couldn't connect",
                        "failed is highest precedence, even over unavailable + a non-empty routing set")
     }
 
     @Test func sourceLinePreservesRoutedAppNameOrder() {
         let row = DeviceRowView(device: makeDevice())
-        row.apply(makeDevice(), selected: false, routedAppNames: ["Zebra App", "Alpha App"])
+        row.apply(makeDevice(), selected: false, liveAppNames: ["Zebra App", "Alpha App"])
         #expect(row.test_statusText == "Zebra App · Alpha App",
                        "the view doesn't re-sort — it renders routedAppNames in the given order")
     }
@@ -308,12 +308,15 @@ import AudioutCore
                        "the confirmed live set wins over the merely-configured intent set")
     }
 
-    @Test func emptyLiveAppNamesFallsBackToRoutedAppNames() {
+    /// Nothing confirmed streaming means the row says nothing about feeds —
+    /// it does NOT fall back to the intent-based label, because a row that
+    /// names an app is claiming that app's audio is going there.
+    @Test func emptyLiveAppNamesLeavesNoFeedText() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: false,
                   routedAppNames: ["Spotify"], liveAppNames: [])
-        #expect(row.test_statusText == "Spotify",
-                       "nothing confirmed streaming yet: falls back to the intent-based label")
+        #expect(row.test_statusText == nil,
+                       "intent alone names no app — confirmed playback or nothing")
     }
 
     @Test func liveAppNamesStillLeadWithSystemTokenWhenSelected() {
@@ -324,16 +327,17 @@ import AudioutCore
                        "'System' still leads off `selected`; the live set replaces the app tokens")
     }
 
-    @Test func clearingLiveAppNamesOnReapplyRevertsToRoutedAppNames() {
+    @Test func clearingLiveAppNamesOnReapplyDropsTheFeed() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: false, routedAppNames: ["Spotify"], liveAppNames: ["Music"])
         #expect(row.test_statusText == "Music")
 
-        // The live mapping cleared (e.g. capture stopped) — a repeated apply with
-        // an empty liveAppNames must revert to the intent-based label, not go
-        // blank or keep showing the stale confirmed name.
+        // The live mapping cleared (e.g. capture stopped) — the row drops the
+        // feed rather than reverting to intent. It must not keep the stale
+        // confirmed name either; "capture stopped" is exactly when an
+        // intent-based label would claim audio that is no longer flowing.
         row.apply(makeDevice(), selected: false, routedAppNames: ["Spotify"], liveAppNames: [])
-        #expect(row.test_statusText == "Spotify")
+        #expect(row.test_statusText == nil)
     }
 
     @Test func sourceTextHookReportsLivePrecedence() {
@@ -466,7 +470,7 @@ import AudioutCore
     @Test func redirectOnlyDeviceHasSliderMuteEnabledCheckboxOffNoSystemToken() {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
         let row = DeviceRowView(device: device)
-        row.apply(device, selected: false, controllable: true, routedAppNames: ["Music"])
+        row.apply(device, selected: false, controllable: true, liveAppNames: ["Music"])
 
         #expect(!row.test_isEnabledOn, "checkbox stays OFF — this device isn't in Selected Devices")
         #expect(row.test_statusText == "Music",
@@ -490,7 +494,7 @@ import AudioutCore
     @Test func selectedAndControllableShowsSystemTokenWithCheckboxOn() {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
         let row = DeviceRowView(device: device)
-        row.apply(device, selected: true, controllable: true, routedAppNames: ["Safari"])
+        row.apply(device, selected: true, controllable: true, liveAppNames: ["Safari"])
 
         #expect(row.test_isEnabledOn)
         #expect(row.test_statusText == "System · Safari")

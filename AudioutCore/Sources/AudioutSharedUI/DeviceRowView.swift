@@ -437,11 +437,14 @@ public final class DeviceRowView: NSView {
     ///     per-device signal, not just routing intent). When non-empty this
     ///     TAKES PRECEDENCE over `routedAppNames` in the routing sublabel — it's
     ///     the "confirmed" state, so it wins over what's merely configured.
-    ///     When empty (nothing confirmed streaming yet — e.g. still connecting,
-    ///     or no live backend), the sublabel falls back to `routedAppNames` so
-    ///     the row isn't blank while a redirect is pending. Only `NativeBackend`
-    ///     ever populates this; `MockBackend`/`OwnToneBackend` leave it empty
-    ///     unless a test/demo explicitly injects it.
+    ///     When empty, the FEED column shows NO app pill — it is the confirmed
+    ///     signal or nothing, so a pending or silently-failed redirect never
+    ///     draws a pill that claims audio is flowing. (The legacy SUBLABEL
+    ///     ladder still falls back to `routedAppNames`; only FEED is strict.)
+    ///     Only `NativeBackend` ever populates this; `MockBackend`/
+    ///     `OwnToneBackend` leave it empty unless a test/demo injects it, so
+    ///     mock-mode UI work sees no FEED pills without
+    ///     `MockBackend.emitRoutedApps`.
     ///   - masterMuted: whether the Main Out MASTER mute is engaged (spec
     ///     §3.3): folded into the route-armed predicate so master mute drains
     ///     every device dot — no "four gold lamps on a silent house". Defaults
@@ -592,7 +595,17 @@ public final class DeviceRowView: NSView {
         // still show app segments alone). Stored so `updateFeedText()`/the
         // VoiceOver feed clause share one source of truth.
         self.mainMixSourceName = activeMember ? (mainOutTargetsGroupName ?? "System") : nil
-        self.feedAppNames = liveAppNames.isEmpty ? routedAppNames : liveAppNames
+        // FEED states CONFIRMED playback and nothing else (Alec, 2026-08-29):
+        // three signals, three facts — the ring says connected, the rail says
+        // the main mix reaches it, FEED says an app is actually feeding it.
+        // It deliberately does NOT fall back to `routedAppNames` (intent) when
+        // the live signal is empty: a pill drawn from intent claims audio that
+        // may not be flowing, which is exactly how a group route that silently
+        // failed to bind still showed "Spotify" on both speakers. A pending
+        // redirect now shows no pill until the backend confirms it, and a
+        // backend that never emits `.routedApps` (Mock/OwnTone) shows none at
+        // all — the honest reading of "nothing is confirmed streaming".
+        self.feedAppNames = liveAppNames
         self.feedAppGroupNames = appRouteGroupNames
         self.appTintColors = appTintColors
         // The fader's engaged (gold) fill reuses the EXACT same predicate the

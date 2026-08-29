@@ -266,7 +266,7 @@ import AudioutCore
     @Test func mutedRedirectTargetPrependsTokenToFeedList() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: false, controllable: true,
-                  routedAppNames: ["Spotify"])
+                  liveAppNames: ["Spotify"])
         #expect(row.test_statusText == "Muted · Spotify")
     }
 

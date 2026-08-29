@@ -31,10 +31,12 @@ set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
 # Which package's tests to run. AudioutCore by default -- it is what Guard 4
-# and every inner-loop run mean by "the suite". ProbeKit is a DEPENDENCY of
-# it, and SwiftPM never runs a dependency's test targets, so ProbeKit's own
-# suite needs this override to run at all (mirrors AUDIOUT_BUILD_PACKAGE in
-# scripts/build.sh):  AUDIOUT_TEST_PACKAGE=ProbeKit scripts/run-tests.sh
+# and every inner-loop run mean by "the suite". SwiftPM never runs a
+# DEPENDENCY package's test targets, so a sibling package's own suite needs
+# this override to run at all (mirrors AUDIOUT_BUILD_PACKAGE in
+# scripts/build.sh):  AUDIOUT_TEST_PACKAGE=AirPlayEngine scripts/run-tests.sh
+# The sync-probe DSP's suite is NOT reachable from here any more: it moved to
+# the audiout-shared repo and runs there, against the tag this app pins.
 pkg=${AUDIOUT_TEST_PACKAGE:-AudioutCore}
 core="$repo_root/$pkg"
 
@@ -119,7 +121,7 @@ cache_dir=${AUDIOUT_TEST_CACHE_DIR:-/tmp/audiout-suite-cache}
 
 # --- content key ------------------------------------------------------------
 # Hash what the suite's result actually depends on: the Swift sources and tests
-# of the package under test, plus the engine and ProbeKit packages it links
+# of the package under test, plus the engine package it links
 # and their manifests. Hashing files on disk (not the git index) is deliberate — it is
 # correct both for a pre-commit run, where the working tree IS what is about to
 # be committed, and for a manual run mid-edit.
@@ -127,24 +129,28 @@ suite_key() {
     {
         find "$repo_root/AudioutCore/Sources" "$repo_root/AudioutCore/Tests" \
              "$repo_root/AirPlayEngine/Sources" \
-             "$repo_root/ProbeKit/Sources" "$repo_root/ProbeKit/Tests" \
              -type f \( -name '*.swift' -o -name '*.c' -o -name '*.h' \) \
              -exec shasum -a 256 {} + 2>/dev/null
         # The manifests MUST be in the key and are not under any Sources/ dir:
         # they carry the target graph, dependencies and the brew include flags,
         # so a manifest-only edit changes what the suite links and can flip a
         # result with every source file byte-identical.
+        # Package.resolved earns its place for the same reason the manifests
+        # do: the shared package is pinned by RANGE, so resolution can land on
+        # a new tag with every file in this repo byte-identical. Without it a
+        # suite that linked different code would be handed the old pass.
         shasum -a 256 "$repo_root/AudioutCore/Package.swift" \
                       "$repo_root/AirPlayEngine/Package.swift" \
-                      "$repo_root/ProbeKit/Package.swift" 2>/dev/null
+                      "$repo_root/AudioutCore/Package.resolved" 2>/dev/null
     } | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}'
 }
 
 key=$(suite_key)
 # The cache records "these exact sources passed", so it must also be keyed on
 # the arguments — a `--filter Foo` pass says nothing about the full suite — and
-# on WHICH package ran: the source hash above spans every package, so a ProbeKit
-# pass would otherwise stamp the AudioutCore suite as green without running it.
+# on WHICH package ran: the source hash above spans every package in this
+# repo, so an AirPlayEngine pass would otherwise stamp the AudioutCore suite
+# green without running it.
 args_key=$(printf '%s\n%s' "$pkg" "$*" | shasum -a 256 | awk '{print $1}')
 stamp="$cache_dir/$key.$args_key"
 

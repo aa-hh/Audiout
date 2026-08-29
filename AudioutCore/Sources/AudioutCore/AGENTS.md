@@ -215,7 +215,7 @@ Redirecting one app to a specific device:
 | Routing brain | `GroupController`, `AppRoutingController`, `PhaseController` |
 | Persistence | `AppRouteStore`, `RoutingStore`, `GroupStore`, `AppSettings`, `ExcludedAppsStore`, `ExcludedAppsController`, `DeviceIconStore`, `DeviceEQStore` |
 | Tone shaping | `DeviceEQ`, `EQStreamTopology`, `EQProcessor` |
-| Mic-probe calibration (064) | `MicProbeSession`, `BuiltInMicRecorder`, `MicCapturePermission` (license-clean; hardware-free). The DSP itself — `SyncProbe`, `SyncProbeCorrelator` — moved out to the root `ProbeKit` package, which the iPhone companion also links; see [ProbeKit/AGENTS.md](../../../ProbeKit/AGENTS.md) |
+| Mic-probe calibration (064) | `MicProbeSession`, `BuiltInMicRecorder`, `MicCapturePermission` (license-clean; hardware-free). The DSP itself — `SyncProbe`, `SyncProbeCorrelator` — moved out to the `ProbeKit` package in [audiout-shared](https://github.com/aa-hh/audiout-shared), which the iPhone companion also links |
 | Local playback | `LocalPlaybackEngine`, `SyncedLocalSink`, `LocalOutputLatency`, `DefaultOutputObserver`, `SystemOutputVolume` |
 | Public aggregate device (Wave 3) | `AggregateOutputDevice` — PUBLIC aggregate "Audiout" (UID `com.audiout.Audiout.aggregate`); wired by `NativeBackend` (adopt/sweep/restore on start/quit). Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` (in `OutputBackend.swift`) drives popover warning via `PopoverController.setRoutingBlockedNeedsDefault(_:)` and user-reselect via `PopoverController.onReselectAudiout`. Shared `EffectiveCaptureDevice.resolve(_:)` (in `NativeCaptureCoordinator.swift`) prevents the private tap-aggregate nesting on the public aggregate (A1). **Interim ceiling:** system volume slider + hardware volume keys dead (A2); fix is `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md`. **Seamless handoff (Wave 3 T9+):** `AirPlayHandoffWatcher` (best-effort unified-log watcher for blocked macOS AirPlay attempts; spawns `/usr/bin/log stream`; degrades silently), `BlockedAirPlayAttempt` (pure matcher), `PTPHelperReleasing` (fast ~1s port release), `releaseForHandoff`/`resumeFromHandoffLocked` (NativeBackend seam; release preserves selection intent, resume restores whole-system + per-app). |
 | Cast output | `CastOutputManager`, `CastDeviceEnumerator`, `PCMDelayLine` |
@@ -228,7 +228,7 @@ Redirecting one app to a specific device:
 | Dependency | Usage |
 |---|---|
 | `AirPlayEngine` | Vendored/local package driving the native AirPlay 2 protocol; `NativeBackend` and `LocalPlaybackEngine` are its main callers here. |
-| `ProbeKit` | Local package (repo root, MIT): the sync-probe sweep synthesis and matched filter. `MicProbeSession` and `AlignmentTickInjector` are its callers here. |
+| `ProbeKit` | Remote package (MIT), from [audiout-shared](https://github.com/aa-hh/audiout-shared), pinned by version: the sync-probe sweep synthesis and matched filter. `MicProbeSession` and `AlignmentTickInjector` are its callers here. Changing it means a release there and a pin bump here — it is not editable from this repo. |
 | `PTPHelperService` / `SMAppServicePTPHelper` | Talks to the privileged PTP helper daemon (see [PTPHelperService.swift](PTPHelperService.swift)). |
 | `CastSender` | Local target: clean-room Cast v2 protocol; `CastOutputManager`/`CastDeviceEnumerator` are its callers. |
 

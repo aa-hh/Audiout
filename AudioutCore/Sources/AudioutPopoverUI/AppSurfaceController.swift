@@ -232,6 +232,10 @@ public final class AppSurfaceController {
     /// nothing for three seconds. A repeat click cuts the wait short on demand
     /// (`show(anchorRect:)`).
     static let revealCeiling: TimeInterval = 0.6
+    /// The reveal delay when discovery ALREADY settled before the click: one
+    /// immediate timer tick — just enough to land after the click's event
+    /// dispatch (see `show`), imperceptible against the settle wait it skips.
+    static let settledRevealDelay: TimeInterval = 0.05
 
     public init(popoverController: PopoverController,
                 settings: AppSettings = AppSettings(),
@@ -367,7 +371,7 @@ public final class AppSurfaceController {
     /// discovery to settle and fronts once, already at the settled size
     /// (`revealFirstOpen`), so the window never resizes in front of the user.
     /// A fleet that ALREADY settled before the click skips that wait and
-    /// reveals in this same turn.
+    /// reveals on an immediate timer tick.
     /// Showing an ALREADY-shown surface (the pinned always-front click) only
     /// fronts it — re-running the Mixer's open ritual there would discard the
     /// user's mid-open collapse toggles for no reason (it is the same open
@@ -405,10 +409,20 @@ public final class AppSurfaceController {
                 // at click time — the common case: the app has been running
                 // and discovery finished long ago — there is nothing left to
                 // wait out, and waiting anyway is dead air on the user's
-                // click. Reveal in this same turn, over the measure just
-                // taken; the splash still covers the fronted content.
+                // click. Reveal over the measure just taken — but on an
+                // immediate timer tick, NEVER synchronously from inside the
+                // status-item click's own event dispatch: a panel fronted
+                // there lost key to the click's remaining focus churn and the
+                // resign/tuck machinery took it straight back off screen
+                // (live, 2026-08-29 — "shows up quickly and then
+                // disappears"). Every proven front runs after the click
+                // completes; this keeps that, minus the settle wait.
                 if discoveryAlreadySettled {
-                    revealFirstOpen(alreadyMeasured: true)
+                    revealCeilingTimer = Timer.scheduledTimer(
+                        withTimeInterval: Self.settledRevealDelay,
+                        repeats: false) { [weak self] _ in
+                        MainActor.assumeIsolated { self?.revealFirstOpen(alreadyMeasured: true) }
+                    }
                     return
                 }
                 // A quiet window wider than the discovery trickle's gap between

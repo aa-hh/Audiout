@@ -1020,6 +1020,30 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// is started for the union of all three sets.
     private var leveledBundleIDs: Set<String> = []
 
+    /// For an app that is leveled but whose slider has returned to 100: the
+    /// monotonic time its volume came back. It stays leveled until that has held
+    /// for ``leveledExitSettleNanos``, so DRAGGING across the boundary costs
+    /// nothing.
+    ///
+    /// Leaving the leveled set tears down the app's muted tap, rebuilds the
+    /// whole-system tap (the exclusion set changed) and starts the metering tap
+    /// — two Core Audio objects destroyed and recreated, ~120 ms with no program
+    /// feed. Live 2026-08-29: a single back-and-forth drag produced eight of
+    /// those cycles in 1.1 s and the audio audibly fell back to the Mac each
+    /// time. Entering is still immediate — pulling a slider down must respond at
+    /// once; only the exit waits. On `stateQueue`.
+    private var leveledExitPendingSince: [String: UInt64] = [:]
+
+    /// Whether a settle re-reconcile is already scheduled, so a slider dragged
+    /// for ten seconds arms one timer rather than hundreds. On `stateQueue`.
+    private var leveledExitRecheckScheduled = false
+
+    /// How long a leveled app's volume must sit at 100 before it actually leaves
+    /// the set. Comfortably longer than a drag's inter-tick gap, short enough
+    /// that a deliberate return to 100 disengages while the user still has the
+    /// slider in mind.
+    private static let leveledExitSettleNanos: UInt64 = 1_000_000_000
+
     /// bundleID → its route's display name, so a `.routedApps` event can carry
     /// human-readable app names. Refreshed on every `updateAppRoutes`.
     private var routeDisplayNames: [String: String] = [:]
@@ -4230,11 +4254,53 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // volume, so a demotion never levels (see `leveledBundleIDs`).
             // Excluded apps are never leveled: the privacy denylist means "never
             // captured", which outranks a volume the user set earlier.
+            //
+            // Entering is immediate; LEAVING waits for the slider to settle (see
+            // `leveledExitPendingSince`). An app at 100 that is already leveled
+            // stays leveled — injected at unity, which `scaledStereoSamples`
+            // makes exact identity — until it has been at 100 for a full second.
+            let nowNanos = DispatchTime.now().uptimeNanoseconds
+            var stillSettling = false
             let newLeveled = Set(routes.compactMap { route -> String? in
-                guard route.destination == .noRedirect, route.volume < 100,
-                      !excludedBundleIDs.contains(route.bundleID) else { return nil }
-                return route.bundleID
+                guard route.destination == .noRedirect,
+                      !excludedBundleIDs.contains(route.bundleID) else {
+                    self.leveledExitPendingSince.removeValue(forKey: route.bundleID)
+                    return nil
+                }
+                if route.volume < 100 {
+                    self.leveledExitPendingSince.removeValue(forKey: route.bundleID)
+                    return route.bundleID
+                }
+                // At 100. Only apps ALREADY leveled get the settle window — one
+                // that was never leveled is simply untouched, as before.
+                guard self.leveledBundleIDs.contains(route.bundleID) else { return nil }
+                let since = self.leveledExitPendingSince[route.bundleID] ?? {
+                    self.leveledExitPendingSince[route.bundleID] = nowNanos
+                    return nowNanos
+                }()
+                guard nowNanos &- since >= Self.leveledExitSettleNanos else {
+                    stillSettling = true
+                    return route.bundleID
+                }
+                self.leveledExitPendingSince.removeValue(forKey: route.bundleID)
+                return nil
             })
+            // Nothing else will call back once the slider stops moving, so the
+            // settle window needs its own wake-up to finish the exit.
+            if stillSettling, !self.leveledExitRecheckScheduled {
+                self.leveledExitRecheckScheduled = true
+                self.stateQueue.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+                    guard let self else { return }
+                    self.leveledExitRecheckScheduled = false
+                    let routes = self.lastRoutes
+                    let excluded = self.lastExcludedBundleIDs
+                    // Re-enter through the public path so the exit runs the exact
+                    // same reconcile an ordinary route edit does.
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        self.updateAppRoutes(routes, excludedBundleIDs: excluded)
+                    }
+                }
+            }
             let previousRouted = self.routedBundleIDs
             let previousLocal = self.localBundleIDs
             let previousLeveled = self.leveledBundleIDs

@@ -7011,7 +7011,25 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(capture.lastExcludedBundleIDs?.contains("com.level") == true,
                 "a leveled app must leave the whole-system tap — its audio comes back scaled")
 
-        // Back to 100: the intercept disengages.
+        // A DRAG across the boundary must not thrash: bouncing 60 -> 100 -> 60
+        // faster than the settle window leaves the tap up throughout, so no Core
+        // Audio object is destroyed and no exclusion change rebuilds the
+        // whole-system tap. Live 2026-08-29: without the settle window, one
+        // back-and-forth drag produced eight teardown/rebuild cycles in 1.1 s
+        // and the audio audibly fell back to the Mac each time.
+        for volume in [100, 60, 100, 60] {
+            backend.updateAppRoutes([
+                AppRoute(bundleID: "com.level", displayName: "Level",
+                         destination: .noRedirect, volume: volume),
+            ])
+        }
+        if case .capturing = perAppCapture.state(for: "com.level") {} else {
+            Issue.record("a drag across 100 must never drop the app's tap")
+        }
+        #expect(capture.lastExcludedBundleIDs?.contains("com.level") == true,
+                "and the app stays out of the whole-system tap for the whole drag")
+
+        // Back to 100 and LEFT there: the intercept disengages once it settles.
         backend.updateAppRoutes([
             AppRoute(bundleID: "com.level", displayName: "Level", destination: .noRedirect),
         ])

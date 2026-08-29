@@ -33,6 +33,9 @@ import Testing
                 if openDelay > 0 {
                     try? await Task.sleep(nanoseconds: UInt64(openDelay * 1_000_000_000))
                 }
+                // Recorded so a test can assert the open never FINISHED — the
+                // only load-independent way to prove a timeout beat it.
+                recorder.record("open-finished:\(address)")
                 return openReturn
             },
             closeConnection: { address in recorder.record("close:\(address)") },
@@ -103,21 +106,32 @@ import Testing
     /// The hard ceiling: an open that outlives `connectTimeout` resolves
     /// `.failed("timeout")` at the ceiling, not at the open's own pace.
     @Test func hangingOpenHitsTheHardTimeout() async {
-        // openDelay is deliberately huge: the ONLY way the test finishes well
-        // under it is the timeout race winning. No tight wall-clock margin —
-        // scheduler latency under machine load once pushed a 0.1s ceiling past
-        // 12s of elapsed and flaked a `< 5` assertion (the roadmap-023 class).
-        let (manager, _) = makeManager(openDelay: 60, connectTimeout: 0.1)
-        let began = Date()
+        // ASSERTS THE MECHANISM, NOT THE CLOCK. The point is that the timeout
+        // resolves the connect instead of the open's own completion doing it —
+        // and the obvious way to say that, "elapsed is far below openDelay",
+        // is precisely what will not survive this suite. It has been widened
+        // once already (a 0.1s ceiling flaked a `< 5` assertion after
+        // scheduler latency pushed elapsed past 12s), and the widened `< 60`
+        // then blew through at 65.8s under ordinary machine load. A margin
+        // cannot be made big enough: the test process can be descheduled for
+        // longer than any bound worth asserting, so every wall-clock version
+        // of this is a treadmill.
+        //
+        // Instead the open is given a delay it CANNOT finish inside any real
+        // run, and the fake records its own completion. Returning at all then
+        // proves the timeout won the race, whatever the machine was doing —
+        // and if the manager ever regresses to waiting for the open, this does
+        // not flake, it hangs and fails outright, which is the honest signal.
+        let (manager, recorder) = makeManager(openDelay: 300, connectTimeout: 0.1)
         let outcome = await manager.connect(address: "C4-38-75-0E-BF-4A")
-        let elapsed = Date().timeIntervalSince(began)
         guard case .failed(let reportedElapsed, let reason) = outcome else {
             Issue.record("expected .failed, got \(outcome)")
             return
         }
         #expect(reason == "timeout")
-        #expect(elapsed < 60, "must resolve at the ceiling, never at the open's own pace")
         #expect(reportedElapsed >= 0.1)
+        #expect(!recorder.events.contains("open-finished:C4-38-75-0E-BF-4A"),
+                "must resolve at the ceiling, never at the open's own pace")
     }
 
     // MARK: Fallback nudge

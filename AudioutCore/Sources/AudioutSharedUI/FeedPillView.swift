@@ -22,15 +22,28 @@ import AppKit
 ///
 /// Drawing/layout-only, non-interactive (`hitTest` returns `nil`, mirroring
 /// `LevelMeterView`/`RouteArmedDotView`'s "small self-contained view" house
-/// pattern) — nothing here ever routes a click. Colors resolve LIVE via
-/// `viewDidChangeEffectiveAppearance` (the border/fill are static `CGColor`s
-/// on the backing layer, same idiom as `DeviceRowView.updateMuteTint()`), so
-/// light/dark and Increase Contrast track for free. Nothing animates, so a
-/// `cacheDisplay` snapshot is byte-identical for a fixed input — the
-/// popover-snapshot determinism contract.
+/// pattern) — nothing here ever routes a click. The fill is a static
+/// `CGColor` on the backing layer (same idiom as
+/// `DeviceRowView.updateMuteTint()`), re-stamped live off BOTH
+/// `viewDidChangeEffectiveAppearance` (light/dark) and the
+/// `accessibilityDisplayOptionsDidChangeNotification` (a mid-session
+/// Increase-Contrast toggle, which fires neither of the other two), so both
+/// track for free. Nothing animates, so a `cacheDisplay` snapshot is
+/// byte-identical for a fixed input — the popover-snapshot determinism
+/// contract.
 final class FeedPillView: NSView {
 
     private let label = NSTextField(labelWithString: "")
+    /// A small leading triangle glyph, mounted only on an ERROR pill (P2-6) —
+    /// decorative (no accessibility description: the row's spoken state
+    /// clause already says "couldn't connect"), so the pill carries a SHAPE
+    /// as well as a colour.
+    private let errorGlyph = NSImageView()
+    /// The label's leading constraint — pinned to the pill's own leading edge
+    /// by default, re-pointed at the glyph's trailing edge the one time
+    /// `configure` installs the error layout (pills are freshly constructed
+    /// per render, so this never needs to be undone).
+    private var labelLeadingConstraint: NSLayoutConstraint?
 
     init() {
         super.init(frame: .zero)
@@ -44,17 +57,44 @@ final class FeedPillView: NSView {
         label.setContentCompressionResistancePriority(.required, for: .horizontal)
         addSubview(label)
 
+        errorGlyph.translatesAutoresizingMaskIntoConstraints = false
+        errorGlyph.image = NSImage(
+            systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold))
+        errorGlyph.contentTintColor = Tokens.Color.failure
+        errorGlyph.isHidden = true
+        addSubview(errorGlyph)
+
+        let labelLeading = label.leadingAnchor.constraint(
+            equalTo: leadingAnchor, constant: PopoverColumnGrid.feedPillHorizontalPadding)
+        labelLeadingConstraint = labelLeading
+
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(
-                equalTo: leadingAnchor, constant: PopoverColumnGrid.feedPillHorizontalPadding),
+            labelLeading,
             label.trailingAnchor.constraint(
                 equalTo: trailingAnchor, constant: -PopoverColumnGrid.feedPillHorizontalPadding),
             label.topAnchor.constraint(
                 equalTo: topAnchor, constant: PopoverColumnGrid.feedPillVerticalPadding),
             label.bottomAnchor.constraint(
                 equalTo: bottomAnchor, constant: -PopoverColumnGrid.feedPillVerticalPadding),
+            errorGlyph.leadingAnchor.constraint(
+                equalTo: leadingAnchor, constant: PopoverColumnGrid.feedPillHorizontalPadding),
+            errorGlyph.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
 
+        updateAppearance()
+        // The fill is a static `CGColor`, so a mid-session Increase Contrast
+        // toggle needs a manual re-stamp off the display-options notification
+        // rather than trusting `viewDidChangeEffectiveAppearance` to fire for
+        // it (design P2-5; same pattern as `LevelMeterView`).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
+    }
+
+    @objc private func accessibilityDisplayOptionsDidChange() {
         updateAppearance()
     }
 
@@ -68,18 +108,31 @@ final class FeedPillView: NSView {
     /// (already carrying a leading `FeedChip` attachment when the segment is
     /// a redirected app, and/or the leading AP1 micro-tag prefix on the FIRST
     /// visible pill) — this view only draws the fill chrome around it. An
-    /// error pill differs only in its (pre-composed) failure-red text; the
-    /// fill is one token for every pill.
+    /// error pill ALSO gets a leading triangle glyph (P2-6), so it reads by
+    /// shape, not colour alone; the fill is one token for every pill.
     func configure(attributedText: NSAttributedString, isError: Bool) {
         label.attributedStringValue = attributedText
+        if isError {
+            errorGlyph.isHidden = false
+            labelLeadingConstraint?.isActive = false
+            let leading = label.leadingAnchor.constraint(
+                equalTo: errorGlyph.trailingAnchor, constant: 3)
+            leading.isActive = true
+            labelLeadingConstraint = leading
+        }
         updateAppearance()
     }
 
     /// The fill is a static `CGColor` on the layer, so a live light/dark or
     /// Increase-Contrast switch needs a manual re-stamp (same discipline as
-    /// `DeviceRowView.updateMuteTint()`). `Tokens.Color.feedPillFill` is the
-    /// pill's dedicated wash — a stock `quaternaryLabelColor` wash measures a
-    /// near-invisible 1.31:1 dark / 1.21:1 light against the canvas.
+    /// `DeviceRowView.updateMuteTint()`): light/dark arrives via
+    /// `viewDidChangeEffectiveAppearance` below, and a mid-session
+    /// Increase-Contrast-ONLY toggle — which fires neither `apply` nor that
+    /// appearance callback — is covered by the `accessibilityDisplayOptionsDidChange`
+    /// observer registered in `init` (design P2-5, mirrors `LevelMeterView`).
+    /// `Tokens.Color.feedPillFill` is the pill's dedicated wash — a stock
+    /// `quaternaryLabelColor` wash measures a near-invisible 1.31:1 dark /
+    /// 1.21:1 light against the canvas.
     private func updateAppearance() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.backgroundColor = Tokens.Color.feedPillFill.cgColor
@@ -130,6 +183,10 @@ final class FeedPillView: NSView {
 
     /// This pill's leading run's CURRENTLY-painted foreground color.
     var test_leadingRunColor: NSColor? { firstRunColor() }
+
+    /// Whether this pill's error glyph is mounted and visible (P2-6) —
+    /// same-module access for `DeviceRowView.test_feedErrorPillHasGlyph`.
+    var test_hasErrorGlyph: Bool { !errorGlyph.isHidden }
 
     private func firstRunColor() -> NSColor? {
         let attr = label.attributedStringValue

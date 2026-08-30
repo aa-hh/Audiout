@@ -305,7 +305,7 @@ public final class MainOutRowView: NSView {
         // drag from the drag's own value.
         if !isDraggingMaster {
             slider.integerValue = master
-            readoutLabel.stringValue = "\(master)%"
+            readoutLabel.stringValue = VolumePercent.label(master)
         }
         configureAccessibility()
     }
@@ -344,7 +344,7 @@ public final class MainOutRowView: NSView {
                                                      weight: .regular)
         iconView.imageScaling = .scaleProportionallyDown
         iconView.image = NSImage(systemSymbolName: DeviceIcon.mainAudioSymbolName,
-                                 accessibilityDescription: "Main Out")?
+                                 accessibilityDescription: "Main Audio")?
             .withSymbolConfiguration(iconConfig)
         // The icon is the visible door to this row's menu. Main Audio always
         // has an Equalizer, so unlike a device row it is armed once, here, and
@@ -390,7 +390,7 @@ public final class MainOutRowView: NSView {
         muteButton.imagePosition = .imageOnly
         let muteConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
         muteButton.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
-                                   accessibilityDescription: "Mute Audio Out")?
+                                   accessibilityDescription: "Mute Main Audio")?
             .withSymbolConfiguration(muteConfig)
         muteButton.target = self
         muteButton.action = #selector(muteToggled(_:))
@@ -609,7 +609,7 @@ public final class MainOutRowView: NSView {
             isDraggingMaster = false
         }
         delegate?.mainOutRow(self, didSetMaster: sender.integerValue)
-        readoutLabel.stringValue = "\(sender.integerValue)%"
+        readoutLabel.stringValue = VolumePercent.label(sender.integerValue)
     }
 
     // The Main Out row lives INSIDE the System card (T-U8), so it paints no fill
@@ -620,7 +620,7 @@ public final class MainOutRowView: NSView {
     private func configureAccessibility() {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel("Main Audio, master volume \(slider.integerValue) percent")
+        setAccessibilityLabel("Main Audio, master volume \(VolumePercent.spoken(slider.integerValue))")
         // The row's VALUE carries the live signal channels (S2/S3): "muted"
         // for the engaged master-mute pill, "armed" for the lit route-armed
         // dot — the spoken equivalents shipped with the drawing.

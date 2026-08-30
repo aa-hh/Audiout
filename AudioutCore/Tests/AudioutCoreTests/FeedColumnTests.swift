@@ -34,6 +34,7 @@ import AudioutCore
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true)
         #expect(row.test_feedText == "System")
+        #expect(!row.test_feedErrorPillHasGlyph, "an ordinary member pill carries no error glyph")
     }
 
     @Test func groupMemberShowsTheGroupNameInsteadOfSystem() {
@@ -77,6 +78,9 @@ import AudioutCore
                   routedAppNames: ["Music", "Safari"])
         #expect(row.test_feedText == "System · Music · +1")
         #expect(row.test_feedHasOverflow)
+        // The tooltip is uncapped (VoiceOver/hover have no viewport to
+        // overflow) — every name, no "+N".
+        #expect(row.test_feedTooltip == "Playing System, Music, Safari")
     }
 
     @Test func neitherMainMixNorAppsShowsNothing() {
@@ -101,6 +105,8 @@ import AudioutCore
         #expect(row.test_feedText == "Didn't respond", "failure overrides the composite entirely — never both — with the failure's own headline")
         #expect(row.test_feedIsErrorColored)
         #expect(row.test_statusText == nil, "the sublabel carries no words for a failed bus row")
+        #expect(row.test_feedTooltip == nil, "a failed row's tooltip carries no feed names")
+        #expect(row.test_feedErrorPillHasGlyph, "an error pill reads by shape, not colour alone (P2-6)")
     }
 
     @Test func unavailableOverridesTheFeed() {
@@ -108,6 +114,7 @@ import AudioutCore
         row.apply(makeDevice(isAvailable: false), selected: true, routedAppNames: ["Music"])
         #expect(row.test_feedText == "Unavailable")
         #expect(row.test_feedIsErrorColored)
+        #expect(row.test_feedErrorPillHasGlyph)
     }
 
     // MARK: Connecting/reconnecting/muted are NOT shown in the FEED column
@@ -131,28 +138,46 @@ import AudioutCore
         #expect(row.test_statusText == "Muted", "…it lives on the sublabel/mute-pill instead")
     }
 
-    // MARK: AP1 micro-tag — the one true exception, AP2 never badged
+    // MARK: No protocol badge — the FEED column shows feeds, never attributes
 
-    @Test func aP1DeviceGetsTheMicroTagPrefix() {
-        let row = makeBusRow()
-        row.apply(makeDevice(supportsAirPlay2: false), selected: true, controllable: true)
-        #expect(row.test_feedHasAP1Tag)
-        #expect(row.test_feedText == "AP1 System")
+    /// The retired "Older AirPlay" micro-tag. It read `supportsAirPlay2`,
+    /// which is false for Bluetooth, Cast AND the Mac's own row as well as a
+    /// genuine AP1 receiver — so it labelled a Chromecast as AirPlay. Alec
+    /// dropped it outright rather than narrowing it to real AP1 receivers: the
+    /// column carries what a device is PLAYING, and a protocol attribute was
+    /// never that.
+    @Test func noDeviceGetsAProtocolTagWhateverItsAirPlay2Flag() {
+        for supportsAirPlay2 in [true, false] {
+            let row = makeBusRow()
+            row.apply(makeDevice(supportsAirPlay2: supportsAirPlay2), selected: true, controllable: true)
+            #expect(row.test_feedText == "System")
+            #expect(row.test_feedTooltip == "Playing System",
+                    "the tooltip keeps the feed line and loses the protocol consequence line")
+        }
     }
 
-    @Test func aP2DeviceNeverGetsATag() {
-        let row = makeBusRow()
-        row.apply(makeDevice(supportsAirPlay2: true), selected: true, controllable: true)
-        #expect(!(row.test_feedHasAP1Tag))
+    /// The kinds that shared the flag without being AirPlay at all — the Mac's
+    /// own row was the visible casualty, its narrow feed slot truncating
+    /// "Older AirPlay System" to a bare "Older".
+    @Test func nonAirPlayKindsShowTheirFeedAndNothingElse() {
+        let kinds: [(Device.Kind, Bool)] = [(.localMac, true), (.bluetooth, false), (.cast, false)]
+        for (kind, isLocal) in kinds {
+            let device = Device(id: "dev-\(kind)", name: "Test Speaker", kind: kind,
+                                isAvailable: true, supportsAirPlay2: false,
+                                isLocalDevice: isLocal, connectionState: .connected)
+            let row = makeBusRow(device: device)
+            row.apply(device, selected: true, controllable: true)
+            #expect(row.test_feedText == "System", "\(kind) shows its feed, unbadged")
+            #expect(!(row.test_feedTooltip ?? "").contains("Older AirPlay"))
+        }
     }
 
-    @Test func failedAP1DeviceShowsTheErrorWithNoTag() {
-        // The error override takes the WHOLE column — no tag mixed in.
+    @Test func failedDeviceShowsOnlyTheError() {
+        // The error override takes the WHOLE column.
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .vanished)), supportsAirPlay2: false),
                   selected: true, controllable: true)
         #expect(row.test_feedText == "Not on the network")
-        #expect(!(row.test_feedHasAP1Tag))
     }
 
     // MARK: STATIC "+N" overflow — locked, no interactive reveal
@@ -239,8 +264,8 @@ import AudioutCore
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
         let label = row.test_accessibilityLabel ?? ""
-        #expect(label.hasSuffix(", feeding System, Music"), "the feed clause trails the rest of the composed announcement")
-        #expect(label.components(separatedBy: "feeding").count - 1 == 1, "spoken exactly once")
+        #expect(label.hasSuffix(", playing System, Music"), "the feed clause trails the rest of the composed announcement")
+        #expect(label.components(separatedBy: "playing").count - 1 == 1, "spoken exactly once")
     }
 
     @Test func failedRowNeverSpeaksAFeedClauseSinceTheConnectionClauseAlreadyCoversIt() {
@@ -249,12 +274,12 @@ import AudioutCore
                   selected: true, controllable: true, routedAppNames: ["Music"])
         let label = row.test_accessibilityLabel ?? ""
         #expect(label.hasSuffix(", couldn't connect"), "no trailing feed clause — the connection clause already spoke the failure")
-        #expect(!(label.contains("feeding")))
+        #expect(!(label.contains("playing")))
     }
 
     @Test func nonBusRowNeverSpeaksAFeedClauseEither() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
-        #expect(!((row.test_accessibilityLabel ?? "").contains("feeding")), "a non-bus host has no FEED column, so nothing new to speak")
+        #expect(!((row.test_accessibilityLabel ?? "").contains("playing")), "a non-bus host has no FEED column, so nothing new to speak")
     }
 }

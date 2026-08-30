@@ -65,6 +65,7 @@ struct SetupCardContent {
     /// The SPINE's own earned title — a short form of ``completedTitle``.
     let spineDoneTitle: String
 
+
     /// The one place the per-state title table lives (brief §"Card anatomy":
     /// imperative → earned capability). The RIBBON reads this; the spine reads
     /// ``spineTitle(for:foundSpeakers:)``.
@@ -572,8 +573,21 @@ final class SetupSpineRowView: NSView {
     /// (owner decision: no padlock shake — a refusal that animates invites a
     /// second try).
     var isPressable: Bool {
+        // A BROKEN row is the one row on the spine asking to be looked at, so
+        // it is pressable whatever state it is otherwise in — pressing it snaps
+        // the flow to it. Ahead of the switch, because the state it wears
+        // (usually `.pending`) would otherwise refuse the click.
+        if isBroken { return true }
         switch state {
         case .pending, .autoPassed: return false
+        // The live row IS its primary button. Safe for every step, because no
+        // step's primary is itself a decision any more: each one raises a
+        // surface the user still has to answer — macOS's dialog for the five
+        // permissions, Audiout's own Share / Don't Share sheet for Usage
+        // Statistics. Usage Statistics briefly granted on the click instead,
+        // and this row is where that reached the user (owner, live: "clicking
+        // on the line item accepts, even though the person might not actually
+        // be meaning to").
         case .active: return isLive
         case .completed, .skipped: return true
         }
@@ -670,7 +684,11 @@ final class SetupSpineRowView: NSView {
         switch state {
         case .active: return ""
         case .pending: return ", locked"
-        case .completed, .autoPassed: return ", allowed"
+        case .completed: return ", allowed"
+        // An auto-pass is NOT a grant, and saying "allowed" for one hid the
+        // whole reason it passed. The visible note is the explanation; this is
+        // the same words, lower-cased into the sentence the label already is.
+        case .autoPassed(let note): return ", " + note.prefix(1).lowercased() + note.dropFirst()
         case .skipped: return ", skipped"
         }
     }

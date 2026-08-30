@@ -119,25 +119,39 @@ import AudioutSharedUI
         #expect(text.contains("BSD-2-Clause"))
     }
 
-    @Test func supportContactIsAnUnmistakableTODOPlaceholder() {
-        let controller = GeneralSettingsViewController(loginItem: FakeLoginItem())
-        #expect(controller.test_about.test_aboutViewController.test_supportContactText.contains("TODO"))
+    /// The permanent fence: About is the surface that discharges the GPL
+    /// source-availability obligation and names where to get help, so nothing
+    /// it renders may ever be a stand-in again. Values are compile-time
+    /// constants, so this holds for every build.
+    @Test func aboutShipsRealValuesAndNeverAPlaceholder() {
+        let about = GeneralSettingsViewController(loginItem: FakeLoginItem())
+            .test_about.test_aboutViewController
+        let rendered = [AboutLinks.sourceCodeURL.absoluteString,
+                        about.test_supportContactText,
+                        about.test_privacyText,
+                        AboutCredits.thirdPartyNoticesText]
+        for text in rendered {
+            #expect(!text.contains("example.com"), Comment(rawValue: "placeholder domain in: \(text)"))
+            #expect(!text.contains("TODO"), Comment(rawValue: "placeholder marker in: \(text)"))
+        }
+        #expect(AboutLinks.sourceCodeURL == URL(string: "https://github.com/aa-hh/Audiout")!)
+        #expect(about.test_supportContactText == "Questions or problems? Email support@audiout.app.")
     }
 
-    @Test func sourceCodeLinkIsAnUnmistakablePlaceholderNotAnInventedRealURL() {
-        // example.com is the IANA-reserved documentation/placeholder domain
-        // (RFC 2606) — asserting on it, not a made-up-looking real domain.
-        #expect(AboutLinks.sourceCodePlaceholderURL.host == "example.com")
-        #expect(AboutLinks.sourceCodePlaceholderURL.absoluteString.contains("TODO"))
+    /// The honest accounting of what leaves this Mac, verbatim.
+    @Test func aboutStatesExactlyWhatTheAppSends() {
+        let about = GeneralSettingsViewController(loginItem: FakeLoginItem())
+            .test_about.test_aboutViewController
+        #expect(about.test_privacyText == "Discovery, routing, volume, and playback stay entirely on your network — none of it touches a server, even offline. Audiout’s only outside connections are about your license and updates: a check of your key, a once-per-launch check-in (your key, a random per-Mac id, and the app version — nothing else), and the update check when one runs. A build compiled from source makes none of these.")
     }
 
-    @Test func viewSourceCodeButtonOpensThePlaceholderURLThroughTheInjectedSeam() {
+    @Test func viewSourceCodeButtonOpensTheRepositoryURLThroughTheInjectedSeam() {
         var opened: [URL] = []
         let controller = GeneralSettingsViewController(
             loginItem: FakeLoginItem(),
             openURL: { opened.append($0) })
         controller.test_about.test_aboutViewController.test_tapViewSourceCode()
-        #expect(opened == [AboutLinks.sourceCodePlaceholderURL])
+        #expect(opened == [URL(string: "https://github.com/aa-hh/Audiout")!])
     }
 
     // MARK: Doesn't regress the single-screen Settings window's size
@@ -148,10 +162,11 @@ import AudioutSharedUI
     @Test func generalPaneStaysCompactAboutIsNotInlined() {
         let controller = GeneralSettingsViewController(loginItem: FakeLoginItem())
         controller.view.layoutSubtreeIfNeeded()
-        // Launch at login / Reconnect at launch / iPhone control / License key
-        // / Send license check-ins / hint lines / a button row (roadmap 054
-        // added the License rows, the companion work the iPhone row) — still
-        // comfortably under half of what full About inlining measured
+        // Launch at login / Reconnect at launch / iPhone control / License
+        // key / a status hint / a button row (roadmap 054 added the License
+        // row, the companion work the iPhone row; check-ins are unconditional
+        // now — no separate consent row, 2026-08-24) — still comfortably
+        // under half of what full About inlining measured
         // (~1039pt, the change that broke
         // `testContentSizeIsFittedNotDegenerate`'s 750pt regression bound).
         #expect(controller.view.fittingSize.height < 520)

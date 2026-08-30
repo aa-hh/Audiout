@@ -3,6 +3,7 @@
 import Testing
 import AppKit
 @testable import AudioutPopoverUI
+@testable import AudioutSharedUI
 
 /// Container-level coverage for `PopoverPanelViewController`: the
 /// whole-header collapse click target (C4), the header
@@ -42,6 +43,32 @@ import AppKit
         #expect(panel.test_fireHeaderClick(title: title))
         #expect(toggleCount == 2, "a second header click toggles again")
         #expect(panel.test_isCardCollapsed(title: title) == false)
+    }
+
+    // MARK: AX headings + chevron Collapse/Expand flip
+
+    @Test func cardAndSubsectionTitlesExposeHeadingRoles() {
+        let panel = makePanel()
+        panel.beginCard(header: "Output Devices", collapsible: true, onToggle: {})
+        panel.addSubsectionHeader("AirPlay Devices", collapsible: true,
+                                  collapsed: false, onToggle: {})
+        #expect(panel.test_headerTitleAXRole(title: "Output Devices")?.rawValue == "AXHeading",
+                "the card title is a VoiceOver heading, so section-jumping works")
+        #expect(panel.test_headerTitleAXRole(title: "AirPlay Devices")?.rawValue == "AXHeading",
+                "subsection titles are headings too, one rank below")
+    }
+
+    @Test func chevronAXLabelFlipsWithCollapse() {
+        let panel = makePanel()
+        let title = "Devices"
+        panel.beginCard(header: title, collapsible: true, collapsed: false, onToggle: {})
+        panel.addRow(NSView())
+        #expect(panel.test_chevronAXLabel(title: title) == "Collapse Devices")
+        panel.setCardCollapsed(title: title, collapsed: true, animated: false)
+        #expect(panel.test_chevronAXLabel(title: title) == "Expand Devices",
+                "the chevron's spoken action tracks the state it would produce")
+        panel.setCardCollapsed(title: title, collapsed: false, animated: false)
+        #expect(panel.test_chevronAXLabel(title: title) == "Collapse Devices")
     }
 
     @Test func nonCollapsibleHeaderHasNoClickTarget() {
@@ -102,7 +129,7 @@ import AppKit
         let notes = panel.test_cardNotes(title: title)
         #expect(notes.count == 1)
         #expect(notes.first?.stringValue == text)
-        #expect(notes.first?.textColor == .secondaryLabelColor)
+        #expect(notes.first?.textColor == Tokens.Color.secondaryLabel)
     }
 
     @Test func cardNoteSurvivesBodyCollapse() {

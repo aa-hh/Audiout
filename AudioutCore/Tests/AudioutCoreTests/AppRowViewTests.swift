@@ -174,9 +174,9 @@ import AppKit
         #expect(delegate.removedAppID == "com.example.app")
     }
 
-    // MARK: Slider dimming (Bug T2 — only "No Redirect" dims)
+    // MARK: Slider enablement (no destination dims it any more)
 
-    /// Bug T2: "Current Device" is now its OWN independent local stream (played on
+    /// Bug T2: "Current Device" is its OWN independent local stream (played on
     /// the Mac's built-in speakers), so its slider is LIVE, not dimmed.
     @Test func sliderNotDimmedWhenDestinationIsCurrentDevice() {
         let (row, _) = makeRow(selected: "local")
@@ -189,16 +189,17 @@ import AppKit
         #expect(!row.test_isSliderDimmed, "slider must be enabled once redirected to an AirPlay device")
     }
 
-    /// Only the standalone "No Redirect" state dims the slider — that's the one
-    /// state with no independent stream to level (the app just plays in the
-    /// whole-system mix).
-    @Test func sliderDimmedWhenDestinationIsNoRedirect() {
+    /// "No Redirect" is live too: below 100 the app is intercepted and summed
+    /// back into the whole-system mix at that volume, so the slider does something
+    /// in every destination state.
+    @Test func sliderLiveWhenDestinationIsNoRedirect() {
         let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
-        #expect(row.test_isSliderDimmed, "slider must dim while destination is No Redirect")
+        #expect(!row.test_isSliderDimmed,
+                "slider must stay live on No Redirect — below 100 the app is levelled in the mix")
     }
 
     /// Bug T2: with all three states present, "Current Device" keeps a LIVE slider
-    /// (its own local stream); only "No Redirect" dims.
+    /// (its own local stream).
     @Test func sliderNotDimmedWhenDestinationIsExplicitCurrentDeviceAmongThreeStates() {
         let (row, _) = makeRowWithThreeStates(selected: "local")
         #expect(!row.test_isSliderDimmed,
@@ -211,9 +212,9 @@ import AppKit
     }
 
     @Test func sliderAlwaysVisibleRegardlessOfDestination() {
-        // LOCKED DECISION 3: the slider is ALWAYS visible, only dimmed — never
-        // hidden. `AppRowView` has no isHidden toggle on the slider at all; this
-        // asserts both states still report a live volume via the hook.
+        // LOCKED DECISION 3: the slider is ALWAYS visible — never hidden.
+        // `AppRowView` has no isHidden toggle on the slider at all; this asserts
+        // both states still report a live volume via the hook.
         let (localRow, _) = makeRow(selected: "local")
         #expect(localRow.test_volume == 42)
         let (redirectedRow, _) = makeRow(selected: "device-1")
@@ -391,22 +392,23 @@ import AppKit
                        "selection must win when both selected and hovered")
     }
 
-    // MARK: Readout tertiary/secondary colour (V7)
+    // MARK: Readout colour (V7)
 
-    @Test func readoutIsTertiaryWhenDestinationIsNoRedirect() {
+    /// Every destination has a live volume, so the readout reads the same in all
+    /// of them — nothing about the % is dimmed on No Redirect.
+    @Test func readoutIsSecondaryWhenDestinationIsNoRedirect() {
         let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
-        #expect(row.test_readoutTextColor == .tertiaryLabelColor,
-                       "the % readout must dim to tertiary while No Redirect is selected")
+        #expect(row.test_readoutTextColor == Tokens.Color.secondaryLabel)
     }
 
     @Test func readoutIsSecondaryWhenDestinationIsCurrentDevice() {
         let (row, _) = makeRow(selected: "local")
-        #expect(row.test_readoutTextColor == .secondaryLabelColor)
+        #expect(row.test_readoutTextColor == Tokens.Color.secondaryLabel)
     }
 
     @Test func readoutIsSecondaryWhenRedirected() {
         let (row, _) = makeRow(selected: "device-1")
-        #expect(row.test_readoutTextColor == .secondaryLabelColor)
+        #expect(row.test_readoutTextColor == Tokens.Color.secondaryLabel)
     }
 
     // MARK: Destination subtitle microcopy (A3)
@@ -614,7 +616,7 @@ import AppKit
     /// name sits at secondary, with no idle suffix.
     @Test func unroutedAppNameIsSecondary() {
         let row = makeThreeStateRow(selected: "no-redirect", isRunning: true)
-        #expect(row.test_nameTextColor == .secondaryLabelColor)
+        #expect(row.test_nameTextColor == Tokens.Color.secondaryLabel)
         #expect(row.test_idleSuffixColor == nil)
         #expect(row.test_nameDisplayText == "Example App")
     }
@@ -626,7 +628,7 @@ import AppKit
     @Test func routedIdleAppShowsTertiaryIdleSuffixAndNoBadge() {
         let row = makeThreeStateRow(selected: "device-1", isRunning: false)
         #expect(row.test_nameDisplayText == "Example App (idle)")
-        #expect(row.test_nameTextColor == .secondaryLabelColor)
+        #expect(row.test_nameTextColor == Tokens.Color.secondaryLabel)
         #expect(row.test_idleSuffixColor == .tertiaryLabelColor, "the (idle) suffix must render in the tertiary idle voice")
         #expect(!(row.test_isOfflineBadgeVisible), "the routed-idle treatment replaces the warning badge")
     }

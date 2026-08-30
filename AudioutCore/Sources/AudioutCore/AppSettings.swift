@@ -83,6 +83,8 @@ public struct AppSettings {
         static let accentStyle = "appearance.accentStyle"
         static let startBufferMs = "audio.startBufferMs"
         static let hasCompletedSetup = "setup.hasCompleted"
+        static let speakerSyncWasEnabled = "speakerSync.wasEnabled"
+        static let localNetworkWasGranted = "localNetwork.wasGranted"
         static let reconnectAtLaunch = "general.reconnectAtLaunch"
         static let wakeRestoreMinutes = "audio.wakeRestoreMinutes"
         static let connectVolume = "audio.connectVolume"
@@ -92,11 +94,13 @@ public struct AppSettings {
         static let surfacePinned = "surface.pinned"
         static let eqAdvancedExpanded = "eq.advancedExpanded"
         static let licenseKey = "license.key"
-        static let licenseCheckInConsent = "license.checkInConsent"
         static let licenseInstallID = "license.installID"
         static let licenseCheckInURL = "license.checkInURL"
         static let licenseStatus = "license.status"
         static let licenseMaxMajor = "license.maxMajor"
+        static let telemetryOptIn = "telemetry.optIn"
+        static let telemetryAsked = "telemetry.asked"
+        static let touchBarControls = "general.touchBarControls"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -148,6 +152,34 @@ public struct AppSettings {
     public var hasCompletedSetup: Bool {
         get { defaults.bool(forKey: Keys.hasCompletedSetup) }
         nonmutating set { defaults.set(newValue, forKey: Keys.hasCompletedSetup) }
+    }
+
+    /// Whether the Speaker Sync helper has EVER been seen `.enabled` — set the
+    /// first time ``SetupModel`` reads that status, and cleared by an explicit
+    /// skip of the Speaker Sync step. It gates the wake audit's "this was
+    /// turned off in Login Items" nag (``SetupModel/unmetRequiredPermissions()``),
+    /// so only a real REGRESSION re-opens the Setup window: a user who never
+    /// approved the helper, or who passed on it, is never nagged about it.
+    public var speakerSyncWasEnabled: Bool {
+        get { defaults.bool(forKey: Keys.speakerSyncWasEnabled) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.speakerSyncWasEnabled) }
+    }
+
+    /// Whether a Local Network browse has EVER reached the network — written by
+    /// ``SetupModel``'s one prime funnel the first time it proves the grant, and
+    /// cleared only by a real refusal (the mDNS policy error).
+    ///
+    /// It exists because Local Network is the one permission with no silent
+    /// read: browsing is what raises the system prompt, so a status of
+    /// `.unknown` — which every freshly built ``SetupModel`` starts at — cannot
+    /// be resolved by just looking. Without this bit, re-opening Setup showed a
+    /// long-granted permission as un-asked and invited the user to grant it
+    /// again (live report, 2026-08-29). With it, a fresh model starts from the
+    /// proven grant and re-verifies by browsing, which raises no prompt on a
+    /// permission already held.
+    public var localNetworkWasGranted: Bool {
+        get { defaults.bool(forKey: Keys.localNetworkWasGranted) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.localNetworkWasGranted) }
     }
 
     /// Settings › General "Reconnect last speakers when Audiout starts"
@@ -444,6 +476,23 @@ public struct AppSettings {
         nonmutating set { defaults.set(newValue?.rawValue, forKey: Keys.licenseStatus) }
     }
 
+    /// Whether this install should be treated as unregistered: no key at all,
+    /// or a key the server declined (`unknown`/`invalid`/`revoked`). A stored
+    /// key with NO verdict yet is **not** unregistered — the check is soft, so
+    /// an unanswered question gets the benefit of the doubt.
+    ///
+    /// Deliberately says nothing about whether this build even has a license
+    /// server: callers compose it with `licenseServerURL != nil` themselves,
+    /// because a build run from source hides the whole surface rather than
+    /// calling anyone unregistered.
+    public var licenseUnregistered: Bool {
+        if (licenseKey ?? "").isEmpty { return true }
+        switch licenseStatus {
+        case .unknown, .invalid, .revoked: return true
+        case .active, nil: return false
+        }
+    }
+
     /// The highest major version the stored key covers, as the server reported
     /// it. `nil` when absent (and for a stored 0, which no real answer uses).
     public var licenseMaxMajor: Int? {
@@ -473,17 +522,16 @@ public struct AppSettings {
         buyURLOverride ?? Self.bundleURL(forInfoDictionaryKey: "AudioutBuyURL")
     }
 
+    /// **https only.** Requests to the license server carry the license key, so
+    /// a plain-http endpoint would put it on the wire in the clear; a non-https
+    /// value is treated as absent, which degrades to the free build's behavior
+    /// rather than to an insecure one. The initializer's
+    /// `licenseServerURL`/`buyURL` overrides deliberately bypass this — they
+    /// are a test seam, not a shipped input.
     private static func bundleURL(forInfoDictionaryKey key: String) -> URL? {
-        (Bundle.main.object(forInfoDictionaryKey: key) as? String).flatMap(URL.init(string:))
-    }
-
-    /// Consent to send licence check-ins (``LicenseCheckIn``) — telemetry that
-    /// records device spread for a licence, never a gate. Defaults to **off**:
-    /// this is the identified stream (PRODUCT.md Data Collection stream 2), so
-    /// it is opt-in like the anonymous stream, never assumed on.
-    public var licenseCheckInConsent: Bool {
-        get { defaults.bool(forKey: Keys.licenseCheckInConsent) }
-        nonmutating set { defaults.set(newValue, forKey: Keys.licenseCheckInConsent) }
+        (Bundle.main.object(forInfoDictionaryKey: key) as? String)
+            .flatMap(URL.init(string:))
+            .flatMap { $0.scheme == "https" ? $0 : nil }
     }
 
     /// A stable per-install identifier for licence check-ins — lazily created
@@ -499,17 +547,55 @@ public struct AppSettings {
         return generated
     }
 
+    /// Opt-in usage analytics consent (PRODUCT.md Data Collection stream 1).
+    /// Defaults to `false` — off by default, and only ever flipped on by the
+    /// user's own answer to the one-time ask (``telemetryAsked``).
+    public var telemetryOptIn: Bool {
+        get { defaults.bool(forKey: Keys.telemetryOptIn) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.telemetryOptIn) }
+    }
+
+    /// Whether the one-time ask has been answered — never re-prompt.
+    /// Defaults to `false` (unset): a fresh install hasn't been asked yet.
+    public var telemetryAsked: Bool {
+        get { defaults.bool(forKey: Keys.telemetryAsked) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.telemetryAsked) }
+    }
+
     /// The licence check-in endpoint (``LicenseCheckIn``). Normally DERIVED —
     /// `v1/checkin` under ``licenseServerURL`` — so a build that carries a
     /// license server checks in and a build run from source, which carries
     /// none, has no endpoint and stays silent. A stored value overrides the
     /// derived one, which is how tests point it somewhere harmless. `nil` when
     /// there is neither.
+    ///
+    /// The stored value must be **https** for the same reason
+    /// ``bundleURL(forInfoDictionaryKey:)`` insists on it — the check-in POSTs
+    /// the license key — so a preference-planted `http://` endpoint is ignored
+    /// and the derived https URL answers instead.
     public var checkInURL: URL? {
         get {
-            defaults.string(forKey: Keys.licenseCheckInURL).flatMap(URL.init(string:))
+            defaults.string(forKey: Keys.licenseCheckInURL)
+                .flatMap(URL.init(string:))
+                .flatMap { $0.scheme == "https" ? $0 : nil }
                 ?? licenseServerURL?.appending(path: "v1/checkin")
         }
         nonmutating set { defaults.set(newValue?.absoluteString, forKey: Keys.licenseCheckInURL) }
+    }
+
+    /// Whether Audiout may replace the Touch Bar with its own controls while
+    /// it is playing to speakers (Settings › General, "Use Audiout's Touch Bar
+    /// controls"). ON unless the user turned it off — taking the whole bar is
+    /// a big enough intrusion that it needs a visible way out. Only meaningful
+    /// on Touch Bar hardware; the Settings row hides itself everywhere else.
+    /// Unset resolves to `true` (distinguished from a stored `false` via
+    /// `object(forKey:)`, the same discipline the other default-true settings
+    /// use).
+    public var touchBarControlsEnabled: Bool {
+        get {
+            guard defaults.object(forKey: Keys.touchBarControls) != nil else { return true }
+            return defaults.bool(forKey: Keys.touchBarControls)
+        }
+        nonmutating set { defaults.set(newValue, forKey: Keys.touchBarControls) }
     }
 }

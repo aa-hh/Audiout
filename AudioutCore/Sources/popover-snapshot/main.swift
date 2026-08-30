@@ -227,9 +227,10 @@ func findViews<T: NSView>(of type: T.Type, in root: NSView) -> [T] {
 ///
 /// T8: also seeds THREE Applications-card rows across the three
 /// `AppRouteDestination` cases — "Music" → `.device(id: "office")` (routed,
-/// active/undimmed slider), "Safari" → `.currentDevice` (explicit local pick,
-/// dimmed slider), "Podcasts" → `.noRedirect` (the neutral default, also
-/// dimmed) — so every destination state is represented in one panel. Every
+/// gold armed fader), "Safari" → `.currentDevice` (explicit local pick),
+/// "Podcasts" → `.noRedirect` (the neutral default, neutral fader) — so every
+/// destination state is represented in one panel; all three sliders are live.
+/// Every
 /// row is built with `showsMeter: true` (`PopoverController.makeAppRow`
 /// always passes that), so all three get a distinct RMS pushed via
 /// `test_pushAppLevel` and are settled synchronously via `findViews` +
@@ -247,10 +248,10 @@ func snapshotMeters(appearanceName: NSAppearance.Name, label: String, outDir: UR
     let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
                                          loadPersisted: false)
     // T8: three app rows spanning all three `AppRouteDestination` cases —
-    // `.device(id:)` (routed away, active slider), `.currentDevice` (explicit
-    // local pick, dimmed slider), `.noRedirect` (neutral default, also
-    // dimmed) — so the Applications card proves every destination state at
-    // once.
+    // `.device(id:)` (routed away, gold armed fader), `.currentDevice`
+    // (explicit local pick), `.noRedirect` (neutral default) — so the
+    // Applications card proves every destination state at once. Every row's
+    // slider is live.
     let musicBundleID = "com.apple.Music"
     let safariBundleID = "com.apple.Safari"
     let podcastsBundleID = "com.apple.podcasts"
@@ -873,17 +874,11 @@ func snapshotRestingRing(appearanceName: NSAppearance.Name, label: String, outDi
     window.contentView = NSView()
 }
 
-/// Render the `local-mix-blocked` scenario (spec §4.6, the §4.8 fixture list's
-/// **greyed-blocked** and **hover** nodes): an AirPlay device (Office) is
-/// checked, so the Mac's own row ("MacBook Pro Speakers") is local-mix BLOCKED —
-/// greyed hollow bus node, honestly-disabled checkbox, tertiary name. The
-/// production body-click branch (`test_simulateBlockedBodyClick` → the exact
-/// `mouseDown` path) then MOUNTS the in-place one-line refusal note
-/// (`GroupController.localMixRefusalReason`) under the row — the reachable
-/// trigger, proven rendered rather than tooltip-only. "Bedroom HomePod"
-/// (an ordinary hollow row) is set HOVERED via `test_setHovered(true)` (the
-/// same `setHovered` path a real pointer crossing drives), so the neutral
-/// hover wash — never gold, never on the node — is pinned in the same panel.
+/// Render the `local-mix-blocked` scenario (the §4.8 fixture list's **hover**
+/// node): an AirPlay device (Office) is checked, and "Bedroom HomePod" (an
+/// ordinary hollow row) is set HOVERED via `test_setHovered(true)` (the same
+/// `setHovered` path a real pointer crossing drives), so the neutral hover
+/// wash — never gold, never on the node — is pinned in the panel.
 @MainActor
 func snapshotLocalMixBlocked(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
     let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
@@ -908,19 +903,6 @@ func snapshotLocalMixBlocked(appearanceName: NSAppearance.Name, label: String, o
     _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
     popover.update(devices: backend.devices)
     popover.test_simulateOpen()
-
-    // Mount the refusal note through the REAL blocked-body-click branch — the
-    // same `mouseDown(with:)` production path, minus the synthesized event.
-    guard let localRow = popover.test_deviceRow(for: "local-mac") else {
-        print("  SETUP FAIL: no local-mac row mounted"); return
-    }
-    localRow.test_simulateBlockedBodyClick()
-    // `insertRow(animated: true)` mounts the note at its full height straight
-    // away — its reveal clip's height constraint takes the grown value the
-    // moment the animator retargets it, so the capture needs no end-state
-    // settling of its own even though a windowless view never fires the
-    // animation's completion handler.
-    drain(0.1)
 
     let appearance = snapshotAppearance(appearanceName)
     let panelView = popover.test_panelView
@@ -964,9 +946,6 @@ func snapshotLocalMixBlocked(appearanceName: NSAppearance.Name, label: String, o
 ///     multi-source composite, never collapsed to one reason.
 ///   - "feed-group": a plain manual member with no redirect ⇒ FEED reads the
 ///     bare **"System"** token, for contrast against the composite above.
-///   - "feed-ap1": an AP1-only device (`supportsAirPlay2: false`), also a
-///     manual member ⇒ FEED reads **"AP1 System"** — the one monochrome
-///     micro-tag exception, prefixed ahead of the composite.
 ///   - "feed-failed": `.failed` ⇒ FEED reads **"Couldn't connect"** — the
 ///     failure-red override, replacing the composite entirely (paired with
 ///     the red halo ring + open diagnosis panel).
@@ -984,8 +963,6 @@ func snapshotFeedComposite(appearanceName: NSAppearance.Name, label: String, out
               volume: 55, isSelected: true, connectionState: .connected),
         Device(id: "feed-group", name: "Living Room Sonos", kind: .sonos,
               volume: 60, isSelected: true, connectionState: .connected),
-        Device(id: "feed-ap1", name: "Attic AirPort Express", kind: .airportExpress,
-              supportsAirPlay2: false, volume: 40, isSelected: true, connectionState: .connected),
         Device(id: "feed-failed", name: "Basement Speaker", kind: .generic,
               volume: 45, connectionState: .failed(ConnectionFailure(cause: .notResponding))),
         Device(id: "feed-overflow", name: "Overflow Speaker", kind: .appleTV,
@@ -1024,7 +1001,6 @@ func snapshotFeedComposite(appearanceName: NSAppearance.Name, label: String, out
     // this fixture, so every non-failed row's neutral segment reads "System".
     _ = popover.test_toggleDeviceEnabled(deviceID: "feed-manual", on: true)
     _ = popover.test_toggleDeviceEnabled(deviceID: "feed-group", on: true)
-    _ = popover.test_toggleDeviceEnabled(deviceID: "feed-ap1", on: true)
 
     popover.applyRoutedApps(deviceID: "feed-overflow", appNames: overflowAppNames)
     popover.update(devices: backend.devices)

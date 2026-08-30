@@ -123,10 +123,59 @@ public final class AppSurfaceController {
     /// frame. Once per open: the panel republishes its size on every fold tick.
     private var overflowReported = false
 
+    /// The launch splash while it is on screen. WEAK on purpose: the hosting
+    /// content view owns it, and it takes itself off when it leaves — nothing
+    /// here has to remember to clear a stale one.
+    private weak var splash: SurfaceSplashView?
+
+    /// Debounces the discovery stream to decide when the fleet has quiesced, so
+    /// the window is REVEALED (fronted) already at the settled size and the user
+    /// sees one frame, never a resize. Non-nil only while a first-open reveal is
+    /// pending (the settle wait exists only to gate that first ornament); the
+    /// headless/Reduce-Motion open never makes one and keeps the old synchronous
+    /// timing.
+    private var settleTracker: DiscoverySettleTracker?
+
+    /// While a first-open splash reveal is pending: whether one is pending, the
+    /// anchor to reveal at, and the backstop timer that reveals anyway if
+    /// discovery never quiets. The window is NOT on screen during this wait — it
+    /// is fronted once, at the settled size, so nothing ever resizes in front of
+    /// the user (a downward window grow can't be hidden by an internal cover; the
+    /// only fix is to not grow it on screen at all — front it already settled).
+    private var isRevealPending = false
+    private var pendingRevealAnchor: NSRect?
+    private var revealCeilingTimer: Timer?
+
+    /// Work handed to ``whenRevealed(_:)`` while that wait was still on — run at
+    /// the end of the reveal, dropped if the wait is cancelled (a close during
+    /// the wait means the user has moved on).
+    private var pendingRevealWork: (() -> Void)?
+
+    /// The most recent device-id snapshot from discovery, kept across opens so a
+    /// warm first open (fleet already known) can seed the settle tracker at once.
+    private var lastDeviceIDs: Set<String> = []
+
     /// Whether the surface window is currently presented (show → close). The
     /// Mixer's `surfaceDidShow`/`surfaceDidHide` lifecycle keys off this so
     /// metering/monitors only run while a user can see the panel.
     public private(set) var isShown = false
+
+    /// Whether the Mixer was put to sleep because its pixels stopped being
+    /// visible — the surface fully covered by another window, or the app
+    /// hidden. A PINNED surface is an ordinary window the user can leave open
+    /// for days behind a browser, and "open" was the only question anyone
+    /// asked: metering, monitors and repaints all ran full tilt against a
+    /// surface nobody could see.
+    ///
+    /// A LATCH, not a mirror of the occlusion state: `surfaceDidHide()` /
+    /// `surfaceDidShow()` are edge calls (they drop transient state and re-run
+    /// the open ritual), so firing them per notification would tear the panel
+    /// down repeatedly. It also keeps the ordinary close/tab-switch paths from
+    /// hiding a Mixer that is already asleep.
+    private var surfaceCoveredHidden = false
+
+    /// The occlusion/app-hide observers, kept only so they can be dropped.
+    private var pixelVisibilityObservers: [NSObjectProtocol] = []
 
     /// Fired after the shell window really closes (✕ / Esc / `performClose`).
     public var onClose: (() -> Void)?
@@ -148,11 +197,25 @@ public final class AppSurfaceController {
     /// Both are WINDOW CONTENT sizes — the toolbar strip is included, because
     /// the Mixer's fit (`fittingSizeSettled()`) already carries the measured
     /// chrome inset. The Mixer's fit at open raises the height above this
-    /// floor; the screen's visible frame caps it. The floor exists for the
-    /// screens that cannot scroll: the Groups editor pane has no scroll view,
-    /// so a 7-device fleet's editor plus the screen's footer strip must fit
-    /// here (`AppSurfaceControllerTests.theSevenDeviceEditorFitsTheMinimumFrame`).
+    /// floor; the screen's visible frame caps it. The Groups editor pane now
+    /// SCROLLS (roadmap 039), so a fleet it cannot fit overflows into its
+    /// scroller instead of asking this floor to grow — guarded by
+    /// `AppSurfaceControllerTests.theSevenDeviceEditorScrollsInsideTheMinimumFrame`.
     public static let minimumContentSize = NSSize(width: SurfaceLayout.width, height: 600)
+
+    /// How long the fleet must stop changing before the first-open reveal fires.
+    /// Wider than discovery's between-device gap so a device-at-a-time stream
+    /// does not read as "settled" in a lull mid-stream.
+    static let revealQuietWindow: TimeInterval = 0.5
+    /// The backstop, and a bound on how long a menu-bar click can appear to do
+    /// NOTHING. It is above `revealQuietWindow` (0.5 s), so a warm open still
+    /// settles first and fronts at the settled size exactly as before. A COLD
+    /// open now reveals here rather than waiting out a whole discovery: the
+    /// splash covers the content churn, and whatever frame growth still arrives
+    /// late is bounded and brief — strictly better than a click that shows
+    /// nothing for three seconds. A repeat click cuts the wait short on demand
+    /// (`show(anchorRect:)`).
+    static let revealCeiling: TimeInterval = 0.6
 
     public init(popoverController: PopoverController,
                 settings: AppSettings = AppSettings(),
@@ -179,6 +242,21 @@ public final class AppSurfaceController {
         toolbarController.onSelectScreen = { [weak self] in self?.select($0) }
         toolbarController.onTogglePin = { [weak self] in self?.togglePin() }
         toolbarController.onQuit = { NSApp?.terminate(nil) }
+
+        // The discovery stream feeds the first-open reveal's settle tracker (nil
+        // outside a first open — a plain no-op then), and is remembered so a
+        // warm open (fleet already known) can seed the tracker at once instead
+        // of waiting on the next event. EMPTY snapshots are NOT fed: at a cold
+        // launch discovery starts empty and streams in, and an empty set would
+        // settle the tracker instantly (0.3 s) — fronting the surface at the
+        // floor, then growing it as the real fleet arrives, which is exactly the
+        // open jump. A genuinely empty network reveals on the ceiling backstop.
+        popoverController.onDeviceSnapshot = { [weak self] ids in
+            guard let self else { return }
+            self.lastDeviceIDs = ids
+            guard !ids.isEmpty else { return }
+            self.settleTracker?.note(deviceIDs: ids)
+        }
         if let window = shell.window {
             toolbarController.attach(to: window)
             // Materialize the toolbar's title-bar machinery NOW (a toolbar on
@@ -188,6 +266,27 @@ public final class AppSurfaceController {
             window.layoutIfNeeded()
         }
         syncToolbar()
+
+        // Pixel visibility (perf P2-12): a covered or hidden surface is idle.
+        // AppKit answers both halves — the window's own occlusion state, and
+        // the app being hidden (⌘H / Hide Others), which occlusion alone does
+        // not report.
+        let center = NotificationCenter.default
+        var observers: [NSObjectProtocol] = []
+        if let window = shell.window {
+            observers.append(center.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification,
+                object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reassessPixelVisibility() }
+            })
+        }
+        for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
+            observers.append(center.addObserver(
+                forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reassessPixelVisibility() }
+            })
+        }
+        pixelVisibilityObservers = observers
 
         // ⌘1/⌘2/⌘3 (the retired header buttons' key equivalents): the shell
         // panel consults this before stock dispatch while the surface is key.
@@ -201,21 +300,114 @@ public final class AppSurfaceController {
         }
     }
 
+    deinit {
+        for observer in pixelVisibilityObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    // MARK: Pixel visibility (perf P2-12)
+
+    /// Ask AppKit whether any of the surface's pixels are actually on screen,
+    /// and hand the answer to the latch. Never runs headless — neither
+    /// notification fires with no window server — which is why the seam below
+    /// exists.
+    private func reassessPixelVisibility() {
+        let visible = (shell.window?.occlusionState.contains(.visible) ?? true)
+            && !(NSApp?.isHidden ?? false)
+        applyPixelVisibility(visible)
+    }
+
+    /// Put the Mixer to sleep while its pixels are gone, and wake it properly
+    /// when they come back. Waking is the full Mixer open ritual the folder's
+    /// rules require of ANY re-entry — the panel is stale by design while it is
+    /// hidden, so re-showing it without `rebuildForOpen()` would put a stale
+    /// list back on screen.
+    ///
+    /// Only the Mixer sleeps: Groups and Settings run no metering and no
+    /// monitors, and a reveal-pending surface is not on screen yet.
+    private func applyPixelVisibility(_ visible: Bool) {
+        guard isShown, selectedScreen == .mixer, !isRevealPending else { return }
+        if !visible, !surfaceCoveredHidden {
+            surfaceCoveredHidden = true
+            popoverController.surfaceDidHide()
+        } else if visible, surfaceCoveredHidden {
+            surfaceCoveredHidden = false
+            popoverController.rebuildForOpen()
+            popoverController.surfaceDidShow()
+            mixerPanel?.panelContentDidChangeHeight(animated: false)
+        }
+    }
+
     // MARK: Show / hide
 
     /// Present the surface anchored under the status item (`nil` centers it;
     /// pinned mode fronts the window wherever the user left it — the shell
-    /// owns that distinction). A FRESH show mounts the current screen first so
-    /// the window appears at that screen's size with no visible jump; showing
-    /// an ALREADY-shown surface (the pinned always-front click) only fronts it
-    /// — re-running the Mixer's open ritual there would discard the user's
-    /// mid-open collapse toggles for no reason (it is the same open session).
+    /// owns that distinction). A FRESH show mounts the current screen; on the
+    /// first-open splash path it does NOT front the window yet — it waits for
+    /// discovery to settle and fronts once, already at the settled size
+    /// (`revealFirstOpen`), so the window never resizes in front of the user.
+    /// Showing an ALREADY-shown surface (the pinned always-front click) only
+    /// fronts it — re-running the Mixer's open ritual there would discard the
+    /// user's mid-open collapse toggles for no reason (it is the same open
+    /// session).
     public func show(anchorRect: NSRect?) {
+        // A repeat click DURING a first-open reveal wait is the user asking for
+        // the surface NOW — the wait has visibly done nothing, so clicking again
+        // must not be swallowed (it used to `return`, and every further click
+        // vanished until the ceiling fired). Reveal at the size measured so far:
+        // `revealFirstOpen` disarms the backstop, fronts once, and lays the
+        // splash over whatever is in place, and its own `guard isRevealPending`
+        // makes this call safe.
+        if isRevealPending {
+            revealFirstOpen()
+            return
+        }
         let wasShown = isShown
         if !wasShown {
+            Analytics.capture("surface:shown", ["screen": String(describing: selectedScreen)])
+            // A fresh show starts awake, whatever a previous session latched.
+            surfaceCoveredHidden = false
             overflowReported = false
             sessionContentSize = measureSessionContentSize()
             mount(selectedScreen)
+            // First open of the process only: DEFER the on-screen reveal until
+            // discovery quiets, so the window is fronted ONCE, already at the
+            // settled size, and the branded hold's centred mark never slides.
+            // Headless / Reduce Motion earn no ornament, so this never runs and
+            // the open stays synchronous exactly as before.
+            if SurfaceSplashView.wouldPresent {
+                isRevealPending = true
+                pendingRevealAnchor = anchorRect
+                // A quiet window wider than the discovery trickle's gap between
+                // devices, so a stream that arrives one device at a time does
+                // NOT settle in a gap mid-stream (0.3 s settled between the
+                // ~0.35 s-spaced fake speakers — the surface fronted at the floor
+                // and grew as the rest arrived, the jump again). It settles once
+                // the fleet has genuinely stopped changing for this long.
+                let tracker = DiscoverySettleTracker(quietWindow: Self.revealQuietWindow)
+                tracker.onSettled = { [weak self] in self?.revealFirstOpen() }
+                settleTracker = tracker
+                // Seed with the fleet already known (a warm open): it settles on
+                // its own quiet window and reveals promptly. A cold open has an
+                // empty fleet here, so the tracker is NOT armed — it waits for
+                // the first real device (or the ceiling), never settling on the
+                // empty pre-discovery state. (Deliberately not `start()`, which
+                // arms an empty-fleet settle — the source of the early reveal.)
+                if !lastDeviceIDs.isEmpty {
+                    tracker.note(deviceIDs: lastDeviceIDs)
+                }
+                // The backstop: a network that never quiets must still reveal
+                // the surface, or the user is trapped waiting on a click that
+                // seemed to do nothing.
+                revealCeilingTimer = Timer.scheduledTimer(
+                    withTimeInterval: Self.revealCeiling,
+                    repeats: false) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.revealFirstOpen() }
+                }
+                return
+            }
+            settleTracker = nil
         }
         shell.show(anchorRect: anchorRect)
         isShown = true
@@ -223,6 +415,71 @@ public final class AppSurfaceController {
             popoverController.surfaceDidShow()
         }
         publishVisibleScreen()
+    }
+
+    /// Discovery has quiesced (or the backstop fired): re-measure the SETTLED
+    /// fleet, size the still-off-screen window to it, THEN front it once and lay
+    /// the branded hold over the already-settled content. The user's very first
+    /// sight of the surface is the settled frame — nothing resizes, and the
+    /// mark holds still because the frame it centres in never changes. Fires at
+    /// most once (the tracker settles once, and this disarms the backstop).
+    private func revealFirstOpen() {
+        guard isRevealPending else { return }
+        isRevealPending = false
+        revealCeilingTimer?.invalidate()
+        revealCeilingTimer = nil
+        settleTracker = nil
+
+        overflowReported = false
+        sessionContentSize = measureSessionContentSize()
+        if selectedScreen == .mixer {
+            // Settled rows, not sliding — animated:false through the panel's own
+            // re-fit, still off screen.
+            mixerPanel?.panelContentDidChangeHeight(animated: false)
+            // Front at the FLOORED session size, not the Mixer's raw fit. AppKit
+            // resizes the shell window to the content controller's
+            // `preferredContentSize` and does so DEFERRED — a plain `setFrame`
+            // here is overridden a runloop later (verified live) — so this
+            // LAST write pins the size the window actually opens at. Below the
+            // 600 floor (a small fleet) the raw fit would otherwise shrink the
+            // window under the splash right after it fronts.
+            mixerPanel?.preferredContentSize = sessionContentSize
+        }
+        applySessionFrame()
+
+        let anchor = pendingRevealAnchor
+        pendingRevealAnchor = nil
+        shell.show(anchorRect: anchor)
+        isShown = true
+        if selectedScreen == .mixer {
+            popoverController.surfaceDidShow()
+        }
+        publishVisibleScreen()
+
+        // The branded hold, over the settled content at the settled size:
+        // content is already in place and discovery already quiet, so only the
+        // hold gates its cross-fade — "splash solid, then cross-fade onto an
+        // already-settled list" (owner).
+        splash = SurfaceSplashView.present(over: shell.window?.contentView)
+        splash?.noteContentReady()
+        splash?.noteDiscoverySettled()
+
+        // Anything that was waiting for a window to exist (the deep link's
+        // license sheet) — last, so it lands on the fronted, settled surface.
+        let deferred = pendingRevealWork
+        pendingRevealWork = nil
+        deferred?()
+    }
+
+    /// Run `work` once the surface is genuinely on screen: straight away when it
+    /// already is, otherwise at the end of the deferred first-open reveal. Call
+    /// it AFTER ``show(anchorRect:)`` — a sheet presented during the reveal wait
+    /// would never appear, because the window has not been fronted yet.
+    /// Last ask wins; the wait's only caller is a deep link, and a newer link
+    /// supersedes an older one.
+    public func whenRevealed(_ work: @escaping () -> Void) {
+        guard isRevealPending else { return work() }
+        pendingRevealWork = work
     }
 
     /// Close through the shell's real-close path (`windowWillClose` →
@@ -237,12 +494,29 @@ public final class AppSurfaceController {
     }
 
     private func handleShellClosed() {
-        if isShown, selectedScreen == .mixer {
+        // A Mixer already asleep behind the latch has had its `surfaceDidHide()`;
+        // a second one would run the teardown twice.
+        if isShown, selectedScreen == .mixer, !surfaceCoveredHidden {
             popoverController.surfaceDidHide()
         }
+        surfaceCoveredHidden = false
         isShown = false
+        // The settle wait belongs to this open's first-reveal; a close ends it.
+        cancelPendingReveal()
         publishVisibleScreen()
         onClose?()
+    }
+
+    /// Drop a pending first-open reveal (a close during the settle wait). The
+    /// window was never fronted, so there is nothing to hide — just stop the
+    /// wait from later fronting a surface the user has moved on from.
+    private func cancelPendingReveal() {
+        isRevealPending = false
+        pendingRevealAnchor = nil
+        pendingRevealWork = nil
+        revealCeilingTimer?.invalidate()
+        revealCeilingTimer = nil
+        settleTracker = nil
     }
 
     /// The screen a user can currently see, `nil` while the surface is closed.
@@ -290,12 +564,17 @@ public final class AppSurfaceController {
     /// size. Selecting the current screen is a no-op.
     public func select(_ screen: SurfaceScreen) {
         guard screen != selectedScreen else { return }
-        if selectedScreen == .mixer, isShown {
+        Analytics.capture("surface:screen_selected", ["screen": String(describing: screen)])
+        if selectedScreen == .mixer, isShown, !surfaceCoveredHidden {
             // The panel is leaving the window: drop what must not outlive a
             // session (transient selection, stale meter bars) and stop paying
-            // for RMS while no meter is visible.
+            // for RMS while no meter is visible. A Mixer already asleep behind
+            // the occlusion latch has had exactly this call already.
             popoverController.surfaceDidHide()
         }
+        // Whichever direction this switch goes, the latch is spent: leaving the
+        // Mixer hides it anyway, and arriving at it below shows it awake.
+        surfaceCoveredHidden = false
         selectedScreen = screen
         syncToolbar()
         if screen == .mixer {
@@ -444,7 +723,11 @@ public final class AppSurfaceController {
 
     public var isPinned: Bool { shell.isPinned }
 
-    public func togglePin() { setPinned(!shell.isPinned) }
+    public func togglePin() {
+        let newValue = !shell.isPinned
+        Analytics.capture("surface:pin_toggled", ["pinned": newValue ? "true" : "false"])
+        setPinned(newValue)
+    }
 
     /// Flip the shell's manner profile (U1) and persist the choice. Also
     /// re-seats every screen's content below the toolbar strip (measured —
@@ -526,6 +809,21 @@ public final class AppSurfaceController {
     var test_settingsRoot: SettingsRootViewController? { settingsRoot }
     /// The chrome inset screens are currently seated below (0 unpinned).
     var test_chromeTopInset: CGFloat { chromeTopInset }
+    /// The launch splash, `nil` when this open showed none or it has left.
+    var test_splash: SurfaceSplashView? { splash }
+    /// The launch settle tracker, `nil` when no splash gated this open.
+    var test_settleTracker: DiscoverySettleTracker? { settleTracker }
+    /// Whether the first-open reveal is waiting on discovery to settle.
+    var test_isRevealPending: Bool { isRevealPending }
+    /// Drive the settle path exactly as a quiesced fleet would.
+    func test_settleDiscovery() { settleTracker?.test_settleNow() }
+    /// Fire the first-open reveal backstop exactly as its ceiling timer would.
+    func test_fireRevealCeiling() { revealFirstOpen() }
+    /// Drive the pixel-visibility latch exactly as an occlusion change would —
+    /// the live read never runs headless (no window server, no notification).
+    func test_notePixelVisibility(_ visible: Bool) { applyPixelVisibility(visible) }
+    /// Whether the Mixer is currently asleep behind the occlusion latch.
+    var test_surfaceCoveredHidden: Bool { surfaceCoveredHidden }
 }
 
 // MARK: - SurfaceScreenViewController

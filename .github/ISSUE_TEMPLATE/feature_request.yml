@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest something Audiout should be able to do.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What were you trying to do?
+      description: Describe the situation, not the control you want added - the problem is more useful than the solution.
+      placeholder: When guests arrive I want the same three rooms at the same levels, and setting them one at a time takes too long.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What did you have in mind?
+      description: Optional. If you have a specific idea for how it should work, say so.
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How do you handle it today?
+      description: Optional. What you do instead, in Audiout or elsewhere.

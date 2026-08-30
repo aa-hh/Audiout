@@ -253,6 +253,17 @@ public enum BackendEvent: Sendable, Equatable {
     /// ``NativeBackend`` emits it — it's the only backend with a real PTP
     /// handover to explain; `MockBackend`/`OwnToneBackend` never do.
     case takeoverStatus(TakeoverStatus?)
+
+    /// The whole-system capture tap failed, so every selected speaker is
+    /// silent while its row still reads "Connected" — the one condition the
+    /// device rows structurally cannot express. `message` is
+    /// ``NativeCaptureError/userMessage``, rendered verbatim; `retrying` says
+    /// whether the T16 backoff retry is armed (`false` = permanent, e.g.
+    /// `.osUnsupported`, and only a restart or deselecting everything clears
+    /// it). `message: nil` clears the condition — capture recovered, or is no
+    /// longer desired. Only ``NativeBackend`` emits it; it's the only backend
+    /// that owns a real tap.
+    case captureFailed(message: String?, retrying: Bool)
 }
 
 /// View-facing state for the takeover status strip (T6). Almost exactly
@@ -495,7 +506,13 @@ public protocol LatencyConfigurable: AnyObject {
     /// when idle it applies silently. Returns when the re-add pass has
     /// completed (per-device failures follow the D4 best-effort rule: marked
     /// unavailable, the rest proceed).
-    func applyStartBuffer(ms: Int) async
+    ///
+    /// `expected` is how many devices were streaming when the apply began;
+    /// `reconnected` is how many of those the best-effort re-add actually
+    /// re-established. The settings pane needs both so it can only claim
+    /// "Speakers reconnected" when they all did.
+    @discardableResult
+    func applyStartBuffer(ms: Int) async -> (reconnected: Int, expected: Int)
 }
 
 /// The optional metering-active capability (T-GATE, playback-meter-research.md).
@@ -553,15 +570,14 @@ public protocol AppRouteConfiguring: AnyObject {
     /// `OwnToneBackend`) compile without change — they have no per-app capture.
     func handleAppLaunched(bundleID: String)
 
-    /// Set the LOCAL playback volume of a `.currentDevice`-routed app (Bug T2):
-    /// an app pinned to "Current Device" is captured and replayed on the Mac's
-    /// built-in speakers as an independent stream, and this levels that stream.
+    /// Set the volume of an app that is rendered from its own capture rather than
+    /// streamed to a device: a `.currentDevice` app replayed on the Mac's built-in
+    /// speakers (Bug T2), or an un-redirected app being LEVELED into the mix.
     /// The popover slider calls it directly for a low-latency response; the same
     /// value also flows through `updateAppRoutes` from the persisted route edit.
-    /// `volume` is the UI's 0–100 int. A no-op for a bundle ID with no live local
-    /// stream (non-`.currentDevice`, or not yet capturing). Default empty body so
-    /// non-`NativeBackend` conformers compile without change — they have no local
-    /// per-app playback.
+    /// `volume` is the UI's 0–100 int. A no-op for a bundle ID neither consumer
+    /// knows. Default empty body so non-`NativeBackend` conformers compile without
+    /// change — they have no per-app rendering.
     func setLocalPlaybackVolume(volume: Int, bundleID: String)
 }
 
@@ -570,8 +586,8 @@ extension AppRouteConfiguring {
     /// this. Only `NativeBackend` overrides it with real restart logic.
     public func handleAppLaunched(bundleID: String) {}
 
-    /// Default no-op so backends without local per-app playback don't need to
+    /// Default no-op so backends without per-app rendering don't need to
     /// implement this. Only `NativeBackend` overrides it (drives
-    /// ``LocalPlaybackControlling``).
+    /// ``LocalPlaybackControlling`` and ``LeveledAppInjector``).
     public func setLocalPlaybackVolume(volume: Int, bundleID: String) {}
 }

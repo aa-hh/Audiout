@@ -328,6 +328,9 @@ final class DemoPaneView: NSView {
         case .prompt:
             switch step {
             case .remoteControl: return DemoSettingsHandoffMockView(step: step)
+            // The one ask whose surface is OURS, so the rehearsal is the real
+            // view rather than a drawing of one.
+            case .usageStats:    return DemoConsentCardMockView()
             default:             return DemoPromptMockView(step: step)
             }
         // Every retry lands on the pane itself — Remote Control's included, now
@@ -848,6 +851,8 @@ func demoGlyph(_ name: String, pointSize: CGFloat,
 /// fresher in-process icon here would make the preview WRONG on a Mac where
 /// Launch Services hasn't caught up to the latest build yet (verified against
 /// live testing, where the real dialog and this mock visibly disagreed).
+/// Intentionally exempt from the `BrandMark` swap: a mock of an OS surface has
+/// to show what the OS will show, which is this icon.
 func demoIconAsAThirdPartyProcessSeesIt() -> NSImage {
     NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
 }
@@ -1057,9 +1062,10 @@ final class DemoPromptMockView: DemoMockView {
     /// and System Audio draws macOS's RED RECORD glyph — NOT Audiout's icon,
     /// which is what this table used to return for it. The badge, the size and
     /// the slot are identical either way; only the tile's contents change.
-    /// `.remoteControl` and `.speakerSync` never reach this mock (one raises the
-    /// Accessibility alert, the other has no dialog at all) and keep the app
-    /// icon as the safe default for a branch nothing takes.
+    /// `.remoteControl`, `.speakerSync` and `.usageStats` never reach this mock
+    /// (the first raises the Accessibility alert, the second has no dialog at
+    /// all, and the third draws its own real card — `DemoConsentCardMockView`)
+    /// and keep the app icon as the safe default for a branch nothing takes.
     private static func iconView(for step: SetupStep) -> NSView {
         switch step {
         // The live-confirmed red record tile: macOS leads its system-audio ask
@@ -1089,7 +1095,7 @@ final class DemoPromptMockView: DemoMockView {
         // DIALOG'S icon — the one a separate system process reads out of Launch
         // Services, not this process's own fresher `NSApp.applicationIconImage`
         // (see `demoIconAsAThirdPartyProcessSeesIt`).
-        case .remoteControl, .speakerSync:
+        case .remoteControl, .speakerSync, .usageStats:
             let icon = NSImageView()
             icon.image = demoIconAsAThirdPartyProcessSeesIt()
             icon.imageScaling = .scaleProportionallyUpOrDown
@@ -1663,6 +1669,9 @@ final class DemoSettingsMockView: DemoMockView {
         case .bluetooth:     return "Bluetooth"
         case .remoteControl: return "Accessibility"
         case .speakerSync:   return "Login Items"
+        // Never reached: Usage Statistics has no System Settings pane to land
+        // on, so nothing ever asks this mock to draw one for it.
+        case .usageStats:    return "General"
         }
     }
 
@@ -1799,6 +1808,96 @@ final class DemoSettingsHandoffMockView: DemoMockView {
     }
 }
 
+// MARK: - Usage-statistics consent card
+
+/// Usage Statistics' stage: the REAL ``UsageStatsConsentCard``, inert, with the
+/// pointer gliding to Share and pressing it.
+///
+/// Every other mock in this file is a drawing of a surface macOS owns, which is
+/// the best that can be done for something another process renders. This step's
+/// surface is Audiout's, so the rehearsal is not a drawing at all — it is the
+/// same view the sheet presents, built by the same initialiser, with its two
+/// buttons switched off. There is nothing to keep in step and nothing to get
+/// subtly wrong (owner: "why can't you make it look exactly like your
+/// mock-up").
+///
+/// The pass ends where it started, like every other ask: the card at rest with
+/// nothing pressed, because that is how the user will FIND it.
+final class DemoConsentCardMockView: DemoMockView {
+
+    private let card = UsageStatsConsentCard()
+    private let cursor = DemoCursorView(pointerHeight: 22)
+
+    /// Where the pointer waits: bottom-left, level with the buttons and clear
+    /// of every line of copy. A cursor resting on top of text reads as a
+    /// drawing mistake rather than a pointer.
+    private let cursorParkLeading: CGFloat = 34
+    private let cursorParkAboveBottom: CGFloat = 34
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        card.makeDecorative()
+        addSubview(card)
+        addSubview(cursor)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalTo: card.widthAnchor),
+            heightAnchor.constraint(equalTo: card.heightAnchor),
+            card.leadingAnchor.constraint(equalTo: leadingAnchor),
+            card.topAnchor.constraint(equalTo: topAnchor),
+            cursor.leadingAnchor.constraint(equalTo: leadingAnchor, constant: cursorParkLeading),
+            cursor.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -cursorParkAboveBottom),
+        ])
+        applySettledState()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// The rehearsal takes no clicks. Its buttons are real, undimmed AppKit
+    /// controls — that is what makes it accurate — so the refusal has to be
+    /// here, or a pointer over the stage would light up a hover state on a
+    /// button that answers nobody.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override var timelineDuration: TimeInterval { DemoBeat.loop }
+
+    override func applySettledState() {
+        cursor.alphaValue = 1
+        cursor.layer?.transform = CATransform3DIdentity
+    }
+
+    override func addTimelineAnimations() {
+        let end = timelineDuration
+        let delta = travelToShare()
+        let moved = NSValue(caTransform3D: CATransform3DMakeTranslation(delta.x, delta.y, 0))
+        let still = NSValue(caTransform3D: CATransform3DIdentity)
+        cursor.layer?.add(keyframes("transform", [
+            (0, still), (DemoBeat.idle, still), (DemoBeat.travelEnd, moved),
+            (DemoBeat.resetEnd, moved), (end, still),
+        ], timing: .easeOut), forKey: "cursorGlide")
+        cursor.layer?.add(keyframes("opacity", [
+            (0, 1), (DemoBeat.holdEnd - 0.3, 1), (DemoBeat.holdEnd, 0),
+            (DemoBeat.resetEnd, 0), (end, 1),
+        ]), forKey: "cursorFade")
+        cursor.addClickSplash(on: self, at: DemoBeat.pressEnd)
+    }
+
+    /// How far the pointer's TIP has to travel to the Share button's middle.
+    private func travelToShare() -> CGPoint {
+        let from = cursor.convert(cursor.tipPoint, to: self)
+        let button = card.shareButton
+        let to = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: self)
+        return CGPoint(x: to.x - from.x, y: to.y - from.y)
+    }
+
+    // MARK: Test-support hooks
+
+    /// The card the sheet would show, so a test can prove the two are the same
+    /// view rather than two drawings that happen to agree.
+    var test_card: UsageStatsConsentCard { card }
+}
+
 // MARK: - Settled mock
 
 /// The finale: the app's own icon resting in a soft warm-gold aura under a
@@ -1909,7 +2008,12 @@ final class DemoSettledMockView: NSView {
         // NOTHING here clips: no `masksToBounds`, no corner rounding, no mask.
         // This card is ours and draws unframed, and the ripple has to cross
         // the stage edge rather than end at it.
-        icon.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
+        // The finale card is OURS, not a mock of a macOS surface, so it wears
+        // the BRAND MARK rather than the OS app icon (see `BrandMark`); the
+        // icon stays as the fallback for a build with no bundled asset.
+        icon.image = BrandMark.image
+            ?? NSApp?.applicationIconImage
+            ?? NSImage(named: NSImage.applicationIconName)
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.translatesAutoresizingMaskIntoConstraints = false
 
@@ -1917,7 +2021,7 @@ final class DemoSettledMockView: NSView {
         headline.textColor = Tokens.Color.label
         headline.alignment = .center
 
-        line.font = .systemFont(ofSize: NSFont.systemFontSize)
+        line.font = Tokens.Font.body
         line.textColor = Tokens.Color.secondaryLabel
         line.alignment = .center
 

@@ -363,6 +363,28 @@ import AppKit
         #expect(window.titleVisibility == .hidden,
                 "no separate title bar ever — the centered toolbar item carries the name")
         #expect(surface.test_toolbarController.test_centeredTitleText == "Audiout")
+        #expect(window.titlebarAccessoryViewControllers.isEmpty,
+                "one header line only — the name rides the toolbar, never a second row")
+    }
+
+    /// Task A: the centered brand lockup fits WITHIN the unified strip, so the
+    /// mark's top no longer clips against the strip and the bubble's rounded
+    /// corner. The mark scales down to its box (never up), and the whole lockup
+    /// sits inside the measured strip height — the horizontal padding widens
+    /// the capsule, it must never grow it downward.
+    @Test func theHeaderLockupFitsTheToolbarStripUnclipped() throws {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        surface.shell.window?.layoutIfNeeded()
+        let toolbar = surface.test_toolbarController
+        #expect(toolbar.test_centeredMarkScalesToFit,
+                "the mark scales to fit its box — the whole figure, un-clipped")
+        let strip = surface.test_chromeTopInset
+        #expect(strip > 0, "the unified strip has real height to measure against")
+        let lockup = toolbar.test_centeredLockupFittingHeight
+        #expect(lockup > 0, "the centered lockup materialized")
+        #expect(lockup <= strip,
+                "the lockup fits within the strip — nothing clips (lockup \(lockup), strip \(strip))")
     }
 
     @Test func toolbarTracksSelectionAndPin() {
@@ -649,8 +671,9 @@ import AppKit
     /// a window that never orders on screen skips the reservation pass, so the
     /// geometry below stayed green through a build that shifted ~210pt in front
     /// of the owner. Both must hold. Measured on the REAL content; a stub
-    /// screen has no sidebar to trigger any of it. The picker view is private
-    /// AppKit, matched by class NAME like `SurfaceToolbarTests` does.
+    /// screen has no sidebar to trigger any of it. Measured off the leading
+    /// tab's own view, which the controller hands over — the tabs are three
+    /// separate items now, so there is no group picker to find by class name.
     @Test func theTabStripNeverMovesAcrossScreens() throws {
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
@@ -675,14 +698,13 @@ import AppKit
         func tabStripLeadingX() throws -> CGFloat {
             window.layoutIfNeeded()
             let themeFrame = try #require(window.contentView?.superview)
-            let picker = try #require(firstView(in: themeFrame,
-                                                namedLike: "NSToolbarItemGroupPicker"),
-                                      "the tab group's picker view is in the window's chrome")
-            return picker.convert(picker.bounds, to: themeFrame).minX
+            let tab = try #require(surface.test_toolbarController.test_tabView(for: .mixer),
+                                   "the leading tab is in the window's chrome")
+            return tab.convert(tab.bounds, to: themeFrame).minX
         }
 
         // Mixer twice: the first layout pass of a freshly attached toolbar
-        // settles the group's width, so the SECOND visit is the reference.
+        // settles the strip's width, so the SECOND visit is the reference.
         _ = try tabStripLeadingX()
         surface.select(.groups)
         surface.select(.mixer)
@@ -705,29 +727,21 @@ import AppKit
                 "and so is the Settings one")
     }
 
-    private func firstView(in root: NSView, namedLike name: String) -> NSView? {
-        if String(describing: type(of: root)).contains(name) { return root }
-        for subview in root.subviews {
-            if let hit = firstView(in: subview, namedLike: name) { return hit }
-        }
-        return nil
-    }
-
-    /// The Groups screen is a SPLIT: speakers/groups sidebar on the left,
-    /// editor pane on the right. Both halves must be mounted, laid out and
+    /// The Groups screen is a SPLIT: the speaker sidebar on the left, the
+    /// content pane on the right. Both halves must be mounted, laid out and
     /// side by side at the surface's real Groups size — a screen showing only
-    /// the editor has no way to change selection at all. Hand the surface the
+    /// the content has no way to change selection at all. Hand the surface the
     /// content half alone, or drop the sidebar split item, and this fails.
-    @Test func theGroupsScreenShowsTheSidebarAndTheEditor() throws {
+    @Test func theGroupsScreenShowsTheSidebarAndTheContentPane() throws {
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
         backend.start()
         let groupController = GroupController(backend: backend,
                                               store: GroupStore(directory: scratchDir),
                                               loadPersisted: false)
-        // A saved group over a fully-discovered fleet, so the screen
-        // auto-selects it and mounts a POPULATED editor pane — the state the
-        // live regression was reported in.
+        // A saved group over a fully-discovered fleet, so the screen mounts a
+        // POPULATED content pane (the card overview it auto-selects) — the
+        // state the live regression was reported in.
         _ = try groupController.createGroup(name: "Group 1",
                                             memberIDs: ["sonos-move", "office"])
         let groups = MixerWindowController(groupController: groupController,
@@ -761,23 +775,25 @@ import AppKit
                 "the sidebar item is not collapsed")
 
         let sidebar = groups.test_sidebar.view
-        let editor = groups.test_editor.view
+        // The auto-selected content pane is the card overview (direction C),
+        // not one group's editor.
+        let content = groups.test_overview.view
         #expect(sidebar.isDescendant(of: screen.view),
-                "the speakers/groups sidebar is mounted in the Groups screen")
-        #expect(editor.isDescendant(of: screen.view),
-                "the editor pane is mounted beside the sidebar")
+                "the speaker sidebar is mounted in the Groups screen")
+        #expect(content.isDescendant(of: screen.view),
+                "the content pane is mounted beside the sidebar")
         #expect(!sidebar.isHiddenOrHasHiddenAncestor, "and it is not hidden")
 
         // Compare in ONE coordinate space — the two panes have different
         // superviews, so raw `frame`s are not comparable.
         let sidebarBox = sidebar.convert(sidebar.bounds, to: screen.view)
-        let editorBox = editor.convert(editor.bounds, to: screen.view)
+        let contentBox = content.convert(content.bounds, to: screen.view)
         #expect(sidebarBox.width >= 200 && sidebarBox.height > 0,
                 "the sidebar gets its real width, not a zero-width sliver (got \(sidebarBox))")
-        #expect(editorBox.width > 0 && editorBox.height > 0,
-                "the editor pane gets real space (got \(editorBox))")
-        #expect(editorBox.minX >= sidebarBox.maxX - 1,
-                "editor sits to the RIGHT of the sidebar — a real split, not a stack")
+        #expect(contentBox.width > 0 && contentBox.height > 0,
+                "the content pane gets real space (got \(contentBox))")
+        #expect(contentBox.minX >= sidebarBox.maxX - 1,
+                "the content sits to the RIGHT of the sidebar — a real split, not a stack")
     }
 
     // MARK: Visible-screen publishing (the Groups content's hidden-work gate)
@@ -811,13 +827,13 @@ import AppKit
 
     // MARK: The fixed frame's two hard budgets
 
-    /// The Groups editor pane has NO scroll view, so whatever the frame gives
-    /// it at the FLOOR is a hard budget — the popover here has no devices, so
-    /// the Mixer's fit cannot raise the height and the floor is what the
-    /// screen gets. If this fails, raise
-    /// `AppSurfaceController.minimumContentSize`; never let the editor
-    /// overflow.
-    @Test func theSevenDeviceEditorFitsTheMinimumFrame() throws {
+    /// The Groups editor pane SCROLLS (roadmap 039), so a seven-device fleet
+    /// no longer spends the frame's height budget: the pane itself asks for no
+    /// more than the frame gives it, and the content that does not fit lives in
+    /// the scroll document and scrolls. The floor in
+    /// `AppSurfaceController.minimumContentSize` stays where it is — an editor
+    /// that overflows is now the scroller's problem, not the frame's.
+    @Test func theSevenDeviceEditorScrollsInsideTheMinimumFrame() throws {
         let (surface, groups, groupID) = try makeRealGroupsSurface()
         surface.show(anchorRect: nil)
         surface.select(.groups)
@@ -827,10 +843,12 @@ import AppKit
 
         let editor = groups.test_editor.view
         #expect(editor.fittingSize.height <= editor.frame.height,
-                Comment(rawValue: "the editor needs \(editor.fittingSize.height)pt but the "
-                        + "fixed frame gives the pane \(editor.frame.height)pt. The pane has "
-                        + "no scroll view, so this is an overflow, not a preference — raise "
-                        + "AppSurfaceController.minimumContentSize."))
+                Comment(rawValue: "the editor asks for \(editor.fittingSize.height)pt but the "
+                        + "fixed frame gives the pane \(editor.frame.height)pt — the scroll "
+                        + "view is meant to absorb the overflow, not pass it to the window."))
+        #expect(groups.test_editor.test_hasScrollView)
+        #expect(groups.test_editor.test_scrollDocumentHeight > 0,
+                "the scroll document carries the editor's real content height")
     }
 
     /// AppKit widens a window to its content's fitting width, and this window
@@ -884,5 +902,217 @@ import AppKit
             settingsContent: { [self] in makeSettingsRoot() },
             frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
         return (surface, groups, group.group.id)
+    }
+
+    // MARK: Launch splash
+
+    /// Run `body` as if this were a real (non-headless) launch that has never
+    /// shown a splash, and put both process-wide facts back afterwards.
+    private func asAFirstRealLaunch(reduceMotion: Bool = false,
+                                    _ body: () throws -> Void) rethrows {
+        SurfaceSplashView.test_headlessOverride = false
+        SurfaceSplashView.test_reduceMotionOverride = reduceMotion
+        SurfaceSplashView.test_resetProcessFlag()
+        defer {
+            SurfaceSplashView.test_headlessOverride = nil
+            SurfaceSplashView.test_reduceMotionOverride = nil
+            SurfaceSplashView.test_resetProcessFlag()
+        }
+        try body()
+    }
+
+    @Test func theDecisionIsARealRunsFirstOpenAndNothingElse() {
+        #expect(SurfaceSplashView.shouldPresent(headless: false, reduceMotion: false,
+                                                alreadyShown: false))
+        #expect(!SurfaceSplashView.shouldPresent(headless: true, reduceMotion: false,
+                                                 alreadyShown: false),
+                "a headless run renders the screen it was pointed at, never ornament")
+        #expect(!SurfaceSplashView.shouldPresent(headless: false, reduceMotion: true,
+                                                 alreadyShown: false),
+                "Reduce Motion skips it entirely — it is pure ornament")
+        #expect(!SurfaceSplashView.shouldPresent(headless: false, reduceMotion: false,
+                                                 alreadyShown: true),
+                "once per process, never once per open")
+    }
+
+    @Test func theFirstShowRevealsTheBrandMarkOnlyOnceDiscoverySettles() throws {
+        try asAFirstRealLaunch {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            // The reveal is DEFERRED: the window is fronted once, already at the
+            // settled size, so the centred mark never slides. Nothing on screen
+            // yet — just a settle tracker gating the reveal.
+            #expect(surface.test_splash == nil,
+                    "no splash on screen until discovery settles — the reveal is deferred")
+            #expect(surface.test_settleTracker != nil, "a settle tracker gates the first reveal")
+            #expect(surface.test_isRevealPending)
+
+            surface.test_settleDiscovery()
+            let splash = try #require(surface.test_splash,
+                                      "settling reveals the surface with its branded hold")
+            #expect(splash.test_isVisible)
+            #expect(!surface.test_isRevealPending)
+            #expect(splash.superview === surface.shell.window?.contentView,
+                    "it covers the mounted screen, not the window chrome")
+            // Content is in place and discovery already quiet at reveal, so only
+            // the hold gates the cross-fade — "splash solid, then cross-fade onto
+            // an already-settled list".
+            splash.test_fireHoldTimer()
+            #expect(!splash.test_isVisible)
+            #expect(splash.superview == nil, "it takes itself off when it leaves")
+        }
+    }
+
+    /// The reveal is deferred until discovery quiets, and the window is fronted
+    /// ONCE at the settled size — the fleet that streams in during the wait is
+    /// measured at reveal, never guessed early. Fronting off screen until then
+    /// is what keeps the resize (`preferredContentSize` grows a REAL ordered
+    /// window on screen — the trap that stayed invisible headless) off the
+    /// user's view: while the reveal is pending there is no on-screen window to
+    /// slide.
+    @Test func theWindowIsFrontedOnceAtTheSettledSizeAfterDiscoverySettles() throws {
+        try asAFirstRealLaunch {
+            let (surface, popover, _, _) = makeSurface()
+            popover.test_isShownOverride = true
+            surface.show(anchorRect: nil)
+            #expect(surface.test_isRevealPending, "the reveal waits off screen for discovery to settle")
+
+            // Discovery streams a full fleet in during the pre-reveal wait.
+            let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            popover.update(devices: backend.devices)
+
+            surface.test_settleDiscovery()
+            #expect(!surface.test_isRevealPending, "settling fronts the surface")
+            let window = try #require(surface.shell.window)
+            let settledHeight = window.contentRect(forFrameRect: window.frame).height
+            // The full fleet raises the fit well above the 600 floor, and the
+            // window opens at exactly that measured size — its first and only
+            // on-screen frame.
+            #expect(settledHeight > 600.5,
+                    "the settled fleet's fit decides the one frame the user sees (got \(settledHeight))")
+        }
+    }
+
+    @Test func aClickTakesTheSplashAwayAtOnce() throws {
+        try asAFirstRealLaunch {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            surface.test_settleDiscovery()
+            let splash = try #require(surface.test_splash)
+            splash.test_click()
+            #expect(!splash.test_isVisible)
+        }
+    }
+
+    /// Discovery may never quiet — the reveal backstop must still front the
+    /// surface (and its branded hold) so the user is never left waiting on a
+    /// click that seemed to do nothing.
+    @Test func theRevealBackstopFrontsTheSurfaceWithNoSettleSignal() throws {
+        try asAFirstRealLaunch {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            #expect(surface.test_splash == nil, "nothing on screen while discovery is still quieting")
+            #expect(surface.test_isRevealPending)
+            surface.test_fireRevealCeiling()
+            let splash = try #require(surface.test_splash,
+                                      "the backstop fronts the surface even if discovery never quiets")
+            #expect(!surface.test_isRevealPending)
+            splash.test_fireHoldTimer()
+            #expect(!splash.test_isVisible, "and the hold then cross-fades it away")
+        }
+    }
+
+    @Test func reduceMotionOpensStraightOntoTheScreen() {
+        asAFirstRealLaunch(reduceMotion: true) {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            #expect(surface.test_splash == nil)
+            #expect(surface.test_settleTracker == nil,
+                    "no splash ⇒ no settle wait; the surface opens immediately on the old timing")
+        }
+    }
+
+    /// P0-1: the wait used to SWALLOW every further menu-bar click, so a user
+    /// who saw nothing happen and clicked again got nothing again, for up to
+    /// three seconds. A second click is the user asking for the surface NOW —
+    /// it cuts the wait short and fronts at the size measured so far, with the
+    /// splash over it.
+    @Test func aSecondClickCancelsTheRevealWaitAndFrontsAtOnce() throws {
+        try asAFirstRealLaunch {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            #expect(surface.test_isRevealPending, "the first click starts the wait")
+
+            surface.show(anchorRect: nil)
+            #expect(!surface.test_isRevealPending, "the second click ends it")
+            #expect(surface.test_splash != nil, "and the surface is on screen with its hold")
+        }
+    }
+
+    /// The backstop is now a bound on how long a click can appear to do
+    /// nothing, so it must stay above the settle's own quiet window — a ceiling
+    /// at or below it would pre-empt the settled reveal on every warm open.
+    @Test func theRevealCeilingStaysAboveTheSettleQuietWindow() {
+        #expect(AppSurfaceController.revealCeiling > AppSurfaceController.revealQuietWindow)
+        #expect(AppSurfaceController.revealCeiling <= 1.0,
+                "a click must not look dead for longer than this")
+    }
+
+    // MARK: Occlusion gating (perf P2-12)
+
+    /// A PINNED surface can sit fully covered by another window for days, and
+    /// "is it open" was the only question anyone asked — so metering and the
+    /// Mixer's monitors ran full tilt against pixels nobody could see. Covering
+    /// it now puts the Mixer to sleep; uncovering runs the full open ritual.
+    /// The latch is what keeps a stream of occlusion notifications from tearing
+    /// the panel down over and over.
+    @Test func aCoveredSurfacePutsTheMixerToSleepAndWakesItOnce() {
+        let (surface, popover, _, _) = makeSurface()
+        var meteringTransitions: [Bool] = []
+        popover.onMeteringActiveChange = { meteringTransitions.append($0) }
+        surface.show(anchorRect: nil)
+        #expect(meteringTransitions == [true], "showing the Mixer turns metering on")
+
+        surface.test_notePixelVisibility(false)
+        #expect(surface.test_surfaceCoveredHidden)
+        #expect(meteringTransitions == [true, false], "covered ⇒ metering off")
+
+        surface.test_notePixelVisibility(false)
+        #expect(meteringTransitions == [true, false], "the latch swallows a repeat")
+
+        let rebuildsBefore = popover.test_rebuildCount
+        surface.test_notePixelVisibility(true)
+        #expect(!surface.test_surfaceCoveredHidden)
+        #expect(meteringTransitions == [true, false, true], "uncovered ⇒ metering back on")
+        #expect(popover.test_rebuildCount > rebuildsBefore,
+                "waking runs the Mixer open ritual — hidden means stale")
+
+        surface.test_notePixelVisibility(true)
+        #expect(meteringTransitions == [true, false, true],
+                "and a repeat wake is a no-op too")
+    }
+
+    /// A surface that is not on screen has no pixels to lose.
+    @Test func occlusionIsIgnoredWhileTheSurfaceIsClosed() {
+        let (surface, popover, _, _) = makeSurface()
+        var meteringTransitions: [Bool] = []
+        popover.onMeteringActiveChange = { meteringTransitions.append($0) }
+        surface.test_notePixelVisibility(false)
+        #expect(!surface.test_surfaceCoveredHidden)
+        #expect(meteringTransitions.isEmpty)
+    }
+
+    @Test func aSecondSurfaceInTheSameProcessGetsNoSplash() throws {
+        try asAFirstRealLaunch {
+            let (first, _, _, _) = makeSurface()
+            first.show(anchorRect: nil)
+            first.test_settleDiscovery()   // reveal the first open's splash (sets the once-per-process flag)
+            #expect(first.test_splash != nil)
+            let (second, _, _, _) = makeSurface()
+            second.show(anchorRect: nil)
+            #expect(second.test_splash == nil)
+        }
     }
 }

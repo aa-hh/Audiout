@@ -281,6 +281,35 @@ import AppKit
                 "a rebuild replaces the rows — it never stacks a second set behind the first")
     }
 
+    /// `refreshUI()` runs on every backend event for the app's whole lifetime.
+    /// A volume/connection-only change touches nothing a membership row draws,
+    /// so it must not throw away and rebuild the rows (and the clicks and
+    /// focus riding on them); a group rename still must.
+    @Test func groupRowsSkipARebuildWhenNothingTheyRenderChanged() throws {
+        let controller = makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["office"],
+                                       memberVolumes: ["office": 50]))
+        let detail = DeviceDetailViewController(groupController: controller,
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        _ = detail.view
+        detail.show(device: makeDevice(id: "office"))
+        #expect(detail.test_groupRowTitles == ["Kitchen"])
+        let baseline = detail.test_groupRowsRebuildCount
+        #expect(baseline > 0, "the first show built the rows once")
+
+        detail.refresh(device: makeDevice(id: "office", volume: 80, connectionState: .connected))
+        #expect(detail.test_groupRowsRebuildCount == baseline,
+                "no membership row shows a volume or a connection state")
+
+        var group = try #require(controller.groups.first { $0.id == "g1" })
+        group.name = "Kitchen Speakers"
+        try controller.saveGroup(group)
+        detail.refresh(device: makeDevice(id: "office"))
+        #expect(detail.test_groupRowsRebuildCount == baseline + 1,
+                "a rename IS on a membership row, so it rebuilds exactly once")
+        #expect(detail.test_groupRowTitles == ["Kitchen Speakers"])
+    }
+
     @Test func selectingAGroupRowReportsThatGroupsID() throws {
         let controller = makeController()
         try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["office"],
@@ -839,6 +868,25 @@ import AppKit
                 "Reset released its cache on the matching echo — a later snapshot is free to render again")
     }
 
+    // MARK: The facts are copyable (P3-3)
+
+    /// The page exists to state facts about a speaker; a fact you cannot copy
+    /// is a fact you have to retype. The name and all three About values are
+    /// selectable — still labels, never editable.
+    @Test func theDeviceNameAndAboutValuesAreSelectable() throws {
+        let detail = makeLoadedPane(device: makeDevice(id: "office", name: "Office"))
+        let fields = detail.view.descendantTextFields()
+
+        for text in ["Office", "Ready", "AirPlay Speaker", "AirPlay 2"] {
+            let matches = fields.filter { $0.stringValue == text }
+            #expect(!matches.isEmpty, "expected a field carrying \"\(text)\"")
+            for field in matches {
+                #expect(field.isSelectable, "\"\(text)\" must be selectable")
+                #expect(!field.isEditable, "…and still a label, not an editable field")
+            }
+        }
+    }
+
     @Test func detailPaneScrolls() {
         let detail = makeLoadedPane(device: makeDevice())
         #expect(detail.test_hasScrollView,
@@ -855,5 +903,16 @@ import AppKit
         detail.test_setOverlayVisible(false)
         // No assertion beyond "didn't crash" — the scrim's layer state isn't
         // exposed, and this is exercised visually by the live snapshot tool.
+    }
+}
+
+private extension NSView {
+    /// Every `NSTextField` in this view's subtree, for asserting on labels
+    /// the pane builds internally and exposes no seam for.
+    func descendantTextFields() -> [NSTextField] {
+        var result: [NSTextField] = []
+        if let field = self as? NSTextField { result.append(field) }
+        for sub in subviews { result.append(contentsOf: sub.descendantTextFields()) }
+        return result
     }
 }

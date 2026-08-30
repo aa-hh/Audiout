@@ -10,7 +10,7 @@ when that changes, not a claim that it has.
 
 ## Purchase terms (state once, exactly)
 
-**$35, one-time. Covers the current major version and every update until the
+**€30, one-time. Covers the current major version and every update until the
 next major release.**
 
 Any other copy about price or what it includes (site, receipts, support
@@ -40,9 +40,17 @@ scripts/make-release.sh
 | `SPARKLE_FEED_URL` | `SUFeedURL` | Where the updater checks. Defaults to `$AUDIOUT_LICENSE_URL/appcast.xml`. |
 | `SPARKLE_ED_PUBLIC_KEY` | `SUPublicEDKey` | The EdDSA public key update archives are verified against. |
 
-All four are optional, and each absence is a real product state, not a broken
-build: a build run from source has no license server, so it validates nothing,
-prompts nothing and updates nothing — that is the free build.
+All four are optional **to `make-app.sh`**, and each absence is a real product
+state, not a broken build: a build run from source has no license server, so it
+validates nothing, prompts nothing and updates nothing — that is the free build.
+
+`make-release.sh` is stricter: it requires `AUDIOUT_LICENSE_URL` and refuses to
+build until that server answers. The artifact it produces is the one a buyer
+pays for, and the address goes into Info.plist — every installed copy polls it
+forever and cannot be redirected afterwards, so a wrong or unreachable value
+costs buyers both key validation and the update channel that would deliver the
+fix. Unauthenticated, the feed must answer `401 license key required`; anything
+else fails the build before it starts. See "Pre-flight" in `make-release.sh`.
 
 `SPARKLE_FEED_URL` / `SPARKLE_ED_PUBLIC_KEY` are consumed by `make-app.sh`
 (which `make-release.sh` calls internally). Setting only one is a hard error —
@@ -112,7 +120,7 @@ the app can verify update signatures against it.
 
 ### d. Paddle account + product setup
 
-- Create the Paddle product: **$35, one-time**, matching the purchase terms
+- Create the Paddle product: **€30, one-time**, matching the purchase terms
   stated above exactly.
 - Upload each release's distributable zip (`build/Audiout-<version>.zip`
   from `make-release.sh`) as the thing Paddle delivers on purchase, or wire

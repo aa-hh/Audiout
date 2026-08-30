@@ -77,4 +77,32 @@ import AppKit
         assertSameRGBA(banner.test_backgroundColor, Tokens.Color.warning.withAlphaComponent(0.14), "background after updateLayer")
         assertSameRGBA(banner.test_borderColor, Tokens.Color.warning.withAlphaComponent(0.40), "border after updateLayer")
     }
+
+    /// `wantsUpdateLayer` is what makes the re-stamp above run at all on a live
+    /// appearance switch: without it AppKit takes the `draw(_:)` path and
+    /// `updateLayer()` is never called, so the banner keeps its build-time
+    /// colours through a light/dark flip.
+    @Test func bothBannersOptIntoTheUpdateLayerPath() {
+        #expect(SilenceFallbackBannerView(text: "Playing on this Mac", maxTextWidth: 200)
+            .wantsUpdateLayer)
+        #expect(SystemAirPlayNoteBannerView(text: "Note", maxTextWidth: 200).wantsUpdateLayer)
+    }
+
+    /// The silence banner is no longer a dead end: given an action it renders a
+    /// real button and dispatches through it.
+    @Test func theSilenceBannerRendersAndFiresItsAction() {
+        let plain = SilenceFallbackBannerView(text: "Playing on this Mac", maxTextWidth: 200)
+        #expect(!plain.test_hasActionButton, "no action, no button")
+
+        var taps = 0
+        let banner = SilenceFallbackBannerView(
+            text: "Playing on this Mac",
+            maxTextWidth: 200,
+            action: .init(title: "Try again",
+                          accessibilityLabel: "Try reconnecting to the unreachable speakers",
+                          handler: { taps += 1 }))
+        #expect(banner.test_hasActionButton)
+        banner.test_tapActionButton()
+        #expect(taps == 1)
+    }
 }

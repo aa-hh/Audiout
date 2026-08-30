@@ -27,15 +27,23 @@ import AudioutSharedUI
     private final class FakeLoginItem: LoginItemManaging {
         var enabled: Bool
         var refuse = false
+        /// Stands in for `SMAppService`'s `.requiresApproval`: `setEnabled`
+        /// succeeds, but the item never actually becomes enabled.
+        var approvalRequired = false
         private(set) var setCallCount = 0
+        private(set) var openLoginItemsCallCount = 0
         init(enabled: Bool) { self.enabled = enabled }
 
         var isEnabled: Bool { enabled }
         func setEnabled(_ newValue: Bool) throws {
             setCallCount += 1
             if refuse { throw NSError(domain: "test", code: 1) }
+            if approvalRequired { return }
             enabled = newValue
         }
+
+        var needsApproval: Bool { approvalRequired }
+        func openSystemSettingsLoginItems() { openLoginItemsCallCount += 1 }
     }
 
     private let isolation = TestIsolation(owner: "SettingsRootViewControllerTests")
@@ -170,6 +178,7 @@ import AudioutSharedUI
         let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
                                                     settings: makeSettings())
         #expect(general.test_licenseStatusText == nil)
+        #expect(!general.test_licenseRowIsVisible, "the whole License surface stays hidden")
         #expect(!general.test_buyButtonIsVisible)
     }
 
@@ -182,35 +191,38 @@ import AudioutSharedUI
                                                     settings: settings)
         general.licenseTransport = transport.closure
 
-        #expect(general.test_licenseStatusText == "Unregistered. Buy a license to support Audiout and get updates.")
+        #expect(general.test_licenseStatusText == "Unregistered. Audiout is fully functional without a license — buying one funds development and unlocks official downloads and updates.")
+        #expect(general.test_enterLicenseButtonTitle == "Enter License…")
 
         transport.replies(#"{"status":"active"}"#)
-        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "Registered. Thank you.")
+        #expect(general.test_licenseStatusText == "Registered. Thank you for supporting Audiout.")
+        #expect(general.test_enterLicenseButtonTitle == "Change…")
 
         transport.replies(#"{"status":"revoked"}"#)
-        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
         #expect(general.test_licenseStatusText == "This key was refunded or revoked. It no longer gets updates.")
 
         transport.replies(#"{"status":"unknown"}"#)
-        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "This key isn’t recognised. Check it against your receipt.")
+        #expect(general.test_licenseStatusText == "This key isn’t recognized. Check it against your receipt.")
 
         transport.replies(#"{"status":"invalid"}"#)
         general.test_setLicenseKey("nonsense")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "That doesn’t look like an Audiout key (AUDR-XXXXX-XXXXX-XXXXX-XXXXX).")
+        #expect(general.test_licenseStatusText == "That doesn’t look like an Audiout key (AUDT-XXXXX-XXXXX-XXXXX-XXXXX).")
 
-        // Clearing the key clears the verdict with it, so the next commit —
-        // against a server that never answers — lands on "never verified".
-        general.test_setLicenseKey("")
+        // Removing the key (the sheet's explicit button) clears the verdict
+        // with it, so the next commit — against a server that never answers —
+        // lands on "never verified".
+        general.test_removeLicense()
         transport.answer = (nil, nil, URLError(.notConnectedToInternet))
-        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "Couldn’t reach the license server — will try again next launch.")
+        #expect(general.test_licenseStatusText == "Not verified yet — Audiout couldn’t reach the license server. Your key is saved.")
     }
 
     /// A different key is an open question, not the old key's answer: while
@@ -222,15 +234,15 @@ import AudioutSharedUI
                                                     settings: settings)
         general.licenseTransport = transport.closure
         transport.replies(#"{"status":"active"}"#)
-        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "Registered. Thank you.")
+        #expect(general.test_licenseStatusText == "Registered. Thank you for supporting Audiout.")
 
         transport.answer = (nil, nil, URLError(.notConnectedToInternet))
-        general.test_setLicenseKey("AUDR-ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ")
-        #expect(general.test_licenseStatusText == "Couldn’t reach the license server — will try again next launch.")
+        general.test_setLicenseKey("AUDT-ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ")
+        #expect(general.test_licenseStatusText == "Not verified yet — Audiout couldn’t reach the license server. Your key is saved.")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "Couldn’t reach the license server — will try again next launch.")
+        #expect(general.test_licenseStatusText == "Not verified yet — Audiout couldn’t reach the license server. Your key is saved.")
     }
 
     /// Buying is offered only where it can work and only where it would help.
@@ -243,14 +255,192 @@ import AudioutSharedUI
         #expect(general.test_buyButtonIsVisible, "no key yet ⇒ the offer is the point")
 
         transport.replies(#"{"status":"active"}"#)
-        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
         #expect(!general.test_buyButtonIsVisible, "a registered build is quiet")
 
         transport.replies(#"{"status":"revoked"}"#)
-        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
         #expect(general.test_buyButtonIsVisible, "a key the server won’t honour is worth re-buying")
+    }
+
+    /// The sheet is the ONE commit path, and its edges hold: Cancel discards
+    /// typed text (no more silent commit-on-focus-loss), Remove License… is
+    /// offered only once a key is stored and clears key + verdict together.
+    @Test func licenseSheetCancelDiscardsAndRemoveClears() async {
+        let settings = makePaidBuildSettings()
+        let transport = StubTransport()
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: settings)
+        general.licenseTransport = transport.closure
+        _ = general.view
+
+        // Cancel: typed text never lands in settings.
+        general.test_tapEnterLicense()
+        let sheet = general.test_licenseSheet
+        #expect(sheet?.test_removeIsVisible == false, "nothing stored yet — nothing to remove")
+        sheet?.test_setKeyText("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        sheet?.test_tapCancel()
+        #expect(settings.licenseKey == nil, "Cancel writes nothing")
+        #expect(general.test_licenseSheet == nil, "the pane lets the sheet go")
+
+        // Register, then Remove through a fresh sheet.
+        transport.replies(#"{"status":"active"}"#)
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(settings.licenseKey != nil)
+
+        general.test_tapEnterLicense()
+        #expect(general.test_licenseSheet?.test_removeIsVisible == true)
+        general.test_licenseSheet?.test_tapRemove()
+        #expect(settings.licenseKey == nil)
+        #expect(settings.licenseStatus == nil, "the verdict goes with the key")
+        #expect(general.test_enterLicenseButtonTitle == "Enter License…")
+    }
+
+    /// The status line promises the key is saved, not that a retry is coming
+    /// at some unnamed later launch — so the retry is a button, and it works
+    /// in-session: the same pane goes from "not verified" to "Registered"
+    /// without a relaunch, and the button leaves once it has nothing to do.
+    @Test func checkAgainRevalidatesInSession() async {
+        let transport = StubTransport()   // starts unreachable
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: makePaidBuildSettings())
+        general.licenseTransport = transport.closure
+
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText == "Not verified yet — Audiout couldn’t reach the license server. Your key is saved.")
+        #expect(general.test_checkAgainIsVisible)
+
+        transport.replies(#"{"status":"active"}"#)
+        general.test_tapCheckAgain()
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText == "Registered. Thank you for supporting Audiout.")
+        #expect(!general.test_checkAgainIsVisible, "nothing left to check")
+    }
+
+    /// The other retry trigger, and the one that costs the user nothing:
+    /// coming back to the pane re-asks whenever no verdict has ever landed.
+    @Test func returningToThePaneRevalidatesAnUnansweredKey() async {
+        let transport = StubTransport()   // starts unreachable
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: makePaidBuildSettings())
+        general.licenseTransport = transport.closure
+
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText == "Not verified yet — Audiout couldn’t reach the license server. Your key is saved.")
+
+        transport.replies(#"{"status":"active"}"#)
+        general.viewWillAppear()
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText == "Registered. Thank you for supporting Audiout.")
+    }
+
+    /// The once-per-launch check-in is disclosed where it happens, and ONLY
+    /// where it happens: no key means no check-in, so claiming one would be a
+    /// lie in the other direction.
+    @Test func checkInDisclosureAppearsExactlyWhileAKeyIsStored() async {
+        let transport = StubTransport()
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: makePaidBuildSettings())
+        general.licenseTransport = transport.closure
+
+        #expect(general.test_checkInDisclosureText == nil, "no key ⇒ no check-in to disclose")
+
+        transport.replies(#"{"status":"active"}"#)
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(general.test_checkInDisclosureText == "Audiout checks in with the license server once per launch so we can spot a key shared across many machines. It sends your key, a random per-Mac id, and the app version — nothing else.")
+
+        general.test_removeLicense()
+        #expect(general.test_checkInDisclosureText == nil)
+    }
+
+    /// A rejected Register writes the key anyway (the commit is deliberate),
+    /// so the sheet must offer the way back out — Remove — without a close and
+    /// re-open.
+    @Test func aRejectedRegisterRevealsRemoveInTheSheet() async {
+        let transport = StubTransport()
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: makePaidBuildSettings())
+        general.licenseTransport = transport.closure
+        transport.replies(#"{"status":"unknown"}"#)
+
+        general.test_tapEnterLicense()
+        let sheet = general.test_licenseSheet
+        sheet?.test_setKeyText("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        sheet?.test_tapRegister()
+        await drainMainQueue()
+
+        #expect(general.test_licenseSheet != nil, "a rejected key keeps the sheet open")
+        #expect(sheet?.test_resultText == "This key isn’t recognized. Check it against your receipt.")
+        #expect(sheet?.test_removeIsVisible == true)
+    }
+
+    /// A second `audiout://register` link that arrives while the first key is
+    /// still being checked is DROPPED, not stacked: Register is disabled for
+    /// exactly that window, and restarting the commit under the answer the user
+    /// is waiting for would leave the sheet describing the wrong key.
+    @Test func aSecondRegisterLinkDuringTheCheckIsDropped() async {
+        /// Records each request and never answers, so the first commit stays in
+        /// flight for the whole test.
+        final class HeldTransport: @unchecked Sendable {
+            private(set) var requests = 0
+            var closure: LicenseValidator.Transport {
+                { [self] _, _ in requests += 1 }
+            }
+        }
+
+        let held = HeldTransport()
+        let settings = makePaidBuildSettings()
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: settings)
+        general.licenseTransport = held.closure
+
+        general.presentLicenseSheet(registering: "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(held.requests == 1)
+        #expect(general.test_licenseSheet?.test_resultText == "Checking…")
+
+        general.presentLicenseSheet(registering: "AUDT-EEEEE-FFFFF-GGGGG-HHHHH")
+        await drainMainQueue()
+        #expect(held.requests == 1, "the second link is dropped while the first is unanswered")
+        #expect(settings.licenseKey == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD",
+                "the in-flight key stands — the second link never committed")
+    }
+
+    /// A paying customer opening Change… is not a sales prospect.
+    @Test func aRegisteredSheetDoesNotOfferToSell() async {
+        let transport = StubTransport()
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: makePaidBuildSettings())
+        general.licenseTransport = transport.closure
+
+        transport.replies(#"{"status":"active"}"#)
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+
+        general.test_tapEnterLicense()
+        #expect(general.test_licenseSheet?.test_buyIsVisible == false)
+    }
+
+    /// `SMAppService.register()` succeeds into `.requiresApproval` without
+    /// throwing, so the switch springs back with nothing said. It must say
+    /// something, and offer the one click that fixes it.
+    @Test func launchAtLoginNeedingApprovalRevertsAndExplains() {
+        let login = FakeLoginItem(enabled: false)
+        login.approvalRequired = true
+        let general = GeneralSettingsViewController(loginItem: login)
+
+        general.test_toggleLaunchAtLogin(true)
+        #expect(!general.test_launchAtLoginIsOn, "the switch must not claim a state macOS is withholding")
+        #expect(general.test_loginApprovalHintIsVisible)
+
+        general.test_tapOpenLoginItems()
+        #expect(login.openLoginItemsCallCount == 1)
     }
 
     /// Owner decision (AGENTS.md): Settings always opens on General. A fresh

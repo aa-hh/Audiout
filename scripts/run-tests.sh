@@ -41,13 +41,39 @@ hk="$repo_root/scripts/housekeeping.sh"
 [ -x "$hk" ] || hk="$(cd "$(dirname "$0")" && pwd)/housekeeping.sh"
 if [ -x "$hk" ]; then "$hk" --current "$repo_root" || true; fi
 
+# Which build engine the suite compiles with. PINNED rather than defaulted,
+# because the two machines DISAGREE and an unpinned run silently uses a
+# different engine depending on where it lands: Swift 6.4 here defaults to
+# `swiftbuild`, while the remote's Swift 6.3.1 does not carry that engine at
+# all and offers only `native`. Same suite, two compilers, results that cannot
+# be compared -- and, locally, two full .build trees (`out` AND
+# `arm64-apple-macosx`) at ~1.3 GB apiece, since scripts/build.sh and
+# scripts/make-app.sh already pin native. That duplication is what filled this
+# disk: 10 of 33 worktrees were holding both.
+#
+# `native` is the only engine BOTH machines have, so it is the only available
+# choice today. scripts/build.sh pins it for the same reason.
+#
+# razor: `native` is deprecated in Swift 6.4 and will be removed eventually.
+# The ceiling is the remote Mac -- pinned to macOS 26, so it cannot reach a
+# toolchain where swiftbuild exists. Upgrade path: once the remote runs
+# macOS 27+/Swift 6.4+, move this and build.sh to swiftbuild together, or drop
+# the pin once both machines default to the same engine.
+engine="--build-system native"
+
 workers=${AUDIOUT_TEST_WORKERS:-6}
 lock_timeout=${AUDIOUT_TEST_LOCK_TIMEOUT:-1800}
-# How many suite runs may proceed at once, machine-wide. Default 2: a single run
-# only reaches ~2.6 of 8 cores (it is wait-bound, not CPU-bound), so two overlap
-# comfortably while still leaving headroom for the developer's own machine.
-# Raise for a beefier box, set to 1 for strict one-at-a-time.
-slots=${AUDIOUT_TEST_SLOTS:-2}
+# How many suite runs may proceed at once, machine-wide. Default 4: the suite is
+# strongly WAIT-bound, not CPU-bound. A serial run burns only ~0.56 of 8 cores
+# (69.7 user-seconds over 124s wall); even the parallel path reaches only ~2.6.
+# Most of the wall clock is the process asleep on fixed timers, so concurrent
+# runs overlap almost for free -- four serial runs are ~2.2 cores, well inside
+# 8 with headroom for the editor and an app under live test. The cap exists to
+# stop unbounded pile-up (an agent typing `swift test` by hand, times N), not to
+# enforce single-file: throughput across many worktrees matters more here than
+# the latency of any one run.
+# Raise for a beefier box, lower for strict one-at-a-time.
+slots=${AUDIOUT_TEST_SLOTS:-4}
 
 # --- remote machine ---------------------------------------------------------
 # Host resolution, the local-vs-remote decision, sync and the run-there wrapper
@@ -75,12 +101,21 @@ run_remote() {
     # so the remote gets the fast parallel path (~1.8x quicker on an idle host).
     # An explicitly forced AUDIOUT_TEST_MODE is still honoured.
     case "${AUDIOUT_TEST_MODE:-auto}" in
-        serial) rargs="" ;;
-        *)      rargs="--parallel --num-workers $workers" ;;
+        serial) rargs="$engine" ;;
+        *)      rargs="$engine --parallel --num-workers $workers" ;;
     esac
 
+    # The remote command is a STRING the far shell re-parses, so caller flags
+    # must be quoted INTO it: an unquoted `--filter "A|B"` arrived there as a
+    # pipe into a command named `B`. Single-quote each argument, escaping any
+    # single quote it contains ('\'' — the standard sh idiom).
+    qargs=""
+    for a in "$@"; do
+        qargs="$qargs '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"
+    done
+
     rrc=0
-    remote_run "$repo_root" "cd AudioutCore && swift test $rargs $*" || rrc=$?
+    remote_run "$repo_root" "cd AudioutCore && swift test $rargs$qargs" || rrc=$?
     if [ "$rrc" -eq 2 ]; then
         # "Ran, but failed" — re-run locally rather than trusting the verdict. A
         # machine on a different Swift/SDK must never be what REFUSES a commit:
@@ -326,6 +361,17 @@ if [ "$acquired" -eq 1 ]; then
     fi
 fi
 
+# --- cold checkouts: resolve solo first --------------------------------------
+# A run that has to MATERIALISE .build/checkouts while another SwiftPM process
+# races it over the shared package cache is what produced the "unable to read
+# tree" Sparkle failures during the merge guards. Doing the checkout step on its
+# own first removes the race; a warm checkout skips this entirely. Best-effort:
+# a resolve failure is left for `swift test` below to report properly.
+if [ ! -d "$core/.build/checkouts" ] || [ -z "$(ls -A "$core/.build/checkouts" 2>/dev/null)" ]; then
+    echo "  suite: cold package checkouts — resolving first, on its own." >&2
+    ( cd "$core" && swift package resolve ) >&2 || true
+fi
+
 # --- run --------------------------------------------------------------------
 # `set -e` is off for this one command so a failure reaches the cache logic
 # (which must NOT write a stamp) and the trap, rather than exiting immediately.
@@ -334,7 +380,7 @@ set +e
 # to nothing at all in serial mode). "$@" stays quoted so caller arguments with
 # spaces survive.
 # shellcheck disable=SC2086
-( cd "$core" && swift test $test_args "$@" ) >&2
+( cd "$core" && swift test $engine $test_args "$@" ) >&2
 status=$?
 set -e
 

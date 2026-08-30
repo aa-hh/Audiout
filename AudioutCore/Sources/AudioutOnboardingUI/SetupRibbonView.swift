@@ -50,6 +50,11 @@ struct RibbonContent {
     var body: NSAttributedString?
     var primary: (title: String, kind: PrimaryKind)?
     var showsSkip = false
+    /// Override for ``SetupRibbonView/skipTitle``, for the one step whose skip
+    /// is not a deferral. Usage Statistics is asked ONCE and never re-nagged
+    /// (PRODUCT.md), so "Skip for now" would promise a second ask that never
+    /// comes; its button says "No Thanks" instead. `nil` keeps the shared word.
+    var skipTitle: String?
     /// A demoted text-button path offered BESIDE the primary, never instead of
     /// it (Local Network's retry keeps its own browse; a browsed row offers its
     /// pane).
@@ -60,7 +65,7 @@ struct RibbonContent {
     /// entrance or steal the keyboard focus back off it.
     var buttonSignature: String {
         [primary.map { "\($0.title)|\($0.kind)" } ?? "-",
-         showsSkip ? "skip" : "-",
+         showsSkip ? "skip:\(skipTitle ?? "")" : "-",
          quietLink ?? "-"].joined(separator: "\u{1F}")
     }
 }
@@ -88,9 +93,13 @@ final class SetupHeroHeadView: NSView {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
-        headlineLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        headlineLabel.font = Tokens.Font.display
         headlineLabel.textColor = Tokens.Color.label
         headlineLabel.maximumNumberOfLines = 2
+        // The hero's heading, findable in VoiceOver's rotor. The raw AX string,
+        // not `NSAccessibilityHeadingRole`: that constant is macOS 26+ and this
+        // app installs on 14.2.
+        headlineLabel.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
 
         // Primary ink, not secondary: this is the sentence the whole step rests
         // on, and it is the only body copy a first ask has.
@@ -127,6 +136,8 @@ final class SetupHeroHeadView: NSView {
 
     var test_headline: String? { headlineLabel.isHidden ? nil : headlineLabel.stringValue }
     var test_why: String? { whyLabel.isHidden ? nil : whyLabel.stringValue }
+    /// The headline's accessibility role — the rotor's heading contract.
+    var test_headlineAccessibilityRole: NSAccessibility.Role? { headlineLabel.accessibilityRole() }
 }
 
 /// The LABELLED frame the rehearsal plays inside: a warm well with a caption
@@ -230,6 +241,21 @@ final class SetupPreviewFrameView: NSView {
         }
     }
 
+    /// What VoiceOver reads for the caption band INSTEAD of its visible words.
+    ///
+    /// The band is small and quiet on purpose, and the picture it labels is
+    /// deliberately invisible to VoiceOver (the demo's accessibility opt-out) —
+    /// so for the one step whose rehearsal carries an instruction the drawing
+    /// alone conveys, the caption is where that instruction can be spoken
+    /// without putting a fourth line of copy on screen. `nil` puts the visible
+    /// text back.
+    var spokenCaption: String? {
+        didSet {
+            guard spokenCaption != oldValue else { return }
+            captionLabel.setAccessibilityLabel(spokenCaption)
+        }
+    }
+
     /// Take the frame's VISUAL chrome away — well fill, rim and clip — leaving
     /// the geometry exactly where it is.
     ///
@@ -253,7 +279,7 @@ final class SetupPreviewFrameView: NSView {
     /// authored, never uppercased (One Case rule).
     private static func captionText(_ text: String) -> NSAttributedString {
         NSAttributedString(string: text, attributes: [
-            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .font: Tokens.Font.microLabel,
             .foregroundColor: Tokens.Color.tertiaryLabel,
         ])
     }
@@ -264,6 +290,9 @@ final class SetupPreviewFrameView: NSView {
     var test_caption: String? {
         labelBand.isHidden ? nil : captionLabel.attributedStringValue.string
     }
+
+    /// What VoiceOver reads for the caption band.
+    var test_captionAccessibilityLabel: String? { captionLabel.accessibilityLabel() }
 
     /// Whether the well is actually drawing chrome (fill, rim, clip).
     var test_drawsChrome: Bool {
@@ -484,7 +513,8 @@ final class SetupRibbonView: NSView {
         if content.showsSkip {
             // Borderless and quiet: skipping is a real answer, but it is not
             // the one the step is asking for.
-            let skip = onboardingActionButton(title: Self.skipTitle, prominent: false,
+            let skip = onboardingActionButton(title: content.skipTitle ?? Self.skipTitle,
+                                              prominent: false,
                                               target: self, action: #selector(skipTapped))
             skip.isBordered = false
             skip.controlSize = .regular

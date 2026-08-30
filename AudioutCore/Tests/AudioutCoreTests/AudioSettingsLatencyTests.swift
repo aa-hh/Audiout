@@ -19,6 +19,9 @@ import AppKit
     private final class ApplyRecorder {
         var applied: [Int] = []
         var streaming = false
+        /// What the backend reports back: how many of the devices that were
+        /// streaming actually came back. Defaults to a clean full reconnect.
+        var result: (reconnected: Int, expected: Int) = (1, 1)
     }
 
     private func makeExcluded() -> ExcludedAppsController {
@@ -37,7 +40,10 @@ import AppKit
             initialMs: initialMs,
             envOverrideMs: envOverrideMs,
             isStreaming: { recorder.streaming },
-            apply: { ms in recorder.applied.append(ms) }
+            apply: { ms in
+                recorder.applied.append(ms)
+                return recorder.result
+            }
         )
         return AudioSettingsViewController(
             excluded: makeExcluded(), runningAppsProvider: { [] }, latency: model)
@@ -91,6 +97,20 @@ import AppKit
         #expect(recorder.applied == [1500], "reselecting the just-applied value must not re-apply")
     }
 
+    /// The pane must not claim a reconnect it didn't get: the re-add is
+    /// best-effort per device, so a speaker that stayed down has to be said out
+    /// loud rather than papered over with "Speakers reconnected".
+    @Test func partialReconnectSaysSoInsteadOfClaimingSuccess() async {
+        let recorder = ApplyRecorder()
+        recorder.streaming = true
+        recorder.result = (reconnected: 1, expected: 2)
+        let pane = makePane(recorder: recorder)
+
+        await pane.test_selectLatencyOption(ms: 1500)
+
+        #expect(pane.test_applyStatusText == "Some speakers didn't reconnect — check the mixer")
+    }
+
     @Test func applyWhileIdleShowsPlainConfirmation() async {
         let recorder = ApplyRecorder()
         let pane = makePane(recorder: recorder)
@@ -119,7 +139,7 @@ import AppKit
     @Test func rootMeasuresTheLatencyBearingAudioPane() {
         let model = LatencySettingModel(
             optionsMs: AppSettings.startBufferOptionsMs, initialMs: 1000,
-            envOverrideMs: nil, isStreaming: { false }, apply: { _ in })
+            envOverrideMs: nil, isStreaming: { false }, apply: { _ in (0, 0) })
         let audio = AudioSettingsViewController(
             excluded: makeExcluded(), runningAppsProvider: { [] }, latency: model)
         let root = SettingsRootViewController(sections: [

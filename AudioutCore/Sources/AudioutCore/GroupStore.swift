@@ -134,7 +134,13 @@ public struct GroupStore: Sendable {
     public func load() throws -> [Group] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
         let data = try Data(contentsOf: fileURL)
-        let envelope = try decoder.decode(Envelope.self, from: data)
+        let envelope: Envelope
+        do {
+            envelope = try decoder.decode(Envelope.self, from: data)
+        } catch {
+            StoreRecovery.quarantine(fileURL)
+            throw error
+        }
         guard envelope.schemaVersion <= Self.currentSchemaVersion else { return [] }
         return envelope.groups
     }

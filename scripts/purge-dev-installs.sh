@@ -60,6 +60,11 @@ PROD_HELPER_LABEL="com.audiout.Audiout.ptphelper"    # make-app.sh HELPER_LABEL
 PROD_APP_SUPPORT="Audiout"                             # GroupStore.defaultDirectory
 # Nothing outside this namespace is ever a candidate, whatever discovery finds.
 NAMESPACE="com.audiout."
+# The same boundary for the one discovery step that greps rather than globs. Its
+# dots must be escaped or they are wildcards: unescaped, `com.audiout.` matches
+# the PRE-RENAME `com.audiouter.…` ids, which discovery then hands to
+# `assert_not_prod`, which correctly refuses them and aborts the whole run.
+NAMESPACE_RE="com\\.audiout\\."
 
 # Preference-domain prefixes leaked by the test suites — one plist per suite
 # per test per run, forever. Historical target names are included because the
@@ -188,7 +193,7 @@ DEV_IDS="$(
     find "$PREFS" -maxdepth 1 -name "${NAMESPACE}*.plist" 2>/dev/null \
       | sed "s|.*/||; s|\.plist$||"
     launchctl print system 2>/dev/null \
-      | grep -oE "${NAMESPACE}[A-Za-z0-9_.-]+\.ptphelper" \
+      | grep -oE "${NAMESPACE_RE}[A-Za-z0-9_.-]+\.ptphelper" \
       | sed 's|\.ptphelper$||'
     find "$HOME/Library/Application Support" -maxdepth 1 -name "${NAMESPACE}*" 2>/dev/null \
       | sed "s|.*/||"

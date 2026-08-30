@@ -39,20 +39,14 @@ public struct AboutInfo: Equatable {
     public var versionLine: String { "Version \(version) (Build \(build))" }
 }
 
-/// External links/contacts the About surface offers. Both are placeholders —
-/// see the TODO on each — so nothing invented ships as if it were real.
+/// External links/contacts the About surface offers.
 enum AboutLinks {
-    /// GPL-2.0-or-later requires making the corresponding source available;
-    /// this stands in for the real repository location until Alec publishes
-    /// one. `example.com` is the IANA-reserved documentation/placeholder
-    /// domain (RFC 2606) — inert, never a real destination.
-    /// TODO(Alec): replace with the real public source-code URL before
-    /// charging money for the app (GPL-2.0-or-later source-availability
-    /// obligation).
-    static let sourceCodePlaceholderURL = URL(string: "https://example.com/TODO-audiout-source")!
+    /// GPL-2.0-or-later requires making the corresponding source available —
+    /// this is that repository, and the link is how the About surface
+    /// discharges the obligation.
+    static let sourceCodeURL = URL(string: "https://github.com/aa-hh/Audiout")!
 
-    /// TODO(Alec): replace with a real support email or contact URL.
-    static let supportContactPlaceholder = "TODO(Alec): add a support email or contact link"
+    static let supportEmail = "support@audiout.app"
 }
 
 /// Third-party attribution shown in the About/Credits surface. Mirrors the
@@ -117,6 +111,21 @@ public final class AboutViewController: NSViewController {
     /// `SettingsForm.contentWidth`.
     private static let windowWidth: CGFloat = 460
 
+    /// What leaves this Mac, stated in full — the app charges money and phones
+    /// home about the license, so the honest accounting belongs where anyone
+    /// can find it rather than only in a privacy policy on a website.
+    static let privacyText = """
+    Discovery, routing, volume, and playback stay entirely on your network — \
+    none of it touches a server, even offline. Audiout’s only outside \
+    connections are about your license and updates: a check of your key, a \
+    once-per-launch check-in (your key, a random per-Mac id, and the app \
+    version — nothing else), and the update check when one runs. A build \
+    compiled from source makes none of these.
+    """
+
+    /// Built from ``AboutLinks/supportEmail`` so the address lives in one place.
+    static let supportText = "Questions or problems? Email \(AboutLinks.supportEmail)."
+
     private let info: AboutInfo
     private let openURL: (URL) -> Void
     private let sourceCodeButton = NSButton()
@@ -147,10 +156,13 @@ public final class AboutViewController: NSViewController {
         let icon = NSImageView()
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.imageScaling = .scaleProportionallyUpOrDown
-        // `NSApplication.shared` (not the bare `NSApp` global) so this is safe
-        // even the very first time any AppKit code runs in this process — the
-        // bare global stays nil until `.shared` has been accessed once.
-        icon.image = NSApplication.shared.applicationIconImage
+        // The BRAND MARK, not the OS app icon: About states our identity, and
+        // `BrandMark` is the render we control (see its doc comment). The app
+        // icon stays as the fallback for a build with no bundled asset, read
+        // through `NSApplication.shared` (not the bare `NSApp` global) so it is
+        // safe even the very first time any AppKit code runs in this process —
+        // the bare global stays nil until `.shared` has been accessed once.
+        icon.image = BrandMark.image ?? NSApplication.shared.applicationIconImage
         NSLayoutConstraint.activate([
             icon.widthAnchor.constraint(equalToConstant: 32),
             icon.heightAnchor.constraint(equalToConstant: 32),
@@ -180,7 +192,6 @@ public final class AboutViewController: NSViewController {
         sourceCodeButton.bezelStyle = .rounded
         sourceCodeButton.target = self
         sourceCodeButton.action = #selector(viewSourceCodeTapped)
-        sourceCodeButton.setAccessibilityLabel("View source code")
         rows.append(SettingsForm.row(
             title: "License",
             subtitle: "GPL-2.0-or-later — see Third-Party Notices below.",
@@ -192,18 +203,32 @@ public final class AboutViewController: NSViewController {
         rows.append(creditsLabel)
         rows.append(makeCreditsScrollView())
 
-        // Same quiet-header voice as "Third-Party Notices" above, so the two
+        // Same quiet-header voice as "Third-Party Notices" above, so the three
         // minor sections read as one system.
+        let privacyLabel = SettingsForm.label("Privacy")
+        privacyLabel.font = Tokens.Font.captionEmphasized
+        privacyLabel.textColor = Tokens.Color.secondaryLabel
+        rows.append(privacyLabel)
+
+        let privacyBody = SettingsForm.label(Self.privacyText)
+        privacyBody.font = Tokens.Font.caption
+        privacyBody.textColor = Tokens.Color.secondaryLabel
+        privacyBody.lineBreakMode = .byWordWrapping
+        privacyBody.maximumNumberOfLines = 0
+        rows.append(privacyBody)
+
         let supportLabel = SettingsForm.label("Support")
         supportLabel.font = Tokens.Font.captionEmphasized
         supportLabel.textColor = Tokens.Color.secondaryLabel
         rows.append(supportLabel)
 
-        let supportBody = SettingsForm.label(AboutLinks.supportContactPlaceholder)
+        let supportBody = SettingsForm.label(Self.supportText)
         supportBody.font = Tokens.Font.caption
         supportBody.textColor = Tokens.Color.secondaryLabel
         supportBody.lineBreakMode = .byWordWrapping
         supportBody.maximumNumberOfLines = 0
+        // The address is only useful if it can be copied.
+        supportBody.isSelectable = true
         rows.append(supportBody)
 
         // An explicit opaque, appearance-adaptive background — matching
@@ -245,8 +270,11 @@ public final class AboutViewController: NSViewController {
         creditsTextView.isSelectable = true
         creditsTextView.isRichText = false
         creditsTextView.drawsBackground = false
-        creditsTextView.font = Tokens.Font.caption
-        creditsTextView.textColor = Tokens.Color.secondaryLabel
+        // Legal text people are expected to actually read is BODY text, not a
+        // caption in the secondary color — the 200pt scroll box already keeps
+        // it from taking over the window.
+        creditsTextView.font = Tokens.Font.body
+        creditsTextView.textColor = Tokens.Color.label
         creditsTextView.textContainerInset = NSSize(width: 8, height: 8)  // 4pt grid
         creditsTextView.string = AboutCredits.thirdPartyNoticesText
         creditsTextView.isVerticallyResizable = true
@@ -264,7 +292,7 @@ public final class AboutViewController: NSViewController {
         return scrollView
     }
 
-    @objc private func viewSourceCodeTapped() { openURL(AboutLinks.sourceCodePlaceholderURL) }
+    @objc private func viewSourceCodeTapped() { openURL(AboutLinks.sourceCodeURL) }
 
     // MARK: Test-support hooks
 
@@ -277,7 +305,10 @@ public final class AboutViewController: NSViewController {
         return creditsTextView.string
     }
 
-    public var test_supportContactText: String { AboutLinks.supportContactPlaceholder }
+    public var test_supportContactText: String { Self.supportText }
+
+    /// The Privacy section's body — what the app does and does not send.
+    public var test_privacyText: String { Self.privacyText }
 
     public var test_sourceCodeButtonTitle: String {
         _ = view
@@ -319,6 +350,9 @@ public final class AboutWindowController: NSWindowController {
         let window = NSWindow(contentViewController: aboutVC)
         window.styleMask = [.titled, .closable]
         window.title = "About Audiout"
+        // Nothing here is worth restoring across a relaunch, and a restored
+        // About window on login would be pure noise.
+        window.isRestorable = false
         super.init(window: window)
     }
 
@@ -331,6 +365,11 @@ public final class AboutWindowController: NSWindowController {
     public func show() {
         aboutVC.view.layoutSubtreeIfNeeded()
         window?.setContentSize(aboutVC.view.fittingSize)
+        // A first open lands centered rather than wherever AppKit's cascade
+        // put it; re-showing an already-open window leaves it where the user
+        // dragged it. Ahead of the headless guard so sizing and centering both
+        // stay exercised without a screen.
+        if window?.isVisible != true { window?.center() }
         guard !HeadlessRuntime.isActive else { return }
         NSApp?.activate(ignoringOtherApps: true)
         showWindow(nil)

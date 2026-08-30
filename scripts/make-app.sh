@@ -12,6 +12,13 @@
 # Gatekeeper lets it launch.
 #
 # Usage: scripts/make-app.sh [output-dir]   (default output dir: ./build)
+# Env:
+#   AUDIOUT_BUILD_LOCAL=1       compile here, never on the second Mac
+#   AUDIOUT_BUNDLE_DYLIBS=1     bundle the Homebrew dylibs (Homebrew-less target)
+#   AUDIOUT_NO_LIVETEST_LOCK=1  skip the live-test slot gate on the shared dev id
+#                                 (see the "Live-test slot gate" section below, and
+#                                 scripts/livetest.sh) — for a deliberate build when
+#                                 you know nobody else is testing
 # Every command below is a paste-proof one-liner — no backslash continuations.
 
 set -euo pipefail
@@ -37,7 +44,25 @@ MIN_MACOS="${MIN_MACOS:-14.2}"
 # without editing this script:
 #   APP_VERSION=0.2.0 BUILD_NUMBER=7 scripts/make-app.sh
 APP_VERSION="${APP_VERSION:-0.1.0}"
+# Captured BEFORE the default is applied — once BUILD_NUMBER is set to 1 there is
+# no way left to tell "the caller asked for 1" from "the caller said nothing".
+BUILD_NUMBER_WAS_SET="${BUILD_NUMBER+set}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
+# Shown in Finder's Get Info and the About window. Required for a GPL app that
+# is being sold: the copyright line and the licence are what the user is owed.
+HUMAN_COPYRIGHT="© 2026 Alec Henderson. Licensed under GPL-2.0-or-later."
+# Fail fast, BEFORE any compile: a bad invocation must die in a second, not after
+# a full build. Both guards below are about releases that look fine at build time
+# and only break in the wild.
+# https, not http: the appcast request carries "Authorization: Bearer <licence
+# key>", and the download it names is what Sparkle will install. Plaintext leaks
+# the key and lets anyone on the path serve the update.
+case "${SPARKLE_FEED_URL:-}" in "") ;; https://*) ;; *) echo "ERROR: SPARKLE_FEED_URL must be https:// — the appcast request carries the licence key as a bearer token and names the update to install; plaintext leaks the key and lets the path serve its own build (got: $SPARKLE_FEED_URL)" >&2; exit 1;; esac
+case "${AUDIOUT_LICENSE_URL:-}" in "") ;; https://*) ;; *) echo "ERROR: AUDIOUT_LICENSE_URL must be https:// — the licence key travels to this server on every check, and the Sparkle feed is derived from it (got: $AUDIOUT_LICENSE_URL)" >&2; exit 1;; esac
+# A Sparkle release built on the default CFBundleVersion=1 is an update the
+# updater will never offer: the appcast compares build numbers, so a release
+# that didn't bump one is invisible to every existing install.
+if [ -n "${SPARKLE_FEED_URL:-}" ] || [ -n "${SPARKLE_ED_PUBLIC_KEY:-}" ]; then [ -n "$BUILD_NUMBER_WAS_SET" ] || { echo "ERROR: a Sparkle release needs an explicit BUILD_NUMBER — the default CFBundleVersion=1 is an update the updater can never offer, since the appcast compares build numbers against what is already installed" >&2; exit 1; }; fi
 # Shown verbatim inside the macOS system-audio permission dialog. Written in the
 # user's mental model ("send my audio to speakers"), not the OS's ("record"),
 # and states the limit explicitly — this is the only text they get before
@@ -49,6 +74,8 @@ LOCAL_NETWORK_USAGE="Audiout looks for AirPlay speakers on your local network so
 # Shown INSIDE the macOS Bluetooth permission dialog (BT-CONNECT,
 # PLAN-UNIVERSAL-SYNC §B/§K). Same mental-model rule as the two above.
 BLUETOOTH_USAGE="Audiout connects to Bluetooth speakers you've already paired so it can play your Mac's audio on them. It only reaches speakers you choose — it never scans for or reads anything else."
+
+MICROPHONE_USAGE="Audiout can listen through your Mac's built-in microphone for a couple of seconds during speaker alignment, to measure how far apart your speakers sound. The recording is analysed on your Mac and thrown away — nothing is saved or sent anywhere."
 
 # The privileged root PTP helper (T2/T5, ptp-helper-design.md §2). Lives in
 # the AirPlayEngine package, not AudioutCore — a separate `swift build`
@@ -74,6 +101,13 @@ HELPER_LABEL="${BUNDLE_ID}.ptphelper"
 # (AudioutCore) as the app executable, so it's built via the SAME `swift
 # build` invocation/bin dir below rather than a second package build.
 TCC_PROBE_EXECUTABLE="tcc-probe"
+
+# SwiftPM resource bundle for AudioutSharedUI (holds the in-app brand mark,
+# Audiout-Hero-1024.svg). SwiftPM emits it next to the app executable in the
+# build's bin dir; BrandMark resolves it from Contents/Resources at runtime — so
+# it MUST be copied into the .app or the in-app brand mark comes up blank.
+# Name is `<PackageName>_<TargetName>.bundle`, deterministic from Package.swift.
+RESOURCE_BUNDLE_NAME="AudioutCore_AudioutSharedUI.bundle"
 
 # Codesigning identity, resolved in priority order:
 #   1. CODESIGN_IDENTITY from the environment — an explicit override. Set it to
@@ -153,6 +187,37 @@ ICON_SOURCE="$SCRIPT_DIR/Audiout-MacOS-Default-1024x1024@1x.png"
 # build a light/dark appearance-aware icon (see the app-icon step below).
 ICON_SOURCE_DARK="$SCRIPT_DIR/Audiout-MacOS-Dark-1024x1024@1x.png"
 
+# --- Live-test slot gate ---------------------------------------------------
+# ONE agent at a time may build the SHARED dev id. Rebuilding it under a tester
+# overwrites the .app he is using and starts a second copy fighting the running
+# one for the same launchd daemon identity — see scripts/livetest.sh's header
+# for why both failures are silent. Agents run in parallel worktrees with no
+# shared memory, so this build script is the only place the rule can actually
+# be enforced: the last common choke point before the .app appears on disk.
+#
+# ONLY the shared dev id is gated. A fresh per-handover id is a different .app
+# in a different bundle and a different daemon identity, so it cannot clobber
+# anything, and the default production id is the /Applications copy nobody
+# should be rebuilding for a test anyway. Both paths run exactly as before —
+# the check below is one `ps` and one `stat`, and it is placed here so it costs
+# nothing when it refuses: before ffmpeg, before housekeeping, before any
+# compile.
+DEV_BUNDLE_ID="com.audiout.Audiout.dev"   # the standing dev id, CLAUDE.md "Build & run"
+if [ "$BUNDLE_ID" = "$DEV_BUNDLE_ID" ] && [ "${AUDIOUT_NO_LIVETEST_LOCK:-0}" != "1" ]; then
+  # Run the check from REPO_ROOT, not the caller's cwd: the slot is owned by a
+  # worktree, and this build belongs to the worktree this script lives in
+  # whatever directory it was invoked from.
+  if ! ( cd "$REPO_ROOT" && "$SCRIPT_DIR/livetest.sh" check ); then
+    echo "ERROR: refusing to build $DEV_BUNDLE_ID — you do not hold the live-test slot." >&2
+    echo "       Take it:      bash scripts/livetest.sh acquire --label <your branch or task>" >&2
+    echo "       Or check:     bash scripts/livetest.sh status" >&2
+    echo "       Or sidestep:  build a FRESH handover id instead, which cannot clobber the" >&2
+    echo "                     dev build — APP_NAME=\"Audiout <thing>\" BUNDLE_ID=\"com.audiout.Audiout.<thing>\" bash scripts/make-app.sh" >&2
+    echo "       (AUDIOUT_NO_LIVETEST_LOCK=1 skips this when you know no one else is testing.)" >&2
+    exit 1
+  fi
+fi
+
 # --- Build (release) ------------------------------------------------------
 # For a self-contained release bundle, build the minimal audio-only ffmpeg FIRST
 # (idempotent — skips if already built; set FFMPEG_MIN_FORCE=1 to rebuild), so the
@@ -213,7 +278,8 @@ swift build --build-system native --package-path AirPlayEngine -c release --prod
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker \"\$R/scripts/ptp-helper-info.plist\" && \
 HBIN=\$(swift build --build-system native --package-path AirPlayEngine -c release --show-bin-path) && \
 rm -rf .remote-products && mkdir -p .remote-products && \
-cp \"\$BIN/$EXECUTABLE\" \"\$BIN/$TCC_PROBE_EXECUTABLE\" \"\$HBIN/$HELPER_EXECUTABLE\" .remote-products/"
+cp \"\$BIN/$EXECUTABLE\" \"\$BIN/$TCC_PROBE_EXECUTABLE\" \"\$HBIN/$HELPER_EXECUTABLE\" .remote-products/ && \
+cp -R \"\$BIN/$RESOURCE_BUNDLE_NAME\" .remote-products/"
 
   RRC=0
   remote_run "$REPO_ROOT" "$REMOTE_CMD" || RRC=$?
@@ -228,10 +294,23 @@ cp \"\$BIN/$EXECUTABLE\" \"\$BIN/$TCC_PROBE_EXECUTABLE\" \"\$HBIN/$HELPER_EXECUT
     trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
     if remote_fetch "$REPO_ROOT" ".remote-products/$EXECUTABLE" "$STAGE/$EXECUTABLE" &&
        remote_fetch "$REPO_ROOT" ".remote-products/$TCC_PROBE_EXECUTABLE" "$STAGE/$TCC_PROBE_EXECUTABLE" &&
-       remote_fetch "$REPO_ROOT" ".remote-products/$HELPER_EXECUTABLE" "$STAGE/$HELPER_EXECUTABLE"; then
+       remote_fetch "$REPO_ROOT" ".remote-products/$HELPER_EXECUTABLE" "$STAGE/$HELPER_EXECUTABLE" &&
+       remote_fetch "$REPO_ROOT" ".remote-products/$RESOURCE_BUNDLE_NAME" "$STAGE/$RESOURCE_BUNDLE_NAME" &&
+       test -d "$STAGE/$RESOURCE_BUNDLE_NAME"; then
+      # NO trailing slash on the bundle source, and the `test -d` above is part
+      # of the fetch condition rather than a later assertion. Both are the same
+      # rsync rule seen from two sides: a trailing slash means "copy the
+      # CONTENTS of this directory", so with it the bundle's files land loose in
+      # $STAGE and $STAGE/<bundle> is never created. rsync still reports
+      # SUCCESS, so without the `test -d` the fetch condition passes, the
+      # graceful local-build fallback below is skipped, and the run dies ~70
+      # lines on at the hard `test -d "$BUILT_RESOURCE_BUNDLE"` exit instead.
+      # (`remote_fetch` hands rsync the destination's PARENT — see its own
+      # contract — which is what makes the slash-free form correct here.)
       BUILT_BINARY="$STAGE/$EXECUTABLE"
       BUILT_TCC_PROBE="$STAGE/$TCC_PROBE_EXECUTABLE"
       BUILT_HELPER="$STAGE/$HELPER_EXECUTABLE"
+      BUILT_RESOURCE_BUNDLE="$STAGE/$RESOURCE_BUNDLE_NAME"
       chmod +x "$BUILT_BINARY" "$BUILT_TCC_PROBE" "$BUILT_HELPER"
       REMOTE_BUILT=1
       echo "==> Fetched 3 products from $remote_host"
@@ -264,6 +343,7 @@ echo "==> Building $EXECUTABLE (release)"
 swift build --build-system native --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
 BIN_DIR="$(swift build --build-system native --package-path "$PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_BINARY="$BIN_DIR/$EXECUTABLE"
+BUILT_RESOURCE_BUNDLE="$BIN_DIR/$RESOURCE_BUNDLE_NAME"
 test -x "$BUILT_BINARY" || { echo "error: built binary not found at $BUILT_BINARY" >&2; exit 1; }
 
 # Same package as $EXECUTABLE, same release config — this lands in $BIN_DIR
@@ -296,6 +376,7 @@ fi  # REMOTE_BUILT
 test -x "$BUILT_BINARY"    || { echo "error: app binary not found at $BUILT_BINARY" >&2; exit 1; }
 test -x "$BUILT_TCC_PROBE" || { echo "error: tcc-probe not found at $BUILT_TCC_PROBE" >&2; exit 1; }
 test -x "$BUILT_HELPER"    || { echo "error: ptp-helper not found at $BUILT_HELPER" >&2; exit 1; }
+test -d "$BUILT_RESOURCE_BUNDLE" || { echo "error: resource bundle not found at $BUILT_RESOURCE_BUNDLE" >&2; exit 1; }
 
 # --- Assemble the bundle --------------------------------------------------
 echo "==> Assembling $APP_BUNDLE"
@@ -313,6 +394,16 @@ chmod +x "$MACOS_DIR/$HELPER_EXECUTABLE"
 # resolves it at exactly Contents/MacOS/tcc-probe, relative to the running bundle.
 cp "$BUILT_TCC_PROBE" "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 chmod +x "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
+
+# SwiftPM resource bundle → Contents/Resources, the only place codesign accepts
+# it (content at the .app root is refused: "unsealed contents present in the
+# bundle root"). SwiftPM's own generated `Bundle.module` accessor does NOT look
+# here — it checks `Bundle.main.bundleURL/<name>.bundle` (the .app ROOT for a
+# bundled app) and then an absolute build-directory path baked in at compile
+# time — which is why BrandMark resolves the bundle itself rather than through
+# `Bundle.module`: see BrandMark.swift.
+mkdir -p "$RESOURCES_DIR"
+cp -R "$BUILT_RESOURCE_BUNDLE" "$RESOURCES_DIR/$RESOURCE_BUNDLE_NAME"
 
 # --- SMAppService launchd daemon plist -------------------------------------
 # Ships from scripts/ptp-helper.plist with __BUNDLE_ID__ substituted for the
@@ -625,6 +716,12 @@ plutil -insert NSAudioCaptureUsageDescription -string "$AUDIO_CAPTURE_USAGE" "$P
 # and a missing permission rationale is not something to discover in the wild.
 plutil -extract NSAudioCaptureUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSAudioCaptureUsageDescription missing from Info.plist" >&2; exit 1; }
 
+# Copyright + licence, shown in Finder's Get Info. plutil, not PlistBuddy, for
+# the same reason as the string above: the value carries punctuation (©, a
+# period-separated licence clause) that PlistBuddy re-parses and then exits 0 on.
+plutil -insert NSHumanReadableCopyright -string "$HUMAN_COPYRIGHT" "$PLIST"
+plutil -extract NSHumanReadableCopyright raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSHumanReadableCopyright missing from Info.plist" >&2; exit 1; }
+
 # Local Network: the app browses Bonjour to discover AirPlay speakers, which macOS
 # gates behind the Local Network permission (a separate prompt from audio). Two
 # keys are needed and BOTH must be present or discovery silently finds nothing:
@@ -680,6 +777,38 @@ plutil -extract NSBonjourServices.5 raw -o - "$PLIST" >/dev/null || { echo "ERRO
 # same plutil-plus-assert treatment as the audio-capture string above.
 plutil -insert NSBluetoothAlwaysUsageDescription -string "$BLUETOOTH_USAGE" "$PLIST"
 plutil -extract NSBluetoothAlwaysUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBluetoothAlwaysUsageDescription missing from Info.plist" >&2; exit 1; }
+
+# Microphone (roadmap 064): the alignment wizard's mic-probe measurement
+# records the BUILT-IN mic for a few seconds. A separate TCC bucket from
+# System Audio Recording above — same plutil-plus-assert treatment, same
+# reason (a silently missing rationale is a bare "wants to record" prompt,
+# or on this key a capture that delivers only zeros).
+plutil -insert NSMicrophoneUsageDescription -string "$MICROPHONE_USAGE" "$PLIST"
+plutil -extract NSMicrophoneUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSMicrophoneUsageDescription missing from Info.plist" >&2; exit 1; }
+
+# --- audiout:// URL scheme (release builds only) ----------------------------
+# The purchase flow's return path: the thanks page links
+# `audiout://register?key=<key>`, LaunchServices hands that to the app as a
+# kAEGetURL Apple Event, and Settings ▸ General opens the license sheet on the
+# key (`AppDelegate.handleGetURLEvent`). Without this key LaunchServices has no
+# claim on the scheme and the link does nothing at all — silently — so it gets
+# the same plutil-plus-assert treatment as the usage strings above.
+#
+# Gated on AUDIOUT_LICENSE_URL, like the license keys below: LaunchServices
+# hands `audiout://` to whichever bundle claimed it, so a throwaway test build
+# that claims the scheme can capture a REAL purchase link — and it has no
+# license server to register the key against anyway.
+if [ -n "${AUDIOUT_LICENSE_URL:-}" ]; then
+  echo "==> Registering the audiout:// URL scheme"
+  plutil -insert CFBundleURLTypes -array "$PLIST"
+  plutil -insert CFBundleURLTypes.0 -dictionary "$PLIST"
+  plutil -insert CFBundleURLTypes.0.CFBundleURLName -string "$BUNDLE_ID" "$PLIST"
+  plutil -insert CFBundleURLTypes.0.CFBundleURLSchemes -array "$PLIST"
+  plutil -insert CFBundleURLTypes.0.CFBundleURLSchemes.0 -string "audiout" "$PLIST"
+  plutil -extract CFBundleURLTypes.0.CFBundleURLSchemes.0 raw -o - "$PLIST" >/dev/null || { echo "ERROR: CFBundleURLTypes is missing the audiout:// scheme — the purchase return link would silently do nothing" >&2; exit 1; }
+else
+  echo "==> Skipping the audiout:// URL scheme (set AUDIOUT_LICENSE_URL for a build that handles purchase return links)"
+fi
 
 # --- License server + buy page (release builds only) ------------------------
 # AUDIOUT_LICENSE_URL is the base URL of the license server (the Worker in
@@ -743,6 +872,17 @@ fi
 # is NOT applied and the shell's own env wins (and `swift run`/tests never read
 # Info.plist at all).
 #
+# PostHog must be present in a bundled release because double-clicked apps do not
+# inherit the build shell's environment. CI supplies these values directly; local
+# release builds may use the wizard-managed root .env.
+if [ -f "$REPO_ROOT/.env" ]; then
+  set -a
+  . "$REPO_ROOT/.env"
+  set +a
+fi
+[ -n "${POSTHOG_PROJECT_TOKEN:-}" ] || { echo "ERROR: POSTHOG_PROJECT_TOKEN is required for a release bundle" >&2; exit 1; }
+[ -n "${POSTHOG_HOST:-}" ] || { echo "ERROR: POSTHOG_HOST is required for a release bundle" >&2; exit 1; }
+#
 #   AIRPLAY_BACKEND=native — a double-clicked release MUST drive real speakers.
 #     BackendKind.resolved() already defaults to `.native` in code (mock is
 #     opt-in only), so this is belt-and-suspenders: it makes the release intent
@@ -755,7 +895,11 @@ fi
 echo "==> Writing LSEnvironment (release backend default)"
 plutil -insert LSEnvironment -dictionary "$PLIST"
 plutil -insert LSEnvironment.AIRPLAY_BACKEND -string "native" "$PLIST"
+plutil -insert LSEnvironment.POSTHOG_PROJECT_TOKEN -string "$POSTHOG_PROJECT_TOKEN" "$PLIST"
+plutil -insert LSEnvironment.POSTHOG_HOST -string "$POSTHOG_HOST" "$PLIST"
 plutil -extract LSEnvironment.AIRPLAY_BACKEND raw -o - "$PLIST" >/dev/null || { echo "ERROR: LSEnvironment.AIRPLAY_BACKEND missing from Info.plist — release builds must pin the native backend explicitly (belt-and-suspenders over the native code default)" >&2; exit 1; }
+plutil -extract LSEnvironment.POSTHOG_PROJECT_TOKEN raw -o - "$PLIST" >/dev/null || { echo "ERROR: POSTHOG_PROJECT_TOKEN missing from Info.plist" >&2; exit 1; }
+plutil -extract LSEnvironment.POSTHOG_HOST raw -o - "$PLIST" >/dev/null || { echo "ERROR: POSTHOG_HOST missing from Info.plist" >&2; exit 1; }
 
 # Opt-in dev diagnostics, baked into LSEnvironment so an `open`-launched bundle
 # still sees them: an `open`ed app does NOT inherit the shell env, and it MUST be

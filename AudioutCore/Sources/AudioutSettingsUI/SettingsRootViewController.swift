@@ -106,6 +106,9 @@ public final class SettingsRootViewController: NSSplitViewController {
 
     private func showSection(at index: Int) {
         guard sections.indices.contains(index) else { return }
+        if index != selectedSectionIndex {
+            Analytics.capture("settings:pane_selected", ["pane": sections[index].title])
+        }
         paneHost.setContent(sections[index].viewController)
         selectedSectionIndex = index
     }

@@ -321,10 +321,12 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     /// the dialog for focus — AppKit reassigns key/main status and reorders
     /// remaining windows on teardown, the same disturbance `isPromptInFlight`
     /// already gives up floating level, reactivate re-front and force-activate
-    /// for. The stuck-prompt hint the content VC already shows after the 20 s
-    /// timeout is the honest explanation for why the ✕ isn't doing anything.
+    /// for. A refusal is never silent: the content VC says why on the ribbon
+    /// and to VoiceOver, and brings its stuck-dialog escape hatch forward.
     public func windowShouldClose(_ sender: NSWindow) -> Bool {
-        !isPromptInFlight
+        guard isPromptInFlight else { return true }
+        contentVC.noteCloseRefused()
+        return false
     }
 
     public func windowWillClose(_ notification: Notification) {

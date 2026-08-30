@@ -46,6 +46,20 @@ remote_toolchain=${remote_toolchain:-swift}
 # would stall every run behind a host that is never going to answer.
 remote_probe_timeout=${AUDIOUT_TEST_REMOTE_TIMEOUT:-5}
 
+# How many jobs may run ON THE REMOTE at once. The local machine has had a slot
+# cap for a long time; the remote had NONE, and that asymmetry is what actually
+# overloaded it: with `testPrefer = remote` every agent shipped its suite there
+# unconditionally, and the remote attempt happens BEFORE the local semaphore is
+# taken, so a remote run touched no cap at all. Observed: three suites at once
+# on a 8-core mule.
+#
+# A COUNT, deliberately, not a load-average check. Load average is a lie for
+# this workload -- the suite is wait-bound, so it parks threads on timers and
+# reports a load of 20+ while the CPU sits near 25%. Anything that gates on
+# load either throttles an idle machine or waves through a busy one. A permit
+# count measures the thing we actually care about: how many jobs are resident.
+remote_slots=${AUDIOUT_TEST_REMOTE_SLOTS:-$(git config --get audiout.remoteSlots 2>/dev/null || echo 2)}
+
 remote_configured() { [ -n "$remote_host" ]; }
 
 remote_reachable() {
@@ -196,6 +210,15 @@ remote_run() {
          cd \"$_rdir\" || exit 97; \
          touch .last-used; \
          command -v $remote_toolchain >/dev/null 2>&1 || exit 97; \
+         _s=''; _n=1; \
+         while [ \$_n -le $remote_slots ]; do \
+             if /usr/bin/shlock -f /tmp/audiout-remote-work.lock.\$_n -p \$\$; then \
+                 _s=/tmp/audiout-remote-work.lock.\$_n; break; \
+             fi; \
+             _n=\$((_n + 1)); \
+         done; \
+         [ -n \"\$_s\" ] || exit 98; \
+         trap 'rm -f \"\$_s\"' EXIT HUP INT TERM; \
          $* ; echo \"REMOTE_EXIT:\$?\"" 2>&1)
     _rc=$?
     _out=$(printf '%s' "$_out" | tr -d '\r')
@@ -210,6 +233,15 @@ remote_run() {
         echo "  remote: environment not usable (missing dir or toolchain) — staying local." >&2
         return 1
     fi
+    # 98: the remote is at its job cap. Not an error and not a failure of the
+    # caller's code -- just "no capacity there", which is the same answer as an
+    # unreachable host, so it takes the same path back into the local queue.
+    # Falling back is strictly better than waiting: the local slots are usually
+    # free precisely when everyone has piled onto the remote.
+    if [ "$_rc" -eq 98 ]; then
+        echo "  remote: all $remote_slots remote slots busy — staying local." >&2
+        return 1
+    fi
     # 255 is ssh's own error code, and a missing marker means the command never
     # completed — either way there is no verdict to trust.
     if [ "$_rc" -eq 255 ] || [ -z "$_marker" ]; then
@@ -221,9 +253,18 @@ remote_run() {
     return 2
 }
 
-# Copy one file back from the synced remote tree. $2 is relative to the remote
-# repo root; $3 is the local destination path.
+# Copy one product back from the synced remote tree. $2 is relative to the remote
+# repo root; $3 is the local destination path, whose LAST COMPONENT must equal
+# $2's — the destination handed to rsync is $3's parent directory, not $3.
+#
+# That indirection is what makes a DIRECTORY source (the SwiftPM resource bundle)
+# land correctly. rsync, unlike cp, does not rename a directory source to the
+# destination path: `rsync -a src/foo dest/foo` treats dest/foo as a container and
+# writes dest/foo/foo, so the bundle used to nest one level deep and Bundle.module
+# could no longer find it (a remote-built .app then trapped on first access). Both
+# a file and a directory copy into a destination DIRECTORY under their own name,
+# so passing the parent is the one form that is correct for either.
 remote_fetch() {
     _esc=$(printf '%s/%s' "$(remote_dir_for "$1")" "$2" | sed 's/ /\\ /g')
-    rsync -az --timeout=30 "$remote_host:$_esc" "$3" >/dev/null 2>&1
+    rsync -az --timeout=30 "$remote_host:$_esc" "$(dirname "$3")/" >/dev/null 2>&1
 }

@@ -35,6 +35,11 @@ struct Options {
     var streamType = "LIVE"
     var appID = CastClient.defaultMediaReceiverAppID
     var autoplay = true
+    // `--fake` only: the receiver behaviours worth driving on purpose.
+    var controlType = "attenuation"
+    var fetchDelay: Double = 0
+    var stallAfter: Double?
+    var stallDuration: Double = 0.9
 }
 
 struct UsageError: Error {
@@ -87,6 +92,22 @@ func parseArgs(_ args: [String]) throws -> Options {
             let raw = try next("a number of milliseconds")
             guard let value = Int(raw), value >= 0 else { throw UsageError(message: "--prime-ms: '\(raw)' is not a number of milliseconds") }
             options.primeMilliseconds = value
+        case "--control-type":
+            let raw = try next("attenuation or fixed")
+            guard ["attenuation", "fixed"].contains(raw) else { throw UsageError(message: "--control-type: '\(raw)' is not attenuation or fixed") }
+            options.controlType = raw
+        case "--fetch-delay":
+            let raw = try next("a number of seconds")
+            guard let value = Double(raw), value >= 0 else { throw UsageError(message: "--fetch-delay: '\(raw)' is not a number of seconds") }
+            options.fetchDelay = value
+        case "--stall-after":
+            let raw = try next("a number of seconds")
+            guard let value = Double(raw), value >= 0 else { throw UsageError(message: "--stall-after: '\(raw)' is not a number of seconds") }
+            options.stallAfter = value
+        case "--stall-for":
+            let raw = try next("a number of seconds")
+            guard let value = Double(raw), value > 0 else { throw UsageError(message: "--stall-for: '\(raw)' is not a number of seconds") }
+            options.stallDuration = value
         default:
             throw UsageError(message: "unknown argument: \(argument)")
         }
@@ -122,6 +143,12 @@ OPTIONS:
   --stream-type <t>      Cast streamType for LOAD: LIVE (default), BUFFERED, NONE
   --no-autoplay          LOAD with autoplay=false, then an explicit PLAY (AirConnect)
   --app-id <id>          receiver app to launch (default CC1AD845; AirConnect uses 46C1A819)
+
+FAKE-RECEIVER OPTIONS (--fake only):
+  --control-type <t>     volume.controlType it reports: attenuation (default) or fixed
+  --fetch-delay <s>      seconds it sits on the LOAD before the GET (default 0)
+  --stall-after <s>      rebuffer once this many seconds into the run
+  --stall-for <s>        how long that rebuffer lasts (default 0.9, the measured cost)
 """
 
 // MARK: - Run
@@ -247,8 +274,11 @@ case .fake:
     }
     var fakeOptions = options
     fakeOptions.streamHost = options.streamHost ?? "127.0.0.1"
-    let fake = FakeCastReceiver()
+    let fake = FakeCastReceiver(controlType: options.controlType, fetchDelay: options.fetchDelay)
     retainer.keep(fake)
+    // Scheduled from here, so `--stall-after` reads against the log's own
+    // elapsed times; one that fires before the LOAD has nothing to stall.
+    if let after = options.stallAfter { fake.stall(after: after, duration: options.stallDuration) }
     fake.start { result in
         switch result {
         case .failure(let error):

@@ -17,13 +17,32 @@ import Security
 /// arrives — the protocol bugs that matter (framing, virtual connections,
 /// requestId routing) all show up against this. It is NOT a Cast emulator: no
 /// Bonjour advertising, no DeviceAuth, no app registry, no real decoding. The
-/// "playback" it performs is fetching the first `fetchBytes` of the stream and
-/// then declaring itself PLAYING.
+/// "playback" it performs is reading the stream and running a clock against it.
+///
+/// **The timing it models, and why sync work can be tested against it.** The
+/// receiver keeps reading the stream for as long as the session lasts and
+/// starts its play clock once it holds `startupLead` seconds of audio. The
+/// sender paces at exactly real time, so buffer level in is buffer level out:
+/// the lead the sender measures (`secondsSent − currentTime`) settles at
+/// `startupLead` and stays there. A stall freezes the clock while the stream
+/// keeps arriving, which is why its cost is permanent — the measured device
+/// gets from 4.6 s to its steady 5.5 s by rebuffering once, about 2 s in, and
+/// never gives that 0.9 s back (`dev/notes/006-cast-output-scope-2026-08-22.md`).
+///
+/// **Where it diverges from the measured device:** PLAYING is announced as
+/// soon as PLAY lands or `fetchBytes` arrive, which is well before the buffer
+/// is full, so the first seconds of a session report a lead that climbs to
+/// `startupLead` rather than one that is settled from the first sample. A
+/// caller that needs PLAYING to coincide with a settled lead sets `fetchBytes`
+/// to `startupLead` seconds' worth (176 400 B/s).
 ///
 /// The listener is loopback-only, which is what keeps macOS's Application
 /// Firewall from prompting on a test run (see DACPServerTests).
 @available(macOS 15, *)
 public final class FakeCastReceiver: @unchecked Sendable {
+
+    /// 44.1 kHz S16LE stereo — the only format `CastLiveAudioServer` serves.
+    private static let bytesPerSecond = 176_400.0
 
     /// How much of the audio stream counts as "enough to start playing".
     private let fetchBytes: Int
@@ -37,6 +56,20 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// is outstanding this fake answers PLAY still BUFFERING, the way hardware
     /// does. `0` fetches immediately and answers PLAY with PLAYING.
     private let fetchDelay: TimeInterval
+    /// Seconds of audio the receiver holds before it starts playing — and so,
+    /// by construction, the lead it reports for the rest of the session. Both
+    /// surviving live sessions started at ~4.6 s.
+    private let startupLead: TimeInterval
+    /// Where the lead ends up. The gap between this and `startupLead` is the
+    /// cost of one early rebuffer, injected `startupRebufferAfter` into
+    /// playback; equal values mean a session that is flat from the start.
+    private let steadyLead: TimeInterval
+    private let startupRebufferAfter: TimeInterval
+    /// The receiver's crystal against the Mac's. Positive runs the play clock
+    /// fast, so the lead shrinks — 100 ppm is ~360 ms an hour. Consumer parts
+    /// are tens of ppm; nobody has measured the Streamer's, so the default is
+    /// a clock that does not drift at all.
+    private let clockDriftPPM: Double
     private let queue = DispatchQueue(label: "FakeCastReceiver")
 
     /// Lock-guarded rather than `queue.sync`-guarded: a test reads this from
@@ -65,6 +98,22 @@ public final class FakeCastReceiver: @unchecked Sendable {
     private var idleReason: String?
     private var currentMediaSessionID: Int?
     private var fetch: NWConnection?
+    /// Body bytes the current fetch has read, framing and WAV header included.
+    /// Only ever compared against a threshold, never differentiated, so the
+    /// ~0.2 % that chunk framing adds moves the moment playback starts by a
+    /// few milliseconds and biases nothing after that.
+    private var receivedBodyBytes = 0
+    private var fetchCompleted = false
+    private var playbackStarted = false
+    /// Media seconds played, banked whenever the clock stops.
+    private var playedSeconds: Double = 0
+    /// When the clock last started running; `nil` while it is stopped.
+    private var playingSince: DispatchTime?
+    private var stalled = false
+    /// Who to volunteer a MEDIA_STATUS to: the sender that sent the LOAD. A
+    /// status the receiver produces on its own — either edge of a stall, or a
+    /// fetch that failed — has no request in hand to reply to.
+    private var mediaTarget: (message: CastMessage, session: Session)?
 
     /// One sender connection: its frame reader and the endpoints it has opened
     /// a virtual connection to.
@@ -79,11 +128,32 @@ public final class FakeCastReceiver: @unchecked Sendable {
     public init(
         fetchBytes: Int = 65_536,
         controlType: String = "attenuation",
-        fetchDelay: TimeInterval = 0
+        fetchDelay: TimeInterval = 0,
+        startupLead: TimeInterval = 4.6,
+        steadyLead: TimeInterval = 5.5,
+        startupRebufferAfter: TimeInterval = 2,
+        clockDriftPPM: Double = 0
     ) {
         self.fetchBytes = fetchBytes
         self.controlType = controlType
         self.fetchDelay = fetchDelay
+        self.startupLead = startupLead
+        self.steadyLead = steadyLead
+        self.startupRebufferAfter = startupRebufferAfter
+        self.clockDriftPPM = clockDriftPPM
+    }
+
+    /// Injects a rebuffer: the receiver re-enters BUFFERING for `duration` and
+    /// its play clock stands still, so every lead it reports afterwards is
+    /// `duration` higher — permanently, because the sender paces at real time
+    /// and can never catch back up. This is the event the room-delay policy is
+    /// built around.
+    ///
+    /// `after` runs from the call. A stall that lands before playback has
+    /// started simply holds the start off that much longer, which puts the
+    /// lead in the same place.
+    public func stall(after: TimeInterval, duration: TimeInterval) {
+        queue.asyncAfter(deadline: .now() + after) { [weak self] in self?.beginStall(duration) }
     }
 
     public var pongCount: Int { stateLock.withLock { _pongCount } }
@@ -146,7 +216,72 @@ public final class FakeCastReceiver: @unchecked Sendable {
             fetch = nil
             for (_, session) in sessions { session.connection.cancel() }
             sessions.removeAll()
+            // The target holds the last sender session, and with it a
+            // connection this has just cancelled.
+            mediaTarget = nil
+            resetPlayback()
         }
+    }
+
+    // MARK: - The play clock (queue-confined)
+
+    /// Where the receiver is in the stream. It only moves while playback is
+    /// actually running, which is what makes a stall's cost permanent.
+    private func currentTime() -> Double {
+        guard let since = playingSince else { return playedSeconds }
+        return playedSeconds + Self.seconds(since: since) * (1 + clockDriftPPM / 1_000_000)
+    }
+
+    private func freezeClock() {
+        guard playingSince != nil else { return }
+        playedSeconds = currentTime()
+        playingSince = nil
+    }
+
+    private func resumeClock() {
+        guard playbackStarted, !stalled, playerState == "PLAYING", playingSince == nil else { return }
+        playingSince = .now()
+    }
+
+    /// Starts the clock the moment the buffer holds `startupLead` seconds —
+    /// the one decision that fixes the lead for the rest of the session.
+    private func startPlaybackIfBuffered() {
+        guard !playbackStarted, !stalled, playerState == "PLAYING" else { return }
+        guard Double(receivedBodyBytes) / Self.bytesPerSecond >= startupLead else { return }
+        playbackStarted = true
+        playingSince = .now()
+        guard steadyLead > startupLead else { return }
+        stall(after: startupRebufferAfter, duration: steadyLead - startupLead)
+    }
+
+    private func beginStall(_ duration: TimeInterval) {
+        guard currentMediaSessionID != nil, !stalled else { return }
+        stalled = true
+        freezeClock()
+        playerState = "BUFFERING"
+        idleReason = nil
+        sendUnsolicitedMediaStatus()
+        queue.asyncAfter(deadline: .now() + duration) { [weak self] in
+            guard let self, self.stalled, self.currentMediaSessionID != nil else { return }
+            self.stalled = false
+            // A PAUSE that landed mid-stall outranks the resume.
+            if self.playerState == "BUFFERING" { self.playerState = "PLAYING" }
+            self.resumeClock()
+            self.sendUnsolicitedMediaStatus()
+        }
+    }
+
+    private func resetPlayback() {
+        receivedBodyBytes = 0
+        fetchCompleted = false
+        playbackStarted = false
+        playedSeconds = 0
+        playingSince = nil
+        stalled = false
+    }
+
+    private static func seconds(since: DispatchTime) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds - since.uptimeNanoseconds) / 1_000_000_000
     }
 
     // MARK: - One sender connection
@@ -282,6 +417,8 @@ public final class FakeCastReceiver: @unchecked Sendable {
             playerState = "IDLE"
             idleReason = "CANCELLED"
             currentMediaSessionID = nil
+            mediaTarget = nil
+            resetPlayback()
         case "SET_VOLUME":
             stateLock.withLock { _setVolumeCount += 1 }
             let volume = json["volume"] as? [String: Any] ?? [:]
@@ -323,24 +460,29 @@ public final class FakeCastReceiver: @unchecked Sendable {
             currentMediaSessionID = mediaSessionCounter
             playerState = "BUFFERING"
             idleReason = nil
+            resetPlayback()
+            mediaTarget = (message, session)
             reply(to: message, on: session, payload: mediaStatusPayload(), requestID: requestID)
             let contentID = (json["media"] as? [String: Any])?["contentId"] as? String
             guard fetchDelay > 0 else {
-                startFetch(contentID: contentID, message: message, session: session)
+                startFetch(contentID: contentID)
                 return
             }
             queue.asyncAfter(deadline: .now() + fetchDelay) { [weak self] in
-                self?.startFetch(contentID: contentID, message: message, session: session)
+                self?.startFetch(contentID: contentID)
             }
             return
         case "PAUSE":
             playerState = "PAUSED"
+            freezeClock()
         case "PLAY":
             // A receiver whose GET has not landed yet is still BUFFERING when
-            // PLAY arrives; it reports PLAYING once the stream reaches it, which
-            // the fetch below already does. Once the fetch HAS completed,
-            // `playerState` is PLAYING and this leaves it there.
-            if fetchDelay == 0 { playerState = "PLAYING" }
+            // PLAY arrives; it reports PLAYING once the stream reaches it,
+            // which the fetch below already does. Once the stream HAS landed,
+            // PLAY is also what brings a PAUSED session back — a delayed-fetch
+            // receiver that ignored it would stay paused for good.
+            if (fetchDelay == 0 || fetchCompleted), !stalled { playerState = "PLAYING" }
+            resumeClock()
         case "STOP":
             // Same reason the receiver-namespace STOP cancels: a fetch left
             // running would still reach `fetchBytes` and flip the stopped
@@ -350,6 +492,8 @@ public final class FakeCastReceiver: @unchecked Sendable {
             playerState = "IDLE"
             idleReason = "CANCELLED"
             currentMediaSessionID = nil
+            mediaTarget = nil
+            resetPlayback()
         case "GET_STATUS":
             break
         default:
@@ -365,29 +509,33 @@ public final class FakeCastReceiver: @unchecked Sendable {
         var entry: [String: Any] = [
             "mediaSessionId": session,
             "playerState": playerState,
-            "currentTime": 0,
+            // Reported to ~10 ms, as the measured device does; a controller
+            // that trusted finer resolution would be reading noise.
+            "currentTime": (currentTime() * 100).rounded() / 100,
             "playbackRate": 1,
         ]
         if let idleReason { entry["idleReason"] = idleReason }
         return ["type": "MEDIA_STATUS", "status": [entry]]
     }
 
-    // MARK: - "Playback" — fetch the stream, then call it PLAYING
+    // MARK: - "Playback" — read the stream and run a clock against it
 
-    private func startFetch(contentID: String?, message: CastMessage, session: Session) {
+    private func startFetch(contentID: String?) {
         // A LOAD over a still-running fetch ends that one for real, rather than
         // just dropping the reference and leaving it pulling the stream. This
         // must run before the URL guard below so a bad-URL LOAD also clears
-        // any previous fetch — otherwise `failFetch(nil, …)`'s identity check
+        // any previous fetch — otherwise `failFetch(nil)`'s identity check
         // would fail and the stale fetch would live on to report a later
         // session as PLAYING.
         fetch?.cancel()
         fetch = nil
+        receivedBodyBytes = 0
+        fetchCompleted = false
         guard let contentID,
               let url = URL(string: contentID),
               let host = url.host,
               let port = NWEndpoint.Port(rawValue: UInt16(url.port ?? 80)) else {
-            failFetch(nil, message: message, session: session)
+            failFetch(nil)
             return
         }
         let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: .tcp)
@@ -401,9 +549,9 @@ public final class FakeCastReceiver: @unchecked Sendable {
                     content: Data("GET \(path) HTTP/1.1\r\nHost: \(host)\r\n\r\n".utf8),
                     completion: .idempotent
                 )
-                self.readBody(connection, header: Data(), body: Data(), message: message, session: session)
+                self.readBody(connection, header: Data(), body: Data())
             case .failed, .cancelled:
-                self.failFetch(connection, message: message, session: session)
+                self.failFetch(connection)
             default:
                 break
             }
@@ -411,53 +559,60 @@ public final class FakeCastReceiver: @unchecked Sendable {
         connection.start(queue: queue)
     }
 
-    /// Counts everything after the response head. Chunk-framing bytes are
-    /// counted along with the audio — "at least `fetchBytes` arrived" is all
-    /// this needs to decide the stream is real.
-    private func readBody(
-        _ connection: NWConnection,
-        header: Data,
-        body: Data,
-        message: CastMessage,
-        session: Session
-    ) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
+    /// Reads the stream for as long as the session lasts — a real receiver
+    /// does not stop at the point it has enough to start, and a fetch that
+    /// stopped would leave the play clock with nothing to run against. The
+    /// first `fetchBytes` are kept as the evidence `onFetchComplete` hands
+    /// back; past that only the count matters, so the bytes are dropped.
+    /// Chunk-framing bytes are counted along with the audio.
+    private func readBody(_ connection: NWConnection, header: Data, body: Data) {
+        // 4 KB is ~23 ms of audio, and it is the bound on how far past
+        // `startupLead` the buffer can get before the read that crosses it
+        // returns — which is the error in the lead for the whole session. A
+        // busy machine coalesces reads; it must not cost more than that.
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, isComplete, error in
             guard let self else { return }
+            // A receive completion queued before a STOP landed must not
+            // resurrect the stopped session: it would flip an app-less
+            // receiver to PLAYING, emit an unsolicited empty MEDIA_STATUS,
+            // feed a NEWER fetch's byte count, and nil out the fetch a later
+            // LOAD had already started. Identity is the whole test — STOP
+            // cancels `fetch` and nils it, and a new LOAD cancels and replaces
+            // it. `playerState` is NOT tested: the no-autoplay recipe
+            // legitimately reaches PLAYING (LOAD → PLAY) while this fetch is
+            // still filling.
+            guard connection === self.fetch else { return }
             var header = header
             var body = body
+            var arrived = Data()
             if let data, !data.isEmpty {
                 if header.range(of: Data("\r\n\r\n".utf8)) == nil {
                     header.append(data)
                     if let terminator = header.range(of: Data("\r\n\r\n".utf8)) {
-                        body.append(Data(header[terminator.upperBound...]))
+                        arrived = Data(header[terminator.upperBound...])
                     }
                 } else {
-                    body.append(data)
+                    arrived = data
                 }
             }
-            if error != nil || (isComplete && body.count < self.fetchBytes) {
-                self.failFetch(connection, message: message, session: session)
+            self.receivedBodyBytes += arrived.count
+            if !self.fetchCompleted { body.append(arrived) }
+            if error != nil || isComplete {
+                self.failFetch(connection)
                 return
             }
-            guard body.count < self.fetchBytes else {
-                // A receive completion queued before a STOP landed must not
-                // resurrect the stopped session: it would flip an app-less
-                // receiver to PLAYING, emit an unsolicited empty MEDIA_STATUS,
-                // and nil out a NEWER fetch a later LOAD had already started.
-                // Identity is the whole test — STOP cancels `fetch` and nils it,
-                // and a new LOAD cancels and replaces it. `playerState` is NOT
-                // tested: the no-autoplay recipe legitimately reaches PLAYING
-                // (LOAD → PLAY) while this fetch is still filling.
-                guard connection === self.fetch else { return }
-                connection.cancel()
-                self.fetch = nil
-                self.onFetchComplete?(Self.payloadBytes(of: body), body.count)
-                self.playerState = "PLAYING"
-                self.idleReason = nil
-                self.sendUnsolicitedMediaStatus(message: message, session: session)
-                return
+            if !self.fetchCompleted, self.receivedBodyBytes >= self.fetchBytes {
+                self.fetchCompleted = true
+                self.onFetchComplete?(Self.payloadBytes(of: body), self.receivedBodyBytes)
+                body = Data()
+                if !self.stalled, self.playerState == "BUFFERING" {
+                    self.playerState = "PLAYING"
+                    self.idleReason = nil
+                    self.sendUnsolicitedMediaStatus()
+                }
             }
-            self.readBody(connection, header: header, body: body, message: message, session: session)
+            self.startPlaybackIfBuffered()
+            self.readBody(connection, header: header, body: body)
         }
     }
 
@@ -482,19 +637,23 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// ERROR. A `nil` connection means the LOAD failed before a fetch existed;
     /// `startFetch` clears any previous fetch first, so the identity check
     /// holds.
-    private func failFetch(_ connection: NWConnection?, message: CastMessage, session: Session) {
+    private func failFetch(_ connection: NWConnection?) {
         guard connection === fetch else { return }
-        guard playerState == "BUFFERING" else { return }
+        // BUFFERING is also how a stall shows itself, and a stall is a
+        // receiver that is fine — only a session that never got enough to
+        // play is an error.
+        guard playerState == "BUFFERING", !stalled else { return }
         fetch?.cancel()
         fetch = nil
         playerState = "IDLE"
         idleReason = "ERROR"
-        sendUnsolicitedMediaStatus(message: message, session: session)
+        sendUnsolicitedMediaStatus()
     }
 
     /// requestId 0 is the wire's way of saying "nobody asked for this".
-    private func sendUnsolicitedMediaStatus(message: CastMessage, session: Session) {
-        reply(to: message, on: session, payload: mediaStatusPayload(), requestID: nil)
+    private func sendUnsolicitedMediaStatus() {
+        guard let target = mediaTarget else { return }
+        reply(to: target.message, on: target.session, payload: mediaStatusPayload(), requestID: nil)
     }
 
     // MARK: - Sending

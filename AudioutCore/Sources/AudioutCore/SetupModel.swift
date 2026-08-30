@@ -113,10 +113,14 @@ public enum RequiredPermission: CaseIterable, Sendable {
 /// is denied or unverifiable. The `x-apple.systempreferences:` scheme is the
 /// documented way to open a specific pane; the `Privacy_*` anchors below are
 /// stable, but the PANE the anchors hang off changed name in macOS 26 (see
-/// ``privacySettingsBundleID(osMajorVersion:)``). They are best-effort — Apple
-/// can rename an anchor between releases — so the opener
-/// (``AudioutOnboardingUI``) falls back to ``privacyRoot`` if a specific pane
-/// URL won't open.
+/// ``privacySettingsBundleID(osMajorVersion:)``).
+///
+/// They are BEST-EFFORT, and there is no code-level fallback behind them:
+/// `NSWorkspace.open` returns true for any of these URLs the scheme resolves,
+/// including one whose anchor misroutes to the wrong pane, so a wrong anchor is
+/// indistinguishable from a right one at the call site. What recovers a
+/// misroute is the written path in the onboarding ribbon (the "turn Audiout on
+/// under Privacy & Security ▸ …" sentence), not a retry.
 public enum SystemSettingsPane: Equatable, Sendable {
     case screenAndSystemAudioRecording
     case localNetwork
@@ -155,7 +159,9 @@ public enum SystemSettingsPane: Equatable, Sendable {
         }
     }
 
-    /// Privacy & Security root — the fallback when a specific anchor won't open.
+    /// Privacy & Security root — the anchorless pane URL. Nothing falls back to
+    /// it any more (see the type comment); it is kept for callers that want the
+    /// root itself.
     public static var privacyRoot: URL { privacyRoot(osMajorVersion: liveOSMajorVersion) }
 
     /// The root for an explicit macOS major version (same seam as ``url(osMajorVersion:)``).
@@ -535,7 +541,9 @@ public final class SetupModel {
                 bluetoothPrimer: BluetoothPermissionPriming = SimulatedBluetoothPermission(status: .unknown),
                 settings: AppSettings = AppSettings(),
                 localNetworkGated: Bool = true,
+                usageStatsAvailable: Bool = Analytics.isAvailable,
                 bluetoothPromptTimeout: TimeInterval = 10) {
+        self.usageStatsAreAvailable = usageStatsAvailable
         self.bluetoothPromptTimeout = bluetoothPromptTimeout
         self.audioProbe = audioProbe
         self.localNetwork = localNetwork
@@ -550,6 +558,17 @@ public final class SetupModel {
         // and never opens the Settings pane that doesn't exist on that OS.
         if !localNetworkGated {
             self.localNetworkStatus = .granted
+        } else if settings.localNetworkWasGranted {
+            // Start from a grant this app already PROVED in an earlier session
+            // (``AppSettings/localNetworkWasGranted``). Every "Open Setup…"
+            // builds a fresh model, and a fresh `.unknown` is the one status
+            // `refreshStatuses()` cannot resolve — browsing is what raises the
+            // prompt, so it deliberately refuses to browse blind. That left a
+            // re-opened Setup screen asking for a permission the user had held
+            // for weeks. Seeding it here does NOT skip verification: the very
+            // next refresh re-browses, which is prompt-free on a permission
+            // already granted, and a real refusal still downgrades the row.
+            self.localNetworkStatus = .granted
         }
     }
 
@@ -558,7 +577,8 @@ public final class SetupModel {
     /// the same set (real or simulated) into every construction site.
     public convenience init(providers: PermissionProviders,
                             settings: AppSettings = AppSettings(),
-                            localNetworkGated: Bool = true) {
+                            localNetworkGated: Bool = true,
+                            usageStatsAvailable: Bool = Analytics.isAvailable) {
         self.init(audioProbe: providers.audioProbe,
                   localNetwork: providers.localNetwork,
                   remoteControl: providers.remoteControl,
@@ -566,7 +586,8 @@ public final class SetupModel {
                   bluetoothReader: providers.bluetoothReader,
                   bluetoothPrimer: providers.bluetoothPrimer,
                   settings: settings,
-                  localNetworkGated: localNetworkGated)
+                  localNetworkGated: localNetworkGated,
+                  usageStatsAvailable: usageStatsAvailable)
     }
 
     /// Trigger + verify the audio-capture permission. On first run this surfaces
@@ -671,9 +692,15 @@ public final class SetupModel {
                 // permission event. Only a browse that actually saw something
                 // rewrites the count a granted card is showing.
                 if found > 0 || !wasGranted { self?.localNetworkFoundSpeakers = found }
+                // Remember the proof for the next session's fresh model — see
+                // `AppSettings.localNetworkWasGranted`. This funnel is the one
+                // place the grant is ever established, so the bit cannot drift
+                // from the status.
+                self?.settings.localNetworkWasGranted = true
                 return .granted
             case .denied:
                 self?.localNetworkFoundSpeakers = 0
+                self?.settings.localNetworkWasGranted = false
                 return .denied
             case .undecided:
                 // GRANTED IS PROVEN AND STICKY. Self-discovery proved the
@@ -803,8 +830,8 @@ public final class SetupModel {
     /// - **Remote Control** always refreshes: `isTrusted()` is a silent read, so a
     ///   grant made in System Settings shows up the moment the window regains key
     ///   (and a revocation downgrades a prior `.granted` back to `.requested`).
-    /// - **System Audio** re-reads ONLY if already asked (`.denied`/`.requested`),
-    ///   and does so via the SILENT ``AudioCapturePermissionProbing/currentStatusSilently()``
+    /// - **System Audio** always re-reads, via the SILENT
+    ///   ``AudioCapturePermissionProbing/currentStatusSilently()``
     ///   — never the audible tone/tap ``AudioCapturePermissionProbing/probe()``,
     ///   which is reserved for the explicit "Allow…" tap (``requestAudioCapture()``).
     ///   This method runs on every plain app reactivation while onboarding is open
@@ -831,14 +858,35 @@ public final class SetupModel {
             remoteControlStatus = .requested   // revoked in Settings since
         }
 
-        // System Audio — re-read only a row the user has already engaged, and do
-        // it SILENTLY: this runs on every plain app reactivation (not just an
-        // explicit gesture), so it must never replay the audible tone/tap probe
-        // — that stays reserved for `requestAudioCapture()`.
-        if audioStatus == .denied || audioStatus == .requested,
-           let silentAudio = audioProbe.currentStatusSilently() {
+        // System Audio — always re-read, and do it SILENTLY: this runs on every
+        // plain app reactivation (not just an explicit gesture), so it must
+        // never replay the audible tone/tap probe — that stays reserved for
+        // `requestAudioCapture()`.
+        //
+        // The read used to be gated on an already-engaged row
+        // (`.denied`/`.requested`). That hid a real grant: every "Open Setup…"
+        // builds a FRESH model, whose `audioStatus` starts `.unknown`, so the
+        // gate skipped the read and the row offered to ask for a permission the
+        // user already held (live report, 2026-08-29). The silent read raises no
+        // prompt — the same property that lets Remote Control and Bluetooth
+        // below re-read unconditionally — so gating it bought nothing, and
+        // `auditRequiredPermissions()` never gated it, leaving two paths over
+        // one seam disagreeing.
+        if let silentAudio = audioProbe.currentStatusSilently() {
             logReportedVsActual(site: "SetupModel.refreshStatuses", reported: audioStatus, silent: silentAudio)
-            audioStatus = silentAudio
+            // GRANTED IS PROVEN AND STICKY — the same rule
+            // `probeLocalNetwork(onReachable:)` states for its own grant, and it
+            // is load-bearing here for a specific reason: `requestAudioCapture()`
+            // proves a grant FUNCTIONALLY (it hears its own tone through the
+            // tap) without writing `SystemAudioCaptureTCC`'s fresh-grant latch,
+            // while the silent read is the process-lifetime-cached TCC read that
+            // keeps saying "undetermined" (⇒ `.unknown`) after the very grant it
+            // missed. Adopting that blindly would flip a just-proven row back to
+            // "not asked" on the next Cmd+Tab. A real `.denied` is a refusal, not
+            // an absence, so it still downgrades.
+            if !(audioStatus == .granted && silentAudio == .unknown) {
+                audioStatus = silentAudio
+            }
         }
 
         // Local Network — re-probe only if already asked (else browsing prompts),
@@ -849,7 +897,7 @@ public final class SetupModel {
         }
 
         // PTP helper — silent status read only, never re-registers here.
-        ptpHelperStatus = ptpHelper.status
+        setPTPHelperStatus(ptpHelper.status)
 
         // Bluetooth — silent, prompt-free, so always re-read.
         refreshBluetoothStatus()
@@ -875,12 +923,41 @@ public final class SetupModel {
     public func registerPTPHelper() {
         do {
             try ptpHelper.register()
+            ptpHelperRegistrationFailed = false
         } catch {
+            // Nothing the user can fix — so it must not hold the gate shut
+            // (``requiredPermissionsNotGranted()``), and the failure has to
+            // reach somewhere a support ticket can quote: `Telemetry` writes to
+            // `~/Library/Logs/Audiout/`, the stderr line stays for a dev run.
+            ptpHelperRegistrationFailed = true
+            Telemetry.log(.permission, "ptp_register_failed", ["error": String(describing: error)])
             FileHandle.standardError.write(
                 Data("[Audiout] PTP helper registration failed: \(error)\n".utf8))
         }
-        ptpHelperStatus = ptpHelper.status
+        setPTPHelperStatus(ptpHelper.status)
         onChange?()
+    }
+
+    /// Whether the launch-time ``registerPTPHelper()`` threw. Like
+    /// ``PTPHelperStatus/notFound`` it is a packaging/signing fault rather than
+    /// a user decision, so the Speaker Sync step auto-passes on it instead of
+    /// asking for an approval that can never be given.
+    public private(set) var ptpHelperRegistrationFailed = false
+
+    /// The one place ``ptpHelperStatus`` is written, so the "was it ever really
+    /// on?" ratchet cannot be bypassed by a new assignment site. Reaching
+    /// `.enabled` — however it is reached — is what arms the wake audit's
+    /// Login Items nag; only an explicit skip
+    /// (``noteSpeakerSyncSkipped()``) disarms it again.
+    private func setPTPHelperStatus(_ next: PTPHelperStatus) {
+        ptpHelperStatus = next
+        if next == .enabled { settings.speakerSyncWasEnabled = true }
+    }
+
+    /// Remember that the user passed on Speaker Sync, so the wake audit stops
+    /// treating an unapproved helper as something that got turned off.
+    public func noteSpeakerSyncSkipped() {
+        settings.speakerSyncWasEnabled = false
     }
 
     /// Deep-link to System Settings › General › Login Items & Extensions,
@@ -889,14 +966,69 @@ public final class SetupModel {
         ptpHelper.openSystemSettingsLoginItems()
     }
 
-    /// Re-read the PTP helper's live status WITHOUT re-registering — cheap
-    /// enough to poll on a timer while `.requiresApproval` waits for the user
-    /// to flip the Login Items toggle (mirrors ``refreshRemoteControlStatus()``
+    // MARK: Usage statistics
+
+    /// Whether the user has agreed to share anonymous usage counts
+    /// (`AppSettings.telemetryOptIn`, PRODUCT.md Data Collection stream 1).
+    /// The Setup step's completion condition.
+    public var usageStatsOptedIn: Bool { settings.telemetryOptIn }
+
+    /// Whether the one-time ask has already been answered — either way.
+    /// PRODUCT.md's rule for this stream is "asked once, never re-nagged", so
+    /// a DECLINE has to be as final as a grant: the Setup flow seeds it as
+    /// skipped rather than re-offering the step on every later presentation.
+    public var usageStatsWereAnswered: Bool { settings.telemetryAsked }
+
+    /// Whether there is anything to opt IN to. False in a build with no
+    /// analytics sink installed — run-from-source, `swift run`, headless —
+    /// where asking would promise a stream nothing can send. The step
+    /// auto-passes there, the same posture as `.unsupported` audio and a
+    /// `.notFound` helper: no grant exists to give.
+    ///
+    /// This is the ask's gate ONLY. Settings › General keeps its toggle either
+    /// way, exactly as it did when this ask was an alert on the first
+    /// menu-bar click.
+    public let usageStatsAreAvailable: Bool
+
+    /// Say yes: consent is persisted, the live sink is opted in, and the ask
+    /// is spent.
+    public func grantUsageStats() {
+        setUsageStats(true)
+    }
+
+    /// Say no. Spends the ask exactly like a grant does — see
+    /// ``usageStatsWereAnswered`` — and opts the sink out explicitly rather
+    /// than leaving it at whatever it was.
+    public func declineUsageStats() {
+        setUsageStats(false)
+    }
+
+    private func setUsageStats(_ granted: Bool) {
+        settings.telemetryOptIn = granted
+        settings.telemetryAsked = true
+        Analytics.setConsent(granted)
+        // AFTER the consent flip, never before: this is the first event a new
+        // opt-in can legitimately send, and it would be dropped on the floor
+        // if it ran a line earlier. A DECLINE deliberately sends nothing —
+        // `capture` no-ops without consent, which is exactly right.
+        Analytics.capture("onboarding:usage_stats_opted_in")
+        onChange?()
+    }
+
+    /// Re-read the PTP helper's live status WITHOUT re-registering, so the
+    /// Setup window can poll while `.requiresApproval` waits for the user to
+    /// flip the Login Items toggle (mirrors ``refreshRemoteControlStatus()``
     /// below). Fires `onChange` only on an actual transition.
-    public func refreshPTPHelperStatus() {
-        let next = ptpHelper.status
+    ///
+    /// The read itself happens OFF the main actor: `SMAppService.status` is a
+    /// synchronous launchd XPC round-trip, and riding it on the main thread
+    /// every 1.5 s is a stall the window pays for the whole time it is open.
+    /// Only the compare-and-publish comes back here.
+    public func refreshPTPHelperStatus() async {
+        let helper = ptpHelper
+        let next = await Task.detached { helper.status }.value
         guard next != ptpHelperStatus else { return }
-        ptpHelperStatus = next
+        setPTPHelperStatus(next)
         onChange?()
     }
 
@@ -931,11 +1063,15 @@ public final class SetupModel {
     /// - Local Network is unmet on `.requested` (asked, nothing answered) and
     ///   on the now-real `.denied`; `.unknown` means never engaged, not lost,
     ///   so it never counts.
-    /// - The PTP helper is unmet when it's registered but not usable
-    ///   (`.requiresApproval`/`.notFound`) — a REGISTERED-but-not-approved
-    ///   helper is the actionable "turned off in Login Items" case.
+    /// - The PTP helper is unmet ONLY on a REGRESSION: `.requiresApproval` on a
+    ///   helper the user did once approve (``AppSettings/speakerSyncWasEnabled``
+    ///   — the ratchet set the first time the status reads `.enabled`). That is
+    ///   the real "turned off in Login Items" case, and the only one worth
+    ///   re-opening the window for. A helper that was never approved, or that
+    ///   the user explicitly skipped (which clears the flag), is not a
+    ///   regression; `.notFound` is a packaging bug the user cannot fix;
     ///   `.notRegistered` is the pre-registration state (handled by the app's
-    ///   launch-time registration attempt, not a nag here) and `.enabled` is fine.
+    ///   launch-time registration attempt, not a nag here); `.enabled` is fine.
     public func unmetRequiredPermissions() -> [RequiredPermission] {
         var unmet: [RequiredPermission] = []
         if audioStatus == .denied {
@@ -944,7 +1080,7 @@ public final class SetupModel {
         if localNetworkStatus == .requested || localNetworkStatus == .denied {
             unmet.append(.localNetwork)
         }
-        if ptpHelperStatus != .enabled, ptpHelperStatus != .notRegistered {
+        if ptpHelperStatus == .requiresApproval, settings.speakerSyncWasEnabled {
             unmet.append(.ptpHelper)
         }
         return unmet
@@ -969,7 +1105,11 @@ public final class SetupModel {
     /// - Audio capture: granted only on `.granted` — `.unsupported` is excluded
     ///   (pre-14.2 OS; no grant can fix it, so nagging about it would mislead).
     /// - Local Network: granted only on `.granted`.
-    /// - PTP helper: granted only on `.enabled`.
+    /// - PTP helper: granted on `.enabled`, and treated as granted on the two
+    ///   states no approval can fix — `.notFound` (the daemon is missing from
+    ///   the bundle) and a `register()` that threw
+    ///   (``ptpHelperRegistrationFailed``). Holding the Done gate shut on a
+    ///   packaging bug would leave the user with nothing to press.
     public func requiredPermissionsNotGranted() -> [RequiredPermission] {
         var notGranted: [RequiredPermission] = []
         if audioStatus != .granted, audioStatus != .unsupported {
@@ -978,7 +1118,7 @@ public final class SetupModel {
         if localNetworkStatus != .granted {
             notGranted.append(.localNetwork)
         }
-        if ptpHelperStatus != .enabled {
+        if ptpHelperStatus != .enabled, ptpHelperStatus != .notFound, !ptpHelperRegistrationFailed {
             notGranted.append(.ptpHelper)
         }
         return notGranted
@@ -1041,7 +1181,7 @@ public final class SetupModel {
 
         let nextPTPHelperStatus = ptpHelper.status
         if nextPTPHelperStatus != ptpHelperStatus {
-            ptpHelperStatus = nextPTPHelperStatus
+            setPTPHelperStatus(nextPTPHelperStatus)
             changed = true
         }
 
@@ -1060,6 +1200,7 @@ public final class SetupModel {
     /// here — the flow returns next launch.
     public func complete() {
         settings.hasCompletedSetup = true
+        Analytics.capture("onboarding:setup_completed")
     }
 
     /// Whether the flow should present at launch.

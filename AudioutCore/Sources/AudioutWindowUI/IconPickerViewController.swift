@@ -99,6 +99,22 @@ public final class IconPickerViewController: NSViewController {
         container.onAppearanceChange = { [weak self] in
             self?.refreshSelectionRingColor()
         }
+        // The ring is a LAYER color — a stamped `CGColor` that keeps showing
+        // until something re-stamps it. The appearance hook above covers
+        // light/dark; Increase Contrast and the accent dial arrive on their own
+        // notifications and were re-resolving nowhere (the same pair
+        // `EQResponseCurveView` observes). Selector-based observation needs no
+        // matching removal (post-10.11 AppKit auto-unregisters).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(ringTokensDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(ringTokensDidChange),
+            name: Tokens.accentStyleDidChangeNotification,
+            object: nil)
 
         grid.translatesAutoresizingMaskIntoConstraints = false
         grid.rowSpacing = 4
@@ -269,6 +285,7 @@ public final class IconPickerViewController: NSViewController {
     /// appearance flip (layer colors are frozen snapshots; `Tokens.Color`
     /// only re-resolves when asked under the right appearance).
     private func refreshSelectionRingColor() {
+        test_ringRefreshCount += 1
         guard let button = selectionRingButton, let layer = button.layer else { return }
         // `NSApp?.` per the UI-target rule in `AudioutSharedUI/AGENTS.md`; the
         // fallback covers a headless run with no NSApplication at all.
@@ -356,10 +373,21 @@ public final class IconPickerViewController: NSViewController {
     /// `trimmed` (the full curated set when empty), then rebuild the grid so
     /// it reflects the search live — independent of, and alongside, the
     /// exact-name preview/Apply gating above.
+    ///
+    /// A name matches on the RAW symbol name or on its plain-language label
+    /// (``accessibilityLabel(forSymbol:)``), so the words a general user
+    /// actually types — "kitchen", "living room", "Apple TV" — find the glyph
+    /// whose symbol name says `fork.knife` / `sofa.fill` / `appletv.fill`.
+    /// The raw-name path is untouched, so the exact-name power path still
+    /// works.
     private func updateCuratedGrid(matching trimmed: String) {
         curatedNames = trimmed.isEmpty
             ? allCuratedNames
-            : allCuratedNames.filter { $0.range(of: trimmed, options: .caseInsensitive) != nil }
+            : allCuratedNames.filter {
+                $0.range(of: trimmed, options: .caseInsensitive) != nil
+                    || Self.accessibilityLabel(forSymbol: $0)
+                        .range(of: trimmed, options: .caseInsensitive) != nil
+            }
 
         // `grid`/`emptyResultsLabel` exist independent of the view hierarchy
         // (both are plain stored properties), so this is safe to call even
@@ -392,6 +420,12 @@ public final class IconPickerViewController: NSViewController {
 
     @objc private func defaultTapped(_ sender: NSButton) {
         useDefault()
+    }
+
+    /// Increase Contrast or the accent dial moved — re-stamp the ring's layer
+    /// color from the freshly-resolved token.
+    @objc private func ringTokensDidChange() {
+        refreshSelectionRingColor()
     }
 
     private func apply() {
@@ -463,6 +497,12 @@ public final class IconPickerViewController: NSViewController {
     public var test_currentRingSymbolName: String? {
         selectionRingButton?.identifier?.rawValue
     }
+
+    /// How many times the selection ring's layer color has been re-resolved —
+    /// proves the accent-dial and Increase-Contrast notifications actually
+    /// reach it (the ring is a stamped `CGColor`, so nothing re-resolves it on
+    /// its own).
+    public private(set) var test_ringRefreshCount = 0
 }
 
 // MARK: - Warm Signal helper views (drawing-only)

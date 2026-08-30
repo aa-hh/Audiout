@@ -267,6 +267,67 @@ import AppKit
         #expect(controller.groups.first(where: { $0.id == group.id })?.name == "Downstairs")
     }
 
+    /// A backend event arriving mid-rename must not touch the field. The host
+    /// re-shows this pane on EVERY event, and the write used to be
+    /// unconditional — so a speaker appearing while the user was two letters
+    /// into a name replaced what they had typed.
+    ///
+    /// CONVERSION NOTE: same early-return compromise as
+    /// `escapeThroughTheRealFieldEditorReverts` — see its note.
+    @Test func aRefreshNeverOverwritesANameBeingTyped() throws {
+        let (window, _, group) = try makeWindow()
+        let editor = window.test_editor
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                            styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        host.contentView = editor.view
+        host.contentView?.layoutSubtreeIfNeeded()
+        guard host.makeFirstResponder(editor.test_titleField),
+              let fieldEditor = editor.test_titleField.currentEditor() else {
+            return
+        }
+        fieldEditor.string = "Kitch"
+
+        // A real change elsewhere in the snapshot, so the pane's gate opens and
+        // `render` genuinely runs — this is not a test of the gate.
+        let renamed = (0..<4).map {
+            Device(id: "d\($0)", name: $0 == 1 ? "Device 1 (renamed)" : "Device \($0)",
+                   kind: .generic, isAvailable: true)
+        }
+        let before = editor.test_renderCount
+        editor.show(groupID: group.id, devices: renamed)
+
+        #expect(editor.test_renderCount == before + 1, "the pane really did repaint")
+        #expect(fieldEditor.string == "Kitch",
+                "…around the half-typed name, which is the one thing it must not touch")
+    }
+
+    /// ESCAPE hands focus somewhere REAL. It used to go to
+    /// `makeFirstResponder(nil)` — the window becomes its own first responder
+    /// and Tab has nothing to advance from, the exact dead-Tab state
+    /// A11Y-GROUPS fixed.
+    ///
+    /// CONVERSION NOTE: same early-return compromise as
+    /// `escapeThroughTheRealFieldEditorReverts` — see its note.
+    @Test func escapeLandsKeyboardFocusOnTheSidebarList() throws {
+        let (window, _, _) = try makeWindow()
+        let editor = window.test_editor
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                            styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        host.contentView = window.contentController.view
+        host.contentView?.layoutSubtreeIfNeeded()
+        guard host.makeFirstResponder(editor.test_titleField),
+              let fieldEditor = editor.test_titleField.currentEditor() as? NSTextView else {
+            return
+        }
+
+        fieldEditor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+
+        #expect(window.test_sidebar.test_isOutlineViewFirstResponder,
+                "focus lands on the sidebar's row list — the one control present whatever pane shows")
+        #expect(host.firstResponder !== host,
+                "…and never on the window itself, which is the dead-Tab state")
+    }
+
     /// Finder-style: taking focus selects the whole name, so typing replaces it.
     ///
     /// CONVERSION NOTE: same early-return compromise as

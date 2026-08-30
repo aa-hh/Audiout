@@ -112,6 +112,46 @@ import AppKit
         #expect(picker.test_previewSymbolName == "airpods")
     }
 
+    // MARK: Search speaks the user's words (P1-7)
+
+    /// The search field matches the PLAIN-LANGUAGE label as well as the raw
+    /// symbol name, so the words a general user types find the glyph whose
+    /// symbol name says something else entirely.
+    @Test func searchMatchesThePlainLanguageLabelNotJustTheRawName() {
+        let picker = IconPickerViewController()
+
+        picker.test_setSearchText("kitchen")
+        #expect(picker.test_curatedSymbolNames.contains("fork.knife"),
+                "\"kitchen\" is the label for fork.knife — the raw name has no such word")
+
+        picker.test_setSearchText("living")
+        #expect(picker.test_curatedSymbolNames.contains("sofa.fill"))
+
+        picker.test_setSearchText("apple tv")
+        #expect(picker.test_curatedSymbolNames.contains("appletv.fill"),
+                "the label spells it as two words; the raw name does not")
+    }
+
+    // MARK: The gold selection ring re-resolves live (design-system P3-5)
+
+    /// The ring is a stamped layer color, so it keeps showing an old gold
+    /// until something re-stamps it. Increase Contrast and the accent dial
+    /// each arrive on their own notification — both must reach it.
+    @Test @MainActor func selectionRingReResolvesOnAccentAndAccessibilityNotifications() {
+        let picker = IconPickerViewController()
+        picker.configure(currentSymbolName: "airpods", defaultSymbolName: "hifispeaker.fill")
+        _ = picker.view
+        #expect(picker.test_currentRingSymbolName == "airpods", "a ring exists to re-resolve")
+
+        let baseline = picker.test_ringRefreshCount
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        NotificationCenter.default.post(name: Tokens.accentStyleDidChangeNotification, object: nil)
+
+        #expect(picker.test_ringRefreshCount == baseline + 2,
+                "both the Increase-Contrast and accent-dial broadcasts re-stamp the ring")
+    }
+
     // MARK: Search field validation — Apply gating + live preview
 
     @Test func applyIsDisabledWithEmptySearchText() {

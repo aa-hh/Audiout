@@ -380,6 +380,41 @@ import AudioToolbox
         #expect(low != bright, "different partials — a low knock against the bright click")
     }
 
+    /// …and they are equally LOUD, not equally scaled. The bright click sits
+    /// nearer the ear's most sensitive band, so at equal digital amplitude it is
+    /// the louder of the two — and a louder event is perceived as EARLIER,
+    /// which the estimator has no counterbalanced condition to cancel: the whole
+    /// psychometric fit shifts and the displacement is stored as latency
+    /// (`dev/notes/wizard-tick-stimulus-brief.md` §3). A-weighted, the bright
+    /// click is +1.28 dB, so it is rendered at ×0.863.
+    ///
+    /// The RATIO is what is pinned, never either variant's absolute level: the
+    /// caller's `amplitude` is free to change and the match has to survive it.
+    @Test func theTwoTimbresAreLoudnessMatched() {
+        #expect(abs(AlignmentTickInjector.brightLoudnessScale - 0.863) < 0.002,
+                "A-weighted correction, computed \(AlignmentTickInjector.brightLoudnessScale)")
+
+        let injector = AlignmentTickInjector(
+            sampleRate: 44_100,
+            config: .init(bpm: 60, maxTicks: AlignmentTickInjector.unlimitedTicks,
+                          armedAtStart: false, bedEnabled: false, replacesProgram: true))
+        injector.armTicks()
+        var pcm = zeroBuffer(frames: injector.test_beatFrames + 2_000)
+        var bedded = Data()
+        injector.mixWizardVariants(into: &pcm, bedded: &bedded)
+        // Same window, same frame count, so the silence around the tick divides
+        // out and the ratio is the two ticks' own.
+        let ratio = pow(10, (dBFS(channel0(bedded)) - dBFS(channel0(pcm))) / 20)
+        #expect(abs(ratio - AlignmentTickInjector.brightLoudnessScale) < 0.03,
+                "the rendered click is quieter than the knock by the correction, measured \(ratio)")
+
+        // Downward, deliberately: the low knock is untouched, so nothing in the
+        // run moved closer to the Int16 clamp.
+        let knockPeak = channel0(pcm).map { abs(Int($0)) }.max() ?? 0
+        #expect(knockPeak > channel0(bedded).map { abs(Int($0)) }.max() ?? 0)
+        #expect(knockPeak < 16_000, "peak \(knockPeak) — nowhere near clipping")
+    }
+
     /// The bed stops WITH the tick budget — an expired injector adds nothing,
     /// so a forgotten switch-off leaks silence, not hiss.
     @Test func bedStopsWhenTheTickBudgetExpires() {
@@ -769,6 +804,127 @@ import AudioToolbox
         // 4096 frames at 44.1 kHz ≈ 92.9 ms per block.
         let step = stamps[1] - stamps[0]
         #expect(abs(step - 92_879_818) < 1_000_000, "one block's worth of pts, got \(step) ns")
+
+        coordinator.setAlignTickMode(.off)
+    }
+
+    // MARK: Mic-probe lanes (roadmap 064)
+
+    /// The staged calibration sweeps land on their lanes sample-exact: the
+    /// engine variant carries the DOWN sweep, the Bluetooth variant the UP
+    /// sweep, both from one shared epoch, silence before and after — and the
+    /// completion latch reports once.
+    @Test func theProbeSweepsLandOnTheirLanesSampleExact() {
+        let rate = 8_000.0
+        let injector = AlignmentTickInjector(
+            sampleRate: rate, channels: 2,
+            config: .init(bpm: AlignmentTickInjector.wizardSearchBPM,
+                          maxTicks: AlignmentTickInjector.unlimitedTicks,
+                          armedAtStart: false, bedEnabled: false,
+                          replacesProgram: true))
+        let amplitude = 0.35
+        injector.stageProbe(amplitude: amplitude)
+        #expect(!injector.test_probeArmed, "staging alone makes no sound")
+        injector.armProbe()
+        #expect(injector.test_probeArmed)
+
+        var engine: [Int16] = []
+        var bluetooth: [Int16] = []
+        for _ in 0..<9 {
+            var pcm = zeroBuffer(frames: 1_600)
+            var bedded = Data()
+            injector.mixWizardVariants(into: &pcm, bedded: &bedded)
+            engine.append(contentsOf: channel0(pcm))
+            bluetooth.append(contentsOf: channel0(bedded))
+        }
+
+        let epoch = Int(0.5 * rate)
+        let down = SyncProbe.samples(.downSweep(sampleRate: rate, duration: 1.0))
+        let up = SyncProbe.samples(.upSweep(sampleRate: rate, duration: 1.0))
+        func expected(_ sweep: [Float], _ i: Int, _ laneAmplitude: Double) -> Int16 {
+            Int16(clamping: Int32((Double(sweep[i]) * laneAmplitude * 32_767.0).rounded()))
+        }
+        let engineAmplitude = amplitude * AlignmentTickInjector.probeEngineLaneScale
+        #expect(engine[0..<epoch].allSatisfy { $0 == 0 },
+                "the lead-in is silent — the sweep never rides the gate's tail")
+        #expect((0..<down.count).allSatisfy {
+                    engine[epoch + $0] == expected(down, $0, engineAmplitude) },
+                "the engine lane carries the DOWN sweep, sample for sample")
+        #expect((0..<up.count).allSatisfy {
+                    bluetooth[epoch + $0] == expected(up, $0, amplitude) },
+                "the Bluetooth lane carries the UP sweep, sample for sample")
+        #expect(engineAmplitude < amplitude,
+                "the lane next to the microphone is the quieter one")
+        #expect(engine[(epoch + down.count)...].allSatisfy { $0 == 0 },
+                "after the sweep: silence — the tick grid is the coordinator's to arm")
+
+        #expect(injector.takeProbeCompletion(), "the finished probe reports once")
+        #expect(!injector.takeProbeCompletion(), "…and only once")
+        #expect(!injector.test_isArmed,
+                "the probe never arms the tick grid on its own")
+    }
+
+    /// Roadmap 064 end to end at the coordinator: with a probe staged, the
+    /// SAME arm gate call starts the sweeps instead of the first tick, the
+    /// two fan-outs carry DIFFERENT sweeps, the finish callback fires, and
+    /// the tick grid arms itself afterwards.
+    @Test func aStagedMicProbeRidesTheArmGateThenHandsOverToTicks() {
+        let tap = FakeTap()
+        let engineSink = SpyPCMSink()
+        let localSink = SpyFanoutSink()
+        let btSink = SpyFanoutSink()
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { tap },
+            sink: engineSink,
+            makeConverter: { _ in ConstantConverter() },
+            processResolver: AudioProcessResolver(enumerator: EmptyEnumerator()),
+            muteBehavior: .mutedWhenTapped)
+        coordinator.setSyncedLocalSink(localSink, renderProcessPID: 212_121)
+        coordinator.setBTSink(btSink, renderProcessPID: 313_131)
+        coordinator.start()
+        waitFor {
+            if case .capturing = coordinator.state { return true }
+            return false
+        }
+
+        coordinator.test_setWizardModeWithoutPacerTimer()
+        final class Box: @unchecked Sendable {
+            let lock = NSLock()
+            var started = 0
+            var finished = 0
+        }
+        let box = Box()
+        coordinator.stageWizardMicProbe(
+            onStarted: { box.lock.lock(); box.started += 1; box.lock.unlock() },
+            onFinished: { box.lock.lock(); box.finished += 1; box.lock.unlock() })
+        coordinator.armWizardTicks()
+
+        // 0.5 s lead + 1 s sweep at the 44.1 kHz feed ≈ 66 150 frames.
+        for _ in 0..<20 { coordinator.test_pumpWizardTick(frames: 4_096) }
+        waitFor { box.lock.withLock { box.finished } == 1 }
+        #expect(box.lock.withLock { box.started } == 1,
+                "the gate's one arm started the probe, not a tick")
+
+        let localDuringProbe = localSink.enqueued.flatMap { $0 }
+        let btDuringProbe = btSink.enqueued.flatMap { $0 }
+        // Well clear of the keep-alive bed (≤ 0.015) but under the engine
+        // lane's own peak, which is deliberately the quieter of the two —
+        // `AlignmentTickInjector.probeEngineLaneScale`.
+        #expect(localDuringProbe.contains { abs($0) > 0.1 },
+                "the engine/Mac fan-out heard its sweep")
+        #expect(btDuringProbe.contains { abs($0) > 0.1 },
+                "the Bluetooth fan-out heard its sweep")
+        #expect(localDuringProbe != btDuringProbe,
+                "two DIFFERENT sweeps — that is the whole separability")
+
+        // After the handover the tick grid is armed: one search-tempo beat
+        // (3 s) past the sweep, the feed carries a tick with no probe left.
+        let blocksBefore = localSink.enqueued.count
+        for _ in 0..<40 { coordinator.test_pumpWizardTick(frames: 4_096) }
+        waitFor { localSink.enqueued.count == blocksBefore + 40 }
+        let afterHandover = localSink.enqueued[blocksBefore...].flatMap { $0 }
+        #expect(afterHandover.contains { abs($0) > 0.2 },
+                "the by-ear ticks follow the probe on their own")
 
         coordinator.setAlignTickMode(.off)
     }

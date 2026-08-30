@@ -41,3 +41,6 @@ DerivedData/
 # them is ever imported rather than run directly).
 __pycache__/
 *.pyc
+
+# PostHog credentials for local builds (scripts/make-app.sh reads this)
+.env

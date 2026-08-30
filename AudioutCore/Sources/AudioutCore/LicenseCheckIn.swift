@@ -30,17 +30,19 @@ public struct LicenseCheckIn {
         self.send = send
     }
 
-    /// Sends one check-in — but only when the user has opted in (
-    /// ``AppSettings/licenseCheckInConsent``), a licence key is on file (
-    /// ``AppSettings/licenseKey``), and a check-in endpoint is configured (
-    /// ``AppSettings/checkInURL``). Any of those missing is a silent no-op —
-    /// this must never surface as an error or a prompt, since it gates
-    /// nothing. When all three hold, POSTs exactly
-    /// `{"license_key", "install_id", "app_version"}` and ignores the
-    /// response: fire-and-forget, not a round-trip the app waits on.
+    /// Sends one check-in whenever a licence key is on file (
+    /// ``AppSettings/licenseKey``) and a check-in endpoint is configured (
+    /// ``AppSettings/checkInURL``) — unconditional, not opt-in: this is
+    /// abuse detection (a licence appearing on far more devices than one
+    /// buyer plausibly owns), so it cannot be a toggle an abuser simply
+    /// turns off, any more than a paid app asks permission before its normal
+    /// licence check. Either gate missing is a silent no-op — this must
+    /// never surface as an error or a prompt, since it gates no feature. When
+    /// both hold, POSTs exactly `{"license_key", "install_id",
+    /// "app_version"}` and ignores the response: fire-and-forget, not a
+    /// round-trip the app waits on.
     public func checkInIfNeeded() {
-        guard settings.licenseCheckInConsent,
-              let key = settings.licenseKey, !key.isEmpty,
+        guard let key = settings.licenseKey, !key.isEmpty,
               let url = settings.checkInURL else { return }
 
         var request = URLRequest(url: url)

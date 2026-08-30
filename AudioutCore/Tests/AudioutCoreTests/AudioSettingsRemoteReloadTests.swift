@@ -29,7 +29,7 @@ import AppKit
             initialMs: initialMs,
             envOverrideMs: envOverrideMs,
             isStreaming: { false },
-            apply: { _ in }
+            apply: { _ in (reconnected: 0, expected: 0) }
         )
         return AudioSettingsViewController(excluded: makeExcluded(),
                                            runningAppsProvider: { [] },

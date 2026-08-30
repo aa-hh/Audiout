@@ -131,12 +131,13 @@ import AppKit
                 "becoming the visible screen refreshes from the stored snapshot")
     }
 
-    // MARK: Sidebar structure (config-only revamp: always both sections)
+    // MARK: Sidebar structure (direction C: the fleet, under the Groups row)
 
-    @Test func sidebarAlwaysShowsGroupsAndSpeakersSections() async throws {
+    @Test func sidebarIsTheFleetUnderThePinnedGroupsRow() async throws {
         let (window, _, _) = try await makeWindow()
-        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Groups", "Speakers"])
-        #expect(window.test_sidebar.test_hasGroupsEmptyStateRow, "zero saved groups shows the empty-state placeholder row")
+        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers"],
+                "saved groups moved into the content pane, so the sidebar has two sections")
+        #expect(window.test_sidebar.test_hasGroupsRow, "the pinned Groups row is always there")
         #expect(window.test_sidebar.test_deviceRowCount == 7)
         #expect(!(window.test_isShowingEditor))
     }
@@ -158,45 +159,148 @@ import AppKit
         _ = try makeGroup1(controller)
         window.update(devices: backend.devices)
         #expect(!sidebarItem.isCollapsed, "a refresh restores a collapsed sidebar")
-        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Groups", "Speakers"],
+        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers"],
                 "and it still lists both sections")
     }
 
-    @Test func baselineContentIsEmptyStateAtZeroGroups() async throws {
+    @Test func baselineContentIsTheOverviewsEmptyCanvasAtZeroGroups() async throws {
         let (window, _, _) = try await makeWindow()
-        #expect(window.test_isShowingEmptyState, "zero groups + no selection auto-lands on the 'No groups yet' pane")
+        #expect(window.test_isShowingOverview, "zero groups + no selection auto-lands on the overview")
+        #expect(window.test_overview.test_isShowingEmptyCanvas,
+                "with nothing saved the overview IS the empty state — there is no separate pane")
     }
 
-    @Test func emptyStateNewGroupButtonPresentsCreationSheet() async throws {
+    @Test func emptyCanvasNewGroupTilePresentsCreationSheet() async throws {
         let (window, _, _) = try await makeWindow()
-        #expect(window.test_isShowingEmptyState)
-        // The empty pane's call-to-action runs the same sheet as the sidebar "+".
-        window.test_emptyState.test_tapNewGroup()
+        #expect(window.test_overview.test_isShowingEmptyCanvas)
+        // The empty canvas's call-to-action runs the same sheet as the sidebar "+".
+        window.test_overview.test_tapNewGroup()
         #expect(window.test_isPresentingCreateSheet)
         window.test_createSheet?.test_cancel()
     }
 
-    @Test func autoSelectLandsOnFirstGroupsEditor() async throws {
+    @Test func autoSelectLandsOnTheGroupsOverviewNotAGroupsEditor() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
         await drain()
-        #expect(window.test_isShowingEditor, "with a saved group and no selection, the window auto-selects it")
-        #expect(window.test_editor.editingGroupID == saved.id)
-        #expect(window.test_sidebar.currentSelection == .group(id: saved.id))
+        #expect(window.test_isShowingOverview,
+                "with a saved group and no selection the screen shows the card field, not one group's editor")
+        #expect(!(window.test_isShowingEditor))
+        #expect(window.test_overview.test_cardGroupIDs == [saved.id])
+        #expect(window.test_sidebar.test_groupsRowIsSelected)
         #expect(controller.activeGroupID == nil, "auto-select never activates")
     }
 
-    @Test func savingGroupAddsFlatGroupRowClearsEmptyStateAndKeepsAllDevicesListed() async throws {
+    @Test func savingAGroupAddsItsCardAndKeepsAllDevicesListed() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+
+        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Speakers"])
+        #expect(window.test_overview.test_cardGroupIDs == [saved.id])
+        #expect(!(window.test_overview.test_isShowingEmptyCanvas))
+        #expect(window.test_overview.test_chipCount(forCard: saved.id) == saved.memberIDs.count,
+                "each member gets a chip along the card's bottom edge")
+        #expect(window.test_sidebar.test_deviceRowCount == 7, "the Speakers section lists every device, a saved group's members included")
+    }
+
+    // MARK: Groups row → overview → editor (direction C's in-pane push)
+
+    @Test func selectingTheGroupsRowShowsTheOverview() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        _ = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.device(id: "office"))
+        await drain()
+        #expect(window.test_isShowingDetail)
+
+        window.test_select(.groupsOverview)
+        await drain()
+        #expect(window.test_isShowingOverview)
+    }
+
+    @Test func openingACardPushesTheEditorAndKeepsTheGroupsRowSelected() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        await drain()
+
+        window.test_overview.test_clickCard(id: saved.id)
+        await drain()
+
+        #expect(window.test_isShowingEditor, "a card opens its group's editor")
+        #expect(window.test_editor.editingGroupID == saved.id)
+        #expect(window.test_sidebar.test_groupsRowIsSelected,
+                "the fleet never moves under the pointer — the Groups row stays selected")
+        #expect(controller.activeGroupID == nil, "opening a card never activates the group")
+    }
+
+    @Test func theEditorsBackBandReturnsToTheOverview() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_overview.test_clickCard(id: saved.id)
+        await drain()
+        #expect(window.test_isShowingEditor)
+
+        window.test_editor.test_goBack()
+        await drain()
+
+        #expect(window.test_isShowingOverview, "'‹ Groups' pops the editor back to the card field")
+        #expect(window.test_sidebar.test_groupsRowIsSelected)
+    }
+
+    @Test func theGroupsRowMenuOffersOnlyNewGroup() async throws {
         let (window, controller, backend) = try await makeWindow()
         _ = try makeGroup1(controller)
         window.update(devices: backend.devices)
 
-        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Groups", "Speakers"])
-        #expect(!(window.test_sidebar.test_hasGroupsEmptyStateRow))
-        #expect(window.test_sidebar.test_groupRowCount == 1)
-        #expect(window.test_sidebar.test_groupRowsAreFlat, "a group row is a flat leaf — no expandable member children (design review 2026-07-18)")
-        #expect(window.test_sidebar.test_deviceRowCount == 7, "the Devices section lists every device, including a saved group's members, since membership is previewed in the editor now, not by sidebar expansion")
+        #expect(window.test_sidebar.test_contextMenuItems(for: .groupsOverview) == ["New Group…"],
+                "Rename…/Delete Group… moved to the cards with the groups")
+        window.test_sidebar.test_clickContextMenuItem("New Group…", for: .groupsOverview)
+        #expect(window.test_isPresentingCreateSheet)
+        window.test_createSheet?.test_cancel()
+    }
+
+    /// The card menu inherits the sidebar group row's two items and both of its
+    /// flows verbatim — open the editor, then focus the rename field.
+    @Test func aCardsRenameOpensTheEditorWithTheRenameFieldFocused() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        await drain()
+
+        #expect(window.test_overview.test_contextMenuItems(forCard: saved.id)
+                == ["Rename…", "Delete Group…"])
+        window.test_overview.test_clickContextMenuItem("Rename…", forCard: saved.id)
+        await drain()
+
+        #expect(window.test_isShowingEditor)
+        #expect(window.test_editor.editingGroupID == saved.id)
+        #expect(window.test_sidebar.test_groupsRowIsSelected)
+    }
+
+    @Test func aCardsDeleteRunsTheEditorsConfirmThenDeleteFlow() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        await drain()
+
+        window.test_overview.test_clickContextMenuItem("Delete Group…", forCard: saved.id)
+        await drain()
+        // The card's Delete lands in the editor's confirm flow. Headless there
+        // is no window to host the confirmation sheet, and deleting without
+        // one is exactly what the sheet prevents — so nothing is deleted yet
+        // (`GroupEditorViewController.deleteTapped`), and `test_confirmDelete()`
+        // stands in for the sheet's Delete button.
+        #expect(window.test_isShowingEditor, "the confirm flow runs in the group's editor")
+        #expect(!controller.groups.isEmpty, "no window, no confirmation — nothing deleted yet")
+        window.test_editor.test_confirmDelete()
+        await drain()
+        #expect(controller.groups.isEmpty)
+        #expect(window.test_isShowingOverview, "the delete falls back to the overview")
+        #expect(window.test_overview.test_isShowingEmptyCanvas)
     }
 
     @Test func sidebarSupportsMultipleSelection() async throws {
@@ -357,7 +461,12 @@ import AppKit
         #expect(completedResult?.alreadyExisted == true)
     }
 
-    @Test func createSheetCandidatesExcludeUnavailableDevices() async throws {
+    /// Reversed 2026-08-28 (Alec): an offline speaker MAY join a brand-new
+    /// group — it simply plays when it is back — and listing it is also what
+    /// keeps the add bar's "New Group from N Speakers…" count honest when the
+    /// selection includes a sleeping speaker. Unavailable candidates sort to
+    /// the bottom, matching every other list on the screen.
+    @Test func createSheetOffersUnavailableDevicesLast() async throws {
         let (window, _, backend) = try await makeWindow()
         let unavailableID = "office"
         let devices = backend.devices.map { device -> Device in
@@ -367,12 +476,16 @@ import AppKit
         }
         window.update(devices: devices)
 
-        window.test_presentCreateSheet(preselected: [])
+        window.test_presentCreateSheet(preselected: [unavailableID])
         await drain()
         let sheet = try #require(window.test_createSheet)
 
-        #expect(!(sheet.test_candidateDeviceIDs.contains(unavailableID)), "a brand-new group never offers joining an unreachable speaker")
-        #expect(sheet.test_candidateDeviceIDs.count == 6)
+        #expect(sheet.test_candidateDeviceIDs.count == 7,
+                "every device is a candidate, asleep or not")
+        #expect(sheet.test_candidateDeviceIDs.last == unavailableID,
+                "the unavailable one sorts to the bottom")
+        #expect(sheet.test_checkedDeviceIDs.contains(unavailableID),
+                "a preselected offline speaker stays checked — the count never lies")
     }
 
     // MARK: Selecting a group → editor only, never activation
@@ -393,9 +506,13 @@ import AppKit
         #expect(window.test_editor.test_candidateDeviceIDs.count == 7)
     }
 
-    // MARK: Editor candidates: unavailable devices stay only while a member
+    // MARK: Editor candidates: every device, unavailable ones last
 
-    @Test func editorCandidatesIncludeUnavailableDeviceOnlyIfMember() async throws {
+    /// Reversed 2026-08-28 (Alec): the editor offers EVERY device — an
+    /// unavailable non-member can be checked into the group and plays when it
+    /// returns. Unavailable rows sort to the bottom (the shared
+    /// `orderedDevices()` rule), rendered dimmed by the row itself.
+    @Test func editorOffersUnavailableDevicesLast() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         // "office" is a member of Group 1; mark it unavailable, and mark a
@@ -410,8 +527,11 @@ import AppKit
         window.test_select(.group(id: saved.id))
         await drain()
 
-        #expect(window.test_editor.test_candidateDeviceIDs.contains("office"), "an unavailable device stays offered while it remains a member")
-        #expect(!(window.test_editor.test_candidateDeviceIDs.contains("appletv-lr")), "an unavailable non-member is not offered")
+        let ids = window.test_editor.test_candidateDeviceIDs
+        #expect(ids.contains("office"), "an unavailable member is still offered")
+        #expect(ids.contains("appletv-lr"), "an unavailable NON-member is offered too — it may join now")
+        #expect(ids.suffix(2).sorted() == ["appletv-lr", "office"],
+                "the two unavailable devices sort to the bottom")
     }
 
     // MARK: Editor → GroupController
@@ -467,6 +587,31 @@ import AppKit
         #expect(window.test_editor.test_checkedDeviceIDs.contains("sonos-move"), "the reverted checkbox shows the member still belongs")
     }
 
+    /// Fable review fix: `rebuildCandidates`'s REUSE path (`apply` re-enables
+    /// the checkbox but never clears the tooltip/VoiceOver help `pinSoleMember`
+    /// set earlier) used to leave a formerly-pinned row stuck announcing "A
+    /// group needs at least one device…" even after it stopped being the sole
+    /// member.
+    @Test func gainingASecondMemberClearsTheFormerSoleMembersStalePin() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try controller.createGroup(name: "Solo", memberIDs: ["office"]).group
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+
+        #expect(!(window.test_editor.test_isMembershipRowEnabled(for: "office")), "the sole member starts pinned")
+        let officeRow = try #require(window.test_editor.test_membershipRow(for: "office") as? MembershipRowView)
+        #expect(officeRow.test_checkboxAccessibilityHelp != nil, "the pin explanation is set")
+
+        // Every demo-fleet device is already available, so this takes the
+        // REUSE path (the candidate ID sequence is unchanged), not a full
+        // rebuild that would have fresh rows anyway.
+        window.test_editor.test_setMembership(true, for: "sonos-move")
+
+        #expect(window.test_editor.test_isMembershipRowEnabled(for: "office"), "no longer the sole member — its checkbox must re-enable")
+        #expect(officeRow.test_checkboxAccessibilityHelp == nil, "the reuse path must clear the stale pin explanation, not just re-enable the checkbox")
+    }
+
     @Test func deleteInEditorCallsDeleteGroupAndReturnsToMixer() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
@@ -480,8 +625,301 @@ import AppKit
 
         #expect(controller.groups.count == 0)
         #expect(!(window.test_isShowingEditor))
-        #expect(window.test_isShowingEmptyState, "deleting the last group falls back to the 'No groups yet' pane")
-        #expect(window.test_sidebar.test_hasGroupsEmptyStateRow, "the Groups section stays but shows the empty state again")
+        #expect(window.test_isShowingOverview, "deleting the last group falls back to the overview")
+        #expect(window.test_overview.test_isShowingEmptyCanvas, "which is now the empty state too")
+        #expect(window.test_sidebar.test_hasGroupsRow, "the pinned Groups row never goes away")
+    }
+
+    // MARK: The delete confirmation (P0-1)
+
+    @Test func deleteAlertNamesTheGroupAndDefaultsToCancel() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+
+        let alert = try #require(window.test_editor.test_makeDeleteAlert())
+        #expect(alert.messageText == "Delete \u{201C}Group 1\u{201D}?",
+                "the sheet names the group being deleted, not \"this group\"")
+        #expect(alert.informativeText == "Deleting a group doesn't change which speakers are playing.",
+                "an inactive group really is pure configuration")
+        #expect(alert.buttons[0].title == "Delete")
+        #expect(alert.buttons[0].hasDestructiveAction)
+        #expect(alert.buttons[0].keyEquivalent == "",
+                "Return must not be the destructive answer")
+        #expect(alert.buttons[1].title == "Cancel")
+        #expect(alert.buttons[1].keyEquivalent == "\r", "Cancel is the default button")
+    }
+
+    /// The lie this fixed: deleting the group that is PLAYING switches Main Out
+    /// back to Selected Devices, so a speaker that is only in this group stops.
+    /// The old sentence claimed nothing would change.
+    @Test func deleteAlertTellsTheTruthForTheGroupThatIsPlaying() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+
+        controller.activateGroup(id: saved.id)
+        window.update(devices: backend.devices)
+        await drain()
+
+        let alert = try #require(window.test_editor.test_makeDeleteAlert())
+        #expect(alert.informativeText
+                == "This group is playing now. Deleting it switches playback to Selected Devices; "
+                   + "speakers that are only in this group will stop.")
+    }
+
+    /// With no window there is no confirmation, so the sidebar's "Delete
+    /// Group…" must NOT delete — it used to delete outright on that path.
+    @Test func aWindowlessDeleteRequestIsANoOp() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+
+        window.test_editor.requestDelete()
+        await drain()
+        #expect(controller.groups.count == 1, "no window means no confirmation, so nothing is deleted")
+
+        window.test_editor.test_confirmDelete()
+        await drain()
+        #expect(controller.groups.isEmpty, "the confirmed path still deletes")
+        _ = saved
+    }
+
+    // MARK: The editor's projection gate (P1-1) and row reuse (P1-2)
+
+    @Test func editorSkipsAnEQOnlyChangeButNotARename() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+        let baseline = window.test_editor.test_renderCount
+        #expect(baseline > 0, "opening the editor rendered it once")
+
+        var eqOnly = backend.devices
+        eqOnly[0].eq = DeviceEQ(bassDB: 4)
+        window.update(devices: eqOnly)
+        #expect(window.test_editor.test_renderCount == baseline,
+                "nothing this pane draws shows a tone value")
+
+        var renamed = eqOnly
+        renamed[0].name += " (renamed)"
+        window.update(devices: renamed)
+        #expect(window.test_editor.test_renderCount == baseline + 1,
+                "a device name IS on a membership row, so the pane repaints")
+    }
+
+    @Test func aRefreshReusesTheMembershipRowsWhenTheCandidateListIsUnchanged() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+        let editor = window.test_editor
+        // The host's own order, so the candidate SEQUENCE is the one already
+        // on screen and only the row contents move.
+        let base = backend.devices.sorted { ($0.name, $0.id) < ($1.name, $1.id) }
+        let candidatesBefore = editor.test_candidateDeviceIDs
+        let row = try #require(editor.test_membershipRow(for: "office"))
+
+        var updated = base
+        let officeIndex = try #require(updated.firstIndex { $0.id == "office" })
+        updated[officeIndex].isAvailable = false   // a member stays a candidate
+        editor.show(groupID: saved.id, devices: updated)
+        #expect(editor.test_membershipRow(for: "office") === row,
+                "the same list, refreshed in place — clicks and hover ride on these instances")
+        #expect(editor.test_candidateDeviceIDs == candidatesBefore)
+
+        // A candidate DROPPING OUT changes the sequence, so the list is rebuilt.
+        let fewer = updated.filter { $0.id != "homepod-bed" }
+        editor.show(groupID: saved.id, devices: fewer)
+        #expect(!editor.test_candidateDeviceIDs.contains("homepod-bed"))
+        #expect(editor.test_membershipRow(for: "office") !== row,
+                "a changed candidate sequence falls through to the full rebuild")
+    }
+
+    /// Fable review fix: the projection gate in `show(groupID:devices:)` used
+    /// to return early on a volume-only change (correctly — nothing this pane
+    /// draws shows a volume) WITHOUT refreshing `allDevices`/`candidateDevices`,
+    /// so a check-in right after persisted the volume from BEFORE that event
+    /// instead of the fresh one. The render count must stay untouched either
+    /// way — this is a model-write fix, not a rendering one.
+    @Test func aVolumeOnlyRefreshBeforeACheckInPersistsTheFreshVolume() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)   // sonos-move, office
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+        let editor = window.test_editor
+        let baseline = editor.test_renderCount
+
+        // Through `window.update(devices:)`, exactly like a real backend echo
+        // arrives — it re-sorts into `orderedDevices()` before handing the
+        // editor its snapshot, so this isn't a second, independently-ordered
+        // fetch of `backend.devices` (which doesn't promise a stable order).
+        var volumeOnly = backend.devices
+        let index = try #require(volumeOnly.firstIndex { $0.id == "homepod-bed" })
+        volumeOnly[index].volume = 77
+        window.update(devices: volumeOnly)
+        #expect(editor.test_renderCount == baseline, "a volume-only change draws nothing this pane shows")
+
+        editor.test_setMembership(true, for: "homepod-bed")
+
+        #expect(controller.groups.first { $0.id == saved.id }?.memberVolumes["homepod-bed"] == 77,
+                "the persisted volume must come from the FRESH snapshot, not the stale one from before the gated refresh")
+    }
+
+    // MARK: Duplicate names are refused (P2-5)
+
+    @Test func renamingOntoAnotherGroupsNameIsRefused() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let first = try makeGroup1(controller)
+        _ = try controller.createGroup(name: "Upstairs", memberIDs: ["homepod-bed"], memberVolumes: [:])
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: first.id))
+        await drain()
+
+        window.test_editor.test_rename(to: "upstairs")
+
+        #expect(controller.groups.first { $0.id == first.id }?.name == "Group 1",
+                "the model is untouched")
+        #expect(window.test_editor.test_nameFieldValue == "Group 1",
+                "…and the field goes back to what is actually saved")
+        #expect(window.test_editor.test_duplicateNameRefused)
+    }
+
+    @Test func recasingAGroupsOwnNameIsStillAllowed() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+
+        window.test_editor.test_rename(to: "GROUP 1")
+
+        #expect(controller.groups.first { $0.id == saved.id }?.name == "GROUP 1",
+                "a group never collides with itself")
+        #expect(!window.test_editor.test_duplicateNameRefused)
+    }
+
+    @Test func creatingWithATakenNameIsRefused() async throws {
+        let (window, controller, _) = try await makeWindow()
+        _ = try makeGroup1(controller)   // "Group 1"
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+        var completed = false
+        sheet.onComplete = { _ in completed = true }
+
+        sheet.test_setName("group 1")
+        sheet.test_setMembership(deviceID: "homepod-bed", isChecked: true)
+        sheet.test_commit()
+        await drain()
+
+        #expect(controller.groups.count == 1, "nothing was created")
+        #expect(!completed, "the sheet stays up with the form intact")
+        #expect(sheet.test_duplicateNameRefused)
+        #expect(sheet.test_checkedDeviceIDs == ["homepod-bed"], "the selection survives the refusal")
+    }
+
+    // MARK: The creation sheet reports a failed save (P1-4)
+
+    @Test func createSheetReportsAFailedSaveAndKeepsTheForm() async throws {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        try await waitForFleet(backend, count: 7)
+        // A plain FILE where the store wants a directory: `createDirectory`
+        // throws, so every write fails.
+        let blocker = tempDirectory().appendingPathComponent("blocker")
+        FileManager.default.createFile(atPath: blocker.path, contents: Data())
+        let controller = GroupController(
+            backend: backend,
+            store: GroupStore(directory: blocker.appendingPathComponent("sub", isDirectory: true)),
+            loadPersisted: false)
+        let window = MixerWindowController(groupController: controller,
+                                           settings: AppSettings(defaults: isolatedDefaults))
+        window.test_isVisibleOverride = true
+        window.update(devices: backend.devices)
+
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+        var completed = false
+        sheet.onComplete = { _ in completed = true }
+        sheet.test_setName("Downstairs")
+        sheet.test_setMembership(deviceID: "office", isChecked: true)
+
+        sheet.test_commit()
+        await drain()
+
+        #expect(sheet.test_saveFailureReported, "a failed write is reported, never swallowed")
+        #expect(!completed, "the sheet does not finish on a failure")
+        #expect(sheet.test_nameFieldText == "Downstairs", "the form is intact…")
+        #expect(sheet.test_checkedDeviceIDs == ["office"])
+        #expect(sheet.test_isCreateEnabled, "…and Create stays live, so the user can try again")
+    }
+
+    /// The dedup announcement is a WINDOW-path sheet; headless keeps today's
+    /// silent resolve, which every existing flow depends on.
+    @Test func aHeadlessDedupStillCompletesWithAlreadyExisted() async throws {
+        let (window, controller, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: ["office", "homepod-bed"])
+        await drain()
+        try #require(window.test_createSheet).test_commit()
+        await drain()
+        #expect(controller.groups.count == 1)
+
+        window.test_presentCreateSheet(preselected: ["homepod-bed", "office"])
+        await drain()
+        let second = try #require(window.test_createSheet)
+        var result: (group: Group, alreadyExisted: Bool)?
+        second.onComplete = { result = $0 }
+        second.test_commit()
+        await drain()
+
+        #expect(controller.groups.count == 1, "the identical member set resolved to the existing group")
+        #expect(result?.alreadyExisted == true, "and headless still reports it, rather than waiting on a sheet")
+    }
+
+    // MARK: The creation sheet's empty checklist (P1-5)
+
+    /// Since 2026-08-28 an offline speaker is still a candidate, so a fleet
+    /// that is merely ASLEEP no longer empties the checklist — only a fleet
+    /// the app has never seen does. The explanatory copy is for that case.
+    @Test func anEmptyChecklistExplainsItself() async throws {
+        let (window, _, backend) = try await makeWindow()
+        window.update(devices: [])
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+
+        #expect(sheet.test_candidateDeviceIDs.isEmpty)
+        #expect(sheet.test_emptyChecklistText
+                == "No speakers found yet. Speakers appear here once they\u{2019}re reachable on your network.")
+        #expect(!sheet.test_isCreateEnabled)
+
+        let allOffline = backend.devices.map { device -> Device in
+            var d = device
+            d.isAvailable = false
+            return d
+        }
+        window.update(devices: allOffline)
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        #expect(try #require(window.test_createSheet).test_candidateDeviceIDs.count == 7,
+                "an all-asleep fleet is still a checklist, not an empty state")
+
+        window.update(devices: backend.devices)
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        #expect(try #require(window.test_createSheet).test_emptyChecklistText == nil,
+                "with real rows there is nothing to explain")
     }
 
     // MARK: Selecting a device → detail pane (config-only, never activation)
@@ -530,13 +968,53 @@ import AppKit
         #expect(window.test_isShowingEditor, "the row opened the group's editor")
         #expect(!(window.test_isShowingDetail))
         #expect(window.test_editor.editingGroupID == saved.id)
-        #expect(window.test_sidebar.currentSelection == .group(id: saved.id),
-                "the sidebar follows, so the screen has one selection, not two")
+        #expect(window.test_sidebar.test_groupsRowIsSelected,
+                "the sidebar follows onto the Groups row, so the screen has one selection, not two")
         #expect(controller.activeGroupID == nil,
                 "selecting a group from the detail pane NEVER activates it")
     }
 
-    @Test func deselectingDeviceAutoSelectsFirstGroupOrEmptyState() async throws {
+    /// Unavailable speakers sink to the bottom of the Speakers section, kept
+    /// alphabetical within each half (Alec, 2026-08-28 — chosen over
+    /// keep-in-place; the accepted trade is that a row moves when its
+    /// availability flips).
+    @Test func unavailableSpeakersSortToTheBottomOfTheSidebar() async throws {
+        let (window, _, backend) = try await makeWindow()
+        let devices = backend.devices.map { device -> Device in
+            var d = device
+            if d.id == "office" || d.id == "appletv-lr" { d.isAvailable = false }
+            return d
+        }
+        window.update(devices: devices)
+
+        let ids = window.test_sidebar.test_deviceRowIDs
+        #expect(ids.count == 7)
+        #expect(ids.suffix(2).sorted() == ["appletv-lr", "office"],
+                "the two asleep speakers are the last two rows")
+        #expect(ids.prefix(5).allSatisfy { $0 != "office" && $0 != "appletv-lr" })
+    }
+
+    /// `select(_:)` is the deep-link/cross-link entry point (the detail pane's
+    /// group rows, `AppDelegate.showSurface(_:selecting:)`), and unlike a real
+    /// click it has to move the sidebar's highlight ITSELF. Sidebar and content
+    /// must end up agreeing: a speaker's pane means the speaker's row is lit,
+    /// never the Groups row. (Only the card->editor push parks it on Groups.)
+    @Test func selectingASpeakerHighlightsThatSpeakersRow() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        _ = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        await drain()
+
+        window.select(.device(id: "office"))
+        await drain()
+
+        #expect(window.test_isShowingDetail)
+        #expect(window.test_sidebar.currentSelection == .device(id: "office"))
+        #expect(!window.test_sidebar.test_groupsRowIsSelected,
+                "the Groups row must not stay lit while a speaker's pane is open")
+    }
+
+    @Test func deselectingADeviceAutoSelectsTheOverview() async throws {
         let (window, controller, backend) = try await makeWindow()
         window.test_select(.device(id: "office"))
         await drain()
@@ -545,7 +1023,7 @@ import AppKit
         window.test_select(nil)
         await drain()
         #expect(!(window.test_isShowingDetail))
-        #expect(window.test_isShowingEmptyState, "no groups: deselecting a device lands on the empty pane")
+        #expect(window.test_isShowingOverview, "no groups: deselecting a device lands on the empty canvas")
 
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
@@ -553,8 +1031,8 @@ import AppKit
         await drain()
         window.test_select(nil)
         await drain()
-        #expect(window.test_isShowingEditor, "with a saved group, deselecting auto-selects its editor")
-        #expect(window.test_editor.editingGroupID == saved.id)
+        #expect(window.test_isShowingOverview, "with a saved group, deselecting lands on its card, not its editor")
+        #expect(window.test_overview.test_cardGroupIDs == [saved.id])
     }
 
     @Test func selectingUnknownDeviceIDFallsBackToDefaultContent() async throws {
@@ -563,7 +1041,7 @@ import AppKit
         await drain()
 
         #expect(!(window.test_isShowingDetail))
-        #expect(window.test_isShowingEmptyState)
+        #expect(window.test_isShowingOverview)
         #expect(window.test_detail.test_shownDeviceID == nil, "the detail pane was never actually shown")
     }
 
@@ -607,7 +1085,7 @@ import AppKit
         window.update(devices: devicesWithoutOffice)
 
         #expect(!(window.test_isShowingDetail), "refreshAll() falls back to the default content once the shown device vanishes")
-        #expect(window.test_isShowingEmptyState, "no groups saved, so the fallback is the empty pane")
+        #expect(window.test_isShowingOverview, "the fallback is always the overview now")
     }
 
     // MARK: Icon flows
@@ -714,19 +1192,22 @@ import AppKit
         #expect(window.test_sidebar.test_isOutlineViewFirstResponder, "the sidebar's outline view must become first responder once the content appears, or Tab has nothing to advance from")
     }
 
-    // MARK: Active-group marker (sidebar)
+    // MARK: Live markers (the Groups row + the card)
 
-    @Test func sidebarMarksTheActiveGroupsRow() async throws {
+    @Test func theGroupsRowAndTheLiveCardBothCarryTheGoldMarker() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
         window.update(devices: backend.devices)
-        #expect(!window.test_sidebar.test_groupRowShowsActiveMarker(id: saved.id),
-                "no marker while the group isn't the active Main Out")
+        #expect(!window.test_sidebar.test_groupsRowShowsLiveMarker,
+                "no marker while nothing is the active Main Out")
+        #expect(!window.test_overview.test_cardShowsLive(id: saved.id))
 
         controller.activateGroup(id: saved.id)
         window.update(devices: backend.devices)
-        #expect(window.test_sidebar.test_groupRowShowsActiveMarker(id: saved.id),
-                "the active group's row carries the gold playing marker")
+        #expect(window.test_sidebar.test_groupsRowShowsLiveMarker,
+                "the Groups row is all the sidebar can say about which group is live")
+        #expect(window.test_overview.test_cardShowsLive(id: saved.id),
+                "and the card names it")
     }
 
     // MARK: Add-button retitle (multi-select discoverability)
@@ -897,15 +1378,15 @@ import AppKit
         #expect(reported.last?.2 == true)
     }
 
-    @Test func autoSelectStillPicksTheFirstGroupWhenNothingIsSelected() async throws {
+    @Test func autoSelectLandsOnTheOverviewWhenNothingIsSelected() async throws {
         let (window, controller, _) = try await makeWindow()
         let group = try makeGroup1(controller)
 
         window.test_select(nil)
 
-        #expect(window.test_isShowingEditor)
-        #expect(window.test_editor.editingGroupID == group.id,
-                "the new System Audio row must not steal the empty selection's auto-select")
+        #expect(window.test_isShowingOverview,
+                "the System Audio row must not steal the empty selection's auto-select either")
+        #expect(window.test_overview.test_cardGroupIDs == [group.id])
     }
 }
 

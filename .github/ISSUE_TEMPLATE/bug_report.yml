@@ -1,0 +1,57 @@
+name: Bug report
+description: Something in Audiout doesn't work the way it should.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what happened, and what you expected instead.
+      placeholder: I moved the fader for the kitchen speaker and every room went quiet.
+    validations:
+      required: true
+
+  - type: input
+    id: speakers
+    attributes:
+      label: Which speakers?
+      description: Make and model of every speaker involved. AirPlay behaviour differs a lot between them.
+      placeholder: HomePod mini (2nd gen) x2, Sonos One, LG C2 TV
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Audiout version and macOS version
+      placeholder: Audiout 1.0.0, macOS 15.2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build
+    attributes:
+      label: Which build?
+      options:
+        - The purchased download
+        - Built from source
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducible
+    attributes:
+      label: Does it happen every time?
+      options:
+        - Every time
+        - Most times
+        - Occasionally
+        - It happened once
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots, a screen recording, or Console output if you have it.

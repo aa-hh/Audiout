@@ -3,8 +3,8 @@
 ## Purpose
 
 The first-run Setup window (pure AppKit): a **two-pane** screen that asks for the
-five permissions **one at a time**. LEFT, the **SPINE** — a fixed 288 pt column
-of the header over six compact status rows (the five permissions plus the
+six grants **one at a time**. LEFT, the **SPINE** — a fixed 288 pt column
+of the header over seven compact status rows (the six grants plus the
 final-check row), carrying short titles and nothing else. RIGHT, the **HERO** —
 one warm panel read top to bottom (owner-approved 2026-08-12):
 
@@ -13,7 +13,10 @@ one warm panel read top to bottom (owner-approved 2026-08-12):
    ask line;
 2. the **PREVIEW FRAME** (`SetupPreviewFrameView`) — a `well` with a caption band
    on its top edge ("You'll see this from macOS") holding the STAGE, the
-   native-drawn miniature of the exact surface this step's ask is about to raise;
+   native-drawn miniature of the exact surface this step's ask is about to
+   raise — except on Usage Statistics, which wears the privacy card's SHAPE but
+   carries NO caption, because macOS raises nothing there (see the Usage
+   Statistics rule below);
 3. the **RIBBON**'s lower region (`SetupRibbonView`) — the status line and the
    recovery paragraph, for the states that have to instruct rather than ask;
 4. the **BARE BOTTOM BAR** — a hairline, then the buttons trailing-aligned, and
@@ -23,6 +26,11 @@ one warm panel read top to bottom (owner-approved 2026-08-12):
 **A FIRST ASK IS ONLY (1), (2) AND (4).** The ask line, the reassurance
 paragraph and the honesty line were DELETED, not moved: each explained a picture
 the user is already looking at.
+
+  **One amendment to that rationale:** System Audio's why line now also warns
+  that allowing plays a brief tone. The deletion rule holds for anything the
+  rehearsal SHOWS — and a picture cannot show a sound, so this one sentence
+  rides the why line rather than resurrecting the body. (**OWNER-PENDING**.)
 
 That split is the rebuild's whole point (Direction 04, "the rehearsal leads",
 owner-chosen 2026-08-11 — it REPLACES the expanding-card column, so read the
@@ -42,7 +50,7 @@ gate/motion/demo/selection rules change.
 
 ## Rules
 
-- **Five steps, four kinds of thing:** **System Audio** and **Local Network** are
+- **Six steps, five kinds of thing:** **System Audio** and **Local Network** are
   real `PermissionStatus`-backed TCC probes; **Bluetooth** is the one permission
   with a fully honest status API (`CBManager.authorization` — granted/denied/
   undetermined all real); **Remote Control** (Accessibility) is primed ahead of a
@@ -50,6 +58,97 @@ gate/motion/demo/selection rules change.
   Sync** is a `PTPHelperStatus` (`SMAppService` Login-Items approval), not a TCC
   permission at all — it has no "Denied" state and registers automatically at load
   with no prompt of its own.
+- **Usage Statistics is not a macOS anything.** The last card asks for
+  Audiout's own anonymous usage counts (PRODUCT.md Data Collection stream 1,
+  `AppSettings.telemetryOptIn`). No prompt, no probe, no System Settings pane:
+  the Allow click IS the grant and lands before it returns
+  (`SetupAllowOutcome.consentGranted`). It sits LAST on purpose — it is the one
+  card asking for something the user gives US rather than something macOS gives
+  Audiout, and putting that between two permission asks blurs the difference
+  the whole window is teaching. Three things follow from PRODUCT.md's "asked
+  once, never re-nagged":
+  - **The skip is the DECLINE**, not a deferral, so its button says "No Thanks"
+    (`RibbonContent.skipTitle`, the only per-step override of the shared "Skip
+    for now") and it spends `telemetryAsked` exactly like a grant does.
+  - **A decline is seeded back into `skippedSteps` on every later flow**
+    (`SetupFlowModel.init`), so re-opening Setup for a revoked permission can
+    never smuggle the ask back onto the screen. Clicking the row still re-opens
+    it, which is the deliberate way back inside the window; Settings › General
+    is the way back afterwards.
+  - **A build with no analytics sink DROPS the card** rather than auto-passing
+    it (`SetupModel.usageStatsAreAvailable` → `SetupFlowModel.steps`, the
+    per-presentation list the view controller iterates — NOT the static
+    `SetupFlowModel.steps` order table). A checkmark beside "Usage statistics"
+    in a build that sends nothing would be the one thing this window must never
+    do. This is also why the ask was gated on `analyticsAvailable` when it was
+    still an alert.
+
+  **Its ask raises Audiout's OWN sheet, and that is what makes the row click
+  safe.** `SetupAllowDestination.usageStatsConsent` → `presentConsentSheet()`,
+  a stock `NSAlert` on the Setup window with Share / Don't Share. The ask
+  GRANTS NOTHING: it raises a surface the user still has to answer, exactly
+  like every other step's ask, and the answer arrives from the sheet. Briefly
+  it granted on the click instead, and the spine row is where that reached the
+  user — a press on a row they were only reading opted them in and advanced
+  past the card (owner, live). The row is a shortcut to the primary for every
+  step; the fix belongs at the primary, not by taking the click away. Do not
+  reintroduce a "grant on click" path here.
+
+  (This sheet is NOT the `NSAlert` deleted from `AppDelegate`. That one
+  ambushed the first menu-bar click with nothing on screen to explain it; this
+  one answers a card the user is looking at and pressed. `presentUsageStatsConsent`
+  is the seam headless tests and the snapshot renderers answer it through.)
+
+  **The promise lives in `UsageStatsConsentCard.bodyText`, and it is held to
+  the real payload — not to intent.** An earlier draft promised "never your
+  network" and "never your licence key" while the SDK was autocapturing both;
+  nothing caught it until a real ingested event was read back out of PostHog.
+  Audit the same way before changing what is sent: query the event, list its
+  property keys, and make the string match. `SetupUsageStatsTests` pins both
+  directions — what must be disclosed, and the two absolute "never" claims that
+  must not come back.
+
+  The hero's `whyLine` carries the WHY only. It sits directly above the card on
+  the stage, so anything said in both reads as a stutter.
+
+  **TRAP — its live spine row is NOT pressable, and that is load-bearing.**
+  Every other live row doubles as a shortcut to its primary button
+  (`rowPressed` → `ribbonPrimaryTapped`), which is safe there because the
+  primary only raises a system dialog that asks again: a stray row click costs
+  a dialog, not a decision. Here the primary IS the consent, applied in-app the
+  moment it fires — so the shortcut opted the user in from a click on a row
+  they were only trying to read, and then advanced past the card (found live:
+  "I click the line item and it just goes to the next step"). One property
+  decides it, `SetupCardContent.livePressRunsTheAsk`, and BOTH the row's
+  `isPressable` and `rowPressed` read it; don't re-add a step-specific check in
+  either. The row goes fully unpressable rather than swallowing the click, so
+  nothing — pointer, keyboard or VoiceOver — offers `allowTitle` as a row
+  action.
+
+  This ask **used to be an `NSAlert` on the first menu-bar click**, fired from
+  `AppDelegate` at the exact moment the user was reaching for the mixer. Don't
+  put it back there.
+
+- **FOUR steps are skippable** — Bluetooth, Remote Control, Usage Statistics, and **Speaker
+  Sync** (`SetupFlowModel.skippableSteps`). The first two sit outside
+  `RequiredPermission` entirely; Speaker Sync stays required and is still audited
+  once it has ever been on, so its skip is an EXIT rather than a demotion —
+  `SetupFlowModel.unmetRequiredSteps()` is the filter that keeps a skipped one out
+  of the gate. Before it, an approval macOS simply refused locked the gate forever
+  with nothing on screen to press. Speaker Sync's other states, all new:
+  - **Asked, and still off.** Once the flow has actually opened Login Items
+    (`didTripLoginItems`) and the helper still reads `.requiresApproval`, the
+    ribbon shows its own recovery — where the switch really lives (Login Items,
+    not Privacy & Security), "Open Login Items…" to go back, and "Skip for now"
+    beside it. (**OWNER-PENDING** copy.)
+  - **Nothing there to approve.** `.notFound` (the daemon isn't in the bundle) or a
+    `register()` that threw auto-passes the row with the note "Couldn't be turned
+    on", the same posture as `.unsupported` audio: a packaging fault is not a user
+    decision, so it must not hold the gate shut. (**OWNER-PENDING** copy.)
+  - **The skip is remembered** (`AppSettings.speakerSyncWasEnabled` — set the first
+    time the status reads `.enabled`, cleared by a skip). The app-level wake audit
+    re-opens this window for the Login Item only on a real REGRESSION, never at a
+    user who passed on it or never approved it.
 - **Setup is a GATE, not guidance** (owner decision 2026-08-11 — this REVERSES the
   documented "setup is guidance, not a gate" decision, so read the history before
   changing it back). Done is **ABSENT from the view hierarchy** until
@@ -192,7 +291,10 @@ gate/motion/demo/selection rules change.
   (this SUPERSEDES the "whole ACTIVE card is the click target" rule, which had to
   keep Allow/Skip hit-testing above the card by construction — the spine has no
   buttons left to hit-test above anything). Every state the user has already
-  DECIDED is pressable; a locked row and an auto-passed one refuse, silently.
+  DECIDED is pressable; a locked row and an auto-passed one refuse, silently. The
+  ONE exception is a row drawn BROKEN: it is pressable whatever state it wears, and
+  pressing it snaps the flow to it — the loud treatment was already asking to be
+  looked at, and a group VoiceOver cannot press was asking for nothing.
   `SetupSpineRowView.mouseUp` and `accessibilityPerformPress()` are the same one
   entry (`onPress`), and `OnboardingViewController.rowPressed(_:)` is the whole
   dispatch table — the selection rules above. The ACTIONS live in the ribbon:
@@ -203,7 +305,9 @@ gate/motion/demo/selection rules change.
   sees it as a `.button` named for what pressing it does ("Allow…" live, "Show"
   for a decided row) with its STATE in the label (", locked" / ", allowed" /
   ", skipped" / ", turned off — needs attention") — a marker VoiceOver can't see
-  is a marker that isn't there. A locked row is a plain `.group`. **The live row,
+  is a marker that isn't there. An auto-passed row speaks its NOTE instead
+  (", requires macOS 14.2 or later", ", couldn't be turned on"): it never earned a
+  grant, so ", allowed" was hiding the only thing worth hearing. A locked row is a plain `.group`. **The live row,
   every prominent Allow, and the CTA act on the click that ACTIVATES the app**
   (`acceptsFirstMouse` overrides on `ProminentButton` and `SetupSpineRowView`; v4
   live fix 2026-08-11, "Start listening took two clicks"): the bounce to System
@@ -252,7 +356,7 @@ gate/motion/demo/selection rules change.
 
   | Step | Hero headline | Why line | Button |
   |---|---|---|---|
-  | System Audio | Hear your Mac's sound | Audiout needs this to send your music to your speakers. | Enable System Audio |
+  | System Audio | Hear your Mac's sound | Audiout needs this to send your music to your speakers. Allowing plays a brief tone to confirm it's working. | Enable System Audio |
   | Local Network | Find speakers on your Wi‑Fi | Audiout needs this to reach the speakers on your network. | Enable Local Network |
   | Bluetooth | Use Bluetooth speakers | Audiout needs this to stream to Bluetooth speakers and wake ones that are off. | Enable Bluetooth Access |
   | Speaker Sync | Keep speakers in perfect time | A small helper shares one clock so your speakers never drift. | Turn On at Login |
@@ -427,6 +531,18 @@ gate/motion/demo/selection rules change.
     routes through the one deep-link table,
     `SetupFlowModel.settingsDestination(for:)`, which the denied-path Allow
     shares. `test_fireStuckPromptTimer()` is the seam (20 s is not waitable).
+  - **A refused ✕ says why.** `windowShouldClose` still refuses while a dialog is
+    unanswered, but no longer in silence: it calls
+    `OnboardingViewController.noteCloseRefused()`, which puts the reason on the
+    ribbon's status line (spinner kept — the wait is unchanged), announces it, and
+    re-arms the stuck-dialog hint at the shortened
+    `stuckPromptDelayAfterCloseAttempt` (5 s), since reaching for the close box is
+    itself the user saying the dialog has stopped being answerable. **Escape is the
+    ✕**: `cancelOperation` routes through `performClose`, so it meets the same
+    refusal and the same words rather than being a quieter second way out.
+    (**OWNER-PENDING** copy — as is Remote Control's spoken caption, the one
+    rehearsal whose instruction VoiceOver cannot see, substituted onto the preview
+    frame's caption band via `SetupPreviewFrameView.spokenCaption`.)
 - **The window is `OnboardingWindow`, the click witness** (live symptom: the
   first "Start listening" click left NO telemetry at all — not even the
   single-flight swallow — so the failure sat somewhere no view-level fix or
@@ -1017,6 +1133,11 @@ gate/motion/demo/selection rules change.
   re-read — the load-time one fires a detached task, so a caller that needs its
   result (Bluetooth and Remote Control only reach `.granted` through it) has to be
   able to wait.
+- **The Setup window runs its own display scale at five ledgered off-token
+  sizes** (9.5 pt `DemoPaneView:2696`, 11.5 pt `SetupRibbonView:348`, 12 pt
+  `DemoPaneView:2336`, 14.5 pt `SetupRibbonView:97`, 24 pt `DemoPaneView:1863`)
+  — deliberate, same ledger idea as `DemoSystemColor`; do not tokenise
+  without a type-scale decision.
 
 ## Feature Flow
 
@@ -1062,6 +1183,7 @@ gate/motion/demo/selection rules change.
 | `DemoPaneView` / `DemoMode` | The hero's STAGE: the mock swap crossfade, the browse/settled resting rules, the waiting dim, the motion policy, the Replay button. |
 | `DemoMockView` | Timeline base class for the animated mocks: restartable score, settled-state hook, and the two multi-stage seams — `held(_:)` and the `stageWindow` offset. |
 | `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The privacy-dialog miniature, the Settings-pane miniature, and the completion finale (one-shot ripple, static gold-aura resting frame). |
+| `DemoPromptMockView` on `.usageStats` | The SAME dialog mock the TCC cards use, with three deliberate departures — it is Audiout's card, not macOS's. The privacy hand badge and the Help button are HIDDEN (both are macOS's own markers), the buttons read "Don't Share"/"Share" rather than "Don't Allow"/"Allow" (`confirmTitle(for:)` / `refuseTitle(for:)`), and the icon is a TILE wearing the step's identity glyph and hue rather than the app icon — BOTH ways of fetching our own icon are wrong here (`demoIconAsAThirdPartyProcessSeesIt` reproduces another process's stale view of us, and `NSApp.applicationIconImage` resolves to a generic folder in the snapshot renderers, which is not a real `.app`). The frame carries no caption at all for this step, the same rule the finale follows. |
 | `DemoSystemAlertMockView` / `DemoLockIconView` | The classic macOS ALERT panel Remote Control's two-stage pass opens on — header, divider, padlock, a MARKED "Open System Settings" beside a ghosted "Deny" — and the gradient-filled padlock it leads with. A passive surface: the host owns the cursor and the crossfade. |
 | `DemoSettingsHandoffMockView` / `DemoStage` | Remote Control's two-stage FIRST ASK: the Accessibility alert handing off to the Settings pane in one pass, the owner of stage one's pointer, and which of its two surfaces the pass rests on. |
 | `DemoWindowSurfaceView` / `DemoPushButtonView` / `DemoButtonEmphasis` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoCursorView` | The drawn parts of the mocks — window body, dialog button (capsule or rounded rect, marked or ghosted), switch, sidebar, list row, greeked label — `demoGistBlock` stacks those into the ragged blocks that stand in for a mock's prose — pill, circle, pointer. |

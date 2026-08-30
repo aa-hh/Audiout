@@ -107,13 +107,11 @@ import AppKit
                 "the deleted Settings help lives on the chip now: \(String(describing: row?.test_syncChipTooltip))")
     }
 
-    @Test func theSyncColumnTitleRendersOverTheThisMacSubsection() {
+    @Test func theOffsetColumnTitleRendersWhenTheMacRowCarriesItsChip() {
         let isolation = TestIsolation(owner: "PopoverLocalSyncTrimTests")
         let (popover, _, _) = makePopover(isolation)
-        #expect(popover.test_syncColumnTitleShown(in: "This Mac"),
-                "a subsection whose rows carry the chip gets the column title")
-        #expect(!popover.test_syncColumnTitleShown(in: "AirPlay Devices"),
-                "…and one whose rows do not, does not")
+        #expect(popover.test_offsetColumnTitleShown(),
+                "the Mac's pinned row carries the sync chip, so the card header prints the Offset legend (once, 2026-08-28)")
     }
 
     // MARK: The drawer
@@ -202,7 +200,7 @@ import AppKit
             #expect((-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs).contains(first))
         }
 
-        wizard?.test_clickDismiss()
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.stopTitle)
         #expect(recorder.localEnds == [nil], "abandoning restores the stored offset")
     }
 }

@@ -87,6 +87,16 @@ import CoreAudio
         // settable output, not the unwritable case the flag exists for.
         func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) { didWrite?(true) }
         func setMuted(_ muted: Bool) {}
+        // Target-resolving pair: the resolver is CALLED (a test can observe what
+        // was resolved) and the outcome then matches the plain writes above.
+        func setVolume(_ volume: Int, resolvingTarget: @escaping @Sendable () -> AudioObjectID?,
+                       didWrite: (@Sendable (Bool) -> Void)?) {
+            _ = resolvingTarget()
+            didWrite?(true)
+        }
+        func setMuted(_ muted: Bool, resolvingTarget: @escaping @Sendable () -> AudioObjectID?) {
+            _ = resolvingTarget()
+        }
         func start() {}
         func stop() {}
     }
@@ -314,7 +324,7 @@ import CoreAudio
     /// T3: with no `btSyncedSinkFactory` wired (this suite's posture — see
     /// `makeBackend`), `btSink` never exists, so `btUsableTrimRangeMs` must
     /// fall through to the protocol's own full-±range default rather than
-    /// crash or hang on the `captureControlQueue.sync` hop.
+    /// crash on the nil reference.
     @Test func usableTrimRangeMsDefaultsToFullRangeWithNoBTSink() {
         let (backend, _) = makeBackend()
         #expect(backend.btUsableTrimRangeMs(forDevice: sonos.id)

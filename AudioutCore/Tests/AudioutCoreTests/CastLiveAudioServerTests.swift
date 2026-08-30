@@ -156,9 +156,28 @@ import Testing
         // Wall-clock pacing (not a fixed frame count per tick) means each
         // chunk's size varies a little, but three ticks of audio should
         // still add up to about 3 x 882 frames x 4 bytes = 10,584 bytes.
+        //
+        // No assertion on the TOTAL bytes of these three chunks, in either
+        // direction, because that total is not a stable quantity.
+        //
+        // The comment that used to stand here claimed load could only push the
+        // sum up (a late tick sends extra to catch up), so successive upper
+        // bounds were raised — 11,500, then 13,000 — as busy machines beat
+        // them. That reasoning was incomplete, and dropping the ceiling on the
+        // strength of it was wrong: the collector above stops as soon as FOUR
+        // chunks have arrived, so what these three contain depends on how the
+        // server's pacing loop happened to slice time, not on how much audio it
+        // owes. Ticks firing early and small make the sum fall just as jitter
+        // makes it rise, and the lower bound was then observed failing too.
+        //
+        // What the test is named for is still fully asserted: a valid WAV
+        // header, and an endless chunked stream whose audio chunks carry real
+        // payload. Genuine under-sending — the failure that would starve a
+        // receiver — is a RATE, so catching it means measuring bytes against
+        // elapsed wall time rather than against a fixed chunk count. That is a
+        // different test, and worth writing if starvation ever shows up.
         let sizes = parsed[1...3].map(\.count)
         #expect(sizes.allSatisfy { $0 > 0 })
-        #expect((9_500...11_500).contains(sizes.reduce(0, +)))
     }
 
     @Test func headGetsTheHeaderAndThenEOF() throws {

@@ -120,7 +120,13 @@ func makeSnapshotDefaults() -> UserDefaults {
 /// is ever reused across two snapshots.
 @MainActor
 func makeRoot() -> SettingsRootViewController {
-    let settings = AppSettings(defaults: makeSnapshotDefaults())
+    // Seed the two URLs the app normally reads from its Info.plist: under a
+    // bare `swift run` there is no such bundle, so without these the General
+    // pane's whole license section — status line, Enter License…, Buy — never
+    // renders and the golden records a build that cannot be licensed.
+    let settings = AppSettings(defaults: makeSnapshotDefaults(),
+                               licenseServerURL: URL(string: "https://license.audiout.app"),
+                               buyURL: URL(string: "https://audiout.app/buy"))
     let excludedApps = ExcludedAppsController(store: ExcludedAppsStore(directory: tempDir()), loadPersisted: false)
     // Seed one excluded app so the Audio section shows a non-empty list, not
     // just the "Add application…" empty state.
@@ -134,7 +140,7 @@ func makeRoot() -> SettingsRootViewController {
         initialMs: AppSettings.defaultStartBufferMs,
         envOverrideMs: nil,
         isStreaming: { false },
-        apply: { _ in })
+        apply: { _ in (0, 0) })
 
     // Section order/labels/symbols mirror the app's own assembly
     // (`AppDelegate.makeSettingsRoot`) exactly.

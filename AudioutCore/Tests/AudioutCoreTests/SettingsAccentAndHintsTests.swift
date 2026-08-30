@@ -170,7 +170,7 @@ extension SerializedSharedState {
                                           initialMs: 1000,
                                           envOverrideMs: nil,
                                           isStreaming: { false },
-                                          apply: { _ in })
+                                          apply: { _ in (0, 0) })
         let pane = makeAudioPane(latency: latency)
         #expect(pane.test_bufferHint.contains("1,000 ms") || pane.test_bufferHint.contains("1000 ms"),
                       "hint must state the current value: \(pane.test_bufferHint)")
@@ -204,7 +204,7 @@ extension SerializedSharedState {
                                           initialMs: 1000,
                                           envOverrideMs: nil,
                                           isStreaming: { false },
-                                          apply: { _ in })
+                                          apply: { _ in (0, 0) })
         let pane = makeAudioPane(latency: latency)
         _ = pane.view
         pane.view.layoutSubtreeIfNeeded()

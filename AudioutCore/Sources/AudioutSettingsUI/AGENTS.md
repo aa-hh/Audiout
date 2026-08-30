@@ -140,6 +140,7 @@ and where the settings model types (`AppSettings`, `ExcludedAppsController`,
 |---|---|
 | `SettingsRootViewController` | Public `NSSplitViewController`: section sidebar + one scrolling pane host; `selectSection(at:)` drives real sidebar selection. |
 | `SettingsSidebarViewController` | The section source list — one "Settings" header row over one leaf row per section, in the Groups sidebar's geometry and warm wash. |
-| `GeneralSettingsViewController` | Launch at login / "Reconnect last speakers when Audiout starts" (switch on `AppSettings.reconnectAtLaunch`, live hint) / a hairline + footer button strip (`Setup…`, `About Audiout…`) in place of the old full-row Setup and About. |
+| `GeneralSettingsViewController` | Launch at login / "Reconnect last speakers when Audiout starts" (switch on `AppSettings.reconnectAtLaunch`, live hint) / the License row (status line + `Enter License…`/`Change…` + `Buy Audiout…`; whole surface hidden when the bundle has no license server) / a hairline + footer button strip (`Setup…`, `About Audiout…`, `Check for Updates…`). |
+| `LicenseSheetViewController` | The Enter License… sheet — the ONLY editable key surface (the pane never shows a field). Register is the one commit; Cancel discards; Remove License… clears key + verdict. Hosts the shared `statusLine(for:)` copy both surfaces render. |
 | `AppearanceSettingsViewController` | Theme tiles (warm product previews) + Accent dial. |
 | `AudioSettingsViewController` | Excluded-apps list (heading via `SettingsForm.sectionHeader`) + connect volume + wake restore + Advanced (Audio buffer), Advanced a disclosure collapsed by default via the CardView-style clip (required height==0 vs a `.defaultHigh` bottom pin). |

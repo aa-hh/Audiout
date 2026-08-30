@@ -33,8 +33,11 @@ public final class ExcludedAppsController {
     /// house idiom — `AppDelegate` is the sole assignee.
     public var onChange: (() -> Void)?
 
+    /// A failed write is reported rather than swallowed: this list is the
+    /// privacy denylist, so an entry that never reaches disk means the app the
+    /// user excluded IS captured again at the next launch.
     private func persist() {
-        try? store.save(excludedApps)
+        do { try store.save(excludedApps) } catch { StoreRecovery.noteWriteFailure(error) }
         onChange?()
     }
 

@@ -30,37 +30,71 @@ public enum BTSyncTrim {
     /// committed value is a whole multiple of this, so the readout, the
     /// steppers, and the persisted value can never disagree.
     public static let resolutionMs: Double = 1
+    /// A CAST row's bound, twice the Bluetooth one. The protocol's own buffer
+    /// (seconds) is measured on the wire and taken out automatically; what this
+    /// offset covers is everything AFTER the receiver's media clock — its
+    /// output stage, its DAC, and, when the target is a TV, the whole
+    /// HDMI → TV → soundbar chain, none of which any Cast surface reports.
+    /// Google's own published residues are 0–40 ms for a speaker, 0–80 ms for a
+    /// soundbar and 0–70 ms for a receiver; a TV feeding a soundbar over ARC
+    /// plausibly passes 400 ms, so ±1000 ms is headroom over the worst chain,
+    /// NOT a dial for seconds. The align aid's beat-aliasing argument behind
+    /// ``rangeMs`` does not apply: no bisection wizard runs on a Cast row.
+    public static let castRangeMs: Double = 1000
 
-    public static func clamp(_ ms: Double) -> Double {
+    public static func clamp(_ ms: Double, rangeMs: Double = BTSyncTrim.rangeMs) -> Double {
         Swift.min(rangeMs, Swift.max(-rangeMs, ms))
     }
 
-    /// Snap to whole ``resolutionMs`` milliseconds and clamp to ±``rangeMs``.
+    /// Round to whole ``resolutionMs`` milliseconds, half away from zero, with
+    /// NO bound applied — for the intermediate steps that a caller's own
+    /// per-device range clamp immediately follows, and for readouts of a value
+    /// something else has already bounded.
+    public static func snap(_ ms: Double) -> Double {
+        (ms / resolutionMs).rounded(.toNearestOrAwayFromZero) * resolutionMs
+    }
+
+    /// Snap to whole ``resolutionMs`` milliseconds and clamp to ±`rangeMs`.
     /// Rounds half away from zero; a typed "22.6" or an old 0.1 ms value from
     /// disk both land on a clean integer.
-    public static func quantise(_ ms: Double) -> Double {
-        clamp((ms / resolutionMs).rounded(.toNearestOrAwayFromZero) * resolutionMs)
+    public static func quantise(_ ms: Double, rangeMs: Double = BTSyncTrim.rangeMs) -> Double {
+        clamp(snap(ms), rangeMs: rangeMs)
     }
 
     /// A spoken/hover description of a trim that spells out the direction
     /// (D7 — never a bare signed number, which readers get backwards). Shared
     /// by the row chip's tooltip and VoiceOver value and the drawer's field
     /// value, so the two can never phrase it differently.
+    /// Rounds but deliberately does NOT clamp: the row chip also speaks a
+    /// measured latency plus its nudge, and a speaker whose measured latency
+    /// exceeds the trim's own ±``rangeMs`` bound must be described as it is,
+    /// not shrunk to the bound. Every caller passing a trim passes an
+    /// already-clamped one, so nothing else changes.
     public static func spokenOffset(_ ms: Double) -> String {
-        let whole = Int(quantise(ms))
+        let whole = Int(ms.rounded(.toNearestOrAwayFromZero))
         if whole == 0 { return "in sync" }
         return whole > 0 ? "\(whole) milliseconds later" : "\(abs(whole)) milliseconds earlier"
     }
 }
 
-/// Codable, versioned JSON persistence for per-device Bluetooth sync trims —
-/// a sibling of `DeviceIconStore`: same Application Support directory, its own
-/// file so the stores evolve independently. Payload is
-/// `[deviceUID: trimMs]`, keyed by the Core Audio device UID (MAC-derived, so
-/// a trim survives disconnect/rejoin AND un-pair/re-pair — never auto-purged).
-/// The directory is injectable so tests never touch the real
-/// `~/Library/Application Support`.
+/// Codable, versioned JSON persistence for per-device sync trims — a sibling
+/// of `DeviceIconStore`: same Application Support directory, its own file so
+/// the stores evolve independently. Payload is `[deviceKey: trimMs]`.
+///
+/// The Bluetooth instance keys by the Core Audio device UID (MAC-derived, so a
+/// trim survives disconnect/rejoin AND un-pair/re-pair — never auto-purged);
+/// the CAST instance (``castFileName``) keys by the receiver's advertised id
+/// and uses only the `trims` map, since a Cast row has no measured latency and
+/// no first-mix intercept. One type, two files: the envelope's extra maps are
+/// optional, so the Cast file is a plain `{schemaVersion, trims}` and the two
+/// stores can never write over each other. The directory is injectable so
+/// tests never touch the real `~/Library/Application Support`.
 public struct BTTrimStore: Sendable {
+
+    /// The Bluetooth trims' file — the default, unchanged.
+    public static let bluetoothFileName = "bt-sync-trims.json"
+    /// The Cast user offsets' file, beside it in the same directory.
+    public static let castFileName = "cast-sync-offsets.json"
 
     struct Envelope: Codable {
         var schemaVersion: Int
@@ -89,11 +123,15 @@ public struct BTTrimStore: Sendable {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
-    /// - Parameter directory: where `bt-sync-trims.json` lives. Defaults to
-    ///   the same `Application Support/Audiout/` directory as the other
-    ///   stores; tests pass a throwaway temp directory.
-    public init(directory: URL = GroupStore.defaultDirectory) {
-        self.fileURL = directory.appendingPathComponent("bt-sync-trims.json")
+    /// - Parameters:
+    ///   - directory: where the file lives. Defaults to the same
+    ///     `Application Support/Audiout/` directory as the other stores; tests
+    ///     pass a throwaway temp directory.
+    ///   - fileName: which file — ``bluetoothFileName`` by default,
+    ///     ``castFileName`` for the Cast offsets.
+    public init(directory: URL = GroupStore.defaultDirectory,
+                fileName: String = BTTrimStore.bluetoothFileName) {
+        self.fileURL = directory.appendingPathComponent(fileName)
         self.encoder = JSONEncoder()
         self.encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         self.decoder = JSONDecoder()
@@ -166,7 +204,13 @@ public struct BTTrimStore: Sendable {
     private func loadEnvelope() throws -> Envelope? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
         let data = try Data(contentsOf: fileURL)
-        let envelope = try decoder.decode(Envelope.self, from: data)
+        let envelope: Envelope
+        do {
+            envelope = try decoder.decode(Envelope.self, from: data)
+        } catch {
+            StoreRecovery.quarantine(fileURL)
+            throw error
+        }
         guard envelope.schemaVersion <= Self.currentSchemaVersion else { return nil }
         return envelope
     }

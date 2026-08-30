@@ -162,11 +162,10 @@ public final class AppRowView: NSView {
     private var isRunning: Bool = true
     /// True iff the selected destination is the standalone "No Redirect" entry
     /// (`isStandalone`) — the neutral/unset state where the app just plays in the
-    /// whole-system mix. The slider stays visible but dims/disables ONLY in this
-    /// state: an app on "No Redirect" has no independent stream to level. Both
-    /// "Current Device" (Bug T2 — its own local built-in-speaker stream) and an
-    /// AirPlay device (its own remote stream) DO have an independent volume, so
-    /// the slider is live for them.
+    /// whole-system mix. It gates the ARMED fader fill ONLY — which means
+    /// "redirected to a stream of its own", not "has a volume". Every
+    /// destination has a live volume: below 100 an un-redirected app is
+    /// intercepted and summed back into the mix attenuated.
     private var isNoRedirect: Bool = true
 
     private let iconView = NSImageView()
@@ -224,7 +223,6 @@ public final class AppRowView: NSView {
     private var isHovered: Bool = false {
         didSet { if isHovered != oldValue { setNeedsDisplay(bounds) } }
     }
-    private var hoverMoveMonitor: Any?
 
     public init(showsMeter: Bool = false) {
         self.showsMeter = showsMeter
@@ -242,8 +240,7 @@ public final class AppRowView: NSView {
     public func apply(_ configuration: Configuration) {
         self.appID = configuration.appID
         self.destinations = configuration.destinations
-        // Dim the slider ONLY for the standalone "No Redirect" entry. A missing
-        // selection (nothing matched) is treated as "No Redirect" (dimmed), the
+        // A missing selection (nothing matched) is treated as "No Redirect", the
         // safe neutral default.
         self.isNoRedirect = configuration.destinations
             .first { $0.id == configuration.selectedDestinationID }?.isStandalone ?? true
@@ -260,14 +257,14 @@ public final class AppRowView: NSView {
 
         if !isDraggingSlider {
             slider.integerValue = configuration.volume
-            readoutLabel.stringValue = "\(configuration.volume)%"
+            readoutLabel.stringValue = VolumePercent.label(configuration.volume)
         }
-        // Always visible, dimmed/disabled ONLY on "No Redirect" — same dimming
-        // approach `DeviceRowView` uses for an unavailable/unselected row. "Current
-        // Device" (Bug T2) and AirPlay routes each have their own stream, so the
-        // slider is live for them.
-        slider.isEnabled = !isNoRedirect
-        readoutLabel.textColor = isNoRedirect ? Tokens.Color.tertiaryLabel : Tokens.Color.secondaryLabel
+        // Live for EVERY destination. "Current Device" (Bug T2) and AirPlay routes
+        // each level their own stream; an un-redirected app is intercepted below
+        // 100 and summed back into the whole-system mix at that volume, so there
+        // is no destination left whose volume does nothing.
+        slider.isEnabled = true
+        readoutLabel.textColor = Tokens.Color.secondaryLabel
         // Fader armed state (the app-row equivalent of the device rows' §3.3
         // predicate — spec §5.1: routed ∧ running, pure model): the gold fill
         // renders only while the redirect route is live; an unrouted or idle
@@ -685,7 +682,7 @@ public final class AppRowView: NSView {
         isDraggingSlider = true
         let event = NSApp?.currentEvent
         if event?.type == .leftMouseUp { isDraggingSlider = false }
-        readoutLabel.stringValue = "\(sender.integerValue)%"
+        readoutLabel.stringValue = VolumePercent.label(sender.integerValue)
         delegate?.appRow(self, didSetVolume: sender.integerValue, for: appID)
     }
 
@@ -776,32 +773,27 @@ public final class AppRowView: NSView {
         for area in trackingAreas { removeTrackingArea(area) }
         addTrackingArea(NSTrackingArea(
             rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
             owner: self))
     }
 
     public override func mouseEntered(with event: NSEvent) { isHovered = true }
     public override func mouseExited(with event: NSEvent) { isHovered = false }
 
-    public override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if let monitor = hoverMoveMonitor { NSEvent.removeMonitor(monitor); hoverMoveMonitor = nil }
-        isHovered = false
-        guard window != nil else { return }
-        // Sticky-hover fix (shared row idiom): a bottom-most row can miss
-        // `mouseExited` when the pointer leaves into an untracked dead-zone
-        // below the card, so reconcile against the true pointer position.
-        // STABILITY(D4): every row installs its own app-wide monitor, churned on each rebuild — any fix should reduce multiplicity/churn only; the monitor pattern itself is deliberate (see this target's AGENTS.md); see dev/notes/stability-audit-2026-07-18.md
-        hoverMoveMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            guard let self, let window = self.window else { return event }
-            let point = self.convert(window.mouseLocationOutsideOfEventStream, from: nil)
-            self.isHovered = self.bounds.contains(point)
-            return event
-        }
+    /// Sticky-hover fix (shared row idiom): a bottom-most row can miss
+    /// `mouseExited` when the pointer leaves into an untracked dead-zone below
+    /// the card, so reconcile against the true pointer position — fed by the
+    /// tracking area's own `.mouseMoved` option (P2-1), not an app-wide
+    /// `NSEvent` monitor.
+    public override func mouseMoved(with event: NSEvent) {
+        guard let window else { return }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        isHovered = bounds.contains(point)
     }
 
-    deinit {
-        if let monitor = hoverMoveMonitor { NSEvent.removeMonitor(monitor) }
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        isHovered = false
     }
 
     /// Test hooks for the hover wash.
@@ -1020,7 +1012,7 @@ public final class AppRowView: NSView {
         // Composition (S6 item 6): an UNROUTED app reads "…, follows main
         // output" (the bridge phrase, spec §5.1); a routed app reads
         // "…, routed to <destination>".
-        var label = "\(appName), volume \(slider.integerValue) percent"
+        var label = "\(appName), volume \(VolumePercent.spoken(slider.integerValue))"
         if isNoRedirect {
             label += ", follows main output"
         } else if let destinationTitle = destinationPopUp.selectedItem?.title,
@@ -1062,10 +1054,8 @@ public final class AppRowView: NSView {
 
     /// The currently displayed volume (structural assertions).
     public var test_volume: Int { slider.integerValue }
-    /// Whether the volume slider is currently dimmed/disabled — true iff the
-    /// destination is the standalone "No Redirect" entry. "Current Device" (Bug
-    /// T2) and AirPlay routes each have an independent stream, so their slider is
-    /// live (not dimmed).
+    /// Whether the volume slider is currently dimmed/disabled. Always false: every
+    /// destination — "No Redirect" included — has a volume that does something.
     public var test_isSliderDimmed: Bool { !slider.isEnabled }
     /// Whether the Warm fader would render its ENGAGED (gold-gradient) fill —
     /// the app-row armed predicate (routed ∧ running) ∧ slider enabled, read

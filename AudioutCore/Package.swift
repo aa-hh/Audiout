@@ -52,12 +52,18 @@ let swiftClangImporterFlags: [String] =
 // fail to build/resolve otherwise). Rather than fighting per-symbol
 // `@available` annotations to keep .v13 alive for code paths that never run
 // on 13 anyway (NativeBackend is opt-in via AIRPLAY_BACKEND=native), we take
-// the whole package to .v14. The mock/OwnTone-backed paths are unaffected —
+// the whole package to macOS 14. The mock/OwnTone-backed paths are unaffected —
 // they don't reference anything gated above .v13; this only tightens the
 // deployment target the app links for and installs on.
+//
+// Raised again to 14.2 (the version-STRING form — `.v14` cannot express a
+// minor): the process-tap API onboarding's System Audio step depends on only
+// exists from 14.2, so 14.0/14.1 could install the app and then be told a
+// required permission is simply unavailable. `scripts/make-app.sh` already
+// stamps `LSMinimumSystemVersion` 14.2, so this makes the two agree.
 let package = Package(
     name: "AudioutCore",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("14.2")],
     products: [
         // The core library the AppKit app links against. It knows nothing about
         // AppKit — it's the seam between "the UI" and "wherever audio actually goes."
@@ -96,6 +102,9 @@ let package = Package(
         // priming) — the window isn't visible to an agent shell, so this renders
         // it (light + dark, each permission status) for visual verification.
         .executable(name: "onboarding-snapshot", targets: ["onboarding-snapshot"]),
+        // Offscreen PNG renderer for the alignment-wizard window (v2 visual
+        // verification). Run: `swift run wizard-snapshot [output-dir]`.
+        .executable(name: "wizard-snapshot", targets: ["wizard-snapshot"]),
         // Silent read-only Core Audio diagnostic for enumerating process objects and
         // their PIDs/bundle IDs, useful for diagnosing per-app routing (T7).
         .executable(name: "core-audio-diagnostic", targets: ["core-audio-diagnostic"]),
@@ -119,6 +128,10 @@ let package = Package(
         // Roadmap 006 Phase 0: the hardware-free Google Cast sender spike —
         // browse, launch, stream, time it. Not linked by the app.
         .executable(name: "cast-spike", targets: ["cast-spike"]),
+        // Mic-probe calibration hardware spike (roadmap 064): dual-sweep
+        // playback + built-in-mic capture + matched filter, with the A2DP/HFP
+        // survival check. Run from a terminal; never linked by the app.
+        .executable(name: "mic-probe-spike", targets: ["mic-probe-spike"]),
     ],
     dependencies: [
         // The native AirPlay 2 sender engine (PLAN-PHASE-2b T-NB-PKGDEP-1).
@@ -139,6 +152,8 @@ let package = Package(
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.0"),
+        // PostHog product analytics SDK for the app lifecycle and UI.
+        .package(url: "https://github.com/PostHog/posthog-ios.git", from: "3.59.3"),
     ],
     targets: [
         // Block-based Objective-C exception catcher. Swift's `catch` cannot
@@ -178,6 +193,7 @@ let package = Package(
         .target(
             name: "AudioutSharedUI",
             dependencies: ["AudioutCore"],
+            resources: [.copy("Resources/Audiout-Hero-1024.svg")],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit popover dropdown (SPEC §9 revised — NSMenu → NSPopover):
@@ -250,6 +266,7 @@ let package = Package(
                 "AudioutSettingsUI",
                 "AudioutOnboardingUI",
                 .product(name: "Sparkle", package: "Sparkle"),
+                .product(name: "PostHog", package: "posthog-ios"),
             ],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
@@ -288,6 +305,13 @@ let package = Package(
             dependencies: ["AudioutCore", "AudioutOnboardingUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
+        // Offscreen PNG renderer for the alignment-wizard window — see the
+        // product comment above.
+        .executableTarget(
+            name: "wizard-snapshot",
+            dependencies: ["AudioutCore", "AudioutPopoverUI", "AudioutSharedUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
+        ),
         // Offscreen PNG renderer for the mixer window (group-creation design
         // review) — see the product comment in window-snapshot/main.swift.
         .executableTarget(
@@ -304,6 +328,29 @@ let package = Package(
         .executableTarget(
             name: "core-audio-diagnostic",
             dependencies: ["AudioutCore"]
+        ),
+        // Mic-probe hardware spike — see the product comment above.
+        .executableTarget(
+            name: "mic-probe-spike",
+            dependencies: ["AudioutCore"],
+            // Info.plist is embedded into the Mach-O at link time (below), NOT
+            // shipped as an SPM resource — exclude it so SPM stops warning.
+            exclude: ["Info.plist"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)],
+            linkerSettings: [
+                // A bare SwiftPM executable has no Info.plist, so
+                // AVCaptureDevice.requestAccess has no NSMicrophoneUsageDescription
+                // to show — and without one, macOS never surfaces the TCC prompt
+                // at all (no crash, no dialog, no callback: exactly the silent
+                // hang this tool hit live against a Sonos Move). Same
+                // -sectcreate fix dev/audiocap uses for its own usage string.
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/mic-probe-spike/Info.plist"
+                ])
+            ]
         ),
         // Tiny, short-lived TCC-preflight probe (T14) — see Sources/tcc-probe/main.swift
         // for the output contract `TCCProbeRunner` parses. Run directly with:

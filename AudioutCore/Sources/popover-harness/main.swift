@@ -170,8 +170,6 @@ func run() -> Int32 {
 
     // --- 5. T-GROUPCTL (Q5): re-adding the current device into a mixed set is now allowed.
     print("\n[5] Local may join a mixed set")
-    checks.expect(controller.canSelectLocalSpeaker("local-mac"),
-                  "local can now join the mixed set")
     let rejoin = popover.test_toggleDeviceEnabled(deviceID: "local-mac", on: true)
     drain()
     checks.expect(rejoin.applied, "adding local to a mixed set is allowed")

@@ -20,14 +20,21 @@ import AppKit
 /// (`MenuBarStatus.symbolName`, outline vs. filled).
 public enum StatusItemIcon {
 
-    /// Builds the status button's image: the outline/filled SF Symbol for
-    /// `isStreaming` (`MenuBarStatus.symbolName`), `variableValue` set from
-    /// `masterVolume` (0...1, clamping is the caller's job), always template.
-    public static func make(isStreaming: Bool, masterVolume: Double) -> NSImage? {
+    /// Builds the status button's image: the SF Symbol for `state`
+    /// (`MenuBarStatus.symbolName(for:)`), `variableValue` set from
+    /// `masterVolume` (0...1, clamping is the caller's job — a master-muted
+    /// caller passes 0, which is how mute drains the arc), always template.
+    /// `isMuted` reaches only the spoken description; the arc already shows it.
+    public static func make(state: MenuBarStatus.State,
+                            masterVolume: Double,
+                            isMuted: Bool) -> NSImage? {
         let image = NSImage(
-            systemSymbolName: MenuBarStatus.symbolName(isStreaming: isStreaming),
+            systemSymbolName: MenuBarStatus.symbolName(for: state),
             variableValue: masterVolume,
-            accessibilityDescription: "AirPlay volume"
+            accessibilityDescription: MenuBarStatus.accessibilityDescription(
+                state: state,
+                masterVolumePercent: Int((masterVolume * 100).rounded()),
+                isMuted: isMuted)
         )
         image?.isTemplate = true
         return image

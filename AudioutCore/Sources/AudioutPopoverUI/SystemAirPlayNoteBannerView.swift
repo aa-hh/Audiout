@@ -117,28 +117,44 @@ final class SystemAirPlayNoteBannerView: NSView {
         layer?.cornerRadius = Tokens.Layout.bannerCornerRadius
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 1
-        layer?.backgroundColor = severity.tintColor.withAlphaComponent(severity.backgroundAlpha).cgColor
-        layer?.borderColor = severity.tintColor.withAlphaComponent(severity.borderAlpha).cgColor
+        stampLayerColors()
 
-        var rowViews: [NSView] = [icon, text]
-        if let button { rowViews.append(button) }
-        let row = NSStackView(views: rowViews)
-        row.orientation = .horizontal
-        row.alignment = .firstBaseline
-        row.spacing = 10
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
+        // The icon+text pair sits at its own natural (leading-hugging) width —
+        // it does NOT stretch to fill the banner. The button is a SEPARATE
+        // view pinned to the banner's trailing edge, not a third stack member:
+        // an all-in-one-stack layout left the button hugging the text with
+        // any leftover width stranded past it, against the banner's true
+        // trailing edge, instead of where the eye expects a CTA to sit.
+        let leading = NSStackView(views: [icon, text])
+        leading.orientation = .horizontal
+        leading.alignment = .firstBaseline
+        leading.spacing = 10
+        leading.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(leading)
         NSLayoutConstraint.activate([
-            row.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            leading.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            leading.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            leading.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
         ])
+        if let button {
+            addSubview(button)
+            NSLayoutConstraint.activate([
+                leading.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -10),
+                button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+                button.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
+            ])
+        } else {
+            leading.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14).isActive = true
+        }
 
         button?.target = self
         button?.action = #selector(actionButtonTapped)
 
-        setAccessibilityRole(.staticText)
+        // A GROUP, not one static string: the banner carries a label and — when
+        // it has one — a real button, so VoiceOver must be able to step into it
+        // and reach the action. `.staticText` swallowed the button entirely.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
         setAccessibilityLabel(text.stringValue)
     }
 
@@ -156,12 +172,31 @@ final class SystemAirPlayNoteBannerView: NSView {
     /// Simulate a click on the action button. No-op if there isn't one.
     func test_tapActionButton() { actionButtonTapped() }
 
-    /// Keep the CGColor-backed fills correct across light/dark appearance switches
-    /// (layer colors don't auto-resolve dynamic `NSColor`s).
+    /// Keep the CGColor-backed fills correct across light/dark appearance
+    /// switches (layer colors don't auto-resolve dynamic `NSColor`s).
+    ///
+    /// `wantsUpdateLayer` is what makes this run at all: without it AppKit takes
+    /// the `draw(_:)` path and `updateLayer()` is never called, so the re-stamp
+    /// below sat dead and the banner kept its build-time appearance across a
+    /// live light/dark flip.
+    override var wantsUpdateLayer: Bool { true }
+
     override func updateLayer() {
         super.updateLayer()
-        layer?.backgroundColor = severity.tintColor.withAlphaComponent(severity.backgroundAlpha).cgColor
-        layer?.borderColor = severity.tintColor.withAlphaComponent(severity.borderAlpha).cgColor
+        stampLayerColors()
+    }
+
+    /// The one place the tint is resolved and stamped — under the view's own
+    /// effective appearance, the `ConnectionDiagnosisView.applyBackgroundTint`
+    /// idiom, so a dynamic token resolves for the appearance actually on screen
+    /// rather than whatever was current at build time.
+    private func stampLayerColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = severity.tintColor
+                .withAlphaComponent(severity.backgroundAlpha).cgColor
+            layer?.borderColor = severity.tintColor
+                .withAlphaComponent(severity.borderAlpha).cgColor
+        }
     }
 
     /// The layer's currently-stamped fill/border, read back as `NSColor` —

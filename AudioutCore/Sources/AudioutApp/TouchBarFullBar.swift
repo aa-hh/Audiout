@@ -2,6 +2,7 @@
 
 import AppKit
 import AudioutCore
+import QuartzCore
 
 /// Replaces the whole Touch Bar with our own version of the macOS Control Strip
 /// while we own the volume: the same everyday controls, but with volume buttons
@@ -19,6 +20,13 @@ import AudioutCore
 /// so brightness, keyboard backlight and transport behave exactly as the real
 /// keys do, HUD included. Volume alone bypasses that, because an aux key would
 /// target the dead aggregate; it drives Main Out directly.
+///
+/// WHEN IT SHOWS, and it is three facts, not one: only while Audiout owns the
+/// volume AND audio is actually leaving the Mac AND the user hasn't turned the
+/// feature off in Settings › General. Ownership alone was too broad — it lasts
+/// the entire time our aggregate is the Mac's output, so the user's own Touch
+/// Bar was gone for hours at a stretch over a feature they might use for
+/// seconds. Any of the three going false hands the bar straight back.
 ///
 /// PROVENANCE: the private-API sequence was learned by reading Pock and MTMR
 /// (both MIT). No code was copied — this is a clean-room reimplementation, which
@@ -52,13 +60,38 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     private weak var playPauseButton: NSButton?
     private var isPlaying = false
     private var silenceTimer: Timer?
+    /// When sound was last heard, so the ONE silence timer can decide whether
+    /// enough quiet has passed rather than being rescheduled per level tick.
+    private var lastAudibleAt: CFTimeInterval = 0
+
+    private var ownsVolume = false
+    private var isStreaming = false
+    private var isEnabled = true
 
     // MARK: - Presenting
 
-    /// Follow volume ownership. Shown only while we own the volume, so the user's
-    /// ordinary Touch Bar is theirs the rest of the time.
+    /// Follow volume ownership — we can only drive volume when we own it.
     func setOwnsVolume(_ owns: Bool) {
-        owns ? present() : dismiss()
+        ownsVolume = owns
+        reconcilePresentation()
+    }
+
+    /// Follow whether audio is actually leaving the Mac. Ownership lasts as
+    /// long as the aggregate is the default output; this is the narrower fact
+    /// that says the bar is worth taking right now.
+    func setStreaming(_ streaming: Bool) {
+        isStreaming = streaming
+        reconcilePresentation()
+    }
+
+    /// Follow the user's Settings › General opt-out.
+    func setEnabled(_ enabled: Bool) {
+        isEnabled = enabled
+        reconcilePresentation()
+    }
+
+    private func reconcilePresentation() {
+        (ownsVolume && isStreaming && isEnabled) ? present() : dismiss()
     }
 
     private func present() {
@@ -68,7 +101,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
         // on the first dim and is never restored for us.
         TouchBarDimObserver.shared.install { [weak self] dimmed in
             guard let self, self.presented else { return }
-            dimmed ? TouchBarPrivateAPI.dismiss(self.makeBar()) : self.reassert()
+            dimmed ? TouchBarPrivateAPI.dismiss(self.bar) : self.reassert()
         }
 
         presented = true
@@ -78,13 +111,13 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     private func dismiss() {
         guard presented else { return }
         presented = false
-        TouchBarPrivateAPI.dismiss(makeBar())
+        TouchBarPrivateAPI.dismiss(bar)
     }
 
     /// (Re)present the bar. Also the recovery path after a dim — the presentation
     /// is not restored automatically.
     private func reassert() {
-        TouchBarPrivateAPI.presentFullWidth(makeBar())
+        TouchBarPrivateAPI.presentFullWidth(bar)
     }
 
     // MARK: - Play/pause state
@@ -103,16 +136,17 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     /// the music is paused reads briefly as playing, and audio from a non-media
     /// app counts too. It is right in the case that matters — press pause, the
     /// icon becomes play — and no better signal exists to us.
+    ///
+    /// Level ticks arrive ~25 times a second PER DEVICE, so this records a
+    /// timestamp and nothing else — scheduling a `Timer` here would mean
+    /// run-loop churn at audio rate for a glyph that changes every few
+    /// minutes. The silence decision rides ONE repeating 1 s timer that exists
+    /// only while we believe something is playing.
     func noteAudioLevel(_ rms: Float) {
         // Above the noise floor of a silent tap, well below normal programme
         // level, so a quiet passage doesn't read as a stop.
         guard rms > 0.002 else { return }
-        silenceTimer?.invalidate()
-        // Hysteresis: brief gaps between tracks, or a quiet beat, must not flap
-        // the icon. Only a sustained silence counts as "stopped".
-        silenceTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.setPlaying(false) }
-        }
+        lastAudibleAt = CACurrentMediaTime()
         setPlaying(true)
     }
 
@@ -121,11 +155,37 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
         isPlaying = playing
         playPauseButton?.image = NSImage(
             systemSymbolName: playPauseSymbol, accessibilityDescription: "Play or pause")
+        playing ? startSilenceTimer() : stopSilenceTimer()
+    }
+
+    /// Hysteresis: brief gaps between tracks, or a quiet beat, must not flap
+    /// the icon. Only a sustained silence counts as "stopped".
+    private func startSilenceTimer() {
+        guard silenceTimer == nil else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, CACurrentMediaTime() - self.lastAudibleAt >= 2.0 else { return }
+                self.setPlaying(false)
+            }
+        }
+        // Loose: this is a glyph, not a deadline — let the run loop coalesce it.
+        timer.tolerance = 0.2
+        silenceTimer = timer
+    }
+
+    private func stopSilenceTimer() {
+        silenceTimer?.invalidate()
+        silenceTimer = nil
     }
 
     private var playPauseSymbol: String { isPlaying ? "pause.fill" : "play.fill" }
 
     // MARK: - The bar
+
+    /// The one bar we ever present. The private dismiss matches on OBJECT
+    /// IDENTITY: it must be handed the same instance that was presented, or the
+    /// bar stays on screen and goes on swallowing the volume buttons.
+    private lazy var bar: NSTouchBar = makeBar()
 
     private func makeBar() -> NSTouchBar {
         let bar = NSTouchBar()

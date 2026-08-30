@@ -519,7 +519,7 @@ public final class ControlPanelWindowController: NSWindowController {
 
         if isPinned {
             if !HeadlessRuntime.isActive {
-                NSApp?.activate(ignoringOtherApps: true)
+                NSApp?.activate()
                 panel.makeKeyAndOrderFront(nil)
             }
             return
@@ -539,7 +539,13 @@ public final class ControlPanelWindowController: NSWindowController {
             // screen if the icon sits near an edge.
             var origin = NSPoint(x: anchor.midX - size.width / 2,
                                  y: anchor.minY - gap - size.height)
-            if let screen = panel.screen ?? NSScreen.main {
+            // Clamp against the ANCHOR's own display, not the panel's. On a
+            // multi-display Mac the panel is still wherever it last was (or
+            // nowhere at all) when this runs, so `panel.screen` could clamp a
+            // menu-bar item on the second display against the first one's
+            // frame and pull the bubble off its own beak.
+            if let screen = NSScreen.screens.first(where: { $0.frame.intersects(anchor) })
+                ?? panel.screen ?? NSScreen.main {
                 let vf = screen.visibleFrame
                 origin.x = min(max(vf.minX + 8, origin.x), vf.maxX - size.width - 8)
                 origin.y = max(vf.minY + 8, origin.y)
@@ -573,7 +579,7 @@ public final class ControlPanelWindowController: NSWindowController {
         // for the run's duration. Everything else (frame math, model state)
         // still runs so headless assertions stay exactly as strong.
         if !HeadlessRuntime.isActive {
-            NSApp?.activate(ignoringOtherApps: true)
+            NSApp?.activate()
             panel.makeKeyAndOrderFront(nil)
         }
 

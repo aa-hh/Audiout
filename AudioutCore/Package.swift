@@ -105,6 +105,12 @@ let package = Package(
         // Offscreen PNG renderer for the alignment-wizard window (v2 visual
         // verification). Run: `swift run wizard-snapshot [output-dir]`.
         .executable(name: "wizard-snapshot", targets: ["wizard-snapshot"]),
+        // Opens the real first-open licence gate and nothing else — no
+        // backend, no permissions, no network. The one surface a snapshot
+        // tool CANNOT stand in for: its ground is a live Metal shader, and
+        // Metal is off under `HeadlessRuntime`, so an offscreen render of this
+        // window is a flat colour. Run: `swift run license-gate-preview`.
+        .executable(name: "license-gate-preview", targets: ["license-gate-preview"]),
         // Silent read-only Core Audio diagnostic for enumerating process objects and
         // their PIDs/bundle IDs, useful for diagnosing per-app routing (T7).
         .executable(name: "core-audio-diagnostic", targets: ["core-audio-diagnostic"]),
@@ -323,6 +329,13 @@ let package = Package(
         .executableTarget(
             name: "wizard-snapshot",
             dependencies: ["AudioutCore", "AudioutPopoverUI", "AudioutSharedUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
+        ),
+        // On-screen preview of the licence gate — see the product comment
+        // above.
+        .executableTarget(
+            name: "license-gate-preview",
+            dependencies: ["AudioutCore", "AudioutOnboardingUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Offscreen PNG renderer for the mixer window (group-creation design

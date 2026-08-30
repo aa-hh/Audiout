@@ -222,6 +222,7 @@ Redirecting one app to a specific device:
 | Per-app capture/mix | `PerAppCaptureCoordinator`, `AppRouteMixer`, `LeveledAppInjector` |
 | Shared capture infra | `DefaultOutputDeviceMonitor`, `TapRebuildLifecycle` (`TapRebuildCoalescer`, `TapReanchor`) |
 | Routing brain | `GroupController`, `AppRoutingController`, `PhaseController` |
+| Repaint gating | `StructuralStateGate` — has selection/groups moved since the surfaces were last painted? `onStateDidChange` fires for EVERY model change (a volume-key hold included) while the repaints it can trigger are full sweeps, so the coordinator gates them on this. |
 | Persistence | `AppRouteStore`, `RoutingStore`, `GroupStore`, `AppSettings`, `ExcludedAppsStore`, `ExcludedAppsController`, `DeviceIconStore`, `DeviceEQStore` |
 | Tone shaping | `DeviceEQ`, `EQStreamTopology`, `EQProcessor` |
 | Mic-probe calibration (064) | `SyncProbe`, `SyncProbeCorrelator`, `MicProbeSession`, `BuiltInMicRecorder`, `MicCapturePermission` (all license-clean; DSP hardware-free) |

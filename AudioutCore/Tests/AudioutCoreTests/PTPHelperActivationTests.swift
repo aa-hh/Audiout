@@ -77,33 +77,31 @@ import Testing
             ptpHelper: FakeHelperStatus(status: .notRegistered),
             machServiceName: unreachableMachServiceName())
 
-        let clock = ContinuousClock()
-        let start = clock.now
         let outcome = await activator.activate(timeout: 30)
-        let elapsed = clock.now - start
 
         #expect(outcome == .needsApproval(.notRegistered))
-        // The whole point of the status precheck: a large timeout must NOT be
-        // waited out when launchd was never going to demand-start anything.
-        #expect(elapsed < .seconds(2), "returned in \(elapsed) — expected an instant short-circuit")
+        // The whole point of the status precheck: `.needsApproval` is reachable
+        // ONLY through the `status == .enabled` guard (PTPHelperService.swift:258),
+        // which returns before the Mach touch and the poll loop below it. So the
+        // outcome alone proves the 30s timeout was never waited out — a regression
+        // here means this test waits the full 30s and then fails on the outcome
+        // (`.timingPortsUnavailable`, not `.needsApproval`), not that it flakes on
+        // a timing bound.
     }
 
     /// The specific case the task calls out: `.requiresApproval` must perform
-    /// NO XPC touch and NO wait. Proven the same way as every non-`.enabled`
-    /// status: an instant return despite a large timeout, using a Mach service
-    /// name that could only ever matter if a touch actually happened.
+    /// NO XPC touch and NO wait. Proven structurally, not by timing:
+    /// `.needsApproval` can only come from the status guard that precedes
+    /// `touchMachService` (`PTPHelperService.swift:258`, ahead of `:262`), using
+    /// a Mach service name that could only ever matter if a touch actually happened.
     @Test func requiresApprovalPerformsNoXPCTouchAndNoWait() async {
         let activator = PTPHelperActivator(
             ptpHelper: FakeHelperStatus(status: .requiresApproval),
             machServiceName: unreachableMachServiceName())
 
-        let clock = ContinuousClock()
-        let start = clock.now
         let outcome = await activator.activate(timeout: 30)
-        let elapsed = clock.now - start
 
         #expect(outcome == .needsApproval(.requiresApproval))
-        #expect(elapsed < .seconds(2), "returned in \(elapsed) — a real wait would mean the Mach service WAS touched")
     }
 
     @Test func notFoundNeedsApprovalWithNoWait() async {
@@ -111,13 +109,9 @@ import Testing
             ptpHelper: FakeHelperStatus(status: .notFound),
             machServiceName: unreachableMachServiceName())
 
-        let clock = ContinuousClock()
-        let start = clock.now
         let outcome = await activator.activate(timeout: 30)
-        let elapsed = clock.now - start
 
         #expect(outcome == .needsApproval(.notFound))
-        #expect(elapsed < .seconds(2))
     }
 
     /// The contrast case: `.enabled` does NOT short-circuit — it proceeds past

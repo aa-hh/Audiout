@@ -176,12 +176,16 @@ final class DemoPaneView: NSView {
 
     /// A layer-colour instrument has to reconcile its live re-resolution triggers
     /// itself (SharedUI AGENTS.md), because none of them reach a view through
-    /// `viewDidChangeEffectiveAppearance` or a model push. Two apply here: a
-    /// mid-session Reduce Motion toggle, which changes the motion POLICY, and the
+    /// `viewDidChangeEffectiveAppearance` or a model push. Three apply here: a
+    /// mid-session Reduce Motion toggle, which changes the motion POLICY; the
     /// user's macOS accent, which the mock's confirming button stamps as a
-    /// resolved `CGColor`. The app's OWN accent dial is deliberately not one of
-    /// them — nothing inside a mock is painted from `Tokens`, that is the point of
-    /// the system-look rule.
+    /// resolved `CGColor`; and Increase Contrast, which `DemoSystemColor`'s
+    /// surface-ladder and button-emphasis values resolve differently (see the
+    /// enum's doc comment) but which — like the accent — doesn't touch
+    /// `effectiveAppearance`, so a toggle mid-session needs its own trigger too.
+    /// The app's OWN accent dial is deliberately not one of them — nothing
+    /// inside a mock is painted from `Tokens`, that is the point of the
+    /// system-look rule.
     private func registerForLiveDisplayChanges() {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(accessibilityDisplayOptionsChanged),
@@ -194,6 +198,11 @@ final class DemoPaneView: NSView {
     @objc private func accessibilityDisplayOptionsChanged() {
         // The policy itself changed — re-derive it from scratch.
         reconcileMotion(restartUnderReduceMotion: false)
+        // Increase Contrast doesn't change `effectiveAppearance`, so the mock's
+        // `DemoSystemColor` fills won't otherwise re-resolve until something else
+        // forces a repaint — same reasoning as `systemColorsChanged` below.
+        mock?.subviewsRecursively.forEach { $0.needsDisplay = true }
+        mock?.needsDisplay = true
     }
 
     @objc private func systemColorsChanged() {
@@ -636,24 +645,44 @@ extension DemoMockView: CAAnimationDelegate {
 /// app proper to paint with them. Measured from real Settings recordings —
 /// `dev/notes/wispr-permissions-brief.md` names the source.
 enum DemoSystemColor {
-    /// Sidebar fill — darker than the content pane in BOTH appearances.
-    static let sidebar = dynamic(light: 0xE8E8E8, dark: 0x232326)
+    /// Sidebar fill — darker than the content pane in BOTH appearances, and
+    /// pushed a further step darker under Increase Contrast: the sidebar/
+    /// content/card ladder and the button-emphasis pair below are the values
+    /// that carry this mock's STRUCTURE (which surface is which, which button
+    /// is correct), so they are the ones Increase Contrast separates further —
+    /// exactly what the setting is for, and unlike the real macOS chrome this
+    /// mock paints (a permission alert, a Settings pane), which visibly widens
+    /// its own greys and adds control outlines under the same setting; a mock
+    /// that stayed flat under it would be the one surface in this rehearsal
+    /// that didn't look like macOS. `DemoButtonEmphasis`'s ghost/marked pair
+    /// gets the same treatment for the same reason.
+    static let sidebar = dynamic(light: 0xE8E8E8, dark: 0x232326,
+                                  lightHighContrast: 0xD2D2D2, darkHighContrast: 0x18181A)
     /// Content-pane fill.
     static let contentPane = dynamic(light: 0xF4F4F4, dark: 0x2C2C2E)
     /// The grouped list's fill. Real Settings draws the card within one level of
     /// the pane and defines it by its border alone; at mock scale that vanishes,
     /// so this is lifted ~2.5 % — a readability adjustment, not a measurement.
-    static let card = dynamic(light: 0xFAFAFA, dark: 0x333336)
+    /// Pushed a step lighter under Increase Contrast, widening it from the
+    /// sidebar the same way the real pane does.
+    static let card = dynamic(light: 0xFAFAFA, dark: 0x333336,
+                               lightHighContrast: 0xFFFFFF, darkHighContrast: 0x3D3D40)
     /// A WRONG button — the one the rehearsal is telling the user not to press.
     /// It is drawn as a ghost (see ``DemoPushButtonView``), so this is only its
-    /// hairline; the fill is clear.
-    static let ghostButtonRim = dynamic(light: 0xC4C4C4, dark: 0x5A5A5E)
+    /// hairline; the fill is clear. Darkened/lightened under Increase Contrast
+    /// so the ghost's rim doesn't fade against the marked button's brighter fill.
+    static let ghostButtonRim = dynamic(light: 0xC4C4C4, dark: 0x5A5A5E,
+                                         lightHighContrast: 0xA0A0A0, darkHighContrast: 0x7A7A80)
     /// The CORRECT button's fill — the same grey family a step brighter, so the
     /// button the pointer is going to press is the lit one in the row without
-    /// borrowing an accent the real dialog doesn't have.
-    static let markedButton = dynamic(light: 0xE4E2DC, dark: 0x6E6E74)
-    /// The thin ring around that fill, one further step again.
-    static let markedButtonRim = dynamic(light: 0xA8A6A0, dark: 0x8E8E96)
+    /// borrowing an accent the real dialog doesn't have. Lifted further under
+    /// Increase Contrast, same reasoning as the ghost rim above.
+    static let markedButton = dynamic(light: 0xE4E2DC, dark: 0x6E6E74,
+                                       lightHighContrast: 0xEDEBE4, darkHighContrast: 0x86868C)
+    /// The thin ring around that fill, one further step again — also widened
+    /// under Increase Contrast.
+    static let markedButtonRim = dynamic(light: 0xA8A6A0, dark: 0x8E8E96,
+                                          lightHighContrast: 0x88867E, darkHighContrast: 0xACACB4)
 
     /// The privacy padlock's gradient, top and bottom. Warm GREY, not the real
     /// icon's gold: gold is spent entirely on the one button the step wants
@@ -692,11 +721,42 @@ enum DemoSystemColor {
     /// system-audio ask with a vivid red record mark, not a dusty rose.
     static let recordTile = NSColor.systemRed
 
-    private static func dynamic(light: Int, dark: Int) -> NSColor {
+    /// `lightHighContrast`/`darkHighContrast` default to `nil` (no change under
+    /// Increase Contrast) because most of these values are already the OS's own
+    /// semantic-adjacent greys, not the structural ladder Increase Contrast
+    /// exists to separate. Increase Contrast is a WORKSPACE setting, not an
+    /// appearance, so it can't be read from `appearance` the way light/dark can
+    /// — `NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast` is read
+    /// directly instead (the same seam `Tokens.swift`'s `warmDynamic` uses), and
+    /// the caller must force a repaint on
+    /// `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification` for a
+    /// mid-session toggle to actually show — see `accessibilityDisplayOptionsChanged`.
+    private static func dynamic(light: Int, dark: Int,
+                                 lightHighContrast: Int? = nil, darkHighContrast: Int? = nil) -> NSColor {
         NSColor(name: nil) { appearance in
-            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            return solid(isDark ? dark : light)
+            solid(resolvedHex(light: light, dark: dark,
+                              lightHighContrast: lightHighContrast,
+                              darkHighContrast: darkHighContrast,
+                              isDark: appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
+                              increaseContrast: NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast))
         }
+    }
+
+    /// Which of the four values wins, as a PURE function of the two axes.
+    ///
+    /// Split out of the resolver above so the choice is testable without the
+    /// ambient settings it normally reads: Increase Contrast is a workspace
+    /// setting with no override seam, and faking it through a mutable static
+    /// would leak across this suite's parallel tests. Passing both axes in
+    /// leaves nothing global to leak.
+    ///
+    /// A token with no high-contrast variant falls back to its normal value, so
+    /// only the cases that carry structure need to declare one.
+    static func resolvedHex(light: Int, dark: Int,
+                            lightHighContrast: Int?, darkHighContrast: Int?,
+                            isDark: Bool, increaseContrast: Bool) -> Int {
+        if isDark { return increaseContrast ? (darkHighContrast ?? dark) : dark }
+        return increaseContrast ? (lightHighContrast ?? light) : light
     }
 
     private static func solid(_ hex: Int) -> NSColor {

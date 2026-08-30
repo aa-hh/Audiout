@@ -237,8 +237,9 @@ Deliberately NOT touched:
     permission (system audio, Bluetooth, local network) prompts again, and the
     old copy in /Applications stays behind under the old name.
   - Git branch names, the GitHub repo name, the worktree directory names.
-  - The website repo (~/Projects/Audiout Website) and the iOS app on
-    claude/ios-staging — run this script inside each of those too.
+  - The website repo (~/Projects/Audiout Website) and the iPhone app, which
+    now lives in its own checkout of aa-hh/audiout-remote — run this script
+    inside each of those too.
   - The artwork inside the icon PNGs, if it carries a wordmark.
 """
 

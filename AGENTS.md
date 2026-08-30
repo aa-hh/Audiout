@@ -41,6 +41,12 @@ symbol you cannot find in source, believe the source and fix the doc.
 - [AudioutCore/](AudioutCore/AGENTS.md) — the Swift package:
   the `Device` model, the `OutputBackend` seam and its implementations, per-app
   routing, the AppKit UI targets, and the shipping app target. This is the app.
+Not a folder here, but linked into the app: **`AudioutProtocol`**, the wire
+contract for the Mac↔iPhone companion app (messages, commands, snapshot
+schema), lives in https://github.com/aa-hh/audiout-shared. MIT, not GPL,
+because the closed-source iPhone app links the same code, and a repository of
+its own because SwiftPM cannot depend on a package inside a subdirectory of
+another repo. `AudioutCore` pins it by version.
 - [AirPlayEngine/](AirPlayEngine/AGENTS.md) — standalone package: a vendored
   AirPlay 2 sender wrapped in a Swift `actor`. No OwnTone runtime dependency.
 - [dev/](dev/AGENTS.md) — offline dev tooling, plus `dev/notes/`, the home for
@@ -52,10 +58,6 @@ symbol you cannot find in source, believe the source and fix the doc.
   bare `swift run` loses the grant.
 - [docs/SPEC.md](docs/SPEC.md) — the product spec. Code cites its sections ("SPEC.md §9").
 - `docs/plans/PLAN-*.md` — the phased execution plans and their resolved decisions.
-- `ios/` — the iPhone companion app. Not present in `main` or this worktree;
-  staged on `claude/ios-staging` until the whole app is ready to merge. See
-  [CLAUDE.md](CLAUDE.md#ios-companion-app) — start any iOS task from that
-  branch, never from `main`.
 
 ## Rules (all targets)
 

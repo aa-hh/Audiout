@@ -110,6 +110,33 @@ public final class GroupController {
     /// is passthrough.
     private(set) public var mainOut: MainOutTarget = .selectedDevices
 
+    /// Fired AFTER a public mutation that actually changed pure-model state —
+    /// Selected Devices membership, Main Out target, groups, the active group,
+    /// mute, or the Main Out master — never on a no-op early return, and never
+    /// before the mutation is committed: observers read this controller back
+    /// SYNCHRONOUSLY from here (the Mac's popover repaints off it), so a fire
+    /// that beat its own commit would hand them the pre-change value.
+    ///
+    /// Deliberately NOT fired from a pure-backend-write path
+    /// (``setMemberVolume(_:for:)``): that writes straight to ``OutputBackend``
+    /// and echoes back as `BackendEvent.deviceUpdated`, so firing here too would
+    /// double-notify. Its one exception is that method's documented passthrough
+    /// redirect — while ``localRowDrivesMain`` the Mac's own row writes the
+    /// MASTER, not a device level, so it announces like any other master move.
+    ///
+    /// The master is announced here because its user arm
+    /// (``setMainOutMasterVolume(_:)``) has no echo of any kind: since the volume
+    /// decoupling, `setMasterGain` re-pushes wire levels without `applyLocal` (no
+    /// `.deviceUpdated`) and its system-volume mirror is pre-memoized (no
+    /// `.systemVolumeChanged`), which leaves this hook the only announcement. The
+    /// read-back arm (``applyExternalSystemVolume(_:)``) is the opposite case: it
+    /// runs downstream of the `.systemVolumeChanged` the volume keys already
+    /// produced, which the host repaints from anyway — there this hook is a
+    /// second, idempotent announcement.
+    ///
+    /// Single-assignment per house idiom — `AppDelegate` is the sole assignee.
+    public var onStateDidChange: (() -> Void)?
+
     /// Fired whenever Main Out membership is (re)applied to the backend, carrying
     /// the AirPlay members now driving the whole-system mix. The coordinating
     /// layer (`AppDelegate`) hooks this to clear any per-app redirect still
@@ -224,6 +251,7 @@ public final class GroupController {
         pushMasterGain(mirrorToSystemVolume: false)
         applyRouting()
         persistRouting()
+        onStateDidChange?()
     }
 
     // MARK: Routing persistence
@@ -390,6 +418,7 @@ public final class GroupController {
             selectedDeviceIDs.insert(id)
             persistRouting()
             if mainOut == .selectedDevices { applyRouting() }
+            onStateDidChange?()
             return autoSwapped ? .okAutoSwap : .ok
         } else {
             guard selectedDeviceIDs.contains(id) else { return .ok }
@@ -412,6 +441,7 @@ public final class GroupController {
 
             persistRouting()
             if mainOut == .selectedDevices { applyRouting() }
+            onStateDidChange?()
             return autoSwapped ? .okAutoSwap : .ok
         }
     }
@@ -510,6 +540,7 @@ public final class GroupController {
         pushMasterGain(mirrorToSystemVolume: false)
         applyRouting()
         persistRouting()
+        onStateDidChange?()
     }
 
     /// Realize `mainOut` against the backend's output set.
@@ -586,7 +617,11 @@ public final class GroupController {
         // group target). For `.selectedDevices` there is no active group even if
         // the set coincidentally equals one.
         guard case .group = mainOut else {
-            if activeGroupID != nil { activeGroupID = nil; memberState.removeAll() }
+            if activeGroupID != nil {
+                activeGroupID = nil
+                memberState.removeAll()
+                onStateDidChange?()
+            }
             return activeGroupID
         }
         let derived = groupMatchingCurrentSelection?.id
@@ -595,6 +630,7 @@ public final class GroupController {
             // A different (or no) active group invalidates mute bookkeeping
             // tied to the previous group's membership.
             memberState.removeAll()
+            onStateDidChange?()
         }
         return activeGroupID
     }
@@ -619,6 +655,7 @@ public final class GroupController {
         }
         try store.save(updated)
         groups = updated
+        onStateDidChange?()
         return group
     }
 
@@ -691,7 +728,8 @@ public final class GroupController {
 
     /// Remove a group. Deactivates it if it was active, and if Main Out pointed
     /// at it, falls back to `.selectedDevices` so the routing target never
-    /// dangles at a deleted group.
+    /// dangles at a deleted group. No-op if `id` names no saved group, so the
+    /// companion's change callback never fires for a delete that moved nothing.
     ///
     /// Both of those follow the SUCCESSFUL disk write, not precede it: the
     /// removal happens on a copy, so a failed save moves nothing at all rather
@@ -701,10 +739,12 @@ public final class GroupController {
     public func deleteGroup(id: String) throws {
         var remaining = groups
         remaining.removeAll { $0.id == id }
+        guard remaining.count != groups.count else { return }
         try store.save(remaining)
         groups = remaining
         if activeGroupID == id { activeGroupID = nil }
         if mainOut == .group(id: id) { setMainOut(.selectedDevices) }
+        onStateDidChange?()
     }
 
     // MARK: Activation
@@ -750,13 +790,17 @@ public final class GroupController {
                 backend.setVolume(volume, for: memberID)
             }
         }
+        onStateDidChange?()
     }
 
     /// Clear the active group without changing the current output set
-    /// (devices remain individually selectable — SPEC.md §9).
+    /// (devices remain individually selectable — SPEC.md §9). No-op if no
+    /// group is currently active.
     public func deactivateGroup() {
+        guard activeGroupID != nil else { return }
         activeGroupID = nil
         memberState.removeAll()
+        onStateDidChange?()
     }
 
     // MARK: Per-member volume
@@ -919,7 +963,13 @@ public final class GroupController {
     /// ONLY thing that distinguishes them, and it is the whole feedback argument:
     /// exactly one arm writes the Mac's hardware volume.
     private func setMain(_ volume: Int, writeBackToSystem: Bool) {
-        mainOutMasterVolume = volume.clampedToVolume
+        let clamped = volume.clampedToVolume
+        let changed = clamped != mainOutMasterVolume
+        mainOutMasterVolume = clamped
+        // Re-pushed unconditionally even when the value didn't move: the push is
+        // also how the CURRENT product is re-asserted onto the wire, and skipping
+        // it would be an audio-path change. Only the announcement below is
+        // edge-gated.
         pushMasterGain(mirrorToSystemVolume: writeBackToSystem)
         // Written straight through, not debounced. `AppSettings.mainOutVolume` is a
         // `UserDefaults` scalar — an in-memory set the framework already coalesces
@@ -929,6 +979,21 @@ public final class GroupController {
         // depended on the main run loop being serviced (it silently never landed
         // under a loaded test run), and quitting inside the window dropped it.
         settings.mainOutVolume = mainOutMasterVolume
+        // Main is the one model value with no echo behind its USER arm.
+        // `setMasterGain` re-pushes wire levels WITHOUT `applyLocal`, precisely so
+        // it emits no `BackendEvent.deviceUpdated`, and the system-volume mirror
+        // is pre-memoized so no `.systemVolumeChanged` comes back either — which
+        // leaves this hook the only announcement. Without it the Mac's popover
+        // only caught up when some unrelated device event happened to arrive, and
+        // a phone-driven master move never repainted it at all.
+        //
+        // Only on the change EDGE: re-storing the value already stored repaints
+        // nothing and broadcasts nothing new. The READ-BACK arm is what makes that
+        // matter — it runs downstream of a `.systemVolumeChanged` the host already
+        // repaints from, so a held volume key pinned at the top or bottom of the
+        // range was doing the whole Main Out repaint + companion broadcast twice
+        // per repeat. A same-value write from the phone is the same no-op.
+        if changed { onStateDidChange?() }
     }
 
     /// The user moved Main (a fader drag, or anything else that means "make
@@ -959,6 +1024,14 @@ public final class GroupController {
         state.explicitMute = muted
         applySilence(for: id, state: &state, wasSilent: wasSilent)
         memberState[id] = state
+        // Announced HERE and not from inside `applySilence`, because the commit
+        // on the line above is what makes `isMuted(id)` answer the new value —
+        // fired from in there it handed every synchronous observer the
+        // PRE-toggle mute (harmless while the only observer was a coalesced
+        // broadcast that rebuilt 50 ms later; wrong the moment the Mac's popover
+        // started repainting off this hook). Edge-only, matching `applySilence`'s
+        // own guard.
+        if muted != wasSilent { onStateDidChange?() }
     }
 
     public func isMuted(_ id: String) -> Bool {
@@ -993,7 +1066,6 @@ public final class GroupController {
     private func applySilence(for id: String, state: inout MemberState, wasSilent: Bool) {
         let isSilent = state.explicitMute
         guard isSilent != wasSilent else { return }
-
         if isSilent {
             state.priorVolume = device(id)?.volume
             backend.setVolume(0, for: id)

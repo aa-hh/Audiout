@@ -80,6 +80,8 @@ SharedUI also hosts shared WINDOW CHROME, not only row views: `ControlPanelWindo
 | `WarmFaderCell` | The Warm Signal fader skin (spec §5): drawing-only `NSSliderCell` swap on the row volume sliders — recessed `well` trough with `faderRim` rim, gold gradient fill (ember-blend dim end) iff route-armed, rounded-rect `faderThumb` thumb; behavior/AX all stock. |
 | `AppRowView` | Popover-only per-app row; owns its own selection highlight and hover wash. Optional leading `LevelMeterView` via `showsMeter`, driven by `BackendEvent.appLevel`. |
 | `AppRowView.Destination` | One destination-menu entry as a plain value — no `AppRoute` dependency. |
+| `AppIconCache` | Per-bundle-id app icons: memory → `Application Support/Audiout/app-icons/<bundleID>.png` → live `NSRunningApplication`/`NSWorkspace.urlForApplication` fetch, downscaled to 128×128 PNG. One source for the popover's routing rows, the Settings exclusion list, and the icon pages the companion server sends the phone. |
+| `AppTetherColor` | Derives a per-app tether tint from the app's icon, cached by bundle id. |
 | `DeviceIcon` | Single resolution point (+ curated symbol list) for device/group icon names, with render-time fallback. |
 | `DeviceIconController` | Loads/persists per-device icon overrides via `AudioutCore.DeviceIconStore`; the only read/write path for them. |
 | `ControlPanelWindowController` | The one surface's window shell: ACTIVATING `NSPanel` in one of two manner profiles (`setPinned(_:)`), one-panel-at-a-time via `setContent(_:)`, `onClose` fires only on a real close, `show(anchorRect:)` anchors it under the menu-bar item (T11) and drives the decorative backing window in lockstep (including across a user resize, via `windowDidResize`). |

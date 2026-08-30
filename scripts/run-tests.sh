@@ -30,7 +30,23 @@
 set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
-core="$repo_root/AudioutCore"
+# Which package's tests to run. AudioutCore by default -- it is what Guard 4
+# and every inner-loop run mean by "the suite". SwiftPM never runs a
+# DEPENDENCY package's test targets, so a sibling package's own suite needs
+# this override to run at all (mirrors AUDIOUT_BUILD_PACKAGE in
+# scripts/build.sh):  AUDIOUT_TEST_PACKAGE=AirPlayEngine scripts/run-tests.sh
+# The sync-probe DSP's suite is NOT reachable from here any more: it moved to
+# the audiout-shared repo and runs there, against the tag this app pins.
+pkg=${AUDIOUT_TEST_PACKAGE:-AudioutCore}
+core="$repo_root/$pkg"
+# A name that is not a sibling directory fails HERE with the reason, not three
+# hundred lines later as a bare `cd` error. ProbeKit is the case people hit:
+# its suite moved to the audiout-shared repo and runs there.
+if [ ! -d "$core" ]; then
+    echo "  suite: no package directory '$pkg' in this repo." >&2
+    [ "$pkg" = "ProbeKit" ] && echo "  ProbeKit's tests live in the audiout-shared repo now (~/Projects/audiout-shared)." >&2
+    exit 64
+fi
 
 # Disk housekeeping (prune .prunable-flagged worktrees, cap .build caches) at
 # the moment disk pressure actually appears: a build starting. Best-effort by
@@ -63,17 +79,25 @@ engine="--build-system native"
 
 workers=${AUDIOUT_TEST_WORKERS:-6}
 lock_timeout=${AUDIOUT_TEST_LOCK_TIMEOUT:-1800}
-# How many suite runs may proceed at once, machine-wide. Default 4: the suite is
-# strongly WAIT-bound, not CPU-bound. A serial run burns only ~0.56 of 8 cores
-# (69.7 user-seconds over 124s wall); even the parallel path reaches only ~2.6.
-# Most of the wall clock is the process asleep on fixed timers, so concurrent
-# runs overlap almost for free -- four serial runs are ~2.2 cores, well inside
-# 8 with headroom for the editor and an app under live test. The cap exists to
-# stop unbounded pile-up (an agent typing `swift test` by hand, times N), not to
-# enforce single-file: throughput across many worktrees matters more here than
-# the latency of any one run.
-# Raise for a beefier box, lower for strict one-at-a-time.
-slots=${AUDIOUT_TEST_SLOTS:-4}
+# How many suite runs may proceed at once, machine-wide. Configurable the same
+# way remote_slots is (see lib/remote.sh) — `git config --local
+# audiout.localSlots N` takes effect on every worktree's next run with no
+# script change needed, which is what makes this a MACHINE setting rather than
+# a per-agent one: an agent exporting AUDIOUT_TEST_SLOTS in its own shell only
+# affects its own commands, and Guard 4's git hook runs as its own subprocess
+# that does not inherit that export.
+#
+# Lowered 4 -> 3 (Alec, 2026-08-30): 4 was sized purely for this machine's CPU
+# headroom (the suite is WAIT-bound, not CPU-bound — a serial run burns only
+# ~0.56 of 8 cores). What it did not account for is that EVERY concurrent run,
+# however small — a single `--filter` invocation, not just a full-suite Guard 4
+# run — occupies one full permit the same as any other. On a night with several
+# agents each running many small filtered checks, four full permits let through
+# more simultaneous test processes than the machine's wait-bound-but-still-real
+# scheduler contention could absorb without starving the fixed-deadline waits
+# elsewhere in the suite (the roadmap-023 class). Lower for stricter, raise for
+# a beefier box or a quieter night.
+slots=${AUDIOUT_TEST_SLOTS:-$(git config --get audiout.localSlots 2>/dev/null || echo 3)}
 
 # --- remote machine ---------------------------------------------------------
 # Host resolution, the local-vs-remote decision, sync and the run-there wrapper
@@ -115,7 +139,7 @@ run_remote() {
     done
 
     rrc=0
-    remote_run "$repo_root" "cd AudioutCore && swift test $rargs$qargs" || rrc=$?
+    remote_run "$repo_root" "cd $pkg && swift test $rargs$qargs" || rrc=$?
     if [ "$rrc" -eq 2 ]; then
         # "Ran, but failed" — re-run locally rather than trusting the verdict. A
         # machine on a different Swift/SDK must never be what REFUSES a commit:
@@ -139,8 +163,8 @@ cache_dir=${AUDIOUT_TEST_CACHE_DIR:-/tmp/audiout-suite-cache}
 
 # --- content key ------------------------------------------------------------
 # Hash what the suite's result actually depends on: the Swift sources and tests
-# of the package under test, plus the engine package it links and both
-# manifests. Hashing files on disk (not the git index) is deliberate — it is
+# of the package under test, plus the engine package it links
+# and their manifests. Hashing files on disk (not the git index) is deliberate — it is
 # correct both for a pre-commit run, where the working tree IS what is about to
 # be committed, and for a manual run mid-edit.
 suite_key() {
@@ -153,15 +177,23 @@ suite_key() {
         # they carry the target graph, dependencies and the brew include flags,
         # so a manifest-only edit changes what the suite links and can flip a
         # result with every source file byte-identical.
+        # Package.resolved earns its place for the same reason the manifests
+        # do: the shared package is pinned by RANGE, so resolution can land on
+        # a new tag with every file in this repo byte-identical. Without it a
+        # suite that linked different code would be handed the old pass.
         shasum -a 256 "$repo_root/AudioutCore/Package.swift" \
-                      "$repo_root/AirPlayEngine/Package.swift" 2>/dev/null
+                      "$repo_root/AirPlayEngine/Package.swift" \
+                      "$repo_root/AudioutCore/Package.resolved" 2>/dev/null
     } | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}'
 }
 
 key=$(suite_key)
 # The cache records "these exact sources passed", so it must also be keyed on
-# the arguments — a `--filter Foo` pass says nothing about the full suite.
-args_key=$(printf '%s' "$*" | shasum -a 256 | awk '{print $1}')
+# the arguments — a `--filter Foo` pass says nothing about the full suite — and
+# on WHICH package ran: the source hash above spans every package in this
+# repo, so an AirPlayEngine pass would otherwise stamp the AudioutCore suite
+# green without running it.
+args_key=$(printf '%s\n%s' "$pkg" "$*" | shasum -a 256 | awk '{print $1}')
 stamp="$cache_dir/$key.$args_key"
 
 if [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ] && [ -f "$stamp" ]; then

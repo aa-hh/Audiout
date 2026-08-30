@@ -197,14 +197,11 @@ import Testing
     /// an IDLE machine. Serial mode does not help, because the contention is
     /// the global queue rather than the runner's workers.
     private func waitForCompletion(
-        timeout: TimeInterval = 10,
+        timeout: TimeInterval? = nil,
+        sourceLocation: SourceLocation = #_sourceLocation,
         _ cond: @escaping () -> Bool
     ) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            try? await Task.sleep(for: .milliseconds(5))
-        }
+        await SuiteWait.until(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     /// Wraps a `SpawnHelper` closure with nothing extra — named purely so

@@ -262,19 +262,32 @@ import CoreAudio
             systemVolume: NoOpSystemVolume(),
             silenceFallbackDelay: silenceFallbackDelay,
             castAbsenceGrace: castAbsenceGrace,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            // D7 (adversarial review, Seamless handoff T3): this suite drives
+            // `expectedSelected` non-empty via `setOutputSet` — without this
+            // override the real default factory would posix_spawn
+            // `/usr/bin/log stream` here too. Same fix as `NativeBackendTests`.
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         backend.captureCoordinator = capture
         backend.start()
         return Rig(backend: backend, cast: cast, manager: manager, capture: capture, bt: bt,
                    discovery: discovery)
     }
 
-    private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    /// Inert `LogStreamSpawning` stand-in (D7) — see `NativeBackendTests`' twin.
+    private final class NoOpLogStream: LogStreamSpawning, @unchecked Sendable {
+        func start(onLine: @escaping @Sendable (String) -> Void,
+                    onTermination: @escaping @Sendable () -> Void) throws {}
+        func stop() {}
+        var isRunning: Bool { false }
+    }
+
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     private static func device(_ backend: NativeBackend, _ id: String) -> Device? {
@@ -324,14 +337,14 @@ import CoreAudio
         waitFor { Self.device(rig.backend, id)?.isAvailable == true }
 
         rig.cast.fire([])
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(Self.device(rig.backend, id)?.isAvailable == true,
                 "one omitted browse must not grey the row")
 
         // Back inside the grace: the pending flip is cancelled, so waiting the
         // whole grace out from here changes nothing.
         rig.cast.fire([Self.graceRecord])
-        waitFor(timeout: 1.3) { false }
+        SuiteWait.settle(1.3)
         #expect(Self.device(rig.backend, id)?.isAvailable == true,
                 "a receiver that comes back inside the grace stays available")
 
@@ -361,7 +374,7 @@ import CoreAudio
         // A membership-neutral re-push re-applies nothing.
         let setsAfterSelect = rig.manager.deviceSets.count
         rig.backend.setOutputSet([Self.record.id])
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(rig.capture.castSinkCalls.count == 1, "the feed attaches exactly once per armed stretch")
         #expect(rig.manager.deviceSets.count == setsAfterSelect, "an unchanged id list enqueues nothing")
 
@@ -446,9 +459,9 @@ import CoreAudio
         waitFor { Self.device(rig.backend, btID) != nil }
 
         rig.backend.setOutputSet([btID])
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         rig.backend.setOutputSet([])
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
 
         #expect(rig.capture.castSinkCalls.isEmpty, "no Cast id selected ⇒ the fan-out slot is never touched")
         #expect(rig.manager.deviceSets.isEmpty, "nor the session manager")
@@ -525,12 +538,12 @@ import CoreAudio
         waitFor { Self.device(rig.backend, Self.record.id)?.connectionState == .off }
 
         rig.manager.fire(id: Self.record.id, state: .playing)
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(Self.device(rig.backend, Self.record.id)?.connectionState == .off,
                 "a PLAYING that lands after deselect must not show the row as connected")
 
         rig.manager.fire(id: Self.record.id, state: .idle)
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(Self.device(rig.backend, Self.record.id)?.connectionState == .off)
 
         // Audibility is private state; the watchdog is its one observable — and
@@ -566,7 +579,7 @@ import CoreAudio
         rig.manager.fire(id: Self.record.id, state: .connecting)
 
         // Well past the (shrunk) fallback delay: nothing armed, nothing fired.
-        waitFor(timeout: 0.5) { false }
+        SuiteWait.settle(0.5)
         #expect(Self.device(rig.backend, Self.record.id)?.connectionState == .connecting)
         #expect(!rig.backend.test_silenceWatchdogArmed, "a starting Cast session is not stranded")
         #expect(!rig.backend.test_silenceFallbackActive,
@@ -638,7 +651,7 @@ import CoreAudio
         rig.backend.setOutputSet([])
         waitFor { rig.manager.deviceSets.last == [] }
         rig.backend.retryOutput(Self.record.id)
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(rig.manager.retries == [Self.record.id], "an unselected receiver has nothing to retry")
     }
 
@@ -663,7 +676,7 @@ import CoreAudio
     @Test func selectingACastDeviceHoldsTheAirPlayFeedBack() {
         let (rig, ap) = castRoom()
         rig.backend.setOutputSet([ap.id])
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(rig.backend.localSinkReferenceDelayMs() == rig.backend.startBufferMs)
         #expect(rig.capture.preDelayMs.isEmpty, "AirPlay alone is never held back")
 
@@ -697,7 +710,7 @@ import CoreAudio
         rig.backend.setOutputSet([btID])
         rig.backend.setOutputSet([btID, ap.id])
         rig.backend.setOutputSet([ap.id])
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(rig.capture.preDelayMs.isEmpty, "got \(rig.capture.preDelayMs)")
     }
 
@@ -731,7 +744,7 @@ import CoreAudio
 
         // Still there, still reporting: a settled receiver is left alone.
         rig.manager.fireLead(id: Self.record.id, leadMs: late, count: 30)
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(rig.capture.preDelayMs.count == published + 1, "got \(rig.capture.preDelayMs)")
     }
 
@@ -745,7 +758,7 @@ import CoreAudio
 
         rig.manager.fireLead(id: Self.record.id, leadMs: 4_000,
                              count: CastRoomDelay.settleSampleCount)
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(rig.capture.preDelayMs.count == published, "got \(rig.capture.preDelayMs)")
         #expect(rig.backend.localSinkReferenceDelayMs() == CastRoomDelay.defaultLeadMs)
     }

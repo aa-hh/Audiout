@@ -139,6 +139,18 @@ let package = Package(
         // (T-NB-BACKEND-1) and NativeCaptureCoordinator (T-NB-CAPTURE-1) are
         // the consumers; the Mock/OwnTone backends do not import it.
         .package(path: "../AirPlayEngine"),
+        // Shared code with the iPhone companion, two products: ProbeKit (the
+        // sync-probe DSP — sweep synthesis and the matched filter behind
+        // mic-probe calibration) and AudioutProtocol (the companion wire
+        // protocol — CompanionServer / CompanionSnapshotBuilder /
+        // CompanionCommandDispatcher are the consumers). MIT, so the
+        // closed-source iPhone companion can link the same code, and a
+        // repository of its own because SwiftPM cannot depend on a package
+        // that lives inside a subdirectory of another repo — and the phone
+        // now lives in `aa-hh/audiout-remote`. Pinned by range: this app
+        // chooses when to follow the shared package, and `Package.resolved`
+        // records which tag it is actually on.
+        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.1.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.
@@ -160,6 +172,8 @@ let package = Package(
             name: "AudioutCore",
             dependencies: [
                 .product(name: "AirPlayEngine", package: "AirPlayEngine"),
+                .product(name: "ProbeKit", package: "audiout-shared"),
+                .product(name: "AudioutProtocol", package: "audiout-shared"),
                 "CastSender",
                 "ObjCExceptionShim",
             ],
@@ -322,7 +336,7 @@ let package = Package(
         // Mic-probe hardware spike — see the product comment above.
         .executableTarget(
             name: "mic-probe-spike",
-            dependencies: ["AudioutCore"],
+            dependencies: ["AudioutCore", .product(name: "ProbeKit", package: "audiout-shared")],
             // Info.plist is embedded into the Mach-O at link time (below), NOT
             // shipped as an SPM resource — exclude it so SPM stops warning.
             exclude: ["Info.plist"],
@@ -388,6 +402,7 @@ let package = Package(
                 "AudioutOnboardingUI",
                 "CastSender",
                 "CastFakeReceiver",
+                .product(name: "ProbeKit", package: "audiout-shared"),
             ],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),

@@ -41,8 +41,38 @@ symbol you cannot find in source, believe the source and fix the doc.
 - [AudioutCore/](AudioutCore/AGENTS.md) — the Swift package:
   the `Device` model, the `OutputBackend` seam and its implementations, per-app
   routing, the AppKit UI targets, and the shipping app target. This is the app.
+Not a folder here, but linked into the app: **`AudioutProtocol`**, the wire
+contract for the Mac↔iPhone companion app (messages, commands, snapshot
+schema), lives in https://github.com/aa-hh/audiout-shared. MIT, not GPL,
+because the closed-source iPhone app links the same code, and a repository of
+its own because SwiftPM cannot depend on a package inside a subdirectory of
+another repo. `AudioutCore` pins it by version.
+
+### Shared-code changes (AudioutProtocol / ProbeKit)
+
+The pin above makes `audiout-shared` read-only from inside this repo, which
+is exactly why a local copy of one of its types is the path of least
+resistance — and exactly what `.githooks/guard-shared-leak.sh` blocks. The
+sanctioned path for a wire-format field, a protocol case, or a ProbeKit
+tweak:
+
+1. Edit it in `~/Projects/audiout-shared` directly — never here.
+2. Test there: `swift test` (no wrapper scripts in that repo).
+3. Tag and push: `git tag X.Y.Z && git push origin main --tags`. Whether
+   that also needs a `CompanionProto.version` bump is audiout-shared's own
+   rule — see its AGENTS.md, don't re-derive it here.
+4. Bump the pin in **both** consumers in the same session — this repo
+   (`AudioutCore/Package.swift` + `Package.resolved`) and audiout-remote's
+   Xcode package pin. A protocol change ships to both apps together or not
+   at all.
 - [AirPlayEngine/](AirPlayEngine/AGENTS.md) — standalone package: a vendored
   AirPlay 2 sender wrapped in a Swift `actor`. No OwnTone runtime dependency.
+Not a folder here, but linked into the app: **`ProbeKit`**, the sync-probe DSP
+(sweep synthesis + matched filter), lives in https://github.com/aa-hh/audiout-shared
+together with the companion wire protocol. MIT, not GPL, because the
+closed-source iPhone app links the same code, and a repository of its own
+because SwiftPM cannot depend on a package inside a subdirectory of another
+repo. `AudioutCore` pins it by version.
 - [dev/](dev/AGENTS.md) — offline dev tooling, plus `dev/notes/`, the home for
   research briefs and phase write-ups.
 - [scripts/make-app.sh](scripts/make-app.sh) — wraps the executable into a real
@@ -52,10 +82,6 @@ symbol you cannot find in source, believe the source and fix the doc.
   bare `swift run` loses the grant.
 - [docs/SPEC.md](docs/SPEC.md) — the product spec. Code cites its sections ("SPEC.md §9").
 - `docs/plans/PLAN-*.md` — the phased execution plans and their resolved decisions.
-- `ios/` — the iPhone companion app. Not present in `main` or this worktree;
-  staged on `claude/ios-staging` until the whole app is ready to merge. See
-  [CLAUDE.md](CLAUDE.md#ios-companion-app) — start any iOS task from that
-  branch, never from `main`.
 
 ## Rules (all targets)
 

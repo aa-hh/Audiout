@@ -617,14 +617,19 @@ extension SerializedSharedState {
 
             /// Poll (never sleep a fixed amount) until the release-gate line
             /// lands — it is emitted from `graphQueue`, not from the render
-            /// call that recorded it.
-            func pollForOvershootLine(timeout: TimeInterval = 3) async -> String? {
-                await pollForLines(evt: "bt_sink_release_overshoot", count: 1)?.first
+            /// call that recorded it. `timeout` is a HANG-STOP: nothing here
+            /// asserts elapsed time, only that the line eventually appears, so
+            /// a generous ceiling is free on the happy path (roadmap-023
+            /// class — the 3s default starved under the full suite's shared
+            /// pool, live 2026-08-30). It was previously dropped instead of
+            /// forwarded to `pollForLines`, which meant it did nothing.
+            func pollForOvershootLine(timeout: TimeInterval = 30) async -> String? {
+                await pollForLines(evt: "bt_sink_release_overshoot", count: 1, timeout: timeout)?.first
             }
 
             /// The same poll, for any event and any number of lines.
             func pollForLines(evt: String, count: Int = 1,
-                              timeout: TimeInterval = 3) async -> [String]? {
+                              timeout: TimeInterval = 30) async -> [String]? {
                 let deadline = Date().addingTimeInterval(timeout)
                 while Date() < deadline {
                     let hits = snapshot().filter { $0.contains("\"evt\":\"\(evt)\"") }

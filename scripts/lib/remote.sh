@@ -35,10 +35,30 @@ remote_bias=${AUDIOUT_TEST_REMOTE_BIAS:-$(git config --get audiout.testRemoteBia
 # so `cd '~/foo'` fails) nor safe quoting of paths containing spaces. ssh starts
 # in $HOME, so a relative path is both simpler and correct.
 remote_root=${AUDIOUT_TEST_REMOTE_ROOT:-audiout-remote-tests}
+# The binary whose presence proves the remote can do this KIND of work. SwiftPM
+# callers want `swift`; the iOS target is built by `xcodebuild`, which can sit on
+# a machine with no Swift on PATH and vice versa. A caller sets this before
+# remote_run; a wrong answer takes the sentinel-97 path below and becomes "stay
+# local" rather than a failed build.
+remote_toolchain=${remote_toolchain:-swift}
 # Short ON PURPOSE. The known failure mode of this particular machine is
 # sleeping: it answers ping (sleep proxy) but refuses TCP, so a generous timeout
 # would stall every run behind a host that is never going to answer.
 remote_probe_timeout=${AUDIOUT_TEST_REMOTE_TIMEOUT:-5}
+
+# How many jobs may run ON THE REMOTE at once. The local machine has had a slot
+# cap for a long time; the remote had NONE, and that asymmetry is what actually
+# overloaded it: with `testPrefer = remote` every agent shipped its suite there
+# unconditionally, and the remote attempt happens BEFORE the local semaphore is
+# taken, so a remote run touched no cap at all. Observed: three suites at once
+# on a 8-core mule.
+#
+# A COUNT, deliberately, not a load-average check. Load average is a lie for
+# this workload -- the suite is wait-bound, so it parks threads on timers and
+# reports a load of 20+ while the CPU sits near 25%. Anything that gates on
+# load either throttles an idle machine or waves through a busy one. A permit
+# count measures the thing we actually care about: how many jobs are resident.
+remote_slots=${AUDIOUT_TEST_REMOTE_SLOTS:-$(git config --get audiout.remoteSlots 2>/dev/null || echo 2)}
 
 remote_configured() { [ -n "$remote_host" ]; }
 
@@ -174,7 +194,7 @@ remote_run() {
     # /opt/homebrew/bin, and Package.swift shells out to `brew --prefix` to find
     # the keg-only C dependencies.
     # Exit 97 is a private sentinel for "the remote ENVIRONMENT is wrong"
-    # (directory missing, no swift) as opposed to "the work failed". Without it,
+    # (directory missing, no toolchain) as opposed to "the work failed". Without it,
     # a broken remote reports as a failure of the caller's code — exactly the
     # confusion this function exists to prevent.
     # -tt ties the remote command's life to this connection: with a tty, sshd
@@ -189,7 +209,16 @@ remote_run() {
         "export PATH=/opt/homebrew/bin:\$PATH; \
          cd \"$_rdir\" || exit 97; \
          touch .last-used; \
-         command -v swift >/dev/null 2>&1 || exit 97; \
+         command -v $remote_toolchain >/dev/null 2>&1 || exit 97; \
+         _s=''; _n=1; \
+         while [ \$_n -le $remote_slots ]; do \
+             if /usr/bin/shlock -f /tmp/audiout-remote-work.lock.\$_n -p \$\$; then \
+                 _s=/tmp/audiout-remote-work.lock.\$_n; break; \
+             fi; \
+             _n=\$((_n + 1)); \
+         done; \
+         [ -n \"\$_s\" ] || exit 98; \
+         trap 'rm -f \"\$_s\"' EXIT HUP INT TERM; \
          $* ; echo \"REMOTE_EXIT:\$?\"" 2>&1)
     _rc=$?
     _out=$(printf '%s' "$_out" | tr -d '\r')
@@ -202,6 +231,15 @@ remote_run() {
 
     if [ "$_rc" -eq 97 ]; then
         echo "  remote: environment not usable (missing dir or toolchain) — staying local." >&2
+        return 1
+    fi
+    # 98: the remote is at its job cap. Not an error and not a failure of the
+    # caller's code -- just "no capacity there", which is the same answer as an
+    # unreachable host, so it takes the same path back into the local queue.
+    # Falling back is strictly better than waiting: the local slots are usually
+    # free precisely when everyone has piled onto the remote.
+    if [ "$_rc" -eq 98 ]; then
+        echo "  remote: all $remote_slots remote slots busy — staying local." >&2
         return 1
     fi
     # 255 is ssh's own error code, and a missing marker means the command never

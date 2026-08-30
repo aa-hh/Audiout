@@ -205,11 +205,19 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   popover-scoped (T3).** `setMeteringActive` fans the popover-visibility gate to
   the whole-system `captureCoordinator`, the `routeMixer`, AND the
   `localPlaybackEngine`, and drives the metering-only tap lifecycle below. Each
-  device's `.level` is the MAX of its whole-system-tap contribution (only if it's
-  a Selected Device, unmuted) and the loudest PRE-volume SOURCE level among the
-  apps `.device`-routed to it (`latestAppLevel`) — a device fed by both shows the
-  larger. Every meter is a SOURCE/program level (PRE any routing/output volume), so
-  a low slider never empties a bar. Each listed app's `.appLevel` comes from exactly
+  device's `.level` is the MAX of its whole-system-tap contribution (only while
+  that device is actually rendering the mix, and unmuted) and the loudest PRE-volume
+  SOURCE level among the apps `.device`-routed to it (`latestAppLevel`) — a device
+  fed by both shows the larger. "Actually rendering" is per transport and
+  `isMeterable` is the one place that decides it: an AirPlay row has a live engine
+  session, but the local sink, Bluetooth and Cast are all structurally excluded from
+  the engine, so each answers with its own fact instead — asking `Device.isSelected`
+  for any of the three is always false and was why their bars stayed dark. Every
+  meter is a SOURCE/program level (PRE any routing/output volume), so a low slider
+  never empties a bar — and, for the same reason, it is the UNDELAYED source: a BT
+  sync trim moves that device's delay line, which sits downstream of the one system
+  RMS every bar is fed from, so a trim changes when a speaker sounds and never when
+  its bar moves. Each listed app's `.appLevel` comes from exactly
   one source by route kind: `.device` → `routeMixer.onAppLevel` (PRE-volume source),
   `.currentDevice` → `localPlaybackEngine.onAppLevel` (PRE-volume, emitted raw),
   `.noRedirect` → `meteringCapture`, a SEPARATE `.unmuted` per-app tap that exists
@@ -356,6 +364,45 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   Cast device selected the capture path is byte-identical to what it always was
   — `NativeCaptureCoordinatorTests` pins that, so never move the engine write
   or make the Cast hop unconditional.
+- **The room delay `R` has one writer and one shape.** A Cast receiver plays
+  seconds behind live and cannot be hurried, so everything else is held back to
+  meet it: `R = NativeBackend.roomDelayLocked()` — the longest intrinsic delay
+  any active output has — and every output delays itself to that ONE number.
+  The Mac's sink reads it through `localSinkReferenceDelayMs`; the BT sinks
+  through their injected `presentationDelayMs()` closure (`btReferenceDelayMs`,
+  NOT `BTReferenceTimeline.delayNanos`'s `castTermMs:` parameter — either route
+  works, so using both reads as though they differed); the AirPlay feed through
+  the `PCMDelayLine` `setAirPlayPreDelay` installs in front of the engine write,
+  because the sender reads its start buffer once at session creation and clamps
+  it to 5 s. `R` moves ONLY through `roomDelayChangedLocked`. Deriving the same
+  quantity a second way is how outputs end up in sync with the room but not with
+  each other. **A `nil` Cast term is the invariant, not a feature flag:** with no
+  Cast device the `max` has no second operand and `setAirPlayPreDelay` publishes
+  no line at all, so every delay is the number it was before Cast existed.
+- **`airPlayPresent` means AirPlay; `usesPresentationReference` chooses the
+  reference.** A Cast receiver authors a presentation timeline exactly as AirPlay
+  does, so every site choosing between the room's timeline and the Mac's own
+  scheduling buffer asks `BTGroupComposition.usesPresentationReference`. Reading
+  `airPlayPresent` there is right only by accident, and wrong the moment Cast is
+  the room's only presentation output.
+- **A Cast row's SYNC value is the residue AFTER the receiver's media clock,
+  and NOTHING else** (CAST-SYNC). The receiver's own buffer (seconds) is
+  measured on the wire and taken out automatically; what no Cast surface
+  reports — and what this value is for — is the receiver's output stage, its
+  DAC, and, on a TV target, the HDMI → TV → soundbar chain behind it. Hence
+  `BTSyncTrim.castRangeMs` (±1000) rather than `rangeMs` (±500): an ARC
+  soundbar plausibly passes 400 ms, while Google's own published residues are
+  0–40/0–80/0–70 ms for a speaker/soundbar/receiver. It is a residue dial, NOT
+  a seconds dial — do not widen it to cover a buffer the wire already reports.
+  Two seams, deliberately apart: `CastSyncOffsetControlling` is the UI's
+  (store + read-back, `NativeBackend` the only conformer) and
+  `CastOutputControlling.setCastUserOffsetMs` is the apply — a term the session
+  manager keeps BESIDE the controller's `setCastRoomDelayMs`, applying
+  `max(0, room + user)`, so neither ever disturbs the other and the by-ear
+  value survives a drop and reconnect. The store re-pushes
+  every armed receiver's value inside `applyCastTransition`, the Cast twin of
+  the Bluetooth sinks' arm-time trim replay — a reselected receiver must come
+  back carrying its offset, not whatever the last armed stretch left behind.
 - **A Bluetooth sink held at gain 0 must always have a live release path.**
   The first-mix alignment intercept (W3) is the ONLY sanctioned writer of a
   0 gain (`BTDeviceSink.setGain` → `mainMixerNode.outputVolume` — the session,
@@ -424,6 +471,11 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   pre-existing persisted group and means "use `Group.defaultIconSymbolName`."
   Resolution (including render-time fallback for a stale/unrecognized name)
   lives in `AudioutSharedUI.DeviceIcon`, not here.
+- **`CompanionSnapshotBuilder` snapshot fields never come from `Device` state.**
+  `DeviceState.isSelected` reads from `GroupController.isSpeakerSelected(_:)`,
+  never `Device.isSelected` (which means "currently streaming"). `DeviceState
+  .isMuted` reads from `GroupController.isMuted(_:)`, never `Device.isMuted`.
+  The phone sees the UI's selection model, not the backend's live output set.
 - **Use `scripts/run-tests.sh --filter <Suite>` for the inner-loop feedback
   cycle**, not the full suite (874 tests). Scope to the test suite(s) touched by
   your change, e.g. `scripts/run-tests.sh --filter PopoverControllerTests`. The
@@ -623,6 +675,16 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   committed through this gate, so `main` stays green. Filtering in the loop is
   a convention (this doc), not machine-enforced; `--no-verify` skips the gate
   for a deliberate emergency.
+- **A new regression test must be watched to FAIL before you trust it.** A test
+  that has never been seen to fail proves nothing about the bug it claims to
+  cover. Take the fix back out — revert it, or comment out the fixing line — run
+  `bash scripts/run-tests.sh --filter <YourNewTests>`, confirm it fails for the
+  reason you expect, then restore the fix. A green suite is not evidence until
+  you have seen the red. Honest exception: some tests legitimately pass both
+  ways — an assertion that something must NOT happen, guarding against
+  over-correction, is green before the fix and after. Those are worth keeping,
+  but say so in the report rather than letting them pad the count of tests that
+  actually demonstrate the fix.
 - **Real-audio-hardware tests are opt-in via `AIRPLAY_AUDIO_HARDWARE_TESTS=1`.**
   `LocalPlaybackEngineTests` drives the concrete `LocalPlaybackEngine` (a real
   `AVAudioEngine`) against the Mac's actual output. **The reason is determinism,
@@ -757,18 +819,19 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `MockBackend` | Fully-working offline backend for tests/demos. |
 | `OwnToneBackend` | HTTP-polling backend against OwnTone; superseded. |
 | `NativeBackend` | Shipping backend; drives `AirPlayEngine`, owns capture gate, owns aggregate device lifecycle. |
-| `AggregateOutputDevice` | Lifecycle owner (adopt-or-create/off-switch/orphan sweep) for the PUBLIC, Sound-settings-visible "Audiout" aggregate (UID `com.audiout.Audiout.aggregate`); thin CoreAudio shell wired by `NativeBackend`. Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit; echo-guarded. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` signals when the app can't route because its aggregate isn't the Mac's default output. |
+| `AggregateOutputDevice` | Lifecycle owner (adopt-or-create/off-switch/orphan sweep) for the PUBLIC, Sound-settings-visible "Audiout" aggregate (UID `com.audiout.Audiout.aggregate`); thin CoreAudio shell wired by `NativeBackend`. Becomes Mac default when whole-system routing arms. With nothing routing it hands the default back whenever the default IS the aggregate — including one this process never wrote, since a flag cannot see a system-wide default that outlives the app — keeping the device itself alive; the write is READ BACK, because this HAL accepts operations on the current system output and does nothing. Restore-prior-default-then-destroy on quit; echo-guarded. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` signals when the app can't route because its aggregate isn't the Mac's default output. |
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
 | `CastSender` | Hand-rolled Google Cast v2 sender: browse, control channel, live WAV server; driven by `CastOutputManager`. |
 | `CastOutputManager` | Per-Cast-device session recipe (connect → launch DMR → LOAD no-autoplay → PLAY), 1 s status poll, composed level, one automatic reconnect policy; feeds each receiver from `CastFeedRing` via the capture fan-out. |
 | `CastDeviceEnumerator` | `_googlecast._tcp` browse → `.cast` rows through the same `known`/`order`/`emit` flow as Bluetooth. |
-| `PCMDelayLine` | Cadence-preserving S16LE delay line for Phase (ii) sync; built and tested, wired nowhere yet. |
+| `PCMDelayLine` | Cadence-preserving S16LE delay line: what holds the AirPlay feed back to the room delay. Installed only while a Cast device contributes a term. |
+| `CastRoomDelay` | The room-delay policy (sync brief §4): a receiver's assumed lead at select, the settle gate over its measured leads, the high-water term and the `R_max` refusal. Pure — no queue, no clock — so it is replayed in tests against a real receiver's recorded samples. **The term never falls while a receiver stays in the mix**: one that comes back towards live is corrected on its own feed instead, because dragging the whole house forward for a number the next stall undoes is worse than being 150 ms late. Its only writer is `NativeBackend`, on `stateQueue`. |
 | `CastFakeReceiver` | In-memory mock Cast receiver for testing (macOS 15+ only). |
 | `cast-spike` | Standalone CLI tool proving end-to-end Cast audio streaming. |
 | `mic-probe-spike` | CLI: dual-sweep playback + built-in-mic capture + matched filter; A2DP/HFP check. |
 | `BTDeviceEnumerator` | Bluetooth outputs: Core Audio BT transport merged with the TCC-gated IOBluetooth paired list; paired-but-disconnected speakers surface unavailable, with pairing recency kept for ghost-row filtering. |
 | `BTSyncedSink` | N-instance BT sink manager: per-device pinned engines, reference-timeline delay. No drift correction — A2DP sinks servo to the host delivery rate and measured inter-speaker drift was ≈ 0 over 30 minutes (2026-08-12), so the resampler runs at unity. **The release gate CATCHES UP.** The producer anchors on the first captured buffer without waiting for the engine, so a slow `engine.start()` (well over 500 ms on A2DP, and every rebuild — `config_change`, `composition_change`, `wizard_feed` — pays it again) can leave the first render cycle PAST `targetReleaseNanos`. The ring is a plain FIFO, so releasing its oldest frame there would make the real delay "however long the engine took to start", permanently, for the whole session — hundreds of ms of extra lag on that speaker, and an alignment that goes stale on every lineup change. The gate therefore skips the overshoot's worth of frames (`BTDelayLine.skipForward` → the ring's consumer-owned seek, NOT `requestShift`, whose word has exactly one writer and it is not the render thread) so the first frame played is the one that was due. A ring shorter than the overshoot releases what it has and is flagged `partial` — empty, not stale. Every gate opening logs `bt_sink_release_overshoot` (a ZERO line too: it is the evidence start-up was clean) and `bt_sink_ring_drops` (the producer's wholesale-drop counter, differenced against a consumer-owned baseline that a new session resets), stashed on the render thread and emitted from `graphQueue` — the `carryToLogNanos` discipline. `bt_sink_ring_drops` ALSO fires at session end (`stopLocked`, so every `stop()` and every rebuild cause), tagged `"at":"gate_open"` vs `"at":"session_end"`: a wizard run has exactly one gate opening and it is at the start, so gate-only reporting left every drop after it invisible — which is what a 2026-08-22 live run's "the speaker just stopped" had to be diagnosed without. **A FORWARD seek is floored.** `applyTrimDelta` clamps any forward move (a larger measured latency) to `BTDeviceSink.seekSafetyMarginMs` short of the write pointer and logs `bt_sink_seek_clamped`: a seek that reaches the write pointer leaves the ring dry with nothing to play and no way back, which is exactly how a wizard trial at the old range ceiling took a speaker silent for the rest of the session. The delay the session books is the APPLIED move, never the asked one. |
-| `BTSyncTrim` / `BTTrimStore` | The SYNC trim's shared clamp/step contract (±500 ms, 10 ms coarse) + versioned-JSON persistence per device UID; `NativeBackend` loads at init and re-pushes into the sink on every arm (`BTOutputControlling` is the UI seam). The same envelope carries the first-mix intercept's FINAL "Not now" dismissals — both saves are read-modify-write so neither record clobbers the other. |
+| `BTSyncTrim` / `BTTrimStore` | The SYNC trim's shared clamp/step contract (±500 ms, 10 ms coarse) + versioned-JSON persistence per device UID; `NativeBackend` loads at init and re-pushes into the sink on every arm (`BTOutputControlling` is the UI seam). The same envelope carries the first-mix intercept's FINAL "Not now" dismissals — both saves are read-modify-write so neither record clobbers the other. TWO instances now: the store takes a `fileName`, and the Cast offsets live in their own `castFileName` beside the Bluetooth trims'. |
 | `AlignmentTickInjector` | Align-by-ear woodblock tick (72 BPM — beat spacing must exceed the ±500 ms trim range or offsets alias), mixed into the converted PCM in `NativeCaptureCoordinator.handleBuffer` BEFORE the engine write and both fan-outs, so every consumer renders the same tick through its own delay; self-limits to ~30 s (`.manual`) / NO budget at all (`.wizard`, via `AlignTickMode` on the `CaptureControlling` seam — the 360-beat ≈ 303 s ceiling expired mid-questionnaire in the 2026-08-22 live run and took the whole feed silent with it, since the pacer kept publishing silent blocks while captured buffers stayed gated; the session's exit paths are the ONE switch-off). Both modes ride a KEEP-ALIVE under the ticks (+ a bed-only wake preamble in `.wizard`): the Sonos Move power-gates its amp after silence and swallows bare ticks. It is a ~20 Hz sine at −40 dBFS RMS — a portable speaker's driver cannot put 20 Hz in the room, while a digital silence gate still sees continuous signal, so the run is inaudible between ticks. `Config.keepAliveKind` selects it, and ONE line flips it back to the original −47 dBFS low-passed noise bed (`.noise`) if a Sonos turns out to gate on content it can reproduce — **the 20 Hz choice is UNVALIDATED on hardware**; only the noise bed was ever proven to hold the amp. Both kinds are loop TABLES indexed by the absolute frame position, never a stored phase: `mixWizardVariants` renders the same frames twice off one cursor advance and a stored phase would advance on both passes. The keep-alive is necessarily ONE shared signal — the injector mixes into the single feed pre-fan-out, so per-device uncorrelated beds are structurally impossible; correlated is fine at that level (its only job is keeping amps awake). WHO hears it is separate: the Mac's own speakers never power-gate, so the old noise bed was simply hiss on them ("heavy static", 2026-08-22) — the wizard pacer therefore renders each block TWICE off ONE cursor advance (`mixWizardVariants(into:bedded:)`), tick-only to the engine write and the synced-local fan-out, tick+keep-alive to the Bluetooth fan-out (`deliver`'s `btPCM`, its only divergence between consumers). `.manual` gets the same keep-alive. Playing ticks out loud can't work — the app's render processes are tap-excluded. `.wizard` additionally sets `replacesProgram`: the captured content is OVERWRITTEN for the run's frames so the guided comparison is ticks alone (owner's call), while `.manual` stays additive — that IS the nudge-while-listening case. **`.wizard` also takes the feed over entirely**: `NativeCaptureCoordinator` starts a dedicated 20 ms `DispatchSourceTimer` pacer that synthesizes its own silent blocks, mixes the tick into them and delivers them through the shared tail, while captured buffers are dropped at the top of `handleBuffer` for the run's duration. That is why the wizard works with the music PAUSED (a tap with nothing to deliver used to carry no ticks either — roadmap 040). Single-producer BY CONSTRUCTION: 040's first attempt failed as two producers contending for a lock on a cadence, so the mode gate is wholesale, and disengaging cancels + `sync`-drains the pacer queue BEFORE publishing the resuming snapshot. The pacer queue is `.userInteractive` — while a run is on it IS the audio producer, and a late fire is late audio. `NativeBackend.setBTWizardTickActive` re-anchors every FIFO sink on BOTH edges (`cause: "wizard_feed"`) because the producer handoff breaks frame continuity. **The wizard's two timbres are LOUDNESS-matched, not amplitude-matched** (research brief `dev/notes/wizard-tick-stimulus-brief.md`, 2026-08-24): equal digital amplitude is not equal loudness — the bright click (1.8 + 2.9 kHz) sits nearer the ear's most sensitive band and measures **+1.28 dB** A-weighted against the low knock (0.9 + 1.45 kHz) — a louder event is heard as EARLIER, and nothing in the estimator cancels it (the psychometric fit's whole centre shifts and the displacement is stored as the device's latency; roles never swap, and more answers only narrow the interval around the wrong value). So `brightLoudnessScale` renders the bright click at **×0.863**; the low knock is untouched, because the correction goes DOWN rather than toward the Int16 clamp. The MATCH travels with the timbre, never with the side. Tests pin the RATIO, never either absolute level. A-weighting under-states the 2–4 kHz dip against a full ISO 226 contour, so a residual bias is expected and there is a way to measure it: **`AUDIOUTER_DEBUG_TICK_SWAP=1`** swaps which fan-out gets which timbre (debug only, no UI, read once at launch — the `AUDIOUTER_TCC_DIAG` idiom) — run the wizard twice on the same pair, once swapped, and HALF the difference between the two kept values is the total stimulus bias in ms, loudness + perceived-onset + codec terms together. **The split is by TRANSPORT, not by role**, so a Bluetooth-vs-Bluetooth (or Mac-vs-AirPlay) pair plays ONE identical click on both sides — which is why the intro copy names the two sounds only when `BTAlignmentWizardSession.pairSoundsDiffer`. |
 | `BTAlignmentPosterior` | Pure estimator for the alignment wizard (license-clean file): a BAYESIAN POSTERIOR over whole-ms offsets across the usable range, replacing the coarse search + method of constant stimuli that needed ~30 answers and had no honest progress denominator. Flat prior; each answer multiplies in its likelihood under a FIXED listener model (fusion half-window `c = 6 ms`, slope `σ = 5 ms`, lapse `λ = 0.12`, all three tabulated once at init from `erf` so nothing calls it per answer) and renormalises. Residual is `a = θ − x`: `P(target) = Φ((a−c)/σ)`, `P(reference) = Φ((−a−c)/σ)`, `P(together)` the remainder, each lapse-mixed. The model is deliberately WIDER than a real listener — an over-broad one is unbiased inside ~10 trials and an under-broad one is not — and λ must stay non-zero or real mistakes bias the result WORSE the longer the run goes. Next level = minimum expected posterior entropy over 33 candidates at `median ± {0,2,4,6,8,11,15,20,28,40,60,90,140,220,350,550,900}` ms, clamped and deduplicated, ties breaking toward the median. NO RandomNumberGenerator anywhere: same answers, same questions, every time. `back()` REFOLDS from the start of the current stretch rather than restoring a snapshot (a posterior is order-independent, so replaying is exact and cheap). Phases: `.asking` → `.proposing` once the 95% credible half-width reaches 6 ms (the stop rule — never a fixed answer count); `acceptProposal()` folds the fused-within-4-ms likelihood and converges, `rejectProposal()` folds its complement, widens the belief and resumes, and a SECOND rejection ends the run. `.unreachable` = ≥ 20% of the belief in the outermost 20 ms of the range after ≥ 8 answers; `.unsettled` = the half-width shrank < 20% across the last 8 answers, 40 answers total, or that second rejection. `progress` is `log(w0/w) / log(w0/6)` clamped 0…1 and may RETREAT after a rejection — honest, not a bug. `init(range:openingProposalMs:)`'s non-nil form opens on a proposal over a STILL-FLAT belief (the zero-click path is a UI shortcut, never a seeded prior). |
 | `BTAlignmentWizardSession` | One wizard run for one device — Bluetooth or the Mac's own row (license-clean): drives ``BTAlignmentPosterior`` over three injected closures — live trim previews relative to the session-start base (never persisted mid-run, each carrying the belief's current half-width for the trial's telemetry), the wizard tick, commit/restore. Every exit path (accept / cancel / the bow-outs / deinit) restores or persists explicitly and ends the tick exactly once. `Screen.question` carries the progress, the credible interval ALREADY MAPPED INTO VALUE SPACE (the panel never does the sign conversion) and the undoable answer count that gates Back; `.proposal` keeps the TICK RUNNING because the user judges the value by listening to it, and `acceptProposal()` IS the keep — `.kept` leaves the panel up so the row's chip can be watched flipping, with `done()` as the close intent. `.unsettled(bestGuessMs:)` is the new bow-out and the only screen offering "Set it by hand". Tempo follows the belief, not a stage: `searchTickBPM` (20) while the half-width is over `fineTempoHalfWidthMs` (250 ms), else `blocksTickBPM` (72), pushed only when a level is being PRESENTED so a trial and its answer can never straddle a tempo change. Carries the `Reference` speaker as identity, not a display string, because the HOST has to make it audible; `nil` refuses `start()`, and `setReference` restarts the run since answers given against another speaker are not evidence about this one. A LATENCY run (`invertsEstimate`, exposed as `measuresLatency`) has two extra rules, both from the 2026-08-22 live run: candidates may go NEGATIVE during the run (the range floor is `−BTSyncTrim.rangeMs`) so it can reverse out of a wrong early answer instead of dead-ending on a fresh speaker whose base is 0 — and a PROPOSAL below `implausibleLatencyMs` (−4 ms, the confirm step's own fusion window) is not a value to confirm but `Screen.macIsLate`, which persists nothing, while accepting floors anything above it at 0. `openingProposalMs` is the zero-click path; `tryAgain()` deliberately drops it, because a restart means that value was wrong. The reachable ceiling is the reference less one `BTSyncedSink.defaultBTOnlyBufferMs`, never the reference itself (that is a delay of 0 — see the ring-dry note above), which is why `NativeBackend.btWizardReferenceBufferMs` is 2 s rather than 1.5. |
@@ -789,5 +852,8 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `SystemSettingsPane` | `x-apple.systempreferences:` deep links the onboarding flow opens on denial. |
 | `TapRebuildDecision` | Pure compare-before-rebuild guard (`NativeCaptureCoordinator.swift`) evaluated once per subscriber inside `DefaultOutputDeviceMonitor`'s fan-out (the single process-wide default-device/nominal-rate listener pair both `CoreAudioProcessTap` and `CoreAudioSystemTap` subscribe to, replacing each tap's own raw HAL listener block): fires a rebuild only when the device/rate a tap is actually pinned to genuinely changed, never on an unrelated HAL notification — the structural fix for the multi-tap rebuild storm (every live tap shares one physical device, so one tap's own rebuild could otherwise re-trigger every other tap's listener). A failed live read counts as "changed" (never suppresses a fire). |
 | `AudioDiag` | Env-gated (`AIRPLAY_AUDIO_DIAG`) diagnostic logging + live-handle counters (`handleCreated`/`handleDestroyed`/`dumpLiveHandles`) for coreaudiod-side objects (process tap / aggregate device / IOProc) — a no-op when disabled, so it costs nothing on the hot audio path in production. Wired into `PerAppCaptureCoordinator`'s `CoreAudioProcessTap` as the reference integration. |
+| `CompanionServer` | NWListener + WebSocket: Bonjour advertisement (`_audiout._tcp`), per-client handshake/command dispatch, snapshot broadcasting. |
+| `CompanionSnapshotBuilder` | Pure mapper: builds full `CompanionSnapshot` from live controllers (devices, groups, app routes) + settings. |
+| `CompanionCommandDispatcher` | MainActor dispatcher: executes the companion commands (select device, change volume, group CRUD, etc.) via controller calls. |
 | `Telemetry` | Always-on structured JSON-lines decision log; never the render path. |
 | `Analytics` | Opt-in anonymous usage-analytics facade; sink installed by the app target. |

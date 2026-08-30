@@ -6,8 +6,8 @@ import AudioutCore
 /// Reports a committed edit from a ``SyncValueFieldEditor``.
 public protocol SyncValueFieldEditorDelegate: AnyObject {
     /// Fired on every commit — Return, focus loss, ↑/↓, or ⌥↑/↓ — never on a
-    /// keystroke alone. Already quantised via `BTSyncTrim.quantise`; the
-    /// host is responsible for its own range clamp (see `clamp` below).
+    /// keystroke alone. Already rounded to whole ms via `BTSyncTrim.snap`;
+    /// the host is responsible for its own range clamp (see `clamp` below).
     func syncValueFieldEditor(_ editor: SyncValueFieldEditor, didCommit ms: Double)
 }
 
@@ -22,8 +22,8 @@ public protocol SyncValueFieldEditorDelegate: AnyObject {
 /// fine per the plan.
 ///
 /// Two behaviours the row's field never needed, both required here:
-/// - **Tolerant parsing.** Parses `Double(...)` and quantises through
-///   `BTSyncTrim.quantise`, so a typed "22.6" (or a stale 0.1 ms value read
+/// - **Tolerant parsing.** Parses `Double(...)` and rounds through
+///   `BTSyncTrim.snap`, so a typed "22.6" (or a stale 0.1 ms value read
 ///   from an older on-disk store) snaps cleanly to whole ms rather than being
 ///   rejected. The drawer resolves to whole milliseconds.
 /// - **Escape reverts.** The row's field had no call site that ever needed
@@ -204,12 +204,14 @@ public final class SyncValueFieldEditor: NSObject, NSTextFieldDelegate {
             .replacingOccurrences(of: "ms", with: "")
             .trimmingCharacters(in: .whitespaces)
             .replacingOccurrences(of: "−", with: "-")   // typography minus
-        let next = Double(cleaned).map(BTSyncTrim.quantise) ?? committedMs
+        // Rounded but unbounded here; `clamp` below is the host's own
+        // per-device range, which is the only bound this editor answers to.
+        let next = Double(cleaned).map(BTSyncTrim.snap) ?? committedMs
         apply(clamp(next))
     }
 
     private func nudge(by deltaMs: Double) {
-        apply(clamp(BTSyncTrim.quantise(committedMs + deltaMs)))
+        apply(clamp(BTSyncTrim.snap(committedMs + deltaMs)))
     }
 
     private func apply(_ ms: Double) {

@@ -1,0 +1,2058 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<style>
+:root{
+  --canvas:#16130F; --canvasHi:#1B1712; --panel:#1D1915; --raised:#241F1A; --well:#100D0A;
+  --hairline:#3A332B; --label:rgba(255,255,255,.92); --label2:rgba(255,255,255,.55); --label3:rgba(255,255,255,.28);
+  --gold:#E8B84B; --ember:#8A6A2F; --glow:#FFD97A; --ring:#8D7D5E; --fail:#D9564A; --caution:#E29A3D;
+  --thumb:#857762; --rim:#6B5F4E; --meter:#4E463A; --pill:#38322B; --socket:#34302A;
+  --glass:rgba(52,45,37,.52); --glassEdge:rgba(255,255,255,.11); --glassHi:rgba(255,255,255,.10);
+  --blur:26px;
+}
+body{margin:0;background:#0d0b09;font-family:-apple-system,system-ui,sans-serif}
+a{color:#c9a24a;text-decoration:none}a:hover{color:#E8B84B}
+.dv-turn{padding:44px 48px 36px;border-bottom:1px solid rgba(255,255,255,.07);scroll-margin-top:16px}
+.dv-thd{display:flex;align-items:baseline;gap:10px;margin:0 0 8px}
+.dv-tid{font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#E8B84B;color:#16130F;border-radius:4px;text-decoration:none}
+.dv-tname{font:600 13px/1.2 system-ui,sans-serif;color:rgba(255,255,255,.88)}
+.dv-opts{display:flex;flex-wrap:wrap;gap:34px;align-items:flex-start;margin-top:26px}
+.dv-opt{flex:none;display:flex;flex-direction:column;gap:10px;scroll-margin-top:16px}
+.dv-oid{font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(255,255,255,.10);color:rgba(255,255,255,.9);border-radius:5px;text-decoration:none}
+.dv-olabel{display:flex;align-items:baseline;gap:8px;font:400 11.5px/1.4 system-ui,sans-serif;color:rgba(255,255,255,.5);max-width:420px}
+.dv-card{max-width:100%;border-radius:10px;overflow:hidden}
+.dv-opt:target .dv-oid{background:#E8B84B;color:#16130F}
+.dv-next{margin:26px 0 0;font:12px/1.6 system-ui,sans-serif;color:rgba(255,255,255,.42)}
+.dv-lede{max-width:760px;font:13px/1.65 system-ui,sans-serif;color:rgba(255,255,255,.5)}
+.mono{font-family:ui-monospace,"SF Mono",Menlo,monospace;text-transform:uppercase;letter-spacing:.09em;font-weight:700}
+.dv-opt div::-webkit-scrollbar{display:none}
+.dv-opt div{scrollbar-width:none}
+</style>
+</helmet>
+
+<section class="dv-turn" id="t2" style="{{ themeVars }}">
+<div class="dv-thd"><a class="dv-tid" href="#t2">2</a><span class="dv-tname">Row-as-fader, the Main Out drawer, and all four tabs — in both grounds</span></div>
+<p class="dv-lede">Volume is now consistent everywhere: <b>tap a row to arm it, drag it horizontally to set its level.</b> The row itself is the trough — a gold wash fills to the current value, so volume is glanceable without opening anything. Main Out is a warm fader on the bottom deck at arm's reach — drag it to set master level, <b>tap it to expand a drawer with a fader for every contributing device.</b> <a class="dv-oid" href="#2a">2a</a> is live — drag a row, then tap the Main Out bar.</p>
+
+<div class="dv-opts">
+
+<div class="dv-opt" id="2a">
+  <div class="dv-olabel"><a class="dv-oid" href="#2a">2a</a><span><b style="color:var(--label)">Speakers</b> — row-as-fader, five collapsible sections, Main Out on the bottom deck at arm's reach. Drag any armed row to set its level; drag the Main Out bar for master, tap it to expand the per-device drawer.</span></div>
+  <div class="dv-card">
+    <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ true }}" hint-size="402px,874px">
+      <div style="position:absolute;inset:0;background:linear-gradient(180deg,var(--canvasHi) 0%,var(--canvas) 44%,var(--canvas) 100%)"></div>
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+        <div style="height:56px;flex:none"></div>
+        <div style="flex:none;padding:0 18px 10px;display:flex;align-items:flex-end;gap:10px">
+          <div>
+            <div class="mono" style="font-size:9.5px;color:var(--label2);margin-bottom:5px">CONNECTED TO</div>
+            <div style="font-size:26px;font-weight:680;color:var(--label);letter-spacing:-.7px">Speakers</div>
+          </div>
+          <div style="flex:1"></div>
+          <div style="display:flex;align-items:center;gap:6px;padding:5px 10px 5px 8px;border-radius:20px;background:var(--glass);backdrop-filter:blur(var(--blur));border:.5px solid var(--glassEdge)">
+            <div style="width:6px;height:6px;border-radius:50%;background:var(--gold);box-shadow:0 0 6px var(--glow)"></div>
+            <div style="font-size:12px;color:var(--label);font-weight:500">Studio</div>
+          </div>
+        </div>
+
+        <div style="flex:1;min-height:0;overflow:auto;padding:0 14px">
+          <sc-for list="{{ faderSections }}" as="sec" hint-placeholder-count="5">
+            <div style="margin-bottom:4px">
+              <div onClick="{{ sec.toggle }}" style="display:flex;align-items:center;gap:8px;height:34px;cursor:pointer">
+                <div style="width:9px;height:9px;border-left:1.8px solid var(--label2);border-bottom:1.8px solid var(--label2);transform:rotate({{ sec.rot }});flex:none;margin-left:4px"></div>
+                <div class="mono" style="font-size:9.5px;color:{{ sec.tint }}">{{ sec.title }}</div>
+                <div class="mono" style="font-size:9.5px;color:var(--label3)">{{ sec.count }}</div>
+                <div style="flex:1;height:1px;background:var(--hairline)"></div>
+              </div>
+              <sc-if value="{{ sec.open }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex;flex-direction:column">
+                  <sc-for list="{{ sec.rows }}" as="row" hint-placeholder-count="2">
+                    <div onPointerDown="{{ row.down }}" onPointerMove="{{ row.move }}" onPointerUp="{{ row.up }}" onPointerCancel="{{ row.up }}" style="position:relative;overflow:hidden;border-radius:16px;margin-bottom:2px;cursor:pointer;touch-action:pan-y;opacity:{{ row.dim }};background:{{ row.rowBg }}">
+                      <div style="position:absolute;left:0;top:0;bottom:0;width:{{ row.washW }};background:{{ row.washBg }}"></div>
+                      <sc-if value="{{ row.showEdge }}" hint-placeholder-val="{{ false }}">
+                        <div style="position:absolute;top:0;bottom:0;left:{{ row.edgeL }};width:2px;background:var(--gold);opacity:{{ row.edgeOp }}"></div>
+                      </sc-if>
+                      <div style="position:relative;display:flex;align-items:center;gap:12px;min-height:64px;padding:0 12px">
+                        <div style="position:relative;width:44px;height:44px;flex:none">
+                          <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised);box-shadow:inset 0 0 0 .5px rgba(255,255,255,.07)"></div>
+                          <div style="position:absolute;inset:0;border-radius:50%;border:{{ row.ring }}"></div>
+                          <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                            <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px {{ row.glyph }}"></div>
+                            <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px {{ row.glyph }}"></div>
+                          </div>
+                          <div style="position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:{{ row.dot }};box-shadow:{{ row.dotGlow }};border:1.5px solid var(--canvas)"></div>
+                        </div>
+                        <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:4px">
+                          <div style="font-size:16.5px;font-weight:{{ row.weight }};color:{{ row.nameColor }};letter-spacing:-.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ row.name }}</div>
+                          <div style="display:flex;align-items:center;gap:6px;height:12px">
+                            <div class="mono" style="font-size:9.5px;color:{{ row.subTint }}">{{ row.sub }}</div>
+                            <sc-if value="{{ row.showMeter }}" hint-placeholder-val="{{ false }}">
+                              <div style="width:62px;height:3px;border-radius:2px;background:var(--meter);overflow:hidden">
+                                <div style="height:3px;border-radius:2px;width:{{ row.level }};background:linear-gradient(90deg,var(--ember),var(--gold))"></div>
+                              </div>
+                            </sc-if>
+                          </div>
+                        </div>
+                        <div style="font-family:ui-monospace,Menlo,monospace;font-weight:700;font-size:{{ row.readSize }};color:{{ row.readTint }};flex:none;letter-spacing:-.4px">{{ row.read }}</div>
+                        <sc-if value="{{ row.selecting }}" hint-placeholder-val="{{ false }}">
+                          <div style="width:24px;height:24px;border-radius:50%;background:{{ row.selBg }};border:2px solid {{ row.selEdge }};flex:none;display:flex;align-items:center;justify-content:center">
+                            <div style="width:9px;height:5px;border-left:2px solid var(--canvas);border-bottom:2px solid var(--canvas);transform:rotate(-45deg);margin-top:-2px"></div>
+                          </div>
+                        </sc-if>
+                      </div>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+            </div>
+          </sc-for>
+          <div style="height:12px"></div>
+        </div>
+
+        <div style="flex:none;padding:0 14px 24px;display:flex;flex-direction:column;gap:9px;position:relative;z-index:3">
+          <div style="border-radius:26px;padding:13px 15px 14px;background:rgba(84,72,58,.48);backdrop-filter:blur(30px) saturate(1.7);border:.5px solid rgba(255,255,255,.16);box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 -10px 34px rgba(0,0,0,.4)">
+            <div onClick="{{ toggleDrawer }}" style="display:flex;align-items:center;gap:10px;margin-bottom:11px;cursor:pointer">
+              <div class="mono" style="font-size:9.5px;color:var(--gold)">MAIN OUT</div>
+              <div style="font-size:15px;font-weight:600;color:var(--label);letter-spacing:-.3px">Downstairs</div>
+              <div class="mono" style="font-size:9px;color:var(--label2)">3 ARMED</div>
+              <div style="flex:1"></div>
+              <div style="width:9px;height:9px;border-left:1.8px solid var(--label2);border-bottom:1.8px solid var(--label2);transform:rotate({{ drawerChev }})"></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px">
+              <div onClick="{{ toggleMainMute }}" style="width:38px;height:38px;border-radius:13px;background:var(--well);border:.5px solid var(--rim);display:flex;align-items:center;justify-content:center;flex:none;cursor:pointer">
+                <div style="width:8px;height:12px;border-radius:2px 0 0 2px;background:var(--label2)"></div>
+                <div style="width:0;height:0;border-top:8px solid transparent;border-bottom:8px solid transparent;border-right:7px solid var(--label2);margin-left:-1px"></div>
+              </div>
+              <div onPointerDown="{{ mainDown }}" onPointerMove="{{ mainMove }}" onPointerUp="{{ mainUp }}" onPointerCancel="{{ mainUp }}" style="flex:1;height:44px;display:flex;align-items:center;position:relative;touch-action:pan-y;cursor:pointer">
+                <div style="position:absolute;left:0;right:0;height:18px;border-radius:9px;background:var(--well);border:1px solid var(--rim);box-shadow:inset 0 1px 3px rgba(0,0,0,.55)"></div>
+                <div style="position:absolute;left:1px;top:13px;height:16px;border-radius:8px;width:{{ mainFill }};background:linear-gradient(90deg,var(--ember),var(--gold))"></div>
+                <div style="position:absolute;top:3px;width:38px;height:38px;border-radius:13px;background:linear-gradient(180deg,var(--thumb),#5f5546);border:1px solid var(--rim);box-shadow:0 2px 7px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.2);left:{{ mainThumb }}"></div>
+              </div>
+              <div style="font-family:ui-monospace,Menlo,monospace;font-size:16px;font-weight:700;color:var(--gold);letter-spacing:-.5px;flex:none;width:26px;text-align:right">{{ main }}</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:flex-start;border-radius:26px;background:var(--glass);backdrop-filter:blur(var(--blur)) saturate(1.6);border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi);padding:9px 6px 8px">
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:24px;height:18px;position:relative">
+                <div style="position:absolute;left:2px;top:3px;width:9px;height:12px;border-radius:1.8px;box-shadow:inset 0 0 0 1.9px var(--gold)"></div>
+                <div style="position:absolute;left:14px;top:6px;width:2px;height:6px;border-radius:1px;background:var(--gold)"></div>
+                <div style="position:absolute;left:18px;top:2px;width:2px;height:14px;border-radius:1px;background:var(--gold)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:600;color:var(--gold);letter-spacing:-.1px">Speakers</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:18px;height:18px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2.6px">
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Apps</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;flex-direction:column;gap:3px;justify-content:center">
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Groups</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;align-items:flex-end;justify-content:center;gap:2.6px">
+                <div style="width:3px;height:6px;border-radius:1.5px;background:var(--label2)"></div>
+                <div style="width:3px;height:11px;border-radius:1.5px;background:var(--label2)"></div>
+                <div style="width:3px;height:16px;border-radius:1.5px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Connect</div>
+            </div>
+          </div>
+        </div>
+
+        <sc-if value="{{ selectMode }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;left:14px;right:14px;bottom:96px;z-index:5;border-radius:22px;padding:12px 14px;background:rgba(46,39,32,.9);backdrop-filter:blur(30px) saturate(1.7);border:.5px solid rgba(255,255,255,.15);box-shadow:0 -10px 30px rgba(0,0,0,.5);display:flex;align-items:center;gap:10px">
+            <div class="mono" style="font-size:9.5px;color:var(--gold)">{{ selCount }} SELECTED</div>
+            <div style="flex:1"></div>
+            <div class="mono" style="font-size:9px;color:var(--label);background:var(--pill);border-radius:7px;padding:7px 10px">ARM</div>
+            <div class="mono" style="font-size:9px;color:var(--label);background:var(--pill);border-radius:7px;padding:7px 10px">MUTE</div>
+            <div class="mono" style="font-size:9px;color:var(--canvas);background:var(--gold);border-radius:7px;padding:7px 10px">GROUP</div>
+            <div onClick="{{ exitSelect }}" class="mono" style="font-size:9px;color:var(--label2);padding:7px 4px;cursor:pointer">DONE</div>
+          </div>
+        </sc-if>
+        <sc-if value="{{ drawerOpen }}" hint-placeholder-val="{{ false }}">
+          <div onClick="{{ toggleDrawer }}" style="position:absolute;inset:0;background:rgba(8,6,4,.5);z-index:2"></div>
+        </sc-if>
+        <sc-if value="{{ drawerOpen }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;left:10px;right:10px;bottom:104px;z-index:4;border-radius:28px;padding:16px 14px 12px;background:rgba(46,39,32,.86);backdrop-filter:blur(34px) saturate(1.7);border:.5px solid rgba(255,255,255,.15);box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 -18px 46px rgba(0,0,0,.6)">
+            <div style="width:38px;height:4px;border-radius:2px;background:var(--label3);margin:0 auto 14px"></div>
+            <div style="display:flex;align-items:baseline;gap:8px;padding:0 4px 12px">
+              <div class="mono" style="font-size:9.5px;color:var(--gold)">ACTIVE DEVICES</div>
+              <div style="flex:1"></div>
+              <div class="mono" style="font-size:9px;color:var(--label2)">DRAG TO ADJUST</div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <sc-for list="{{ drawerRows }}" as="row" hint-placeholder-count="3">
+                <div onPointerDown="{{ row.down }}" onPointerMove="{{ row.move }}" onPointerUp="{{ row.up }}" onPointerCancel="{{ row.up }}" style="position:relative;overflow:hidden;border-radius:14px;padding:10px 12px;background:var(--well);border:.5px solid var(--rim);touch-action:pan-y;cursor:pointer">
+                  <div style="position:absolute;left:0;top:0;bottom:0;width:{{ row.washW }};background:linear-gradient(90deg,var(--ember),var(--gold));opacity:.30"></div>
+                  <div style="position:absolute;top:0;bottom:0;left:{{ row.edgeL }};width:2.5px;background:var(--glow);opacity:{{ row.edgeOp }}"></div>
+                  <div style="position:relative;display:flex;align-items:center;gap:10px">
+                    <div style="width:24px;height:24px;border-radius:50%;border:2px solid var(--ring);flex:none;position:relative">
+                      <div style="position:absolute;left:6px;top:5px;width:12px;height:14px">
+                        <div style="position:absolute;left:3px;top:1px;width:6px;height:11px;border-radius:1.2px;box-shadow:inset 0 0 0 1.4px var(--label)"></div>
+                      </div>
+                    </div>
+                    <div style="flex:1;min-width:0;font-size:14.5px;font-weight:540;color:var(--label);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ row.name }}</div>
+                    <div style="font-family:ui-monospace,Menlo,monospace;font-size:14px;font-weight:700;color:var(--gold);letter-spacing:-.4px">{{ row.read }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
+      </div>
+    </x-import>
+  </div>
+</div>
+
+<div class="dv-opt" id="2b">
+  <div class="dv-olabel"><a class="dv-oid" href="#2b">2b</a><span><b style="color:var(--label)">Circuit light mode</b> — an equal citizen, not a wash. Paper <code>#FBFBF9</code>, ink <code>#1E1C1C</code>, warm-tinted frosted glass. Instruments keep their authored light values: ring <code>#A08C66</code>, brass thumb <code>#8A7A62</code>. Row 2 is mid-drag.</span></div>
+  <div class="dv-card">
+    <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ false }}" hint-size="402px,874px">
+      <div style="position:absolute;inset:0;background:linear-gradient(180deg,#FBFBF9 0%,#F7F6F0 100%)"></div>
+      <div style="position:absolute;left:-40px;top:90px;width:280px;height:280px;border-radius:50%;background:radial-gradient(circle,rgba(169,127,30,.07),transparent 70%)"></div>
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+        <div style="height:56px;flex:none"></div>
+        <div style="flex:none;padding:0 18px 10px;display:flex;align-items:flex-end;gap:10px">
+          <div>
+            <div class="mono" style="font-size:9.5px;color:#706464;margin-bottom:5px">CONNECTED TO</div>
+            <div style="font-size:26px;font-weight:680;color:#1E1C1C;letter-spacing:-.7px">Speakers</div>
+          </div>
+          <div style="flex:1"></div>
+          <div style="display:flex;align-items:center;gap:6px;padding:5px 10px 5px 8px;border-radius:20px;background:rgba(250,247,238,.66);backdrop-filter:blur(26px) saturate(1.4);border:.5px solid rgba(30,28,28,.10)">
+            <div style="width:6px;height:6px;border-radius:50%;background:#A97F1E"></div>
+            <div style="font-size:12px;color:#1E1C1C;font-weight:500">Studio</div>
+          </div>
+        </div>
+
+        <div style="flex:1;min-height:0;overflow:auto;padding:0 14px">
+          <div style="display:flex;align-items:center;gap:8px;height:34px">
+            <div style="width:9px;height:9px;border-left:1.8px solid #706464;border-bottom:1.8px solid #706464;transform:rotate(-45deg);margin-left:4px"></div>
+            <div class="mono" style="font-size:9.5px;color:#A97F1E">PINNED</div>
+            <div class="mono" style="font-size:9.5px;color:#76716B">1</div>
+            <div style="flex:1;height:1px;background:#E7E6DF"></div>
+          </div>
+          <div style="position:relative;overflow:hidden;border-radius:16px;margin-bottom:2px">
+            <div style="position:absolute;left:0;top:0;bottom:0;width:65%;background:linear-gradient(90deg,rgba(169,127,30,.16),rgba(169,127,30,.07))"></div>
+            <div style="position:absolute;top:0;bottom:0;left:calc(65% - 1px);width:2px;background:#A97F1E;opacity:.4"></div>
+            <div style="position:relative;display:flex;align-items:center;gap:12px;min-height:64px;padding:0 12px">
+              <div style="position:relative;width:44px;height:44px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:#FBFBF9;box-shadow:inset 0 0 0 .5px rgba(30,28,28,.08)"></div>
+                <div style="position:absolute;inset:0;border-radius:50%;border:2.5px solid #A08C66"></div>
+                <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                  <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px #1E1C1C"></div>
+                  <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px #1E1C1C"></div>
+                </div>
+                <div style="position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:#A97F1E;border:1.5px solid #FBFBF9"></div>
+              </div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:16.5px;font-weight:590;color:#1E1C1C;letter-spacing:-.2px">Kitchen HomePod</div>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:5px">
+                  <div class="mono" style="font-size:9.5px;color:#A97F1E">LIVE</div>
+                  <div style="width:62px;height:3px;border-radius:2px;background:#CBBEA1;overflow:hidden"><div style="height:3px;width:74%;border-radius:2px;background:linear-gradient(90deg,#C2A05A,#A97F1E)"></div></div>
+                </div>
+              </div>
+              <div style="font-family:ui-monospace,Menlo,monospace;font-size:13px;font-weight:700;color:#A97F1E">65</div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:8px;height:34px">
+            <div style="width:9px;height:9px;border-left:1.8px solid #706464;border-bottom:1.8px solid #706464;transform:rotate(-45deg);margin-left:4px"></div>
+            <div class="mono" style="font-size:9.5px;color:#A97F1E">ARMED / LIVE</div>
+            <div class="mono" style="font-size:9.5px;color:#76716B">2</div>
+            <div style="flex:1;height:1px;background:#E7E6DF"></div>
+          </div>
+          <div style="position:relative;overflow:hidden;border-radius:16px;margin-bottom:2px;background:rgba(169,127,30,.06)">
+            <div style="position:absolute;left:0;top:0;bottom:0;width:48%;background:linear-gradient(90deg,rgba(169,127,30,.32),rgba(169,127,30,.18))"></div>
+            <div style="position:absolute;top:0;bottom:0;left:calc(48% - 1px);width:2px;background:#A97F1E"></div>
+            <div style="position:relative;display:flex;align-items:center;gap:12px;min-height:64px;padding:0 12px">
+              <div style="position:relative;width:44px;height:44px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:#FBFBF9;box-shadow:inset 0 0 0 .5px rgba(30,28,28,.08)"></div>
+                <div style="position:absolute;inset:0;border-radius:50%;border:2.5px solid #A08C66"></div>
+                <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                  <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px #1E1C1C"></div>
+                  <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px #1E1C1C"></div>
+                </div>
+                <div style="position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:#A97F1E;border:1.5px solid #FBFBF9"></div>
+              </div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:16.5px;font-weight:590;color:#1E1C1C;letter-spacing:-.2px">Office Sonos</div>
+                <div class="mono" style="font-size:9.5px;color:#A97F1E;margin-top:5px">LIVE</div>
+              </div>
+              <div style="font-family:ui-monospace,Menlo,monospace;font-size:22px;font-weight:700;color:#A97F1E;letter-spacing:-.4px">48</div>
+            </div>
+          </div>
+          <div style="position:relative;overflow:hidden;border-radius:16px;margin-bottom:2px">
+            <div style="position:absolute;left:0;top:0;bottom:0;width:80%;background:linear-gradient(90deg,rgba(169,127,30,.16),rgba(169,127,30,.07))"></div>
+            <div style="position:absolute;top:0;bottom:0;left:calc(80% - 1px);width:2px;background:#A97F1E;opacity:.4"></div>
+            <div style="position:relative;display:flex;align-items:center;gap:12px;min-height:64px;padding:0 12px">
+              <div style="position:relative;width:44px;height:44px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:#FBFBF9;box-shadow:inset 0 0 0 .5px rgba(30,28,28,.08)"></div>
+                <div style="position:absolute;inset:0;border-radius:50%;border:2.5px solid #A08C66"></div>
+                <div style="position:absolute;left:14px;top:14px;width:16px;height:16px;border-radius:2.5px;box-shadow:inset 0 0 0 1.8px #1E1C1C"></div>
+              </div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:16.5px;font-weight:590;color:#1E1C1C;letter-spacing:-.2px">This Mac</div>
+                <div class="mono" style="font-size:9.5px;color:#A97F1E;margin-top:5px">LIVE</div>
+              </div>
+              <div style="font-family:ui-monospace,Menlo,monospace;font-size:13px;font-weight:700;color:#A97F1E">80</div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:8px;height:34px">
+            <div style="width:9px;height:9px;border-left:1.8px solid #706464;border-bottom:1.8px solid #706464;transform:rotate(-45deg);margin-left:4px"></div>
+            <div class="mono" style="font-size:9.5px;color:#706464">AIRPLAY</div>
+            <div class="mono" style="font-size:9.5px;color:#76716B">2</div>
+            <div style="flex:1;height:1px;background:#E7E6DF"></div>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;min-height:62px;padding:0 12px">
+            <div style="position:relative;width:44px;height:44px;flex:none">
+              <div style="position:absolute;inset:0;border-radius:50%;background:#F5F4ED"></div>
+              <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px #706464"></div>
+                <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px #706464"></div>
+              </div>
+              <div style="position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:#E0D8C6;border:1.5px solid #FBFBF9"></div>
+            </div>
+            <div style="flex:1"><div style="font-size:16.5px;color:#706464;letter-spacing:-.2px">Living Room Apple TV</div><div class="mono" style="font-size:9.5px;color:#76716B;margin-top:5px">IDLE</div></div>
+            <div style="font-family:ui-monospace,Menlo,monospace;font-size:13px;color:#76716B">55</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;min-height:62px;padding:0 12px">
+            <div style="position:relative;width:44px;height:44px;flex:none">
+              <div style="position:absolute;inset:0;border-radius:50%;background:#F5F4ED"></div>
+              <div style="position:absolute;inset:0;border-radius:50%;border:2.8px solid #BB3A2F"></div>
+              <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px #706464"></div>
+                <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px #706464"></div>
+              </div>
+            </div>
+            <div style="flex:1"><div style="font-size:16.5px;color:#706464;letter-spacing:-.2px">Garage Express</div><div class="mono" style="font-size:9.5px;color:#BB3A2F;margin-top:5px">NOT ON NETWORK</div></div>
+            <div style="font-size:12.5px;color:#A97F1E;font-weight:600">Diagnose</div>
+          </div>
+        </div>
+
+        <div style="flex:none;padding:0 14px 24px;display:flex;flex-direction:column;gap:9px">
+          <div style="border-radius:26px;padding:13px 15px 14px;background:rgba(250,247,238,.78);backdrop-filter:blur(30px) saturate(1.5);border:.5px solid rgba(30,28,28,.10);box-shadow:inset 0 1px 0 rgba(255,255,255,.8),0 -8px 26px rgba(30,28,28,.10)">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:11px">
+              <div class="mono" style="font-size:9.5px;color:#A97F1E">MAIN OUT</div>
+              <div style="font-size:15px;font-weight:600;color:#1E1C1C;letter-spacing:-.3px">Downstairs</div>
+              <div class="mono" style="font-size:9px;color:#706464">3 ARMED</div>
+              <div style="flex:1"></div>
+              <div style="width:9px;height:9px;border-left:1.8px solid #706464;border-bottom:1.8px solid #706464;transform:rotate(-45deg)"></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="width:38px;height:38px;border-radius:13px;background:#F5F4ED;border:.5px solid #9E8D6B;display:flex;align-items:center;justify-content:center;flex:none">
+                <div style="width:8px;height:12px;border-radius:2px 0 0 2px;background:#706464"></div>
+                <div style="width:0;height:0;border-top:8px solid transparent;border-bottom:8px solid transparent;border-right:7px solid #706464;margin-left:-1px"></div>
+              </div>
+              <div style="flex:1;height:44px;display:flex;align-items:center;position:relative">
+                <div style="position:absolute;left:0;right:0;height:18px;border-radius:9px;background:#F5F4ED;border:1px solid #9E8D6B;box-shadow:inset 0 1px 3px rgba(30,28,28,.16)"></div>
+                <div style="position:absolute;left:1px;top:13px;height:16px;border-radius:8px;width:calc(72% - 2px);background:linear-gradient(90deg,#C2A05A,#A97F1E)"></div>
+                <div style="position:absolute;top:3px;left:calc(72% - 19px);width:38px;height:38px;border-radius:13px;background:linear-gradient(180deg,#9E8D6B,#8A7A62);border:1px solid #9E8D6B;box-shadow:0 2px 7px rgba(30,28,28,.28),inset 0 1px 0 rgba(255,255,255,.35)"></div>
+              </div>
+              <div style="font-family:ui-monospace,Menlo,monospace;font-size:16px;font-weight:700;color:#A97F1E;letter-spacing:-.5px;flex:none;width:26px;text-align:right">72</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:flex-start;border-radius:26px;background:rgba(250,247,238,.72);backdrop-filter:blur(26px) saturate(1.6);border:.5px solid rgba(30,28,28,.10);box-shadow:inset 0 1px 0 rgba(255,255,255,.8);padding:9px 6px 8px">
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:24px;height:18px;position:relative">
+                <div style="position:absolute;left:2px;top:3px;width:9px;height:12px;border-radius:1.8px;box-shadow:inset 0 0 0 1.9px #A97F1E"></div>
+                <div style="position:absolute;left:14px;top:6px;width:2px;height:6px;border-radius:1px;background:#A97F1E"></div>
+                <div style="position:absolute;left:18px;top:2px;width:2px;height:14px;border-radius:1px;background:#A97F1E"></div>
+              </div>
+              <div style="font-size:10px;font-weight:600;color:#A97F1E;letter-spacing:-.1px">Speakers</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:18px;height:18px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2.6px">
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px #706464"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px #706464"></div>
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px #706464"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px #706464"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:#706464;letter-spacing:-.1px">Apps</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;flex-direction:column;gap:3px;justify-content:center">
+                <div style="height:3.2px;border-radius:1.6px;background:#706464"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:#706464"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:#706464"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:#706464;letter-spacing:-.1px">Groups</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;align-items:flex-end;justify-content:center;gap:2.6px">
+                <div style="width:3px;height:6px;border-radius:1.5px;background:#706464"></div>
+                <div style="width:3px;height:11px;border-radius:1.5px;background:#706464"></div>
+                <div style="width:3px;height:16px;border-radius:1.5px;background:#706464"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:#706464;letter-spacing:-.1px">Connect</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </x-import>
+  </div>
+</div>
+
+<div class="dv-opt" id="2c">
+  <div class="dv-olabel"><a class="dv-oid" href="#2c">2c</a><span><b style="color:var(--label)">Apps</b> — per-app routing. Same row-as-fader grammar as Speakers, and it's live here too: drag to set app volume, tap to mute. Silent apps dim to the bottom.</span></div>
+  <div class="dv-card">
+    <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ true }}" hint-size="402px,874px">
+      <div style="position:absolute;inset:0;background:linear-gradient(180deg,var(--canvasHi) 0%,var(--canvas) 44%,var(--canvas) 100%)"></div>
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+        <div style="height:56px;flex:none"></div>
+        <div style="flex:none;padding:0 18px 12px">
+          <div class="mono" style="font-size:9.5px;color:var(--label2);margin-bottom:5px">PER-APP ROUTING</div>
+          <div style="font-size:26px;font-weight:680;color:var(--label);letter-spacing:-.7px">Apps</div>
+        </div>
+        <div style="flex:none;margin:0 14px 8px;padding:11px 14px;border-radius:18px;background:var(--glass);backdrop-filter:blur(var(--blur)) saturate(1.6);border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi);display:flex;align-items:center;gap:10px">
+          <div style="width:7px;height:7px;border-radius:50%;background:var(--gold);box-shadow:0 0 7px var(--glow);flex:none"></div>
+          <div style="flex:1;font-size:13px;color:var(--label2)">Apps without a route follow <span style="color:var(--label);font-weight:540">Main Out</span></div>
+        </div>
+        <div style="flex:1;min-height:0;overflow:auto;padding:0 14px">
+          <sc-for list="{{ appRows }}" as="app" hint-placeholder-count="6">
+            <div onPointerDown="{{ app.down }}" onPointerMove="{{ app.move }}" onPointerUp="{{ app.up }}" onPointerCancel="{{ app.up }}" style="position:relative;overflow:hidden;border-radius:16px;margin-bottom:2px;cursor:pointer;touch-action:pan-y;opacity:{{ app.dim }};background:{{ app.rowBg }}">
+              <div style="position:absolute;left:0;top:0;bottom:0;width:{{ app.washW }};background:{{ app.washBg }}"></div>
+              <sc-if value="{{ app.showEdge }}" hint-placeholder-val="{{ false }}">
+                <div style="position:absolute;top:0;bottom:0;left:{{ app.edgeL }};width:2px;background:var(--gold);opacity:{{ app.edgeOp }}"></div>
+              </sc-if>
+              <div style="position:relative;display:flex;align-items:center;gap:12px;min-height:66px;padding:0 12px">
+                <div style="width:44px;height:44px;border-radius:11px;background:var(--raised);border:.5px solid var(--hairline);display:flex;align-items:center;justify-content:center;flex:none">
+                  <div class="mono" style="font-size:15px;color:{{ app.readTint }};letter-spacing:0">{{ app.initial }}</div>
+                </div>
+                <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:6px">
+                  <div style="font-size:16px;font-weight:540;color:{{ app.nameColor }};letter-spacing:-.2px">{{ app.name }}</div>
+                  <div style="display:flex;align-items:center;gap:6px">
+                    <div style="display:flex;align-items:center;gap:5px;padding:3px 8px;border-radius:7px;background:var(--pill)">
+                      <div class="mono" style="font-size:9px;color:{{ app.destTint }}">{{ app.dest }}</div>
+                      <div style="width:5px;height:5px;border-left:1.4px solid var(--label3);border-bottom:1.4px solid var(--label3);transform:rotate(-45deg);margin-bottom:2px"></div>
+                    </div>
+                    <div class="mono" style="font-size:9px;color:{{ app.subTint }}">{{ app.sub }}</div>
+                  </div>
+                </div>
+                <div style="font-family:ui-monospace,Menlo,monospace;font-weight:700;font-size:{{ app.readSize }};color:{{ app.readTint }};flex:none;letter-spacing:-.4px">{{ app.read }}</div>
+              </div>
+            </div>
+          </sc-for>
+          <div style="height:12px"></div>
+        </div>
+        <div style="flex:none;padding:0 14px 24px;display:flex;flex-direction:column;gap:9px">
+          <div style="display:flex;align-items:flex-start;border-radius:26px;background:var(--glass);backdrop-filter:blur(var(--blur)) saturate(1.6);border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi);padding:9px 6px 8px">
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:24px;height:18px;position:relative">
+                <div style="position:absolute;left:2px;top:3px;width:9px;height:12px;border-radius:1.8px;box-shadow:inset 0 0 0 1.9px var(--label2)"></div>
+                <div style="position:absolute;left:14px;top:6px;width:2px;height:6px;border-radius:1px;background:var(--label2)"></div>
+                <div style="position:absolute;left:18px;top:2px;width:2px;height:14px;border-radius:1px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Speakers</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:18px;height:18px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2.6px">
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--gold)"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--gold)"></div>
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--gold)"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--gold)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:600;color:var(--gold);letter-spacing:-.1px">Apps</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;flex-direction:column;gap:3px;justify-content:center">
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Groups</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;align-items:flex-end;justify-content:center;gap:2.6px">
+                <div style="width:3px;height:6px;border-radius:1.5px;background:var(--label2)"></div>
+                <div style="width:3px;height:11px;border-radius:1.5px;background:var(--label2)"></div>
+                <div style="width:3px;height:16px;border-radius:1.5px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Connect</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </x-import>
+  </div>
+</div>
+
+<div class="dv-opt" id="2d">
+  <div class="dv-olabel"><a class="dv-oid" href="#2d">2d</a><span><b style="color:var(--label)">Groups</b> — the bus rail as the group visual. One tap arms a whole group; membership editing is behind the chevron. Drag the handle to reorder.</span></div>
+  <div class="dv-card">
+    <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ true }}" hint-size="402px,874px">
+      <div style="position:absolute;inset:0;background:linear-gradient(180deg,var(--canvasHi) 0%,var(--canvas) 44%,var(--canvas) 100%)"></div>
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+        <div style="height:56px;flex:none"></div>
+        <div style="flex:none;padding:0 18px 12px;display:flex;align-items:flex-end">
+          <div>
+            <div class="mono" style="font-size:9.5px;color:var(--label2);margin-bottom:5px">SAVED ROUTES</div>
+            <div style="font-size:26px;font-weight:680;color:var(--label);letter-spacing:-.7px">Groups</div>
+          </div>
+          <div style="flex:1"></div>
+          <div style="width:34px;height:34px;border-radius:50%;background:var(--glass);backdrop-filter:blur(var(--blur));border:.5px solid var(--glassEdge);display:flex;align-items:center;justify-content:center">
+            <div style="width:15px;height:1.8px;background:var(--gold);position:relative">
+              <div style="position:absolute;left:6.6px;top:-6.6px;width:1.8px;height:15px;background:var(--gold)"></div>
+            </div>
+          </div>
+        </div>
+        <div style="flex:1;min-height:0;overflow:auto;padding:0 14px">
+          <sc-for list="{{ groupRows }}" as="g" hint-placeholder-count="4">
+            <div style="border-radius:20px;margin-bottom:8px;padding:14px 14px 13px;background:{{ g.cardBg }};border:.5px solid {{ g.cardEdge }}">
+              <div style="display:flex;align-items:center;gap:12px">
+                <div style="width:26px;height:26px;border-radius:50%;background:{{ g.dotFill }};border:2px solid {{ g.dotEdge }};box-shadow:{{ g.dotGlow }};flex:none"></div>
+                <div style="flex:1;min-width:0">
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <div style="font-size:17px;font-weight:600;color:{{ g.nameColor }};letter-spacing:-.3px">{{ g.name }}</div>
+                    <div class="mono" style="font-size:9px;color:{{ g.badgeTint }}">{{ g.badge }}</div>
+                  </div>
+                </div>
+                <div class="mono" style="font-size:9.5px;color:var(--label3)">{{ g.count }}</div>
+                <div style="width:7px;height:7px;border-top:1.6px solid var(--label3);border-right:1.6px solid var(--label3);transform:rotate(45deg);flex:none"></div>
+              </div>
+              <div style="display:flex;align-items:center;gap:0;margin:12px 0 0;padding-left:12px">
+                <div style="width:2px;height:26px;background:{{ g.dotEdge }};flex:none"></div>
+                <div style="width:14px;height:2px;background:{{ g.dotEdge }};flex:none"></div>
+                <div style="flex:1;font-size:12.5px;color:var(--label2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:8px">{{ g.members }}</div>
+              </div>
+            </div>
+          </sc-for>
+          <div style="display:flex;align-items:center;justify-content:center;gap:8px;height:56px;border-radius:20px;border:1px dashed var(--hairline);margin-bottom:12px">
+            <div style="width:13px;height:1.7px;background:var(--gold);position:relative">
+              <div style="position:absolute;left:5.6px;top:-5.6px;width:1.7px;height:13px;background:var(--gold)"></div>
+            </div>
+            <div style="font-size:14px;color:var(--gold);font-weight:540">New group</div>
+          </div>
+        </div>
+        <div style="flex:none;padding:0 14px 24px">
+          <div style="display:flex;align-items:flex-start;border-radius:26px;background:var(--glass);backdrop-filter:blur(var(--blur)) saturate(1.6);border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi);padding:9px 6px 8px">
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:24px;height:18px;position:relative">
+                <div style="position:absolute;left:2px;top:3px;width:9px;height:12px;border-radius:1.8px;box-shadow:inset 0 0 0 1.9px var(--label2)"></div>
+                <div style="position:absolute;left:14px;top:6px;width:2px;height:6px;border-radius:1px;background:var(--label2)"></div>
+                <div style="position:absolute;left:18px;top:2px;width:2px;height:14px;border-radius:1px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Speakers</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:18px;height:18px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2.6px">
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Apps</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;flex-direction:column;gap:3px;justify-content:center">
+                <div style="height:3.2px;border-radius:1.6px;background:var(--gold)"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:var(--gold)"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:var(--gold)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:600;color:var(--gold);letter-spacing:-.1px">Groups</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;align-items:flex-end;justify-content:center;gap:2.6px">
+                <div style="width:3px;height:6px;border-radius:1.5px;background:var(--label2)"></div>
+                <div style="width:3px;height:11px;border-radius:1.5px;background:var(--label2)"></div>
+                <div style="width:3px;height:16px;border-radius:1.5px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Connect</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </x-import>
+  </div>
+</div>
+
+<div class="dv-opt" id="2e">
+  <div class="dv-olabel"><a class="dv-oid" href="#2e">2e</a><span><b style="color:var(--label)">Connect</b> — discovery, the diagnosis card, engine settings, and the accent dial. The Warm Signal identity is a user-facing control here, not just a token.</span></div>
+  <div class="dv-card">
+    <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ true }}" hint-size="402px,874px">
+      <div style="position:absolute;inset:0;background:linear-gradient(180deg,var(--canvasHi) 0%,var(--canvas) 44%,var(--canvas) 100%)"></div>
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+        <div style="height:56px;flex:none"></div>
+        <div style="flex:none;padding:0 18px 12px">
+          <div class="mono" style="font-size:9.5px;color:var(--label2);margin-bottom:5px">LINK &amp; SETTINGS</div>
+          <div style="font-size:26px;font-weight:680;color:var(--label);letter-spacing:-.7px">Connect</div>
+        </div>
+        <div style="flex:1;min-height:0;overflow:auto;padding:0 14px">
+          <div style="border-radius:20px;padding:15px 16px;background:var(--glass);backdrop-filter:blur(var(--blur)) saturate(1.6);border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi);margin-bottom:14px">
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="position:relative;width:44px;height:44px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;border:2.5px solid var(--gold);box-shadow:0 0 14px rgba(255,217,122,.28)"></div>
+                <div style="position:absolute;left:14px;top:14px;width:16px;height:16px;border-radius:3px;box-shadow:inset 0 0 0 1.8px var(--label)"></div>
+              </div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:17px;font-weight:600;color:var(--label);letter-spacing:-.3px">Alec's Studio</div>
+                <div class="mono" style="font-size:9.5px;color:var(--gold);margin-top:5px">PAIRED · 3 MS LINK</div>
+              </div>
+              <div class="mono" style="font-size:9px;color:var(--label2);background:var(--pill);border-radius:6px;padding:5px 9px">FORGET</div>
+            </div>
+          </div>
+
+          <div class="mono" style="font-size:9.5px;color:var(--label2);padding:0 4px 8px">OTHER MACS</div>
+          <div style="display:flex;align-items:center;gap:12px;min-height:56px;padding:0 12px;border-radius:16px;border:.5px solid var(--hairline);margin-bottom:16px">
+            <div style="width:36px;height:36px;border-radius:9px;background:var(--raised);display:flex;align-items:center;justify-content:center;flex:none">
+              <div style="width:14px;height:14px;border-radius:2.5px;box-shadow:inset 0 0 0 1.7px var(--label2)"></div>
+            </div>
+            <div style="flex:1"><div style="font-size:15.5px;color:var(--label2)">Studio Mac mini</div><div class="mono" style="font-size:9px;color:var(--label3);margin-top:4px">NOT PAIRED</div></div>
+            <div class="mono" style="font-size:9px;color:var(--gold);background:var(--pill);border-radius:6px;padding:5px 9px">PAIR</div>
+          </div>
+
+          <div style="border-radius:18px;padding:14px 15px;background:rgba(217,86,74,.07);border:.5px solid rgba(217,86,74,.24);margin-bottom:16px">
+            <div style="display:flex;align-items:center;gap:9px;margin-bottom:9px">
+              <div style="width:16px;height:16px;border-radius:50%;border:2px solid var(--fail);display:flex;align-items:center;justify-content:center;flex:none">
+                <div style="width:1.8px;height:7px;background:var(--fail);border-radius:1px"></div>
+              </div>
+              <div class="mono" style="font-size:9.5px;color:var(--fail)">LOCAL NETWORK BLOCKED</div>
+            </div>
+            <div style="font-size:13px;line-height:1.5;color:var(--label2);margin-bottom:11px">Audiout Remote can't see Macs on your Wi‑Fi. Allow Local Network access to discover them.</div>
+            <div style="display:inline-flex;align-items:center;padding:8px 14px;border-radius:10px;background:var(--gold)">
+              <div style="font-size:13px;font-weight:620;color:var(--canvas)">Open Settings</div>
+            </div>
+          </div>
+
+          <div class="mono" style="font-size:9.5px;color:var(--label2);padding:0 4px 8px">ENGINE</div>
+          <div style="border-radius:18px;border:.5px solid var(--hairline);margin-bottom:16px;overflow:hidden">
+            <div style="display:flex;align-items:center;gap:12px;padding:13px 14px;border-bottom:1px solid var(--hairline)">
+              <div style="flex:1;font-size:15px;color:var(--label)">Connect volume</div>
+              <div style="width:98px;height:22px;position:relative;display:flex;align-items:center">
+                <div style="position:absolute;left:0;right:0;height:9px;border-radius:5px;background:var(--well);border:1px solid var(--rim)"></div>
+                <div style="position:absolute;left:1px;height:7px;border-radius:4px;width:62%;background:linear-gradient(90deg,var(--ember),var(--gold))"></div>
+                <div style="position:absolute;left:calc(62% - 9px);width:20px;height:20px;border-radius:7px;background:linear-gradient(180deg,var(--thumb),#5f5546);border:1px solid var(--rim);box-shadow:0 1px 4px rgba(0,0,0,.5)"></div>
+              </div>
+              <div class="mono" style="font-size:11px;color:var(--gold);width:22px;text-align:right">62</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px;padding:13px 14px">
+              <div style="flex:1"><div style="font-size:15px;color:var(--label)">Start buffer</div><div class="mono" style="font-size:9px;color:var(--label3);margin-top:4px">HIGHER = FEWER DROPOUTS</div></div>
+              <div class="mono" style="font-size:11px;color:var(--gold)">280 MS</div>
+            </div>
+          </div>
+
+          <div class="mono" style="font-size:9.5px;color:var(--label2);padding:0 4px 8px">APPEARANCE</div>
+          <div style="border-radius:18px;border:.5px solid var(--hairline);margin-bottom:16px;overflow:hidden">
+            <div style="padding:13px 14px;border-bottom:1px solid var(--hairline)">
+              <div style="font-size:15px;color:var(--label);margin-bottom:10px">Accent dial</div>
+              <div style="display:flex;gap:7px">
+                <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:7px;padding:10px 0;border-radius:12px;background:rgba(232,184,75,.10);border:1px solid var(--gold)">
+                  <div style="width:18px;height:18px;border-radius:50%;background:#E8B84B;box-shadow:0 0 8px #FFD97A"></div>
+                  <div class="mono" style="font-size:8.5px;color:var(--gold)">FULL GOLD</div>
+                </div>
+                <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:7px;padding:10px 0;border-radius:12px;border:1px solid var(--hairline)">
+                  <div style="width:18px;height:18px;border-radius:50%;background:#B99B53"></div>
+                  <div class="mono" style="font-size:8.5px;color:var(--label2)">SUBTLE</div>
+                </div>
+                <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:7px;padding:10px 0;border-radius:12px;border:1px solid var(--hairline)">
+                  <div style="width:18px;height:18px;border-radius:50%;background:#0A84FF"></div>
+                  <div class="mono" style="font-size:8.5px;color:var(--label2)">SYSTEM</div>
+                </div>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;padding:13px 14px">
+              <div style="flex:1;font-size:15px;color:var(--label)">Theme</div>
+              <div style="display:flex;gap:4px;padding:3px;border-radius:10px;background:var(--well)">
+                <div class="mono" style="font-size:9px;color:var(--canvas);background:var(--gold);border-radius:7px;padding:6px 10px">DARK</div>
+                <div class="mono" style="font-size:9px;color:var(--label2);padding:6px 10px">LIGHT</div>
+                <div class="mono" style="font-size:9px;color:var(--label2);padding:6px 10px">AUTO</div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:10px;padding:0 4px 20px">
+            <div class="mono" style="font-size:9px;color:var(--label3)">AUDIOUT REMOTE 1.0 (114)</div>
+            <div style="flex:1"></div>
+            <div class="mono" style="font-size:9px;color:var(--gold)">ABOUT</div>
+          </div>
+        </div>
+        <div style="flex:none;padding:0 14px 24px">
+          <div style="display:flex;align-items:flex-start;border-radius:26px;background:var(--glass);backdrop-filter:blur(var(--blur)) saturate(1.6);border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi);padding:9px 6px 8px">
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:24px;height:18px;position:relative">
+                <div style="position:absolute;left:2px;top:3px;width:9px;height:12px;border-radius:1.8px;box-shadow:inset 0 0 0 1.9px var(--label2)"></div>
+                <div style="position:absolute;left:14px;top:6px;width:2px;height:6px;border-radius:1px;background:var(--label2)"></div>
+                <div style="position:absolute;left:18px;top:2px;width:2px;height:14px;border-radius:1px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Speakers</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:18px;height:18px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2.6px">
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Apps</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;flex-direction:column;gap:3px;justify-content:center">
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Groups</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;align-items:flex-end;justify-content:center;gap:2.6px">
+                <div style="width:3px;height:6px;border-radius:1.5px;background:var(--gold)"></div>
+                <div style="width:3px;height:11px;border-radius:1.5px;background:var(--gold)"></div>
+                <div style="width:3px;height:16px;border-radius:1.5px;background:var(--gold)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:600;color:var(--gold);letter-spacing:-.1px">Connect</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </x-import>
+  </div>
+</div>
+
+<div class="dv-opt" id="2f">
+  <div class="dv-olabel"><a class="dv-oid" href="#2f">2f</a><span><b style="color:var(--label)">Device sheet + failure diagnosis</b> — everything buried behind a tap — mute, pin, rename, icon. Latency and sync stay on the Mac. The failed row opens the full diagnosis, not an inline card.</span></div>
+  <div class="dv-card" style="display:flex;gap:20px">
+    <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ true }}" hint-size="402px,874px">
+      <div style="position:absolute;inset:0;background:var(--canvas)"></div>
+      <div style="position:absolute;inset:0;background:rgba(8,6,4,.55)"></div>
+      <div style="position:absolute;left:0;right:0;bottom:0;top:150px;border-radius:32px 32px 0 0;background:rgba(46,39,32,.9);backdrop-filter:blur(34px) saturate(1.7);border-top:.5px solid rgba(255,255,255,.15);box-shadow:0 -18px 46px rgba(0,0,0,.6);padding:14px 18px 0;display:flex;flex-direction:column">
+        <div style="width:38px;height:4px;border-radius:2px;background:var(--label3);margin:0 auto 18px;flex:none"></div>
+        <div style="display:flex;align-items:center;gap:14px;flex:none;margin-bottom:20px">
+          <div style="position:relative;width:56px;height:56px;flex:none">
+            <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised);border:3px solid var(--ring)"></div>
+            <div style="position:absolute;left:15px;top:16px;width:26px;height:26px">
+              <div style="position:absolute;left:6.5px;top:2.8px;width:13px;height:20.4px;border-radius:2px;box-shadow:inset 0 0 0 2px var(--label)"></div>
+              <div style="position:absolute;left:9px;top:11px;width:8px;height:8px;border-radius:50%;box-shadow:inset 0 0 0 2px var(--label)"></div>
+            </div>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:21px;font-weight:640;color:var(--label);letter-spacing:-.4px">Kitchen HomePod</div>
+            <div class="mono" style="font-size:9.5px;color:var(--gold);margin-top:6px">LIVE · AIRPLAY 2</div>
+          </div>
+          <div class="mono" style="font-size:9px;color:var(--label2);background:var(--pill);border-radius:6px;padding:6px 10px">RENAME</div>
+        </div>
+
+        <div style="flex:none;margin-bottom:18px">
+          <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:10px">
+            <div class="mono" style="font-size:9.5px;color:var(--label2)">VOLUME</div>
+            <div style="flex:1"></div>
+            <div style="font-family:ui-monospace,Menlo,monospace;font-size:20px;font-weight:700;color:var(--gold);letter-spacing:-.5px">65</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px">
+            <div style="width:38px;height:38px;border-radius:12px;background:var(--well);border:.5px solid var(--rim);display:flex;align-items:center;justify-content:center;flex:none">
+              <div style="width:8px;height:12px;border-radius:2px 0 0 2px;background:var(--label2)"></div>
+              <div style="width:0;height:0;border-top:8px solid transparent;border-bottom:8px solid transparent;border-right:7px solid var(--label2);margin-left:-1px"></div>
+            </div>
+            <div style="flex:1;height:44px;display:flex;align-items:center;position:relative">
+              <div style="position:absolute;left:0;right:0;height:16px;border-radius:8px;background:var(--well);border:1px solid var(--rim);box-shadow:inset 0 1px 3px rgba(0,0,0,.55)"></div>
+              <div style="position:absolute;left:1px;top:14px;height:14px;border-radius:7px;width:65%;background:linear-gradient(90deg,var(--ember),var(--gold))"></div>
+              <div style="position:absolute;top:3px;left:calc(65% - 19px);width:38px;height:38px;border-radius:13px;background:linear-gradient(180deg,var(--thumb),#5f5546);border:1px solid var(--rim);box-shadow:0 2px 7px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.2)"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mono" style="font-size:9.5px;color:var(--label2);padding:0 2px 9px;flex:none">OUTPUT</div>
+        <div style="flex:none;border-radius:18px;border:.5px solid var(--hairline);overflow:hidden;margin-bottom:18px">
+          <div style="display:flex;align-items:center;padding:13px 14px;border-bottom:1px solid var(--hairline)">
+            <div style="flex:1;font-size:15px;color:var(--label)">Mute</div>
+            <div style="width:46px;height:28px;border-radius:14px;background:var(--well);border:.5px solid var(--rim);position:relative;flex:none">
+              <div style="position:absolute;left:2px;top:2px;width:23px;height:23px;border-radius:50%;background:var(--thumb);box-shadow:0 1px 3px rgba(0,0,0,.5)"></div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;padding:13px 14px;border-bottom:1px solid var(--hairline)">
+            <div style="flex:1;font-size:15px;color:var(--label)">Pin to top</div>
+            <div style="width:46px;height:28px;border-radius:14px;background:var(--gold);position:relative;flex:none">
+              <div style="position:absolute;right:2px;top:2px;width:23px;height:23px;border-radius:50%;background:#FFF6E2;box-shadow:0 1px 3px rgba(0,0,0,.35)"></div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;padding:13px 14px">
+            <div style="flex:1;font-size:15px;color:var(--label)">Icon</div>
+            <div class="mono" style="font-size:11px;color:var(--label2)">HOMEPOD</div>
+            <div style="width:7px;height:7px;border-top:1.6px solid var(--label3);border-right:1.6px solid var(--label3);transform:rotate(45deg);margin-left:9px"></div>
+          </div>
+        </div>
+
+        <div style="flex:none;display:flex;gap:8px;padding-bottom:24px">
+          <div style="flex:1;text-align:center;padding:13px 0;border-radius:13px;background:var(--pill)">
+            <div style="font-size:14px;color:var(--label);font-weight:540">Unpin</div>
+          </div>
+          <div style="flex:1;text-align:center;padding:13px 0;border-radius:13px;background:rgba(217,86,74,.12);border:.5px solid rgba(217,86,74,.3)">
+            <div style="font-size:14px;color:var(--fail);font-weight:540">Disarm</div>
+          </div>
+        </div>
+      </div>
+    </x-import>
+
+    <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ true }}" hint-size="402px,874px">
+      <div style="position:absolute;inset:0;background:var(--canvas)"></div>
+      <div style="position:absolute;inset:0;background:rgba(8,6,4,.55)"></div>
+      <div style="position:absolute;left:0;right:0;bottom:0;top:180px;border-radius:32px 32px 0 0;background:rgba(46,39,32,.9);backdrop-filter:blur(34px) saturate(1.7);border-top:.5px solid rgba(255,255,255,.15);box-shadow:0 -18px 46px rgba(0,0,0,.6);padding:14px 18px 0;display:flex;flex-direction:column">
+        <div style="width:38px;height:4px;border-radius:2px;background:var(--label3);margin:0 auto 18px;flex:none"></div>
+        <div style="display:flex;align-items:center;gap:14px;flex:none;margin-bottom:18px">
+          <div style="position:relative;width:56px;height:56px;flex:none">
+            <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised);border:3px solid var(--fail)"></div>
+            <div style="position:absolute;left:15px;top:16px;width:26px;height:26px">
+              <div style="position:absolute;left:6.5px;top:2.8px;width:13px;height:20.4px;border-radius:2px;box-shadow:inset 0 0 0 2px var(--label2)"></div>
+              <div style="position:absolute;left:9px;top:11px;width:8px;height:8px;border-radius:50%;box-shadow:inset 0 0 0 2px var(--label2)"></div>
+            </div>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:21px;font-weight:640;color:var(--label);letter-spacing:-.4px">Garage Express</div>
+            <div class="mono" style="font-size:9.5px;color:var(--fail);margin-top:6px">NOT ON NETWORK</div>
+          </div>
+        </div>
+
+        <div style="flex:none;border-radius:18px;padding:16px;background:rgba(217,86,74,.07);border:.5px solid rgba(217,86,74,.24);margin-bottom:16px">
+          <div class="mono" style="font-size:9.5px;color:var(--fail);margin-bottom:12px">DIAGNOSIS</div>
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <div style="display:flex;align-items:flex-start;gap:10px">
+              <div style="width:16px;height:16px;border-radius:50%;border:2px solid var(--gold);flex:none;margin-top:1px;display:flex;align-items:center;justify-content:center">
+                <div style="width:6px;height:3px;border-left:1.6px solid var(--gold);border-bottom:1.6px solid var(--gold);transform:rotate(-45deg);margin-top:-1px"></div>
+              </div>
+              <div style="flex:1"><div style="font-size:14px;color:var(--label)">Mac is on the network</div><div class="mono" style="font-size:9px;color:var(--label3);margin-top:3px">STUDIO · 192.168.1.14</div></div>
+            </div>
+            <div style="display:flex;align-items:flex-start;gap:10px">
+              <div style="width:16px;height:16px;border-radius:50%;border:2px solid var(--fail);flex:none;margin-top:1px;display:flex;align-items:center;justify-content:center">
+                <div style="width:1.8px;height:7px;background:var(--fail);border-radius:1px"></div>
+              </div>
+              <div style="flex:1"><div style="font-size:14px;color:var(--label)">Speaker stopped responding</div><div class="mono" style="font-size:9px;color:var(--fail);margin-top:3px">LAST SEEN 4 MIN AGO</div></div>
+            </div>
+            <div style="display:flex;align-items:flex-start;gap:10px">
+              <div style="width:16px;height:16px;border-radius:50%;border:2px solid var(--caution);flex:none;margin-top:1px"></div>
+              <div style="flex:1"><div style="font-size:14px;color:var(--label2)">Likely powered off or out of range</div></div>
+            </div>
+          </div>
+        </div>
+
+        <div style="flex:none;display:flex;flex-direction:column;gap:8px">
+          <div style="text-align:center;padding:14px 0;border-radius:13px;background:var(--gold)">
+            <div style="font-size:15px;color:var(--canvas);font-weight:620">Retry connection</div>
+          </div>
+          <div style="text-align:center;padding:14px 0;border-radius:13px;background:var(--pill)">
+            <div style="font-size:15px;color:var(--label);font-weight:540">Remove from group</div>
+          </div>
+        </div>
+
+        <div style="flex:1"></div>
+        <div class="mono" style="font-size:9px;color:var(--label3);text-align:center;padding-bottom:26px">AUDIOUT WILL RE-ARM AUTOMATICALLY WHEN IT RETURNS</div>
+      </div>
+    </x-import>
+  </div>
+</div>
+
+</div>
+
+<div class="dv-opt" id="2g">
+  <div class="dv-olabel"><a class="dv-oid" href="#2g">2g</a><span><b style="color:var(--label)">Multi-select</b> — long-press any row to enter. Then tap selects, drag still adjusts that row's volume. Batch arm, mute, or save as a group. <b style="color:var(--gold)">Live in <a class="dv-oid" href="#2a">2a</a> too</b> — long-press a row.</span></div>
+  <div class="dv-card">
+    <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ true }}" hint-size="402px,874px">
+      <div style="position:absolute;inset:0;background:linear-gradient(180deg,var(--canvasHi) 0%,var(--canvas) 44%,var(--canvas) 100%)"></div>
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+        <div style="height:56px;flex:none"></div>
+        <div style="flex:none;padding:0 18px 10px;display:flex;align-items:flex-end;gap:10px">
+          <div>
+            <div class="mono" style="font-size:9.5px;color:var(--gold);margin-bottom:5px">SELECT MODE</div>
+            <div style="font-size:26px;font-weight:680;color:var(--label);letter-spacing:-.7px">3 selected</div>
+          </div>
+          <div style="flex:1"></div>
+          <div class="mono" style="font-size:9.5px;color:var(--label2);padding:7px 11px;border-radius:18px;background:var(--glass);backdrop-filter:blur(var(--blur));border:.5px solid var(--glassEdge)">DONE</div>
+        </div>
+        <div style="flex:1;min-height:0;overflow:auto;padding:0 14px">
+          <div style="display:flex;align-items:center;gap:8px;height:34px">
+            <div style="width:9px;height:9px;border-left:1.8px solid var(--label2);border-bottom:1.8px solid var(--label2);transform:rotate(-45deg);margin-left:4px"></div>
+            <div class="mono" style="font-size:9.5px;color:var(--gold)">ARMED / LIVE</div>
+            <div class="mono" style="font-size:9.5px;color:var(--label3)">3</div>
+            <div style="flex:1;height:1px;background:var(--hairline)"></div>
+          </div>
+          <div style="position:relative;overflow:hidden;border-radius:16px;margin-bottom:2px;background:color-mix(in srgb, var(--gold) 6%, transparent)">
+            <div style="position:absolute;left:0;top:0;bottom:0;width:65%;background:linear-gradient(90deg,color-mix(in srgb,var(--gold) 14%,transparent),color-mix(in srgb,var(--gold) 6%,transparent))"></div>
+            <div style="position:absolute;top:0;bottom:0;left:calc(65% - 1px);width:2px;background:var(--gold);opacity:.4"></div>
+            <div style="position:relative;display:flex;align-items:center;gap:12px;min-height:64px;padding:0 12px">
+              <div style="position:relative;width:44px;height:44px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised);border:2.5px solid var(--ring)"></div>
+                <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                  <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px var(--label)"></div>
+                  <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px var(--label)"></div>
+                </div>
+              </div>
+              <div style="flex:1;min-width:0"><div style="font-size:16.5px;font-weight:590;color:var(--label);letter-spacing:-.2px">Kitchen HomePod</div><div class="mono" style="font-size:9.5px;color:var(--gold);margin-top:5px">LIVE</div></div>
+              <div style="font-family:ui-monospace,Menlo,monospace;font-size:13px;font-weight:700;color:var(--gold)">65</div>
+              <div style="width:24px;height:24px;border-radius:50%;background:var(--gold);border:2px solid var(--gold);flex:none;display:flex;align-items:center;justify-content:center">
+                <div style="width:9px;height:5px;border-left:2px solid var(--canvas);border-bottom:2px solid var(--canvas);transform:rotate(-45deg);margin-top:-2px"></div>
+              </div>
+            </div>
+          </div>
+          <div style="position:relative;overflow:hidden;border-radius:16px;margin-bottom:2px;background:color-mix(in srgb, var(--gold) 6%, transparent)">
+            <div style="position:absolute;left:0;top:0;bottom:0;width:48%;background:linear-gradient(90deg,color-mix(in srgb,var(--gold) 14%,transparent),color-mix(in srgb,var(--gold) 6%,transparent))"></div>
+            <div style="position:absolute;top:0;bottom:0;left:calc(48% - 1px);width:2px;background:var(--gold);opacity:.4"></div>
+            <div style="position:relative;display:flex;align-items:center;gap:12px;min-height:64px;padding:0 12px">
+              <div style="position:relative;width:44px;height:44px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised);border:2.5px solid var(--ring)"></div>
+                <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                  <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px var(--label)"></div>
+                  <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px var(--label)"></div>
+                </div>
+              </div>
+              <div style="flex:1;min-width:0"><div style="font-size:16.5px;font-weight:590;color:var(--label);letter-spacing:-.2px">Office Sonos</div><div class="mono" style="font-size:9.5px;color:var(--gold);margin-top:5px">LIVE</div></div>
+              <div style="font-family:ui-monospace,Menlo,monospace;font-size:13px;font-weight:700;color:var(--gold)">48</div>
+              <div style="width:24px;height:24px;border-radius:50%;background:var(--gold);border:2px solid var(--gold);flex:none;display:flex;align-items:center;justify-content:center">
+                <div style="width:9px;height:5px;border-left:2px solid var(--canvas);border-bottom:2px solid var(--canvas);transform:rotate(-45deg);margin-top:-2px"></div>
+              </div>
+            </div>
+          </div>
+          <div style="position:relative;overflow:hidden;border-radius:16px;margin-bottom:2px">
+            <div style="position:absolute;left:0;top:0;bottom:0;width:80%;background:linear-gradient(90deg,color-mix(in srgb,var(--gold) 14%,transparent),color-mix(in srgb,var(--gold) 6%,transparent))"></div>
+            <div style="position:absolute;top:0;bottom:0;left:calc(80% - 1px);width:2px;background:var(--gold);opacity:.4"></div>
+            <div style="position:relative;display:flex;align-items:center;gap:12px;min-height:64px;padding:0 12px">
+              <div style="position:relative;width:44px;height:44px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised);border:2.5px solid var(--ring)"></div>
+                <div style="position:absolute;left:14px;top:14px;width:16px;height:16px;border-radius:2.5px;box-shadow:inset 0 0 0 1.8px var(--label)"></div>
+              </div>
+              <div style="flex:1;min-width:0"><div style="font-size:16.5px;font-weight:590;color:var(--label);letter-spacing:-.2px">This Mac</div><div class="mono" style="font-size:9.5px;color:var(--gold);margin-top:5px">LIVE</div></div>
+              <div style="font-family:ui-monospace,Menlo,monospace;font-size:13px;font-weight:700;color:var(--gold)">80</div>
+              <div style="width:24px;height:24px;border-radius:50%;border:2px solid var(--label3);flex:none"></div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:8px;height:34px">
+            <div style="width:9px;height:9px;border-left:1.8px solid var(--label2);border-bottom:1.8px solid var(--label2);transform:rotate(-45deg);margin-left:4px"></div>
+            <div class="mono" style="font-size:9.5px;color:var(--label2)">AIRPLAY</div>
+            <div class="mono" style="font-size:9.5px;color:var(--label3)">2</div>
+            <div style="flex:1;height:1px;background:var(--hairline)"></div>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;min-height:64px;padding:0 12px">
+            <div style="position:relative;width:44px;height:44px;flex:none">
+              <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised)"></div>
+              <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+                <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+              </div>
+            </div>
+            <div style="flex:1"><div style="font-size:16.5px;color:var(--label2);letter-spacing:-.2px">Living Room Apple TV</div><div class="mono" style="font-size:9.5px;color:var(--label3);margin-top:5px">IDLE</div></div>
+            <div style="font-family:ui-monospace,Menlo,monospace;font-size:13px;color:var(--label3)">55</div>
+            <div style="width:24px;height:24px;border-radius:50%;background:var(--gold);border:2px solid var(--gold);flex:none;display:flex;align-items:center;justify-content:center">
+              <div style="width:9px;height:5px;border-left:2px solid var(--canvas);border-bottom:2px solid var(--canvas);transform:rotate(-45deg);margin-top:-2px"></div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;min-height:64px;padding:0 12px">
+            <div style="position:relative;width:44px;height:44px;flex:none">
+              <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised);border:2.5px dashed var(--ring)"></div>
+              <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+                <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+              </div>
+            </div>
+            <div style="flex:1"><div style="font-size:16.5px;color:var(--label2);letter-spacing:-.2px">Bedroom HomePod mini</div><div class="mono" style="font-size:9.5px;color:var(--ring);margin-top:5px">CONNECTING…</div></div>
+            <div style="width:24px;height:24px;border-radius:50%;border:2px solid var(--label3);flex:none"></div>
+          </div>
+          <div style="height:100px"></div>
+        </div>
+
+        <div style="position:absolute;left:14px;right:14px;bottom:96px;z-index:5;border-radius:22px;padding:12px 14px;background:rgba(46,39,32,.9);backdrop-filter:blur(30px) saturate(1.7);border:.5px solid rgba(255,255,255,.15);box-shadow:0 -10px 30px rgba(0,0,0,.5);display:flex;align-items:center;gap:10px">
+          <div class="mono" style="font-size:9.5px;color:var(--gold)">3 SELECTED</div>
+          <div style="flex:1"></div>
+          <div class="mono" style="font-size:9px;color:var(--label);background:var(--pill);border-radius:7px;padding:7px 10px">ARM</div>
+          <div class="mono" style="font-size:9px;color:var(--label);background:var(--pill);border-radius:7px;padding:7px 10px">MUTE</div>
+          <div class="mono" style="font-size:9px;color:var(--canvas);background:var(--gold);border-radius:7px;padding:7px 10px">GROUP</div>
+        </div>
+
+        <div style="flex:none;padding:0 14px 24px">
+          <div style="display:flex;align-items:flex-start;border-radius:26px;background:var(--glass);backdrop-filter:blur(var(--blur)) saturate(1.6);border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi);padding:9px 6px 8px">
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:24px;height:18px;position:relative">
+                <div style="position:absolute;left:2px;top:3px;width:9px;height:12px;border-radius:1.8px;box-shadow:inset 0 0 0 1.9px var(--gold)"></div>
+                <div style="position:absolute;left:14px;top:6px;width:2px;height:6px;border-radius:1px;background:var(--gold)"></div>
+                <div style="position:absolute;left:18px;top:2px;width:2px;height:14px;border-radius:1px;background:var(--gold)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:600;color:var(--gold);letter-spacing:-.1px">Speakers</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:18px;height:18px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2.6px">
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Apps</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;flex-direction:column;gap:3px;justify-content:center">
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Groups</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;align-items:flex-end;justify-content:center;gap:2.6px">
+                <div style="width:3px;height:6px;border-radius:1.5px;background:var(--label2)"></div>
+                <div style="width:3px;height:11px;border-radius:1.5px;background:var(--label2)"></div>
+                <div style="width:3px;height:16px;border-radius:1.5px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Connect</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </x-import>
+  </div>
+</div>
+
+<p class="dv-next">Try next: "make the drawer swipe-up from anywhere" · "show <a class="dv-oid" href="#2c">2c</a> and <a class="dv-oid" href="#2d">2d</a> in light" · "add the multi-select mode" · "the group editor screen"</p>
+</section>
+
+<section class="dv-turn" id="t1">
+<div class="dv-thd"><a class="dv-tid" href="#t1">1</a><span class="dv-tname">Audiout Remote — Warm Signal under Liquid Glass</span></div>
+<p class="dv-lede">Read from your <b>companion-app-phase2-ios</b> worktree (4-tab SwiftUI shell, <code>Snapshot</code> protocol, <code>DeviceRowView</code> rules) and the Figma file's 405 variables. Everything below uses the real Warm Signal hexes — no invented colour.</p>
+
+<div class="dv-opts" style="{{ themeVars }}">
+
+<div class="dv-opt" id="1x" style="width:452px">
+  <div class="dv-olabel"><a class="dv-oid" href="#1x">1x</a>The reasoning — read this first</div>
+  <div class="dv-card" style="background:var(--panel);border:1px solid var(--hairline);padding:22px 24px;color:var(--label)">
+    <div class="mono" style="font-size:9.5px;color:var(--gold);margin-bottom:14px">THE IDENTITY MOVE</div>
+    <p style="margin:0 0 16px;font-size:13.5px;line-height:1.6;color:var(--label)">Liquid Glass samples what sits behind it. So we don't tint the glass — <b>we tint the room.</b> The warm near-black canvas (<code style="color:var(--gold)">#16130F → #1B1712</code>) is the substrate under every glass layer, which means every sheet, tab bar and toolbar comes out warm on its own. Apple's utilities float over grey. Ours float over a warm-dark console.</p>
+    <div style="height:1px;background:var(--hairline);margin:0 0 16px"></div>
+    <div class="mono" style="font-size:9.5px;color:var(--label2);margin-bottom:12px">FOUR RULES</div>
+    <div style="display:flex;flex-direction:column;gap:11px;font-size:12.5px;line-height:1.55;color:var(--label2)">
+      <div><b style="color:var(--label)">Instruments sit ON glass, never inside it.</b> A 1.6 pt halo ring dies under a blur. Rings, gold dots, meters and faders are always the top opaque layer.</div>
+      <div><b style="color:var(--label)">Gold is scarce and means "armed".</b> Selection, route-armed, meter hot end. Nothing decorative is gold — that's why an armed device reads instantly.</div>
+      <div><b style="color:var(--label)">The micro-label voice carries over verbatim.</b> SF Mono, 700, uppercase, +0.09 em: <span class="mono" style="font-size:10px;color:var(--gold)">LIVE</span> <span class="mono" style="font-size:10px;color:var(--label2)">MUTED</span> <span class="mono" style="font-size:10px;color:var(--fail)">NO ROUTE</span>. It's the one type detail nobody else's audio app has.</div>
+      <div><b style="color:var(--label)">Light mode is Circuit, not a wash.</b> Scaffolding aliases Circuit; instruments keep their authored Warm Signal values in both grounds. Flip the <i>Appearance</i> tweak.</div>
+    </div>
+    <div style="height:1px;background:var(--hairline);margin:16px 0"></div>
+    <div class="mono" style="font-size:9.5px;color:var(--label2);margin-bottom:12px">MAC → PHONE, MEASURED</div>
+    <div style="display:grid;grid-template-columns:1fr auto auto;gap:7px 14px;font-size:11.5px;color:var(--label2);align-items:baseline">
+      <span></span><span class="mono" style="font-size:9px;color:var(--label3)">MACOS</span><span class="mono" style="font-size:9px;color:var(--label3)">IOS</span>
+      <span>Body row height</span><span style="font-family:ui-monospace">42</span><span style="font-family:ui-monospace;color:var(--gold)">60</span>
+      <span>Halo ring diameter</span><span style="font-family:ui-monospace">30</span><span style="font-family:ui-monospace;color:var(--gold)">44</span>
+      <span>Halo stroke (connected)</span><span style="font-family:ui-monospace">1.6</span><span style="font-family:ui-monospace;color:var(--gold)">2.5</span>
+      <span>Route-armed dot</span><span style="font-family:ui-monospace">8</span><span style="font-family:ui-monospace;color:var(--gold)">11</span>
+      <span>Fader hit slab</span><span style="font-family:ui-monospace">17</span><span style="font-family:ui-monospace;color:var(--gold)">44</span>
+      <span>Micro-label size</span><span style="font-family:ui-monospace">8.5</span><span style="font-family:ui-monospace;color:var(--gold)">10</span>
+    </div>
+    <div style="height:1px;background:var(--hairline);margin:16px 0"></div>
+    <div class="mono" style="font-size:9.5px;color:var(--label2);margin-bottom:10px">ASSUMPTIONS I MADE</div>
+    <ul style="margin:0;padding-left:16px;font-size:12px;line-height:1.6;color:var(--label2)">
+      <li>Tabs, in your order: <b>Speakers</b> · Apps · Groups · Connect.</li>
+      <li><b>Main Out never collapses</b> — it's a fixed glass header, not a section.</li>
+      <li>Tapping a row <b>arms/disarms</b> it. Volume appears inline only once armed; everything deeper is behind the chevron.</li>
+      <li><b>PINNED</b> is a curated zone above everything; below it, armed devices float to the top of their own section.</li>
+      <li>Collapsed sections remembered <b>per Mac</b>.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="dv-opt" id="1a">
+  <div class="dv-olabel"><a class="dv-oid" href="#1a">1a</a><span><b style="color:var(--label)">Tabbed Console</b> — closest to your worktree. Glass header + glass tab bar, warm canvas between. Sections collapse; armed rows grow a fader.</span></div>
+  <div class="dv-card">
+    <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ true }}" hint-size="402px,874px">
+      <div style="position:absolute;inset:0;background:linear-gradient(180deg,var(--canvasHi) 0%,var(--canvas) 46%,var(--canvas) 100%)"></div>
+
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+        <div style="height:54px;flex:none"></div>
+
+        <div style="flex:none;padding:0 16px 12px">
+          <div style="display:flex;align-items:center;gap:9px;padding:0 2px 12px">
+            <div style="width:7px;height:7px;border-radius:50%;background:var(--gold);box-shadow:0 0 7px var(--glow);flex:none"></div>
+            <div style="font-size:20px;font-weight:600;color:var(--label);letter-spacing:-.4px">Alec's Studio</div>
+            <div class="mono" style="font-size:9px;color:var(--label2);padding:3px 6px;border-radius:4px;background:var(--pill)">LIVE</div>
+            <div style="flex:1"></div>
+            <div style="width:30px;height:30px;border-radius:50%;background:var(--glass);backdrop-filter:blur(var(--blur)) saturate(1.5);border:.5px solid var(--glassEdge);display:flex;align-items:center;justify-content:center">
+              <div style="width:3px;height:3px;border-radius:50%;background:var(--label2);box-shadow:0 -6px 0 var(--label2),0 6px 0 var(--label2)"></div>
+            </div>
+          </div>
+
+          <div style="border-radius:22px;padding:15px 16px 13px;background:var(--glass);backdrop-filter:blur(var(--blur)) saturate(1.6);border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi),0 10px 26px rgba(0,0,0,.34)">
+            <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:11px">
+              <div class="mono" style="font-size:9.5px;color:var(--gold)">MAIN OUT</div>
+              <div style="flex:1"></div>
+              <div class="mono" style="font-size:9px;color:var(--label2)">3 ARMED</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:11px;margin-bottom:14px">
+              <div style="font-size:17px;font-weight:590;color:var(--label);letter-spacing:-.2px">Downstairs</div>
+              <div style="width:5px;height:5px;border-radius:50%;background:var(--label3)"></div>
+              <div style="font-size:13px;color:var(--label2)">saved group</div>
+              <div style="flex:1"></div>
+              <div style="font-family:ui-monospace;font-size:15px;font-weight:600;color:var(--gold);letter-spacing:-.3px">{{ main }}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:13px">
+              <div onClick="{{ toggleMainMute }}" style="width:36px;height:36px;border-radius:12px;background:var(--well);border:.5px solid var(--rim);display:flex;align-items:center;justify-content:center;flex:none;cursor:pointer">
+                <div style="width:8px;height:12px;border-radius:2px 0 0 2px;background:var(--label2)"></div>
+                <div style="width:0;height:0;border-top:8px solid transparent;border-bottom:8px solid transparent;border-right:7px solid var(--label2);margin-left:-1px"></div>
+              </div>
+              <div style="flex:1;height:44px;display:flex;align-items:center;position:relative">
+                <div style="position:absolute;left:0;right:0;height:14px;border-radius:7px;background:var(--well);border:1px solid var(--rim);box-shadow:inset 0 1px 2px rgba(0,0,0,.5)"></div>
+                <div style="position:absolute;left:1px;top:15px;height:12px;border-radius:6px;width:{{ mainFill }};background:linear-gradient(90deg,var(--ember),var(--gold))"></div>
+                <div style="position:absolute;top:5px;width:34px;height:34px;border-radius:11px;background:linear-gradient(180deg,var(--thumb),color-mix(in srgb,var(--thumb) 78%,#000));border:1px solid var(--rim);box-shadow:0 2px 6px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.18);left:{{ mainThumb }}"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="flex:1;min-height:0;overflow:auto;padding:6px 16px 0">
+          <sc-for list="{{ sections }}" as="sec" hint-placeholder-count="4">
+            <div style="margin-bottom:6px">
+              <div onClick="{{ sec.toggle }}" style="display:flex;align-items:center;gap:8px;height:34px;cursor:pointer">
+                <div style="width:9px;height:9px;border-left:1.8px solid {{ sec.chev }};border-bottom:1.8px solid {{ sec.chev }};transform:rotate({{ sec.rot }});flex:none;margin-left:2px"></div>
+                <div class="mono" style="font-size:9.5px;color:{{ sec.tint }}">{{ sec.title }}</div>
+                <div class="mono" style="font-size:9.5px;color:var(--label3)">{{ sec.count }}</div>
+                <div style="flex:1;height:1px;background:var(--hairline);margin-left:2px"></div>
+              </div>
+              <sc-if value="{{ sec.open }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex;flex-direction:column">
+                  <sc-for list="{{ sec.rows }}" as="row" hint-placeholder-count="2">
+                    <div onClick="{{ row.toggle }}" style="display:flex;flex-direction:column;cursor:pointer;opacity:{{ row.dim }};border-radius:16px;background:{{ row.bg }};padding:0 10px;margin-bottom:2px">
+                      <div style="display:flex;align-items:center;gap:12px;min-height:60px">
+                        <div style="position:relative;width:44px;height:44px;flex:none">
+                          <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised);box-shadow:inset 0 0 0 .5px rgba(255,255,255,.07)"></div>
+                          <div style="position:absolute;inset:0;border-radius:50%;border:{{ row.ring }}"></div>
+                          <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                            <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px {{ row.glyph }}"></div>
+                            <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px {{ row.glyph }}"></div>
+                          </div>
+                          <div style="position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:{{ row.dot }};box-shadow:{{ row.dotGlow }};border:1.5px solid var(--canvas)"></div>
+                        </div>
+                        <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:4px">
+                          <div style="font-size:16.5px;font-weight:{{ row.weight }};color:{{ row.nameColor }};letter-spacing:-.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ row.name }}</div>
+                          <div style="display:flex;align-items:center;gap:6px;height:12px">
+                            <div class="mono" style="font-size:9.5px;color:{{ row.subTint }}">{{ row.sub }}</div>
+                            <sc-if value="{{ row.showMeter }}" hint-placeholder-val="{{ false }}">
+                              <div style="width:62px;height:3px;border-radius:2px;background:var(--meter);overflow:hidden">
+                                <div style="height:3px;border-radius:2px;width:{{ row.level }};background:linear-gradient(90deg,var(--ember),var(--gold))"></div>
+                              </div>
+                            </sc-if>
+                            <sc-if value="{{ row.pill }}" hint-placeholder-val="{{ false }}">
+                              <div class="mono" style="font-size:9px;color:var(--label2);background:var(--pill);border-radius:5px;padding:2px 5px">{{ row.pill }}</div>
+                            </sc-if>
+                          </div>
+                        </div>
+                        <div style="font-family:ui-monospace;font-size:13px;color:{{ row.readTint }};flex:none">{{ row.read }}</div>
+                        <div style="width:7px;height:7px;border-top:1.6px solid var(--label3);border-right:1.6px solid var(--label3);transform:rotate(45deg);flex:none;margin-left:2px"></div>
+                      </div>
+                      <sc-if value="{{ row.showFader }}" hint-placeholder-val="{{ false }}">
+                        <div style="display:flex;align-items:center;gap:11px;padding:0 2px 10px">
+                          <div style="width:30px;height:30px;border-radius:10px;background:var(--well);border:.5px solid var(--rim);display:flex;align-items:center;justify-content:center;flex:none">
+                            <div style="width:7px;height:10px;border-radius:2px 0 0 2px;background:var(--label2)"></div>
+                            <div style="width:0;height:0;border-top:7px solid transparent;border-bottom:7px solid transparent;border-right:6px solid var(--label2);margin-left:-1px"></div>
+                          </div>
+                          <div style="flex:1;height:36px;display:flex;align-items:center;position:relative">
+                            <div style="position:absolute;left:0;right:0;height:12px;border-radius:6px;background:var(--well);border:1px solid var(--rim);box-shadow:inset 0 1px 2px rgba(0,0,0,.5)"></div>
+                            <div style="position:absolute;left:1px;top:13px;height:10px;border-radius:5px;width:{{ row.fill }};background:linear-gradient(90deg,var(--ember),var(--gold))"></div>
+                            <div style="position:absolute;top:5px;width:26px;height:26px;border-radius:9px;background:linear-gradient(180deg,var(--thumb),color-mix(in srgb,var(--thumb) 78%,#000));border:1px solid var(--rim);box-shadow:0 2px 5px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.18);left:{{ row.thumb }}"></div>
+                          </div>
+                        </div>
+                      </sc-if>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="flex:none;padding:0 14px 30px">
+          <div style="display:flex;border-radius:24px;background:var(--glass);backdrop-filter:blur(var(--blur)) saturate(1.6);border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi),0 -6px 24px rgba(0,0,0,.4);padding:9px 6px 7px">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px">
+              <div style="width:22px;height:16px;position:relative">
+                <div style="position:absolute;left:2px;top:3px;width:8px;height:10px;border-radius:1.6px;box-shadow:inset 0 0 0 1.8px var(--gold)"></div>
+                <div style="position:absolute;left:13px;top:5px;width:2px;height:6px;border-radius:1px;background:var(--gold)"></div>
+                <div style="position:absolute;left:17px;top:2px;width:2px;height:12px;border-radius:1px;background:var(--gold)"></div>
+              </div>
+              <div style="font-size:10.5px;font-weight:590;color:var(--gold)">Speakers</div>
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px">
+              <div style="width:16px;height:16px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2.5px">
+                <div style="border-radius:2px;box-shadow:inset 0 0 0 1.7px var(--label2)"></div><div style="border-radius:2px;box-shadow:inset 0 0 0 1.7px var(--label2)"></div>
+                <div style="border-radius:2px;box-shadow:inset 0 0 0 1.7px var(--label2)"></div><div style="border-radius:2px;box-shadow:inset 0 0 0 1.7px var(--label2)"></div>
+              </div>
+              <div style="font-size:10.5px;color:var(--label2)">Apps</div>
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px">
+              <div style="width:18px;height:16px;display:flex;flex-direction:column;gap:2.5px;justify-content:center">
+                <div style="height:3.4px;border-radius:1.7px;background:var(--label2)"></div>
+                <div style="height:3.4px;border-radius:1.7px;background:var(--label2)"></div>
+                <div style="height:3.4px;border-radius:1.7px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10.5px;color:var(--label2)">Groups</div>
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px">
+              <div style="width:18px;height:16px;position:relative;display:flex;align-items:flex-end;justify-content:center;gap:2.5px">
+                <div style="width:3px;height:6px;border-radius:1.5px;background:var(--label2)"></div>
+                <div style="width:3px;height:11px;border-radius:1.5px;background:var(--label2)"></div>
+                <div style="width:3px;height:16px;border-radius:1.5px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10.5px;color:var(--label2)">Connect</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </x-import>
+  </div>
+</div>
+
+<div class="dv-opt" id="1b">
+  <div class="dv-olabel"><a class="dv-oid" href="#1b">1b</a><span><b style="color:var(--label)">Floating Deck</b> — Main Out leaves the header and becomes a glass deck docked above the tab bar, thumb-reachable. The list gets the whole screen; sections are pure hairline captions.</span></div>
+  <div class="dv-card">
+    <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ true }}" hint-size="402px,874px">
+      <div style="position:absolute;inset:0;background:linear-gradient(180deg,var(--canvasHi) 0%,var(--canvas) 40%,#120F0C 100%)"></div>
+      <div style="position:absolute;left:-60px;top:120px;width:300px;height:300px;border-radius:50%;background:radial-gradient(circle,rgba(232,184,75,.09),transparent 70%)"></div>
+
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+        <div style="height:56px;flex:none"></div>
+        <div style="flex:none;padding:0 20px 14px;display:flex;align-items:flex-end;gap:10px">
+          <div>
+            <div class="mono" style="font-size:9px;color:var(--label2);margin-bottom:5px">CONNECTED TO</div>
+            <div style="font-size:26px;font-weight:680;color:var(--label);letter-spacing:-.7px">Speakers</div>
+          </div>
+          <div style="flex:1"></div>
+          <div style="display:flex;align-items:center;gap:6px;padding:5px 9px 5px 7px;border-radius:20px;background:var(--glass);backdrop-filter:blur(var(--blur));border:.5px solid var(--glassEdge)">
+            <div style="width:6px;height:6px;border-radius:50%;background:var(--gold);box-shadow:0 0 6px var(--glow)"></div>
+            <div style="font-size:12px;color:var(--label);font-weight:500">Studio</div>
+          </div>
+        </div>
+
+        <div style="flex:1;min-height:0;overflow:auto;padding:0 20px">
+          <div style="display:flex;align-items:center;gap:8px;height:30px">
+            <div class="mono" style="font-size:9px;color:var(--gold)">PINNED</div>
+            <div style="flex:1;height:1px;background:linear-gradient(90deg,var(--ember),transparent)"></div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">
+            <div style="display:flex;align-items:center;gap:13px;padding:11px 14px;border-radius:18px;background:rgba(232,184,75,.07);border:.5px solid rgba(232,184,75,.22)">
+              <div style="position:relative;width:44px;height:44px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised)"></div>
+                <div style="position:absolute;inset:0;border-radius:50%;border:2.5px solid var(--ring)"></div>
+                <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                  <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px var(--label)"></div>
+                  <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px var(--label)"></div>
+                </div>
+                <div style="position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:var(--gold);box-shadow:0 0 8px var(--glow);border:1.5px solid var(--canvas)"></div>
+              </div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:16.5px;font-weight:590;color:var(--label);letter-spacing:-.2px">Kitchen HomePod</div>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:5px">
+                  <div class="mono" style="font-size:9.5px;color:var(--gold)">LIVE</div>
+                  <div style="width:62px;height:3px;border-radius:2px;background:var(--meter);overflow:hidden"><div style="height:3px;width:68%;border-radius:2px;background:linear-gradient(90deg,var(--ember),var(--gold))"></div></div>
+                  <div class="mono" style="font-size:9px;color:var(--label2);background:var(--pill);border-radius:5px;padding:2px 5px">MUSIC</div>
+                </div>
+              </div>
+              <div style="font-family:ui-monospace;font-size:13px;color:var(--gold)">65</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:13px;padding:11px 14px;border-radius:18px;background:rgba(232,184,75,.07);border:.5px solid rgba(232,184,75,.22)">
+              <div style="position:relative;width:44px;height:44px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised)"></div>
+                <div style="position:absolute;inset:0;border-radius:50%;border:2.5px solid var(--ring)"></div>
+                <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                  <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px var(--label)"></div>
+                  <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px var(--label)"></div>
+                </div>
+                <div style="position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:var(--gold);box-shadow:0 0 8px var(--glow);border:1.5px solid var(--canvas)"></div>
+              </div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:16.5px;font-weight:590;color:var(--label);letter-spacing:-.2px">Office Sonos</div>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:5px">
+                  <div class="mono" style="font-size:9.5px;color:var(--gold)">LIVE</div>
+                  <div style="width:62px;height:3px;border-radius:2px;background:var(--meter);overflow:hidden"><div style="height:3px;width:41%;border-radius:2px;background:linear-gradient(90deg,var(--ember),var(--gold))"></div></div>
+                </div>
+              </div>
+              <div style="font-family:ui-monospace;font-size:13px;color:var(--gold)">48</div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:8px;height:30px">
+            <div style="width:9px;height:9px;border-left:1.8px solid var(--label2);border-bottom:1.8px solid var(--label2);transform:rotate(-45deg)"></div>
+            <div class="mono" style="font-size:9px;color:var(--label2)">AIRPLAY</div>
+            <div class="mono" style="font-size:9px;color:var(--label3)">4</div>
+            <div style="flex:1;height:1px;background:var(--hairline)"></div>
+          </div>
+          <div style="display:flex;flex-direction:column">
+            <div style="display:flex;align-items:center;gap:13px;min-height:58px;padding:0 4px">
+              <div style="position:relative;width:44px;height:44px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised)"></div>
+                <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                  <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+                  <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+                </div>
+                <div style="position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:var(--socket);border:1.5px solid var(--canvas)"></div>
+              </div>
+              <div style="flex:1"><div style="font-size:16.5px;color:var(--label2);letter-spacing:-.2px">Living Room Apple TV</div><div class="mono" style="font-size:9.5px;color:var(--label3);margin-top:5px">IDLE</div></div>
+              <div style="font-family:ui-monospace;font-size:13px;color:var(--label3)">55</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:13px;min-height:58px;padding:0 4px">
+              <div style="position:relative;width:44px;height:44px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised)"></div>
+                <div style="position:absolute;inset:0;border-radius:50%;border:2.5px dashed var(--ring)"></div>
+                <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                  <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+                  <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+                </div>
+              </div>
+              <div style="flex:1"><div style="font-size:16.5px;color:var(--label2);letter-spacing:-.2px">Bedroom HomePod mini</div><div class="mono" style="font-size:9.5px;color:var(--ring);margin-top:5px">CONNECTING…</div></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:13px;min-height:58px;padding:0 4px">
+              <div style="position:relative;width:44px;height:44px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised)"></div>
+                <div style="position:absolute;inset:0;border-radius:50%;border:2.8px solid var(--fail)"></div>
+                <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+                  <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+                  <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+                </div>
+              </div>
+              <div style="flex:1"><div style="font-size:16.5px;color:var(--label2);letter-spacing:-.2px">Garage Express</div><div class="mono" style="font-size:9.5px;color:var(--fail);margin-top:5px">NOT ON NETWORK</div></div>
+              <div style="font-size:12.5px;color:var(--gold);font-weight:500">Retry</div>
+            </div>
+          </div>
+        </div>
+
+        <div style="flex:none;padding:0 14px 24px;display:flex;flex-direction:column;gap:9px">
+          <div style="border-radius:26px;padding:14px 16px 12px;background:rgba(52,45,37,.66);backdrop-filter:blur(30px) saturate(1.7);border:.5px solid rgba(255,255,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.13),0 -10px 34px rgba(0,0,0,.5)">
+            <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:10px">
+              <div class="mono" style="font-size:9.5px;color:var(--gold)">MAIN OUT</div>
+              <div style="font-size:13px;color:var(--label2)">Downstairs · 3 armed</div>
+              <div style="flex:1"></div>
+              <div style="font-family:ui-monospace;font-size:14px;font-weight:600;color:var(--gold)">72</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="width:34px;height:34px;border-radius:11px;background:var(--well);border:.5px solid var(--rim);display:flex;align-items:center;justify-content:center;flex:none">
+                <div style="width:8px;height:11px;border-radius:2px 0 0 2px;background:var(--label2)"></div>
+                <div style="width:0;height:0;border-top:7.5px solid transparent;border-bottom:7.5px solid transparent;border-right:6.5px solid var(--label2);margin-left:-1px"></div>
+              </div>
+              <div style="flex:1;height:40px;display:flex;align-items:center;position:relative">
+                <div style="position:absolute;left:0;right:0;height:16px;border-radius:8px;background:var(--well);border:1px solid var(--rim);box-shadow:inset 0 1px 3px rgba(0,0,0,.55)"></div>
+                <div style="position:absolute;left:1px;top:13px;height:14px;border-radius:7px;width:72%;background:linear-gradient(90deg,var(--ember),var(--gold))"></div>
+                <div style="position:absolute;top:3px;left:calc(72% - 17px);width:34px;height:34px;border-radius:12px;background:linear-gradient(180deg,var(--thumb),#5f5546);border:1px solid var(--rim);box-shadow:0 2px 7px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.2)"></div>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;border-radius:24px;background:var(--glass);backdrop-filter:blur(var(--blur)) saturate(1.6);border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi);padding:8px 6px 6px">
+            <div style="flex:1;text-align:center;font-size:10.5px;font-weight:590;color:var(--gold)">Speakers</div>
+            <div style="flex:1;text-align:center;font-size:10.5px;color:var(--label2)">Apps</div>
+            <div style="flex:1;text-align:center;font-size:10.5px;color:var(--label2)">Groups</div>
+            <div style="flex:1;text-align:center;font-size:10.5px;color:var(--label2)">Connect</div>
+          </div>
+        </div>
+      </div>
+    </x-import>
+  </div>
+</div>
+
+<div class="dv-opt" id="1c">
+  <div class="dv-olabel"><a class="dv-oid" href="#1c">1c</a><span><b style="color:var(--label)">Bus Rail</b> — the boldest. The membership rail from the Groups window becomes a literal gold spine down the left gutter: every armed device is a node wired to Main Out. Signal flow you can see.</span></div>
+  <div class="dv-card">
+    <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ true }}" hint-size="402px,874px">
+      <div style="position:absolute;inset:0;background:radial-gradient(120% 60% at 50% 0%,#221D16,var(--canvas) 60%)"></div>
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+        <div style="height:56px;flex:none"></div>
+
+        <div style="flex:none;padding:0 18px 8px;display:flex;align-items:center;gap:10px">
+          <div style="font-size:15px;font-weight:600;color:var(--label)">Studio</div>
+          <div class="mono" style="font-size:9px;color:var(--gold)">LIVE</div>
+          <div style="flex:1"></div>
+          <div class="mono" style="font-size:9px;color:var(--label2)">3 / 6 ARMED</div>
+        </div>
+
+        <div style="flex:none;margin:0 18px 4px;padding:16px 18px 15px;border-radius:20px;background:var(--glass);backdrop-filter:blur(var(--blur)) saturate(1.6);border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi);position:relative">
+          <div style="display:flex;align-items:center;gap:14px">
+            <div style="position:relative;width:56px;height:56px;flex:none">
+              <div style="position:absolute;inset:0;border-radius:50%;border:3px solid var(--gold);box-shadow:0 0 16px rgba(255,217,122,.34)"></div>
+              <div style="position:absolute;inset:7px;border-radius:50%;background:var(--well);border:.5px solid var(--rim)"></div>
+              <div class="mono" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:15px;color:var(--gold);letter-spacing:0">72</div>
+            </div>
+            <div style="flex:1">
+              <div class="mono" style="font-size:9.5px;color:var(--gold);margin-bottom:5px">MAIN OUT</div>
+              <div style="font-size:18px;font-weight:620;color:var(--label);letter-spacing:-.3px">Downstairs</div>
+              <div style="font-size:12.5px;color:var(--label2);margin-top:3px">Kitchen · Office · This Mac</div>
+            </div>
+            <div style="width:38px;height:38px;border-radius:13px;background:var(--well);border:.5px solid var(--rim);display:flex;align-items:center;justify-content:center;flex:none">
+              <div style="width:8px;height:12px;border-radius:2px 0 0 2px;background:var(--label2)"></div>
+              <div style="width:0;height:0;border-top:8px solid transparent;border-bottom:8px solid transparent;border-right:7px solid var(--label2);margin-left:-1px"></div>
+            </div>
+          </div>
+        </div>
+
+        <div style="flex:1;min-height:0;overflow:auto;position:relative;padding:0 18px">
+          <div style="position:absolute;left:44px;top:0;bottom:96px;width:2px;background:linear-gradient(180deg,var(--gold) 0%,var(--gold) 46%,var(--ember) 47%,var(--ember) 100%)"></div>
+          <div style="position:absolute;left:40px;bottom:92px;width:10px;height:10px;border-radius:50%;background:var(--ember)"></div>
+
+          <div style="display:flex;align-items:center;gap:8px;height:32px;padding-left:44px">
+            <div class="mono" style="font-size:9px;color:var(--gold)">ARMED</div>
+            <div style="flex:1;height:1px;background:var(--hairline)"></div>
+          </div>
+
+          <div style="display:flex;align-items:center;min-height:64px;position:relative">
+            <div style="width:26px;height:26px;border-radius:50%;background:var(--gold);border:2px solid var(--ember);box-shadow:0 0 12px rgba(255,217,122,.3);flex:none;margin-left:13px;z-index:2"></div>
+            <div style="width:16px;height:2px;background:var(--gold);flex:none"></div>
+            <div style="flex:1;display:flex;align-items:center;gap:11px;padding:9px 13px;border-radius:16px;background:rgba(232,184,75,.06);border:.5px solid rgba(232,184,75,.18);min-width:0">
+              <div style="position:relative;width:38px;height:38px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised);border:2.5px solid var(--ring)"></div>
+                <div style="position:absolute;left:9px;top:10px;width:20px;height:20px">
+                  <div style="position:absolute;left:5px;top:2.2px;width:10px;height:15.6px;border-radius:1.6px;box-shadow:inset 0 0 0 1.7px var(--label)"></div>
+                  <div style="position:absolute;left:7px;top:8.4px;width:6px;height:6px;border-radius:50%;box-shadow:inset 0 0 0 1.7px var(--label)"></div>
+                </div>
+              </div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:15.5px;font-weight:560;color:var(--label);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Kitchen HomePod</div>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+                  <div style="width:54px;height:3px;border-radius:2px;background:var(--meter);overflow:hidden"><div style="height:3px;width:68%;border-radius:2px;background:linear-gradient(90deg,var(--ember),var(--gold))"></div></div>
+                  <div class="mono" style="font-size:9px;color:var(--label2)">65</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;min-height:64px;position:relative">
+            <div style="width:26px;height:26px;border-radius:50%;background:var(--gold);border:2px solid var(--ember);box-shadow:0 0 12px rgba(255,217,122,.3);flex:none;margin-left:13px;z-index:2"></div>
+            <div style="width:16px;height:2px;background:var(--gold);flex:none"></div>
+            <div style="flex:1;display:flex;align-items:center;gap:11px;padding:9px 13px;border-radius:16px;background:rgba(232,184,75,.06);border:.5px solid rgba(232,184,75,.18);min-width:0">
+              <div style="position:relative;width:38px;height:38px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised);border:2.5px solid var(--ring)"></div>
+                <div style="position:absolute;left:9px;top:10px;width:20px;height:20px">
+                  <div style="position:absolute;left:5px;top:2.2px;width:10px;height:15.6px;border-radius:1.6px;box-shadow:inset 0 0 0 1.7px var(--label)"></div>
+                  <div style="position:absolute;left:7px;top:8.4px;width:6px;height:6px;border-radius:50%;box-shadow:inset 0 0 0 1.7px var(--label)"></div>
+                </div>
+              </div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:15.5px;font-weight:560;color:var(--label)">Office Sonos</div>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+                  <div style="width:54px;height:3px;border-radius:2px;background:var(--meter);overflow:hidden"><div style="height:3px;width:41%;border-radius:2px;background:linear-gradient(90deg,var(--ember),var(--gold))"></div></div>
+                  <div class="mono" style="font-size:9px;color:var(--label2)">48</div>
+                  <div class="mono" style="font-size:9px;color:var(--label2);background:var(--pill);border-radius:5px;padding:2px 5px">SAFARI</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:8px;height:34px;padding-left:44px">
+            <div style="width:9px;height:9px;border-left:1.8px solid var(--label2);border-bottom:1.8px solid var(--label2);transform:rotate(-45deg)"></div>
+            <div class="mono" style="font-size:9px;color:var(--label2)">AVAILABLE</div>
+            <div class="mono" style="font-size:9px;color:var(--label3)">3</div>
+            <div style="flex:1;height:1px;background:var(--hairline)"></div>
+          </div>
+
+          <div style="display:flex;align-items:center;min-height:56px">
+            <div style="width:26px;height:26px;border-radius:50%;background:transparent;border:2px solid var(--ember);flex:none;margin-left:13px;z-index:2"></div>
+            <div style="width:16px"></div>
+            <div style="flex:1;display:flex;align-items:center;gap:11px;padding:0 13px;min-width:0">
+              <div style="position:relative;width:38px;height:38px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised)"></div>
+                <div style="position:absolute;left:9px;top:10px;width:20px;height:20px">
+                  <div style="position:absolute;left:5px;top:2.2px;width:10px;height:15.6px;border-radius:1.6px;box-shadow:inset 0 0 0 1.7px var(--label3)"></div>
+                  <div style="position:absolute;left:7px;top:8.4px;width:6px;height:6px;border-radius:50%;box-shadow:inset 0 0 0 1.7px var(--label3)"></div>
+                </div>
+              </div>
+              <div style="flex:1;font-size:15.5px;color:var(--label2)">Living Room Apple TV</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;min-height:56px">
+            <div style="width:26px;height:26px;border-radius:50%;background:transparent;border:2px solid var(--ember);flex:none;margin-left:13px;z-index:2"></div>
+            <div style="width:16px"></div>
+            <div style="flex:1;display:flex;align-items:center;gap:11px;padding:0 13px;min-width:0">
+              <div style="position:relative;width:38px;height:38px;flex:none">
+                <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised);border:2.5px dashed var(--ring)"></div>
+                <div style="position:absolute;left:9px;top:10px;width:20px;height:20px">
+                  <div style="position:absolute;left:5px;top:2.2px;width:10px;height:15.6px;border-radius:1.6px;box-shadow:inset 0 0 0 1.7px var(--label3)"></div>
+                  <div style="position:absolute;left:7px;top:8.4px;width:6px;height:6px;border-radius:50%;box-shadow:inset 0 0 0 1.7px var(--label3)"></div>
+                </div>
+              </div>
+              <div style="flex:1"><div style="font-size:15.5px;color:var(--label2)">Bedroom HomePod mini</div><div class="mono" style="font-size:9px;color:var(--ring);margin-top:3px">CONNECTING…</div></div>
+            </div>
+          </div>
+        </div>
+
+        <div style="flex:none;padding:0 14px 30px">
+          <div style="display:flex;align-items:flex-start;border-radius:26px;background:var(--glass);backdrop-filter:blur(var(--blur)) saturate(1.6);border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi);padding:9px 6px 8px">
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:24px;height:18px;position:relative">
+                <div style="position:absolute;left:2px;top:3px;width:9px;height:12px;border-radius:1.8px;box-shadow:inset 0 0 0 1.9px var(--gold)"></div>
+                <div style="position:absolute;left:14px;top:6px;width:2px;height:6px;border-radius:1px;background:var(--gold)"></div>
+                <div style="position:absolute;left:18px;top:2px;width:2px;height:14px;border-radius:1px;background:var(--gold)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:600;color:var(--gold);letter-spacing:-.1px">Speakers</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:18px;height:18px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2.6px">
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+                <div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div><div style="border-radius:2.2px;box-shadow:inset 0 0 0 1.8px var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Apps</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;flex-direction:column;gap:3px;justify-content:center">
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+                <div style="height:3.2px;border-radius:1.6px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Groups</div>
+            </div>
+<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0">
+              <div style="width:20px;height:18px;display:flex;align-items:flex-end;justify-content:center;gap:2.6px">
+                <div style="width:3px;height:6px;border-radius:1.5px;background:var(--label2)"></div>
+                <div style="width:3px;height:11px;border-radius:1.5px;background:var(--label2)"></div>
+                <div style="width:3px;height:16px;border-radius:1.5px;background:var(--label2)"></div>
+              </div>
+              <div style="font-size:10px;font-weight:400;color:var(--label2);letter-spacing:-.1px">Connect</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </x-import>
+  </div>
+</div>
+
+<div class="dv-opt" id="1d" style="width:440px">
+  <div class="dv-olabel"><a class="dv-oid" href="#1d">1d</a><span><b style="color:var(--label)">Device row states</b> — the full state machine from <code>DeviceRowView.swift</code>, at iOS scale. This is the atom all three directions share.</span></div>
+  <div class="dv-card" style="background:linear-gradient(180deg,var(--canvasHi),var(--canvas));border:1px solid var(--hairline);padding:14px 16px">
+    <sc-for list="{{ stateRows }}" as="s" hint-placeholder-count="8">
+      <div style="display:flex;align-items:center;gap:12px;min-height:62px;border-bottom:1px solid rgba(58,51,43,.5);opacity:{{ s.dim }}">
+        <div style="position:relative;width:44px;height:44px;flex:none">
+          <div style="position:absolute;inset:0;border-radius:50%;background:var(--raised);box-shadow:inset 0 0 0 .5px rgba(255,255,255,.07)"></div>
+          <div style="position:absolute;inset:0;border-radius:50%;border:{{ s.ring }}"></div>
+          <div style="position:absolute;left:11px;top:12px;width:22px;height:22px">
+            <div style="position:absolute;left:5.5px;top:2.4px;width:11px;height:17.2px;border-radius:1.8px;box-shadow:inset 0 0 0 1.8px {{ s.glyph }}"></div>
+            <div style="position:absolute;left:7.7px;top:9.2px;width:6.6px;height:6.6px;border-radius:50%;box-shadow:inset 0 0 0 1.8px {{ s.glyph }}"></div>
+          </div>
+          <div style="position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:{{ s.dot }};box-shadow:{{ s.dotGlow }};border:1.5px solid var(--canvas)"></div>
+        </div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:16px;font-weight:{{ s.weight }};color:{{ s.nameColor }};letter-spacing:-.2px">{{ s.name }}</div>
+          <div class="mono" style="font-size:9.5px;color:{{ s.subTint }};margin-top:5px">{{ s.sub }}</div>
+        </div>
+        <div class="mono" style="font-size:10px;color:var(--label2);text-align:right;flex:none;max-width:104px;line-height:1.4">{{ s.label }}</div>
+      </div>
+    </sc-for>
+  </div>
+</div>
+
+<div class="dv-opt" id="1e" style="width:440px">
+  <div class="dv-olabel"><a class="dv-oid" href="#1e">1e</a><span><b style="color:var(--label)">Main Out, three ways</b> — the master control is the one thing on every screen. Pick the metaphor.</span></div>
+  <div class="dv-card" style="background:linear-gradient(180deg,var(--canvasHi),var(--canvas));border:1px solid var(--hairline);padding:20px 18px;display:flex;flex-direction:column;gap:18px">
+
+    <div>
+      <div class="mono" style="font-size:10px;color:var(--label2);margin-bottom:9px">A · WARM FADER — literal port of the Mac</div>
+      <div style="border-radius:20px;padding:14px 16px;background:var(--glass);backdrop-filter:blur(var(--blur));border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi)">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:11px">
+          <div class="mono" style="font-size:9.5px;color:var(--gold)">MAIN OUT</div><div style="font-size:12.5px;color:var(--label2)">Downstairs</div>
+          <div style="flex:1"></div><div style="font-family:ui-monospace;font-size:14px;font-weight:600;color:var(--gold)">72</div>
+        </div>
+        <div style="height:40px;display:flex;align-items:center;position:relative">
+          <div style="position:absolute;left:0;right:0;height:16px;border-radius:8px;background:var(--well);border:1px solid var(--rim);box-shadow:inset 0 1px 3px rgba(0,0,0,.55)"></div>
+          <div style="position:absolute;left:1px;top:12px;height:14px;border-radius:7px;width:72%;background:linear-gradient(90deg,var(--ember),var(--gold))"></div>
+          <div style="position:absolute;top:3px;left:calc(72% - 17px);width:34px;height:34px;border-radius:12px;background:linear-gradient(180deg,var(--thumb),#5f5546);border:1px solid var(--rim);box-shadow:0 2px 7px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.2)"></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="mono" style="font-size:10px;color:var(--label2);margin-bottom:9px">B · DIAL — one-thumb, drag anywhere on the ring</div>
+      <div style="border-radius:20px;padding:16px;background:var(--glass);backdrop-filter:blur(var(--blur));border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi);display:flex;align-items:center;gap:16px">
+        <div style="position:relative;width:76px;height:76px;flex:none">
+          <div style="position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 220deg,var(--gold) 0deg,var(--gold) 200deg,var(--meter) 200deg,var(--meter) 280deg,transparent 280deg)"></div>
+          <div style="position:absolute;inset:6px;border-radius:50%;background:var(--canvas)"></div>
+          <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px">
+            <div style="font-family:ui-monospace;font-size:22px;font-weight:700;color:var(--gold);letter-spacing:-1px">72</div>
+            <div class="mono" style="font-size:7.5px;color:var(--label3)">MAIN</div>
+          </div>
+        </div>
+        <div style="flex:1">
+          <div style="font-size:17px;font-weight:600;color:var(--label);letter-spacing:-.3px">Downstairs</div>
+          <div style="font-size:12.5px;color:var(--label2);margin-top:4px">Kitchen · Office · This Mac</div>
+          <div style="display:flex;gap:6px;margin-top:9px">
+            <div class="mono" style="font-size:9px;color:var(--label2);background:var(--pill);border-radius:5px;padding:3px 6px">MUTE</div>
+            <div class="mono" style="font-size:9px;color:var(--label2);background:var(--pill);border-radius:5px;padding:3px 6px">SWITCH</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="mono" style="font-size:10px;color:var(--label2);margin-bottom:9px">C · SIGNAL BAR — level meter and control in one slab</div>
+      <div style="border-radius:20px;padding:15px 16px;background:var(--glass);backdrop-filter:blur(var(--blur));border:.5px solid var(--glassEdge);box-shadow:inset 0 1px 0 var(--glassHi)">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+          <div class="mono" style="font-size:9.5px;color:var(--gold)">MAIN OUT</div>
+          <div style="font-size:12.5px;color:var(--label);font-weight:500">Downstairs</div>
+          <div style="flex:1"></div><div class="mono" style="font-size:9px;color:var(--label2)">3 ARMED</div>
+        </div>
+        <div style="height:46px;border-radius:12px;background:var(--well);border:1px solid var(--rim);position:relative;overflow:hidden">
+          <div style="position:absolute;left:0;top:0;bottom:0;width:72%;background:linear-gradient(90deg,rgba(138,106,47,.5),rgba(232,184,75,.42))"></div>
+          <div style="position:absolute;left:calc(72% - 1.5px);top:0;bottom:0;width:3px;background:var(--glow);box-shadow:0 0 10px var(--glow)"></div>
+          <div style="position:absolute;left:0;right:0;bottom:0;height:5px;display:flex;gap:2px;padding:0 4px 3px;align-items:flex-end">
+            <div style="flex:1;height:2px;background:var(--gold);border-radius:1px"></div><div style="flex:1;height:4px;background:var(--gold);border-radius:1px"></div><div style="flex:1;height:2px;background:var(--gold);border-radius:1px"></div><div style="flex:1;height:3px;background:var(--gold);border-radius:1px"></div><div style="flex:1;height:2px;background:var(--ember);border-radius:1px"></div><div style="flex:1;height:1px;background:var(--ember);border-radius:1px"></div>
+          </div>
+          <div style="position:absolute;left:14px;top:0;bottom:0;display:flex;align-items:center"><div style="font-family:ui-monospace;font-size:19px;font-weight:700;color:var(--label);letter-spacing:-.6px">72</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="dv-opt" id="1f" style="width:440px">
+  <div class="dv-olabel"><a class="dv-oid" href="#1f">1f</a><span><b style="color:var(--label)">Glanceable surfaces</b> — read-only Lock Screen widget, Live Activity while streaming, and the Home Screen group tile.</span></div>
+  <div class="dv-card" style="background:linear-gradient(160deg,#2a2118,#100d0a);border:1px solid var(--hairline);padding:22px 20px;display:flex;flex-direction:column;gap:20px">
+
+    <div>
+      <div class="mono" style="font-size:10px;color:var(--label2);margin-bottom:10px">LOCK SCREEN · RECTANGULAR</div>
+      <div style="width:170px;padding:3px 0">
+        <div style="display:flex;align-items:center;gap:5px;margin-bottom:4px">
+          <div style="width:5px;height:5px;border-radius:50%;background:#fff"></div>
+          <div class="mono" style="font-size:9px;color:rgba(255,255,255,.75)">AUDIOUT</div>
+        </div>
+        <div style="font-size:16px;font-weight:640;color:#fff;letter-spacing:-.3px">Downstairs</div>
+        <div style="font-size:12px;color:rgba(255,255,255,.62);margin-top:1px">Kitchen · Office · This Mac</div>
+        <div style="display:flex;gap:3px;margin-top:6px;align-items:flex-end;height:9px">
+          <div style="flex:1;height:4px;background:rgba(255,255,255,.85);border-radius:1px"></div><div style="flex:1;height:8px;background:rgba(255,255,255,.85);border-radius:1px"></div><div style="flex:1;height:5px;background:rgba(255,255,255,.85);border-radius:1px"></div><div style="flex:1;height:9px;background:rgba(255,255,255,.85);border-radius:1px"></div><div style="flex:1;height:3px;background:rgba(255,255,255,.5);border-radius:1px"></div><div style="flex:1;height:6px;background:rgba(255,255,255,.5);border-radius:1px"></div><div style="flex:1;height:2px;background:rgba(255,255,255,.35);border-radius:1px"></div>
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--label3);margin-top:9px;line-height:1.5;max-width:330px">Lock Screen widgets render monochrome — so the identity here is the <b style="color:var(--label2)">micro-label voice and the meter silhouette</b>, not gold. Gold returns the instant it's tapped.</div>
+    </div>
+
+    <div style="height:1px;background:var(--hairline)"></div>
+
+    <div>
+      <div class="mono" style="font-size:10px;color:var(--label2);margin-bottom:10px">LIVE ACTIVITY · STREAMING</div>
+      <div style="width:360px;border-radius:24px;padding:15px 17px;background:rgba(38,32,26,.9);backdrop-filter:blur(20px);border:.5px solid rgba(255,255,255,.09);box-shadow:0 12px 30px rgba(0,0,0,.5)">
+        <div style="display:flex;align-items:center;gap:12px">
+          <div style="position:relative;width:42px;height:42px;flex:none">
+            <div style="position:absolute;inset:0;border-radius:50%;border:2.5px solid var(--gold);box-shadow:0 0 12px rgba(255,217,122,.3)"></div>
+            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center"><div class="mono" style="font-size:11px;color:var(--gold);letter-spacing:0">72</div></div>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:7px">
+              <div style="font-size:15.5px;font-weight:600;color:var(--label);letter-spacing:-.2px">Downstairs</div>
+              <div class="mono" style="font-size:8.5px;color:var(--gold)">LIVE</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:5px;margin-top:6px">
+              <div style="flex:1;height:3px;border-radius:2px;background:var(--meter);overflow:hidden"><div style="height:3px;width:64%;background:linear-gradient(90deg,var(--ember),var(--gold));border-radius:2px"></div></div>
+              <div class="mono" style="font-size:8.5px;color:var(--label2)">3 SPKR</div>
+            </div>
+          </div>
+          <div style="width:34px;height:34px;border-radius:11px;background:var(--well);border:.5px solid var(--rim);display:flex;align-items:center;justify-content:center;flex:none">
+            <div style="width:7px;height:11px;border-radius:2px 0 0 2px;background:var(--label)"></div>
+            <div style="width:0;height:0;border-top:7px solid transparent;border-bottom:7px solid transparent;border-right:6px solid var(--label);margin-left:-1px"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="height:1px;background:var(--hairline)"></div>
+
+    <div>
+      <div class="mono" style="font-size:10px;color:var(--label2);margin-bottom:10px">HOME SCREEN · SMALL — TAP A GROUP TO ARM IT</div>
+      <div style="display:flex;gap:14px">
+        <div style="width:150px;height:150px;border-radius:34px;padding:16px;background:linear-gradient(160deg,#221D16,#14110D);border:.5px solid rgba(255,255,255,.07);display:flex;flex-direction:column;box-shadow:0 8px 22px rgba(0,0,0,.45)">
+          <div class="mono" style="font-size:8.5px;color:var(--gold)">ARMED</div>
+          <div style="font-size:19px;font-weight:660;color:var(--label);letter-spacing:-.4px;margin-top:6px;line-height:1.15">Downstairs</div>
+          <div style="flex:1"></div>
+          <div style="display:flex;gap:7px;align-items:center">
+            <div style="width:14px;height:14px;border-radius:50%;background:var(--gold);box-shadow:0 0 8px var(--glow)"></div>
+            <div style="width:14px;height:14px;border-radius:50%;background:var(--gold);box-shadow:0 0 8px var(--glow)"></div>
+            <div style="width:14px;height:14px;border-radius:50%;background:var(--gold);box-shadow:0 0 8px var(--glow)"></div>
+            <div style="width:14px;height:14px;border-radius:50%;border:1.8px solid var(--ember)"></div>
+            <div style="flex:1"></div>
+            <div style="font-family:ui-monospace;font-size:14px;font-weight:700;color:var(--gold)">72</div>
+          </div>
+        </div>
+        <div style="width:150px;height:150px;border-radius:34px;padding:16px;background:linear-gradient(160deg,#1B1712,#100D0A);border:.5px solid rgba(255,255,255,.05);display:flex;flex-direction:column;box-shadow:0 8px 22px rgba(0,0,0,.45)">
+          <div class="mono" style="font-size:8.5px;color:var(--label3)">IDLE</div>
+          <div style="font-size:19px;font-weight:660;color:var(--label2);letter-spacing:-.4px;margin-top:6px;line-height:1.15">Whole House</div>
+          <div style="flex:1"></div>
+          <div style="display:flex;gap:7px;align-items:center">
+            <div style="width:14px;height:14px;border-radius:50%;border:1.8px solid var(--ember)"></div>
+            <div style="width:14px;height:14px;border-radius:50%;border:1.8px solid var(--ember)"></div>
+            <div style="width:14px;height:14px;border-radius:50%;border:1.8px solid var(--ember)"></div>
+            <div style="width:14px;height:14px;border-radius:50%;border:1.8px solid var(--ember)"></div>
+            <div style="width:14px;height:14px;border-radius:50%;border:1.8px solid var(--ember)"></div>
+            <div style="flex:1"></div>
+            <div style="font-family:ui-monospace;font-size:14px;font-weight:700;color:var(--label3)">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<p class="dv-next">Try next: "build out <a class="dv-oid" href="#1a">1a</a>'s Apps and Groups tabs" · "take <a class="dv-oid" href="#1b">1b</a>'s deck into <a class="dv-oid" href="#1a">1a</a>" · "show <a class="dv-oid" href="#1c">1c</a> in light mode" · "<a class="dv-oid" href="#1e">1e</a>-B as the master everywhere"</p>
+</section>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;accentDial&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;Full gold&quot;,&quot;Subtle&quot;,&quot;Follow system&quot;],&quot;default&quot;:&quot;Full gold&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Warm Signal&quot;},&quot;appearance&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;Dark&quot;,&quot;Light&quot;],&quot;default&quot;:&quot;Dark&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Warm Signal&quot;},&quot;glassBlur&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;min&quot;:0,&quot;max&quot;:48,&quot;step&quot;:2,&quot;default&quot;:26,&quot;unit&quot;:&quot;px&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Liquid Glass&quot;}}">
+const D = {
+  canvas:'#16130F', canvasHi:'#1B1712', panel:'#1D1915', raised:'#241F1A', well:'#100D0A',
+  hairline:'#3A332B', label:'rgba(255,255,255,.92)', label2:'rgba(255,255,255,.55)', label3:'rgba(255,255,255,.28)',
+  gold:'#E8B84B', ember:'#8A6A2F', glow:'#FFD97A', ring:'#8D7D5E', fail:'#D9564A', caution:'#E29A3D',
+  thumb:'#857762', rim:'#6B5F4E', meter:'#4E463A', pill:'#38322B', socket:'#34302A',
+  glass:'rgba(52,45,37,.52)', glassEdge:'rgba(255,255,255,.11)', glassHi:'rgba(255,255,255,.10)'
+};
+// Light = Circuit scaffolding + authored Warm Signal instruments (never Circuit-mapped).
+const L = {
+  canvas:'#FBFBF9', canvasHi:'#FBFBF9', panel:'#FBFBF9', raised:'#FBFBF9', well:'#F5F4ED',
+  hairline:'#E7E6DF', label:'#1E1C1C', label2:'#706464', label3:'#76716B',
+  gold:'#A97F1E', ember:'#C2A05A', glow:'#E8B84B', ring:'#A08C66', fail:'#BB3A2F', caution:'#B3701C',
+  thumb:'#8A7A62', rim:'#9E8D6B', meter:'#CBBEA1', pill:'#D0CDC3', socket:'#E0D8C6',
+  glass:'rgba(250,247,238,.66)', glassEdge:'rgba(30,28,28,.10)', glassHi:'rgba(255,255,255,.8)'
+};
+const DIAL = {
+  'Full gold':   { gold:'#E8B84B', ember:'#8A6A2F', glow:'#FFD97A' },
+  'Subtle':      { gold:'#B99B53', ember:'#6D5B34', glow:'rgba(0,0,0,0)' },
+  'Follow system': { gold:'#0A84FF', ember:'#0A4B8F', glow:'#5FB0FF' }
+};
+const DIAL_L = {
+  'Full gold':   { gold:'#A97F1E', ember:'#C2A05A', glow:'#E8B84B' },
+  'Subtle':      { gold:'#8F7B4A', ember:'#AE9668', glow:'rgba(0,0,0,0)' },
+  'Follow system': { gold:'#0071E3', ember:'#4A90D9', glow:'#8FC4FF' }
+};
+
+class Component extends DCLogic {
+  state = {
+    open: { pinned:true, live:true, airplay:false, bluetooth:false, offline:false,
+            s2pinned:true, s2live:true, s2airplay:true, s2bt:false, s2gone:false },
+    armed: { hp:true, sonos:true, mac:true, atv:false, mini:false, express:false, jbl:false, bt:false },
+    main: 72,
+    vol: { hp:65, sonos:48, mac:80, atv:55, mini:40, express:0, jbl:35, bt:52,
+           music:82, safari:61, zoom:74, spotify:55, fcp:0, messages:0 },
+    appMuted: {},
+    mainMuted: false,
+    drag: null,
+    drawerOpen: false,
+    selectMode: false,
+    sel: {}
+  };
+
+  exitSelect = () => this.setState({ selectMode: false, sel: {} });
+
+  // Main Out fader: drag sets master level, tap raises the per-device drawer.
+  mainDown = (e) => {
+    const el = e.currentTarget;
+    try { el.setPointerCapture(e.pointerId); } catch (_) {}
+    this.setState({ mdrag: { x: e.clientX, v: this.state.main, w: el.getBoundingClientRect().width || 1, moved: false } });
+  };
+  mainMove = (e) => {
+    const d = this.state.mdrag;
+    if (!d) return;
+    const dx = e.clientX - d.x;
+    if (!d.moved && Math.abs(dx) < 5) return;
+    this.setState(s => ({
+      mdrag: Object.assign({}, s.mdrag, { moved: true }),
+      main: Math.max(0, Math.min(100, Math.round(d.v + (dx / d.w) * 100)))
+    }));
+  };
+  mainUp = () => {
+    const d = this.state.mdrag;
+    this.setState({ mdrag: null });
+    if (d && !d.moved) this.toggleDrawer();
+  };
+
+  toggleDrawer = () => this.setState(s => ({ drawerOpen: !s.drawerOpen }));
+
+  // Row-as-fader: tap arms, horizontal drag sets volume. Pointer capture so the
+  // drag survives leaving the row; touch-action:pan-y keeps the list scrollable.
+  beginDrag(id) {
+    return (e) => {
+      const el = e.currentTarget;
+      try { el.setPointerCapture(e.pointerId); } catch (_) {}
+      clearTimeout(this._lp);
+      this._lpFired = false;
+      this._lp = setTimeout(() => {
+        this._lpFired = true;
+        this.setState(s => ({ selectMode: true, sel: Object.assign({}, s.sel, { [id]: true }) }));
+      }, 450);
+      this.setState({ drag: { id, x: e.clientX, v: this.state.vol[id], w: el.getBoundingClientRect().width || 1, moved: false } });
+    };
+  }
+  moveDrag(id) {
+    return (e) => {
+      const d = this.state.drag;
+      if (!d || d.id !== id) return;
+      const dx = e.clientX - d.x;
+      if (!d.moved && Math.abs(dx) < 5) return;
+      clearTimeout(this._lp);
+      const v = Math.max(0, Math.min(100, Math.round(d.v + (dx / d.w) * 100)));
+      this.setState(s => ({
+        drag: Object.assign({}, s.drag, { moved: true }),
+        vol: Object.assign({}, s.vol, { [id]: v })
+      }));
+    };
+  }
+  endDrag(id, onTap) {
+    return () => {
+      const d = this.state.drag;
+      clearTimeout(this._lp);
+      this.setState({ drag: null });
+      if (!d || d.id !== id || d.moved) return;
+      // The long-press already consumed this gesture — don't also treat it as a tap.
+      if (this._lpFired) { this._lpFired = false; return; }
+      if (onTap) return onTap();
+      if (this.state.selectMode) this.setState(s => ({ sel: Object.assign({}, s.sel, { [id]: !s.sel[id] }) }));
+      else this.toggleArmed(id);
+    };
+  }
+
+  appRow(a, t) {
+    const muted = !!this.state.appMuted[a.id];
+    const v = this.state.vol[a.id];
+    const dragging = !!(this.state.drag && this.state.drag.id === a.id && this.state.drag.moved);
+    const mix = (p) => 'color-mix(in srgb, ' + t.gold + ' ' + p + '%, transparent)';
+    return {
+      id: a.id, name: a.name, initial: a.initial, dest: a.dest, live: a.live,
+      destTint: a.destTint === 'gold' ? t.gold : (a.destTint === 'dim' ? t.label3 : t.label2),
+      dim: a.live ? 1 : 0.45,
+      nameColor: a.live ? t.label : t.label2,
+      rowBg: dragging ? mix(6) : 'transparent',
+      washW: (a.live && !muted ? v : 0) + '%',
+      washBg: 'linear-gradient(90deg,' + mix(dragging ? 30 : 14) + ',' + mix(dragging ? 17 : 6) + ')',
+      showEdge: a.live && !muted,
+      edgeL: 'calc(' + v + '% - 1px)',
+      edgeOp: dragging ? 1 : 0.4,
+      sub: a.live ? (muted ? 'MUTED' : 'LIVE') : 'NO AUDIO',
+      subTint: a.live ? (muted ? t.label2 : t.gold) : t.label3,
+      read: a.live ? String(v) : '—',
+      readTint: a.live && !muted ? t.gold : t.label3,
+      readSize: dragging ? '22px' : '13px',
+      down: this.beginDrag(a.id),
+      move: this.moveDrag(a.id),
+      up: this.endDrag(a.id, () => this.setState(s => ({ appMuted: Object.assign({}, s.appMuted, { [a.id]: !s.appMuted[a.id] }) })))
+    };
+  }
+
+  faderRow(d, t) {
+    const armed = !!this.state.armed[d.id];
+    const failed = d.conn === 'failed', gone = d.conn === 'gone', connecting = d.conn === 'connecting';
+    const dragging = !!(this.state.drag && this.state.drag.id === d.id && this.state.drag.moved);
+    const v = this.state.vol[d.id];
+    const live = armed && !failed && !gone && !connecting;
+    let ring = 'none';
+    if (failed) ring = '2.8px solid ' + t.fail;
+    else if (connecting) ring = '2.5px dashed ' + t.ring;
+    else if (live) ring = '2.5px solid ' + t.ring;
+    let sub = 'IDLE', subTint = t.label3;
+    if (failed) { sub = d.failure || 'CONNECTION FAILED'; subTint = t.fail; }
+    else if (gone) { sub = 'UNAVAILABLE'; subTint = t.label3; }
+    else if (connecting) { sub = 'CONNECTING…'; subTint = t.ring; }
+    else if (live) { sub = 'LIVE'; subTint = t.gold; }
+    const mix = (p) => 'color-mix(in srgb, ' + t.gold + ' ' + p + '%, transparent)';
+    const selected = !!this.state.sel[d.id];
+    return {
+      id: d.id, name: d.name, armed, sub, subTint, dragging,
+      selecting: this.state.selectMode,
+      selected,
+      selBg: selected ? t.gold : 'transparent',
+      selEdge: selected ? t.gold : t.label3,
+      dim: gone ? 0.45 : 1,
+      ring,
+      glyph: gone ? t.label3 : (live ? t.label : t.label2),
+      dot: d.routed ? t.gold : t.socket,
+      dotGlow: d.routed ? '0 0 8px ' + t.glow : 'none',
+      rowBg: dragging ? mix(6) : 'transparent',
+      washW: (live ? v : 0) + '%',
+      washBg: 'linear-gradient(90deg,' + mix(dragging ? 30 : 14) + ',' + mix(dragging ? 17 : 6) + ')',
+      showEdge: live,
+      edgeL: 'calc(' + v + '% - 1px)',
+      edgeOp: dragging ? 1 : 0.4,
+      weight: armed ? 590 : 400,
+      nameColor: gone ? t.label3 : (live ? t.label : t.label2),
+      showMeter: live && !dragging,
+      level: (d.level || 0) + '%',
+      read: gone || failed ? '—' : String(v),
+      readTint: live ? t.gold : t.label3,
+      readSize: dragging ? '22px' : '13px',
+      down: this.beginDrag(d.id), move: this.moveDrag(d.id), up: this.endDrag(d.id)
+    };
+  }
+
+  get theme() {
+    const light = (this.props.appearance ?? 'Dark') === 'Light';
+    const base = light ? L : D;
+    const dial = (light ? DIAL_L : DIAL)[this.props.accentDial ?? 'Full gold'];
+    return Object.assign({}, base, dial, { blur: (this.props.glassBlur ?? 26) + 'px' });
+  }
+
+  toggleSection(k) {
+    this.setState(s => ({ open: Object.assign({}, s.open, { [k]: !s.open[k] }) }));
+  }
+  toggleArmed(k) {
+    this.setState(s => ({ armed: Object.assign({}, s.armed, { [k]: !s.armed[k] }) }));
+  }
+
+  // One device → the row viewmodel both 1a and 1d consume.
+  row(d, t, fader) {
+    const armed = !!this.state.armed[d.id];
+    const failed = d.conn === 'failed';
+    const gone = d.conn === 'gone';
+    const connecting = d.conn === 'connecting';
+    const connected = armed && !failed && !gone && !connecting;
+    let ring = 'none';
+    if (failed) ring = '2.8px solid ' + t.fail;
+    else if (connecting) ring = '2.5px dashed ' + t.ring;
+    else if (connected) ring = '2.5px solid ' + t.ring;
+    let sub = 'IDLE', subTint = t.label3;
+    if (failed) { sub = d.failure || 'CONNECTION FAILED'; subTint = t.fail; }
+    else if (gone) { sub = 'UNAVAILABLE'; subTint = t.label3; }
+    else if (connecting) { sub = 'CONNECTING…'; subTint = t.ring; }
+    else if (d.muted) { sub = 'MUTED'; subTint = t.label2; }
+    else if (armed) { sub = 'LIVE'; subTint = t.gold; }
+    return {
+      id: d.id, name: d.name, armed, sub, subTint,
+      showFader: armed && !!fader && !failed && !gone,
+      dim: gone ? 0.45 : 1,
+      ring,
+      glyph: gone ? t.label3 : (armed ? t.label : t.label2),
+      dot: d.routed ? t.gold : t.socket,
+      dotGlow: d.routed ? '0 0 8px ' + t.glow : 'none',
+      bg: armed ? 'rgba(232,184,75,.055)' : 'transparent',
+      weight: armed ? 590 : 400,
+      nameColor: gone ? t.label3 : (armed ? t.label : t.label2),
+      showMeter: armed && !d.muted && !failed,
+      level: (d.level || 0) + '%',
+      pill: d.pill || false,
+      read: gone || failed ? '—' : String(this.state.vol[d.id]),
+      readTint: armed ? t.gold : t.label3,
+      fill: 'calc(' + this.state.vol[d.id] + '% - 2px)',
+      thumb: 'calc(' + this.state.vol[d.id] + '% - 13px)',
+      toggle: () => this.toggleArmed(d.id)
+    };
+  }
+
+  renderVals() {
+    const t = this.theme;
+    const themeVars = Object.keys(t).reduce((acc, k) => {
+      acc['--' + k] = t[k];
+      return acc;
+    }, {});
+    // token names in CSS are lowercase-insensitive for custom props, so map explicitly
+    const vars = {
+      '--canvas': t.canvas, '--canvasHi': t.canvasHi, '--panel': t.panel, '--raised': t.raised,
+      '--well': t.well, '--hairline': t.hairline, '--label': t.label, '--label2': t.label2,
+      '--label3': t.label3, '--gold': t.gold, '--ember': t.ember, '--glow': t.glow,
+      '--ring': t.ring, '--fail': t.fail, '--caution': t.caution, '--thumb': t.thumb,
+      '--rim': t.rim, '--meter': t.meter, '--pill': t.pill, '--socket': t.socket,
+      '--glass': t.glass, '--glassEdge': t.glassEdge, '--glassHi': t.glassHi, '--blur': t.blur
+    };
+
+    const devices = {
+      hp:      { id:'hp',      name:'Kitchen HomePod',      conn:'ok',         level:68, routed:true,  pill:'MUSIC' },
+      sonos:   { id:'sonos',   name:'Office Sonos',         conn:'ok',         level:41, routed:true,  pill:'SAFARI' },
+      mac:     { id:'mac',     name:'This Mac',             conn:'ok',         level:55, routed:false },
+      atv:     { id:'atv',     name:'Living Room Apple TV', conn:'ok',         level:0,  routed:false },
+      mini:    { id:'mini',    name:'Bedroom HomePod mini', conn:'connecting', level:0,  routed:false },
+      express: { id:'express', name:'Garage Express',       conn:'failed',     level:0,  routed:false, failure:'NOT ON NETWORK' },
+      jbl:     { id:'jbl',     name:'JBL Flip 6',           conn:'gone',       level:0,  routed:false }
+    };
+
+    // Only the curated PINNED zone shows its fader inline; deeper rows open a sheet.
+    const pick = (ids, fader) => ids.map(i => this.row(devices[i], t, fader));
+    const armedIds = ['hp','sonos','mac','atv','mini','express','jbl'].filter(i => this.state.armed[i]);
+    const airplayIds = ['hp','sonos','atv','mini','express'].filter(i => !this.state.armed[i]);
+
+    const sec = (key, title, rows, tint) => ({
+      key, title, rows,
+      count: String(rows.length),
+      open: !!this.state.open[key],
+      rot: this.state.open[key] ? '-45deg' : '135deg',
+      chev: t.label2,
+      tint: tint || t.label2,
+      toggle: () => this.toggleSection(key)
+    });
+
+    const sections = [
+      sec('pinned', 'PINNED', pick(['hp'], true), t.gold),
+      sec('live', 'ARMED / LIVE', pick(armedIds.filter(i => i !== 'hp'), false), t.gold),
+      sec('airplay', 'AIRPLAY', pick(airplayIds, false), null),
+      sec('bluetooth', 'BLUETOOTH', pick(['jbl'], false), null),
+      sec('offline', 'UNAVAILABLE', [], null)
+    ];
+
+    const stateSpecs = [
+      { d:{ id:'hp', name:'Connected + armed', conn:'ok', level:68, routed:false }, armed:true, label:'CONNECTED' },
+      { d:{ id:'sonos', name:'Armed + app route', conn:'ok', level:41, routed:true, pill:'SAFARI' }, armed:true, label:'ROUTE ARMED' },
+      { d:{ id:'mac', name:'Muted', conn:'ok', level:0, routed:false, muted:true }, armed:true, label:'MUTED' },
+      { d:{ id:'mini', name:'Connecting', conn:'connecting' }, armed:true, label:'DASHED RING' },
+      { d:{ id:'express', name:'Failed', conn:'failed', failure:'NOT ON NETWORK' }, armed:true, label:'FAILURE HUE' },
+      { d:{ id:'atv', name:'Available, not armed', conn:'ok' }, armed:false, label:'NO RING' },
+      { d:{ id:'jbl', name:'Unavailable', conn:'gone' }, armed:false, label:'DIMMED 45%' }
+    ];
+    const stateRows = stateSpecs.map(s => {
+      const saved = this.state.armed[s.d.id];
+      this.state.armed[s.d.id] = s.armed;
+      const r = this.row(s.d, t);
+      this.state.armed[s.d.id] = saved;
+      r.label = s.label;
+      r.name = s.d.name;
+      return r;
+    });
+
+    devices.bt = { id:'bt', name:'Soundcore Motion', conn:'ok', level:0, routed:false };
+    const fpick = ids => ids.map(i => this.faderRow(devices[i], t));
+    const fsec = (key, title, rows, tint) => ({
+      key, title, rows, count: String(rows.length),
+      open: !!this.state.open[key],
+      rot: this.state.open[key] ? '-45deg' : '135deg',
+      tint: tint || t.label2,
+      toggle: () => this.toggleSection(key)
+    });
+    const armed2 = ['sonos','mac','atv','mini','bt'].filter(i => this.state.armed[i]);
+    const idle2 = ['sonos','atv','mini'].filter(i => !this.state.armed[i]);
+    const faderSections = [
+      fsec('s2pinned', 'PINNED', fpick(['hp']), t.gold),
+      fsec('s2live', 'ARMED / LIVE', fpick(armed2), t.gold),
+      fsec('s2airplay', 'AIRPLAY', fpick(idle2.concat(['express'])), null),
+      fsec('s2bt', 'BLUETOOTH', fpick(['bt']), null),
+      fsec('s2gone', 'UNAVAILABLE', fpick(['jbl']), null)
+    ];
+    const drawerRows = fpick(['hp'].concat(armed2));
+    const mainDeg = (this.state.main * 3.6) + 'deg';
+
+    const appRows = [
+      { id:'music',    name:'Music',         initial:'M', dest:'Downstairs',       destTint:'gold', live:true },
+      { id:'safari',   name:'Safari',        initial:'S', dest:'Office Sonos',     destTint:'gold', live:true },
+      { id:'zoom',     name:'Zoom',          initial:'Z', dest:'Follows Main Out', destTint:'sub',  live:true },
+      { id:'spotify',  name:'Spotify',       initial:'S', dest:'Kitchen HomePod',  destTint:'gold', live:true },
+      { id:'fcp',      name:'Final Cut Pro', initial:'F', dest:'No audio',         destTint:'dim',  live:false },
+      { id:'messages', name:'Messages',      initial:'M', dest:'No audio',         destTint:'dim',  live:false }
+    ].map(a => this.appRow(a, t));
+
+    const groupRows = [
+      { name:'Downstairs',  members:'Kitchen HomePod · Office Sonos · This Mac', count:'3', armed:true },
+      { name:'Whole House', members:'All 5 available speakers',                  count:'5', armed:false },
+      { name:'Party',       members:'Kitchen · Living Room · Garage Express',    count:'3', armed:false },
+      { name:'Focus',       members:'Office Sonos',                              count:'1', armed:false }
+    ].map(g => Object.assign({}, g, {
+      badge: g.armed ? 'LIVE' : 'IDLE',
+      badgeTint: g.armed ? t.gold : t.label3,
+      cardBg: g.armed ? 'color-mix(in srgb, ' + t.gold + ' 7%, transparent)' : 'transparent',
+      cardEdge: g.armed ? 'color-mix(in srgb, ' + t.gold + ' 24%, transparent)' : t.hairline,
+      dotFill: g.armed ? t.gold : 'transparent',
+      dotEdge: g.armed ? t.gold : t.ember,
+      dotGlow: g.armed ? '0 0 9px ' + t.glow : 'none',
+      nameColor: g.armed ? t.label : t.label2
+    }));
+
+    return {
+      faderSections, drawerRows, appRows, groupRows,
+      drawerOpen: this.state.drawerOpen,
+      toggleDrawer: this.toggleDrawer,
+      selectMode: this.state.selectMode,
+      exitSelect: this.exitSelect,
+      selCount: String(Object.keys(this.state.sel).filter(k => this.state.sel[k]).length),
+      mainDown: this.mainDown, mainMove: this.mainMove, mainUp: this.mainUp,
+      drawerChev: this.state.drawerOpen ? '135deg' : '-45deg',
+      mainRing: 'conic-gradient(from 180deg,' + t.gold + ' 0deg,' + t.gold + ' ' + mainDeg + ',' + t.meter + ' ' + mainDeg + ',' + t.meter + ' 360deg)',
+      themeVars: vars,
+      main: String(this.state.main),
+      mainFill: 'calc(' + this.state.main + '% - 2px)',
+      mainThumb: 'calc(' + this.state.main + '% - 17px)',
+      toggleMainMute: () => this.setState(s => ({ mainMuted: !s.mainMuted })),
+      sections,
+      stateRows
+    };
+  }
+}
+
+</script>
+</body>
+</html>

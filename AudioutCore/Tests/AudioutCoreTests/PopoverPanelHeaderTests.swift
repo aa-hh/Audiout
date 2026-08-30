@@ -45,6 +45,32 @@ import AppKit
         #expect(panel.test_isCardCollapsed(title: title) == false)
     }
 
+    // MARK: AX headings + chevron Collapse/Expand flip
+
+    @Test func cardAndSubsectionTitlesExposeHeadingRoles() {
+        let panel = makePanel()
+        panel.beginCard(header: "Output Devices", collapsible: true, onToggle: {})
+        panel.addSubsectionHeader("AirPlay Devices", collapsible: true,
+                                  collapsed: false, onToggle: {})
+        #expect(panel.test_headerTitleAXRole(title: "Output Devices")?.rawValue == "AXHeading",
+                "the card title is a VoiceOver heading, so section-jumping works")
+        #expect(panel.test_headerTitleAXRole(title: "AirPlay Devices")?.rawValue == "AXHeading",
+                "subsection titles are headings too, one rank below")
+    }
+
+    @Test func chevronAXLabelFlipsWithCollapse() {
+        let panel = makePanel()
+        let title = "Devices"
+        panel.beginCard(header: title, collapsible: true, collapsed: false, onToggle: {})
+        panel.addRow(NSView())
+        #expect(panel.test_chevronAXLabel(title: title) == "Collapse Devices")
+        panel.setCardCollapsed(title: title, collapsed: true, animated: false)
+        #expect(panel.test_chevronAXLabel(title: title) == "Expand Devices",
+                "the chevron's spoken action tracks the state it would produce")
+        panel.setCardCollapsed(title: title, collapsed: false, animated: false)
+        #expect(panel.test_chevronAXLabel(title: title) == "Collapse Devices")
+    }
+
     @Test func nonCollapsibleHeaderHasNoClickTarget() {
         let panel = makePanel()
         panel.beginCard(header: "System")   // collapsible defaults to false

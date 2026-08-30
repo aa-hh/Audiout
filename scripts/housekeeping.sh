@@ -39,9 +39,9 @@
 #              this script is invoked from) — always protected from both jobs
 #   --dry-run  report what would happen, touch nothing
 #
-# Env: AUDIOUT_CACHE_MAX_AGE_DAYS  staleness cutoff (default 7)
-#      AUDIOUT_MIN_FREE_GB         headroom target, our caches only (default 8)
-#      AUDIOUT_CRITICAL_FREE_GB    take everything below this (default 2)
+# Env: AUDIOUT_CACHE_MAX_AGE_DAYS  staleness cutoff (default 3)
+#      AUDIOUT_MIN_FREE_GB         headroom target, our caches only (default 15)
+#      AUDIOUT_CRITICAL_FREE_GB    take everything below this (default 6)
 #      AUDIOUT_NO_HOUSEKEEPING=1   do nothing (escape hatch for odd states)
 set -u
 
@@ -156,30 +156,53 @@ for wt in "$worktrees_dir"/*/; do
     fi
 done
 
+# --- C. PTP-helper daemon check (best-effort) -----------------------------------
+#
+# Stale *.ptphelper launchd daemons pile up from old/side-by-side dev builds and
+# can block live testing by holding UDP 319/320. purge-stale-ptp-helpers.sh's dry
+# run enumerates them, but includes override-only GHOSTS (no loaded job, harmless,
+# unremovable by bootout). We count only LOADED jobs: when > 1, a stale helper
+# is squatting on the ports. Threshold is >1 because one loaded helper is legit
+# (the current dev build). When exceeded, nag with the fix. Best-effort: any
+# error is silent, never blocks the build.
+stale_helpers_output=$(bash scripts/purge-stale-ptp-helpers.sh 2>/dev/null || true)
+stale_helpers_total=$(printf '%s\n' "$stale_helpers_output" | grep -oE 'Found [0-9]+' | grep -oE '[0-9]+')
+[ -z "$stale_helpers_total" ] && stale_helpers_total=0
+stale_helpers_ghosts=$(printf '%s\n' "$stale_helpers_output" | grep -c "unknown (override-only entry, no loaded job)")
+stale_helpers_loaded=$((stale_helpers_total - stale_helpers_ghosts))
+if [ "$stale_helpers_loaded" -gt 1 ]; then
+    say "WARNING: $stale_helpers_loaded stale PTP-helper(s) with loaded jobs — run to clean up:"
+    say "    bash scripts/purge-stale-ptp-helpers.sh --apply"
+fi
+
 # --- B. build caches: staleness sweep + disk-pressure floor ------------------
 # NOT a fixed count. Caches on a roomy disk cost nothing, and a count cap
 # forces cold rebuilds (minutes of heavy compile per Guard-4 commit) exactly
 # on the busy multi-agent days run-tests.sh exists to keep survivable. The
 # harm was only ever disk exhaustion, so target that directly:
-#   1. STALENESS: a cache untouched for AUDIOUT_CACHE_MAX_AGE_DAYS (7) is
+#   1. STALENESS: a cache untouched for AUDIOUT_CACHE_MAX_AGE_DAYS (3) is
 #      deleted unconditionally — after that much source drift SwiftPM largely
-#      rebuilds from scratch anyway, so it saves ~nothing and holds ~1 GB.
-#   2. PRESSURE: below AUDIOUT_MIN_FREE_GB (8) free, delete caches least-
+#      rebuilds from scratch anyway, so it saves ~nothing and holds ~1.3 GB.
+#      Cut from 7 days to 3 on 2026-08-29: with 30+ live worktrees nothing was
+#      ever idle for a full week, so this rule had never once fired.
+#   2. PRESSURE: below AUDIOUT_MIN_FREE_GB (15) free, delete caches least-
 #      recently-built first — but ONLY when doing so actually reaches the
 #      floor, so builds never eat the last of the disk while a shortfall
 #      caused elsewhere is left for a human to deal with. See rule 2 below.
 # The current checkout and anything a live process references are never
 # touched by either rule.
-max_age_days=${AUDIOUT_CACHE_MAX_AGE_DAYS:-7}
-# The headroom a build should be able to count on: ~2 builds' worth (~1 GB
-# each) plus room for the OS to breathe. Deliberately below this machine's
-# ~13 GB everyday baseline — a floor above the baseline would ask for reclaim
-# on every single build (observed live at 15).
-min_free_gb=${AUDIOUT_MIN_FREE_GB:-8}
+max_age_days=${AUDIOUT_CACHE_MAX_AGE_DAYS:-3}
+# The headroom a build should be able to count on: ~2 builds' worth (~1.3 GB
+# each) plus room for the OS to breathe, and comfortably ABOVE the ~8 GB line
+# where this machine's builds start hanging and dying with 137.
+# Raised 8 -> 15 on 2026-08-29: the disk sat at 8.4-8.8 GB for days, i.e.
+# permanently just above the old trigger, so the pressure rule never ran while
+# builds were already failing for want of space.
+min_free_gb=${AUDIOUT_MIN_FREE_GB:-15}
 # Emergency line. Above it, a shortfall we cannot fix is reported and left
 # alone; below it, every reclaimable cache goes regardless, because a build
 # dying on a full disk is the incident this whole script exists to prevent.
-critical_gb=${AUDIOUT_CRITICAL_FREE_GB:-2}
+critical_gb=${AUDIOUT_CRITICAL_FREE_GB:-6}
 now=$(date +%s)
 
 # A "build" is a checkout owning any SwiftPM cache dir; its recency is the
@@ -264,7 +287,20 @@ units=$(
 # run until it merges main. Checking each worktree's own run-tests.sh keeps the
 # reclaim to caches that are genuinely unreachable.
 dead_engine_dir=out
-migrated() { grep -q -- '--build-system native' "$1/scripts/run-tests.sh" 2>/dev/null; }
+migrated() {
+    grep -q -- '--build-system native' "$1/scripts/run-tests.sh" 2>/dev/null && return 0
+    # A worktree predating the pin is still BUILT by the primary checkout's
+    # wrapper — Guard 4 resolves scripts/ there whenever the worktree is older
+    # than they are — so the native cache it grew is the live one and .build/out
+    # is dead after all. Presence of BOTH is the evidence: nothing produces an
+    # arm64-apple-macosx tree except the pinned wrapper. Without this the
+    # commonest case on this machine (33 worktrees, 10 carrying both engines)
+    # was skipped forever and cost ~1.3 GB each.
+    both=$(caches_of "$1" | while IFS= read -r d; do
+        [ -d "$d/arm64-apple-macosx" ] && printf 'x'
+    done)
+    [ -n "$both" ]
+}
 printf '%s\n' "$units" | while IFS='	' read -r mt u; do
     [ -n "$u" ] || continue
     found=$(caches_of "$u" | while IFS= read -r d; do

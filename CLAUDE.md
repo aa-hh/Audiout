@@ -2,7 +2,7 @@
 
 A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers with per-device volume, mute, saved groups, and per-app routing.
 
-**Read [`AGENTS.md`](AGENTS.md) before doing anything.** It contains the architectural rules, constraint explanations, and traps that the code alone cannot convey. Each subdirectory has its own `AGENTS.md` with folder-level rules — read the nearest one before editing in that folder.
+**Read [`AGENTS.md`](AGENTS.md) before doing anything.** It contains the architectural rules, constraint explanations, and traps that the code alone cannot convey. Each subdirectory has its own `AGENTS.md` with folder-level rules — read the nearest one before editing **or tracing** code in that folder. The trap you are chasing is often already written down there.
 
 ## Package layout
 
@@ -10,31 +10,16 @@ A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers
 |---|---|
 | `AudioutCore/` | The whole app: Swift package with the core library, AppKit UI targets, and the shipping menu-bar executable |
 | `AirPlayEngine/` | Standalone Swift package: vendored AirPlay 2 C sender wrapped in a Swift actor. Separate package on purpose — licensing boundary, no app concepts inside |
-| _(external)_ `audiout-shared` | The sync-probe DSP and the companion wire protocol, at https://github.com/aa-hh/audiout-shared. MIT, not GPL — the closed-source iPhone app links the same code, so it has one home outside both apps. Pinned by version in `AudioutCore/Package.swift` |
+| _(external)_ `audiout-shared` | Two products: ProbeKit (the sync-probe DSP) and AudioutProtocol (the companion wire protocol), at https://github.com/aa-hh/audiout-shared. MIT, not GPL — the closed-source iPhone app links the same code, so it has one home outside both apps. Pinned by version in `AudioutCore/Package.swift` |
 | `dev/` | Offline dev tooling (fake speakers, dev scripts); `dev/notes/` holds research briefs |
 | `docs/SPEC.md` | Product spec — the source of truth for *what* to build |
 | `scripts/make-app.sh` | Wraps the executable into a signed `.app` bundle (required for TCC/process-tap) |
-| `ios/` | iPhone companion app (SwiftUI). **Not in this checkout** — staged on `claude/ios-staging` until the whole app is ready to merge into `main`. See "iOS companion app" below. |
 
 ## iOS companion app
 
-The iPhone companion (`ios/AudioutRemote/`) is built entirely on
-`claude/ios-staging` — a long-lived integration branch, not a one-off
-feature branch — kept off `main` on purpose so Mac-only changes keep
-merging without waiting on the whole iOS app. `main` has no `ios/`
-directory at all right now.
-
-**Before any iOS task, start from that branch, not `main`:**
-
-```bash
-cd .claude/worktrees/ios-staging   # already checked out; git pull if stale
-# or, if that worktree doesn't exist yet:
-git worktree add .claude/worktrees/ios-staging claude/ios-staging
-```
-
-Commit iOS work there (merging other `claude/ios-*` branches into it as they
-land), and push to `origin/claude/ios-staging`. It merges into `main` as one
-unit later, on Alec's go-ahead — not per-branch.
+The iPhone companion now lives in its own private repository,
+`aa-hh/audiout-remote` — this repo no longer contains it. Build it from here
+with `scripts/ios.sh build --root <that checkout>`.
 
 ## First steps in a fresh clone
 

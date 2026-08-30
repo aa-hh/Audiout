@@ -41,6 +41,12 @@ symbol you cannot find in source, believe the source and fix the doc.
 - [AudioutCore/](AudioutCore/AGENTS.md) — the Swift package:
   the `Device` model, the `OutputBackend` seam and its implementations, per-app
   routing, the AppKit UI targets, and the shipping app target. This is the app.
+Not a folder here, but linked into the app: **`AudioutProtocol`**, the wire
+contract for the Mac↔iPhone companion app (messages, commands, snapshot
+schema), lives in https://github.com/aa-hh/audiout-shared. MIT, not GPL,
+because the closed-source iPhone app links the same code, and a repository of
+its own because SwiftPM cannot depend on a package inside a subdirectory of
+another repo. `AudioutCore` pins it by version.
 - [AirPlayEngine/](AirPlayEngine/AGENTS.md) — standalone package: a vendored
   AirPlay 2 sender wrapped in a Swift `actor`. No OwnTone runtime dependency.
 Not a folder here, but linked into the app: **`ProbeKit`**, the sync-probe DSP
@@ -58,10 +64,6 @@ repo. `AudioutCore` pins it by version.
   bare `swift run` loses the grant.
 - [docs/SPEC.md](docs/SPEC.md) — the product spec. Code cites its sections ("SPEC.md §9").
 - `docs/plans/PLAN-*.md` — the phased execution plans and their resolved decisions.
-- `ios/` — the iPhone companion app. Not present in `main` or this worktree;
-  staged on `claude/ios-staging` until the whole app is ready to merge. See
-  [CLAUDE.md](CLAUDE.md#ios-companion-app) — start any iOS task from that
-  branch, never from `main`.
 
 ## Rules (all targets)
 
@@ -86,6 +88,19 @@ repo. `AudioutCore` pins it by version.
   look as though it had never existed. Also check `git fsck --unreachable`,
   `git stash list`, the reflog, and the other worktrees. Quote every path: this
   repo's own path contains a space, which silently breaks unquoted loops.
+- **When a fix rests on a claim about live system state, verify that claim with a
+  real command before writing the fix.** Much of what decides behavior here lives
+  outside the code — which device macOS currently treats as the default output,
+  what the public aggregate device is made of, which permissions are granted. The
+  tests that run routinely cannot see any of it (the real-hardware suite is
+  opt-in and skips by default), so they encode what you believed rather than
+  what is true, and the suite stays green while the app is broken. Check against
+  a running system sitting in the failing state instead of inferring from source:
+  `system_profiler SPAudioDataType | grep -B3 "Default Output Device: Yes"` names
+  the device macOS is really playing through, and
+  `AUDIOUT_CORE_AUDIO_DIAGNOSTIC=1 swift run --package-path AudioutCore
+  core-audio-diagnostic` lists the Core Audio process objects behind per-app
+  routing.
 - **Inner-loop test command:** see [AudioutCore/AGENTS.md](AudioutCore/AGENTS.md) for
   guidance on scoping tests with `--filter`, and for the "tests must stay
   invisible" rule every UI test has to obey.

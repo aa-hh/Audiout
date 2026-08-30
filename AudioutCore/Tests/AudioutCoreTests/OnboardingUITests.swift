@@ -1508,10 +1508,21 @@ import Testing
     /// pending, the offending step re-opens through the same snap-back
     /// machinery, and nothing payoff-ish ever appears.
     @Test func aFailedAutoCheckRevertsTheRowAndSnapsBack() async {
-        let vc = makeVC(model: makeGrantableModel(silentAudio: .denied))
+        // The revocation lands AFTER the rows are granted, the same shape the
+        // two sibling snap-back tests use. It used to be canned as denied from
+        // the start, which worked only while `refreshStatuses()` left an
+        // unengaged row unread — now that it always takes the silent read, a
+        // permission denied from the very first look is caught before the
+        // check ever runs, which is a different (and earlier) story than the
+        // one this test is about.
+        let audio = MutableSilentAudioProbe(silent: .granted)
+        let vc = makeVC(model: makeModel(audio: .granted, audioProbe: audio, foundSpeakers: 3,
+                                         ptpHelper: FakePTPHelper(status: .enabled)))
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
+
+        audio.silent = .denied   // revoked before the automatic check runs
 
         await vc.test_awaitFinalCheck()
 
@@ -2243,6 +2254,36 @@ import Testing
         }
     }
 
+    /// Increase Contrast picks the widened value, and a token that declares no
+    /// widened value falls back rather than going blank. Driven through the
+    /// pure resolver because the real setting is a workspace flag with no
+    /// override seam — faking it through a mutable static would leak into this
+    /// suite's other tests, which run in parallel.
+    @Test func increaseContrastSelectsTheWidenedValuePerAppearance() {
+        // Both axes, all four corners.
+        #expect(DemoSystemColor.resolvedHex(light: 0x111111, dark: 0x222222,
+                                            lightHighContrast: 0x333333, darkHighContrast: 0x444444,
+                                            isDark: false, increaseContrast: false) == 0x111111)
+        #expect(DemoSystemColor.resolvedHex(light: 0x111111, dark: 0x222222,
+                                            lightHighContrast: 0x333333, darkHighContrast: 0x444444,
+                                            isDark: true, increaseContrast: false) == 0x222222)
+        #expect(DemoSystemColor.resolvedHex(light: 0x111111, dark: 0x222222,
+                                            lightHighContrast: 0x333333, darkHighContrast: 0x444444,
+                                            isDark: false, increaseContrast: true) == 0x333333)
+        #expect(DemoSystemColor.resolvedHex(light: 0x111111, dark: 0x222222,
+                                            lightHighContrast: 0x333333, darkHighContrast: 0x444444,
+                                            isDark: true, increaseContrast: true) == 0x444444)
+
+        // A token with no widened variant keeps its normal value under
+        // Increase Contrast — the fallback every unchanged case relies on.
+        #expect(DemoSystemColor.resolvedHex(light: 0x111111, dark: 0x222222,
+                                            lightHighContrast: nil, darkHighContrast: nil,
+                                            isDark: false, increaseContrast: true) == 0x111111)
+        #expect(DemoSystemColor.resolvedHex(light: 0x111111, dark: 0x222222,
+                                            lightHighContrast: nil, darkHighContrast: nil,
+                                            isDark: true, increaseContrast: true) == 0x222222)
+    }
+
     /// The mocks are stylised, but a SYSTEM DIALOG is mimicked truthfully: its
     /// icon symbol, its colours, its shape and its button words are what macOS
     /// really shows, and only the COPY is abstracted to grey bars (owner,
@@ -2531,24 +2572,24 @@ import Testing
 
     // MARK: The setup-v3 hero — gold spent once, ember on the spine
 
-    /// Gold is now the accent of exactly ONE thing on screen: the button this
-    /// step wants pressed. The live row's edge bar takes gold's dimmer
-    /// companion instead, so the spine can't compete with it from across the
-    /// window.
-    @Test func theLiveRowsEdgeBarIsEmberAndOnlyTheButtonIsGold() async {
+    /// The live row draws NO leading bar. It is already the row carrying the
+    /// selection fill inside the grouped list, and a coloured rule beside it
+    /// both repeated that and drew a shape macOS's own grouped lists don't
+    /// have. Gold stays the accent of exactly ONE thing on screen — the button
+    /// this step wants pressed — which is now true of the whole window rather
+    /// than true only after the spine settled for ember.
+    @Test func theLiveRowDrawsNoEdgeBarAndOnlyTheButtonIsGold() async {
         let vc = makeVC(model: makeGrantableModel())
 
-        #expect(resolvedSRGB(vc.test_rowEdgeBarFill(.audio))
-                == resolvedSRGB(Tokens.Color.ember), "the live row's bar is ember")
-        #expect(resolvedSRGB(vc.test_rowEdgeBarFill(.audio))
-                != resolvedSRGB(Tokens.Color.gold))
+        #expect(vc.test_rowEdgeBarFill(.audio) == nil, "the live row is marked by its fill, not a bar")
         #expect(vc.test_rowEdgeBarFill(.localNetwork) == nil, "a locked row draws no bar")
 
         await vc.test_tapAllow(.audio)
 
-        #expect(vc.test_rowEdgeBarFill(.audio) == nil, "the bar moves on with the flow")
-        #expect(resolvedSRGB(vc.test_rowEdgeBarFill(.localNetwork))
-                == resolvedSRGB(Tokens.Color.ember))
+        // Advancing the flow must not introduce one either.
+        #expect(vc.test_rowEdgeBarFill(.audio) == nil)
+        #expect(vc.test_rowEdgeBarFill(.localNetwork) == nil,
+                "the newly-live row is marked the same way the last one was")
     }
 
     /// A broken permission still outranks it — that row is the one asking to be

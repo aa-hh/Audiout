@@ -108,15 +108,20 @@ import Testing
         // scheduler latency under machine load once pushed a 0.1s ceiling past
         // 12s of elapsed and flaked a `< 5` assertion (the roadmap-023 class).
         let (manager, _) = makeManager(openDelay: 60, connectTimeout: 0.1)
-        let began = Date()
         let outcome = await manager.connect(address: "C4-38-75-0E-BF-4A")
-        let elapsed = Date().timeIntervalSince(began)
         guard case .failed(let reportedElapsed, let reason) = outcome else {
             Issue.record("expected .failed, got \(outcome)")
             return
         }
         #expect(reason == "timeout")
-        #expect(elapsed < 60, "must resolve at the ceiling, never at the open's own pace")
+        // Judge the ceiling by the manager's OWN measurement, not this test's
+        // wall clock. `reportedElapsed` is taken at the moment the race
+        // resolves; `elapsed` additionally contains however long the scheduler
+        // then took to hand the result back here, which under a saturated pool
+        // has been observed past 60 s and failed this line on an unmodified
+        // `main` — the very roadmap-023 class the comment above warns about,
+        // reintroduced by measuring from the outside.
+        #expect(reportedElapsed < 60, "must resolve at the ceiling, never at the open's own pace")
         #expect(reportedElapsed >= 0.1)
     }
 

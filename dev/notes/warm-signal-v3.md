@@ -261,7 +261,9 @@ master-mute state-collision break). The per-app `liveAppNames` branch is
 independent of master mute (redirect streams bypass the main-out master).
 
 Dot appearance: `gold` fill + `glow` halo (Full-gold mode) when armed; dark/empty
-socket (`#34302A` dark) when not armed. Cap the lit dot's size and luminance so
+socket (`#4A443B` dark — deepened 2026-08-28 from this spec's original `#34302A`,
+which measured 1.33:1 vs `panel` and read as absent; the Increase-Contrast value
+was promoted to standard) when not armed. Cap the lit dot's size and luminance so
 it reads as an indicator, not a beacon beside the bus scan (R1, §7).
 
 ### 3.4 Mute (decision d)

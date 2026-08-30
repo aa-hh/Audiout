@@ -265,48 +265,102 @@ public final class OnboardingViewController: NSViewController {
         view = background
     }
 
-    /// The spine: the hero header over six compact rows. No buttons, no copy —
-    /// everything a step SAYS lives in the ribbon now.
+    /// The spine: the hero header over six compact rows, GROUPED INSET —
+    /// macOS's native shape for a status list (`DemoPaneView`'s own Login Items
+    /// mock already draws it correctly): one rounded, bordered container, its
+    /// rows abutting with a hairline between them, rather than six separately
+    /// bordered cards with gaps — the "same-size icon + heading + text card"
+    /// shape that reads as a generic cross-platform wizard (owner critique,
+    /// Direction 04 grouped-inset pass). No buttons, no copy — everything a
+    /// step SAYS lives in the ribbon now.
     private func makeSpine() -> NSView {
         let pane = NSView()
         pane.translatesAutoresizingMaskIntoConstraints = false
 
         let header = makeHeader()
+
+        let group = RoundedContainerView(fill: Tokens.Color.panel,
+                                         border: Tokens.Color.hairline,
+                                         radius: SetupSpineRowView.cornerRadius)
+        // Clips every row's own fill/edge-bar to the group's rounded corners —
+        // the first and last rows have no radius of their own (see
+        // `SetupSpineRowView`), so this is what keeps them from squaring off
+        // past the group's rim.
+        group.wantsLayer = true
+        group.layer?.masksToBounds = true
+
         spineStack = NSStackView()
         spineStack.orientation = .vertical
         spineStack.alignment = .leading
-        spineStack.spacing = 6
+        // Zero: the hairline BETWEEN rows is drawn by a separator arranged
+        // subview, not by gap-plus-border the way six separate cards were —
+        // that gap is exactly what made the column read as six tiles.
+        spineStack.spacing = 0
         spineStack.distribution = .fill
         spineStack.translatesAutoresizingMaskIntoConstraints = false
         for step in flow.steps {
+            if !rows.isEmpty { addRowSeparator(to: spineStack) }
             let row = makeRow(for: step)
             rows[step] = row
             spineStack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: spineStack.widthAnchor).isActive = true
         }
+        addRowSeparator(to: spineStack)
         checkRow = SetupCheckRowView()
         spineStack.addArrangedSubview(checkRow)
         checkRow.widthAnchor.constraint(equalTo: spineStack.widthAnchor).isActive = true
 
+        group.addSubview(spineStack)
+        NSLayoutConstraint.activate([
+            spineStack.leadingAnchor.constraint(equalTo: group.leadingAnchor),
+            spineStack.trailingAnchor.constraint(equalTo: group.trailingAnchor),
+            spineStack.topAnchor.constraint(equalTo: group.topAnchor),
+            spineStack.bottomAnchor.constraint(equalTo: group.bottomAnchor),
+        ])
+
         pane.addSubview(header)
-        pane.addSubview(spineStack)
+        pane.addSubview(group)
 
         // Weakest constraint in the column: the spine hangs from the header and
         // the pane's lower slack falls below it.
-        let stackAboveBottom = spineStack.bottomAnchor.constraint(lessThanOrEqualTo: pane.bottomAnchor)
-        stackAboveBottom.priority = .defaultLow
+        let groupAboveBottom = group.bottomAnchor.constraint(lessThanOrEqualTo: pane.bottomAnchor)
+        groupAboveBottom.priority = .defaultLow
 
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
             header.topAnchor.constraint(equalTo: pane.topAnchor),
 
-            spineStack.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
-            spineStack.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
-            spineStack.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 18),
-            stackAboveBottom,
+            group.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
+            group.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
+            group.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 18),
+            groupAboveBottom,
         ])
         return pane
+    }
+
+    /// A hairline between two spine rows, inset to the row's text column and
+    /// full-bleed to the trailing edge — the same anatomy
+    /// `DemoPaneView`'s grouped-list mock already draws for its own rows,
+    /// which is what makes the group read as ONE list rather than six tiles
+    /// glued together.
+    private func addRowSeparator(to stack: NSStackView) {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        let box = NSBox()
+        box.boxType = .separator
+        box.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(box)
+        let textLeading = SetupSpineRowView.horizontalInset + SetupSpineRowView.iconSide
+            + SetupSpineRowView.iconGap
+        NSLayoutConstraint.activate([
+            box.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: textLeading),
+            box.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            box.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            container.heightAnchor.constraint(equalToConstant: 1),
+        ])
+        stack.addArrangedSubview(container)
+        container.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
     }
 
     /// The hero: one warm panel, read top to bottom (owner-approved 2026-08-12).

@@ -101,7 +101,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
         // on the first dim and is never restored for us.
         TouchBarDimObserver.shared.install { [weak self] dimmed in
             guard let self, self.presented else { return }
-            dimmed ? TouchBarPrivateAPI.dismiss(self.makeBar()) : self.reassert()
+            dimmed ? TouchBarPrivateAPI.dismiss(self.bar) : self.reassert()
         }
 
         presented = true
@@ -111,13 +111,13 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     private func dismiss() {
         guard presented else { return }
         presented = false
-        TouchBarPrivateAPI.dismiss(makeBar())
+        TouchBarPrivateAPI.dismiss(bar)
     }
 
     /// (Re)present the bar. Also the recovery path after a dim — the presentation
     /// is not restored automatically.
     private func reassert() {
-        TouchBarPrivateAPI.presentFullWidth(makeBar())
+        TouchBarPrivateAPI.presentFullWidth(bar)
     }
 
     // MARK: - Play/pause state
@@ -181,6 +181,11 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     private var playPauseSymbol: String { isPlaying ? "pause.fill" : "play.fill" }
 
     // MARK: - The bar
+
+    /// The one bar we ever present. The private dismiss matches on OBJECT
+    /// IDENTITY: it must be handed the same instance that was presented, or the
+    /// bar stays on screen and goes on swallowing the volume buttons.
+    private lazy var bar: NSTouchBar = makeBar()
 
     private func makeBar() -> NSTouchBar {
         let bar = NSTouchBar()

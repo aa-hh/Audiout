@@ -77,7 +77,13 @@ private final class CardFooterView: NSView {
         }
         segmented.target = self
         segmented.action = #selector(segmentTapped(_:))
-        segmented.setAccessibilityLabel(showsRemove ? "Add or remove application" : "Add a device")
+        // The devices "+" (showsRemove: false) fronts a MENU — save the
+        // selected devices as a group, pair a Bluetooth speaker, connect a
+        // known one — so its spoken name and tooltip must cover saving too,
+        // not just "add a device".
+        let label = showsRemove ? "Add or remove application" : "Add or save devices"
+        segmented.setAccessibilityLabel(label)
+        if !showsRemove { segmented.toolTip = label }
 
         addSubview(segmented)
 
@@ -225,6 +231,17 @@ public final class PopoverController: NSObject {
     /// the button, if ever rendered, taps into nothing.
     public var onReselectAudiout: (() -> Void)?
 
+    /// Called when the user taps the takeover status strip's "Try Again"
+    /// button (T6, state 4 — `.timedOut`): the bounded wait for the clock
+    /// ran out, so the device the strip was explaining is now `.failed`
+    /// (`enterFailure(_:cause:.timingUnavailable)`). The app wires this to
+    /// the same sanctioned single-device re-kick the "Speakers unreachable"
+    /// fallback banner's own "Try again" already drives
+    /// (`GroupController.requestReconnect(for:)` per not-yet-connected Main
+    /// Out member) — never a broad routing re-apply. `nil` (the default)
+    /// means the button, if ever rendered, taps into nothing.
+    public var onRetryTakeover: (() -> Void)?
+
     /// Called with `true` on `surfaceDidShow()` and `false` on
     /// `surfaceDidHide()` (T-GATE): the metering-active gate. The app wires this to
     /// `(backend as? MeteringControlling)?.setMeteringActive(_:)` so the backend
@@ -237,8 +254,9 @@ public final class PopoverController: NSObject {
     /// debounces to decide when the fleet has quiesced. `nil` when no host cares.
     public var onDeviceSnapshot: ((Set<String>) -> Void)?
     /// Called when an Applications-card slider moves, so the app can push the new
-    /// volume straight to a `.currentDevice` app's LOCAL playback stream (Bug T2)
-    /// for a low-latency response, in ADDITION to the persisted
+    /// volume straight to whichever renderer holds that app — a `.currentDevice`
+    /// app's LOCAL playback stream (Bug T2), or the leveled intercept for an
+    /// un-redirected one — for a low-latency response, in ADDITION to the persisted
     /// `AppRoutingController.setVolume` edit. The app wires this to
     /// `(backend as? AppRouteConfiguring)?.setLocalPlaybackVolume`. Called
     /// unconditionally (for every route kind): the backend no-ops it for a bundle
@@ -319,6 +337,25 @@ public final class PopoverController: NSObject {
     public var onLocalTrimPreview: ((_ ms: Double) -> Void)?
     /// End a local preview: non-nil keeps (and persists) it, `nil` restores.
     public var onLocalTrimEndPreview: ((_ keepMs: Double?) -> Void)?
+
+    /// A CAST receiver's BY-EAR offset (CAST-SYNC). Third store, same
+    /// affordance: the chip and drawer are the Bluetooth ones, the value lives
+    /// in its own file keyed by receiver id, and the range is
+    /// `BTSyncTrim.castRangeMs` rather than `rangeMs` — a Cast row corrects
+    /// what the protocol cannot report (the receiver's output stage, its DAC,
+    /// and a TV's HDMI → soundbar chain), not the receiver's own buffer, which
+    /// is measured and removed automatically. No `persist` flag, for the same
+    /// reason the local closures have none: the drawer emits committed
+    /// gestures only. Wired to `(backend as? CastSyncOffsetControlling)`.
+    public var onSetCastOffset: ((_ ms: Double, _ deviceID: String) -> Void)?
+    /// The Cast twin of ``btTrimProvider``.
+    public var castOffsetProvider: ((_ deviceID: String) -> Double)?
+    /// The Cast twin of ``btTrimIsSetProvider`` — "tuned or never tuned?".
+    public var castOffsetIsSetProvider: ((_ deviceID: String) -> Bool)?
+    /// The Cast twin of ``onResetBTAlignment``: delete the stored entry (never
+    /// write 0 — that is a tuned value) and put the live feed back on no
+    /// correction.
+    public var onResetCastOffset: ((_ deviceID: String) -> Void)?
 
     /// Delete a Bluetooth device's STORED alignment — its measured latency AND
     /// its trim — and re-push the live sink so a playing speaker reverts
@@ -1018,6 +1055,34 @@ public final class PopoverController: NSObject {
         }
     }
 
+    /// Repaint the Main Out readouts from the model, for a master move that did
+    /// NOT originate in this popover — a phone command (T7), or the Mac's own
+    /// volume keys. A user-driven master change emits no `BackendEvent` (see
+    /// `GroupController.setMain`), so `update(devices:)`'s repaint tail never
+    /// runs for one; `GroupController.onStateDidChange` calls this instead.
+    /// In-place only, never a `rebuild()` (audit B8), and it only READS the
+    /// controller — no re-entrant mutation, unlike `update(devices:)`. Mid-drag
+    /// thumb writes are already suppressed by `MainOutRowView`/`DeviceRowView`'s
+    /// own drag guards.
+    public func refreshMainOutMaster() {
+        // Closed: nothing to repaint — every open goes through `rebuildForOpen()`,
+        // whose `rebuild()` re-applies the Main Out row from the model.
+        guard isEffectivelyShown else { return }
+        refreshMainOutRow()
+        // Deliberately NOT `refreshDeviceRows()`: no device row's paint depends on
+        // the master EXCEPT the Mac's own while `localRowDrivesMain`, where the row
+        // and Main are one control and `applySelectionState` overlays Main onto it.
+        // The full sweep would re-run the energize reconcile, the rail extents and
+        // the card accessory on every step of a volume-key hold, for one row's
+        // number. (Everything else this hook can also announce — mute, membership,
+        // groups — reaches the rows through the backend echo and its
+        // `update(devices:)` tail, as it did before this repaint existed.)
+        guard groupController?.localRowDrivesMain == true,
+              let local = devicesByID.values.first(where: \.isLocalDevice),
+              let row = deviceRowsByID[local.id] else { return }
+        applySelectionState(to: row, device: local)
+    }
+
     /// Record a routed-app process-lifecycle change (T4, `BackendEvent.routedAppRunning`).
     /// Called by the host (`AppDelegate`) directly — the signal has no home on
     /// `Device` and can't ride `update(devices:)`. Stores the offline state and
@@ -1236,9 +1301,10 @@ public final class PopoverController: NSObject {
     /// (T6), which outranks the double-path guard (W3-T3), which outranks the
     /// unregistered-build note; none active means no note. `action` is non-nil
     /// for routing-blocked (the "Use <productName>" button), for the takeover
-    /// strip's `.needsApproval` (state 1), and for the unregistered note
-    /// ("Buy…") — the states with an actual remedy a button can offer. The
-    /// capture-failure message names its own remedy in prose, so it has none.
+    /// strip's `.needsApproval` (state 1) and `.timedOut` (state 4, "Try
+    /// Again"), and for the unregistered note ("Buy…") — the states with an
+    /// actual remedy a button can offer. The capture-failure message names
+    /// its own remedy in prose, so it has none.
     private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?, severity: SystemAirPlayNoteBannerView.Severity) {
         if let captureFailureMessage {
             return (captureFailureMessage, nil, .warning)
@@ -1247,7 +1313,12 @@ public final class PopoverController: NSObject {
             return (Self.routingBlockedNeedsDefaultText, routingBlockedNeedsDefaultAction, .warning)
         }
         if let takeoverStatus {
-            return (Self.takeoverStatusText(for: takeoverStatus), takeoverStatusAction(for: takeoverStatus), .info)
+            // State 4 (`.timedOut`) is a genuine failure — the connection did
+            // NOT complete — so it takes the same warning tier routing-blocked
+            // uses, rather than the informational tier the other three
+            // (still-in-progress or explains-a-remedy) states keep.
+            let severity: SystemAirPlayNoteBannerView.Severity = takeoverStatus == .timedOut ? .warning : .info
+            return (Self.takeoverStatusText(for: takeoverStatus), takeoverStatusAction(for: takeoverStatus), severity)
         }
         if systemAirPlayNoteActive {
             return (Self.systemAirPlayNoteText, nil, .info)
@@ -1278,7 +1349,11 @@ public final class PopoverController: NSObject {
 
     /// The takeover strip's copy for each state (T6, PLAN-AIRPLAY-COEXISTENCE.md) —
     /// plain language throughout, never "PTP"/"bind"/"ports 319/320". State 3's
-    /// copy is the plan's own exact wording; the others follow its voice.
+    /// copy is the plan's own exact wording; the others follow its voice. State
+    /// 4's copy is honest about the outcome — the wait ran out and the
+    /// connection genuinely failed (`enterFailure(_:cause:.timingUnavailable)`),
+    /// so it no longer promises the app will "try again" on its own; the "Try
+    /// Again" button below is what actually does that, on the user's own ask.
     static func takeoverStatusText(for status: TakeoverStatus) -> String {
         switch status {
         case .needsApproval:
@@ -1288,20 +1363,31 @@ public final class PopoverController: NSObject {
         case .takingOver:
             return "Taking audio back from macOS…"
         case .timedOut:
-            return "Another app is using AirPlay's timing right now, so this connection couldn't complete. Try again in a moment."
+            return "Speaker Sync couldn't get the speakers' clocks in step, so this connection couldn't complete."
         }
     }
 
-    /// The strip's action button. Only state 1 (`.needsApproval`) has one: state
-    /// 2's own doc says plainly there's nothing an approval UX can do about a
-    /// missing bundle component; state 3 is transient; state 4 needs a DIFFERENT
-    /// app to yield, which no button here can cause.
+    /// The strip's action button. States 1 (`.needsApproval`) and 4
+    /// (`.timedOut`) have one: state 2's own doc says plainly there's nothing
+    /// an approval UX can do about a missing bundle component, and state 3 is
+    /// transient. State 4's device is genuinely `.failed` by the time the
+    /// state shows, so "Try Again" gives the user the same single-device
+    /// re-kick a `.failed` row's own diagnosis panel offers.
     private func takeoverStatusAction(for status: TakeoverStatus) -> SystemAirPlayNoteBannerView.Action? {
-        guard case .needsApproval = status else { return nil }
-        return SystemAirPlayNoteBannerView.Action(
-            title: "Open Login Items…",
-            accessibilityLabel: "Open Login Items to approve Speaker Sync",
-            handler: { [weak self] in self?.onOpenPTPHelperLoginItems?() })
+        switch status {
+        case .needsApproval:
+            return SystemAirPlayNoteBannerView.Action(
+                title: "Open Login Items…",
+                accessibilityLabel: "Open Login Items to approve Speaker Sync",
+                handler: { [weak self] in self?.onOpenPTPHelperLoginItems?() })
+        case .timedOut:
+            return SystemAirPlayNoteBannerView.Action(
+                title: "Try Again",
+                accessibilityLabel: "Try connecting again",
+                handler: { [weak self] in self?.onRetryTakeover?() })
+        case .helperMissing, .takingOver:
+            return nil
+        }
     }
 
     /// Test-only: whichever note (double-path guard or takeover strip) currently
@@ -1457,7 +1543,7 @@ public final class PopoverController: NSObject {
         // slider column, so a title over it prints the same word three times —
         // and a horizontal fader with a live `%` beside it is the most
         // self-evident control on the surface. The TRAILING titles stay: Output /
-        // Feed / Sync / Redirect each name a different, genuinely non-obvious
+        // Source / Offset / Redirect each name a different, genuinely non-obvious
         // thing occupying one shared column. The asymmetry is the point; don't
         // restore a slider title for symmetry.
         //
@@ -1483,7 +1569,6 @@ public final class PopoverController: NSObject {
         renderedSubsectionTitles = []
         renderedBluetoothOrder = []
         renderedBTConnectShown = false
-        renderedSyncColumnTitles = []
         renderedSpeakerSearchText = nil
         bluetoothConnectButton = nil
         // Combined header row: "Output Devices" title on the left. The
@@ -1491,11 +1576,36 @@ public final class PopoverController: NSObject {
         // (v4 §Call-1), so this card no longer heads a membership column — but
         // its device rows' trailing dropdown column, once left empty, now
         // fills the FEED composite (v4.1 item 3), so the header names it
-        // "Feed" (`DeviceRowView.updateFeedText`/`feedStack`). The header row
-        // carries NO accessory: the "+" that fronts the add MENU is the card's
-        // bottom footer strip now (`devicesFooter`, added after every
-        // subsection below).
-        panel.beginCard(header: Self.outputDevicesCardTitle, trailingTitle: "Feed",
+        // "Source" (renamed from "Feed", 2026-08-28 — the column carries
+        // `DeviceRowView.updateFeedText`/`feedStack`; the internal FEED
+        // vocabulary stays). The header row carries NO accessory: the "+"
+        // that fronts the add MENU is the card's bottom footer strip now
+        // (`devicesFooter`, added after every subsection below).
+        // The FEED pills are LEFT-ALIGNED in their slot, so the "Source"
+        // title left-aligns on the same leading anchor the pills use
+        // (`feedColumnLeadingFromTrailing`) — centered over the whole reserved
+        // column it floated ~46 pt right of a single pill.
+        //
+        // The "Offset" column legend (renamed from "Sync", 2026-08-28) rides
+        // this SAME header line — moved up from the subsection header lines
+        // when the This Mac subsection was dissolved, and printed exactly
+        // once. Same has-rows gate as before, now card-wide: only when a row
+        // carrying the sync chip (`showsSyncControls`: the Mac's own row, or
+        // a listed Bluetooth row) actually renders under it — chrome must
+        // never name absent content. Gated on the SECTIONS, not on collapse
+        // (a collapsed subsection still has its rows, exactly as a collapsed
+        // card keeps its own column titles).
+        let showsOffsetTitle = sections.contains {
+            ($0.title == Self.thisMacSubsectionTitle
+                || $0.title == Self.bluetoothSubsectionTitle) && !$0.devices.isEmpty
+        }
+        renderedOffsetColumnTitle = showsOffsetTitle
+        panel.beginCard(header: Self.outputDevicesCardTitle, trailingTitle: "Source",
+                        trailingTitleLeadingFromTrailing:
+                            PopoverColumnGrid.feedColumnLeadingFromTrailing,
+                        secondTrailingTitle: showsOffsetTitle ? "Offset" : nil,
+                        secondTrailingTitleTrailing:
+                            PopoverColumnGrid.offsetTitleTrailingFromTrailing,
                         collapsible: true,
                         collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
                         onToggle: { [weak self] in self?.toggleCard(Self.outputDevicesCardTitle) })
@@ -1510,37 +1620,34 @@ public final class PopoverController: NSObject {
         if let note = devicesCardNote {
             panel.addCardNote(note)
         }
+        // The Mac's own row is PINNED directly under the card header (header
+        // decision 2026-08-28): no "This Mac" subsection wrapper any more — no
+        // grouping label, no chevron, no per-subsection collapse. The row
+        // lands in the CARD's body (`currentSubsectionStack` is nil here), so
+        // collapsing "Output Devices" still folds it with everything else,
+        // and the rail's order is untouched (`deviceSections()` still lists
+        // it first). "AirPlay Devices" is therefore the first subsection.
+        if let macSection = sections.first(where: { $0.title == Self.thisMacSubsectionTitle }) {
+            for device in macSection.devices {
+                panel.addRow(makeDeviceRow(device, indented: false))
+            }
+        }
         // A subsection is HIDDEN entirely when it has no rows to show — never
         // an empty grouping label — except Bluetooth, whose header always
         // renders (BT-LIST): its empty body IS content, the Connect
         // affordance (`rendersHeader`). A COLLAPSED one keeps its header and
-        // renders no rows.
+        // renders no rows. Subsection headers carry no column titles — the
+        // "Offset" legend lives on the card header line above (printed once).
+        // `rendersHeader` is also `update(devices:)`'s structural-compare
+        // filter, so what renders and what is expected can't drift — This Mac
+        // answers false there (pinned row, never a grouping header).
         for section in sections where rendersHeader(section) {
-            // The SYNC column title lives in the Bluetooth subsection's header
-            // line only (BT-OFFSET-UI) — and ONLY when that subsection actually
-            // has rows carrying a sync chip. The Bluetooth header renders even
-            // with nothing listed (its empty body IS the Connect affordance), so
-            // ungating this leaves "Sync" floating over a column that does not
-            // exist: chrome naming absent content, the one thing a legend line
-            // must never do. Gated on the SECTION, not on `collapsed` — a
-            // collapsed subsection still HAS its rows, exactly as a collapsed
-            // card keeps its own column titles.
-            // Roadmap 056: the This Mac subsection's row carries the same SYNC
-            // chip, so it takes the same column title under the same has-rows
-            // gate.
-            let syncSubsection = section.title == Self.bluetoothSubsectionTitle
-                || section.title == Self.thisMacSubsectionTitle
-            let showsSync = syncSubsection && !section.devices.isEmpty
-            if showsSync { renderedSyncColumnTitles.insert(section.title) }
-            let collapsed = addSubsection(
-                section.title,
-                columnTitle: showsSync ? "Sync" : nil,
-                columnCenterFromTrailing: showsSync ? PopoverColumnGrid.syncCenterFromTrailing : 0)
+            let collapsed = addSubsection(section.title)
             guard !collapsed else { continue }
             addSubsectionRows(section)
         }
         // The "+" footer belongs to the CARD, not to any one subsection, so it
-        // is added after ALL of them (This Mac / AirPlay / Bluetooth) — last
+        // is added after ALL of them (AirPlay / Cast / Bluetooth) — last
         // thing in the card body, and hidden with it when the card collapses.
         // `endSubsection()` is what keeps it out of the last subsection's clip,
         // where collapsing Bluetooth would take the strip with it. A sync drawer
@@ -1628,10 +1735,10 @@ public final class PopoverController: NSObject {
 
     /// The device-type subsection labels — constants because, like the card
     /// titles, the string IS the collapse key and tests assert the rendered
-    /// text. "This Mac", not "Current Device": once the app inserts its own
-    /// aggregate ("Audiout") as the default output, the literal "current
-    /// device" is the aggregate — a plumbing artifact the user shouldn't see.
-    /// The row under it still shows the real underlying device name.
+    /// text. "This Mac" is no longer a RENDERED header (its row is pinned
+    /// directly under the card header since 2026-08-28) — the constant
+    /// survives as `deviceSections()`'s grouping key for the local band, which
+    /// keeps the rail's full order and the section machinery on one list.
     static let thisMacSubsectionTitle = "This Mac"
     static let airPlaySubsectionTitle = "AirPlay Devices"
     static let bluetoothSubsectionTitle = "Bluetooth Devices"
@@ -1648,8 +1755,13 @@ public final class PopoverController: NSObject {
     /// state IS content (the Connect affordance). AirPlay does the same while a
     /// search state is active: the state line needs the "AirPlay Devices"
     /// grouping label above it to say WHAT was not found. The rest stay
-    /// hidden-when-empty.
+    /// hidden-when-empty — and This Mac NEVER renders one (2026-08-28: its row
+    /// is pinned directly under the card header, no subsection). This answer
+    /// is shared by `rebuild()`'s section loop and `update(devices:)`'s
+    /// structural compare; splitting them made every backend event read as a
+    /// structural change and rebuild the whole panel.
     private func rendersHeader(_ section: DeviceSection) -> Bool {
+        if section.title == Self.thisMacSubsectionTitle { return false }
         if !section.devices.isEmpty { return true }
         if section.title == Self.bluetoothSubsectionTitle { return true }
         return section.title == Self.airPlaySubsectionTitle && speakerSearchState() != nil
@@ -1869,15 +1981,14 @@ public final class PopoverController: NSObject {
     /// row (BT-LIST) — `test_bluetoothConnectRowShown()`.
     private var renderedBTConnectShown = false
 
-    /// Which subsections the LAST `rebuild()` printed the "Sync" column title
-    /// on — `test_syncColumnTitleShown(in:)`. Recorded rather than derived
+    /// Whether the LAST `rebuild()` printed the card header's "Offset" column
+    /// title — `test_offsetColumnTitleShown()`. Recorded rather than derived
     /// because the title is a RENDER decision (it must never name a column with
     /// no rows under it), and nothing else on this surface would notice it
-    /// silently going missing. Keyed by subsection since roadmap 060: TWO
-    /// subsections can print it now, so a bare Bool could no longer tell "the
-    /// Bluetooth header printed it with nothing under it" from "the Mac's did,
-    /// correctly".
-    private var renderedSyncColumnTitles: Set<String> = []
+    /// silently going missing. One card-level Bool since the 2026-08-28 header
+    /// decision moved the legend off the subsection header lines: it prints on
+    /// the card header, exactly once.
+    private var renderedOffsetColumnTitle = false
 
     /// The mounted Bluetooth empty-state Connect button, for
     /// `test_fireBluetoothConnectClick()` to drive real target/action dispatch.
@@ -1892,14 +2003,10 @@ public final class PopoverController: NSObject {
     /// transient within one open and `rebuildForOpen()` resets it to the
     /// expanded default, identically to a card.
     @discardableResult
-    private func addSubsection(_ title: String,
-                               columnTitle: String? = nil,
-                               columnCenterFromTrailing: CGFloat = 0) -> Bool {
+    private func addSubsection(_ title: String) -> Bool {
         renderedSubsectionTitles.append(title)
         let collapsed = collapsedState(for: title, default: false)
-        panel.addSubsectionHeader(title, columnTitle: columnTitle,
-                                  columnCenterFromTrailing: columnCenterFromTrailing,
-                                  collapsible: true, collapsed: collapsed,
+        panel.addSubsectionHeader(title, collapsible: true, collapsed: collapsed,
                                   onToggle: { [weak self] in self?.toggleSubsection(title) })
         return collapsed
     }
@@ -2064,6 +2171,55 @@ public final class PopoverController: NSObject {
         let next = !(transientCollapsed[title] ?? false)
         transientCollapsed[title] = next
         panel.setCardCollapsed(title: title, collapsed: next, animated: animated)
+    }
+
+    /// Repaint the Applications card when the routing table gained or lost a
+    /// route under the popover rather than through it — the phone's add and
+    /// remove, which reach `AppRoutingController` through the companion
+    /// dispatcher and used to leave the card painting a stale list until the
+    /// next open re-read it.
+    ///
+    /// MEMBERSHIP ONLY, and that is the whole safety of it. `onRoutesDidChange`
+    /// is source-blind: it also fires for the popover's OWN continuous volume
+    /// drag, once per tick (`AppRowView`'s slider is `isContinuous`), and a
+    /// `rebuild()` there would replace the `AppRowView` under the mouse and
+    /// break the NSSlider tracking loop — the invariant
+    /// `appRow(_:didSetVolume:for:)` documents and deliberately protects. A
+    /// volume or destination write never changes which rows exist, so keying
+    /// off the rendered row set skips every one of those without needing to
+    /// know where the mutation came from.
+    ///
+    /// Closed is a no-op: every open runs `rebuildForOpen()`, which re-reads
+    /// the table anyway (audit B8 — a closed popover never rebuilds).
+    ///
+    /// A phone-driven VOLUME or DESTINATION change still doesn't repaint the
+    /// Mac's row live; that is pre-existing and unchanged here, and fixing it
+    /// needs an in-place `AppRowView.apply` sweep rather than a rebuild.
+    public func refreshAppRoutes() {
+        guard isEffectivelyShown else { return }
+        guard Set(appRouting.appRoutes.map(\.bundleID)) != Set(appRowsByBundleID.keys) else { return }
+        rebuild()
+    }
+
+    /// Repaint every device row's membership state in place, for the changes
+    /// that reach the model WITHOUT a backend echo behind them.
+    ///
+    /// `update(devices:)` is how a row normally learns anything, and it rides
+    /// a `BackendEvent`. But `GroupController.setDeviceSelected` only calls
+    /// `applyRouting()` — the sole path that can produce an event — while Main
+    /// Out targets Selected Devices. With a GROUP as the target it mutates
+    /// `selectedDeviceIDs` and announces `onStateDidChange` alone, so a phone
+    /// toggling a speaker left the checkbox stale with nothing on the way to
+    /// correct it. Group edits reach the rows the same way (the rail's dormant
+    /// dimming is derived from the active target's membership).
+    ///
+    /// The caller gates this on the selection or the groups having actually
+    /// changed — `refreshMainOutMaster` documents why the full sweep must not
+    /// ride every `onStateDidChange` (it would re-run the energize reconcile
+    /// and the rail extents on every tick of a volume-key hold).
+    public func refreshDeviceMembership() {
+        guard isEffectivelyShown else { return }
+        refreshDeviceRows()
     }
 
     // MARK: Main Out row
@@ -2404,8 +2560,9 @@ public final class PopoverController: NSObject {
                                  paintsSelectionBackground: false, showsMeter: true, showsBus: true,
                                  // Roadmap 056 Part 1: the Mac's own output is
                                  // a trimmable device too, and gets the identical
-                                 // chip/drawer/wizard surface.
-                                 showsSyncControls: device.isBluetooth || device.isLocalDevice)
+                                 // chip/drawer/wizard surface. CAST-SYNC adds
+                                 // Cast rows — chip and drawer, no wizard.
+                                 showsSyncControls: isTrimmable(device))
         view.delegate = self
         applySelectionState(to: view, device: device)
         deviceRowsByID[device.id] = view
@@ -2585,20 +2742,35 @@ public final class PopoverController: NSObject {
 
     /// A trimmable row's current Sync trim: the session cache first (the
     /// user's freshest edit), else the persisted value — via `btTrimProvider`
-    /// for a Bluetooth row, `localTrimProvider` for the Mac's own. Rows with no
-    /// Sync chip short-circuit to 0 (they ignore the value anyway).
+    /// for a Bluetooth row, `localTrimProvider` for the Mac's own,
+    /// `castOffsetProvider` for a Cast receiver. Rows with no Sync chip
+    /// short-circuit to 0 (they ignore the value anyway).
     private func btSyncTrim(for device: Device) -> Double {
-        guard device.isBluetooth || device.isLocalDevice else { return 0 }
+        guard isTrimmable(device) else { return 0 }
         if let cached = btTrimsByID[device.id] { return cached }
-        let persisted = device.isLocalDevice
-            ? (localTrimProvider?() ?? 0)
-            : (btTrimProvider?(device.id) ?? 0)
+        let persisted: Double
+        let isSet: Bool
+        if device.isLocalDevice {
+            persisted = localTrimProvider?() ?? 0
+            isSet = localTrimIsSetProvider?() ?? false
+        } else if device.isCast {
+            persisted = castOffsetProvider?(device.id) ?? 0
+            isSet = castOffsetIsSetProvider?(device.id) == true
+        } else {
+            persisted = btTrimProvider?(device.id) ?? 0
+            isSet = btTrimIsSetProvider?(device.id) == true
+        }
         btTrimsByID[device.id] = persisted
-        let isSet = device.isLocalDevice
-            ? (localTrimIsSetProvider?() ?? false)
-            : (btTrimIsSetProvider?(device.id) == true)
         if isSet { btTunedDeviceIDs.insert(device.id) }
         return persisted
+    }
+
+    /// Which rows carry the SYNC chip and drawer: every Bluetooth speaker, the
+    /// Mac's own output (roadmap 056), and every Cast receiver (CAST-SYNC).
+    /// AirPlay rows still carry none, by locked Decision 1 — their timing is
+    /// the reference everything else is aligned to.
+    private func isTrimmable(_ device: Device) -> Bool {
+        device.isBluetooth || device.isLocalDevice || device.isCast
     }
 
     /// A Bluetooth row's MEASURED latency (roadmap 056 Part A): the session
@@ -2614,7 +2786,7 @@ public final class PopoverController: NSObject {
     /// Whether this device has been tuned at all (D10 — "Not set" otherwise).
     /// Reads the trim first so both caches seed together on a row's first paint.
     private func btSyncTrimIsSet(for device: Device) -> Bool {
-        guard device.isBluetooth || device.isLocalDevice else { return false }
+        guard isTrimmable(device) else { return false }
         _ = btSyncTrim(for: device)
         return btTunedDeviceIDs.contains(device.id)
     }
@@ -2671,7 +2843,7 @@ public final class PopoverController: NSObject {
         if let id = expandedSyncDeviceID {
             let selected = groupController?.isSpeakerSelected(id) ?? false
             let rowIsLive = devicesByID[id]
-                .map { ($0.isBluetooth || $0.isLocalDevice) && $0.isAvailable } == true
+                .map { isTrimmable($0) && $0.isAvailable } == true
                 && deviceRowsByID[id] != nil
             if !rowIsLive || (expandedSyncDeviceWasSelected && !selected) {
                 closeSyncDrawerIntent()
@@ -2727,7 +2899,11 @@ public final class PopoverController: NSObject {
     /// only — a measured latency from an alignment run.
     private func canResetAlignment(for device: Device) -> Bool {
         if btSyncTrimIsSet(for: device) { return true }
-        return !device.isLocalDevice && btMeasuredLatency(for: device.id) != nil
+        // Only a wizard run leaves a measured latency, and only Bluetooth rows
+        // get one — the Mac's is the zero it is measured from, and Cast has no
+        // run at all.
+        guard !device.isLocalDevice, !device.isCast else { return false }
+        return btMeasuredLatency(for: device.id) != nil
     }
 
     private func unmountSyncDrawer(animated: Bool) {
@@ -2746,6 +2922,14 @@ public final class PopoverController: NSObject {
         if devicesByID[id]?.isLocalDevice == true {
             return -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
         }
+        // A Cast receiver's own buffer is measured and removed on the wire, so
+        // this control is left with the residue AFTER its media clock — the
+        // output stage, the DAC, and a TV's HDMI → soundbar chain, which alone
+        // can pass 400 ms. Its whole range is usable: there is no per-device
+        // zero clamp to solve against, so the BT provider is not consulted.
+        if devicesByID[id]?.isCast == true {
+            return -BTSyncTrim.castRangeMs...BTSyncTrim.castRangeMs
+        }
         return btTrimRangeProvider?(id) ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
     }
 
@@ -2754,10 +2938,9 @@ public final class PopoverController: NSObject {
     /// session cache updates either way, so the row's chip tracks the scrub
     /// digit by digit.
     private func applyBTTrim(_ ms: Double, deviceID id: String, persist: Bool) {
-        if persist {
-            Analytics.capture("bt_sync:trim_committed")
-        }
-        let value = BTSyncTrim.quantise(ms)
+        let isCast = devicesByID[id]?.isCast == true
+        let value = BTSyncTrim.quantise(
+            ms, rangeMs: isCast ? BTSyncTrim.castRangeMs : BTSyncTrim.rangeMs)
         btTrimsByID[id] = value
         // Editing a device IS tuning it — a scrub that passes through exactly
         // 0.0 must read "0.0 ms", never flip the chip back to "Not set".
@@ -2767,8 +2950,14 @@ public final class PopoverController: NSObject {
             // gestures, and the one closure both stores the value and triggers
             // the live apply.
             onSetLocalTrim?(value)
+        } else if isCast {
+            // Same posture as the local closure, and for the same reason.
+            onSetCastOffset?(value, id)
         } else {
             onSetBTTrim?(value, id, persist)
+        }
+        if persist {
+            Analytics.capture(isCast ? "cast_sync:offset_committed" : "bt_sync:trim_committed")
         }
         // Repaint just this one row's chip. A scrub arrives dozens of times a
         // second and `refreshDeviceRows()` would drag the rail extents and
@@ -3409,23 +3598,24 @@ public final class PopoverController: NSObject {
         return .device(id: id)
     }
 
-    /// Resolve a routed app's icon lazily (T-8): the live `NSRunningApplication`'s
-    /// icon when the app is running, else a generic placeholder — routes persist
-    /// across app quits, so a routed-but-quit app must still render. Prefers the
-    /// injected `runningAppsProvider` (so tests/headless runs stay off the real
-    /// workspace), falling back to `NSRunningApplication(bundleIdentifier:)`.
+    /// Resolve a routed app's icon lazily (T-8): the injected `runningAppsProvider`
+    /// first — the test/harness seam (`popover-harness`/`popover-snapshot` inject
+    /// fake apps there; a live lookup ahead of it would put headless runs on the
+    /// real workspace) — then `AppIconCache`, which resolves a routed-but-quit
+    /// app's real icon from disk/`NSWorkspace` instead of falling straight to the
+    /// placeholder below. Only an app `AppIconCache` truly can't find (never
+    /// installed, or an invalid bundle id) reaches the generic placeholder. This
+    /// also means `appTintColor(for:)` below, which derives its tint from this
+    /// icon, now resolves a quit app's real brand hue instead of the neutral
+    /// placeholder tint.
     private func appIcon(for bundleID: String) -> NSImage? {
         if let running = runningAppsProvider().first(where: { $0.bundleID == bundleID }),
            let icon = running.icon {
             return icon
         }
-        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first,
-           let icon = app.icon {
-            return icon
+        if let cached = AppIconCache.icon(forBundleID: bundleID) {
+            return cached
         }
-        // Not currently running (route persisted across a quit) — generic
-        // placeholder (PLAN §C: "a routed app that is NOT currently running shows a
-        // generic placeholder").
         let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .regular)
         return NSImage(systemSymbolName: Self.missingAppIconSymbolName, accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
@@ -3935,14 +4125,10 @@ public final class PopoverController: NSObject {
     /// (BT-LIST).
     public func test_bluetoothConnectRowShown() -> Bool { renderedBTConnectShown }
 
-    /// Whether the last rebuild printed the "Sync" column title anywhere.
-    public func test_syncColumnTitleShown() -> Bool { !renderedSyncColumnTitles.isEmpty }
-
-    /// Whether it printed on ONE named subsection (`"Bluetooth Devices"` /
-    /// `"This Mac"`).
-    public func test_syncColumnTitleShown(in subsection: String) -> Bool {
-        renderedSyncColumnTitles.contains(subsection)
-    }
+    /// Whether the last rebuild printed the card header's "Offset" column
+    /// title (2026-08-28: the legend lives on the card header line, once —
+    /// never on a subsection header).
+    public func test_offsetColumnTitleShown() -> Bool { renderedOffsetColumnTitle }
 
     /// Fire the Bluetooth empty-state Connect button through real AppKit
     /// target/action dispatch (never a bypass seam).
@@ -4300,6 +4486,12 @@ extension PopoverController: DeviceRowView.Delegate {
     /// — the same conditions that tear an open wizard down.
     func startBTAlignmentWizard(deviceID: String) {
         guard let device = devicesByID[deviceID], btAlignmentTargetIsLive(deviceID) else { return }
+        // A Cast receiver has no run to give: it plays seconds behind live, and
+        // no ±500 ms bisection converges on that. Its row's own doors are
+        // absent (`DeviceRowView.supportsAlignmentWizard`); this refuses the
+        // drawer's hidden ⌥-click, the one entry point with no visible
+        // affordance to hide.
+        guard !device.isCast else { return }
         tearDownBTWizard()
         let isLocalTarget = device.isLocalDevice
         // The Mac's run still measures its own sync OFFSET; a Bluetooth run now
@@ -4729,6 +4921,9 @@ extension PopoverController: BTSyncDrawerViewDelegate {
         guard let id = expandedSyncDeviceID else { return }
         if devicesByID[id]?.isLocalDevice == true {
             onResetLocalTrim?()
+        } else if devicesByID[id]?.isCast == true {
+            onResetCastOffset?(id)
+            Analytics.capture("cast_sync:offset_reset")
         } else {
             onResetBTAlignment?(id)
         }
@@ -4797,7 +4992,8 @@ extension PopoverController: AppRowView.Delegate {
             Analytics.capture("mixer:volume_adjusted", ["control": "app"])
         }
         noteSliderGesture()
-        // Drive `.currentDevice` local stream immediately (low-latency path).
+        // Drive the app's own renderer immediately (low-latency path): a
+        // `.currentDevice` local stream, or the leveled intercept.
         // `appRouting.setVolume` fires `onRoutesDidChange` which re-pushes volumes
         // to the mixer/engine — no rebuild needed here; a rebuild would replace
         // the AppRowView mid-drag and break the NSSlider tracking loop.

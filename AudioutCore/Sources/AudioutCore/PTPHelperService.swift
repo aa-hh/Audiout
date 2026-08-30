@@ -240,15 +240,26 @@ public struct PTPHelperActivator: PTPHelperActivating {
     private let ptpHelper: PTPHelperManaging
     private let machServiceName: String
     private let pollInterval: TimeInterval
+    private let touchInterval: TimeInterval
+    /// Test-only observation hook, fired synchronously right after each Mach
+    /// touch (including the first). `nil` in production. Exists so
+    /// `PTPHelperActivationTests` can count touches without a second, parallel
+    /// touch seam — the real ``touchMachService(named:)`` still runs every
+    /// time; this never replaces it.
+    private let onTouch: (@Sendable () -> Void)?
 
     public init(
         ptpHelper: PTPHelperManaging = SMAppServicePTPHelper(),
         machServiceName: String = PTPHelperActivator.machServiceName,
-        pollInterval: TimeInterval = 0.2
+        pollInterval: TimeInterval = 0.2,
+        touchInterval: TimeInterval = 2.0,
+        onTouch: (@Sendable () -> Void)? = nil
     ) {
         self.ptpHelper = ptpHelper
         self.machServiceName = machServiceName
         self.pollInterval = pollInterval
+        self.touchInterval = touchInterval
+        self.onTouch = onTouch
     }
 
     public var willWaitForClock: Bool { ptpHelper.status == .enabled }
@@ -257,17 +268,41 @@ public struct PTPHelperActivator: PTPHelperActivating {
         let status = ptpHelper.status
         guard status == .enabled else { return .needsApproval(status) }
 
-        // Held for the whole wait below via `withExtendedLifetime` — releasing
-        // it early would let ARC invalidate the connection mid-handshake.
-        let touch = Self.touchMachService(named: machServiceName)
+        // The helper self-exits after its own ~15 s idle window
+        // (AUDIOUT_PTP_IDLE_SECS, AirPlayEngine/Sources/ptp-helper/main.c)
+        // and shm_unlinks its clock record on the way out — so if it was
+        // already idling out right as this call started, ONE touch cannot
+        // cover a wait that can run up to `timeout` (up to 10 s at real call
+        // sites): the helper exits mid-wait and nothing re-demand-starts it
+        // for the rest of it. Re-touch on any poll iteration where the last
+        // touch has aged past `touchInterval`, for as long as the deadline
+        // allows. Every touch is collected here and held for the WHOLE wait
+        // via `withExtendedLifetime` below — releasing any of them early
+        // would let ARC invalidate that connection mid-handshake, which is
+        // the exact bug `PTPHelperReconciler.realLivenessProbe`'s doc comment
+        // warns about: an early release forges a false failure/zombie signal,
+        // it doesn't just leak a socket.
+        var touches: [xpc_connection_t] = [Self.touchMachService(named: machServiceName)]
+        onTouch?()
+        var lastTouchAt = Date()
 
         let deadline = Date().addingTimeInterval(max(0, timeout))
         while Date() < deadline {
             if PTPClockProbe.isReady() { break }
+            // razor: fixed 2.0 s re-touch ceiling, not adaptive backoff — well
+            // under the helper's own ~15 s idle-exit window, so a flat
+            // interval keeps it re-armed with room to spare. Upgrade path:
+            // back off the interval if a longer wait ever needs covering
+            // more cheaply.
+            if Date().timeIntervalSince(lastTouchAt) >= touchInterval {
+                touches.append(Self.touchMachService(named: machServiceName))
+                onTouch?()
+                lastTouchAt = Date()
+            }
             try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
         }
         let ready = PTPClockProbe.isReady()
-        withExtendedLifetime(touch) {}
+        withExtendedLifetime(touches) {}
         return ready ? .ready : .timingPortsUnavailable
     }
 
@@ -431,30 +466,78 @@ public struct PTPHelperReconciler: Sendable {
         // "heal failed" for "heal manufactures the next launch's zombie"), then
         // (2) still retries `register()` with spacing for any residual
         // acceptance race. `unregister()` throwing fails immediately — there is
-        // nothing to retry into.
-        do {
-            try await helper.unregister()
-        } catch {
+        // nothing to retry into. ``unregisterDrainAndReregister(helper:registerRetryDelay:registerRetryAttempts:)``
+        // below is this exact sequence, factored out so T9b's self-heal cycle
+        // (``PTPHelperSelfHealingActivator``) can reuse it verbatim instead of
+        // re-deriving the same landmine-avoidance at a second call site.
+        let cycle = await Self.unregisterDrainAndReregister(
+            helper: helper,
+            registerRetryDelay: registerRetryDelay,
+            registerRetryAttempts: registerRetryAttempts)
+        switch cycle.outcome {
+        case .unregisterThrew:
             Telemetry.log(.airplay, "ptp_zombie_heal", [
                 "before": Self.telemetryStatus(status),
                 "result": "heal_failed",
             ])
             return .healFailed
+        case .drainNeverObserved:
+            Telemetry.log(.airplay, "ptp_zombie_heal", [
+                "before": Self.telemetryStatus(status),
+                "result": "heal_failed",
+                "drain_polls": String(cycle.drainPolls),
+            ])
+            return .healFailed
+        case .registerExhausted:
+            Telemetry.log(.airplay, "ptp_zombie_heal", [
+                "before": Self.telemetryStatus(status),
+                "result": "heal_failed",
+                "register_attempts": String(cycle.registerAttempts),
+            ])
+            return .healFailed
+        case .registered(let newStatus):
+            Telemetry.log(.airplay, "ptp_zombie_heal", [
+                "before": Self.telemetryStatus(status),
+                "after": Self.telemetryStatus(newStatus),
+                "drain_polls": String(cycle.drainPolls),
+            ])
+            return .healed(newStatus)
+        }
+    }
+
+    /// Outcome of ``unregisterDrainAndReregister(helper:registerRetryDelay:registerRetryAttempts:)``.
+    enum RegistrationCycleOutcome: Equatable {
+        case registered(PTPHelperStatus)
+        case unregisterThrew
+        case drainNeverObserved
+        case registerExhausted
+    }
+
+    /// The doomed-registration-safe unregister→drain→register sequence — see the
+    /// LIVE ROOT CAUSE comment at this function's one call site inside
+    /// `reconcile()` for why every step here is load-bearing: registering into
+    /// an un-drained teardown lets a queued removal SIGTERM the fresh
+    /// registration's own running helper. Shared by `reconcile()`'s zombie heal
+    /// and ``PTPHelperSelfHealingActivator``'s repeated-timing-failure cycle —
+    /// same daemon, same landmine, one implementation.
+    static func unregisterDrainAndReregister(
+        helper: PTPHelperManaging,
+        registerRetryDelay: TimeInterval,
+        registerRetryAttempts: Int
+    ) async -> (outcome: RegistrationCycleOutcome, drainPolls: Int, registerAttempts: Int) {
+        do {
+            try await helper.unregister()
+        } catch {
+            return (.unregisterThrew, 0, 0)
         }
         var drainPolls = 0
         while helper.status != .notRegistered {
             guard drainPolls < max(1, registerRetryAttempts) else {
-                Telemetry.log(.airplay, "ptp_zombie_heal", [
-                    "before": Self.telemetryStatus(status),
-                    "result": "heal_failed",
-                    "drain_polls": String(drainPolls),
-                ])
-                return .healFailed
+                return (.drainNeverObserved, drainPolls, 0)
             }
             drainPolls += 1
             try? await Task.sleep(nanoseconds: UInt64(registerRetryDelay * 1_000_000_000))
         }
-        var registered = false
         var attemptsUsed = 0
         for attempt in 0..<max(1, registerRetryAttempts) {
             if attempt > 0 {
@@ -463,28 +546,12 @@ public struct PTPHelperReconciler: Sendable {
             attemptsUsed = attempt + 1
             do {
                 try helper.register()
-                registered = true
-                break
+                return (.registered(helper.status), drainPolls, attemptsUsed)
             } catch {
                 continue
             }
         }
-        guard registered else {
-            Telemetry.log(.airplay, "ptp_zombie_heal", [
-                "before": Self.telemetryStatus(status),
-                "result": "heal_failed",
-                "register_attempts": String(attemptsUsed),
-            ])
-            return .healFailed
-        }
-
-        let newStatus = helper.status
-        Telemetry.log(.airplay, "ptp_zombie_heal", [
-            "before": Self.telemetryStatus(status),
-            "after": Self.telemetryStatus(newStatus),
-            "drain_polls": String(drainPolls),
-        ])
-        return .healed(newStatus)
+        return (.registerExhausted, drainPolls, attemptsUsed)
     }
 
     /// Stable short tokens for the telemetry line (the enum has no raw value).
@@ -565,6 +632,175 @@ public struct PTPHelperReconciler: Sendable {
                 withExtendedLifetime(connection) {}
             }
         }
+    }
+}
+
+// MARK: - Self-heal on repeated timing failure (T9b, wedged-helper incident)
+
+/// App-side self-heal for a WEDGED or STALE root PTP helper. Two motivating
+/// incidents:
+///
+/// (2026-08-29, wedged): a wedged root helper held UDP 319/320 for over an
+/// hour without servicing them, so every connect attempt failed
+/// `.timingPortsUnavailable` for that whole hour with no self-recovery — dead
+/// until a human intervened.
+///
+/// (2026-08-29, alive-but-stale, live hardware test): after a session ended,
+/// the helper stayed ALIVE but stale — process running, clock record no
+/// longer ready — and a full 14 s activation failed while the app's 2 s
+/// re-touches flowed (the touches may even prolong the stale state, since the
+/// helper counts them as peer connections). The two-consecutive-failures
+/// trigger this wrapper used to require never armed, so recovery only
+/// happened ~66 s later by luck: the stale helper finally idle-exited and a
+/// re-touch spawned a fresh one that bound instantly. A full-budget
+/// `.timingPortsUnavailable` with touches flowing already means one of two
+/// things — a stale helper (a cycle heals it) or externally held ports (a
+/// cycle changes nothing, so the retry still fails and the caller sees the
+/// same banner) — so a cycle is the correct FIRST response to both; there is
+/// nothing a second failure would prove that the first one didn't.
+///
+/// The app cannot kill a root process directly, but `SMAppService` CAN
+/// unregister its OWN bundled daemon without a password (launchd then tears
+/// the job down) and re-register it — approval for the same bundle id
+/// survives, proven live. That teardown+respawn is the only password-free
+/// lever against both a wedged and a stale helper, so this wraps a real
+/// ``PTPHelperActivating`` and reaches for that lever on the very first
+/// failure, before it reaches the user as the orange "clock unavailable"
+/// banner.
+///
+/// Cycles on a SINGLE `activate(timeout:)` call ending
+/// `.timingPortsUnavailable` — no streak requirement. The cycle itself is
+/// ``PTPHelperReconciler/unregisterDrainAndReregister(helper:registerRetryDelay:registerRetryAttempts:)``
+/// — the EXACT doomed-registration-safe sequence `PTPHelperReconciler.reconcile()`
+/// uses for its zombie heal (see that function's LIVE ROOT CAUSE doc comment):
+/// registering into an un-drained teardown risks a queued removal SIGTERMing
+/// the freshly-registered helper mid-session, so this never re-derives its own
+/// unregister/register ordering — reusing the proven sequence is what makes the
+/// cycle provably safe against that trap. After a successful cycle, one more
+/// `activate(timeout:)` runs on the real ``inner`` activator and ITS outcome is
+/// what the caller sees — the caller (`NativeBackend.ensurePTPTakeover`) never
+/// knows a cycle happened. A cycle that still fails (the externally-held-ports
+/// case, where cycling changes nothing) surfaces `.timingPortsUnavailable`
+/// exactly as it would have without this wrapper — same orange banner, same
+/// Try Again.
+///
+/// Never starts a cycle while another `activate(timeout:)` call is still
+/// awaiting its own clock — a second device's takeover wait can be genuinely
+/// mid-flight (multiple devices can connect concurrently), and tearing the
+/// shared daemon down under it would sabotage a wait that might still win.
+/// That attempt's own failure still surfaces to ITS caller as
+/// `.timingPortsUnavailable` with no cycle; the opportunity is deferred, not
+/// lost — a later, non-concurrent attempt's own failure is independently
+/// eligible to cycle.
+///
+/// razor: cycle on the first failure, exactly one cycle per rolling `window`
+/// (60 s default), never a loop or a retry storm. A wedge or stale helper
+/// that recurs inside one window is exactly the "surface failure to the
+/// user" case this was asked to preserve, not a reason to widen the ceiling
+/// — upgrade path is a product decision, not a bigger number here.
+public struct PTPHelperSelfHealingActivator: PTPHelperActivating {
+    private let inner: PTPHelperActivating
+    private let helper: PTPHelperManaging
+    private let window: TimeInterval
+    private let registerRetryDelay: TimeInterval
+    private let registerRetryAttempts: Int
+    private let state = PTPSelfHealState()
+
+    public init(
+        inner: PTPHelperActivating = PTPHelperActivator(),
+        helper: PTPHelperManaging = SMAppServicePTPHelper(),
+        window: TimeInterval = 60,
+        registerRetryDelay: TimeInterval = 0.5,
+        registerRetryAttempts: Int = 10
+    ) {
+        self.inner = inner
+        self.helper = helper
+        self.window = window
+        self.registerRetryDelay = registerRetryDelay
+        self.registerRetryAttempts = registerRetryAttempts
+    }
+
+    public var willWaitForClock: Bool { inner.willWaitForClock }
+
+    public func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome {
+        state.beginAttempt()
+        let outcome = await inner.activate(timeout: timeout)
+        let othersInFlight = state.endAttempt()
+
+        guard outcome == .timingPortsUnavailable else {
+            return outcome
+        }
+
+        guard othersInFlight == 0, state.armCycleIfEligible(now: Date(), window: window) else {
+            return outcome
+        }
+
+        let cycleStart = Date()
+        let cycle = await PTPHelperReconciler.unregisterDrainAndReregister(
+            helper: helper,
+            registerRetryDelay: registerRetryDelay,
+            registerRetryAttempts: registerRetryAttempts)
+
+        guard case .registered = cycle.outcome else {
+            Telemetry.log(.airplay, "ptp_helper_cycle", [
+                "outcome": "cycle_failed",
+                "elapsed_ms": "\(Int(Date().timeIntervalSince(cycleStart) * 1000))",
+            ])
+            return outcome
+        }
+
+        state.beginAttempt()
+        let retryOutcome = await inner.activate(timeout: timeout)
+        _ = state.endAttempt()
+
+        let outcomeName: String
+        switch retryOutcome {
+        case .ready: outcomeName = "recovered"
+        case .timingPortsUnavailable: outcomeName = "still_unavailable"
+        case .needsApproval: outcomeName = "needs_approval"
+        }
+        Telemetry.log(.airplay, "ptp_helper_cycle", [
+            "outcome": outcomeName,
+            "elapsed_ms": "\(Int(Date().timeIntervalSince(cycleStart) * 1000))",
+        ])
+        return retryOutcome
+    }
+}
+
+/// Lock-protected bookkeeping ``PTPHelperSelfHealingActivator`` uses to cap
+/// cycling at one per rolling `window` — race-safe against concurrent
+/// `activate()` calls from different devices' converge loops (`NativeBackend`
+/// holds ONE shared activator instance for its whole lifetime). `@unchecked
+/// Sendable` for the same reason as ``ProbeResumeGate``: the `NSLock` is
+/// synchronization the compiler can't see.
+private final class PTPSelfHealState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var inFlight = 0
+    private var lastCycleAt: Date?
+
+    /// Call before the wrapped `activate()` await starts.
+    func beginAttempt() {
+        lock.lock(); inFlight += 1; lock.unlock()
+    }
+
+    /// Call right after the wrapped `activate()` await returns. Returns how
+    /// many OTHER attempts are still in flight — used to refuse a cycle while
+    /// a concurrent takeover wait is mid-flight.
+    func endAttempt() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        inFlight -= 1
+        return inFlight
+    }
+
+    /// True iff this attempt should start a cycle NOW: no cycle has fired
+    /// within `window`. Arms the cycle (records `lastCycleAt`) atomically
+    /// with the check so two racing callers can never both win.
+    func armCycleIfEligible(now: Date, window: TimeInterval) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let rateLimitClear = lastCycleAt.map { now.timeIntervalSince($0) > window } ?? true
+        guard rateLimitClear else { return false }
+        lastCycleAt = now
+        return true
     }
 }
 

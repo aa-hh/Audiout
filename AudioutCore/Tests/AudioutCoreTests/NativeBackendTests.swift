@@ -1276,7 +1276,7 @@ private final class SpyLocalPlayback: LocalPlaybackControlling, @unchecked Senda
 
 /// Records `.level`/`.appLevel` events (the two the other `collect` helpers
 /// deliberately skip) with sync accessors so `pollUntil` can inspect them.
-private final class LevelSink: @unchecked Sendable {
+final class LevelSink: @unchecked Sendable {
     private let lock = NSLock()
     private var _device: [(id: String, rms: Float)] = []
     private var _app: [(bundleID: String, rms: Float)] = []
@@ -1296,7 +1296,8 @@ private final class LevelSink: @unchecked Sendable {
 }
 
 /// Subscribe and record every `.level`/`.appLevel`. Caller cancels the task.
-private func subscribeLevels(_ backend: NativeBackend) -> (LevelSink, Task<Void, Never>) {
+/// Shared with the BT and Cast suites, which meter through the same channel.
+func subscribeLevels(_ backend: NativeBackend) -> (LevelSink, Task<Void, Never>) {
     let sink = LevelSink()
     let stream = backend.makeEventStream()
     let task = Task { for await event in stream { sink.record(event) } }
@@ -5056,7 +5057,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Single-Flight Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -5122,7 +5126,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -5183,7 +5190,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Reverse-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -5251,7 +5261,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Sleep-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -5302,7 +5315,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Sleep-Badge Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -6355,7 +6371,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6394,7 +6413,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:85", name: "Unbounded Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6429,7 +6451,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:86", name: "De-routed Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6492,7 +6517,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             // sub-millisecond de-route call below) so the de-route deterministically
             // lands before the timer fires, rather than racing it.
             processNotYetAudibleRetryDelay: 0.3, processNotYetAudibleMaxBackoff: 0.6,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:8A", name: "Orphan Race Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6561,7 +6589,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:8C", name: "Toggle Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6639,7 +6670,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Terminate Relaunch Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6677,7 +6711,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:87", name: "Rebind Recovery Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6737,7 +6774,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:88", name: "Gone Receiver")
         await startAndDiscover(backend, engine, discovery, device)
@@ -7100,6 +7140,224 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         if case .capturing = perAppCapture.state(for: "com.local") {} else {
             Issue.record("a relaunched `.currentDevice` app must have its per-app capture tap restarted — it stayed \(perAppCapture.state(for: "com.local"))")
         }
+    }
+
+    // MARK: - Leveled apps (per-app volume on a No Redirect route)
+    //
+    // An app left un-redirected but pulled BELOW 100 is "leveled": it gets the
+    // same `.mutedWhenTapped` per-app tap a `.currentDevice` app gets, leaves the
+    // whole-system tap, and its audio re-enters the program through
+    // `LeveledAppInjector` (while the whole-system capture runs) or the local
+    // playback engine (while it doesn't). At exactly 100 none of that happens.
+
+    /// Volume < 100 on a No Redirect route starts the per-app tap and takes the
+    /// app out of the whole-system tap; returning to 100 undoes both, restoring
+    /// the byte-identical untouched path.
+    @Test func leveledNoRedirectRouteTapsAndExcludesUntilVolumeReturnsTo100() async {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.level"])
+        let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // Volume 100: untouched — no tap, no exclusion.
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.level", displayName: "Level", destination: .noRedirect),
+        ])
+        await pollUntil { capture.routingUpdates.count >= 1 }
+        #expect(capture.lastExcludedBundleIDs?.contains("com.level") == false,
+                "an un-redirected app at full volume must stay in the whole-system mix")
+        #expect(perAppCapture.state(for: "com.level") == .idle,
+                "and must not be tapped at all")
+
+        // Below 100: tapped and excluded.
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.level", displayName: "Level",
+                     destination: .noRedirect, volume: 60),
+        ])
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.level") { return true }
+            return false
+        }
+        await pollUntil { capture.lastExcludedBundleIDs?.contains("com.level") == true }
+        #expect(capture.lastExcludedBundleIDs?.contains("com.level") == true,
+                "a leveled app must leave the whole-system tap — its audio comes back scaled")
+
+        // A DRAG across the boundary must not thrash: bouncing 60 -> 100 -> 60
+        // faster than the settle window leaves the tap up throughout, so no Core
+        // Audio object is destroyed and no exclusion change rebuilds the
+        // whole-system tap. Live 2026-08-29: without the settle window, one
+        // back-and-forth drag produced eight teardown/rebuild cycles in 1.1 s
+        // and the audio audibly fell back to the Mac each time.
+        for volume in [100, 60, 100, 60] {
+            backend.updateAppRoutes([
+                AppRoute(bundleID: "com.level", displayName: "Level",
+                         destination: .noRedirect, volume: volume),
+            ])
+        }
+        if case .capturing = perAppCapture.state(for: "com.level") {} else {
+            Issue.record("a drag across 100 must never drop the app's tap")
+        }
+        #expect(capture.lastExcludedBundleIDs?.contains("com.level") == true,
+                "and the app stays out of the whole-system tap for the whole drag")
+
+        // Back to 100 and LEFT there: the intercept STAYS engaged, at unity gain.
+        // Disengaging would destroy the app's tap and rebuild the whole-system
+        // tap, and while that tap is down the Mac's own speakers are unmuted —
+        // the app is briefly heard on the Mac before the speaker takes over
+        // again (live 2026-08-29). Staying put removes the transition entirely.
+        let routingUpdatesBefore = capture.routingUpdates.count
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.level", displayName: "Level", destination: .noRedirect),
+        ])
+        await pollUntil { capture.routingUpdates.count > routingUpdatesBefore }
+        if case .capturing = perAppCapture.state(for: "com.level") {} else {
+            Issue.record("a once-leveled app keeps its tap at 100 rather than rebuilding")
+        }
+        #expect(capture.lastExcludedBundleIDs?.contains("com.level") == true,
+                "and stays out of the whole-system tap — the injector carries it at unity")
+
+        // The memory is the previous set, so it self-clears with the route: drop
+        // the app from the table and re-add it at 100.
+        backend.updateAppRoutes([])
+        await pollUntil { perAppCapture.state(for: "com.level") == .idle }
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.level", displayName: "Level", destination: .noRedirect),
+        ])
+        await pollUntil { capture.lastExcludedBundleIDs?.contains("com.level") == false }
+        #expect(perAppCapture.state(for: "com.level") == .idle,
+                "a route that left the table forgets it was ever leveled")
+        #expect(capture.lastExcludedBundleIDs?.contains("com.level") == false,
+                "so a fresh No Redirect route at 100 is untouched again")
+    }
+
+    /// A leveled app is metered by the injector / local engine, so it must NOT
+    /// also get a dedicated `.unmuted` metering-only tap. A plain sibling at
+    /// volume 100 proves metering is otherwise working.
+    @Test func aLeveledAppGetsNoMeteringOnlyTap() async {
+        let metering = workingPerAppCapture(bundleIDs: ["com.level", "com.plain"])
+        let (backend, engine, _) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.level"]),
+            injectedMeteringCapture: metering)
+        backend.captureCoordinator = FakeCapture()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.setMeteringActive(true)
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.level", displayName: "Level",
+                     destination: .noRedirect, volume: 60),
+            AppRoute(bundleID: "com.plain", displayName: "Plain", destination: .noRedirect),
+        ])
+
+        await pollUntil {
+            if case .capturing = metering.state(for: "com.plain") { return true }
+            return false
+        }
+        #expect(metering.state(for: "com.level") == .idle,
+                "the leveled app's level comes from its own routing capture, not a second tap")
+    }
+
+    /// R5 / roadmap 008: a `.device` route DEMOTED to `.noRedirect` (target
+    /// unreachable) must rejoin the system mix at FULL volume — a demotion is not
+    /// a user choice to level, so it must never engage the intercept.
+    @Test func aDemotedDeviceRouteBelow100DoesNotLevel() async {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.demoted"])
+        let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // "ghost" was never discovered, so the route is demoted for the duration.
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.demoted", displayName: "Demoted",
+                     destination: .device(id: "ghost"), volume: 60),
+        ])
+        await pollUntil { capture.routingUpdates.count >= 1 }
+        try? await Task.sleep(nanoseconds: 60_000_000)
+
+        #expect(capture.lastExcludedBundleIDs?.contains("com.demoted") == false,
+                "a demoted route plays in the whole-system mix, unattenuated")
+        #expect(perAppCapture.state(for: "com.demoted") == .idle,
+                "and is not tapped")
+    }
+
+    /// PRIVACY: an app on the excluded-apps denylist is never captured, whatever
+    /// volume its row happens to hold — the denylist outranks the slider.
+    @Test func anExcludedAppNeverLevels() async {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.secret"])
+        let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        backend.captureCoordinator = FakeCapture()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.updateAppRoutes(
+            [AppRoute(bundleID: "com.secret", displayName: "Secret",
+                      destination: .noRedirect, volume: 30)],
+            excludedBundleIDs: ["com.secret"])
+        try? await Task.sleep(nanoseconds: 80_000_000)
+
+        #expect(perAppCapture.state(for: "com.secret") == .idle,
+                "an excluded app must never be tapped for levelling")
+    }
+
+    /// While NOTHING is streaming there is no whole-system program to sum into,
+    /// so a leveled app renders on the Mac through the local playback engine —
+    /// the same pipeline a `.currentDevice` app uses.
+    @Test func aLeveledAppRendersLocallyWhileTheWholeSystemCaptureIsOff() async {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.level"])
+        let (backend, engine, _) = makeBackend(injectedPerAppCapture: perAppCapture)
+        backend.captureCoordinator = FakeCapture()
+        let localPlayback = SpyLocalPlayback()
+        backend.localPlaybackEngine = localPlayback
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.level", displayName: "Level",
+                     destination: .noRedirect, volume: 40),
+        ])
+
+        await pollUntil { localPlayback.addedApps.contains { $0.bundleID == "com.level" } }
+        #expect(abs((localPlayback.addedVolume(for: "com.level") ?? -1) - 0.4) <= 0.001,
+                "the local player renders it at the row's own volume")
+    }
+
+    /// The `captureRunning` edge hands a leveled app between its two renderers:
+    /// selecting an AirPlay device pulls its local player (its audio now rides the
+    /// whole-system program through the injector), and deselecting gives it back.
+    @Test func theCaptureGateEdgeMovesALeveledAppBetweenItsTwoRenderers() async {
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.level"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
+        backend.captureCoordinator = FakeCapture()
+        let localPlayback = SpyLocalPlayback()
+        backend.localPlaybackEngine = localPlayback
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        backend.updateAppRoutes([
+            AppRoute(bundleID: "com.level", displayName: "Level",
+                     destination: .noRedirect, volume: 40),
+        ])
+        await pollUntil { localPlayback.addedApps.contains { $0.bundleID == "com.level" } }
+
+        // Streaming starts: the local player goes, the injector takes over.
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:71", name: "Leveled Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { localPlayback.removedApps.contains("com.level") }
+        #expect(localPlayback.removedApps.contains("com.level"),
+                "a leveled app must not ALSO render locally while the mix carries it")
+
+        // Streaming stops: it comes back to the local engine.
+        let addsBefore = localPlayback.addedApps.filter { $0.bundleID == "com.level" }.count
+        backend.setOutputSet([])
+        await pollUntil {
+            localPlayback.addedApps.filter { $0.bundleID == "com.level" }.count > addsBefore
+        }
+        #expect(localPlayback.addedApps.filter { $0.bundleID == "com.level" }.count > addsBefore,
+                "with nothing streaming the app has nowhere else to play")
     }
 
     // MARK: - Metering: three real level sources (T3)
@@ -8556,7 +8814,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             processNotYetAudibleRetryDelay: 0.5, processNotYetAudibleMaxBackoff: 1.0,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         defer { backend.stop() }
@@ -9254,7 +9515,11 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: activator,
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.02)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.02,
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Reanchor Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -9292,7 +9557,11 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: activator,
-            maxRebindRecoveryAttempts: 1, rebindRecoveryRetryDelay: 0.02)
+            maxRebindRecoveryAttempts: 1, rebindRecoveryRetryDelay: 0.02,
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Clockless Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -9527,7 +9796,11 @@ extension SerializedSharedState {
             systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]),
-            maxRebindRecoveryAttempts: 6, rebindRecoveryRetryDelay: 0.25)
+            maxRebindRecoveryAttempts: 6, rebindRecoveryRetryDelay: 0.25,
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:A5", name: "Backoff Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -9897,7 +10170,10 @@ extension SerializedSharedState {
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
             maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02,
-            aggregateControl: NoOpAggregateControl())
+            aggregateControl: NoOpAggregateControl(),
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:89", name: "Telemetry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -9999,6 +10275,51 @@ extension SerializedSharedState {
         // Gen 2's trail ends in a real terminal outcome, not a lone "scheduled"
         // or "retry_scheduled" line with no resolution.
         #expect(rebindLines(gen: 2).contains { $0["outcome"] as? String == "succeeded" })
+    }
+
+    /// `ensurePTPTakeover`'s new `ptp_activate` telemetry (audio-reclaim
+    /// instrumentation): fires exactly once per gate run, carrying the
+    /// resolved outcome. A `.timingPortsUnavailable` script (same fake +
+    /// `willWaitForClock: true` shape as `takeoverStatusTakingOverThenTimesOut`
+    /// above) exercises the debounced-wait branch so `will_wait` is asserted
+    /// non-trivially too, not just the always-`false` short-circuit case.
+    /// Uses `Telemetry._installTestSink` (the documented capture seam,
+    /// `Telemetry.swift`), same pattern as `failedBindLogsTelemetry` above.
+    @Test func ptpActivateTelemetryFiresOncePerGateRun() async {
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: true, outcome: .timingPortsUnavailable)
+        let (backend, engine, discovery) = makeBackend(ptpHelperActivator: activator)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:C0", name: "Ptp Activate Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.connectionState
+            == .failed(ConnectionFailure(cause: .timingUnavailable)) }
+
+        func parsed(_ line: String) -> [String: Any]? {
+            guard let data = line.data(using: .utf8),
+                  let raw = try? JSONSerialization.jsonObject(with: data),
+                  let obj = raw as? [String: Any]
+            else { return nil }
+            return obj
+        }
+        func ptpActivateLines() -> [[String: Any]] {
+            box.snapshot().compactMap(parsed).filter {
+                $0["cat"] as? String == "airplay" && $0["evt"] as? String == "ptp_activate"
+                    && $0["device"] as? String == device.id
+            }
+        }
+        await pollUntil(timeout: 5) { !ptpActivateLines().isEmpty }
+        let lines = ptpActivateLines()
+        #expect(lines.count == 1, "ptp_activate must fire exactly once per gate run")
+        #expect(lines.first?["outcome"] as? String == "timingPortsUnavailable")
+        #expect(lines.first?["will_wait"] as? String == "true")
+        #expect(lines.first?["switch_away"] as? String == "none", "no defaultOutputSwitcher was injected")
+        #expect(Int(lines.first?["elapsed_ms"] as? String ?? "") != nil, "elapsed_ms must be an integer")
     }
 
 }

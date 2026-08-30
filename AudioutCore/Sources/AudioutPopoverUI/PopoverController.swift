@@ -231,6 +231,17 @@ public final class PopoverController: NSObject {
     /// the button, if ever rendered, taps into nothing.
     public var onReselectAudiout: (() -> Void)?
 
+    /// Called when the user taps the takeover status strip's "Try Again"
+    /// button (T6, state 4 — `.timedOut`): the bounded wait for the clock
+    /// ran out, so the device the strip was explaining is now `.failed`
+    /// (`enterFailure(_:cause:.timingUnavailable)`). The app wires this to
+    /// the same sanctioned single-device re-kick the "Speakers unreachable"
+    /// fallback banner's own "Try again" already drives
+    /// (`GroupController.requestReconnect(for:)` per not-yet-connected Main
+    /// Out member) — never a broad routing re-apply. `nil` (the default)
+    /// means the button, if ever rendered, taps into nothing.
+    public var onRetryTakeover: (() -> Void)?
+
     /// Called with `true` on `surfaceDidShow()` and `false` on
     /// `surfaceDidHide()` (T-GATE): the metering-active gate. The app wires this to
     /// `(backend as? MeteringControlling)?.setMeteringActive(_:)` so the backend
@@ -243,8 +254,9 @@ public final class PopoverController: NSObject {
     /// debounces to decide when the fleet has quiesced. `nil` when no host cares.
     public var onDeviceSnapshot: ((Set<String>) -> Void)?
     /// Called when an Applications-card slider moves, so the app can push the new
-    /// volume straight to a `.currentDevice` app's LOCAL playback stream (Bug T2)
-    /// for a low-latency response, in ADDITION to the persisted
+    /// volume straight to whichever renderer holds that app — a `.currentDevice`
+    /// app's LOCAL playback stream (Bug T2), or the leveled intercept for an
+    /// un-redirected one — for a low-latency response, in ADDITION to the persisted
     /// `AppRoutingController.setVolume` edit. The app wires this to
     /// `(backend as? AppRouteConfiguring)?.setLocalPlaybackVolume`. Called
     /// unconditionally (for every route kind): the backend no-ops it for a bundle
@@ -1273,9 +1285,10 @@ public final class PopoverController: NSObject {
     /// (T6), which outranks the double-path guard (W3-T3), which outranks the
     /// unregistered-build note; none active means no note. `action` is non-nil
     /// for routing-blocked (the "Use <productName>" button), for the takeover
-    /// strip's `.needsApproval` (state 1), and for the unregistered note
-    /// ("Buy…") — the states with an actual remedy a button can offer. The
-    /// capture-failure message names its own remedy in prose, so it has none.
+    /// strip's `.needsApproval` (state 1) and `.timedOut` (state 4, "Try
+    /// Again"), and for the unregistered note ("Buy…") — the states with an
+    /// actual remedy a button can offer. The capture-failure message names
+    /// its own remedy in prose, so it has none.
     private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?, severity: SystemAirPlayNoteBannerView.Severity) {
         if let captureFailureMessage {
             return (captureFailureMessage, nil, .warning)
@@ -1284,7 +1297,12 @@ public final class PopoverController: NSObject {
             return (Self.routingBlockedNeedsDefaultText, routingBlockedNeedsDefaultAction, .warning)
         }
         if let takeoverStatus {
-            return (Self.takeoverStatusText(for: takeoverStatus), takeoverStatusAction(for: takeoverStatus), .info)
+            // State 4 (`.timedOut`) is a genuine failure — the connection did
+            // NOT complete — so it takes the same warning tier routing-blocked
+            // uses, rather than the informational tier the other three
+            // (still-in-progress or explains-a-remedy) states keep.
+            let severity: SystemAirPlayNoteBannerView.Severity = takeoverStatus == .timedOut ? .warning : .info
+            return (Self.takeoverStatusText(for: takeoverStatus), takeoverStatusAction(for: takeoverStatus), severity)
         }
         if systemAirPlayNoteActive {
             return (Self.systemAirPlayNoteText, nil, .info)
@@ -1315,7 +1333,11 @@ public final class PopoverController: NSObject {
 
     /// The takeover strip's copy for each state (T6, PLAN-AIRPLAY-COEXISTENCE.md) —
     /// plain language throughout, never "PTP"/"bind"/"ports 319/320". State 3's
-    /// copy is the plan's own exact wording; the others follow its voice.
+    /// copy is the plan's own exact wording; the others follow its voice. State
+    /// 4's copy is honest about the outcome — the wait ran out and the
+    /// connection genuinely failed (`enterFailure(_:cause:.timingUnavailable)`),
+    /// so it no longer promises the app will "try again" on its own; the "Try
+    /// Again" button below is what actually does that, on the user's own ask.
     static func takeoverStatusText(for status: TakeoverStatus) -> String {
         switch status {
         case .needsApproval:
@@ -1325,20 +1347,31 @@ public final class PopoverController: NSObject {
         case .takingOver:
             return "Taking audio back from macOS…"
         case .timedOut:
-            return "Another app is using AirPlay's timing right now, so this connection couldn't complete. Try again in a moment."
+            return "Speaker Sync couldn't get the speakers' clocks in step, so this connection couldn't complete."
         }
     }
 
-    /// The strip's action button. Only state 1 (`.needsApproval`) has one: state
-    /// 2's own doc says plainly there's nothing an approval UX can do about a
-    /// missing bundle component; state 3 is transient; state 4 needs a DIFFERENT
-    /// app to yield, which no button here can cause.
+    /// The strip's action button. States 1 (`.needsApproval`) and 4
+    /// (`.timedOut`) have one: state 2's own doc says plainly there's nothing
+    /// an approval UX can do about a missing bundle component, and state 3 is
+    /// transient. State 4's device is genuinely `.failed` by the time the
+    /// state shows, so "Try Again" gives the user the same single-device
+    /// re-kick a `.failed` row's own diagnosis panel offers.
     private func takeoverStatusAction(for status: TakeoverStatus) -> SystemAirPlayNoteBannerView.Action? {
-        guard case .needsApproval = status else { return nil }
-        return SystemAirPlayNoteBannerView.Action(
-            title: "Open Login Items…",
-            accessibilityLabel: "Open Login Items to approve Speaker Sync",
-            handler: { [weak self] in self?.onOpenPTPHelperLoginItems?() })
+        switch status {
+        case .needsApproval:
+            return SystemAirPlayNoteBannerView.Action(
+                title: "Open Login Items…",
+                accessibilityLabel: "Open Login Items to approve Speaker Sync",
+                handler: { [weak self] in self?.onOpenPTPHelperLoginItems?() })
+        case .timedOut:
+            return SystemAirPlayNoteBannerView.Action(
+                title: "Try Again",
+                accessibilityLabel: "Try connecting again",
+                handler: { [weak self] in self?.onRetryTakeover?() })
+        case .helperMissing, .takingOver:
+            return nil
+        }
     }
 
     /// Test-only: whichever note (double-path guard or takeover strip) currently
@@ -5045,7 +5078,8 @@ extension PopoverController: AppRowView.Delegate {
             Analytics.capture("mixer:volume_adjusted", ["control": "app"])
         }
         noteSliderGesture()
-        // Drive `.currentDevice` local stream immediately (low-latency path).
+        // Drive the app's own renderer immediately (low-latency path): a
+        // `.currentDevice` local stream, or the leveled intercept.
         // `appRouting.setVolume` fires `onRoutesDidChange` which re-pushes volumes
         // to the mixer/engine — no rebuild needed here; a rebuild would replace
         // the AppRowView mid-drag and break the NSSlider tracking loop.

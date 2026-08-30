@@ -75,16 +75,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configurePostHog() {
         guard !HeadlessRuntime.isActive else { return }
 
+        // A missing variable WARNS rather than asserts. `assertionFailure` traps
+        // in debug, and both variables come from the gitignored root `.env` that
+        // only `make-app.sh` sources — so asserting here kills every bare
+        // `swift run`, and every run from a worktree, on an EXC_BREAKPOINT that
+        // reads like a real crash. Analytics is optional and consent-gated; it
+        // has no business bricking a dev run, and stderr serves the same stated
+        // purpose: say loudly that events are being missed.
         let environment = ProcessInfo.processInfo.environment
         guard let projectToken = environment["POSTHOG_PROJECT_TOKEN"], !projectToken.isEmpty else {
 #if DEBUG
-            assertionFailure("POSTHOG_PROJECT_TOKEN variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once POSTHOG_PROJECT_TOKEN is configured")
+            log("POSTHOG_PROJECT_TOKEN is missing or empty — analytics is OFF and events are being silently missed. Set it (the repo root's .env carries it) to silence this.")
 #endif
             return
         }
         guard let host = environment["POSTHOG_HOST"], !host.isEmpty else {
 #if DEBUG
-            assertionFailure("POSTHOG_HOST variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once POSTHOG_HOST is configured")
+            log("POSTHOG_HOST is missing or empty — analytics is OFF and events are being silently missed. Set it (the repo root's .env carries it) to silence this.")
 #endif
             return
         }
@@ -801,6 +808,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onReselectAudiout = { [weak self] in
             (self?.backend as? NativeBackend)?.reselectAggregateAsDefault()
         }
+        // T6 (takeover status strip, state 4's "Try Again" button): the same
+        // sanctioned single-device re-kick `retryUnreachableMembers()` already
+        // drives for the "Speakers unreachable" fallback banner (AudioutPopoverUI)
+        // — `GroupController.requestReconnect(for:)` per Main Out member that
+        // isn't up, never a broad routing re-apply (the 2026-08-06 retry storm).
+        // By the time this state shows, the device the strip was explaining is
+        // `.failed` (`enterFailure(_:cause:.timingUnavailable)`), so it's caught
+        // by the same `!= .connected && != .connecting` filter.
+        popoverController.onRetryTakeover = { [weak self] in
+            guard let self else { return }
+            for device in self.groupController.devices
+            where self.groupController.isMainOutMember(device.id)
+                && device.connectionState != .connected
+                && device.connectionState != .connecting {
+                self.groupController.requestReconnect(for: device.id)
+            }
+            Analytics.capture("takeover:retry_tapped")
+        }
         // The unregistered note's "Buy…" button. Nil URL (a build with no
         // `AudioutBuyURL`) never gets the note in the first place, since
         // `applyLicenseState()` needs a license server to arm it.
@@ -816,10 +841,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onMeteringActiveChange = { [weak self] active in
             (self?.backend as? MeteringControlling)?.setMeteringActive(active)
         }
-        // Bug T2: an Applications-card slider drive on a `.currentDevice` app must
-        // reach its LOCAL playback stream immediately (low latency), not only after
-        // the persisted route round-trips through `updateAppRoutes`. No-ops on
-        // backends without per-app local playback (`MockBackend`/`OwnToneBackend`).
+        // Bug T2: an Applications-card slider drive must reach the app's own
+        // renderer immediately (low latency) — a `.currentDevice` app's LOCAL
+        // playback stream, or an un-redirected app's leveled intercept — not only
+        // after the persisted route round-trips through `updateAppRoutes`. No-ops
+        // on backends without per-app rendering (`MockBackend`/`OwnToneBackend`).
         popoverController.onSetLocalPlaybackVolume = { [weak self] volume, bundleID in
             (self?.backend as? AppRouteConfiguring)?.setLocalPlaybackVolume(
                 volume: volume, bundleID: bundleID)

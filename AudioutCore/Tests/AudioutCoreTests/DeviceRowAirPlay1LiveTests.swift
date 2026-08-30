@@ -8,10 +8,10 @@ import AudioutCore
 /// an AP2 row — full alpha, an enabled checkbox/slider/mute, and a normal
 /// accessibility label with no "not yet supported" wording. `supportsAirPlay2`
 /// is purely informational now (NativeBackend/T7 drives AP1 through the same
-/// shared engine as AP2); `DeviceRowView` reads it for exactly ONE thing (v4.1
-/// item 3): the monochrome "AP1" micro-tag prefixed to a bus row's FEED
-/// column (`test_feedHasAP1Tag`) — never for anything gating alpha,
-/// enablement, or wording, which is what THIS file covers.
+/// shared engine as AP2); since the "Older AirPlay" FEED micro-tag was
+/// dropped, `DeviceRowView` does not read the flag AT ALL — never for
+/// anything gating alpha, enablement, or wording, which is what THIS file
+/// covers.
 // `@MainActor` is load-bearing, not decoration: this suite builds and drives
 // AppKit views, and every `NSView`-family API is main-actor-only. XCTest ran
 // each test method on the main thread, so the annotation was never needed;

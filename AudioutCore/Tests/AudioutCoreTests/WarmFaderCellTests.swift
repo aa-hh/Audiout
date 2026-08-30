@@ -145,10 +145,11 @@ import AppKit
         #expect(!(row.test_isFaderEngaged), "a routed-but-idle app keeps the neutral fill (calm, not live)")
     }
 
-    @Test func appFaderNeutralAndDisabledOnNoRedirect() {
+    @Test func appFaderNeutralButLiveOnNoRedirect() {
         let row = AppRowView()
         row.apply(makeAppConfiguration(selected: "no-redirect", isRunning: true))
-        #expect(row.test_isSliderDimmed)
+        #expect(!row.test_isSliderDimmed,
+                "the slider levels an un-redirected app inside the mix, so it stays live")
         #expect(!(row.test_isFaderEngaged), "the standalone follows-main-output state is never gold")
     }
 

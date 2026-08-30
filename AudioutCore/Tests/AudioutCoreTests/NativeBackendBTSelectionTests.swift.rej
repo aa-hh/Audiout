@@ -1,0 +1,332 @@
+diff a/AudioutCore/Tests/AudioutCoreTests/NativeBackendBTSelectionTests.swift b/AudioutCore/Tests/AudioutCoreTests/NativeBackendBTSelectionTests.swift	(rejected hunks)
+@@ -192,6 +192,17 @@ import CoreAudio
+             lock.withLock { _calls.append("setGain"); _gains.append((gain: gain, uid: uid)) }
+         }
+         func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {}
++        func setPerAppClaimedUIDs(_ uids: Set<String>) {
++            lock.withLock { _calls.append("setPerAppClaimedUIDs"); _perAppClaimedUIDCalls.append(uids) }
++        }
++        /// The UID-scoped per-app feed (BT-BACKEND, per-app half) — records the
++        /// UIDs and frame count of every call, never `_calls`: like the
++        /// whole-system `enqueue` above, this is the per-buffer hot path, not a
++        /// lifecycle event.
++        func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec,
++                     forDeviceUIDs uids: [String]) {
++            lock.withLock { _perAppEnqueues.append((uids: uids, frameCount: frameCount)) }
++        }
+ 
+         /// Which devices are "audible" right now — the test drives the render
+         /// signal a real `BTSyncedSink` reads off its per-device delay gates.
+@@ -221,12 +232,71 @@ import CoreAudio
+         func lastGain(for uid: String) -> Float? {
+             lock.withLock { _gains.last { $0.uid == uid }?.gain }
+         }
++        private var _perAppClaimedUIDCalls: [Set<String>] = []
++        var perAppClaimedUIDCalls: [Set<String>] { lock.withLock { _perAppClaimedUIDCalls } }
++        private var _perAppEnqueues: [(uids: [String], frameCount: Int)] = []
++        var perAppEnqueues: [(uids: [String], frameCount: Int)] { lock.withLock { _perAppEnqueues } }
+         /// Call order with the per-device gain seeds stripped — for the
+         /// lifecycle-order assertions, which don't care how many uids got a
+         /// gain pushed between `setComposition` and `setDevices`.
+         var lifecycleCalls: [String] { calls.filter { $0 != "setGain" } }
+     }
+ 
++    /// A `ProcessAudioTap` that always succeeds, self-registers with an
++    /// external registry keyed by the bundle ID it was started for (so a test
++    /// can grab a handle to THIS app's specific tap instance and `push(_:)`
++    /// content into it directly), and uses the engine's exact output format
++    /// (44100/16-bit interleaved S16) so buffers round-trip through the real
++    /// `AVFormatConverter` essentially unchanged. Per-suite copy of
++    /// `NativeBackendTests.BundleTaggingTap` (house convention: doubles are
++    /// per-suite, not shared).
++    private final class BundleTaggingTap: ProcessAudioTap, @unchecked Sendable {
++        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
++        var onDefaultDeviceChanged: (@Sendable () -> Void)?
++        var onRegister: (@Sendable (String) -> Void)?
++        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
++            onRegister?(bundleID)
++            return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
++        }
++        func teardown() {}
++        func push(_ buffer: CapturedBuffer) { onBuffer?(buffer) }
++    }
++
++    /// Thread-safe bundleID -> tap registry, populated by `BundleTaggingTap.onRegister`.
++    private final class TapRegistry: @unchecked Sendable {
++        private let lock = NSLock()
++        private var byBundleID: [String: BundleTaggingTap] = [:]
++        func register(_ bundleID: String, _ tap: BundleTaggingTap) { lock.withLock { byBundleID[bundleID] = tap } }
++        func tap(for bundleID: String) -> BundleTaggingTap? { lock.withLock { byBundleID[bundleID] } }
++    }
++
++    /// A scripted `AudioProcessEnumerating` fake: hands back a fixed process
++    /// list so an `AudioProcessResolver` built on it resolves deterministically,
++    /// with no live Core Audio.
++    private struct FakeProcessEnumerator: AudioProcessEnumerating {
++        let processes: [RawAudioProcess]
++        var parents: [pid_t: pid_t] = [:]
++        func enumerateProcesses() -> [RawAudioProcess] { processes }
++        func parentPID(of pid: pid_t) -> pid_t? { parents[pid] }
++    }
++
++    /// A `ProcessAudioTap` that always succeeds: `createAndStart` never throws,
++    /// so a coordinator built over it takes every bundle ID all the way to
++    /// `.capturing` and keeps it there — unlike the default empty-resolver setup
++    /// (`NoAudioProcesses`), which fails fast at `.processNotYetAudible` and
++    /// then marks the bundle dead, retracting its route from the mixer
++    /// (`handlePerAppCaptureHealthChange`). A per-app BT claim armed over that
++    /// default is torn back down within milliseconds by that cascade — tests
++    /// that need the claim to STAY armed use this tap instead.
++    private final class AlwaysSucceedsTap: ProcessAudioTap, @unchecked Sendable {
++        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
++        var onDefaultDeviceChanged: (@Sendable () -> Void)?
++        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
++            TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
++        }
++        func teardown() {}
++    }
++
+     // MARK: Fixtures + helpers
+ 
+     private let btMove = BTDeviceSnapshot(id: "C4-38-75-0E-BF-4A:output", name: "Move 2", isConnected: true)
+@@ -260,10 +330,66 @@ import CoreAudio
+         func stopObservingConnections() {}
+     }
+ 
++    /// Builds an `AudioProcessResolver` where each bundle id resolves to
++    /// exactly ONE process object, at `pid = objectID`.
++    private func singleProcessResolver(_ bundleIDsToObjectIDs: [String: AudioObjectID]) -> AudioProcessResolver {
++        let processes = bundleIDsToObjectIDs.map { bundleID, objectID in
++            RawAudioProcess(objectID: objectID, pid: pid_t(objectID), bundleID: bundleID)
++        }
++        return AudioProcessResolver(enumerator: FakeProcessEnumerator(processes: processes))
++    }
++
++    /// A `PerAppCaptureCoordinator` whose every `start(bundleID:)` reaches
++    /// `.capturing` and stays there — pass as `injectedPerAppCapture:` to
++    /// `makeBackend` for a test that needs a per-app BT claim to stay armed
++    /// rather than get torn down by the dead-bundle cascade. Every bundle id
++    /// the test will route needs its own resolvable process, so callers list
++    /// them.
++    private func workingPerAppCapture(bundleIDs: [String]) -> PerAppCaptureCoordinator {
++        var mapping: [String: AudioObjectID] = [:]
++        for (offset, bundleID) in bundleIDs.enumerated() {
++            mapping[bundleID] = AudioObjectID(9000 + offset)
++        }
++        return PerAppCaptureCoordinator(
++            makeTap: { AlwaysSucceedsTap() }, processResolver: singleProcessResolver(mapping), muteBehavior: .mutedWhenTapped)
++    }
++
++    /// A per-app capture over `BundleTaggingTap`s that self-register so a test
++    /// can push content into a specific bundle's tap. Every bundle id the test
++    /// will start needs its own resolvable process, so callers list them.
++    private func registeringPerAppCapture(
++        muteBehavior: TapMuteBehavior, bundleIDs: [String], into registry: TapRegistry
++    ) -> PerAppCaptureCoordinator {
++        var mapping: [String: AudioObjectID] = [:]
++        for (offset, bundleID) in bundleIDs.enumerated() {
++            mapping[bundleID] = AudioObjectID(9500 + offset)
++        }
++        return PerAppCaptureCoordinator(
++            makeTap: {
++                let tap = BundleTaggingTap()
++                tap.onRegister = { bundleID in registry.register(bundleID, tap) }
++                return tap
++            },
++            processResolver: singleProcessResolver(mapping),
++            muteBehavior: muteBehavior)
++    }
++
++    /// A single-second, fixed-fill-byte, interleaved-S16-stereo `CapturedBuffer`.
++    private func fingerprintedBuffer(fill: UInt8, frames: Int, atSecond sec: Int) -> CapturedBuffer {
++        let data = Data(repeating: fill, count: frames * 2 /* ch */ * 2 /* bytes/sample */)
++        return CapturedBuffer(channelData: [data], frameCount: frames, pts: timespec(tv_sec: sec, tv_nsec: 0))
++    }
++
++    /// A `.device(id:)` route fixture.
++    private func route(_ bundleID: String, name: String, toDevice deviceID: String, volume: Int = 100) -> AppRoute {
++        AppRoute(bundleID: bundleID, displayName: name, destination: .device(id: deviceID), volume: volume)
++    }
++
+     private func makeBackend(
+         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
+         btConnection: BTConnectionManaging? = nil,
+-        btRenderStartTimeout: TimeInterval = 6
++        btRenderStartTimeout: TimeInterval = 6,
++        injectedPerAppCapture: PerAppCaptureCoordinator? = nil
+     ) -> (NativeBackend, RecordingEngine, FakeDiscovery, FakeBTEnumerator, SpyBTSink, FakeCapture) {
+         let engine = RecordingEngine()
+         let discovery = FakeDiscovery()
+@@ -276,6 +402,7 @@ import CoreAudio
+             dacpEndpoint: FakeDACPEndpoint(),
+             systemVolume: NoOpSystemVolume(),
+             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
++            injectedPerAppCapture: injectedPerAppCapture,
+             silenceFallbackDelay: silenceFallbackDelay,
+             systemDefaultOutputIsAirPlayClass: { false },
+             aggregateControl: NoOpAggregateControl(),
+@@ -1045,4 +1172,164 @@ import CoreAudio
+         backend.setBTAlignTickActive(false)
+         #expect(capture.ops.last == "tickOff")
+     }
++
++    // MARK: - Per-app Bluetooth routing (R-partition, per-app half)
++    //
++    // A route naming a Bluetooth id is fed by UID through the sink manager
++    // (`btPerAppClaimedUIDs`/`setPerAppClaimedUIDs`), armed independently of
++    // any whole-system selection (`btArmingLocked`) — but the room's timing
++    // (`btReferenceBufferMs`) stays a function of the whole-system selection
++    // ALONE: a per-app-only speaker reads the room's clock, never sets it.
++
++    /// A per-app-only route arms the sink and hands its uid to BOTH the
++    /// device set and the whole-system fan-out's skip list with NOTHING
++    /// selected whole-system, and an unrelated whole-system BT selection
++    /// composes with it rather than evicting it from the device set.
++    @Test func perAppOnlyBTRouteArmsSinkAndComposesWithAnUnrelatedWholeSystemSelection() {
++        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
++        let (backend, engine, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
++        defer { backend.stop() }
++        backend.start()
++        bt.fire([btMove, btFlip])
++        waitFor { self.device(backend, self.btMove.id) != nil && self.device(backend, self.btFlip.id) != nil }
++
++        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
++        waitFor { sink.perAppClaimedUIDCalls.last == [self.btMove.id] }
++        #expect(sink.calls.contains("start"),
++                "a per-app-only claim arms the sink with no whole-system selection")
++        #expect(sink.deviceSets.last?.map(\.uid) == [btMove.id],
++                "the claimed uid reaches the device set even with nothing selected whole-system")
++        #expect(sink.perAppClaimedUIDCalls.last == [btMove.id],
++                "the claimed uid reaches the whole-system fan-out's skip list")
++
++        backend.setOutputSet([btFlip.id])
++        waitFor { sink.deviceSets.last?.map(\.uid).sorted() == [self.btFlip.id, self.btMove.id].sorted() }
++        #expect(sink.deviceSets.last?.map(\.uid).sorted() == [btFlip.id, btMove.id].sorted(),
++                "an unrelated whole-system selection must not evict the per-app claim from the device set")
++        #expect(engine.addedIDs.isEmpty, "no BT id may ever reach the AirPlay engine")
++    }
++
++    /// The CONTESTED case: the same device is BOTH whole-system selected AND
++    /// per-app routed. `isRouteTargetEligibleLocked` is
++    /// `isRouteTargetReachableLocked(id) && !isWholeSystemClaimedLocked(id)`,
++    /// and `isWholeSystemClaimedLocked` reads `expectedSelected`, which
++    /// `setOutputSet` fills with every selected id regardless of kind — so the
++    /// per-app route is demoted before it can ever claim the speaker. Were it
++    /// not, the speaker would be pulled out of the whole-system fan-out and go
++    /// silent for every consumer but the one app routed to it.
++    @Test func perAppRouteToAWholeSystemSelectedBTDeviceNeverClaimsItAwayFromTheFanOut() {
++        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
++        let (backend, engine, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
++        defer { backend.stop() }
++        backend.start()
++        bt.fire([btMove])
++        waitFor { self.device(backend, self.btMove.id) != nil }
++
++        backend.setOutputSet([btMove.id])
++        waitFor { sink.calls.contains("start") }
++
++        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
++        waitFor { backend.test_scopeConflict(deviceID: self.btMove.id) != nil }
++
++        #expect(backend.test_scopeConflict(deviceID: btMove.id)?.bundleIDs == ["com.foo"],
++                "the route to an already-selected speaker must be demoted, not accepted")
++        #expect(!sink.perAppClaimedUIDCalls.contains { $0.contains(btMove.id) },
++                "a whole-system-claimed uid must never reach the per-app claim set")
++        #expect(sink.deviceSets.last?.map(\.uid).contains(btMove.id) == true,
++                "the speaker must stay in the whole-system device set, not drop out for being contested")
++        #expect(engine.addedIDs.isEmpty, "no BT id may ever reach the AirPlay engine")
++    }
++
++    /// The mirror case: with no whole-system BT ever selected, clearing the
++    /// app's only route drops its uid from both the device set and the claim
++    /// set, and disables the manager entirely.
++    @Test func clearingTheOnlyPerAppBTRouteDropsTheClaimAndDisablesTheSink() {
++        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
++        let (backend, engine, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
++        defer { backend.stop() }
++        backend.start()
++        bt.fire([btMove])
++        waitFor { self.device(backend, self.btMove.id) != nil }
++
++        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
++        waitFor { sink.perAppClaimedUIDCalls.last == [self.btMove.id] }
++
++        backend.updateAppRoutes([])
++        waitFor { sink.perAppClaimedUIDCalls.last?.isEmpty == true }
++        #expect(sink.calls.contains("stop"),
++                "no whole-system BT selected ⇒ clearing the only per-app claim disables the manager")
++        #expect(sink.deviceSets.last?.isEmpty == true, "the uid drops out of the device set")
++        #expect(sink.perAppClaimedUIDCalls.last?.isEmpty == true, "the uid drops out of the claim set")
++        #expect(engine.addedIDs.isEmpty, "no BT id may ever reach the AirPlay engine")
++    }
++
++    /// Owner decision: per-app destinations READ the room's timing, never SET
++    /// it. A per-app-only speaker's own measured latency — however large —
++    /// must never raise the shared BT reference every other speaker, the
++    /// Mac's own sink, and the AirPlay pre-delay are scheduled against; and
++    /// the composition the per-app arm hands the sink stays exactly what the
++    /// whole-system selection produced.
++    @Test func perAppOnlyLatencyNeverRaisesTheSharedReference() {
++        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
++        let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
++        defer { backend.stop() }
++        backend.start()
++        bt.fire([btMove, btFlip])
++        waitFor { self.device(backend, self.btMove.id) != nil && self.device(backend, self.btFlip.id) != nil }
++
++        // btFlip is the WHOLE-SYSTEM selection — it alone decides
++        // `btSinkEnabled` and the composition; btMove is per-app-only.
++        backend.setOutputSet([btFlip.id])
++        waitFor { sink.calls.contains("start") }
++
++        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
++        waitFor { sink.deviceSets.last?.map(\.uid).sorted() == [self.btFlip.id, self.btMove.id].sorted() }
++
++        // Seed a measured latency for the per-app-only device that would blow
++        // straight through the default reference if it were ever allowed to
++        // count — seeded the way the existing suite does.
++        backend.endBTWizardLatencyPreview(forDevice: btMove.id, keepMs: 900)
++        waitFor { backend.btMeasuredLatencyMs(forDevice: self.btMove.id) == 900 }
++        waitFor(timeout: 0.3) { false }   // let the async reference recompute settle
++
++        #expect(backend.localSinkReferenceDelayMs() == BTSyncedSink.defaultBTOnlyBufferMs,
++                "a per-app-only device's latency must never raise the shared BT reference")
++        #expect(sink.compositions.last == BTGroupComposition(airPlayPresent: false, macLocalPresent: false),
++                "the per-app arm hands the sink exactly the composition whole-system selection produced")
++    }
++
++    /// Full-chain delivery (T10-style harness, per-suite doubles): a real
++    /// captured buffer pushed through `PerAppCaptureCoordinator` ->
++    /// `AppRouteMixer` reaches the Bluetooth sink through the UID-scoped
++    /// `enqueue`, addressed to exactly the routed device — and a second BT
++    /// device that is whole-system selected but never per-app routed gets
++    /// nothing through that path (the routing-partition invariant, end to end).
++    @Test func perAppRoutedBTDeviceReceivesFramesThroughTheUIDScopedPath() {
++        let registry = TapRegistry()
++        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, bundleIDs: ["com.foo"], into: registry)
++        let (backend, _, _, bt, sink, _) = makeBackend(injectedPerAppCapture: perAppCapture)
++        defer { backend.stop() }
++        backend.start()
++        bt.fire([btMove, btFlip])
++        waitFor { self.device(backend, self.btMove.id) != nil && self.device(backend, self.btFlip.id) != nil }
++
++        // btFlip: whole-system selected, never per-app routed — the negative.
++        backend.setOutputSet([btFlip.id])
++        waitFor { sink.calls.contains("start") }
++
++        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
++        waitFor { if case .capturing = perAppCapture.state(for: "com.foo") { return true }; return false }
++        guard let tap = registry.tap(for: "com.foo") else {
++            Issue.record("the routed app's per-app tap must have registered")
++            return
++        }
++
++        tap.push(fingerprintedBuffer(fill: 0xAA, frames: 1000, atSecond: 1))
++
++        waitFor { !sink.perAppEnqueues.isEmpty }
++        #expect(sink.perAppEnqueues.contains { $0.uids == [btMove.id] && $0.frameCount > 0 },
++                "the per-app mixed stream must reach the BT sink through the UID-scoped enqueue")
++        #expect(!sink.perAppEnqueues.contains { $0.uids.contains(btFlip.id) },
++                "a whole-system-only BT device must never receive frames through the UID-scoped per-app path")
++    }
+ }

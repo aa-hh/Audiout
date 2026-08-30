@@ -137,6 +137,15 @@ produced. The manager remembers the value per UID like the gain, so a sink
 created later starts already shaped, and `startLocked` re-derives from that
 remembered value after a genuine rebuild.
 
+**PTP activation and helper lifecycle:**
+The app's PTP activation wait (`ptpActivationTimeout`, 14s) must STRICTLY EXCEED the helper's bind-retry budget (10s) — an equal wait can never observe a late success. The helper self-exits after ~15s idle and unlinks its shared clock record, so any connect-time wait must keep re-demand-starting it (the activator re-touches every 2s); a single pre-wait touch is a proven failure mode.
+
+**"Taking audio back from macOS…" strip trigger:**
+The strip is triggered by the helper's clock not being ready — NOT by a macOS AirPlay session. The switch-away step is a no-op whenever the Mac's output isn't an AirPlay receiver.
+
+**Helper-cycling self-heal path:**
+Helper-cycling must ALWAYS go through `PTPHelperReconciler.unregisterDrainAndReregister` — never re-derive the unregister→register sequence. A register() call before the drain completes is a proven failure mode producing a doomed registration.
+
 ## Architecture
 
 ```mermaid
@@ -210,9 +219,10 @@ Redirecting one app to a specific device:
 | Domain models | `Device`, `ConnectionState`, `ConnectionFailure`, `BackendEvent` |
 | Backend seam | `OutputBackend`, `NativeBackend`, `MockBackend`, `OwnToneBackend`, `makeBackend(_:)` |
 | Whole-system capture | `CaptureCoordinator`, `NativeCaptureCoordinator`, `AudioProcessResolver` |
-| Per-app capture/mix | `PerAppCaptureCoordinator`, `AppRouteMixer` |
+| Per-app capture/mix | `PerAppCaptureCoordinator`, `AppRouteMixer`, `LeveledAppInjector` |
 | Shared capture infra | `DefaultOutputDeviceMonitor`, `TapRebuildLifecycle` (`TapRebuildCoalescer`, `TapReanchor`) |
 | Routing brain | `GroupController`, `AppRoutingController`, `PhaseController` |
+| Repaint gating | `StructuralStateGate` — has selection/groups moved since the surfaces were last painted? `onStateDidChange` fires for EVERY model change (a volume-key hold included) while the repaints it can trigger are full sweeps, so the coordinator gates them on this. |
 | Persistence | `AppRouteStore`, `RoutingStore`, `GroupStore`, `AppSettings`, `ExcludedAppsStore`, `ExcludedAppsController`, `DeviceIconStore`, `DeviceEQStore` |
 | Tone shaping | `DeviceEQ`, `EQStreamTopology`, `EQProcessor` |
 | Mic-probe calibration (064) | `SyncProbe`, `SyncProbeCorrelator`, `MicProbeSession`, `BuiltInMicRecorder`, `MicCapturePermission` (all license-clean; DSP hardware-free) |

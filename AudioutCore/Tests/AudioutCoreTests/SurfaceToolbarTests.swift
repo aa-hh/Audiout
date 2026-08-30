@@ -3,14 +3,15 @@
 import Foundation
 import Testing
 import AppKit
+import AudioutSharedUI
 @testable import AudioutPopoverUI
 
 /// Coverage for `SurfaceToolbarController` — the one-surface header as a real
 /// window-attached `NSToolbar` (live-review D1, which retired the custom
 /// `PopoverHeaderView` strip and its three-tier material machinery; the
 /// system toolbar owns materials and Reduce Transparency now, so no tier
-/// seams remain to test). Headless: items are materialized by attaching the
-/// toolbar to a never-shown window.
+/// seams remain to test), plus the brand header row beneath it. Headless:
+/// items are materialized by attaching the toolbar to a never-shown window.
 @MainActor
 @Suite struct SurfaceToolbarTests {
 
@@ -31,25 +32,27 @@ import AppKit
     @Test func attachingMaterializesTheItemsInOrder() {
         let (controller, window) = makeAttached()
         #expect(controller.test_itemIdentifiers == [
-            SurfaceToolbarController.tabsItemIdentifier,
+            SurfaceToolbarController.tabItemIdentifier(for: .mixer),
+            SurfaceToolbarController.tabItemIdentifier(for: .groups),
+            SurfaceToolbarController.tabItemIdentifier(for: .settings),
             .flexibleSpace,
             SurfaceToolbarController.titleItemIdentifier,
             .flexibleSpace,
             SurfaceToolbarController.pinItemIdentifier,
             .space,
             SurfaceToolbarController.quitItemIdentifier,
-        ], "tabs lead, the app name sits centered, Pin and Quit trail — with a gap between them")
+        ], "three separate tabs lead, the app name sits centered, Pin and Quit trail with a gap")
         #expect(controller.test_quitItemHasImage,
                 "Quit carries an exit glyph, resolved on this OS")
         #expect(window.toolbar === controller.toolbar)
         #expect(window.toolbarStyle == .unified, "D1: unified — the toolbar IS the one header strip")
     }
 
-    @Test func tabsGroupCarriesAllThreeScreensWithResolvedGlyphs() {
+    @Test func tabsCarryAllThreeScreensWithResolvedGlyphs() {
         let (controller, _) = makeAttached()
         #expect(controller.test_tabLabels == ["Mixer", "Groups", "Settings"])
         #expect(controller.test_allTabImagesResolved,
-                "every tab segment resolved a system SF Symbol")
+                "every tab resolved a system SF Symbol")
     }
 
     @Test func centeredAppNameItemExists() {
@@ -70,47 +73,65 @@ import AppKit
                 "the wordmark speaks the name — the mark must not say it twice")
     }
 
+    /// The lockup's capsule is drawn by AppKit around the item's view, so its
+    /// padding IS the stack's edge insets. The ends get more than the top and
+    /// bottom on purpose (Alec, 2026-08-29): at equal insets the wordmark sat
+    /// close enough to the glass edge to read as a cramped chip, and the
+    /// horizontal axis is the one the strip height does not pin.
+    @Test func theCenteredLockupBreathesInsideItsCapsule() {
+        let (controller, _) = makeAttached()
+        #expect(controller.test_centeredLockupHorizontalInset
+                    == SurfaceToolbarController.lockupHorizontalInset)
+        #expect(SurfaceToolbarController.lockupHorizontalInset
+                    > SurfaceToolbarController.lockupVerticalInset,
+                "the ends get more room than the strip-bound vertical axis can give")
+    }
+
     @Test func pinAndQuitItemsResolveGlyphs() {
         let (controller, _) = makeAttached()
         #expect(controller.test_pinItemHasImage)
         #expect(controller.test_quitItemHasImage)
     }
 
-    // MARK: Display mode — the dead-tabs guard
+    // MARK: No segmented separators, and clicks that really land
 
-    /// Icon-only is load-bearing, not cosmetic (live review 2026-08-11): under
-    /// a label-showing display mode macOS 26+ builds the tab group's picker
-    /// WITHOUT its interactive expanded view, and segments that render blank
-    /// also swallow every click. Hence the assertion — no expanded view means
-    /// dead tabs. Both classes are private AppKit, so they are matched by
-    /// class NAME, never by type. It discriminates only where the break
-    /// happens: a macOS 26.5 host builds the expanded view under labels too,
-    /// so there this passes either way.
-    @Test func theTabGroupBuildsItsInteractivePicker() {
-        guard #available(macOS 26, *) else { return }
-        let (_, window) = makeAttached()
-        guard let themeFrame = window.contentView?.superview else {
-            Issue.record("no theme frame to search — the window built no chrome")
-            return
+    /// The reason the tabs stopped being one `NSToolbarItemGroup` (live review
+    /// 2026-08-29): a segmented control draws a hairline between adjacent
+    /// segments and SUPPRESSES the one beside the selected segment, so the
+    /// strip showed a divider that moved with the selection — one line with
+    /// Mixer selected, none with Groups, one on the far side with Settings.
+    /// Separate items cannot draw segment separators at all, so this asserts
+    /// the structural fact that makes the dividers impossible.
+    @Test func theTabsAreSeparateItemsSoNoSegmentSeparatorCanAppear() {
+        let (controller, _) = makeAttached()
+        let tabIdentifiers = SurfaceScreen.allCases.map(SurfaceToolbarController.tabItemIdentifier(for:))
+        #expect(Set(tabIdentifiers).isSubset(of: Set(controller.test_itemIdentifiers)),
+                "each screen is its own toolbar item")
+        for identifier in tabIdentifiers {
+            let item = controller.toolbar.items.first { $0.itemIdentifier == identifier }
+            #expect(item as? NSToolbarItemGroup == nil,
+                    "\(identifier.rawValue) must not be a group — a group is the segmented control whose separator moved with the selection")
         }
-        themeFrame.layoutSubtreeIfNeeded()
-
-        guard let picker = firstView(in: themeFrame, named: "NSToolbarItemGroupPickerView") else {
-            Issue.record("the tab group materialized no picker view at all")
-            return
-        }
-        #expect(picker.subviews.contains {
-            String(describing: type(of: $0)).contains("NSToolbarItemGroupPickerExpandedView")
-        }, "no expanded view under the picker — the tabs would render blank and eat every click")
     }
 
-    /// First view in `root`'s subtree whose class name contains `name`.
-    private func firstView(in root: NSView, named name: String) -> NSView? {
-        if String(describing: type(of: root)).contains(name) { return root }
-        for subview in root.subviews {
-            if let hit = firstView(in: subview, named: name) { return hit }
-        }
-        return nil
+    /// The selection has to be visible without the segmented capsule doing it
+    /// for us, and it has to be visible on exactly one tab.
+    @Test func onlyTheSelectedTabPaintsItsDisc() {
+        let (controller, _) = makeAttached()
+        #expect(controller.test_onlySelectedTabHasDisc, "Mixer starts selected, alone")
+
+        controller.setSelectedScreen(.settings)
+
+        #expect(controller.test_onlySelectedTabHasDisc, "the disc followed the selection")
+    }
+
+    /// The disc is neutral on purpose: gold means signal — carrying audio —
+    /// and which screen you are on is chrome. Same rule that keeps the mute
+    /// pill and the row washes off the gold family.
+    @Test func theSelectionDiscIsNeutralNotGold() {
+        #expect(SurfaceTabButton.selectionWashAlpha > 0, "the disc is actually painted")
+        #expect(Tokens.Color.engagedChrome == Tokens.Color.label,
+                "the disc draws in engagedChrome, which is the neutral label tone")
     }
 
     // MARK: Selection — host-confirmed round trip
@@ -118,10 +139,9 @@ import AppKit
     @Test func tabTapsReportTheScreenButDoNotSelfSelect() {
         // The host owns selection, same contract as the retired header: a tap
         // fires the callback with the right screen, and with no confirming
-        // `setSelectedScreen` the segmented state snaps back to the confirmed
-        // selection. NOTE: `test_selectTab` runs the action directly — it
-        // proves the callback contract, never that a real click reaches it
-        // (that is the picker guard above).
+        // `setSelectedScreen` the tabs snap back to the confirmed selection.
+        // `test_selectTab` is a REAL `performClick` through the button's own
+        // target/action, so this proves the click path as well as the contract.
         let (controller, _) = makeAttached()
         var reported: [SurfaceScreen] = []
         controller.onSelectScreen = { reported.append($0) }
@@ -132,7 +152,7 @@ import AppKit
         #expect(reported == [.groups, .settings])
         #expect(controller.selectedScreen == .mixer, "selection unchanged until the host confirms")
         #expect(controller.test_selectedTabIndex == SurfaceScreen.mixer.rawValue,
-                "the group snapped back to the host-confirmed segment")
+                "the tabs snapped back to the host-confirmed screen")
     }
 
     @Test func hostConfirmedSelectionMovesTheSegment() {
@@ -148,7 +168,7 @@ import AppKit
 
     @Test func aConfirmingHostKeepsTheTappedSegment() {
         // The live wiring: the host's callback calls setSelectedScreen
-        // synchronously, so the tapped segment stays.
+        // synchronously, so the tapped tab stays.
         let (controller, _) = makeAttached()
         controller.onSelectScreen = { controller.setSelectedScreen($0) }
 

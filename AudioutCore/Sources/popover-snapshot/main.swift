@@ -227,9 +227,10 @@ func findViews<T: NSView>(of type: T.Type, in root: NSView) -> [T] {
 ///
 /// T8: also seeds THREE Applications-card rows across the three
 /// `AppRouteDestination` cases — "Music" → `.device(id: "office")` (routed,
-/// active/undimmed slider), "Safari" → `.currentDevice` (explicit local pick,
-/// dimmed slider), "Podcasts" → `.noRedirect` (the neutral default, also
-/// dimmed) — so every destination state is represented in one panel. Every
+/// gold armed fader), "Safari" → `.currentDevice` (explicit local pick),
+/// "Podcasts" → `.noRedirect` (the neutral default, neutral fader) — so every
+/// destination state is represented in one panel; all three sliders are live.
+/// Every
 /// row is built with `showsMeter: true` (`PopoverController.makeAppRow`
 /// always passes that), so all three get a distinct RMS pushed via
 /// `test_pushAppLevel` and are settled synchronously via `findViews` +
@@ -247,10 +248,10 @@ func snapshotMeters(appearanceName: NSAppearance.Name, label: String, outDir: UR
     let appRouting = AppRoutingController(store: AppRouteStore(directory: tempDir()),
                                          loadPersisted: false)
     // T8: three app rows spanning all three `AppRouteDestination` cases —
-    // `.device(id:)` (routed away, active slider), `.currentDevice` (explicit
-    // local pick, dimmed slider), `.noRedirect` (neutral default, also
-    // dimmed) — so the Applications card proves every destination state at
-    // once.
+    // `.device(id:)` (routed away, gold armed fader), `.currentDevice`
+    // (explicit local pick), `.noRedirect` (neutral default) — so the
+    // Applications card proves every destination state at once. Every row's
+    // slider is live.
     let musicBundleID = "com.apple.Music"
     let safariBundleID = "com.apple.Safari"
     let podcastsBundleID = "com.apple.podcasts"
@@ -945,9 +946,6 @@ func snapshotLocalMixBlocked(appearanceName: NSAppearance.Name, label: String, o
 ///     multi-source composite, never collapsed to one reason.
 ///   - "feed-group": a plain manual member with no redirect ⇒ FEED reads the
 ///     bare **"System"** token, for contrast against the composite above.
-///   - "feed-ap1": an AP1-only device (`supportsAirPlay2: false`), also a
-///     manual member ⇒ FEED reads **"AP1 System"** — the one monochrome
-///     micro-tag exception, prefixed ahead of the composite.
 ///   - "feed-failed": `.failed` ⇒ FEED reads **"Couldn't connect"** — the
 ///     failure-red override, replacing the composite entirely (paired with
 ///     the red halo ring + open diagnosis panel).
@@ -965,8 +963,6 @@ func snapshotFeedComposite(appearanceName: NSAppearance.Name, label: String, out
               volume: 55, isSelected: true, connectionState: .connected),
         Device(id: "feed-group", name: "Living Room Sonos", kind: .sonos,
               volume: 60, isSelected: true, connectionState: .connected),
-        Device(id: "feed-ap1", name: "Attic AirPort Express", kind: .airportExpress,
-              supportsAirPlay2: false, volume: 40, isSelected: true, connectionState: .connected),
         Device(id: "feed-failed", name: "Basement Speaker", kind: .generic,
               volume: 45, connectionState: .failed(ConnectionFailure(cause: .notResponding))),
         Device(id: "feed-overflow", name: "Overflow Speaker", kind: .appleTV,
@@ -1005,7 +1001,6 @@ func snapshotFeedComposite(appearanceName: NSAppearance.Name, label: String, out
     // this fixture, so every non-failed row's neutral segment reads "System".
     _ = popover.test_toggleDeviceEnabled(deviceID: "feed-manual", on: true)
     _ = popover.test_toggleDeviceEnabled(deviceID: "feed-group", on: true)
-    _ = popover.test_toggleDeviceEnabled(deviceID: "feed-ap1", on: true)
 
     popover.applyRoutedApps(deviceID: "feed-overflow", appNames: overflowAppNames)
     popover.update(devices: backend.devices)

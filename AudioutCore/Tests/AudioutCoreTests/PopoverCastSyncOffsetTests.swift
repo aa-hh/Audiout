@@ -111,11 +111,24 @@ import AppKit
                 "the chip is the only place that says what the dial is FOR")
     }
 
-    @Test func theSyncColumnTitleRendersOverTheCastSubsection() {
+    /// The legend for the chip lives on the CARD HEADER now, not on each
+    /// subsection's own header line — the 2026-08-28 owner ruling that moved
+    /// "Source" / "Offset" up there, which landed after Cast did. So a Cast row
+    /// is covered by the same legend a Bluetooth or This Mac row sits under
+    /// instead of carrying a "Sync" title of its own. This replaces
+    /// `theSyncColumnTitleRendersOverTheCastSubsection`, which pinned the
+    /// per-subsection mechanism that ruling removed; the behaviour it protected
+    /// — Cast rows are labelled, AirPlay rows are not — is what the two
+    /// expectations below still hold.
+    @Test func theCardHeaderOffsetLegendCoversTheCastRows() {
         let isolation = TestIsolation(owner: "PopoverCastSyncOffsetTests")
         let (popover, _, _) = makePopover(isolation)
-        #expect(popover.test_syncColumnTitleShown(in: "Cast Devices"))
-        #expect(!popover.test_syncColumnTitleShown(in: "AirPlay Devices"))
+        #expect(popover.test_offsetColumnTitleShown(),
+                "a chip-carrying Cast row puts the card header's Offset legend on screen")
+        #expect(popover.test_deviceRow(for: "cast-tv")?.test_syncChipTitle != nil,
+                "and the Cast row carries the chip that legend names")
+        #expect(popover.test_deviceRow(for: "office")?.test_syncChipTitle == nil,
+                "while an AirPlay row still carries no chip for it to name")
     }
 
     // MARK: The drawer

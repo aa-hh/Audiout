@@ -139,18 +139,21 @@ let package = Package(
         // (T-NB-BACKEND-1) and NativeCaptureCoordinator (T-NB-CAPTURE-1) are
         // the consumers; the Mock/OwnTone backends do not import it.
         .package(path: "../AirPlayEngine"),
-        // Shared code with the iPhone companion, two products: ProbeKit (the
+        // Shared code with the iPhone companion, three products: ProbeKit (the
         // sync-probe DSP — sweep synthesis and the matched filter behind
-        // mic-probe calibration) and AudioutProtocol (the companion wire
+        // mic-probe calibration), AudioutProtocol (the companion wire
         // protocol — CompanionServer / CompanionSnapshotBuilder /
-        // CompanionCommandDispatcher are the consumers). MIT, so the
-        // closed-source iPhone companion can link the same code, and a
+        // CompanionCommandDispatcher are the consumers) and AudioutField (the
+        // emitter field's numbers, which the marketing site's shader reads
+        // from the same file — `EmitterFieldView` is its consumer here). MIT,
+        // so the closed-source iPhone companion can link the same code, and a
         // repository of its own because SwiftPM cannot depend on a package
         // that lives inside a subdirectory of another repo — and the phone
         // now lives in `aa-hh/audiout-remote`. Pinned by range: this app
         // chooses when to follow the shared package, and `Package.resolved`
-        // records which tag it is actually on.
-        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.1.0"),
+        // records which tag it is actually on. 0.2.0 is the floor because
+        // that is the tag AudioutField landed in.
+        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.2.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.
@@ -253,7 +256,13 @@ let package = Package(
             name: "AudioutOnboardingUI",
             // AudioutSharedUI: the Tokens design-token layer (Wave 2 of the
             // Warm Signal redesign) — onboarding styles through Tokens.* now.
-            dependencies: ["AudioutCore", "AudioutSharedUI"],
+            // AudioutField: the emitter field's shared numbers, which
+            // `EmitterFieldView` generates its Metal shader from rather than
+            // retyping them (the licence gate's ground).
+            dependencies: [
+                "AudioutCore", "AudioutSharedUI",
+                .product(name: "AudioutField", package: "audiout-shared"),
+            ],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Pure AppKit (SPEC §9). The app shell (status item, backend wiring,
@@ -403,6 +412,10 @@ let package = Package(
                 "CastSender",
                 "CastFakeReceiver",
                 .product(name: "ProbeKit", package: "audiout-shared"),
+                // EmitterFieldTests reads the same defaults the shader is
+                // generated from, so a change to field.json fails a test here
+                // instead of silently forking the brand's one moving image.
+                .product(name: "AudioutField", package: "audiout-shared"),
             ],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),

@@ -1182,19 +1182,35 @@ never from this target. Rules that hold it together:
   verify" must never read as "not yours", least of all on a blocking window.
   Every verdict's wording is `LicenseCopy` (Core), shared with the Settings
   sheet — never fork a string here.
-- **`EmitterFieldView` is a port of the marketing site's hero field**
-  (`fields/emitters.js` in the website repo): the MECHANISM — orbit, squash,
-  ring shape, falloff, breathing, masks, tone map — is the site's shipped
-  DEFAULTS remapped to the warm gold ramp, and must move together with the
-  site. Four values are deliberate stage tunings for the small window (marked
-  `STAGE TUNING` in the shader): emitter centres, density ×1.7, speed ×1.4,
-  paper lift. Don't "fix" those back to the site's numbers — at 440 pt the
-  site's wavelength reads as blobs. Colors resolve from
-  `Tokens` per frame (bg=`canvas`, lo=`ember`, mid=`accent`, peak=blend), so
-  the accent dial and Increase Contrast land free; the MSL source compiles at
-  RUNTIME (`makeLibrary(source:)`) because SwiftPM cannot build `.metal`
-  files. Reduce Motion = one still at t=40; headless or any Metal failure =
-  flat `canvas`, never a crash, never a display loop.
+- **`EmitterFieldView` GENERATES its shader from the shared field, it does not
+  copy it.** Every shared number — orbit, squash, ring speed and density, ring
+  shape, falloff, breathing, gain, paper lift — is read from
+  `AudioutField.defaults` (`field.json` in audiout-shared, the same file the
+  marketing site's `fields/emitters.js` reads) and interpolated into the MSL
+  string. Never retype one of those values here; change it in audiout-shared,
+  tag, and move the pin. `EmitterFieldTests` fails the moment the generated
+  source stops carrying what `field.json` says.
+  - **Exactly one declared deviation: `stageScale` (×5), on ring density and
+    ring speed together.** The site's crest spacing is ~163 pt, which is most
+    of this window, so the hero's rings arrive as bare arcs. Scaling BOTH by
+    one number is what keeps it honest — crest velocity is speed/density, so
+    the wavefronts still travel at the site's own pace. A second deviation
+    needs the same standard: one number, one reason, and a test.
+  - **The composition is per-surface and it is deliberately QUIET.** Three
+    sources sit past the window's edges, each with a `reach` cap, so what
+    shows is the near arcs of three distant emitters and the content column
+    sits on unlit ground. Positions, `size`, `reach` and the ramp are knobs
+    the field leaves open, so composing them freely is the sanctioned way to
+    make this window its own — reach for those before touching anything
+    shared. The loud full-bleed reading this replaced measured up to 0.14
+    ground luminance behind the type; it is now under 0.05.
+  - Colors still resolve from `Tokens` per frame (bg=`canvas`, lo=`ember`,
+    mid=`accent`, peak=`gold` lifted 0.25 toward white), so the accent dial
+    and Increase Contrast land free. That peak used to lift 0.7 and outshone
+    the gold Register button in front of it. The MSL compiles at RUNTIME
+    (`makeLibrary(source:)`) because SwiftPM cannot build `.metal` files.
+    Reduce Motion = one still at t=40; headless or any Metal failure = flat
+    `canvas`, never a crash, never a display loop.
 - **One surface, and nothing on it ever moves** (owner-approved v2 brief):
   every state lands as words in the ONE reserved two-line gutter and as a
   scene on the field — no sheet, no second window, no reflow. The lost-key
@@ -1216,7 +1232,7 @@ never from this target. Rules that hold it together:
 | `OnboardingWindowController` | Owns the window; lazy-create-then-reuse lifecycle; Done-vs-✕ dismissal contract; reactivate re-front; the floating level and its yield-to-Settings amendment. |
 | `LicenseGateWindowController` | The first-open licence gate window: full-bleed field, hidden title, pass/abort single-fire contract. |
 | `LicenseGateViewController` | The gate's one surface: mark, welcome, key field, gold Register, reserved gutter, quiet satellites; in-place lost-key morph; Register mirrors the Settings sheet. |
-| `EmitterFieldView` | Metal port of the site's hero emitter field, gold ramp, 30 fps; `Scene` engine (idle/typing/armed/checking/quiet/waiting/farewell) over uniforms; recomposed stills under Reduce Motion, flat `canvas` headless. |
+| `EmitterFieldView` | Metal port of the site's emitter field, shader GENERATED from `AudioutField.defaults` (one declared deviation: `stageScale`); three capped sources past the window's edges, gold ramp, 30 fps; `Scene` engine (idle/typing/armed/checking/quiet/waiting/farewell) over uniforms; recomposed stills under Reduce Motion, flat `canvas` headless. |
 | `OnboardingViewController` | Assembles the spine and the hero; turns `SetupModel` + `SetupFlowModel` into row states and ribbon content; owns `browseStep`, the press dispatch, the grant choreography, the Done gate, the announcements, the header message and both polling timers. |
 | `OnboardingReason` | `.firstRun` vs `.permissionLost([RequiredPermission])` — drives the header message. |
 | `SetupSpineRowView` / `SetupCardContent` / `SetupCardState` | One SPINE row: the compact status strip, its one trailing marker, the live/broken/browsed surface treatment, and the whole-row press target. Both per-state title tables (ribbon sentence and spine short form) live on `SetupCardContent`. |

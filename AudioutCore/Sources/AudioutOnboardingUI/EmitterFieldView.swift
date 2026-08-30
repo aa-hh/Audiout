@@ -2,6 +2,7 @@
 
 import AppKit
 import AudioutCore
+import AudioutField
 import AudioutSharedUI
 import MetalKit
 
@@ -10,16 +11,26 @@ import MetalKit
 /// shader.
 ///
 /// A native port of the marketing site's WebGL hero, remapped from the site's
-/// green to the app's warm gold ramp (`canvas` → `ember` → `accent` → a lifted
-/// peak). The field's MECHANISM in ``shaderSource`` — orbit drift, squash,
-/// ring shape (`pow(sin, 4)`), falloff, breathing, tone-map exponents and mix
-/// domains — mirrors the website's `fields/emitters.js` DEFAULTS, and those
-/// parts must move together with the site or the brand's one moving image
-/// silently forks. Four values are DELIBERATE stage tunings for this window
-/// (a ~440 pt stage vs a viewport hero) and are marked inline: the emitter
-/// centres (triangulated around the content column), ring density ×1.7 and
-/// speed ×1.4 (the site's wavelength reads as blobs at this size), and a
-/// gentler paper lift.
+/// green to the app's warm gold ramp (`canvas` → `ember` → `accent` → a
+/// lifted peak). Every SHARED number — orbit, squash, ring speed and density,
+/// ring shape, falloff, the breathing group, gain and paper lift — is READ
+/// from ``AudioutField/defaults`` (the `field.json` in audiout-shared that
+/// the site's `fields/emitters.js` also reads) and interpolated into
+/// ``shaderSource``. Nothing shared is retyped here, so the brand's one
+/// moving image cannot silently fork.
+///
+/// Exactly one shared value is deviated from, and it is one number:
+/// ``stageScale`` — see its own comment for why. Everything else this file
+/// authors is a PER-SURFACE choice the field explicitly leaves open (the
+/// placements in ``emitters`` and the colour ramp), so it carries no drift
+/// risk.
+///
+/// The composition is deliberately QUIET. Three sources sit past or on the
+/// window's edges, each with a `reach` cap, so what the window shows is the
+/// near arcs of three distant emitters and the whole content column is
+/// unlit ground. The reading it replaced — hero-scale sources throwing
+/// window-wide arcs across the type — is what this window is not: the field
+/// is the room the key gets typed in, not the picture being looked at.
 ///
 /// It is ORNAMENT: it decides nothing and carries no state of its own beyond
 /// the ``Scene`` the gate hands it, and under Reduce Motion it holds a single
@@ -61,8 +72,54 @@ final class EmitterFieldView: NSView {
         case farewell
     }
 
-    /// Base energy of the field. The surge envelope adds on top of it.
-    private static let baseGain: Float = 0.65
+    /// One emitter's placement on this stage. Position, `size` and `reach`
+    /// are the field's PER-SURFACE knobs (the optional third element of the
+    /// site's `emitters` entries), so composing them freely is the sanctioned
+    /// way to make a surface its own — no shared number moves.
+    ///
+    /// `reach` is a mask centred on the emitter that fades its rings to
+    /// nothing by that radius, which is what CONTAINS each source here: the
+    /// site uses it so a speaker near a canvas edge stops short instead of
+    /// being cut by it, and this window uses it so three sources light their
+    /// own corners and leave the middle alone.
+    struct Emitter {
+        let x: Double, y: Double
+        let size: Double
+        let reach: Double
+    }
+
+    /// The three sources, in uv (centre 0,0; y up; units of the stage's
+    /// height). All three centres sit OUTSIDE the 560 × 440 frame
+    /// (|x| > 0.636 or |y| > 0.5), so the window shows arcs arriving rather
+    /// than bullseyes sitting on it, and the `reach` caps stop each one
+    /// before the 320 pt content column (|x| < 0.364).
+    private static let emitters: [Emitter] = [
+        // Left edge, slightly high: the anchor, and the only one wide enough
+        // to read as a fan rather than a corner.
+        Emitter(x: -0.80, y: 0.16, size: 1.00, reach: 0.62),
+        // Past the top-right corner, a touch smaller so the three read at
+        // different distances instead of as one repeated stamp.
+        Emitter(x: 0.66, y: 0.40, size: 0.90, reach: 0.52),
+        // Well below the bottom-right corner: only its outermost arcs enter
+        // the frame, which keeps the quiet Buy/Quit row on clean ground.
+        Emitter(x: 0.62, y: -0.86, size: 0.95, reach: 0.62),
+    ]
+
+    /// THE ONE DEVIATION from the shared field. Ring density and ring speed
+    /// are both multiplied by this; nothing else is touched.
+    ///
+    /// The shared `densBase` puts 2π/17 uv — about 163 pt — between crests,
+    /// which on a 440 pt stage is most of the window, so the hero's rings
+    /// arrive as bare arcs with no concentric structure left to read. At ×5
+    /// the spacing is ~33 pt and a source reads as rings again. Speed is
+    /// scaled by the same number ON PURPOSE: crest velocity is speed/density,
+    /// so scaling both leaves the wavefronts travelling at exactly the site's
+    /// own pace. This is one change of scale, not two tunings.
+    private static let stageScale: Double = 5
+
+    /// Base energy of the field — the shared `gain`, unmodified. The surge
+    /// envelope adds on top of it.
+    private static let baseGain = Float(AudioutField.defaults.gain)
     /// The site composes its stills at t = 40 s and starts its live clock
     /// there, so frame one is a developed field rather than three points
     /// snapping outward from nothing. Same here.
@@ -437,9 +494,15 @@ final class EmitterFieldView: NSView {
                 ? accent.blended(withFraction: 0.6, of: .white) ?? accent
                 : Tokens.Color.ember)
             mid = Self.components(of: accent)
+            // The dark peak lifts gold by 0.25, not the 0.7 it used to: at
+            // 0.7 a crest resolved to #F5E4B4, a near-cream that was the
+            // brightest thing on the window and outshone the gold Register
+            // button it sits behind. 0.25 gives #EEC978 — the same warm gold
+            // family, and close to the shared "Chill out" ramp's own peak
+            // (#FFD97A) that the site paints this field with.
             peak = Self.components(of: isLight
                 ? accent.blended(withFraction: 0.55, of: .black) ?? accent
-                : accent.blended(withFraction: 0.7, of: .white) ?? accent)
+                : accent.blended(withFraction: 0.25, of: .white) ?? accent)
         }
 
         let now = CACurrentMediaTime()
@@ -479,11 +542,34 @@ final class EmitterFieldView: NSView {
                             Float(srgb.blueComponent))
     }
 
+    // MARK: Test-support hooks
+
+    /// The three values `EmitterFieldTests` guards against drift: the base
+    /// energy, the one declared deviation, and this window's composition.
+    static var test_baseGain: Float { baseGain }
+    static var test_stageScale: Double { stageScale }
+    static var test_emitters: [Emitter] { emitters }
+
     // MARK: Shader
 
-    /// Metal Shading Language source for the field. See the type's doc comment:
-    /// these constants are the website's shipped hero and are not free to drift.
-    private static let shaderSource = """
+    /// MSL wants a decimal point on every float literal, and a shared number
+    /// must reach the shader as itself — never rounded to something tidier.
+    private static func msl(_ value: Double) -> String {
+        String(format: "%.4f", value)
+    }
+
+    /// Metal Shading Language source for the field, GENERATED from
+    /// ``AudioutField/defaults``. See the type's doc comment: every shared
+    /// number below is interpolated, so this string cannot drift from the
+    /// site — only ``emitters`` and ``stageScale`` are authored here.
+    static let shaderSource: String = {
+        let d = AudioutField.defaults
+        let centres = emitters
+            .map { "float2(\(msl($0.x)), \(msl($0.y)))" }
+            .joined(separator: ", ")
+        let sizes = emitters.map { msl($0.size) }.joined(separator: ", ")
+        let reaches = emitters.map { msl($0.reach) }.joined(separator: ", ")
+        return """
     #include <metal_stdlib>
     using namespace metal;
 
@@ -531,47 +617,50 @@ final class EmitterFieldView: NSView {
 
     fragment float4 emitter_field_fragment(float4 position [[position]],
                                            constant Uniforms &u [[buffer(0)]]) {
-        // Metal's fragment y runs down; the composition (emitter 3 sits in the
-        // UPPER half) is authored y-up.
+        // Metal's fragment y runs down; the composition is authored y-up.
         float2 fragCoord = float2(position.x, u.resolution.y - position.y);
         float2 uv = (fragCoord - 0.5 * u.resolution) / u.resolution.y;
         float t = u.time;
 
-        // STAGE TUNING: the site's centres sit for a viewport-wide hero; these
-        // triangulate around this window's centred content column instead, so
-        // no corner of the stage goes dead.
-        float2 centres[3] = { float2(-0.62, 0.30), float2(0.72, -0.34), float2(0.08, 0.52) };
+        // PER-SURFACE: this window's three placements — see `emitters`.
+        float2 centres[3] = { \(centres) };
+        float sizes[3] = { \(sizes) };
+        float reaches[3] = { \(reaches) };
         float light = 0.0;
         for (int k = 0; k < 3; ++k) {
             float f = float(k);
             float seed = f * 6.13 + 1.7;
-            float2 c = centres[k] + 0.1 * float2(sin(t * 0.030 + seed),
+            float2 c = centres[k] + \(msl(d.orbit)) * float2(sin(t * 0.030 + seed),
                                                  cos(t * 0.026 + seed * 1.7));
-            float r = length((uv - c) * float2(1.0, 1.12));
-            // STAGE TUNING: density ×1.7 / speed ×1.4 on the site's values —
-            // at ~440 pt the site's ring wavelength reads as blobs, not waves.
-            float speed = (1.11 + 0.20 * f) * 1.4;
-            float dens = (17.0 + 3.0 * f) * 1.7;
-            float rings = pow(0.5 + 0.5 * sin(r * dens - t * speed + seed), 4.0);
-            float fall = exp(-r * 1.5);
+            // `size` scales the DISTANCE, so a source's rings and its falloff
+            // shrink together; the cap's edges are in those same scaled units.
+            float r = length((uv - c) * float2(1.0, \(msl(d.squash)))) / sizes[k];
+            float cap = 1.0 - sstep(0.55 * reaches[k] / sizes[k],
+                                    reaches[k] / sizes[k], r);
+            // STAGE SCALE (this file's one deviation): density and speed are
+            // scaled by the same number, which leaves crest velocity — their
+            // ratio — at the site's own. See `stageScale`.
+            float speed = (\(msl(d.speedBase)) + \(msl(d.speedStep)) * f) * \(msl(stageScale));
+            float dens = (\(msl(d.densBase)) + \(msl(d.densStep)) * f) * \(msl(stageScale));
+            float rings = pow(0.5 + 0.5 * sin(r * dens - t * speed + seed), \(msl(d.sharp)));
+            float fall = exp(-r * \(msl(d.fade)));
             // `breath` scales only the OSCILLATING half and pays the rest back
             // at its midpoint, so breath = 1 is the site's swell, breath = 0
-            // pins it at 0.7 (steady), and the crossfade between them is
-            // continuous.
-            float wave = 0.5 + 0.5 * sin(t * (0.10 + 0.028 * f) + seed * 2.3);
-            float swell = 0.4 + 0.6 * u.breath * wave + 0.6 * (1.0 - u.breath) * 0.5;
-            light += rings * fall * swell * u.gain * u.emitterGain[k];
+            // pins it steady, and the crossfade between them is continuous.
+            float wave = 0.5 + 0.5 * sin(t * (\(msl(d.breatheRate)) + \(msl(d.breatheStep)) * f) + seed * 2.3);
+            float swell = \(msl(d.breatheFloor)) + \(msl(d.breatheDepth)) * u.breath * wave
+                        + \(msl(d.breatheDepth)) * (1.0 - u.breath) * 0.5;
+            light += rings * fall * cap * swell * u.gain * u.emitterGain[k];
         }
         // Paper lift: the light ramp needs more energy to read on white.
-        // STAGE TUNING: the site lifts ×1.94; this smaller, busier stage
-        // overcooks there.
-        light *= mix(1.0, 1.55, u.lightMode);
+        light *= mix(1.0, \(msl(d.paperLift)), u.lightMode);
 
-        // Calm zones top and bottom, then a hollow through the middle so the
-        // window's text sits on quiet ground.
+        // Calm zones top and bottom: the quiet Quit/Buy row lives in the
+        // bottom one, and the mark sits under the top one.
         light *= sstep(-0.62, -0.38, uv.y) * sstep(0.72, 0.35, uv.y);
-        // Same ellipse, parameterised: hollowRadius 1 is the shipped picture,
-        // and `farewell` grows it until the inner edge swallows the frame.
+        // The hollow. The placements above already keep the middle dark, so
+        // at rest this only deepens it — its load-bearing job now is
+        // `farewell`, which grows it until the inner edge swallows the frame.
         float hollow = length((uv - u.hollowCenter) * float2(0.62, 1.45));
         light *= 1.0 - hollowDepth * sstep(0.72 * u.hollowRadius,
                                            0.12 * u.hollowRadius, hollow);
@@ -588,6 +677,7 @@ final class EmitterFieldView: NSView {
         return float4(col, 1.0);
     }
     """
+    }()
 }
 
 extension EmitterFieldView: MTKViewDelegate {

@@ -1,0 +1,426 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+import AppKit
+import Foundation
+import Testing
+@testable import AudioutCore
+@testable import AudioutOnboardingUI
+
+/// `LicenseGate` (Core) and the first-open gate window (OnboardingUI). The
+/// rule under defense: only a PURCHASED build (a licence server URL) with an
+/// unregistered install gates, the gate never locks out an offline buyer, and
+/// closing it unanswered aborts rather than leaking a running unlicensed app.
+@Suite struct LicenseGateTests {
+
+    private let isolation = TestIsolation(owner: "LicenseGateTests")
+    private var defaults: UserDefaults { isolation.isolatedDefaults }
+
+    private static let server = URL(string: "https://license.example.com")!
+    private static let key = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+    private static let buy = URL(string: "https://audiout.app/buy")!
+
+    private func settings(withServer: Bool = true, withBuy: Bool = false) -> AppSettings {
+        AppSettings(defaults: defaults,
+                    licenseServerURL: withServer ? Self.server : nil,
+                    buyURL: withBuy ? Self.buy : nil)
+    }
+
+    // MARK: The decision
+
+    @Test func sourceBuildNeverGates() {
+        let settings = settings(withServer: false)
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+    }
+
+    @Test func purchasedBuildGatesWithoutAKey() {
+        #expect(LicenseGate.shouldPresent(settings: settings(), presentation: .auto))
+    }
+
+    @Test func activeKeyPassesTheGate() {
+        let settings = settings()
+        settings.licenseKey = Self.key
+        settings.licenseStatus = .active
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+    }
+
+    /// The soft-check posture carries into the gate: a stored key with no
+    /// verdict yet (saved while the server was unreachable) is registered.
+    @Test func unverifiedStoredKeyPassesTheGate() {
+        let settings = settings()
+        settings.licenseKey = Self.key
+        #expect(settings.licenseStatus == nil)
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+    }
+
+    @Test(arguments: [LicenseStatus.revoked, .unknown, .invalid])
+    func declinedKeyGates(status: LicenseStatus) {
+        let settings = settings()
+        settings.licenseKey = Self.key
+        settings.licenseStatus = status
+        #expect(LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+    }
+
+    @Test func forceOverridesEvenASourceBuild() {
+        #expect(LicenseGate.shouldPresent(settings: settings(withServer: false),
+                                          presentation: .forceShow))
+        #expect(!LicenseGate.shouldPresent(settings: settings(), presentation: .forceHide))
+    }
+
+    @Test func environmentKnobResolves() {
+        #expect(LicenseGatePresentation.resolved(environment: [:]) == .auto)
+        #expect(LicenseGatePresentation.resolved(
+            environment: ["AUDIOUT_LICENSE_GATE": "force"]) == .forceShow)
+        #expect(LicenseGatePresentation.resolved(
+            environment: ["AUDIOUT_LICENSE_GATE": "skip"]) == .forceHide)
+        #expect(LicenseGatePresentation.resolved(
+            environment: ["AUDIOUT_LICENSE_GATE": "gibberish"]) == .auto)
+    }
+
+    // MARK: The window
+
+    /// Canned-transport helper mirroring `LicenseValidatorTests.Transport`,
+    /// plus the requests it was handed — the resend path has no verdict to
+    /// assert on, only the fact that it asked.
+    private final class Transport: @unchecked Sendable {
+        var answer: (Data?, URLResponse?, Error?) = (nil, nil, nil)
+        var requests: [URLRequest] = []
+        func stub(status: Int, json: String) {
+            answer = (Data(json.utf8),
+                      HTTPURLResponse(url: LicenseGateTests.server, statusCode: status,
+                                      httpVersion: nil, headerFields: nil),
+                      nil)
+        }
+        var closure: LicenseValidator.Transport {
+            { [self] request, completion in
+                requests.append(request)
+                completion(answer.0, answer.1, answer.2)
+            }
+        }
+    }
+
+    @MainActor
+    private func makeGate(_ settings: AppSettings, _ transport: Transport,
+                          onPassed: @escaping () -> Void = {},
+                          onAbort: @escaping () -> Void = {}) -> LicenseGateWindowController {
+        LicenseGateWindowController(settings: settings, transport: transport.closure,
+                                    openURL: { _ in },
+                                    onPassed: onPassed, onAbort: onAbort)
+    }
+
+    /// The gate's content on its own, for the states that never involve the
+    /// window (the clipboard offer's seam is set after `init`).
+    @MainActor
+    private func makeContent(_ settings: AppSettings, _ transport: Transport,
+                             onPassed: @escaping () -> Void = {}) -> LicenseGateViewController {
+        LicenseGateViewController(settings: settings, transport: transport.closure,
+                                  openURL: { _ in }, onPassed: onPassed)
+    }
+
+    /// `LicenseValidator` lands every completion via `DispatchQueue.main.async`
+    /// even with a synchronous transport — one queued turn stands between
+    /// Register and its outcome.
+    private func drainMain() async {
+        await withCheckedContinuation { cont in
+            DispatchQueue.main.async { cont.resume() }
+        }
+    }
+
+    /// The transport answers synchronously and headless runs skip the settle
+    /// beat, so the pass lands one main-queue turn after Register.
+    @MainActor
+    @Test func verifiedActiveKeyOpensTheGate() async {
+        let settings = settings()
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"active","key":"\#(Self.key)"}"#)
+
+        var passed = 0
+        let gate = makeGate(settings, transport, onPassed: { passed += 1 })
+        gate.test_contentViewController.test_setKeyText(Self.key)
+        gate.test_contentViewController.test_tapRegister()
+        await drainMain()
+
+        #expect(passed == 1)
+        #expect(gate.test_didFinish)
+        #expect(settings.licenseStatus == .active)
+    }
+
+    @MainActor
+    @Test func rejectedKeyHoldsTheGateAndSaysWhy() async {
+        let settings = settings()
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"unknown","key":"\#(Self.key)"}"#)
+
+        var passed = 0
+        let gate = makeGate(settings, transport, onPassed: { passed += 1 })
+        gate.test_contentViewController.test_setKeyText(Self.key)
+        gate.test_contentViewController.test_tapRegister()
+        await drainMain()
+
+        #expect(passed == 0)
+        #expect(!gate.test_didFinish)
+        #expect(gate.test_contentViewController.test_resultText
+            == LicenseCopy.statusLine(for: .unknown))
+    }
+
+    /// An unreachable server saves the key AND opens the gate — "couldn't
+    /// verify" must never lock a buyer out.
+    @MainActor
+    @Test func unreachableServerSavesKeyAndOpens() async {
+        let settings = settings()
+        let transport = Transport()   // (nil, nil, nil) → .unreachable
+
+        var passed = 0
+        let gate = makeGate(settings, transport, onPassed: { passed += 1 })
+        gate.test_contentViewController.test_setKeyText(Self.key)
+        gate.test_contentViewController.test_tapRegister()
+        await drainMain()
+
+        #expect(passed == 1)
+        #expect(settings.licenseKey == Self.key)
+        #expect(settings.licenseStatus == nil)
+        #expect(gate.test_contentViewController.test_resultText
+            == "Your key is saved. We'll check it next time you're online.")
+        // Next launch does not re-gate on the saved-unverified key.
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+    }
+
+    @MainActor
+    @Test func emptySubmitPromptsWithoutPassing() async {
+        let settings = settings()
+        var passed = 0
+        let gate = makeGate(settings, Transport(), onPassed: { passed += 1 })
+        gate.test_contentViewController.test_tapRegister()
+        #expect(passed == 0)
+        #expect(gate.test_contentViewController.test_resultText != nil)
+    }
+
+    @MainActor
+    @Test func closingUnansweredAborts() async {
+        let settings = settings()
+        var aborted = 0
+        var passed = 0
+        let gate = makeGate(settings, Transport(),
+                            onPassed: { passed += 1 }, onAbort: { aborted += 1 })
+        gate.test_closeWindow()
+        #expect(aborted == 1)
+        #expect(passed == 0)
+        // The single-fire guard: a second close changes nothing.
+        gate.test_closeWindow()
+        #expect(aborted == 1)
+    }
+
+    /// The purchase deep link lands in the gate's own field.
+    @MainActor
+    @Test func deepLinkSubmitsIntoTheGate() async {
+        let settings = settings()
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"active","key":"\#(Self.key)"}"#)
+
+        var passed = 0
+        let gate = makeGate(settings, transport, onPassed: { passed += 1 })
+        gate.submit(key: Self.key)
+        await drainMain()
+        #expect(passed == 1)
+        #expect(settings.licenseKey == Self.key)
+    }
+
+    // MARK: The one surface's states
+
+    /// A key on the clipboard is OFFERED, never spent: filled in and named, so
+    /// the buyer still presses Register themselves.
+    @MainActor
+    @Test func clipboardKeyIsOfferedNeverSubmitted() async {
+        let settings = settings()
+        var passed = 0
+        let content = makeContent(settings, Transport(), onPassed: { passed += 1 })
+        content.pasteboardString = { "  \(Self.key)\n" }
+        content.test_arrive()
+
+        #expect(content.test_keyText == Self.key)
+        #expect(content.test_resultText == "From your clipboard")
+        #expect(passed == 0)
+        #expect(settings.licenseKey == nil)
+    }
+
+    /// Anything that is not a key is left alone — the field stays empty and
+    /// the gutter says nothing.
+    @MainActor
+    @Test func unrelatedClipboardIsIgnored() async {
+        let content = makeContent(settings(), Transport())
+        content.pasteboardString = { "https://example.com" }
+        content.test_arrive()
+
+        #expect(content.test_keyText.isEmpty)
+        #expect(content.test_resultText == nil)
+    }
+
+    /// "I lost my key" morphs the SAME field and button — no sheet, no second
+    /// window — and lands one neutral line whatever the server did.
+    @MainActor
+    @Test func lostKeyMorphsInPlaceAndResends() async {
+        let settings = settings()
+        let transport = Transport()
+        let content = makeContent(settings, transport)
+
+        content.test_tapLostKey()
+        #expect(content.test_placeholder == "you@example.com")
+        #expect(content.test_commitTitle == "Email my key")
+        #expect(content.test_lostKeyTitle == "Back to your key")
+        #expect(content.test_resultText == "Enter the email you bought with.")
+
+        content.test_setKeyText("Buyer@Example.com")
+        content.test_tapRegister()
+        await drainMain()
+
+        #expect(transport.requests.count == 1)
+        let request = transport.requests.first
+        #expect(request?.url == Self.server.appending(path: "v1/resend"))
+        let body = (try? JSONSerialization.jsonObject(with: request?.httpBody ?? Data()))
+            as? [String: Any]
+        #expect(body?["email"] as? String == "buyer@example.com")
+
+        #expect(content.test_resultText == "If that address bought Audiout, the key is on its way.")
+        #expect(content.test_commitTitle == "Register")
+        #expect(content.test_placeholder == LicenseCopy.keyFormatHint)
+        #expect(content.test_lostKeyTitle == "I lost my key")
+    }
+
+    /// Back restores the key that was mid-typing, and clears the detour's line.
+    @MainActor
+    @Test func backFromLostKeyRestoresTheTypedKey() async {
+        let content = makeContent(settings(), Transport())
+        content.test_setKeyText(Self.key)
+        content.test_tapLostKey()
+        #expect(content.test_keyText.isEmpty)
+
+        content.test_tapLostKey()
+        #expect(content.test_keyText == Self.key)
+        #expect(content.test_resultText == nil)
+    }
+
+    @MainActor
+    @Test func resendWithoutAnAddressAsksAgain() async {
+        let transport = Transport()
+        let content = makeContent(settings(), transport)
+        content.test_tapLostKey()
+        content.test_tapRegister()
+        await drainMain()
+
+        #expect(content.test_resultText == "Enter the email address you bought with.")
+        #expect(transport.requests.isEmpty)
+    }
+
+    /// A refunded key has one useful answer left, so Buy stops being quiet.
+    @MainActor
+    @Test func revokedVerdictPromotesTheBuyLink() async {
+        let settings = settings(withBuy: true)
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"revoked","key":"\#(Self.key)"}"#)
+
+        let content = makeContent(settings, transport)
+        content.test_setKeyText(Self.key)
+        content.test_tapRegister()
+        await drainMain()
+
+        #expect(content.test_resultText == LicenseCopy.statusLine(for: .revoked))
+        #expect(content.test_buyIsVisible)
+        #expect(content.test_buyAlpha == 1)
+    }
+
+    /// The field behind the type is part of the answer: a farewell on the way
+    /// out, quiet on a refusal.
+    @MainActor
+    @Test func fieldSceneFollowsTheVerdict() async {
+        let accepted = Transport()
+        accepted.stub(status: 200, json: #"{"status":"active","key":"\#(Self.key)"}"#)
+        let passing = makeContent(settings(), accepted)
+        passing.test_setKeyText(Self.key)
+        passing.test_tapRegister()
+        await drainMain()
+        #expect(passing.test_fieldScene == .farewell)
+
+        let refused = Transport()
+        refused.stub(status: 200, json: #"{"status":"unknown","key":"\#(Self.key)"}"#)
+        let held = makeContent(settings(), refused)
+        held.test_setKeyText(Self.key)
+        held.test_tapRegister()
+        await drainMain()
+        #expect(held.test_fieldScene == .quiet)
+    }
+
+    // MARK: LicenseResend (Core)
+
+    @MainActor
+    @Test func resendPostsTheTrimmedAddress() async throws {
+        let settings = settings()
+        let transport = Transport()
+        var completions = 0
+        LicenseResend(settings: settings, transport: transport.closure)
+            .request(email: "  Buyer@Example.com ") { completions += 1 }
+        await drainMain()
+
+        #expect(completions == 1)
+        let request = try #require(transport.requests.first)
+        #expect(request.url == Self.server.appending(path: "v1/resend"))
+        #expect(request.httpMethod == "POST")
+        #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
+        let body = try #require(request.httpBody)
+        let obj = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(obj["email"] as? String == "buyer@example.com")
+    }
+
+    /// There is no failure to report — a dead network completes exactly like a
+    /// delivered mail, because the caller's one line is the same either way.
+    @MainActor
+    @Test func resendCompletesOnFailureToo() async {
+        let transport = Transport()
+        transport.answer = (nil, nil, URLError(.notConnectedToInternet))
+        var completions = 0
+        LicenseResend(settings: settings(), transport: transport.closure)
+            .request(email: "buyer@example.com") { completions += 1 }
+        await drainMain()
+        #expect(completions == 1)
+    }
+
+    /// No server (a build from source) and a malformed address both send
+    /// nothing, and still call back.
+    @MainActor
+    @Test func resendSendsNothingWithoutAServerOrAnAtSign() async {
+        let transport = Transport()
+        var completions = 0
+        LicenseResend(settings: settings(withServer: false), transport: transport.closure)
+            .request(email: "buyer@example.com") { completions += 1 }
+        LicenseResend(settings: settings(), transport: transport.closure)
+            .request(email: "buyer") { completions += 1 }
+        await drainMain()
+
+        #expect(completions == 2)
+        #expect(transport.requests.isEmpty)
+    }
+
+    // MARK: Layout
+
+    /// The window is a FIXED 560 x 440 and the content column is centred in
+    /// it, so every type size on this screen is spending a budget that cannot
+    /// grow. The column has to clear the Quit/Buy row pinned to the bottom
+    /// edge — an overlap here is two controls drawn on top of each other, not
+    /// a scroll.
+    @MainActor
+    @Test func theContentColumnClearsTheBottomButtonRow() {
+        let gate = makeContent(settings(withBuy: true), Transport())
+        gate.view.frame = NSRect(origin: .zero, size: LicenseGateViewController.contentSize)
+        gate.view.layoutSubtreeIfNeeded()
+
+        let column = gate.view.subviews.compactMap { $0 as? NSStackView }.first
+        #expect(column != nil)
+        let buttons = gate.view.subviews.compactMap { $0 as? NSButton }
+        #expect(buttons.count == 2, "expected the Quit and Buy pair on the root view")
+        guard let column, let rowTop = buttons.map(\.frame.maxY).max() else { return }
+
+        // The root view is unflipped, so y counts up from the bottom edge.
+        #expect(column.frame.minY > rowTop,
+                "the column reaches down to \(column.frame.minY), into a button row topping out at \(rowTop)")
+        #expect(column.frame.maxY < LicenseGateViewController.contentSize.height,
+                "the column overflows the top of a window that cannot grow")
+    }
+}

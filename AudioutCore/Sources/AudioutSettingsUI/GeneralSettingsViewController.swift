@@ -377,8 +377,10 @@ public final class GeneralSettingsViewController: NSViewController {
     private static func licenseStatusLine(keyIsEmpty: Bool,
                                           status: LicenseStatus?) -> String {
         if keyIsEmpty {
-            return "Unregistered. Audiout is fully functional without a license — "
-                + "buying one funds development and unlocks official downloads and updates."
+            // Post-gate truth (2026-08-30): an official build asks for its key
+            // at launch, so "fully functional without a license" would lie here.
+            return "Unregistered. Audiout keeps working for this session, and asks "
+                + "for a license key the next time it opens."
         }
         guard let status else {
             return "Not verified yet — Audiout couldn’t reach the license server. Your key is saved."

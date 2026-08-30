@@ -44,6 +44,14 @@ package layout, backends, and core types, see
   `subscribeToBackendEvents()` before `backend.start()` (or the initial
   `deviceAdded` burst is silently missed) and guards a `backendStarted` flag so
   it can't double-start.
+- **The licence gate precedes EVERYTHING on a purchased build.**
+  `LicenseGate.shouldPresent` (Core — the decision is testable, this target is
+  not) gates `applicationDidFinishLaunching`'s first-run/backend block behind
+  `presentLicenseGate()`; the pass runs `runFirstRunGateAndStartBackend()`
+  exactly once, the abort terminates. While the gate is open it owns the
+  status-item click, the reopen, and the `audiout://register` deep link.
+  `AUDIOUT_LICENSE_GATE` (`force`/`skip`) is the dev knob — dev builds carry no
+  licence server, so `force` is the only way to see the window in the dev loop.
 - **First-run setup DEFERS the backend (native only).** When
   `SetupModel.shouldPresentOnLaunch(settings:backendKind:)` is true (native
   backend + setup not yet completed), `applicationDidFinishLaunching` presents

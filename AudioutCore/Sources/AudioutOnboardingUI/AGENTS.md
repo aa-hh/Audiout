@@ -1168,11 +1168,71 @@ gate/motion/demo/selection rules change.
 7. `finish()`/`dismiss()` fire `onFinished` exactly once, unbind `model.onChange`,
    and close the window — the app starts the (deferred) backend from `onFinished`.
 
+## The first-open licence gate (sibling window, not a Setup step)
+
+`LicenseGateWindowController` is the OTHER window in this folder: on a
+purchased build (`LicenseGate.shouldPresent`, Core) it precedes Setup, the
+backend, and the surface — its pass runs the launch block `AppDelegate`
+deferred; its abort (✕ or Quit) terminates the app via the injected closure,
+never from this target. Rules that hold it together:
+
+- **Register mirrors `LicenseSheetViewController`'s contract** — trim, a
+  changed key clears the stored verdict, and the key is SAVED even when the
+  server is unreachable, in which case the gate also OPENS (`pass`): "couldn't
+  verify" must never read as "not yours", least of all on a blocking window.
+  Every verdict's wording is `LicenseCopy` (Core), shared with the Settings
+  sheet — never fork a string here.
+- **`EmitterFieldView` GENERATES its shader from the shared field, it does not
+  copy it.** Every shared number — orbit, squash, ring speed and density, ring
+  shape, falloff, breathing, gain, paper lift — is read from
+  `AudioutField.defaults` (`field.json` in audiout-shared, the same file the
+  marketing site's `fields/emitters.js` reads) and interpolated into the MSL
+  string. Never retype one of those values here; change it in audiout-shared,
+  tag, and move the pin. `EmitterFieldTests` fails the moment the generated
+  source stops carrying what `field.json` says.
+  - **Exactly one declared deviation: `stageScale` (×5), on ring density and
+    ring speed together.** The site's crest spacing is ~163 pt, which is most
+    of this window, so the hero's rings arrive as bare arcs. Scaling BOTH by
+    one number is what keeps it honest — crest velocity is speed/density, so
+    the wavefronts still travel at the site's own pace. A second deviation
+    needs the same standard: one number, one reason, and a test.
+  - **The composition is per-surface and it is deliberately QUIET.** Three
+    sources sit past the window's edges, each with a `reach` cap, so what
+    shows is the near arcs of three distant emitters and the content column
+    sits on unlit ground. Positions, `size`, `reach` and the ramp are knobs
+    the field leaves open, so composing them freely is the sanctioned way to
+    make this window its own — reach for those before touching anything
+    shared. The loud full-bleed reading this replaced measured up to 0.14
+    ground luminance behind the type; it is now under 0.05.
+  - Colors still resolve from `Tokens` per frame (bg=`canvas`, lo=`ember`,
+    mid=`accent`, peak=`gold` lifted 0.25 toward white), so the accent dial
+    and Increase Contrast land free. That peak used to lift 0.7 and outshone
+    the gold Register button in front of it. The MSL compiles at RUNTIME
+    (`makeLibrary(source:)`) because SwiftPM cannot build `.metal` files.
+    Reduce Motion = one still at t=40; headless or any Metal failure = flat
+    `canvas`, never a crash, never a display loop.
+- **One surface, and nothing on it ever moves** (owner-approved v2 brief):
+  every state lands as words in the ONE reserved two-line gutter and as a
+  scene on the field — no sheet, no second window, no reflow. The lost-key
+  path MORPHS the same field/button in place and calls Core's
+  `LicenseResend` (`/v1/resend`), landing the SAME neutral line on every
+  outcome — anything more specific is an email-enumeration oracle. The
+  clipboard offer (`pasteboardString` seam) pre-fills an `AUDT-` string and
+  NEVER auto-submits — a clipboard is not consent.
+- **The field's scenes are uniform-driven, never CAAnimation** — that is why
+  they survive Reduce Motion as recomposed stills. `surge(intensity: 1)` on
+  `active` is still the window's ONE bright moment; errors make the room go
+  QUIETER (`.quiet`: dim + frozen clock), never louder — don't add entrances
+  or scatter effects around either.
+
 ## Map
 
 | Type | What it is |
 |---|---|
 | `OnboardingWindowController` | Owns the window; lazy-create-then-reuse lifecycle; Done-vs-✕ dismissal contract; reactivate re-front; the floating level and its yield-to-Settings amendment. |
+| `LicenseGateWindowController` | The first-open licence gate window: full-bleed field, hidden title, pass/abort single-fire contract. |
+| `LicenseGateViewController` | The gate's one surface: mark, welcome, key field, gold Register, reserved gutter, quiet satellites; in-place lost-key morph; Register mirrors the Settings sheet. |
+| `EmitterFieldView` | Metal port of the site's emitter field, shader GENERATED from `AudioutField.defaults` (one declared deviation: `stageScale`); three capped sources past the window's edges, gold ramp, 30 fps; `Scene` engine (idle/typing/armed/checking/quiet/waiting/farewell) over uniforms; recomposed stills under Reduce Motion, flat `canvas` headless. |
 | `OnboardingViewController` | Assembles the spine and the hero; turns `SetupModel` + `SetupFlowModel` into row states and ribbon content; owns `browseStep`, the press dispatch, the grant choreography, the Done gate, the announcements, the header message and both polling timers. |
 | `OnboardingReason` | `.firstRun` vs `.permissionLost([RequiredPermission])` — drives the header message. |
 | `SetupSpineRowView` / `SetupCardContent` / `SetupCardState` | One SPINE row: the compact status strip, its one trailing marker, the live/broken/browsed surface treatment, and the whole-row press target. Both per-state title tables (ribbon sentence and spine short form) live on `SetupCardContent`. |

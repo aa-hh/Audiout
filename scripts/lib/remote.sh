@@ -35,6 +35,12 @@ remote_bias=${AUDIOUT_TEST_REMOTE_BIAS:-$(git config --get audiout.testRemoteBia
 # so `cd '~/foo'` fails) nor safe quoting of paths containing spaces. ssh starts
 # in $HOME, so a relative path is both simpler and correct.
 remote_root=${AUDIOUT_TEST_REMOTE_ROOT:-audiout-remote-tests}
+# The binary whose presence proves the remote can do this KIND of work. SwiftPM
+# callers want `swift`; the iOS target is built by `xcodebuild`, which can sit on
+# a machine with no Swift on PATH and vice versa. A caller sets this before
+# remote_run; a wrong answer takes the sentinel-97 path below and becomes "stay
+# local" rather than a failed build.
+remote_toolchain=${remote_toolchain:-swift}
 # Short ON PURPOSE. The known failure mode of this particular machine is
 # sleeping: it answers ping (sleep proxy) but refuses TCP, so a generous timeout
 # would stall every run behind a host that is never going to answer.
@@ -188,7 +194,7 @@ remote_run() {
     # /opt/homebrew/bin, and Package.swift shells out to `brew --prefix` to find
     # the keg-only C dependencies.
     # Exit 97 is a private sentinel for "the remote ENVIRONMENT is wrong"
-    # (directory missing, no swift) as opposed to "the work failed". Without it,
+    # (directory missing, no toolchain) as opposed to "the work failed". Without it,
     # a broken remote reports as a failure of the caller's code — exactly the
     # confusion this function exists to prevent.
     # -tt ties the remote command's life to this connection: with a tty, sshd
@@ -203,7 +209,7 @@ remote_run() {
         "export PATH=/opt/homebrew/bin:\$PATH; \
          cd \"$_rdir\" || exit 97; \
          touch .last-used; \
-         command -v swift >/dev/null 2>&1 || exit 97; \
+         command -v $remote_toolchain >/dev/null 2>&1 || exit 97; \
          _s=''; _n=1; \
          while [ \$_n -le $remote_slots ]; do \
              if /usr/bin/shlock -f /tmp/audiout-remote-work.lock.\$_n -p \$\$; then \

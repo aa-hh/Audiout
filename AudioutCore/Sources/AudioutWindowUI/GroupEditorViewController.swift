@@ -660,6 +660,11 @@ public final class GroupEditorViewController: NSViewController {
     /// writer of ``lastRenderedProjection`` (recomputed at the end, so a
     /// failure re-render always re-syncs the gate).
     private func render(group: Group, devices: [Device]) {
+        // Read BEFORE `editingGroupID` moves: the typing guard below is scoped
+        // to the SAME group, and switching the pane to a different group must
+        // re-fill the field, or it would show the previous group's half-typed
+        // name (a phone-driven edit can force exactly that switch).
+        let switchedGroup = editingGroupID != group.id
         editingGroupID = group.id
         allDevices = devices
 
@@ -667,7 +672,7 @@ public final class GroupEditorViewController: NSViewController {
         // every backend event, and writing `stringValue` while the field
         // editor is up replaced the user's half-typed name mid-keystroke.
         // Everything else below still runs.
-        if nameField.currentEditor() == nil {
+        if nameField.currentEditor() == nil || switchedGroup {
             nameField.stringValue = group.name
             updateNameFieldWidth()
         }

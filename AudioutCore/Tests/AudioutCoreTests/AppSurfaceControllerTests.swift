@@ -363,12 +363,15 @@ import AppKit
         #expect(window.titleVisibility == .hidden,
                 "no separate title bar ever — the centered toolbar item carries the name")
         #expect(surface.test_toolbarController.test_centeredTitleText == "Audiout")
+        #expect(window.titlebarAccessoryViewControllers.isEmpty,
+                "one header line only — the name rides the toolbar, never a second row")
     }
 
     /// Task A: the centered brand lockup fits WITHIN the unified strip, so the
     /// mark's top no longer clips against the strip and the bubble's rounded
     /// corner. The mark scales down to its box (never up), and the whole lockup
-    /// sits inside the measured strip height.
+    /// sits inside the measured strip height — the horizontal padding widens
+    /// the capsule, it must never grow it downward.
     @Test func theHeaderLockupFitsTheToolbarStripUnclipped() throws {
         let (surface, _, _, _) = makeSurface()
         surface.show(anchorRect: nil)
@@ -668,8 +671,9 @@ import AppKit
     /// a window that never orders on screen skips the reservation pass, so the
     /// geometry below stayed green through a build that shifted ~210pt in front
     /// of the owner. Both must hold. Measured on the REAL content; a stub
-    /// screen has no sidebar to trigger any of it. The picker view is private
-    /// AppKit, matched by class NAME like `SurfaceToolbarTests` does.
+    /// screen has no sidebar to trigger any of it. Measured off the leading
+    /// tab's own view, which the controller hands over — the tabs are three
+    /// separate items now, so there is no group picker to find by class name.
     @Test func theTabStripNeverMovesAcrossScreens() throws {
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
@@ -694,14 +698,13 @@ import AppKit
         func tabStripLeadingX() throws -> CGFloat {
             window.layoutIfNeeded()
             let themeFrame = try #require(window.contentView?.superview)
-            let picker = try #require(firstView(in: themeFrame,
-                                                namedLike: "NSToolbarItemGroupPicker"),
-                                      "the tab group's picker view is in the window's chrome")
-            return picker.convert(picker.bounds, to: themeFrame).minX
+            let tab = try #require(surface.test_toolbarController.test_tabView(for: .mixer),
+                                   "the leading tab is in the window's chrome")
+            return tab.convert(tab.bounds, to: themeFrame).minX
         }
 
         // Mixer twice: the first layout pass of a freshly attached toolbar
-        // settles the group's width, so the SECOND visit is the reference.
+        // settles the strip's width, so the SECOND visit is the reference.
         _ = try tabStripLeadingX()
         surface.select(.groups)
         surface.select(.mixer)
@@ -722,14 +725,6 @@ import AppKit
         let settingsRoot = try #require(surface.test_settingsRoot)
         #expect(settingsRoot.test_sidebarSplitItem.behavior != .sidebar,
                 "and so is the Settings one")
-    }
-
-    private func firstView(in root: NSView, namedLike name: String) -> NSView? {
-        if String(describing: type(of: root)).contains(name) { return root }
-        for subview in root.subviews {
-            if let hit = firstView(in: subview, namedLike: name) { return hit }
-        }
-        return nil
     }
 
     /// The Groups screen is a SPLIT: the speaker sidebar on the left, the

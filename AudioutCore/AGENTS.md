@@ -205,11 +205,19 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   popover-scoped (T3).** `setMeteringActive` fans the popover-visibility gate to
   the whole-system `captureCoordinator`, the `routeMixer`, AND the
   `localPlaybackEngine`, and drives the metering-only tap lifecycle below. Each
-  device's `.level` is the MAX of its whole-system-tap contribution (only if it's
-  a Selected Device, unmuted) and the loudest PRE-volume SOURCE level among the
-  apps `.device`-routed to it (`latestAppLevel`) — a device fed by both shows the
-  larger. Every meter is a SOURCE/program level (PRE any routing/output volume), so
-  a low slider never empties a bar. Each listed app's `.appLevel` comes from exactly
+  device's `.level` is the MAX of its whole-system-tap contribution (only while
+  that device is actually rendering the mix, and unmuted) and the loudest PRE-volume
+  SOURCE level among the apps `.device`-routed to it (`latestAppLevel`) — a device
+  fed by both shows the larger. "Actually rendering" is per transport and
+  `isMeterable` is the one place that decides it: an AirPlay row has a live engine
+  session, but the local sink, Bluetooth and Cast are all structurally excluded from
+  the engine, so each answers with its own fact instead — asking `Device.isSelected`
+  for any of the three is always false and was why their bars stayed dark. Every
+  meter is a SOURCE/program level (PRE any routing/output volume), so a low slider
+  never empties a bar — and, for the same reason, it is the UNDELAYED source: a BT
+  sync trim moves that device's delay line, which sits downstream of the one system
+  RMS every bar is fed from, so a trim changes when a speaker sounds and never when
+  its bar moves. Each listed app's `.appLevel` comes from exactly
   one source by route kind: `.device` → `routeMixer.onAppLevel` (PRE-volume source),
   `.currentDevice` → `localPlaybackEngine.onAppLevel` (PRE-volume, emitted raw),
   `.noRedirect` → `meteringCapture`, a SEPARATE `.unmuted` per-app tap that exists
@@ -463,6 +471,11 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   pre-existing persisted group and means "use `Group.defaultIconSymbolName`."
   Resolution (including render-time fallback for a stale/unrecognized name)
   lives in `AudioutSharedUI.DeviceIcon`, not here.
+- **`CompanionSnapshotBuilder` snapshot fields never come from `Device` state.**
+  `DeviceState.isSelected` reads from `GroupController.isSpeakerSelected(_:)`,
+  never `Device.isSelected` (which means "currently streaming"). `DeviceState
+  .isMuted` reads from `GroupController.isMuted(_:)`, never `Device.isMuted`.
+  The phone sees the UI's selection model, not the backend's live output set.
 - **Use `scripts/run-tests.sh --filter <Suite>` for the inner-loop feedback
   cycle**, not the full suite (874 tests). Scope to the test suite(s) touched by
   your change, e.g. `scripts/run-tests.sh --filter PopoverControllerTests`. The
@@ -839,5 +852,8 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `SystemSettingsPane` | `x-apple.systempreferences:` deep links the onboarding flow opens on denial. |
 | `TapRebuildDecision` | Pure compare-before-rebuild guard (`NativeCaptureCoordinator.swift`) evaluated once per subscriber inside `DefaultOutputDeviceMonitor`'s fan-out (the single process-wide default-device/nominal-rate listener pair both `CoreAudioProcessTap` and `CoreAudioSystemTap` subscribe to, replacing each tap's own raw HAL listener block): fires a rebuild only when the device/rate a tap is actually pinned to genuinely changed, never on an unrelated HAL notification — the structural fix for the multi-tap rebuild storm (every live tap shares one physical device, so one tap's own rebuild could otherwise re-trigger every other tap's listener). A failed live read counts as "changed" (never suppresses a fire). |
 | `AudioDiag` | Env-gated (`AIRPLAY_AUDIO_DIAG`) diagnostic logging + live-handle counters (`handleCreated`/`handleDestroyed`/`dumpLiveHandles`) for coreaudiod-side objects (process tap / aggregate device / IOProc) — a no-op when disabled, so it costs nothing on the hot audio path in production. Wired into `PerAppCaptureCoordinator`'s `CoreAudioProcessTap` as the reference integration. |
+| `CompanionServer` | NWListener + WebSocket: Bonjour advertisement (`_audiout._tcp`), per-client handshake/command dispatch, snapshot broadcasting. |
+| `CompanionSnapshotBuilder` | Pure mapper: builds full `CompanionSnapshot` from live controllers (devices, groups, app routes) + settings. |
+| `CompanionCommandDispatcher` | MainActor dispatcher: executes the companion commands (select device, change volume, group CRUD, etc.) via controller calls. |
 | `Telemetry` | Always-on structured JSON-lines decision log; never the render path. |
 | `Analytics` | Opt-in anonymous usage-analytics facade; sink installed by the app target. |

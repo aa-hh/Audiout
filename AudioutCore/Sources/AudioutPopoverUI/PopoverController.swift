@@ -231,6 +231,17 @@ public final class PopoverController: NSObject {
     /// the button, if ever rendered, taps into nothing.
     public var onReselectAudiout: (() -> Void)?
 
+    /// Called when the user taps the takeover status strip's "Try Again"
+    /// button (T6, state 4 — `.timedOut`): the bounded wait for the clock
+    /// ran out, so the device the strip was explaining is now `.failed`
+    /// (`enterFailure(_:cause:.timingUnavailable)`). The app wires this to
+    /// the same sanctioned single-device re-kick the "Speakers unreachable"
+    /// fallback banner's own "Try again" already drives
+    /// (`GroupController.requestReconnect(for:)` per not-yet-connected Main
+    /// Out member) — never a broad routing re-apply. `nil` (the default)
+    /// means the button, if ever rendered, taps into nothing.
+    public var onRetryTakeover: (() -> Void)?
+
     /// Called with `true` on `surfaceDidShow()` and `false` on
     /// `surfaceDidHide()` (T-GATE): the metering-active gate. The app wires this to
     /// `(backend as? MeteringControlling)?.setMeteringActive(_:)` so the backend
@@ -243,8 +254,9 @@ public final class PopoverController: NSObject {
     /// debounces to decide when the fleet has quiesced. `nil` when no host cares.
     public var onDeviceSnapshot: ((Set<String>) -> Void)?
     /// Called when an Applications-card slider moves, so the app can push the new
-    /// volume straight to a `.currentDevice` app's LOCAL playback stream (Bug T2)
-    /// for a low-latency response, in ADDITION to the persisted
+    /// volume straight to whichever renderer holds that app — a `.currentDevice`
+    /// app's LOCAL playback stream (Bug T2), or the leveled intercept for an
+    /// un-redirected one — for a low-latency response, in ADDITION to the persisted
     /// `AppRoutingController.setVolume` edit. The app wires this to
     /// `(backend as? AppRouteConfiguring)?.setLocalPlaybackVolume`. Called
     /// unconditionally (for every route kind): the backend no-ops it for a bundle
@@ -1043,6 +1055,34 @@ public final class PopoverController: NSObject {
         }
     }
 
+    /// Repaint the Main Out readouts from the model, for a master move that did
+    /// NOT originate in this popover — a phone command (T7), or the Mac's own
+    /// volume keys. A user-driven master change emits no `BackendEvent` (see
+    /// `GroupController.setMain`), so `update(devices:)`'s repaint tail never
+    /// runs for one; `GroupController.onStateDidChange` calls this instead.
+    /// In-place only, never a `rebuild()` (audit B8), and it only READS the
+    /// controller — no re-entrant mutation, unlike `update(devices:)`. Mid-drag
+    /// thumb writes are already suppressed by `MainOutRowView`/`DeviceRowView`'s
+    /// own drag guards.
+    public func refreshMainOutMaster() {
+        // Closed: nothing to repaint — every open goes through `rebuildForOpen()`,
+        // whose `rebuild()` re-applies the Main Out row from the model.
+        guard isEffectivelyShown else { return }
+        refreshMainOutRow()
+        // Deliberately NOT `refreshDeviceRows()`: no device row's paint depends on
+        // the master EXCEPT the Mac's own while `localRowDrivesMain`, where the row
+        // and Main are one control and `applySelectionState` overlays Main onto it.
+        // The full sweep would re-run the energize reconcile, the rail extents and
+        // the card accessory on every step of a volume-key hold, for one row's
+        // number. (Everything else this hook can also announce — mute, membership,
+        // groups — reaches the rows through the backend echo and its
+        // `update(devices:)` tail, as it did before this repaint existed.)
+        guard groupController?.localRowDrivesMain == true,
+              let local = devicesByID.values.first(where: \.isLocalDevice),
+              let row = deviceRowsByID[local.id] else { return }
+        applySelectionState(to: row, device: local)
+    }
+
     /// Record a routed-app process-lifecycle change (T4, `BackendEvent.routedAppRunning`).
     /// Called by the host (`AppDelegate`) directly — the signal has no home on
     /// `Device` and can't ride `update(devices:)`. Stores the offline state and
@@ -1261,9 +1301,10 @@ public final class PopoverController: NSObject {
     /// (T6), which outranks the double-path guard (W3-T3), which outranks the
     /// unregistered-build note; none active means no note. `action` is non-nil
     /// for routing-blocked (the "Use <productName>" button), for the takeover
-    /// strip's `.needsApproval` (state 1), and for the unregistered note
-    /// ("Buy…") — the states with an actual remedy a button can offer. The
-    /// capture-failure message names its own remedy in prose, so it has none.
+    /// strip's `.needsApproval` (state 1) and `.timedOut` (state 4, "Try
+    /// Again"), and for the unregistered note ("Buy…") — the states with an
+    /// actual remedy a button can offer. The capture-failure message names
+    /// its own remedy in prose, so it has none.
     private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?, severity: SystemAirPlayNoteBannerView.Severity) {
         if let captureFailureMessage {
             return (captureFailureMessage, nil, .warning)
@@ -1272,7 +1313,12 @@ public final class PopoverController: NSObject {
             return (Self.routingBlockedNeedsDefaultText, routingBlockedNeedsDefaultAction, .warning)
         }
         if let takeoverStatus {
-            return (Self.takeoverStatusText(for: takeoverStatus), takeoverStatusAction(for: takeoverStatus), .info)
+            // State 4 (`.timedOut`) is a genuine failure — the connection did
+            // NOT complete — so it takes the same warning tier routing-blocked
+            // uses, rather than the informational tier the other three
+            // (still-in-progress or explains-a-remedy) states keep.
+            let severity: SystemAirPlayNoteBannerView.Severity = takeoverStatus == .timedOut ? .warning : .info
+            return (Self.takeoverStatusText(for: takeoverStatus), takeoverStatusAction(for: takeoverStatus), severity)
         }
         if systemAirPlayNoteActive {
             return (Self.systemAirPlayNoteText, nil, .info)
@@ -1303,7 +1349,11 @@ public final class PopoverController: NSObject {
 
     /// The takeover strip's copy for each state (T6, PLAN-AIRPLAY-COEXISTENCE.md) —
     /// plain language throughout, never "PTP"/"bind"/"ports 319/320". State 3's
-    /// copy is the plan's own exact wording; the others follow its voice.
+    /// copy is the plan's own exact wording; the others follow its voice. State
+    /// 4's copy is honest about the outcome — the wait ran out and the
+    /// connection genuinely failed (`enterFailure(_:cause:.timingUnavailable)`),
+    /// so it no longer promises the app will "try again" on its own; the "Try
+    /// Again" button below is what actually does that, on the user's own ask.
     static func takeoverStatusText(for status: TakeoverStatus) -> String {
         switch status {
         case .needsApproval:
@@ -1313,20 +1363,31 @@ public final class PopoverController: NSObject {
         case .takingOver:
             return "Taking audio back from macOS…"
         case .timedOut:
-            return "Another app is using AirPlay's timing right now, so this connection couldn't complete. Try again in a moment."
+            return "Speaker Sync couldn't get the speakers' clocks in step, so this connection couldn't complete."
         }
     }
 
-    /// The strip's action button. Only state 1 (`.needsApproval`) has one: state
-    /// 2's own doc says plainly there's nothing an approval UX can do about a
-    /// missing bundle component; state 3 is transient; state 4 needs a DIFFERENT
-    /// app to yield, which no button here can cause.
+    /// The strip's action button. States 1 (`.needsApproval`) and 4
+    /// (`.timedOut`) have one: state 2's own doc says plainly there's nothing
+    /// an approval UX can do about a missing bundle component, and state 3 is
+    /// transient. State 4's device is genuinely `.failed` by the time the
+    /// state shows, so "Try Again" gives the user the same single-device
+    /// re-kick a `.failed` row's own diagnosis panel offers.
     private func takeoverStatusAction(for status: TakeoverStatus) -> SystemAirPlayNoteBannerView.Action? {
-        guard case .needsApproval = status else { return nil }
-        return SystemAirPlayNoteBannerView.Action(
-            title: "Open Login Items…",
-            accessibilityLabel: "Open Login Items to approve Speaker Sync",
-            handler: { [weak self] in self?.onOpenPTPHelperLoginItems?() })
+        switch status {
+        case .needsApproval:
+            return SystemAirPlayNoteBannerView.Action(
+                title: "Open Login Items…",
+                accessibilityLabel: "Open Login Items to approve Speaker Sync",
+                handler: { [weak self] in self?.onOpenPTPHelperLoginItems?() })
+        case .timedOut:
+            return SystemAirPlayNoteBannerView.Action(
+                title: "Try Again",
+                accessibilityLabel: "Try connecting again",
+                handler: { [weak self] in self?.onRetryTakeover?() })
+        case .helperMissing, .takingOver:
+            return nil
+        }
     }
 
     /// Test-only: whichever note (double-path guard or takeover strip) currently
@@ -2110,6 +2171,55 @@ public final class PopoverController: NSObject {
         let next = !(transientCollapsed[title] ?? false)
         transientCollapsed[title] = next
         panel.setCardCollapsed(title: title, collapsed: next, animated: animated)
+    }
+
+    /// Repaint the Applications card when the routing table gained or lost a
+    /// route under the popover rather than through it — the phone's add and
+    /// remove, which reach `AppRoutingController` through the companion
+    /// dispatcher and used to leave the card painting a stale list until the
+    /// next open re-read it.
+    ///
+    /// MEMBERSHIP ONLY, and that is the whole safety of it. `onRoutesDidChange`
+    /// is source-blind: it also fires for the popover's OWN continuous volume
+    /// drag, once per tick (`AppRowView`'s slider is `isContinuous`), and a
+    /// `rebuild()` there would replace the `AppRowView` under the mouse and
+    /// break the NSSlider tracking loop — the invariant
+    /// `appRow(_:didSetVolume:for:)` documents and deliberately protects. A
+    /// volume or destination write never changes which rows exist, so keying
+    /// off the rendered row set skips every one of those without needing to
+    /// know where the mutation came from.
+    ///
+    /// Closed is a no-op: every open runs `rebuildForOpen()`, which re-reads
+    /// the table anyway (audit B8 — a closed popover never rebuilds).
+    ///
+    /// A phone-driven VOLUME or DESTINATION change still doesn't repaint the
+    /// Mac's row live; that is pre-existing and unchanged here, and fixing it
+    /// needs an in-place `AppRowView.apply` sweep rather than a rebuild.
+    public func refreshAppRoutes() {
+        guard isEffectivelyShown else { return }
+        guard Set(appRouting.appRoutes.map(\.bundleID)) != Set(appRowsByBundleID.keys) else { return }
+        rebuild()
+    }
+
+    /// Repaint every device row's membership state in place, for the changes
+    /// that reach the model WITHOUT a backend echo behind them.
+    ///
+    /// `update(devices:)` is how a row normally learns anything, and it rides
+    /// a `BackendEvent`. But `GroupController.setDeviceSelected` only calls
+    /// `applyRouting()` — the sole path that can produce an event — while Main
+    /// Out targets Selected Devices. With a GROUP as the target it mutates
+    /// `selectedDeviceIDs` and announces `onStateDidChange` alone, so a phone
+    /// toggling a speaker left the checkbox stale with nothing on the way to
+    /// correct it. Group edits reach the rows the same way (the rail's dormant
+    /// dimming is derived from the active target's membership).
+    ///
+    /// The caller gates this on the selection or the groups having actually
+    /// changed — `refreshMainOutMaster` documents why the full sweep must not
+    /// ride every `onStateDidChange` (it would re-run the energize reconcile
+    /// and the rail extents on every tick of a volume-key hold).
+    public func refreshDeviceMembership() {
+        guard isEffectivelyShown else { return }
+        refreshDeviceRows()
     }
 
     // MARK: Main Out row
@@ -3488,23 +3598,24 @@ public final class PopoverController: NSObject {
         return .device(id: id)
     }
 
-    /// Resolve a routed app's icon lazily (T-8): the live `NSRunningApplication`'s
-    /// icon when the app is running, else a generic placeholder — routes persist
-    /// across app quits, so a routed-but-quit app must still render. Prefers the
-    /// injected `runningAppsProvider` (so tests/headless runs stay off the real
-    /// workspace), falling back to `NSRunningApplication(bundleIdentifier:)`.
+    /// Resolve a routed app's icon lazily (T-8): the injected `runningAppsProvider`
+    /// first — the test/harness seam (`popover-harness`/`popover-snapshot` inject
+    /// fake apps there; a live lookup ahead of it would put headless runs on the
+    /// real workspace) — then `AppIconCache`, which resolves a routed-but-quit
+    /// app's real icon from disk/`NSWorkspace` instead of falling straight to the
+    /// placeholder below. Only an app `AppIconCache` truly can't find (never
+    /// installed, or an invalid bundle id) reaches the generic placeholder. This
+    /// also means `appTintColor(for:)` below, which derives its tint from this
+    /// icon, now resolves a quit app's real brand hue instead of the neutral
+    /// placeholder tint.
     private func appIcon(for bundleID: String) -> NSImage? {
         if let running = runningAppsProvider().first(where: { $0.bundleID == bundleID }),
            let icon = running.icon {
             return icon
         }
-        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first,
-           let icon = app.icon {
-            return icon
+        if let cached = AppIconCache.icon(forBundleID: bundleID) {
+            return cached
         }
-        // Not currently running (route persisted across a quit) — generic
-        // placeholder (PLAN §C: "a routed app that is NOT currently running shows a
-        // generic placeholder").
         let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .regular)
         return NSImage(systemSymbolName: Self.missingAppIconSymbolName, accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
@@ -4881,7 +4992,8 @@ extension PopoverController: AppRowView.Delegate {
             Analytics.capture("mixer:volume_adjusted", ["control": "app"])
         }
         noteSliderGesture()
-        // Drive `.currentDevice` local stream immediately (low-latency path).
+        // Drive the app's own renderer immediately (low-latency path): a
+        // `.currentDevice` local stream, or the leveled intercept.
         // `appRouting.setVolume` fires `onRoutesDidChange` which re-pushes volumes
         // to the mixer/engine — no rebuild needed here; a rebuild would replace
         // the AppRowView mid-drag and break the NSSlider tracking loop.

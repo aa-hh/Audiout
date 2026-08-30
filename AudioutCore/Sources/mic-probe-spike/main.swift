@@ -26,6 +26,7 @@ import AVFoundation
 import AudioutCore
 import CoreAudio
 import Foundation
+import ProbeKit
 
 // MARK: - CLI
 

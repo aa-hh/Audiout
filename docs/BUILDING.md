@@ -110,7 +110,12 @@ code alone doesn't convey.
 
 ## A note on the licence check
 
-The released build contains a soft licence check: without a key it keeps every
-feature working and shows a prompt asking you to buy. A build made from source
-has no licence server configured, so it validates nothing, prompts nothing and
-updates nothing. That is the intended behaviour of the free build, not a bug.
+The official, paid build asks for a licence key the first time it opens, and
+keeps asking until it gets one — it is the build you buy, and it links itself
+to your purchase before it runs.
+
+A build made from source has no licence server configured, so it never gates,
+validates nothing, prompts nothing and updates nothing. Building it yourself is
+the free path and it stays that way: the gate is unreachable here by
+construction, not disabled by a flag. That is the intended behaviour of the
+free build, not a bug.

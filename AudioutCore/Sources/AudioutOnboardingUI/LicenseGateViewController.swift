@@ -70,11 +70,17 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// key plus slop is known to fit.
     private static let columnWidth: CGFloat = 320
 
-    /// Rest and lifted opacity for the bottom-edge pair. They start under the
+    /// Rest and lifted opacity for the bottom-edge pair. They sit under the
     /// hero's attention and rise ONCE for a user who has sat there without
     /// typing — an offer, not a nag, so it never animates twice.
-    private static let quietRestAlpha: CGFloat = 0.45
-    private static let quietLiftedAlpha: CGFloat = 0.7
+    ///
+    /// Rest was 0.45, which was too quiet to survive contact with a real
+    /// screen: "Buy Audiout" is a bordered button, not a filled one, and at
+    /// 0.45 over the field it was unreadable — and that is the ONLY route
+    /// for someone who arrives without a key. Quiet has to mean subordinate
+    /// to the gold Register button, not invisible.
+    private static let quietRestAlpha: CGFloat = 0.75
+    private static let quietLiftedAlpha: CGFloat = 1.0
     private static let quietLiftDelay: TimeInterval = 20
     private static let quietLiftDuration: TimeInterval = 0.8
 
@@ -100,7 +106,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         mark.setAccessibilityElement(false)
 
         let headline = NSTextField(labelWithString: "Welcome to Audiout")
-        headline.font = Tokens.Font.display
+        headline.font = Tokens.Font.displayLarge
         headline.textColor = Tokens.Color.label
         headline.alignment = .center
         headline.setAccessibilityRole(.staticText)
@@ -108,7 +114,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
 
         let why = NSTextField(wrappingLabelWithString:
             "It takes one key to open — yours is in your receipt email, starting with AUDT.")
-        why.font = Tokens.Font.body
+        why.font = Tokens.Font.titleLarge
         why.textColor = Tokens.Color.secondaryLabel
         why.alignment = .center
         why.preferredMaxLayoutWidth = Self.columnWidth
@@ -118,6 +124,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         keyField.setAccessibilityLabel("License key")
         keyField.alignment = .center
         keyField.controlSize = .large
+        keyField.font = Tokens.Font.titleLarge
         keyField.delegate = self
         // A key is one line; a pasted receipt fragment with a newline must not
         // wrap the field open (same reasoning as the Settings sheet).
@@ -137,7 +144,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         buttonSlot.addSubview(registerButton)
         buttonSlot.addSubview(resendButton)
 
-        gutterLine.font = Tokens.Font.body
+        gutterLine.font = Tokens.Font.titleLarge
         gutterLine.textColor = Tokens.Color.secondaryLabel
         gutterLine.alignment = .center
         gutterLine.maximumNumberOfLines = 2
@@ -152,14 +159,14 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         gutter.addSubview(gutterLine)
 
         lostKeyButton.isBordered = false
-        lostKeyButton.controlSize = .small
+        lostKeyButton.controlSize = .regular
         lostKeyButton.target = self
         lostKeyButton.action = #selector(lostKeyTapped)
         setLostKeyTitle("I lost my key")
 
         buyButton.title = "Don’t have a key? Buy Audiout — €30"
         buyButton.bezelStyle = .rounded
-        buyButton.controlSize = .small
+        buyButton.controlSize = .regular
         buyButton.target = self
         buyButton.action = #selector(buyTapped)
         buyButton.isHidden = settings.buyURL == nil
@@ -168,7 +175,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
 
         quitButton.title = "Quit"
         quitButton.bezelStyle = .rounded
-        quitButton.controlSize = .small
+        quitButton.controlSize = .regular
         quitButton.target = self
         quitButton.action = #selector(quitTapped)
         // No main menu exists yet at the gate, so ⌘Q needs an explicit home.
@@ -232,7 +239,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// Two lines of body text, measured rather than guessed — the gutter's
     /// whole job is to be exactly this tall whatever it holds.
     private static var gutterHeight: CGFloat {
-        let font = Tokens.Font.body
+        let font = Tokens.Font.titleLarge
         return ceil((font.ascender - font.descender + font.leading) * 2)
     }
 
@@ -240,7 +247,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         let button = ProminentButton(title: title, target: self, action: action,
                                      fill: Tokens.Color.goldCTA,
                                      picksInkFromFill: true,
-                                     titleFont: Tokens.Font.bodyEmphasized)
+                                     titleFont: Tokens.Font.heading)
         button.translatesAutoresizingMaskIntoConstraints = false
         return button
     }
@@ -251,7 +258,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         lostKeyButton.attributedTitle = NSAttributedString(
             string: title,
             attributes: [.foregroundColor: Tokens.Color.secondaryLabel,
-                         .font: Tokens.Font.caption])
+                         .font: Tokens.Font.body])
     }
 
     /// Authored rather than inferred from frames: field, the commit button,

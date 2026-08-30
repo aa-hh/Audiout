@@ -397,4 +397,30 @@ import Testing
         #expect(completions == 2)
         #expect(transport.requests.isEmpty)
     }
+
+    // MARK: Layout
+
+    /// The window is a FIXED 560 x 440 and the content column is centred in
+    /// it, so every type size on this screen is spending a budget that cannot
+    /// grow. The column has to clear the Quit/Buy row pinned to the bottom
+    /// edge — an overlap here is two controls drawn on top of each other, not
+    /// a scroll.
+    @MainActor
+    @Test func theContentColumnClearsTheBottomButtonRow() {
+        let gate = makeContent(settings(withBuy: true), Transport())
+        gate.view.frame = NSRect(origin: .zero, size: LicenseGateViewController.contentSize)
+        gate.view.layoutSubtreeIfNeeded()
+
+        let column = gate.view.subviews.compactMap { $0 as? NSStackView }.first
+        #expect(column != nil)
+        let buttons = gate.view.subviews.compactMap { $0 as? NSButton }
+        #expect(buttons.count == 2, "expected the Quit and Buy pair on the root view")
+        guard let column, let rowTop = buttons.map(\.frame.maxY).max() else { return }
+
+        // The root view is unflipped, so y counts up from the bottom edge.
+        #expect(column.frame.minY > rowTop,
+                "the column reaches down to \(column.frame.minY), into a button row topping out at \(rowTop)")
+        #expect(column.frame.maxY < LicenseGateViewController.contentSize.height,
+                "the column overflows the top of a window that cannot grow")
+    }
 }

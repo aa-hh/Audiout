@@ -89,21 +89,42 @@ final class EmitterFieldView: NSView {
     }
 
     /// The three sources, in uv (centre 0,0; y up; units of the stage's
-    /// height). All three centres sit OUTSIDE the 560 × 440 frame
-    /// (|x| > 0.636 or |y| > 0.5), so the window shows arcs arriving rather
-    /// than bullseyes sitting on it, and the `reach` caps stop each one
-    /// before the 320 pt content column (|x| < 0.364).
+    /// height). Two rules govern where they may sit, and
+    /// `EmitterFieldTests` holds both:
+    ///
+    /// 1. **A centre stays outside the frame even at the far end of its
+    ///    orbit.** The drift is ±`orbit` on each axis, so a source parked a
+    ///    hair outside the edge sails INTO view twice a cycle and lands as a
+    ///    bullseye on the ground — a different picture every few minutes.
+    ///    Clearance is measured against the frame plus `orbit`.
+    /// 2. **A fan reaches well INSIDE the frame.** A source whose cap only
+    ///    grazes the edge has nothing left to lose: the breathing dip and the
+    ///    orbit drift together take it to the bare canvas, and one of the
+    ///    three visibly switches off. That is not hypothetical — it is what
+    ///    the first pass at this composition did, with a source parked 0.36
+    ///    below the frame whose fan penetrated only 0.22: it sat at the
+    ///    canvas floor for about 110 seconds at a time.
     private static let emitters: [Emitter] = [
-        // Left edge, slightly high: the anchor, and the only one wide enough
-        // to read as a fan rather than a corner.
-        Emitter(x: -0.80, y: 0.16, size: 1.00, reach: 0.62),
+        // Left edge, slightly high: the anchor, and the widest of the three.
+        Emitter(x: -0.82, y: 0.16, size: 1.00, reach: 0.66),
         // Past the top-right corner, a touch smaller so the three read at
         // different distances instead of as one repeated stamp.
-        Emitter(x: 0.66, y: 0.40, size: 0.90, reach: 0.52),
-        // Well below the bottom-right corner: only its outermost arcs enter
-        // the frame, which keeps the quiet Buy/Quit row on clean ground.
-        Emitter(x: 0.62, y: -0.86, size: 0.95, reach: 0.62),
+        Emitter(x: 0.80, y: 0.38, size: 0.90, reach: 0.60),
+        // Past the bottom-right corner. It is the one nearest the Quit/Buy
+        // row, which is why the bottom calm zone in the shader ends where it
+        // does — see there.
+        Emitter(x: 0.76, y: -0.54, size: 0.95, reach: 0.62),
     ]
+
+    /// The bottom calm zone, in the field's uv: the light is nothing at
+    /// `dark` (the frame's bottom edge) and full by `lit`.
+    ///
+    /// This is not decoration. Quit and "Buy Audiout" sit in this band, both
+    /// are BORDERED buttons rather than filled ones, and ring crests crossing
+    /// them made the Buy offer — the only route for someone who arrives with
+    /// no key — unreadable on a real screen. `lit` sits above the row's top
+    /// edge so the whole row is ground, not field.
+    private static let bottomCalmZone = (dark: -0.50, lit: -0.30)
 
     /// THE ONE DEVIATION from the shared field. Ring density and ring speed
     /// are both multiplied by this; nothing else is touched.
@@ -549,6 +570,7 @@ final class EmitterFieldView: NSView {
     static var test_baseGain: Float { baseGain }
     static var test_stageScale: Double { stageScale }
     static var test_emitters: [Emitter] { emitters }
+    static var test_bottomCalmZone: (dark: Double, lit: Double) { bottomCalmZone }
 
     // MARK: Shader
 
@@ -655,9 +677,10 @@ final class EmitterFieldView: NSView {
         // Paper lift: the light ramp needs more energy to read on white.
         light *= mix(1.0, \(msl(d.paperLift)), u.lightMode);
 
-        // Calm zones top and bottom: the quiet Quit/Buy row lives in the
-        // bottom one, and the mark sits under the top one.
-        light *= sstep(-0.62, -0.38, uv.y) * sstep(0.72, 0.35, uv.y);
+        // Calm zones top and bottom — see `bottomCalmZone` for what the
+        // bottom one is protecting.
+        light *= sstep(\(msl(bottomCalmZone.dark)), \(msl(bottomCalmZone.lit)), uv.y)
+               * sstep(0.72, 0.35, uv.y);
         // The hollow. The placements above already keep the middle dark, so
         // at rest this only deepens it — its load-bearing job now is
         // `farewell`, which grows it until the inner edge swallows the frame.

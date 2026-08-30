@@ -97,11 +97,54 @@ import Testing
     }
 
     /// Sources sit past the frame's edges, so the window shows arcs arriving
-    /// rather than bullseyes parked on the ground.
-    @MainActor @Test func everySourceSitsOutsideTheFrame() {
-        let halfWidth = (560.0 / 440.0) / 2
+    /// rather than bullseyes parked on the ground — and they stay past them
+    /// at the far end of the ORBIT, which drifts each centre by ±`orbit` on
+    /// each axis. A source parked a hair outside sails into view twice a
+    /// cycle and lands as a bullseye; an earlier composition had one 0.044
+    /// outside the edge against an orbit of 0.1, and it did exactly that.
+    @MainActor @Test func everySourceStaysOutsideTheFrameAcrossItsOrbit() {
+        let orbit = defaults.orbit
         for emitter in EmitterFieldView.test_emitters {
-            #expect(abs(emitter.x) > halfWidth || abs(emitter.y) > 0.5)
+            let clearsSides = abs(emitter.x) - orbit > Self.halfWidth
+            let clearsTopOrBottom = abs(emitter.y) - orbit > 0.5
+            #expect(clearsSides || clearsTopOrBottom,
+                    "the source at (\(emitter.x), \(emitter.y)) drifts into the frame")
         }
     }
+
+    /// Every fan reaches well INSIDE the frame. A source whose cap only
+    /// grazes the edge has nothing left to lose: the breathing dip and the
+    /// orbit drift together take it to bare canvas and one of the three
+    /// visibly switches off. Measured on the composition that did this — a
+    /// source 0.36 below the frame whose fan penetrated 0.22 — its brightest
+    /// crest sat at the canvas floor for ~110 s at a stretch, against a
+    /// healthy source's 0.10. Three times the orbit is the floor: the drift
+    /// alone can spend most of a shallower penetration.
+    @MainActor @Test func everyFanReachesWellInsideTheFrame() {
+        for emitter in EmitterFieldView.test_emitters {
+            // Nearest point of the frame to this centre, in the shader's
+            // squashed metric — the same one `reach` is expressed in.
+            let dx = max(0, abs(emitter.x) - Self.halfWidth)
+            let dy = max(0, abs(emitter.y) - 0.5) * defaults.squash
+            let penetration = emitter.reach - (dx * dx + dy * dy).squareRoot()
+            #expect(penetration > 3 * defaults.orbit,
+                    "the source at (\(emitter.x), \(emitter.y)) only reaches \(penetration) into the frame")
+        }
+    }
+
+    /// The bottom calm zone has to cover the whole Quit/Buy row, not just
+    /// clip its lower edge — those two are bordered buttons and the field
+    /// crossing them is what made "Buy Audiout" unreadable.
+    @MainActor @Test func theCalmZoneCoversTheWholeButtonRow() {
+        // The row: 14 pt up from the bottom edge, and a `.regular` push
+        // button is about 21 pt tall.
+        let rowTop = -0.5 + (14.0 + 21.0) / 440.0
+        let zone = EmitterFieldView.test_bottomCalmZone
+        #expect(zone.lit > rowTop,
+                "the field is back to full strength at \(zone.lit), inside a button row that reaches \(rowTop)")
+        #expect(shader.contains("sstep(\(literal(zone.dark)), \(literal(zone.lit)), uv.y)"))
+    }
+
+    /// Half the 560 × 440 stage's width, in the field's uv (units of height).
+    private static let halfWidth = (560.0 / 440.0) / 2
 }

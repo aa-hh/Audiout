@@ -29,6 +29,9 @@ set -euo pipefail
 # The staging worker, not production — and overridable for a local `wrangler dev`.
 export AUDIOUT_LICENSE_URL="${AUDIOUT_LICENSE_URL:-https://license-staging.audiout.app}"
 R2_BUCKET="${R2_BUCKET:-audiouter-releases-staging}"
+# Both release buckets live in the EU jurisdiction. Without -J the uploads
+# land in a different (default-jurisdiction) bucket the Worker cannot read.
+R2_JURISDICTION="${R2_JURISDICTION:-eu}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-audiout-notary}"
 WRANGLER="${WRANGLER:-npx --yes wrangler}"
 MAJOR="${APP_VERSION%%.*}"
@@ -40,6 +43,17 @@ APP_BUNDLE="$OUTPUT_DIR/Audiout.app"
 DIST_ZIP="$OUTPUT_DIR/Audiout-${APP_VERSION}.zip"
 DIST_DMG="$OUTPUT_DIR/Audiout-${APP_VERSION}.dmg"
 SIGN_UPDATE="${SIGN_UPDATE:-$REPO_ROOT/AudioutCore/.build/artifacts/sparkle/Sparkle/bin/sign_update}"
+GENERATE_KEYS="${GENERATE_KEYS:-$REPO_ROOT/AudioutCore/.build/artifacts/sparkle/Sparkle/bin/generate_keys}"
+
+# make-app.sh defaults SPARKLE_FEED_URL from AUDIOUT_LICENSE_URL but has no
+# default for the public key, and refuses a feed without one — so a run that
+# passes neither dies AFTER the build. The private key is already in this
+# Mac's keychain; `generate_keys -p` prints its public half, so derive it
+# rather than making the caller paste it. Explicit env still wins.
+if [ -z "${SPARKLE_ED_PUBLIC_KEY:-}" ] && [ -x "$GENERATE_KEYS" ]; then
+  SPARKLE_ED_PUBLIC_KEY="$("$GENERATE_KEYS" -p 2>/dev/null | tr -d '[:space:]')" || true
+  [ -n "$SPARKLE_ED_PUBLIC_KEY" ] && export SPARKLE_ED_PUBLIC_KEY && echo "==> [0] Derived SPARKLE_ED_PUBLIC_KEY from the keychain"
+fi
 
 # --- Step banners with per-step timing ---------------------------------------
 STEP_N=0
@@ -47,7 +61,13 @@ STEP_T0=$SECONDS
 step() { local now=$SECONDS; [ "$STEP_N" -gt 0 ] && echo "    step $STEP_N took $((now - STEP_T0))s"; STEP_N=$((STEP_N + 1)); STEP_T0=$now; echo "==> [$STEP_N $(date +%H:%M:%S)] $1"; }
 
 # --- Pre-flight: fail in seconds, not after a 10-minute notary wait ----------
-step "Pre-flight: wrangler auth"
+step "Pre-flight: signing key + wrangler auth"
+# Checked HERE because make-app.sh only errors on it after building ffmpeg
+# from source and linking the app — minutes of work thrown away.
+if [ -z "${SPARKLE_ED_PUBLIC_KEY:-}" ]; then
+  echo "ERROR: SPARKLE_ED_PUBLIC_KEY is unset and could not be derived — build AudioutCore once so SwiftPM fetches Sparkle's generate_keys, or pass the key explicitly. make-app.sh defaults the feed URL and then refuses a feed with no key, so this run would fail after the build." >&2
+  exit 1
+fi
 $WRANGLER whoami >/dev/null 2>&1 || { echo "ERROR: wrangler is not authenticated — run 'npx wrangler login' first" >&2; exit 1; }
 
 # --- Build the artifact -------------------------------------------------------
@@ -128,9 +148,9 @@ fi
 
 # --- Upload -------------------------------------------------------------------
 step "Upload to R2 bucket $R2_BUCKET"
-$WRANGLER r2 object put "$R2_BUCKET/releases/$DIST_NAME" --file "$DIST_FILE"
-$WRANGLER r2 object put "$R2_BUCKET/releases/latest-v$MAJOR.json" --file "$OUTPUT_DIR/latest-v$MAJOR.json"
-[ -n "$APPCAST" ] && $WRANGLER r2 object put "$R2_BUCKET/appcast-v$MAJOR.xml" --file "$APPCAST"
+$WRANGLER r2 object put "$R2_BUCKET/releases/$DIST_NAME" --file "$DIST_FILE" -J "$R2_JURISDICTION"
+$WRANGLER r2 object put "$R2_BUCKET/releases/latest-v$MAJOR.json" --file "$OUTPUT_DIR/latest-v$MAJOR.json" -J "$R2_JURISDICTION"
+[ -n "$APPCAST" ] && $WRANGLER r2 object put "$R2_BUCKET/appcast-v$MAJOR.xml" --file "$APPCAST" -J "$R2_JURISDICTION"
 
 step "Done"
 shasum -a 256 "$DIST_FILE"

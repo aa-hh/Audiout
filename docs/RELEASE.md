@@ -70,6 +70,15 @@ The one manual proof this runbook does call for —
 `scripts/verify-standalone-app.sh` — is a Homebrew-less *launch* check, not a
 live-testing session; do it, then don't keep using that copy.
 
+## Staging rehearsal
+
+`APP_VERSION=… BUILD_NUMBER=… scripts/make-staging.sh` runs the same pipeline
+against the staging license server and then goes further: wraps the stapled
+app in a notarised, stapled DMG, signs it with `sign_update`, writes
+`latest-vN.json` + `appcast-vN.xml`, and uploads everything to the
+`audiouter-releases-staging` R2 bucket. `SKIP_NOTARIZE=1` and `SKIP_DMG=1`
+skip those steps for fast iteration. It never touches the production bucket.
+
 ## What the pipeline does *not* do
 
 - No DMG. The zip `make-release.sh` produces is what both Paddle's file

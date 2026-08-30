@@ -1,0 +1,137 @@
+#!/bin/bash
+# make-staging.sh — full release rehearsal against the STAGING license server.
+# build → sign → notarize → staple → DMG → notarize DMG → staple DMG →
+# sign_update → latest-vN.json + appcast-vN.xml → upload to the staging R2
+# bucket. Production (make-release.sh) is untouched by anything here: this
+# script only ever writes to audiouter-releases-staging.
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Usage:
+#   APP_VERSION=1.0.0 BUILD_NUMBER=2 SPARKLE_ED_PUBLIC_KEY=... scripts/make-staging.sh [output-dir]
+#
+# Flags (default OFF — the default run mirrors a real buyer end to end):
+#   SKIP_NOTARIZE=1  skip both Apple notary waits (fast iteration; the artifact
+#                    will NOT pass Gatekeeper on a quarantined download)
+#   SKIP_DMG=1       ship the zip as the download instead of building a DMG
+#
+# razor: steps are NOT parallelized. Each one consumes the previous one's
+# output (stapled app → DMG → stapled DMG → EdDSA signature → upload), so
+# there is nothing independent to overlap; the per-step timers below show
+# where the time actually goes (the two notary waits). Every command is a
+# paste-proof one-liner — no backslash continuations.
+
+set -euo pipefail
+
+[ -n "${APP_VERSION:-}" ] || { echo "ERROR: APP_VERSION must be set (e.g. APP_VERSION=1.0.0 BUILD_NUMBER=2 scripts/make-staging.sh)" >&2; exit 1; }
+[ -n "${BUILD_NUMBER:-}" ] || { echo "ERROR: BUILD_NUMBER must be set (e.g. APP_VERSION=1.0.0 BUILD_NUMBER=2 scripts/make-staging.sh)" >&2; exit 1; }
+
+# The staging worker, not production — and overridable for a local `wrangler dev`.
+export AUDIOUT_LICENSE_URL="${AUDIOUT_LICENSE_URL:-https://license-staging.audiout.app}"
+R2_BUCKET="${R2_BUCKET:-audiouter-releases-staging}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-audiout-notary}"
+WRANGLER="${WRANGLER:-npx --yes wrangler}"
+MAJOR="${APP_VERSION%%.*}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+OUTPUT_DIR="${1:-$REPO_ROOT/build}"
+APP_BUNDLE="$OUTPUT_DIR/Audiout.app"
+DIST_ZIP="$OUTPUT_DIR/Audiout-${APP_VERSION}.zip"
+DIST_DMG="$OUTPUT_DIR/Audiout-${APP_VERSION}.dmg"
+SIGN_UPDATE="${SIGN_UPDATE:-$REPO_ROOT/AudioutCore/.build/artifacts/sparkle/Sparkle/bin/sign_update}"
+
+# --- Step banners with per-step timing ---------------------------------------
+STEP_N=0
+STEP_T0=$SECONDS
+step() { local now=$SECONDS; [ "$STEP_N" -gt 0 ] && echo "    step $STEP_N took $((now - STEP_T0))s"; STEP_N=$((STEP_N + 1)); STEP_T0=$now; echo "==> [$STEP_N $(date +%H:%M:%S)] $1"; }
+
+# --- Pre-flight: fail in seconds, not after a 10-minute notary wait ----------
+step "Pre-flight: wrangler auth"
+$WRANGLER whoami >/dev/null 2>&1 || { echo "ERROR: wrangler is not authenticated — run 'npx wrangler login' first" >&2; exit 1; }
+
+# --- Build the artifact -------------------------------------------------------
+if [ "${SKIP_NOTARIZE:-0}" = "1" ]; then
+  # Fast path: build + sign + zip, no Apple round-trips. make-release.sh is
+  # bypassed entirely because notarization is its whole point.
+  step "Build + sign (make-app.sh, NOTARIZATION SKIPPED)"
+  AUDIOUT_BUNDLE_DYLIBS=1 "$SCRIPT_DIR/make-app.sh" "$OUTPUT_DIR"
+  test -d "$APP_BUNDLE" || { echo "ERROR: expected app bundle not found at $APP_BUNDLE" >&2; exit 1; }
+  rm -f "$DIST_ZIP"
+  ditto -c -k --keepParent "$APP_BUNDLE" "$DIST_ZIP"
+else
+  # Real path: make-release.sh does build → notarize → staple → zip, plus its
+  # own pre-flight that the feed URL above answers as the license server.
+  step "Build + notarize + staple + zip (make-release.sh, against $AUDIOUT_LICENSE_URL)"
+  "$SCRIPT_DIR/make-release.sh" "$OUTPUT_DIR"
+fi
+
+# --- DMG ----------------------------------------------------------------------
+if [ "${SKIP_DMG:-0}" = "1" ]; then
+  DIST_FILE="$DIST_ZIP"
+  ENCLOSURE_TYPE="application/zip"
+else
+  step "Create + sign DMG"
+  DMG_STAGE="$OUTPUT_DIR/dmg-stage"
+  rm -rf "$DMG_STAGE" "$DIST_DMG"
+  mkdir -p "$DMG_STAGE"
+  cp -R "$APP_BUNDLE" "$DMG_STAGE/"
+  ln -s /Applications "$DMG_STAGE/Applications"
+  hdiutil create -volname "Audiout" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DIST_DMG" -quiet
+  rm -rf "$DMG_STAGE"
+  # Same auto-detection as make-app.sh; ad-hoc only if notarization is off.
+  DMG_IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | grep -o '"Developer ID Application:[^"]*"' | head -1 | tr -d '"' || true)}"
+  if [ -z "$DMG_IDENTITY" ]; then
+    [ "${SKIP_NOTARIZE:-0}" = "1" ] || { echo "ERROR: no Developer ID Application identity in the keychain — the DMG could not be notarized" >&2; exit 1; }
+    DMG_IDENTITY="-"
+  fi
+  codesign --force --sign "$DMG_IDENTITY" "$DIST_DMG"
+
+  if [ "${SKIP_NOTARIZE:-0}" != "1" ]; then
+    step "Notarize + staple DMG (Apple wait, typically minutes)"
+    NOTARY_OUTPUT="$(xcrun notarytool submit "$DIST_DMG" --keychain-profile "$NOTARY_PROFILE" --wait 2>&1)" || { echo "$NOTARY_OUTPUT" >&2; echo "ERROR: notarytool submit failed for the DMG" >&2; exit 1; }
+    echo "$NOTARY_OUTPUT" | grep -q "status: Accepted" || { echo "$NOTARY_OUTPUT" >&2; SUBMISSION_ID="$(echo "$NOTARY_OUTPUT" | grep -m1 '  id:' | awk '{print $2}')"; [ -n "$SUBMISSION_ID" ] && xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" >&2; echo "ERROR: DMG notarization was not Accepted" >&2; exit 1; }
+    xcrun stapler staple "$DIST_DMG"
+  fi
+  DIST_FILE="$DIST_DMG"
+  ENCLOSURE_TYPE="application/x-apple-diskimage"
+fi
+DIST_NAME="$(basename "$DIST_FILE")"
+
+# --- latest-vN.json + appcast-vN.xml -----------------------------------------
+# latest-vN.json is THE pointer /download serves from — flipping it is what
+# "publishing" means. The appcast carries only this release: staging rehearses
+# the newest update, and regenerating history would need every old artifact's
+# signature for no test value.
+step "Write latest-v$MAJOR.json + appcast-v$MAJOR.xml"
+printf '{"version": "%s", "file": "releases/%s"}\n' "$APP_VERSION" "$DIST_NAME" > "$OUTPUT_DIR/latest-v$MAJOR.json"
+
+# A missing or unsignable appcast is fatal on a real run — an update channel
+# that cannot verify signatures is worse than none. On a SKIP_NOTARIZE
+# rehearsal it is only a warning: that run exists to prove the upload path,
+# and its unnotarised artifact was never going to update anyone anyway.
+APPCAST="$OUTPUT_DIR/appcast-v$MAJOR.xml"
+REHEARSAL="${SKIP_NOTARIZE:-0}"
+if [ ! -x "$SIGN_UPDATE" ]; then
+  [ "$REHEARSAL" = "1" ] || { echo "ERROR: sign_update not found at $SIGN_UPDATE — build AudioutCore once so SwiftPM fetches the Sparkle artifact, or set SIGN_UPDATE. Without it this release has no verifiable update feed." >&2; exit 1; }
+  echo "    WARNING: sign_update not found at $SIGN_UPDATE — skipping the appcast (rehearsal only; /download is still exercised)"
+  APPCAST=""
+elif ! SIG_ATTRS="$("$SIGN_UPDATE" "$DIST_FILE" 2>&1)"; then
+  [ "$REHEARSAL" = "1" ] || { echo "ERROR: sign_update failed — is the Sparkle EdDSA private key in this Mac's keychain? (docs/RELEASE.md §c)" >&2; echo "$SIG_ATTRS" >&2; exit 1; }
+  echo "    WARNING: sign_update failed (no EdDSA private key in the keychain?) — skipping the appcast (rehearsal only)"
+  APPCAST=""
+else
+  # sign_update signs the FINAL bytes (post-staple) and prints the exact
+  # attribute pair the enclosure needs: sparkle:edSignature="..." length="..."
+  { printf '<?xml version="1.0" encoding="utf-8"?>\n'; printf '<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">\n'; printf '<channel><title>Audiout v%s updates (STAGING)</title>\n' "$MAJOR"; printf '<item><title>%s</title>\n' "$APP_VERSION"; printf '<sparkle:version>%s</sparkle:version>\n' "$BUILD_NUMBER"; printf '<sparkle:shortVersionString>%s</sparkle:shortVersionString>\n' "$APP_VERSION"; printf '<sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>\n'; printf '<enclosure url="%s/download" %s type="%s"/>\n' "$AUDIOUT_LICENSE_URL" "$SIG_ATTRS" "$ENCLOSURE_TYPE"; printf '</item></channel></rss>\n'; } > "$APPCAST"
+fi
+
+# --- Upload -------------------------------------------------------------------
+step "Upload to R2 bucket $R2_BUCKET"
+$WRANGLER r2 object put "$R2_BUCKET/releases/$DIST_NAME" --file "$DIST_FILE"
+$WRANGLER r2 object put "$R2_BUCKET/releases/latest-v$MAJOR.json" --file "$OUTPUT_DIR/latest-v$MAJOR.json"
+[ -n "$APPCAST" ] && $WRANGLER r2 object put "$R2_BUCKET/appcast-v$MAJOR.xml" --file "$APPCAST"
+
+step "Done"
+shasum -a 256 "$DIST_FILE"
+echo "    Try it: $AUDIOUT_LICENSE_URL/download?key=<a staging key> should now stream $DIST_NAME"

@@ -3,7 +3,7 @@
 # build → sign → notarize → staple → DMG → notarize DMG → staple DMG →
 # sign_update → latest-vN.json + appcast-vN.xml → upload to the staging R2
 # bucket. Production (make-release.sh) is untouched by anything here: this
-# script only ever writes to audiouter-releases-staging.
+# script only ever writes to audiout-releases-staging.
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
@@ -32,7 +32,7 @@ set -euo pipefail
 
 # The staging worker, not production — and overridable for a local `wrangler dev`.
 export AUDIOUT_LICENSE_URL="${AUDIOUT_LICENSE_URL:-https://license-staging.audiout.app}"
-R2_BUCKET="${R2_BUCKET:-audiouter-releases-staging}"
+R2_BUCKET="${R2_BUCKET:-audiout-releases-staging}"
 # Both release buckets live in the EU jurisdiction. Without -J the uploads
 # land in a different (default-jurisdiction) bucket the Worker cannot read.
 R2_JURISDICTION="${R2_JURISDICTION:-eu}"
@@ -173,9 +173,12 @@ fi
 
 # --- Upload -------------------------------------------------------------------
 step "Upload to R2 bucket $R2_BUCKET"
-$WRANGLER r2 object put "$R2_BUCKET/releases/$DIST_NAME" --file "$DIST_FILE" -J "$R2_JURISDICTION"
-$WRANGLER r2 object put "$R2_BUCKET/releases/latest-v$MAJOR.json" --file "$OUTPUT_DIR/latest-v$MAJOR.json" -J "$R2_JURISDICTION"
-[ -n "$APPCAST" ] && $WRANGLER r2 object put "$R2_BUCKET/appcast-v$MAJOR.xml" --file "$APPCAST" -J "$R2_JURISDICTION"
+# --remote is NOT optional: without it wrangler writes to the local .wrangler
+# simulator and still prints "Upload complete", so the release silently never
+# leaves this Mac. The only visible tell is a "Resource location: local" line.
+$WRANGLER r2 object put "$R2_BUCKET/releases/$DIST_NAME" --file "$DIST_FILE" -J "$R2_JURISDICTION" --remote
+$WRANGLER r2 object put "$R2_BUCKET/releases/latest-v$MAJOR.json" --file "$OUTPUT_DIR/latest-v$MAJOR.json" -J "$R2_JURISDICTION" --remote
+[ -n "$APPCAST" ] && $WRANGLER r2 object put "$R2_BUCKET/appcast-v$MAJOR.xml" --file "$APPCAST" -J "$R2_JURISDICTION" --remote
 
 # --- Verify what a buyer will actually receive --------------------------------
 # Set VERIFY_KEY to an active staging licence key and this re-downloads the

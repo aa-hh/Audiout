@@ -76,7 +76,7 @@ live-testing session; do it, then don't keep using that copy.
 against the staging license server and then goes further: wraps the stapled
 app in a notarised, stapled DMG, signs it with `sign_update`, writes
 `latest-vN.json` + `appcast-vN.xml`, and uploads everything to the
-`audiouter-releases-staging` R2 bucket. `SKIP_NOTARIZE=1` and `SKIP_DMG=1`
+`audiout-releases-staging` R2 bucket. `SKIP_NOTARIZE=1` and `SKIP_DMG=1`
 skip those steps for fast iteration. It never touches the production bucket.
 
 ## What the pipeline does *not* do
@@ -153,12 +153,15 @@ the website. For every release meant to reach existing users via Sparkle, with
    header on the enclosure fetch too, and the server resolves which file that
    key is entitled to.
 3. Write `latest-vN.json`: `{"version": "<version>", "file": "releases/Audiout-<version>.zip"}`.
-4. Upload all three:
+4. Upload all three. `--remote` and `-J eu` are both required: without
+   `--remote` wrangler writes to the local simulator and still says "Upload
+   complete", and the buckets live in the EU jurisdiction.
+
 
    ```bash
-   wrangler r2 object put audiout-releases/releases/Audiout-1.0.0.zip --file build/Audiout-1.0.0.zip
-   wrangler r2 object put audiout-releases/releases/latest-v1.json --file latest-v1.json
-   wrangler r2 object put audiout-releases/appcast-v1.xml --file appcast-v1.xml
+   wrangler r2 object put audiout-releases-live/releases/Audiout-1.0.0.zip --file build/Audiout-1.0.0.zip -J eu --remote
+   wrangler r2 object put audiout-releases-live/releases/latest-v1.json --file latest-v1.json -J eu --remote
+   wrangler r2 object put audiout-releases-live/appcast-v1.xml --file appcast-v1.xml -J eu --remote
    ```
 
 ### f. Choose the license server's public URL

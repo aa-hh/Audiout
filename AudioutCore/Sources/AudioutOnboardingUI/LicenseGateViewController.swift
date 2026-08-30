@@ -8,6 +8,14 @@ import AudioutSharedUI
 /// site's hero, remapped to gold) filling the window, with the welcome, the
 /// key field and the gold Register floating in its calm centre.
 ///
+/// **One surface, and nothing on it ever moves.** Every state — a clipboard
+/// offer, a verdict, the checkout wait, the lost-key detour — lands as words in
+/// ONE reserved gutter (two lines' height, always there, empty at rest) and as
+/// a scene on the field behind it. There is no sheet, no second window and no
+/// row that appears and pushes the rest down: the window the buyer types into
+/// is the same shape from launch to pass. Any constraint added here must keep
+/// that true.
+///
 /// Register mirrors `LicenseSheetViewController`'s contract exactly — trim, a
 /// changed key clears the stored verdict, the key is SAVED even when the
 /// server can't be reached — because "couldn't verify" must never read as "not
@@ -20,7 +28,7 @@ import AudioutSharedUI
 /// gate that bricked an offline Mac would punish exactly the buyer it exists
 /// to thank.
 @MainActor
-public final class LicenseGateViewController: NSViewController {
+public final class LicenseGateViewController: NSViewController, NSTextFieldDelegate {
 
     private let settings: AppSettings
     private let transport: LicenseValidator.Transport?
@@ -29,11 +37,29 @@ public final class LicenseGateViewController: NSViewController {
 
     private let field = EmitterFieldView()
     private let keyField = NSTextField()
-    private let resultLine = NSTextField(wrappingLabelWithString: "")
+    private let gutterLine = NSTextField(wrappingLabelWithString: "")
     private var registerButton: ProminentButton!
+    private var resendButton: ProminentButton!
+    private let lostKeyButton = NSButton()
     private let buyButton = NSButton()
     private let quitButton = NSButton()
     private var didPass = false
+
+    /// What the shared controls currently mean. The lost-key path MORPHS this
+    /// one field and one button rather than opening anything: same geometry,
+    /// different question.
+    private enum Mode { case key, resend }
+    private var mode: Mode = .key
+    /// The half-typed key set aside while the resend question borrows the
+    /// field, restored verbatim on the way back.
+    private var stashedKey = ""
+
+    private var liftTimer: Timer?
+    private var didLiftQuietRow = false
+
+    /// Where a pre-filled key may come from, injectable so tests can offer one
+    /// without touching the user's real pasteboard.
+    public var pasteboardString: () -> String? = { NSPasteboard.general.string(forType: .string) }
 
     /// The window's fixed content size. Wide enough for the emitters to sit
     /// out near the edges the way the site composes them; the calm-zone masks
@@ -43,6 +69,14 @@ public final class LicenseGateViewController: NSViewController {
     /// The key column's width — the Settings sheet's 320, the one width a full
     /// key plus slop is known to fit.
     private static let columnWidth: CGFloat = 320
+
+    /// Rest and lifted opacity for the bottom-edge pair. They start under the
+    /// hero's attention and rise ONCE for a user who has sat there without
+    /// typing — an offer, not a nag, so it never animates twice.
+    private static let quietRestAlpha: CGFloat = 0.45
+    private static let quietLiftedAlpha: CGFloat = 0.7
+    private static let quietLiftDelay: TimeInterval = 20
+    private static let quietLiftDuration: TimeInterval = 0.8
 
     public init(settings: AppSettings,
                 transport: LicenseValidator.Transport? = nil,
@@ -73,7 +107,7 @@ public final class LicenseGateViewController: NSViewController {
         headline.setAccessibilitySubrole(NSAccessibility.Subrole(rawValue: "AXHeading"))
 
         let why = NSTextField(wrappingLabelWithString:
-            "This build is the paid one. Enter the license key from your receipt and everything else is yours.")
+            "It takes one key to open — yours is in your receipt email, starting with AUDT.")
         why.font = Tokens.Font.body
         why.textColor = Tokens.Color.secondaryLabel
         why.alignment = .center
@@ -84,32 +118,53 @@ public final class LicenseGateViewController: NSViewController {
         keyField.setAccessibilityLabel("License key")
         keyField.alignment = .center
         keyField.controlSize = .large
+        keyField.delegate = self
         // A key is one line; a pasted receipt fragment with a newline must not
         // wrap the field open (same reasoning as the Settings sheet).
         keyField.usesSingleLineMode = true
         keyField.cell?.isScrollable = true
         keyField.translatesAutoresizingMaskIntoConstraints = false
 
-        resultLine.font = Tokens.Font.body
-        resultLine.textColor = Tokens.Color.secondaryLabel
-        resultLine.alignment = .center
-        resultLine.preferredMaxLayoutWidth = Self.columnWidth
-        resultLine.isHidden = true
-
-        registerButton = ProminentButton(title: "Register",
-                                         target: self, action: #selector(registerTapped),
-                                         fill: Tokens.Color.goldCTA,
-                                         picksInkFromFill: true,
-                                         titleFont: Tokens.Font.bodyEmphasized)
+        registerButton = goldButton(title: "Register", action: #selector(registerTapped))
+        resendButton = goldButton(title: "Email my key", action: #selector(resendTapped))
+        resendButton.isHidden = true
         registerButton.keyEquivalent = "\r"
-        registerButton.translatesAutoresizingMaskIntoConstraints = false
 
-        buyButton.title = "Buy Audiout…"
+        // Both live in one slot so swapping them cannot move anything: the slot
+        // keeps the column's width and the button's height whichever is up.
+        let buttonSlot = NSView()
+        buttonSlot.translatesAutoresizingMaskIntoConstraints = false
+        buttonSlot.addSubview(registerButton)
+        buttonSlot.addSubview(resendButton)
+
+        gutterLine.font = Tokens.Font.body
+        gutterLine.textColor = Tokens.Color.secondaryLabel
+        gutterLine.alignment = .center
+        gutterLine.maximumNumberOfLines = 2
+        gutterLine.preferredMaxLayoutWidth = Self.columnWidth
+        gutterLine.translatesAutoresizingMaskIntoConstraints = false
+        gutterLine.setAccessibilityLabel("Status")
+
+        // The gutter is RESERVED, never conditional: a line appearing must not
+        // push the link, the field or the mark by a pixel.
+        let gutter = NSView()
+        gutter.translatesAutoresizingMaskIntoConstraints = false
+        gutter.addSubview(gutterLine)
+
+        lostKeyButton.isBordered = false
+        lostKeyButton.controlSize = .small
+        lostKeyButton.target = self
+        lostKeyButton.action = #selector(lostKeyTapped)
+        setLostKeyTitle("I lost my key")
+
+        buyButton.title = "Don’t have a key? Buy Audiout — €30"
         buyButton.bezelStyle = .rounded
         buyButton.controlSize = .small
         buyButton.target = self
         buyButton.action = #selector(buyTapped)
         buyButton.isHidden = settings.buyURL == nil
+        buyButton.alphaValue = Self.quietRestAlpha
+        buyButton.translatesAutoresizingMaskIntoConstraints = false
 
         quitButton.title = "Quit"
         quitButton.bezelStyle = .rounded
@@ -119,16 +174,11 @@ public final class LicenseGateViewController: NSViewController {
         // No main menu exists yet at the gate, so ⌘Q needs an explicit home.
         quitButton.keyEquivalent = "q"
         quitButton.keyEquivalentModifierMask = [.command]
+        quitButton.alphaValue = Self.quietRestAlpha
+        quitButton.translatesAutoresizingMaskIntoConstraints = false
 
-        // Buy and Quit live on the window's bottom edge, out of the hero
-        // column — stacked under the gold Register they read as a second CTA.
-        let quietRow = NSStackView(views: [buyButton, quitButton])
-        quietRow.orientation = .horizontal
-        quietRow.spacing = 8
-        quietRow.translatesAutoresizingMaskIntoConstraints = false
-
-        let column = NSStackView(views: [mark, headline, why, keyField, resultLine,
-                                         registerButton])
+        let column = NSStackView(views: [mark, headline, why, keyField, buttonSlot,
+                                         gutter, lostKeyButton])
         column.orientation = .vertical
         column.alignment = .centerX
         column.spacing = 10
@@ -136,12 +186,15 @@ public final class LicenseGateViewController: NSViewController {
         column.setCustomSpacing(6, after: headline)
         column.setCustomSpacing(22, after: why)
         column.setCustomSpacing(12, after: keyField)
+        column.setCustomSpacing(14, after: buttonSlot)
+        column.setCustomSpacing(6, after: gutter)
         column.translatesAutoresizingMaskIntoConstraints = false
 
         let root = NSView()
         root.addSubview(field)
         root.addSubview(column)
-        root.addSubview(quietRow)
+        root.addSubview(quitButton)
+        root.addSubview(buyButton)
         NSLayoutConstraint.activate([
             root.widthAnchor.constraint(equalToConstant: Self.contentSize.width),
             root.heightAnchor.constraint(equalToConstant: Self.contentSize.height),
@@ -151,16 +204,63 @@ public final class LicenseGateViewController: NSViewController {
             field.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             column.centerXAnchor.constraint(equalTo: root.centerXAnchor),
             column.centerYAnchor.constraint(equalTo: root.centerYAnchor),
-            quietRow.centerXAnchor.constraint(equalTo: root.centerXAnchor),
-            quietRow.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
-            mark.widthAnchor.constraint(equalToConstant: 96),
-            mark.heightAnchor.constraint(equalToConstant: 96),
+            quitButton.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            quitButton.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
+            buyButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            buyButton.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
+            mark.widthAnchor.constraint(equalToConstant: 64),
+            mark.heightAnchor.constraint(equalToConstant: 64),
             keyField.widthAnchor.constraint(equalToConstant: Self.columnWidth),
+            buttonSlot.widthAnchor.constraint(equalToConstant: Self.columnWidth),
+            buttonSlot.heightAnchor.constraint(equalTo: registerButton.heightAnchor),
+            registerButton.centerXAnchor.constraint(equalTo: buttonSlot.centerXAnchor),
+            registerButton.centerYAnchor.constraint(equalTo: buttonSlot.centerYAnchor),
+            resendButton.centerXAnchor.constraint(equalTo: buttonSlot.centerXAnchor),
+            resendButton.centerYAnchor.constraint(equalTo: buttonSlot.centerYAnchor),
+            gutter.widthAnchor.constraint(equalToConstant: Self.columnWidth),
+            gutter.heightAnchor.constraint(equalToConstant: Self.gutterHeight),
+            gutterLine.topAnchor.constraint(equalTo: gutter.topAnchor),
+            gutterLine.leadingAnchor.constraint(equalTo: gutter.leadingAnchor),
+            gutterLine.trailingAnchor.constraint(equalTo: gutter.trailingAnchor),
         ])
         view = root
 
-        keyField.nextKeyView = registerButton
-        registerButton.nextKeyView = buyButton
+        applyTabOrder()
+        field.setScene(.idle)
+    }
+
+    /// Two lines of body text, measured rather than guessed — the gutter's
+    /// whole job is to be exactly this tall whatever it holds.
+    private static var gutterHeight: CGFloat {
+        let font = Tokens.Font.body
+        return ceil((font.ascender - font.descender + font.leading) * 2)
+    }
+
+    private func goldButton(title: String, action: Selector) -> ProminentButton {
+        let button = ProminentButton(title: title, target: self, action: action,
+                                     fill: Tokens.Color.goldCTA,
+                                     picksInkFromFill: true,
+                                     titleFont: Tokens.Font.bodyEmphasized)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        return button
+    }
+
+    /// The quiet tier's one link. `ProminentButton` stamps its own title, so
+    /// this one carries its ink itself.
+    private func setLostKeyTitle(_ title: String) {
+        lostKeyButton.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [.foregroundColor: Tokens.Color.secondaryLabel,
+                         .font: Tokens.Font.caption])
+    }
+
+    /// Authored rather than inferred from frames: field, the commit button,
+    /// the link, then the two bottom-edge buttons, and back.
+    private func applyTabOrder() {
+        let commit: NSButton = mode == .resend ? resendButton : registerButton
+        keyField.nextKeyView = commit
+        commit.nextKeyView = lostKeyButton
+        lostKeyButton.nextKeyView = buyButton
         buyButton.nextKeyView = quitButton
         quitButton.nextKeyView = keyField
     }
@@ -168,8 +268,60 @@ public final class LicenseGateViewController: NSViewController {
     public override func viewDidAppear() {
         super.viewDidAppear()
         field.start()
+        arrive()
         // The field is why the window exists — typing starts without a click.
         view.window?.makeFirstResponder(keyField)
+    }
+
+    /// Arrival: offer whatever key is already on the clipboard, and start the
+    /// clock on the bottom row's one lift.
+    private func arrive() {
+        offerClipboardKey()
+        armQuietLift()
+    }
+
+    /// A key sitting on the clipboard is almost always the one from the
+    /// receipt the user just opened — so it is OFFERED, filled in and named,
+    /// never submitted: the buyer presses Register, this window doesn't.
+    private func offerClipboardKey() {
+        guard mode == .key, keyField.stringValue.isEmpty else { return }
+        let pasted = (pasteboardString() ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard pasted.hasPrefix("AUDT-") else { return }
+        keyField.stringValue = pasted
+        show("From your clipboard")
+        updateSceneForText()
+    }
+
+    // MARK: The bottom row's one lift
+
+    private func armQuietLift() {
+        guard !didLiftQuietRow, keyField.stringValue.isEmpty else { return }
+        liftTimer?.invalidate()
+        liftTimer = Timer.scheduledTimer(withTimeInterval: Self.quietLiftDelay,
+                                         repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.liftQuietRow() }
+        }
+    }
+
+    private func cancelQuietLift() {
+        liftTimer?.invalidate()
+        liftTimer = nil
+    }
+
+    private func liftQuietRow() {
+        cancelQuietLift()
+        guard !didLiftQuietRow else { return }
+        didLiftQuietRow = true
+        let targets = [quitButton, buyButton]
+        guard !HeadlessRuntime.isActive,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            targets.forEach { $0.alphaValue = Self.quietLiftedAlpha }
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.quietLiftDuration
+            targets.forEach { $0.animator().alphaValue = Self.quietLiftedAlpha }
+        }
     }
 
     // MARK: Actions
@@ -177,18 +329,88 @@ public final class LicenseGateViewController: NSViewController {
     @objc private func buyTapped() {
         guard let url = settings.buyURL else { return }
         Analytics.capture("license:buy_link_opened", ["source": "gate"])
-        // Leaves the gate open: the buyer comes back with a key to paste.
+        // Leaves the gate open: the buyer comes back with a key to paste, and
+        // the window says so rather than sitting blank while they shop.
         openURL(url)
+        field.setScene(.waiting)
+        show("The checkout is in your browser. Come back with the key — it lands right here.")
     }
 
     @objc private func quitTapped() {
         NSApp?.terminate(nil)
     }
 
+    /// The lost-key detour, both ways: the SAME field and the SAME button ask
+    /// the other question, so nothing opens and nothing moves.
+    @objc private func lostKeyTapped() {
+        mode == .key ? enterResendMode() : restoreKeyMode(keepingLine: false)
+    }
+
+    private func enterResendMode() {
+        mode = .resend
+        stashedKey = keyField.stringValue
+        keyField.stringValue = ""
+        keyField.placeholderString = "you@example.com"
+        keyField.alignment = .natural
+        keyField.setAccessibilityLabel("Purchase email address")
+        registerButton.isHidden = true
+        registerButton.keyEquivalent = ""
+        resendButton.isHidden = false
+        resendButton.keyEquivalent = "\r"
+        setLostKeyTitle("Back to your key")
+        show("Enter the email you bought with.")
+        applyTabOrder()
+        view.window?.makeFirstResponder(keyField)
+    }
+
+    /// `keepingLine` is the difference between Back (which clears the gutter)
+    /// and a finished resend (whose one neutral line is the whole point).
+    private func restoreKeyMode(keepingLine: Bool) {
+        mode = .key
+        keyField.stringValue = stashedKey
+        keyField.placeholderString = LicenseCopy.keyFormatHint
+        keyField.alignment = .center
+        keyField.setAccessibilityLabel("License key")
+        resendButton.isHidden = true
+        resendButton.keyEquivalent = ""
+        registerButton.isHidden = false
+        registerButton.keyEquivalent = "\r"
+        setLostKeyTitle("I lost my key")
+        if !keepingLine { show("") }
+        applyTabOrder()
+        updateSceneForText()
+    }
+
+    /// Ask the server to email the key again. The answer is deliberately the
+    /// same sentence every time — hit, miss, throttled or offline — because a
+    /// different one would tell a stranger whether an address bought Audiout.
+    @objc private func resendTapped() {
+        let email = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !email.isEmpty, email.contains("@") else {
+            show("Enter the email address you bought with.")
+            return
+        }
+        // Never a property: the address is exactly the free text the privacy
+        // fence forbids sending (PRODUCT.md "Data Collection").
+        Analytics.capture("license:resend_requested")
+
+        keyField.isEnabled = false
+        resendButton.isEnabled = false
+        let resend = transport.map { LicenseResend(settings: settings, transport: $0) }
+            ?? LicenseResend(settings: settings)
+        resend.request(email: email) { [weak self] in
+            guard let self else { return }
+            self.keyField.isEnabled = true
+            self.resendButton.isEnabled = true
+            self.show("If that address bought Audiout, the key is on its way.")
+            self.restoreKeyMode(keepingLine: true)
+        }
+    }
+
     @objc private func registerTapped() {
         let text = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
-            show(result: "Enter the key from your purchase receipt.")
+            show("Enter the key from your purchase receipt.")
             return
         }
 
@@ -199,7 +421,8 @@ public final class LicenseGateViewController: NSViewController {
 
         keyField.isEnabled = false
         registerButton.isEnabled = false
-        show(result: "Checking…")
+        show("Checking…")
+        field.setScene(.checking)
 
         let validator = transport.map { LicenseValidator(settings: settings, transport: $0) }
             ?? LicenseValidator(settings: settings)
@@ -216,24 +439,40 @@ public final class LicenseGateViewController: NSViewController {
             Analytics.capture("license:key_submitted", ["outcome": outcome, "source": "gate"])
             switch result {
             case .verified(.active):
-                self.show(result: LicenseCopy.statusLine(for: .active))
-                self.field.surge()
+                self.show(LicenseCopy.statusLine(for: .active))
+                self.field.surge(intensity: 1.0)
+                self.field.setScene(.farewell)
                 self.pass(afterBeat: true)
             case .verified(let status):
                 self.keyField.isEnabled = true
                 self.registerButton.isEnabled = true
                 self.keyField.stringValue = self.settings.licenseKey ?? ""
-                self.show(result: LicenseCopy.statusLine(for: status))
+                self.show(LicenseCopy.statusLine(for: status))
+                self.field.setScene(.quiet)
+                // A refunded key has one useful answer left, so the offer
+                // stops being quiet.
+                if status == .revoked { self.promoteBuy() }
                 self.view.window?.makeFirstResponder(self.keyField)
+                // Reselected, so the retype the user is about to do overwrites
+                // rather than appends to a key they already know is wrong.
+                self.keyField.currentEditor()?.selectAll(nil)
             case .unreachable, .noServer, .noKey:
                 // The key is SAVED and the gate opens: an unreachable server
                 // must never lock a buyer out of the thing they paid for. The
                 // normal launch validation settles the verdict later.
-                self.show(result: "The license server can't be reached right now. "
-                    + "Your key is saved and will be checked once you're online.")
+                self.show("Your key is saved. We'll check it next time you're online.")
+                self.field.surge(intensity: 0.5)
                 self.pass(afterBeat: true)
             }
         }
+    }
+
+    /// The revoked verdict's one promotion: Buy comes up to full strength and
+    /// the timed lift is spent, so nothing later dims it back down.
+    private func promoteBuy() {
+        cancelQuietLift()
+        didLiftQuietRow = true
+        buyButton.alphaValue = 1
     }
 
     /// Open the gate exactly once. `afterBeat` holds the window just long
@@ -242,6 +481,7 @@ public final class LicenseGateViewController: NSViewController {
     private func pass(afterBeat: Bool) {
         guard !didPass else { return }
         didPass = true
+        cancelQuietLift()
         let animated = afterBeat && !HeadlessRuntime.isActive
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         guard animated else { return onPassed() }
@@ -250,9 +490,35 @@ public final class LicenseGateViewController: NSViewController {
         }
     }
 
-    private func show(result: String) {
-        resultLine.stringValue = result
-        resultLine.isHidden = false
+    /// Every state's words land here — one label, so VoiceOver has one place
+    /// to listen and the layout has one thing to reserve room for.
+    private func show(_ line: String) {
+        gutterLine.stringValue = line
+        guard !line.isEmpty, let app = NSApp else { return }
+        NSAccessibility.post(element: app, notification: .announcementRequested,
+                             userInfo: [.announcement: line,
+                                        .priority: NSAccessibilityPriorityLevel.high.rawValue])
+    }
+
+    // MARK: Editing
+
+    public func controlTextDidChange(_ obj: Notification) {
+        // Typing is the answer to every offer on screen: the clipboard
+        // caption, a verdict, the checkout wait.
+        cancelQuietLift()
+        show("")
+        updateSceneForText()
+    }
+
+    private func updateSceneForText() {
+        let text = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty {
+            field.setScene(.idle)
+        } else if mode == .key, text.count >= LicenseCopy.keyFormatHint.count {
+            field.setScene(.armed)
+        } else {
+            field.setScene(.typing)
+        }
     }
 
     /// Fill the field with `key` and submit it, exactly as a paste followed by
@@ -261,6 +527,9 @@ public final class LicenseGateViewController: NSViewController {
     /// way a second click is dropped.
     public func submit(key: String) {
         _ = view
+        // A link arriving mid-detour answers the question the detour was for,
+        // so the controls come back to the key first.
+        if mode == .resend { restoreKeyMode(keepingLine: false) }
         guard registerButton.isEnabled else { return }
         keyField.stringValue = key
         registerTapped()
@@ -272,24 +541,83 @@ public final class LicenseGateViewController: NSViewController {
     public func test_setKeyText(_ text: String) {
         _ = view
         keyField.stringValue = text
+        controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
     }
 
-    /// Invoke Register as a click would.
+    /// Invoke the gold button as a click would — whichever question it is
+    /// currently asking.
     public func test_tapRegister() {
         _ = view
-        registerTapped()
+        mode == .resend ? resendTapped() : registerTapped()
     }
 
-    /// The inline result line's text, or `nil` while it is hidden.
+    /// Invoke "I lost my key" / "Back to your key" as a click would.
+    public func test_tapLostKey() {
+        _ = view
+        lostKeyTapped()
+    }
+
+    /// Invoke the Buy link as a click would.
+    public func test_tapBuy() {
+        _ = view
+        buyTapped()
+    }
+
+    /// Arrival, without the on-screen half of `viewDidAppear`.
+    public func test_arrive() {
+        _ = view
+        offerClipboardKey()
+    }
+
+    /// The gutter's text, or `nil` while it is empty.
     public var test_resultText: String? {
         _ = view
-        return resultLine.isHidden ? nil : resultLine.stringValue
+        return gutterLine.stringValue.isEmpty ? nil : gutterLine.stringValue
     }
 
-    /// Whether "Buy Audiout…" is offered (needs a buy URL to point at).
+    /// The gold button's current title — "Register" or "Email my key".
+    public var test_commitTitle: String {
+        _ = view
+        // `ProminentButton` renders through `attributedTitle` (it measures its
+        // own ink), so that is where its title actually lives.
+        return (mode == .resend ? resendButton : registerButton).attributedTitle.string
+    }
+
+    /// The quiet link's current title.
+    public var test_lostKeyTitle: String {
+        _ = view
+        return lostKeyButton.attributedTitle.string
+    }
+
+    /// The key field's placeholder — the other half of the lost-key morph.
+    public var test_placeholder: String {
+        _ = view
+        return keyField.placeholderString ?? ""
+    }
+
+    /// The key field's current text (the morph stashes and restores it).
+    public var test_keyText: String {
+        _ = view
+        return keyField.stringValue
+    }
+
+    /// Whether "Buy Audiout" is offered (needs a buy URL to point at).
     public var test_buyIsVisible: Bool {
         _ = view
         return !buyButton.isHidden
+    }
+
+    /// The Buy link's opacity — quiet at rest, full after a revoked verdict.
+    public var test_buyAlpha: CGFloat {
+        _ = view
+        return buyButton.alphaValue
+    }
+
+    /// What the field behind the type is currently doing. Internal on purpose:
+    /// `Scene` is module-internal and the tests import `@testable`.
+    var test_fieldScene: EmitterFieldView.Scene {
+        _ = view
+        return field.test_scene
     }
 
     /// Whether the gate has fired `onPassed` (or is in the beat before it).

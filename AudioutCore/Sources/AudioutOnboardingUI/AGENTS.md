@@ -1195,8 +1195,19 @@ never from this target. Rules that hold it together:
   RUNTIME (`makeLibrary(source:)`) because SwiftPM cannot build `.metal`
   files. Reduce Motion = one still at t=40; headless or any Metal failure =
   flat `canvas`, never a crash, never a display loop.
-- **`surge()` is the window's ONE authored motion moment** (an `active`
-  verdict); don't add entrances or scatter effects around it.
+- **One surface, and nothing on it ever moves** (owner-approved v2 brief):
+  every state lands as words in the ONE reserved two-line gutter and as a
+  scene on the field — no sheet, no second window, no reflow. The lost-key
+  path MORPHS the same field/button in place and calls Core's
+  `LicenseResend` (`/v1/resend`), landing the SAME neutral line on every
+  outcome — anything more specific is an email-enumeration oracle. The
+  clipboard offer (`pasteboardString` seam) pre-fills an `AUDT-` string and
+  NEVER auto-submits — a clipboard is not consent.
+- **The field's scenes are uniform-driven, never CAAnimation** — that is why
+  they survive Reduce Motion as recomposed stills. `surge(intensity: 1)` on
+  `active` is still the window's ONE bright moment; errors make the room go
+  QUIETER (`.quiet`: dim + frozen clock), never louder — don't add entrances
+  or scatter effects around either.
 
 ## Map
 
@@ -1204,8 +1215,8 @@ never from this target. Rules that hold it together:
 |---|---|
 | `OnboardingWindowController` | Owns the window; lazy-create-then-reuse lifecycle; Done-vs-✕ dismissal contract; reactivate re-front; the floating level and its yield-to-Settings amendment. |
 | `LicenseGateWindowController` | The first-open licence gate window: full-bleed field, hidden title, pass/abort single-fire contract. |
-| `LicenseGateViewController` | The gate's content: mark + welcome + key field + gold Register over the field's calm centre; Register mirrors the Settings sheet. |
-| `EmitterFieldView` | Metal port of the site's hero emitter field, gold ramp, 30 fps, still under Reduce Motion, flat `canvas` headless. |
+| `LicenseGateViewController` | The gate's one surface: mark, welcome, key field, gold Register, reserved gutter, quiet satellites; in-place lost-key morph; Register mirrors the Settings sheet. |
+| `EmitterFieldView` | Metal port of the site's hero emitter field, gold ramp, 30 fps; `Scene` engine (idle/typing/armed/checking/quiet/waiting/farewell) over uniforms; recomposed stills under Reduce Motion, flat `canvas` headless. |
 | `OnboardingViewController` | Assembles the spine and the hero; turns `SetupModel` + `SetupFlowModel` into row states and ribbon content; owns `browseStep`, the press dispatch, the grant choreography, the Done gate, the announcements, the header message and both polling timers. |
 | `OnboardingReason` | `.firstRun` vs `.permissionLost([RequiredPermission])` — drives the header message. |
 | `SetupSpineRowView` / `SetupCardContent` / `SetupCardState` | One SPINE row: the compact status strip, its one trailing marker, the live/broken/browsed surface treatment, and the whole-row press target. Both per-state title tables (ribbon sentence and spine short form) live on `SetupCardContent`. |

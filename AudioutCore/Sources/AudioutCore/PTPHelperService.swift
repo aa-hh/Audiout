@@ -247,19 +247,41 @@ public struct PTPHelperActivator: PTPHelperActivating {
     /// touch seam — the real ``touchMachService(named:)`` still runs every
     /// time; this never replaces it.
     private let onTouch: (@Sendable () -> Void)?
+    /// Time source for the deadline/re-touch math below. Defaults to the wall
+    /// clock; a test injects a manually-advanced fake (see
+    /// `PTPHelperActivationTests`) so "does this loop retouch more than once
+    /// before its deadline" is a fact about the LOOP'S ARITHMETIC, not a race
+    /// against the shared test suite's scheduler. Real `Date()` has no
+    /// business being asked to hold still for a fixed number of real seconds
+    /// while ~3,000 other tests are also runnable — that unwinnable race is
+    /// what `hangingOpenHitsTheHardTimeout` hit first (2026-08-30) and this
+    /// loop hits the same way: given a bad enough scheduling gap, `now()` can
+    /// already be past `deadline` the FIRST time this function's Task ever
+    /// runs, and no timeout value fixes a race that can lose before it starts.
+    private let now: @Sendable () -> Date
+    /// Advances `now()` by `pollInterval` and yields. Defaults to a real
+    /// sleep; a test injects an instant, deterministic advance so the whole
+    /// loop runs at CPU speed with a fake clock instead of racing a real one.
+    private let sleep: @Sendable (TimeInterval) async -> Void
 
     public init(
         ptpHelper: PTPHelperManaging = SMAppServicePTPHelper(),
         machServiceName: String = PTPHelperActivator.machServiceName,
         pollInterval: TimeInterval = 0.2,
         touchInterval: TimeInterval = 2.0,
-        onTouch: (@Sendable () -> Void)? = nil
+        onTouch: (@Sendable () -> Void)? = nil,
+        now: @escaping @Sendable () -> Date = Date.init,
+        sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+        }
     ) {
         self.ptpHelper = ptpHelper
         self.machServiceName = machServiceName
         self.pollInterval = pollInterval
         self.touchInterval = touchInterval
         self.onTouch = onTouch
+        self.now = now
+        self.sleep = sleep
     }
 
     public var willWaitForClock: Bool { ptpHelper.status == .enabled }
@@ -284,22 +306,22 @@ public struct PTPHelperActivator: PTPHelperActivating {
         // it doesn't just leak a socket.
         var touches: [xpc_connection_t] = [Self.touchMachService(named: machServiceName)]
         onTouch?()
-        var lastTouchAt = Date()
+        var lastTouchAt = now()
 
-        let deadline = Date().addingTimeInterval(max(0, timeout))
-        while Date() < deadline {
+        let deadline = now().addingTimeInterval(max(0, timeout))
+        while now() < deadline {
             if PTPClockProbe.isReady() { break }
             // razor: fixed 2.0 s re-touch ceiling, not adaptive backoff — well
             // under the helper's own ~15 s idle-exit window, so a flat
             // interval keeps it re-armed with room to spare. Upgrade path:
             // back off the interval if a longer wait ever needs covering
             // more cheaply.
-            if Date().timeIntervalSince(lastTouchAt) >= touchInterval {
+            if now().timeIntervalSince(lastTouchAt) >= touchInterval {
                 touches.append(Self.touchMachService(named: machServiceName))
                 onTouch?()
-                lastTouchAt = Date()
+                lastTouchAt = now()
             }
-            try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+            await sleep(pollInterval)
         }
         let ready = PTPClockProbe.isReady()
         withExtendedLifetime(touches) {}

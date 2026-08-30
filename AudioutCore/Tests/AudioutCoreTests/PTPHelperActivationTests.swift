@@ -70,6 +70,24 @@ import Testing
         }
     }
 
+    /// A manually-advanced clock for `PTPHelperActivator`'s injectable `now`/
+    /// `sleep` — the retouch loop's own deadline/interval arithmetic runs
+    /// against THIS instead of the wall clock, so "does it retouch more than
+    /// once before its deadline" is settled by the loop's math, never by
+    /// whether the shared test suite's scheduler got around to this Task in
+    /// time (roadmap-023 class; a real 0.35 s wait had ~0.05 s of scheduler
+    /// slack and starved under the full suite, live 2026-08-30).
+    private final class ManualClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var current = Date()
+        func now() -> Date { lock.withLock { current } }
+        /// The activator's injected `sleep`: no real waiting, just moves the
+        /// clock forward by exactly what it asked for.
+        func advance(by seconds: TimeInterval) {
+            lock.withLock { current = current.addingTimeInterval(seconds) }
+        }
+    }
+
     // MARK: - Status precheck ordering (the point of the task)
 
     @Test func notRegisteredNeedsApprovalWithNoWait() async {
@@ -152,12 +170,26 @@ import Testing
     /// `enabledDoesNotShortCircuit` already accepts.
     @Test func enabledRetouchesMoreThanOnceAcrossAWaitThatNeverBecomesReady() async {
         let counter = TouchCounter()
+        // Widening the real timeout was tried first and did not hold: this
+        // Task's very first turn under the full suite's shared scheduler can
+        // be delayed past ANY fixed real-time budget, the same unwinnable
+        // race `hangingOpenHitsTheHardTimeout` hit (2026-08-30) — a real
+        // `Date()` deadline can already be behind `now()` the first time the
+        // loop's condition is even evaluated, so no timeout value is safe.
+        // A manually-advanced clock removes the race outright: the loop's
+        // deadline/interval arithmetic runs against simulated time that only
+        // moves when the loop itself asks it to, so the touch count this test
+        // asserts is a fact about the PRODUCTION LOOP'S MATH, never about
+        // real-world scheduling luck.
+        let clock = ManualClock()
         let activator = PTPHelperActivator(
             ptpHelper: FakeHelperStatus(status: .enabled),
             machServiceName: unreachableMachServiceName(),
             pollInterval: 0.02,
             touchInterval: 0.1,
-            onTouch: { counter.increment() })
+            onTouch: { counter.increment() },
+            now: { clock.now() },
+            sleep: { clock.advance(by: $0) })
 
         _ = await activator.activate(timeout: 0.35)
 

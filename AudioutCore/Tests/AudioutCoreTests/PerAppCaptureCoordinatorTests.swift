@@ -150,18 +150,15 @@ extension SerializedSharedState {
         return CapturedBuffer(channelData: [ch, ch], frameCount: frames, pts: pts)
     }
 
-    // Default timeout is a generous ceiling, not an expected wait: the loop
-    // returns the instant `cond()` holds, so a higher bound only adds headroom
-    // for the FAILURE/slow case and costs nothing on the happy path. Raised from
-    // 2s so it doesn't spuriously time out under `swift test --parallel`, where
-    // ~8 test processes contend for cores and an async state transition can take
-    // longer than 2s of wall-clock to land.
-    private func waitFor(timeout: TimeInterval = 8, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    // Forwards to the shared helper. The ceiling is generous on purpose and is
+    // not an expected wait: the loop returns the instant `cond()` holds, so the
+    // bound costs nothing on the happy path and only buys headroom when an
+    // async state transition is slow under contention. The number lives in
+    // `SuiteWait.timeout` now, sized once for the whole suite.
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     /// Builds a coordinator the way every test in this file wants it: the

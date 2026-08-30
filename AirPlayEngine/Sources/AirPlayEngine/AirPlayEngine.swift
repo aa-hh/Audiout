@@ -1924,8 +1924,15 @@ final class WriteCadenceTracker: @unchecked Sendable {
     /// production always takes the default.
     private let stallGapSeconds: Double
 
-    init(stallGapSeconds: Double = 5.0) {
+    /// Same idiom as `stallGapSeconds` above: injectable so a test can drive
+    /// deterministic gaps without a real sleep. Production always takes the
+    /// default, which is the real monotonic clock this class exists to
+    /// measure against — nothing about a live producer's cadence changes.
+    private let now: () -> Double
+
+    init(stallGapSeconds: Double = 5.0, now: @escaping () -> Double = WriteCadenceTracker.monotonicSeconds) {
         self.stallGapSeconds = stallGapSeconds
+        self.now = now
     }
 
     /// Record one write's audio-time contribution against the wall clock.
@@ -1934,7 +1941,7 @@ final class WriteCadenceTracker: @unchecked Sendable {
     /// isolation (an actor hop is exactly what the hot path must avoid).
     func record(samples: Int, sampleRate: Int) {
         guard samples > 0, sampleRate > 0 else { return }
-        let now = Self.monotonicSeconds()
+        let now = self.now()
         let audioSeconds = Double(samples) / Double(sampleRate)
 
         lock.lock()

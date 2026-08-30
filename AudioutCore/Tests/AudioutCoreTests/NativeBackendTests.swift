@@ -1148,8 +1148,19 @@ private func subscribeRoutedApps(
     _ backend: NativeBackend, deviceID: String
 ) -> (RoutedAppsLog, Task<Void, Never>) {
     let log = RoutedAppsLog()
+    // Create the stream HERE, not inside the `Task`. `makeEventStream` registers
+    // its continuation with `stateQueue.async`, so creating it on the caller's
+    // thread enqueues that registration BEFORE any stimulus the caller then
+    // fires through `stateQueue.sync` — the serial queue does the ordering for
+    // us, and `AsyncStream` buffers what is yielded before iteration begins.
+    // Created inside the `Task`, registration races the stimulus: on an idle
+    // machine the subscriber usually wins, and under load it loses and the
+    // event is gone for good. That race is why a wait on `routedApps.last`
+    // could hang forever — it read as flakiness only because the old wait
+    // expired in silence.
+    let stream = backend.makeEventStream()
     let task = Task {
-        for await event in backend.makeEventStream() {
+        for await event in stream {
             if case .routedApps(let id, let names) = event, id == deviceID {
                 log.append(names)
             }
@@ -1364,19 +1375,11 @@ private func makeSyncedLocalBackend(macSelectedByDefault: Bool)
     return (backend, engine, discovery, capture, sink, macSelected)
 }
 
-/// Poll until `condition` holds or the ceiling elapses. The ceiling is a
-/// HANG-STOP, not a performance assertion: it costs a passing poll nothing
-/// (it returns on the first satisfied tick), so it only bounds how long a
-/// genuinely stuck condition takes to reach its assertion. Kept generous
-/// because a full-suite run shares one cooperative pool with ~3,000 tests,
-/// several of which block a thread outright — the roadmap-023 class of flake
-/// documented in `BTConnectionManagerTests` and `CastLiveAudioServerTests`.
-private func pollUntil(timeout: TimeInterval = 30, _ condition: @escaping () -> Bool) async {
-    let deadline = Date().addingTimeInterval(timeout)
-    while Date() < deadline {
-        if condition() { return }
-        try? await Task.sleep(nanoseconds: 5_000_000)
-    }
+private func pollUntil(timeout: TimeInterval? = nil,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    _ condition: @escaping () -> Bool
+) async {
+    await SuiteWait.until(timeout: timeout, sourceLocation: sourceLocation, condition)
 }
 
 /// Poll the spy until a `setVolume(outputID, value)` call lands (the push is
@@ -1993,7 +1996,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Mirror Main to hardware. The write no-ops, so the system is still at 50
         // and nothing may be recorded as 70.
         backend.setMasterGain(mainOut: 70, group: 100, mirrorToSystemVolume: true)
-        await pollUntil { volume.volumeCalls.contains(70) }
+        // The mirror writes through the device-targeting pair, not the bare
+        // `setVolume` — polling `volumeCalls` waited on a call this path no
+        // longer makes, and silently expired on every run.
+        await pollUntil { volume.setVolumeToDeviceCalls.contains { $0.level == 70 } }
 
         let events = await collect(from: backend) { events in
             events.contains { if case .systemVolumeChanged = $0 { return true } else { return false } }
@@ -5857,7 +5863,6 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
       return false
   }, "a rebind that fails at the engine must clear .routedApps back to empty, not leave it falsely claiming Bar's stream")
 
-        await pollUntil { engine.streamAddCalls.filter { $0.0 == device.outputID }.count >= 2 }
     }
 
     // MARK: T10 cross-component gap coverage

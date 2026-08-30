@@ -236,16 +236,14 @@ extension SerializedSharedState {
         return CapturedBuffer(channelData: [ch, ch], frameCount: frames, pts: pts)
     }
 
-    // Generous ceiling, not an expected wait: returns as soon as `cond()` holds,
-    // so a higher bound only helps the slow/failure case. Raised from 2s for
-    // headroom under `swift test --parallel` core contention (see the sibling
-    // helper in PerAppCaptureCoordinatorTests for the full rationale).
-    private func waitFor(timeout: TimeInterval = 8, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    // Forwards to the shared helper: generous ceiling, not an expected wait —
+    // it returns the instant `cond()` holds, so the bound only ever costs the
+    // slow/failure case. The number itself now lives in `SuiteWait.timeout`,
+    // sized once against machine contention for the whole suite.
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     // MARK: - Full lifecycle: create → convert+forward → device-change → stop.

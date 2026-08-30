@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import Foundation
+import ProbeKit
 
 /// What shape of align-tick run a caller wants (W2) — the public vocabulary
 /// the ``CaptureControlling`` seam speaks so the injector's numeric ``AlignmentTickInjector/Config``

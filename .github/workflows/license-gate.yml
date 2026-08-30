@@ -35,7 +35,10 @@ jobs:
         run: bash scripts/test-license-guards.sh
 
   build-invariants:
-    runs-on: macos-15
+    # macos-26 (Xcode 26.x): matches the Swift toolchains on both of Alec's
+    # Macs; macos-15's Xcode 16.4 is older than anything this repo is built
+    # with locally.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: Run the licence-guard tests (macOS, includes the plist cases)

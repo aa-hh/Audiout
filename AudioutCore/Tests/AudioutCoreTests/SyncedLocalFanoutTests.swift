@@ -157,12 +157,10 @@ import AVFoundation
 
     // MARK: Helpers
 
-    private func waitFor(timeout: TimeInterval = 8, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     private func waitForCapturing(_ c: NativeCaptureCoordinator) {
@@ -397,7 +395,7 @@ import AVFoundation
         #expect(tap.excludes(pid: sinkRenderPID))
 
         coordinator.setSyncedLocalSink(SpySyncedSink(), renderProcessPID: sinkRenderPID)
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(tap.creates == 1,
                 "an already-excluded render pid must not force a tap recreate (the Mac-join feed hole)")
     }
@@ -556,7 +554,7 @@ import AVFoundation
         // ahead of the new capture session's very first write.
         tap.deliverMix(frames: 4, phaseStart: 4, pts: timespec(tv_sec: 2, tv_nsec: 500_000_000))
         waitFor { engineSink.forwarded.count >= 2 }
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
 
         let forwarded = engineSink.forwarded
         #expect(forwarded.count == 2, "a new session must start from 'nothing ever delivered'")

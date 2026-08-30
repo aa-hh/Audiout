@@ -128,12 +128,10 @@ import CoreAudio
         return (backend, bt)
     }
 
-    private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     private func device(_ backend: NativeBackend, _ id: String) -> Device? {
@@ -264,7 +262,7 @@ import CoreAudio
         waitFor { self.device(backend, self.flip.id) != nil }
 
         backend.retryOutput(flip.id)   // flip IS in the merged list (paired)
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         if case .failed(let failure)? = device(backend, flip.id)?.connectionState {
             #expect(failure.cause != .notPaired, "pairedness comes from the merged list, not availability")
         }

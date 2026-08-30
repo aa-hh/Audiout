@@ -188,12 +188,21 @@ import CAirPlayEngine
     /// `netDriftSeconds` must stay near zero across that same feed.
     ///
     /// Assertions are RELATIVE (net small *compared to* the buckets) rather
-    /// than absolute: `Thread.sleep` only ever overshoots, so each write adds a
-    /// little one-sided noise to the deficit side. The margin absorbs that
-    /// without hiding the bug — a one-sided sum mistaken for drift puts the net
-    /// at ~100% of a bucket, not under 30%.
+    /// than absolute: `Thread.sleep` only ever overshoots, so each write used
+    /// to add a little one-sided noise to the deficit side. That was the
+    /// THEORY — in practice `Thread.sleep`'s overshoot is not "a little" once
+    /// dozens of other processes are contending for the same cores (live
+    /// 2026-08-30: net drift landed at ~106% of the 30% margin, twice, with
+    /// closely-matching numbers both times — a real, load-driven bias eating
+    /// the margin, not a rare unlucky sample). A manually-advanced clock
+    /// removes that bias at the root: `WriteCadenceTracker`'s injectable `now`
+    /// (same idiom as `stallGapSeconds` just below it — "so tests can cross it
+    /// without a real sleep") lets this test hand the tracker EXACT, symmetric
+    /// gaps with zero real waiting, so the margin is tested against the
+    /// tracker's own arithmetic rather than against the OS scheduler's mood.
     @Test func symmetricJitterInflatesBucketsButNotNetDrift() {
-        let tracker = WriteCadenceTracker()
+        var simulatedSeconds: Double = 0
+        let tracker = WriteCadenceTracker(now: { simulatedSeconds })
         let sampleRate = 44100
         let pauseSeconds = 0.05
         // Alternate a write claiming ~2x the elapsed audio (runs ahead ->
@@ -203,9 +212,9 @@ import CAirPlayEngine
 
         tracker.record(samples: aheadSamples, sampleRate: sampleRate) // seed
         for _ in 0..<8 {
-            Thread.sleep(forTimeInterval: pauseSeconds)
+            simulatedSeconds += pauseSeconds
             tracker.record(samples: aheadSamples, sampleRate: sampleRate)
-            Thread.sleep(forTimeInterval: pauseSeconds)
+            simulatedSeconds += pauseSeconds
             tracker.record(samples: behindSamples, sampleRate: sampleRate)
         }
 

@@ -422,12 +422,10 @@ import CoreAudio
         return (backend, engine, discovery, bt, sink, capture)
     }
 
-    private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     private func device(_ backend: NativeBackend, _ id: String) -> Device? {
@@ -557,7 +555,7 @@ import CoreAudio
 
         macSelected.set(true)
         backend.setOutputSet([btMove.id, ap.id])   // same ids — the Mac-toggle shape
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
 
         #expect(sink.calls.filter { $0 == "setComposition" }.count == compositionPushes,
                 "a Mac toggle alone must not push a composition")
@@ -597,7 +595,7 @@ import CoreAudio
         let callsAfterEnable = sink.calls.count
 
         backend.setOutputSet([btMove.id])   // membership-neutral
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(sink.calls.count == callsAfterEnable,
                 "an unchanged BT decision must not re-drive the sink manager")
     }
@@ -612,7 +610,7 @@ import CoreAudio
 
         backend.setOutputSet([btMove.id])
         backend.retryOutput(btMove.id)
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(engine.addedIDs.isEmpty, "a BT retry must not invent an engine op")
     }
 
@@ -626,7 +624,7 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor(timeout: 0.2) { false }
+        SuiteWait.settle(0.2)
         // Passes by not crashing; nothing to observe without a sink.
     }
 
@@ -644,7 +642,7 @@ import CoreAudio
 
         backend.setOutputSet([btMove.id])
         waitFor { sink.calls.contains("start") }
-        waitFor(timeout: 0.5) { false }   // give a (wrong) fallback time to fire
+        SuiteWait.settle(0.5)   // give a (wrong) fallback time to fire
 
         #expect(!capture.ops.contains("stop"),
                 "an audible BT-only selection must never un-gate capture (the Mac stays muted)")
@@ -855,7 +853,7 @@ import CoreAudio
 
         // The engine being up is not yet audio: the hold survives a started
         // sink and ends only when the delay gate opens.
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connecting,
                 "a started-but-silent sink must not light the armed dot")
 
@@ -894,7 +892,7 @@ import CoreAudio
         backend.retryOutput(btMove.id)          // never selected
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .off }
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off)
-        waitFor(timeout: 0.3) { false }
+        SuiteWait.settle(0.3)
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off,
                 "an unselected connect must never leave a row spinning")
     }
@@ -952,7 +950,7 @@ import CoreAudio
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .connecting }
         backend.setOutputSet([])
         sink.renderingUIDs = [btMove.id]        // the sink kept rendering briefly
-        waitFor(timeout: 0.5) { false }
+        SuiteWait.settle(0.5)
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off,
                 "a deselected row is off — never connected, never failed")
     }

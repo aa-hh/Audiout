@@ -233,6 +233,19 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   apps redirected to it — named by a `.device` route OR a member of a routed
   GROUP (`latestAppLevel`) — a device fed by both shows the larger. Every meter is a SOURCE/program level (PRE any routing/output volume), so
   a low slider never empties a bar. Each listed app's `.appLevel` comes from exactly
+  device's `.level` is the MAX of its whole-system-tap contribution (only while
+  that device is actually rendering the mix, and unmuted) and the loudest PRE-volume
+  SOURCE level among the apps `.device`-routed to it (`latestAppLevel`) — a device
+  fed by both shows the larger. "Actually rendering" is per transport and
+  `isMeterable` is the one place that decides it: an AirPlay row has a live engine
+  session, but the local sink, Bluetooth and Cast are all structurally excluded from
+  the engine, so each answers with its own fact instead — asking `Device.isSelected`
+  for any of the three is always false and was why their bars stayed dark. Every
+  meter is a SOURCE/program level (PRE any routing/output volume), so a low slider
+  never empties a bar — and, for the same reason, it is the UNDELAYED source: a BT
+  sync trim moves that device's delay line, which sits downstream of the one system
+  RMS every bar is fed from, so a trim changes when a speaker sounds and never when
+  its bar moves. Each listed app's `.appLevel` comes from exactly
   one source by route kind: `.device` → `routeMixer.onAppLevel` (PRE-volume source),
   `.currentDevice` → `localPlaybackEngine.onAppLevel` (PRE-volume, emitted raw),
   `.noRedirect` → `meteringCapture`, a SEPARATE `.unmuted` per-app tap that exists

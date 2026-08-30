@@ -132,6 +132,14 @@ public final class DeviceRowView: NSView {
     /// pointer leaves the popover without a matching `mouseExited` (T-U8 bug).
     private var isHovered: Bool = false
 
+    /// Transient pointer-in-the-gutter state, the same discipline as
+    /// `isHovered` (reset on `apply` and re-parenting via
+    /// ``setGutterHovered(_:)``). Stored — rather than pushed straight into
+    /// the bus skin — because the node's hover RESIZE resolves from BOTH
+    /// flags (``refreshBusHoverCue()``): the gutter resizes any live node, and
+    /// row hover additionally resizes an unselected one.
+    private var isGutterHovered: Bool = false
+
     /// The PRIMARY "Selected Devices" membership control (SPEC §9b device-row
     /// toggle). An `NSButton` **checkbox** (`.switch` button type, empty title)
     /// under the "Selected" column header. `.state` is `.on`/`.off`, identical
@@ -310,10 +318,12 @@ public final class DeviceRowView: NSView {
     // MARK: Bluetooth SYNC chip (BT-OFFSET-UI → PLAN-BT-SYNC-DRAWER T6)
 
     /// Whether this row carries the SYNC control — the popover passes `true`
-    /// for Bluetooth, Cast and the Mac's own rows. The chip occupies the LEFT portion of the
-    /// reserved trailing slot; the FEED pill right-aligns into
-    /// `PopoverColumnGrid.btFeedReserveWidth` beside it (feed pill far right,
-    /// locked spec). Non-sync rows are byte-for-byte unchanged.
+    /// for Bluetooth, Cast and the Mac's own rows. The FEED pills keep the
+    /// reserved trailing slot's LEADING portion
+    /// (`PopoverColumnGrid.btFeedSlotWidth`, on the same anchor every other
+    /// row's pills use) and the chip closes the slot beside them, so the two
+    /// controls run in the order of the card header's "Source" / "Offset"
+    /// legends above them.
     private let showsSyncControls: Bool
     /// The row's ONE sync control (T6): a read-only value chip that opens the
     /// drawer. It replaced the − / value-field / + / metronome cluster
@@ -527,6 +537,16 @@ public final class DeviceRowView: NSView {
         enableCheckbox.isEnabled = showsToggle && (device.isAvailable || selected)
         enableCheckbox.toolTip = (busActive && showsToggle)
             ? (selected ? "Remove \(device.name) from the mix" : "Add \(device.name) to the mix")
+            : nil
+        // The name is a click-to-toggle surface too (the mouse convenience
+        // below) — say so before commitment on a row that is NOT yet in the
+        // mix, where the invisible node checkbox gives the eye nothing.
+        // Selected rows carry no name tooltip: the node's own tooltip already
+        // names the removal. Scoped to rows whose toggle would actually accept
+        // the click — a greyed Bluetooth row's name click CONNECTS instead
+        // (`deviceRowDidRequestReconnect`), so a mix tooltip there would lie.
+        nameLabel.toolTip = (busActive && showsToggle && !selected && device.isAvailable)
+            ? "Add \(device.name) to the mix"
             : nil
         // A1: dim, don't disable — `isEnabled` above is untouched by
         // `selectionDimmed`, only the alpha is. EXCEPTION for bus rows (spec §4.7):
@@ -1042,13 +1062,6 @@ public final class DeviceRowView: NSView {
     /// already expects between segment WORDS.
     private static let feedSegmentSeparator = " · "
 
-    /// The one monochrome SF Mono uppercase micro-tag this column ever shows,
-    /// prefixed ahead of the FIRST visible pill's own text for a true
-    /// protocol exception. AP2 is the default and is never badged (spec item
-    /// 3 "attributes/flags"). Plain speech, not the protocol jargon "AP1" —
-    /// the tooltip carries the consequence (popover P1-5).
-    private static let ap1FeedTag = "Older AirPlay"
-
     /// Re-derive and push the FEED column's pills from the current device/
     /// mix/redirect state (``mainMixSourceName``/``feedAppNames``, set by
     /// ``apply``). No-op — hides `feedStack` — when this row hosts no FEED
@@ -1115,22 +1128,21 @@ public final class DeviceRowView: NSView {
             if controlsMuted { color = color.withAlphaComponent(Self.feedMutedTintAlpha) }
             segments.append(.init(text: name, color: color, hasChip: true))
         }
-        let tag = device.supportsAirPlay2 ? nil : Self.ap1FeedTag
-        setFeedSegments(segments, tag: tag)
+        setFeedSegments(segments)
         // Tooltip (P1-5): the FULL, uncapped feed list — the "+N" cap is a
-        // screen-only affordance — plus the Older-AirPlay consequence line
-        // when this device can't route single apps. Two lines max, joined by
-        // a newline; `nil` when there's nothing to say (mirrors the
-        // FEED column's own empty case). MUST be set AFTER `setFeedSegments`:
+        // screen-only affordance. `nil` when there's nothing to say (mirrors
+        // the FEED column's own empty case). MUST be set AFTER
+        // `setFeedSegments`:
         // it rebuilds the pills through `renderFeedPills` → `clearFeedPills()`,
         // which unconditionally wipes `feedStack.toolTip` as part of tearing
         // down the old pills — setting it before that call had it silently
         // erased on every apply.
-        var tooltipLines: [String] = []
+        // "Playing", not "Feeding" (main, PR #74) — and no protocol tag line:
+        // the "Older AirPlay" micro-tag was deliberately deleted, not narrowed.
         let tooltipNames = feedNames(qualifiedByGroup: false)
-        if !tooltipNames.isEmpty { tooltipLines.append("Feeding " + tooltipNames.joined(separator: ", ")) }
-        if !device.supportsAirPlay2 { tooltipLines.append("Older AirPlay — can't route single apps") }
-        feedStack.toolTip = tooltipLines.isEmpty ? nil : tooltipLines.joined(separator: "\n")
+        feedStack.toolTip = tooltipNames.isEmpty
+            ? nil
+            : "Playing " + tooltipNames.joined(separator: ", ")
     }
 
     /// The FEED column's spoken/tooltip names, in order: `mainMixSourceName`
@@ -1196,7 +1208,7 @@ public final class DeviceRowView: NSView {
         feedStack.toolTip = nil
     }
 
-    /// Render a SINGLE failure-red pill (no tag, no chip) — the "Couldn't
+    /// Render a SINGLE failure-red pill (no chip) — the "Couldn't
     /// connect" / "Unavailable" rungs.
     private func setFeedText(_ text: String, color: NSColor) {
         let attr = NSAttributedString(
@@ -1205,32 +1217,25 @@ public final class DeviceRowView: NSView {
     }
 
     /// Compose `segments` (main-mix + app tokens, already colored) into ONE
-    /// PILL EACH, prefixing `tag` (the AP1 micro-tag) onto the FIRST visible
-    /// pill's own text when present, with the spec item 3 STATIC overflow
+    /// PILL EACH, with the spec item 3 STATIC overflow
     /// rule: try showing every value's pill first; if the row of pills
     /// doesn't fit `PopoverColumnGrid.feedColumnWidth`, drop values from the
     /// TAIL one at a time (never cut a pill mid-string) and append a trailing
     /// "+N" pill for the dropped count — no interactive reveal, locked.
     /// Clears the pills when there is nothing to show at all.
-    private func setFeedSegments(_ segments: [FeedSegment], tag: String?) {
+    private func setFeedSegments(_ segments: [FeedSegment]) {
         guard !segments.isEmpty else {
             clearFeedPills()
             return
         }
         let font = Tokens.Font.caption
-        // Item 8: the "+N" overflow pill and the AP1 micro-tag dim in
-        // lockstep with the pills they sit beside — the same `controlsMuted`
-        // gate ``updateFeedText()`` used to build `segments`.
+        // Item 8: the "+N" overflow pill dims in lockstep with the pills it
+        // sits beside — the same `controlsMuted` gate ``updateFeedText()``
+        // used to build `segments`.
         let chromeColor = controlsMuted ? Tokens.Color.tertiaryLabel : Tokens.Color.feedPillText
 
-        func attributed(_ segment: FeedSegment, prefixTag: Bool) -> NSAttributedString {
+        func attributed(_ segment: FeedSegment) -> NSAttributedString {
             let result = NSMutableAttributedString()
-            if prefixTag, let tag {
-                result.append(NSAttributedString(string: tag + " ", attributes: [
-                    .font: Tokens.Font.microLabel,
-                    .foregroundColor: chromeColor,
-                ]))
-            }
             // The chip (Warm Signal v4.1 CORRECTIONS "[chip] Music," now
             // living INSIDE the pill beside the name) — an app segment only,
             // never the neutral main-mix segment.
@@ -1248,19 +1253,11 @@ public final class DeviceRowView: NSView {
             attr.size().width + PopoverColumnGrid.feedPillHorizontalPadding * 2
         }
 
-        /// The "+N" pill itself, optionally wearing the AP1 tag — used both
-        /// as the trailing pill alongside visible value pills and, when even
-        /// ONE value pill can't fit beside it, as the composite's SOLE pill.
-        func overflowPill(count: Int, prefixTag: Bool) -> NSAttributedString {
-            let result = NSMutableAttributedString()
-            if prefixTag, let tag {
-                result.append(NSAttributedString(string: tag + " ", attributes: [
-                    .font: Tokens.Font.microLabel,
-                    .foregroundColor: chromeColor,
-                ]))
-            }
-            result.append(NSAttributedString(string: "+\(count)", attributes: [.font: font, .foregroundColor: chromeColor]))
-            return result
+        /// The "+N" pill itself — used both as the trailing pill alongside
+        /// visible value pills and, when even ONE value pill can't fit beside
+        /// it, as the composite's SOLE pill.
+        func overflowPill(count: Int) -> NSAttributedString {
+            NSAttributedString(string: "+\(count)", attributes: [.font: font, .foregroundColor: chromeColor])
         }
 
         let available = PopoverColumnGrid.feedColumnWidth
@@ -1279,12 +1276,10 @@ public final class DeviceRowView: NSView {
         while true {
             let overflowCount = segments.count - visibleCount
             var trial: [NSAttributedString] = visibleCount > 0
-                ? segments.prefix(visibleCount).enumerated().map { index, segment in
-                    attributed(segment, prefixTag: index == 0)
-                  }
+                ? segments.prefix(visibleCount).map(attributed)
                 : []
             if overflowCount > 0 {
-                trial.append(overflowPill(count: overflowCount, prefixTag: visibleCount == 0))
+                trial.append(overflowPill(count: overflowCount))
             }
             let totalWidth = trial.map(pillWidth).reduce(0, +)
                 + CGFloat(max(0, trial.count - 1)) * PopoverColumnGrid.feedPillGap
@@ -1647,29 +1642,30 @@ public final class DeviceRowView: NSView {
                 // offer can never land in a slot too narrow to read it.
                 removalUndoStack.leadingAnchor.constraint(
                     equalTo: trailingAnchor,
-                    constant: -(PopoverColumnGrid.trailingControlTrailing
-                                + PopoverColumnGrid.trailingControlWidth)),
+                    constant: -PopoverColumnGrid.feedColumnLeadingFromTrailing),
                 removalUndoStack.centerYAnchor.constraint(equalTo: centerYAnchor),
                 // ≥24 pt of hit height for the inline link button.
                 removalUndoButton.heightAnchor.constraint(
                     greaterThanOrEqualToConstant: PopoverColumnGrid.removalUndoButtonHeight),
             ])
             if showsSyncControls {
-                // Bluetooth rows (BT-OFFSET-UI): the FEED pill hugs the FAR
-                // RIGHT of the slot (`btFeedReserveWidth` — locked spec) so
-                // the SYNC chip can take the slot's left portion; the
-                // stack's existing mask clips an overlong pill at the reserve's
-                // edge, same honest-clipping fallback as elsewhere.
+                // Sync-capable rows split the slot in the same order as the
+                // card header's legends: FEED pills on the slot's LEADING
+                // edge under "Source" — the identical anchor a plain bus row
+                // uses — capped at `btFeedSlotWidth` so the chip keeps its
+                // share. The stack's mask clips an overlong pill at that cap,
+                // same honest-clipping fallback as elsewhere. (BT-OFFSET-UI's
+                // "feed pill far right" is superseded — see `btFeedSlotWidth`.)
                 constraints.append(contentsOf: [
-                    feedStack.trailingAnchor.constraint(
+                    feedStack.leadingAnchor.constraint(
                         equalTo: trailingAnchor,
-                        constant: -PopoverColumnGrid.trailingInset),
+                        constant: -PopoverColumnGrid.feedColumnLeadingFromTrailing),
                     feedStack.widthAnchor.constraint(
-                        lessThanOrEqualToConstant: PopoverColumnGrid.btFeedReserveWidth),
-                    // The chip: one fixed-width control on the same trailing
-                    // anchor the old cluster ended at, so the subsection
-                    // header's SYNC title (centred via
-                    // `syncCenterFromTrailing`) still lands over it.
+                        lessThanOrEqualToConstant: PopoverColumnGrid.btFeedSlotWidth),
+                    // The chip: one fixed-width control closing the slot. The
+                    // card header's "Offset" title trailing-aligns on
+                    // `offsetTitleTrailingFromTrailing`, which follows
+                    // `syncTrailing`, so it lands over the chip either way.
                     syncChipButton.trailingAnchor.constraint(
                         equalTo: trailingAnchor,
                         constant: -PopoverColumnGrid.syncTrailing),
@@ -1693,7 +1689,7 @@ public final class DeviceRowView: NSView {
                 constraints.append(contentsOf: [
                     feedStack.leadingAnchor.constraint(
                         equalTo: trailingAnchor,
-                        constant: -(PopoverColumnGrid.trailingControlTrailing + PopoverColumnGrid.trailingControlWidth)),
+                        constant: -PopoverColumnGrid.feedColumnLeadingFromTrailing),
                     feedStack.widthAnchor.constraint(
                         lessThanOrEqualToConstant: PopoverColumnGrid.trailingControlWidth),
                 ])
@@ -2265,9 +2261,9 @@ public final class DeviceRowView: NSView {
     /// The FEED column's current plain-text content, or `nil` when it has
     /// nothing to show. Joins each pill's own text (chip object-replacement
     /// characters already stripped by `FeedPillView.test_text`) with the same
-    /// " · " a test already reads between values — including a static
-    /// "AP1 " prefix on the first pill, or a trailing "+N" pill, when
-    /// present — so a test can assert the rendered WORDS across the whole
+    /// " · " a test already reads between values — including a trailing
+    /// "+N" pill when present — so a test can assert the rendered WORDS
+    /// across the whole
     /// pill row without parsing per-pill color runs itself.
     public var test_feedText: String? {
         let pills = feedPills
@@ -2330,14 +2326,17 @@ public final class DeviceRowView: NSView {
         return text.range(of: #"\+\d+$"#, options: .regularExpression) != nil
     }
 
-    /// Whether the FEED column is currently prefixed with the monochrome AP1
-    /// micro-tag (spec item 3 "attributes/flags" — the one true-exception tag;
-    /// AP2 is the default and is never badged).
-    public var test_feedHasAP1Tag: Bool { test_feedText?.hasPrefix("\(Self.ap1FeedTag) ") == true }
-
-    /// The FEED stack's tooltip — the uncapped "Feeding …" line plus the
-    /// Older-AirPlay consequence line, `nil` when neither applies (P1-5).
+    /// The FEED stack's tooltip — the uncapped "Playing …" line, `nil` when
+    /// the column has nothing to show (P1-5).
     public var test_feedTooltip: String? { feedStack.toolTip }
+
+    /// The trailing slot's two occupants, in this row's own coordinates, after
+    /// a layout pass. Exposed so a test can pin the column ORDER (pills left
+    /// under "Source", chip right under "Offset") and the two shared anchors —
+    /// never an absolute width, since AppKit's rounding grid varies per run.
+    public var test_trailingSlotFrames: (feed: NSRect, syncChip: NSRect) {
+        (feedStack.frame, syncChipButton.frame)
+    }
 
     /// The color a FEED app-name segment for `appName` currently resolves to —
     /// the seam T7 rewires (``appSegmentColor(for:)``) to `AppTetherColor`.
@@ -2589,12 +2588,13 @@ public final class DeviceRowView: NSView {
         return enableCheckbox.frame
     }
 
-    /// The drawn node's outer rect (disc plus hover ring) in this row's
-    /// coordinates — what the hit rect above has to contain.
+    /// The drawn node's outer rect at the WIDEST any node ever reaches — the
+    /// selected size, which a hovered non-member grows into — in this row's
+    /// coordinates; what the hit rect above has to contain.
     public func test_nodeRect() -> NSRect? {
         guard busActive else { return nil }
         layoutSubtreeIfNeeded()
-        let r = PopoverColumnGrid.busNodeHoverRingRadius
+        let r = PopoverColumnGrid.busNodeDiameterSelected / 2
         return NSRect(x: busView.frame.midX - r, y: busView.frame.midY - r,
                       width: 2 * r, height: 2 * r)
     }
@@ -2602,8 +2602,13 @@ public final class DeviceRowView: NSView {
     /// Drive the gutter hover through the same private path the tracking area
     /// uses (a real pointer crossing can't be synthesized headlessly).
     public func test_setGutterHovered(_ hovered: Bool) { setGutterHovered(hovered) }
-    /// Whether the node currently draws its gold hover ring.
-    public var test_drawsHoverRing: Bool { busActive && busView.test_drawsHoverRing }
+    /// Whether the node is previewing its post-click size (grown or shrunk).
+    public var test_nodePreviewsClick: Bool { busActive && busView.test_nodePreviewsClick }
+    /// The radius the node is settling on — resting, or its post-click size.
+    /// `nil` when the row has no bus.
+    public var test_nodeTargetRadius: CGFloat? {
+        busActive ? busView.test_nodeTargetRadius : nil
+    }
 
     /// The membership control's (the node-skinned checkbox's) current VoiceOver
     /// label — asserts the bus node speaks as the SAME real checkbox (spec §4.8:
@@ -2614,6 +2619,8 @@ public final class DeviceRowView: NSView {
     /// The membership checkbox's tooltip — "Add/Remove <name> to/from the mix"
     /// on a bus row with its toggle shown, `nil` otherwise (P1-2).
     public var test_membershipTooltip: String? { enableCheckbox.toolTip }
+    /// The name label's click-to-add tooltip (unselected bus rows only).
+    public var test_nameTooltip: String? { nameLabel.toolTip }
 
     /// Drive the REAL checkbox action dispatch (spec §4.8 — the checkbox stays the
     /// control underneath). Mirrors `MainOutRowMenuDispatchTests`' house style:
@@ -2660,8 +2667,8 @@ public final class DeviceRowView: NSView {
             options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
             owner: self
         ))
-        // The bus gutter's own region: hovering it wakes the socket rim (the
-        // node's "I am clickable" affordance). Same rect as the checkbox's
+        // The bus gutter's own region: hovering it grows the node (its "I am
+        // clickable" affordance). Same rect as the checkbox's
         // expanded hit box, read off the control itself so the two can't drift.
         if busActive {
             // Explicit rect, so NO `.inVisibleRect` here — that option makes
@@ -2734,19 +2741,38 @@ public final class DeviceRowView: NSView {
         window?.invalidateCursorRects(for: self)
     }
 
-    /// Push the gutter hover into the bus skin. Only a LIVE membership control
-    /// ever reports a hover: an honestly-disabled checkbox (an
-    /// unavailable+unselected row) must not have its socket invite a click it
-    /// would refuse.
+    /// Record the gutter-hover half of the node cue and re-resolve it. Only a
+    /// LIVE membership control ever reports a hover: an honestly-disabled
+    /// checkbox (an unavailable+unselected row) must not have its socket
+    /// invite a click it would refuse.
     private func setGutterHovered(_ hovered: Bool) {
         guard busActive else { return }
-        busView.setHovered(hovered && enableCheckbox.isEnabled)
+        isGutterHovered = hovered
+        refreshBusHoverCue()
+    }
+
+    /// Resolve whether the node previews its post-click size for the pointer:
+    /// the pointer in the GUTTER always resizes it (any row), and the pointer
+    /// anywhere on the ROW resizes an UNSELECTED node too — the invisible
+    /// checkbox has no resting affordance, so a row not yet in the mix admits
+    /// its node is the way in while the pointer is over it. A selected row keeps
+    /// the gutter-only resize (its filled node already reads as the control).
+    /// Same enabled guard as ever: never preview a click the checkbox would
+    /// refuse — and that guard is what keeps an unavailable+UNSELECTED row's
+    /// node still, since its checkbox is dead. A SELECTED row's checkbox stays
+    /// live whatever its availability (see `apply`), so a `.connecting` or
+    /// `.failed` node does preview: its click really does drop the membership.
+    private func refreshBusHoverCue() {
+        guard busActive else { return }
+        let inviting = isGutterHovered || (isHovered && !isSelectedInSet)
+        busView.setHovered(inviting && enableCheckbox.isEnabled)
     }
 
     /// Set the transient hover flag and repaint only when it actually changes.
     private func setHovered(_ hovered: Bool) {
         guard isHovered != hovered else { return }
         isHovered = hovered
+        refreshBusHoverCue()
         setNeedsDisplay(bounds)
     }
 
@@ -3005,9 +3031,12 @@ public final class DeviceRowView: NSView {
         guard busActive else { return nil }
         if case .failed = device.connectionState { return nil }
         if !device.isAvailable { return nil }
+        // Spoken clause keeps the GROUP qualifier ("Safari, through Kitchen") —
+        // a group route is otherwise indistinguishable from a direct one — and
+        // takes main's verb, "playing".
         let names = feedNames(qualifiedByGroup: true)
         guard !names.isEmpty else { return nil }
-        return "feeding " + names.joined(separator: ", ")
+        return "playing " + names.joined(separator: ", ")
     }
 
     /// The accessibility-label clause for the current connection state

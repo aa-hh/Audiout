@@ -238,8 +238,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// WebSocket server the phone connects to. Created once; started/stopped
     /// only by `updateCompanionServerState()` (launch + the Settings › General
     /// checkbox, both funneled through `AppSettings.resolvedAllowRemoteControl`
-    /// so the `AUDIOUT_COMPANION` env override wins). Off by default — a
-    /// fresh install never opens an always-on listener uninvited.
+    /// so the `AUDIOUT_COMPANION` env override wins). ON when the setting is
+    /// unset, so a fresh install advertises without being asked twice — the
+    /// Local Network grant is already the user's consent to this.
     private let companionServer = CompanionServer()
 
     /// The per-phone approval model (T24): remembers each phone's

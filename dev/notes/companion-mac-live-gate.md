@@ -46,20 +46,33 @@ approvals file. No phone required — dev/notes/wspoke.py (pure-stdlib Python) s
 
 ---
 
-## 2. Default state: companion server OFF (not listening)
+## 2. Default state: companion server ON (advertising)
 
-- [ ] **Launch with mock backend** (safest for first run; no network/firewall exposure)
+T22 (`e5f0b7c6`, Alec 2026-08-06) flipped an UNSET setting from OFF to ON, so a
+fresh profile advertises at launch without being asked. The Local Network grant
+is the consent; asking twice for the same thing was the reason.
+
+- [ ] **Launch with mock backend** (safest for first run; no real speakers touched)
   ```bash
   AIRPLAY_BACKEND=mock open build/Audiout.app
   ```
 
-- [ ] **Confirm server NOT listening** (should be empty; no `_audiout._tcp` advertised)
+- [ ] **Confirm the server IS listening** — one `_audiout._tcp` instance named
+      after this Mac, on each live interface.
   ```bash
   dns-sd -B _audiout._tcp
   ```
-  Expected: times out or shows "no results" after ~5 seconds. Kill with Ctrl+C.
+  Expected: an `Add` row within a second or two. Kill with Ctrl+C. Nothing at all
+  means either the setting is persisted OFF from earlier testing (`defaults read
+  <bundle-id> companion.allowRemoteControl` — unset is ON), or you built a tree
+  without the companion code, which `strings … | grep -c '_audiout._tcp'` settles.
 
-- [ ] **Confirm companion toggle is OFF** in Settings › General. Toggle off explicitly to be sure.
+- [ ] **Confirm the toggle reads ON** in Settings › General, matching what the
+      network says. A checkbox disagreeing with the listener is the bug this
+      section exists to catch, in either direction.
+
+- [ ] **Then untick it** and confirm the advertisement disappears — the OFF path
+      still has to work, it is just no longer where you start.
 
 ---
 
@@ -85,7 +98,9 @@ approvals file. No phone required — dev/notes/wspoke.py (pure-stdlib Python) s
 
 ## 4. Environment override behavior (explicit knob policy)
 
-- [ ] **Override ON via env** (default OFF, explicit opt-in)
+- [ ] **Override ON via env** (redundant with the default since T22, which flipped
+      an unset setting to ON — this step now proves the override AGREES with the
+      default rather than opting in from OFF)
   ```bash
   AUDIOUT_COMPANION=1 AIRPLAY_BACKEND=mock open build/Audiout.app
   ```

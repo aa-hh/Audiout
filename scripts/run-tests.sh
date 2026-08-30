@@ -30,7 +30,15 @@
 set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
-core="$repo_root/AudioutCore"
+# Which package's tests to run. AudioutCore by default -- it is what Guard 4
+# and every inner-loop run mean by "the suite". SwiftPM never runs a
+# DEPENDENCY package's test targets, so a sibling package's own suite needs
+# this override to run at all (mirrors AUDIOUT_BUILD_PACKAGE in
+# scripts/build.sh):  AUDIOUT_TEST_PACKAGE=AirPlayEngine scripts/run-tests.sh
+# The sync-probe DSP's suite is NOT reachable from here any more: it moved to
+# the audiout-shared repo and runs there, against the tag this app pins.
+pkg=${AUDIOUT_TEST_PACKAGE:-AudioutCore}
+core="$repo_root/$pkg"
 
 # Disk housekeeping (prune .prunable-flagged worktrees, cap .build caches) at
 # the moment disk pressure actually appears: a build starting. Best-effort by
@@ -115,7 +123,7 @@ run_remote() {
     done
 
     rrc=0
-    remote_run "$repo_root" "cd AudioutCore && swift test $rargs$qargs" || rrc=$?
+    remote_run "$repo_root" "cd $pkg && swift test $rargs$qargs" || rrc=$?
     if [ "$rrc" -eq 2 ]; then
         # "Ran, but failed" — re-run locally rather than trusting the verdict. A
         # machine on a different Swift/SDK must never be what REFUSES a commit:
@@ -139,8 +147,8 @@ cache_dir=${AUDIOUT_TEST_CACHE_DIR:-/tmp/audiout-suite-cache}
 
 # --- content key ------------------------------------------------------------
 # Hash what the suite's result actually depends on: the Swift sources and tests
-# of the package under test, plus the engine package it links and both
-# manifests. Hashing files on disk (not the git index) is deliberate — it is
+# of the package under test, plus the engine package it links
+# and their manifests. Hashing files on disk (not the git index) is deliberate — it is
 # correct both for a pre-commit run, where the working tree IS what is about to
 # be committed, and for a manual run mid-edit.
 suite_key() {
@@ -165,8 +173,11 @@ suite_key() {
 
 key=$(suite_key)
 # The cache records "these exact sources passed", so it must also be keyed on
-# the arguments — a `--filter Foo` pass says nothing about the full suite.
-args_key=$(printf '%s' "$*" | shasum -a 256 | awk '{print $1}')
+# the arguments — a `--filter Foo` pass says nothing about the full suite — and
+# on WHICH package ran: the source hash above spans every package in this
+# repo, so an AirPlayEngine pass would otherwise stamp the AudioutCore suite
+# green without running it.
+args_key=$(printf '%s\n%s' "$pkg" "$*" | shasum -a 256 | awk '{print $1}')
 stamp="$cache_dir/$key.$args_key"
 
 if [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ] && [ -f "$stamp" ]; then

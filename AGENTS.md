@@ -49,6 +49,12 @@ its own because SwiftPM cannot depend on a package inside a subdirectory of
 another repo. `AudioutCore` pins it by version.
 - [AirPlayEngine/](AirPlayEngine/AGENTS.md) — standalone package: a vendored
   AirPlay 2 sender wrapped in a Swift `actor`. No OwnTone runtime dependency.
+Not a folder here, but linked into the app: **`ProbeKit`**, the sync-probe DSP
+(sweep synthesis + matched filter), lives in https://github.com/aa-hh/audiout-shared
+together with the companion wire protocol. MIT, not GPL, because the
+closed-source iPhone app links the same code, and a repository of its own
+because SwiftPM cannot depend on a package inside a subdirectory of another
+repo. `AudioutCore` pins it by version.
 - [dev/](dev/AGENTS.md) — offline dev tooling, plus `dev/notes/`, the home for
   research briefs and phase write-ups.
 - [scripts/make-app.sh](scripts/make-app.sh) — wraps the executable into a real

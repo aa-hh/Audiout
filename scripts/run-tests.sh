@@ -63,17 +63,25 @@ engine="--build-system native"
 
 workers=${AUDIOUT_TEST_WORKERS:-6}
 lock_timeout=${AUDIOUT_TEST_LOCK_TIMEOUT:-1800}
-# How many suite runs may proceed at once, machine-wide. Default 4: the suite is
-# strongly WAIT-bound, not CPU-bound. A serial run burns only ~0.56 of 8 cores
-# (69.7 user-seconds over 124s wall); even the parallel path reaches only ~2.6.
-# Most of the wall clock is the process asleep on fixed timers, so concurrent
-# runs overlap almost for free -- four serial runs are ~2.2 cores, well inside
-# 8 with headroom for the editor and an app under live test. The cap exists to
-# stop unbounded pile-up (an agent typing `swift test` by hand, times N), not to
-# enforce single-file: throughput across many worktrees matters more here than
-# the latency of any one run.
-# Raise for a beefier box, lower for strict one-at-a-time.
-slots=${AUDIOUT_TEST_SLOTS:-4}
+# How many suite runs may proceed at once, machine-wide. Configurable the same
+# way remote_slots is (see lib/remote.sh) — `git config --local
+# audiout.localSlots N` takes effect on every worktree's next run with no
+# script change needed, which is what makes this a MACHINE setting rather than
+# a per-agent one: an agent exporting AUDIOUT_TEST_SLOTS in its own shell only
+# affects its own commands, and Guard 4's git hook runs as its own subprocess
+# that does not inherit that export.
+#
+# Lowered 4 -> 3 (Alec, 2026-08-30): 4 was sized purely for this machine's CPU
+# headroom (the suite is WAIT-bound, not CPU-bound — a serial run burns only
+# ~0.56 of 8 cores). What it did not account for is that EVERY concurrent run,
+# however small — a single `--filter` invocation, not just a full-suite Guard 4
+# run — occupies one full permit the same as any other. On a night with several
+# agents each running many small filtered checks, four full permits let through
+# more simultaneous test processes than the machine's wait-bound-but-still-real
+# scheduler contention could absorb without starving the fixed-deadline waits
+# elsewhere in the suite (the roadmap-023 class). Lower for stricter, raise for
+# a beefier box or a quieter night.
+slots=${AUDIOUT_TEST_SLOTS:-$(git config --get audiout.localSlots 2>/dev/null || echo 3)}
 
 # --- remote machine ---------------------------------------------------------
 # Host resolution, the local-vs-remote decision, sync and the run-there wrapper

@@ -35,6 +35,8 @@ R2_JURISDICTION="${R2_JURISDICTION:-eu}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-audiout-notary}"
 WRANGLER="${WRANGLER:-npx --yes wrangler}"
 MAJOR="${APP_VERSION%%.*}"
+# The license server repo, read only to cross-check CURRENT_MAJOR below.
+LICENSE_REPO="${LICENSE_REPO:-$HOME/Projects/Audiout License Server}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -61,7 +63,26 @@ STEP_T0=$SECONDS
 step() { local now=$SECONDS; [ "$STEP_N" -gt 0 ] && echo "    step $STEP_N took $((now - STEP_T0))s"; STEP_N=$((STEP_N + 1)); STEP_T0=$now; echo "==> [$STEP_N $(date +%H:%M:%S)] $1"; }
 
 # --- Pre-flight: fail in seconds, not after a 10-minute notary wait ----------
-step "Pre-flight: signing key + wrangler auth"
+step "Pre-flight: major version, signing key, wrangler auth"
+
+# CURRENT_MAJOR (license server) and this build's major must agree. The Worker
+# stamps max_major=CURRENT_MAJOR on every new key, and /download then serves
+# releases/latest-v<max_major>.json. Drift either way is silent and only hurts
+# NEW buyers: ship 2.x while CURRENT_MAJOR is still 1 and their keys can never
+# reach it; bump CURRENT_MAJOR to 2 before a v2 release is uploaded and their
+# download 404s. Nothing else checks this — the two values live in different
+# repos and no endpoint exposes the Worker's copy.
+CURRENT_MAJOR="$(sed -n 's|.*"CURRENT_MAJOR"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*|\1|p' "$LICENSE_REPO/wrangler.jsonc" 2>/dev/null | head -1)"
+if [ -z "$CURRENT_MAJOR" ]; then
+  echo "    WARNING: could not read CURRENT_MAJOR from $LICENSE_REPO/wrangler.jsonc — skipping the major-version cross-check (set LICENSE_REPO to enable it)"
+elif [ "$CURRENT_MAJOR" != "$MAJOR" ]; then
+  echo "ERROR: this build is major $MAJOR (APP_VERSION=$APP_VERSION) but the license server issues keys with max_major=$CURRENT_MAJOR." >&2
+  echo "       Every new key would be entitled to v$CURRENT_MAJOR while /download serves releases/latest-v$MAJOR.json — new buyers get a 404." >&2
+  echo "       Set CURRENT_MAJOR=\"$MAJOR\" in $LICENSE_REPO/wrangler.jsonc and redeploy, or build a $CURRENT_MAJOR.x version." >&2
+  exit 1
+fi
+echo "    ok — build major $MAJOR matches the license server's CURRENT_MAJOR"
+
 # Checked HERE because make-app.sh only errors on it after building ffmpeg
 # from source and linking the app — minutes of work thrown away.
 if [ -z "${SPARKLE_ED_PUBLIC_KEY:-}" ]; then

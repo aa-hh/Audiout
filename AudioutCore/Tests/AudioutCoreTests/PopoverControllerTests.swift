@@ -3122,6 +3122,36 @@ import AudioutProtocol
         #expect(popover.test_systemAirPlayNoteText == nil, "the note clears once a key is in place")
     }
 
+    /// The money-back reminder sits below everything, including the
+    /// unregistered note, and carries no button — the refund goes through
+    /// Paddle from the receipt email, which the app has no link to. It must
+    /// never read as an expiry: the buyer owns the app either way.
+    @Test func refundWindowNoteSitsLowestAndOffersNoButton() async throws {
+        let (popover, _, _) = try await makePopover()
+
+        popover.setRefundWindowDaysRemaining(2)
+        #expect(popover.test_systemAirPlayNoteText
+                    == "2 days left to request a refund on Audiout, if it isn’t for you.")
+        #expect(!popover.test_systemAirPlayNoteHasActionButton)
+
+        popover.setRefundWindowDaysRemaining(1)
+        #expect(popover.test_systemAirPlayNoteText
+                    == "Today is the last day to request a refund on Audiout, if it isn’t for you.")
+
+        // Anything else at all takes the slot away from it…
+        popover.setUnregisteredNoteActive(true)
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredNoteText)
+
+        // …and hands it back.
+        popover.setUnregisteredNoteActive(false)
+        #expect(popover.test_systemAirPlayNoteText
+                    == "Today is the last day to request a refund on Audiout, if it isn’t for you.")
+
+        popover.setRefundWindowDaysRemaining(nil)
+        #expect(popover.test_systemAirPlayNoteText == nil,
+                "the window closing ends the note; there is no zero-day state")
+    }
+
     // MARK: Routing-blocked warning (Wave 3 T-UI)
 
     /// The "Audiout isn't your output device" warning: shows the verbatim copy

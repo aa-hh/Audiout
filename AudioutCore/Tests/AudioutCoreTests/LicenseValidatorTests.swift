@@ -144,4 +144,93 @@ import Testing
                 "no canonical key in the answer ⇒ the typed one stays as typed")
         #expect(settings.licenseMaxMajor == nil)
     }
+
+    // MARK: - The money-back window
+
+    @Test func aRefundDeadlineIsParsedAndStored() async {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        settings.licenseKey = Self.key
+        let transport = Transport()
+        transport.stub(status: 200,
+                       json: #"{"status":"active","refund_deadline":"2026-10-31T12:00:00.000Z"}"#)
+
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.licenseRefundDeadline
+                    == Date(timeIntervalSince1970: 1_793_448_000),
+                "the server stamps these with milliseconds")
+    }
+
+    /// The server stops sending the field to say the window has shut. A
+    /// conditional write — the pattern `max_major` correctly uses — would leave
+    /// the old deadline in `UserDefaults` forever, counting down past its end.
+    @Test func aDeadlineGoingAwayClearsTheStoredOne() async {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        settings.licenseKey = Self.key
+        settings.licenseRefundDeadline = Date(timeIntervalSinceNow: 86_400)
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"active"}"#)
+
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.licenseRefundDeadline == nil)
+        #expect(settings.licenseRefundDaysRemaining() == nil)
+    }
+
+    @Test func aRevokeReasonIsStoredAndLaterCleared() async {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        settings.licenseKey = Self.key
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"revoked","reason":"refund"}"#)
+
+        #expect(await validate(settings, transport) == .verified(.revoked))
+        #expect(settings.licenseRevokedReason == "refund")
+
+        // A key un-revoked (a reversed chargeback) drops the reason with it.
+        transport.stub(status: 200, json: #"{"status":"active"}"#)
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.licenseRevokedReason == nil)
+    }
+
+    /// The soft check's own rule, applied to the new fields: no answer changes
+    /// nothing, so someone offline keeps counting down against the deadline
+    /// they already have rather than watching it vanish.
+    @Test func anUnreachableServerLeavesTheDeadlineAlone() async {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        settings.licenseKey = Self.key
+        let deadline = Date(timeIntervalSinceNow: 3 * 86_400)
+        settings.licenseRefundDeadline = deadline
+        let transport = Transport()
+        transport.answer = (nil, nil, URLError(.notConnectedToInternet))
+
+        #expect(await validate(settings, transport) == .unreachable)
+        #expect(settings.licenseRefundDeadline == deadline)
+    }
+
+    @Test func removingTheKeyClearsBothVerdicts() {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        settings.licenseKey = Self.key
+        settings.licenseRefundDeadline = Date(timeIntervalSinceNow: 86_400)
+        settings.licenseRevokedReason = "refund"
+
+        settings.licenseKey = nil
+
+        #expect(settings.licenseRefundDeadline == nil)
+        #expect(settings.licenseRevokedReason == nil)
+    }
+
+    /// A part day counts as a whole one, and a passed deadline is no window at
+    /// all rather than zero or a negative number.
+    @Test func daysRemainingRoundsUpAndStopsAtTheDeadline() {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        let noon = Date(timeIntervalSince1970: 1_793_448_000)
+
+        settings.licenseRefundDeadline = noon
+        #expect(settings.licenseRefundDaysRemaining(asOf: noon.addingTimeInterval(-86_400)) == 1)
+        #expect(settings.licenseRefundDaysRemaining(asOf: noon.addingTimeInterval(-86_400 - 1)) == 2)
+        #expect(settings.licenseRefundDaysRemaining(asOf: noon.addingTimeInterval(-60)) == 1)
+        #expect(settings.licenseRefundDaysRemaining(asOf: noon) == nil)
+        #expect(settings.licenseRefundDaysRemaining(asOf: noon.addingTimeInterval(60)) == nil)
+
+        settings.licenseRefundDeadline = nil
+        #expect(settings.licenseRefundDaysRemaining(asOf: noon.addingTimeInterval(-86_400)) == nil)
+    }
 }

@@ -203,12 +203,43 @@ import AudioutSharedUI
         transport.replies(#"{"status":"revoked"}"#)
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "This key was refunded or revoked. It no longer gets updates.")
+        #expect(general.test_licenseStatusText == "This key was revoked. It no longer gets updates.")
+
+        // The buyer's own refund reads as what it is, not as the same failure
+        // as a key taken away from them.
+        transport.replies(#"{"status":"revoked","reason":"refund"}"#)
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText
+                    == "This purchase was refunded, so the key no longer gets updates. Audiout itself keeps working.")
+
+        // A chargeback is somebody else's dispute, so it keeps the plain wording.
+        transport.replies(#"{"status":"revoked","reason":"chargeback"}"#)
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText == "This key was revoked. It no longer gets updates.")
 
         transport.replies(#"{"status":"unknown"}"#)
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
         #expect(general.test_licenseStatusText == "This key isn’t recognized. Check it against your receipt.")
+
+        // The pane carries the money-back window for the whole of it — this is
+        // where a buyer who goes looking finds the date. The popover's late
+        // nudge is separate and much quieter.
+        let deadline = ISO8601DateFormatter().string(from: Date(timeIntervalSinceNow: 10 * 86_400))
+        transport.replies(#"{"status":"active","refund_deadline":"\#(deadline)"}"#)
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText
+                    == "Registered. Thank you for supporting Audiout. 10 days left to request a refund, if it isn’t for you.")
+
+        // Once the window shuts the server stops sending the field, and the
+        // sentence goes with it — never a "0 days left".
+        transport.replies(#"{"status":"active"}"#)
+        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText == "Registered. Thank you for supporting Audiout.")
 
         transport.replies(#"{"status":"invalid"}"#)
         general.test_setLicenseKey("nonsense")

@@ -70,10 +70,19 @@ public final class LicenseSheetViewController: NSViewController {
     /// The one wording for each server verdict, shared with the pane's status
     /// line so the two surfaces can never drift apart. Plain words, and never
     /// a claim the app is about to stop working (the check gates nothing).
-    static func statusLine(for status: LicenseStatus) -> String {
+    ///
+    /// `reason` is the server's `reason` field, sent only alongside `revoked`.
+    /// A key revoked because the buyer asked for their money back gets said so
+    /// plainly rather than reading as the same failure as a key that was taken
+    /// away — the refund was the buyer's own doing and worked. A chargeback or
+    /// a manual note keeps the ordinary revoked wording.
+    static func statusLine(for status: LicenseStatus, reason: String?) -> String {
         switch status {
         case .active: return "Registered. Thank you for supporting Audiout."
-        case .revoked: return "This key was refunded or revoked. It no longer gets updates."
+        case .revoked where reason == "refund":
+            return "This purchase was refunded, so the key no longer gets updates. "
+                + "Audiout itself keeps working."
+        case .revoked: return "This key was revoked. It no longer gets updates."
         case .unknown: return "This key isn’t recognized. Check it against your receipt."
         case .invalid: return "That doesn’t look like an Audiout key (\(keyFormatHint))."
         }
@@ -268,7 +277,8 @@ public final class LicenseSheetViewController: NSViewController {
                 self.keyField.isEnabled = true
                 self.registerButton.isEnabled = true
                 self.keyField.stringValue = self.settings.licenseKey ?? ""
-                self.show(result: Self.statusLine(for: status))
+                self.show(result: Self.statusLine(for: status,
+                                                  reason: self.settings.licenseRevokedReason))
                 self.refreshButtons()
                 self.onStateChange?()
             case .unreachable, .noServer, .noKey:

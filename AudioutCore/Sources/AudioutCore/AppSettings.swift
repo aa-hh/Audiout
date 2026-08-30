@@ -98,6 +98,8 @@ public struct AppSettings {
         static let licenseCheckInURL = "license.checkInURL"
         static let licenseStatus = "license.status"
         static let licenseMaxMajor = "license.maxMajor"
+        static let licenseRefundDeadline = "license.refundDeadline"
+        static let licenseRevokedReason = "license.revokedReason"
         static let telemetryOptIn = "telemetry.optIn"
         static let telemetryAsked = "telemetry.asked"
         static let touchBarControls = "general.touchBarControls"
@@ -457,13 +459,18 @@ public struct AppSettings {
     /// General, roadmap 054). `nil` when unset — Audiout is fully functional
     /// without one (the Ardour model: the binary is what's sold, never a
     /// software lock — GPL forbids one). Setting `nil` removes the stored value
-    /// AND clears ``licenseStatus``: a verdict about a key the user has deleted
-    /// is not a verdict about anything.
+    /// AND clears ``licenseStatus``, ``licenseRefundDeadline`` and
+    /// ``licenseRevokedReason``: a verdict about a key the user has deleted is
+    /// not a verdict about anything.
     public var licenseKey: String? {
         get { defaults.string(forKey: Keys.licenseKey) }
         nonmutating set {
             defaults.set(newValue, forKey: Keys.licenseKey)
-            if newValue == nil { licenseStatus = nil }
+            if newValue == nil {
+                licenseStatus = nil
+                licenseRefundDeadline = nil
+                licenseRevokedReason = nil
+            }
         }
     }
 
@@ -501,6 +508,42 @@ public struct AppSettings {
             return stored == 0 ? nil : stored
         }
         nonmutating set { defaults.set(newValue, forKey: Keys.licenseMaxMajor) }
+    }
+
+    /// When the buyer's money-back window closes, as the server last reported
+    /// it (`refund_deadline` on `POST /v1/validate`). `nil` once the window has
+    /// shut, and for a key that never carried one.
+    ///
+    /// The server sends the field only while the window is open, so its absence
+    /// is itself the answer — which is why ``LicenseValidator`` assigns this
+    /// straight through including when it is `nil`, rather than writing it only
+    /// when present the way ``licenseMaxMajor`` is written.
+    public var licenseRefundDeadline: Date? {
+        get { defaults.object(forKey: Keys.licenseRefundDeadline) as? Date }
+        nonmutating set { defaults.set(newValue, forKey: Keys.licenseRefundDeadline) }
+    }
+
+    /// Why the server says the key is `revoked` (`reason`): `"refund"`,
+    /// `"chargeback"`, or whatever note a manual revocation carried. `nil` for
+    /// every other status — and, like ``licenseRefundDeadline``, written
+    /// through unconditionally, because the field going away is how the server
+    /// says the key is fine again.
+    public var licenseRevokedReason: String? {
+        get { defaults.string(forKey: Keys.licenseRevokedReason) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.licenseRevokedReason) }
+    }
+
+    /// Whole days left in the money-back window, a part day counting as a day,
+    /// or `nil` when no window is open.
+    ///
+    /// Derived on every read rather than stored: a copy that has been closed for
+    /// a week must reopen showing today's number, not the one it last saw. That
+    /// also means a machine left offline keeps counting down against the
+    /// deadline it already knows, which is the behaviour the soft check wants —
+    /// ``LicenseValidator`` writes nothing when it cannot reach the server.
+    public func licenseRefundDaysRemaining(asOf reference: Date = Date()) -> Int? {
+        guard let deadline = licenseRefundDeadline, deadline > reference else { return nil }
+        return Int((deadline.timeIntervalSince(reference) / 86_400).rounded(.up))
     }
 
     /// The license server this build talks to, from the bundle's

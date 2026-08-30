@@ -367,15 +367,18 @@ public final class GeneralSettingsViewController: NSViewController {
 
     /// What the status line under the License row says, per state — plain
     /// words, no jargon, and never a claim the app is about to stop working.
-    /// The four server-verdict strings come from
-    /// ``LicenseSheetViewController/statusLine(for:)`` so the pane and the
-    /// sheet can never drift apart; the two key-side states are the pane's own.
+    /// The server-verdict strings come from
+    /// ``LicenseSheetViewController/statusLine(for:reason:)`` so the pane and
+    /// the sheet can never drift apart; the two key-side states are the pane's
+    /// own, and the money-back sentence is appended to whichever verdict stands.
     ///
     /// The no-verdict line leads with the state the user cares about (their key
     /// is safe) rather than with the failure, and promises nothing about when
     /// the retry happens — Check Again sits beside it.
     private static func licenseStatusLine(keyIsEmpty: Bool,
-                                          status: LicenseStatus?) -> String {
+                                          status: LicenseStatus?,
+                                          revokedReason: String?,
+                                          refundDaysRemaining: Int?) -> String {
         if keyIsEmpty {
             return "Unregistered. Audiout is fully functional without a license — "
                 + "buying one funds development and unlocks official downloads and updates."
@@ -383,7 +386,20 @@ public final class GeneralSettingsViewController: NSViewController {
         guard let status else {
             return "Not verified yet — Audiout couldn’t reach the license server. Your key is saved."
         }
-        return LicenseSheetViewController.statusLine(for: status)
+        let verdict = LicenseSheetViewController.statusLine(for: status, reason: revokedReason)
+        guard let days = refundDaysRemaining else { return verdict }
+        return verdict + " " + Self.refundWindowSentence(daysRemaining: days)
+    }
+
+    /// The money-back window, in the same plain terms the website's refund page
+    /// uses ("no reason required") — information, not a warning. Nothing here
+    /// expires: on the day after the deadline the purchase simply stops being
+    /// refundable, and the line disappears because the server stops sending the
+    /// deadline. Never phrase it as a trial running out.
+    static func refundWindowSentence(daysRemaining days: Int) -> String {
+        days == 1
+            ? "Today is the last day to request a refund, if it isn’t for you."
+            : "\(days) days left to request a refund, if it isn’t for you."
     }
 
     /// Re-read the stored license state into the row, then tell the app
@@ -400,8 +416,11 @@ public final class GeneralSettingsViewController: NSViewController {
         let key = settings.licenseKey ?? ""
         let status = settings.licenseStatus
         if serverConfigured {
-            licenseStatusHint.stringValue = Self.licenseStatusLine(keyIsEmpty: key.isEmpty,
-                                                                   status: status)
+            licenseStatusHint.stringValue = Self.licenseStatusLine(
+                keyIsEmpty: key.isEmpty,
+                status: status,
+                revokedReason: settings.licenseRevokedReason,
+                refundDaysRemaining: settings.licenseRefundDaysRemaining())
         }
 
         // Only where it can do something: a key is stored, and no verdict has

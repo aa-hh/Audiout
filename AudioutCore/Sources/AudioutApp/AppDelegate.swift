@@ -2046,12 +2046,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Push the stored licence state at the two things that read it: the
-    /// Mixer's lowest-precedence note, and the update feed's authorization
+    /// Push the stored licence state at the three things that read it: the
+    /// Mixer's two lowest-precedence notes, and the update feed's authorization
     /// header (the server serves the appcast and the download only to a key).
     /// Called at launch, on every validator answer, and whenever the General
-    /// pane commits a key. Idempotent by construction — both writes are plain
-    /// assignments of a computed value.
+    /// pane commits a key. Idempotent by construction — every write is a plain
+    /// assignment of a computed value.
     ///
     /// A build with no licence server is the free build: no note, no matter
     /// what is stored. `popoverController` is still nil at the launch call
@@ -2063,6 +2063,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let unregistered = settings.licenseServerURL != nil
             && (key.isEmpty || status == .unknown || status == .invalid || status == .revoked)
         popoverController?.setUnregisteredNoteActive(unregistered)
+        popoverController?.setRefundWindowDaysRemaining(Self.refundReminderDays(settings))
         updaterController?.updater.httpHeaders = key.isEmpty ? nil : ["Authorization": "Bearer \(key)"]
 
         // License identity for analytics (PRODUCT.md Data Collection stream 1,
@@ -2083,6 +2084,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 PostHogSDK.shared.unregister("license_max_major")
             }
         }
+    }
+
+    /// How many days of the money-back window to put in front of the buyer, or
+    /// `nil` to say nothing — which is the answer for all but the last couple of
+    /// days of it. The owner's call: the reminder shouldn't be in the buyer's
+    /// face, but going silent and hoping they forget the deadline is the wrong
+    /// posture too. The Settings pane carries the full count the whole way
+    /// through for anyone who goes looking; this is only the late nudge.
+    private static func refundReminderDays(_ settings: AppSettings) -> Int? {
+        guard let days = settings.licenseRefundDaysRemaining(), days <= 2 else { return nil }
+        return days
     }
 
     /// Gives graceful AirPlay teardown a bounded window before the process exits

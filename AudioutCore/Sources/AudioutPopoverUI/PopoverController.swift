@@ -1261,6 +1261,30 @@ public final class PopoverController: NSObject {
         applyNoteSlot()
     }
 
+    /// Days left in the buyer's money-back window, when the host has decided
+    /// the window is close enough to its end to mention. `nil` the rest of the
+    /// time, which is nearly always — the host owns that judgement, exactly as
+    /// it owns whether the build counts as unregistered.
+    private var refundWindowDaysRemaining: Int?
+
+    /// Show, update, or clear the refund-window reminder. Called by the host
+    /// (`AppDelegate`), same shape as ``setTakeoverStatus(_:)``. Idempotent: a
+    /// repeat of the current value (including a repeated `nil`) is a no-op.
+    public func setRefundWindowDaysRemaining(_ days: Int?) {
+        guard days != refundWindowDaysRemaining else { return }
+        refundWindowDaysRemaining = days
+        applyNoteSlot()
+    }
+
+    /// The reminder's copy. A courtesy about a deadline the buyer holds, not a
+    /// countdown to losing anything: they bought the app outright and keep it
+    /// whichever way this goes, so nothing here may read as an expiry.
+    static func refundWindowNoteText(daysRemaining days: Int) -> String {
+        days == 1
+            ? "Today is the last day to request a refund on Audiout, if it isn’t for you."
+            : "\(days) days left to request a refund on Audiout, if it isn’t for you."
+    }
+
     /// Show or clear the "double-path audio" note
     /// (`BackendEvent.systemDefaultIsAirPlayActive`). Called by the host
     /// (`AppDelegate`) directly — a whole-app condition with no home on `Device`,
@@ -1299,8 +1323,9 @@ public final class PopoverController: NSObject {
     /// behind rows that still read Connected) outranks routing-blocked (T-UI,
     /// WARNING — audio is dead right now), which outranks a takeover status
     /// (T6), which outranks the double-path guard (W3-T3), which outranks the
-    /// unregistered-build note; none active means no note. `action` is non-nil
-    /// for routing-blocked (the "Use <productName>" button), for the takeover
+    /// unregistered-build note, which outranks the refund-window reminder;
+    /// none active means no note. `action` is non-nil for routing-blocked (the
+    /// "Use <productName>" button), for the takeover
     /// strip's `.needsApproval` (state 1) and `.timedOut` (state 4, "Try
     /// Again"), and for the unregistered note ("Buy…") — the states with an
     /// actual remedy a button can offer. The capture-failure message names
@@ -1325,6 +1350,9 @@ public final class PopoverController: NSObject {
         }
         if unregisteredNoteActive {
             return (Self.unregisteredNoteText, unregisteredNoteAction, .info)
+        }
+        if let days = refundWindowDaysRemaining {
+            return (Self.refundWindowNoteText(daysRemaining: days), nil, .info)
         }
         return (nil, nil, .info)
     }

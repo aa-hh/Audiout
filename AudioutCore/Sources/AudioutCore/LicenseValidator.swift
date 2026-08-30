@@ -83,6 +83,13 @@ public struct LicenseValidator {
                 if let maxMajor = body.maxMajor {
                     settings.licenseMaxMajor = maxMajor
                 }
+                // Unconditional, unlike the two writes above. Both of these
+                // fields disappear from the response to MEAN something — the
+                // refund window has closed, the key is no longer revoked — so
+                // writing them only when present would pin a stale deadline in
+                // UserDefaults forever.
+                settings.licenseRefundDeadline = body.refundDeadline
+                settings.licenseRevokedReason = body.reason
                 completion(.verified(status))
             }
         }
@@ -92,15 +99,36 @@ public struct LicenseValidator {
     /// transport error, a non-200, or JSON that isn't the documented shape.
     /// All of those are "no answer", never "the key is bad".
     private static func parse(data: Data?, response: URLResponse?)
-        -> (status: LicenseStatus?, key: String?, maxMajor: Int?)? {
+        -> (status: LicenseStatus?, key: String?, maxMajor: Int?,
+            refundDeadline: Date?, reason: String?)? {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let data,
               let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return nil }
         return ((object["status"] as? String).flatMap(LicenseStatus.init(rawValue:)),
                 object["key"] as? String,
-                object["max_major"] as? Int)
+                object["max_major"] as? Int,
+                timestamp(object["refund_deadline"] as? String),
+                object["reason"] as? String)
     }
+
+    /// The server stamps `refund_deadline` with JavaScript's `toISOString()`,
+    /// which always carries milliseconds — but the column behind it is plain
+    /// text a row could have been seeded by hand, so a stamp without them is
+    /// read too. An unreadable stamp is no deadline rather than a wrong one:
+    /// the buyer then sees nothing, which is the same as a window that closed.
+    private static func timestamp(_ text: String?) -> Date? {
+        guard let text else { return nil }
+        return withMilliseconds.date(from: text) ?? wholeSeconds.date(from: text)
+    }
+
+    private static let withMilliseconds: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let wholeSeconds = ISO8601DateFormatter()
 
     private func finish(_ result: Result, _ completion: @escaping (Result) -> Void) {
         DispatchQueue.main.async { completion(result) }

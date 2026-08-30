@@ -413,6 +413,63 @@ import AppKit
         #expect(!title.isBordered)
         #expect(!title.drawsBackground)
     }
+
+    // MARK: A repaint must not discard what is being typed
+
+    /// `show(groupID:devices:)` is a REFRESH as well as a first show:
+    /// `MixerWindowController.refreshAll()` calls it on every repaint of a
+    /// visible editor. A membership toggle in this same pane saves the group,
+    /// and any phone-driven group edit repaints too — so writing the model's
+    /// name into the field unconditionally threw away whatever the user was
+    /// halfway through typing, with nothing said.
+    ///
+    /// CONVERSION NOTE: same early-return compromise as the other field-editor
+    /// tests in this file — a headless run can refuse first responder.
+    @MainActor
+    @Test func aRepaintDoesNotDiscardAHalfTypedName() throws {
+        let (window, _, group) = try makeWindow()
+        let editor = window.test_editor
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                            styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        host.contentView = editor.view
+        host.contentView?.layoutSubtreeIfNeeded()
+        guard host.makeFirstResponder(editor.test_titleField),
+              let fieldEditor = editor.test_titleField.currentEditor() else {
+            return
+        }
+
+        fieldEditor.string = "Half typed"
+        // Exactly what `refreshAll()` does for a visible editor.
+        editor.show(groupID: group.id, devices: [])
+
+        #expect(editor.test_nameFieldValue == "Half typed",
+                "a background repaint must leave the in-progress rename alone")
+    }
+
+    /// The guard is scoped to the group being renamed: switching the pane to a
+    /// DIFFERENT group must re-fill the field, or the new group would show the
+    /// previous one's half-typed name.
+    @MainActor
+    @Test func switchingToAnotherGroupWhileTypingStillRefillsTheField() throws {
+        let (window, controller, _) = try makeWindow()
+        let other = try controller.createGroup(name: "Upstairs", memberIDs: ["d1"],
+                                               memberVolumes: [:]).group
+        let editor = window.test_editor
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                            styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        host.contentView = editor.view
+        host.contentView?.layoutSubtreeIfNeeded()
+        guard host.makeFirstResponder(editor.test_titleField),
+              let fieldEditor = editor.test_titleField.currentEditor() else {
+            return
+        }
+
+        fieldEditor.string = "Half typed"
+        editor.show(groupID: other.id, devices: [])
+
+        #expect(editor.test_nameFieldValue == "Upstairs",
+                "a different group's editor must never inherit the last one's typing")
+    }
 }
 
 private extension NSView {

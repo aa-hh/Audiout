@@ -90,6 +90,7 @@ public struct AppSettings {
         static let connectVolume = "audio.connectVolume"
         static let mainOutVolume = "audio.mainOutVolume"
         static let syncOffsetMs = "audio.syncOffsetMs"
+        static let allowRemoteControl = "companion.allowRemoteControl"
         static let surfacePinned = "surface.pinned"
         static let eqAdvancedExpanded = "eq.advancedExpanded"
         static let licenseKey = "license.key"
@@ -318,6 +319,102 @@ public struct AppSettings {
         nonmutating set {
             defaults.set(min(max(newValue, Self.minSyncOffsetMs), Self.maxSyncOffsetMs), forKey: Keys.syncOffsetMs)
         }
+    }
+
+    /// Whether the iPhone companion app may connect to and control this Mac
+    /// (Settings › General "Allow control from iPhone on this network").
+    /// Defaults to **`true`** when unset (T22 flip, Alec's call 2026-08-06):
+    /// the phone app ships alongside the Mac app now, and the per-phone
+    /// approval gate (T24) means an enabled listener still admits nobody the
+    /// user hasn't explicitly approved. Unchecking the Settings › General
+    /// checkbox stores `false` and wins. See ``resolvedAllowRemoteControl(explicit:environment:)``
+    /// for the env-var override AppDelegate actually reads at launch.
+    public var allowRemoteControl: Bool {
+        get {
+            guard defaults.object(forKey: Keys.allowRemoteControl) != nil else { return true }
+            return defaults.bool(forKey: Keys.allowRemoteControl)
+        }
+        nonmutating set { defaults.set(newValue, forKey: Keys.allowRemoteControl) }
+    }
+
+    /// The env var that force-overrides ``allowRemoteControl`` for one launch,
+    /// mirroring `BackendKind.environmentVariableName`'s dev-convenience idiom.
+    public static let allowRemoteControlEnvironmentVariableName = "AUDIOUT_COMPANION"
+
+    /// What decided a ``resolvedAllowRemoteControlWithSource(explicit:environment:settings:)``
+    /// call — carried alongside the resolved value so a caller that needs to
+    /// EXPLAIN itself (the Settings › General checkbox, FIX-C) can tell "this is
+    /// the user's own setting" apart from "an override forced this value for the
+    /// launch, the setting can't take effect until it's gone." Without this, the
+    /// General pane rendered the raw persisted bool while the server actually
+    /// ran on the resolved one — a checkbox that could show OFF while a LAN
+    /// server was running, and silently do nothing when unchecked.
+    public enum RemoteControlResolution: Equatable, Sendable {
+        /// The persisted ``allowRemoteControl`` setting decided — nothing
+        /// overrode it, so writing the setting takes effect immediately.
+        case setting(Bool)
+        /// An explicit argument or the `AUDIOUT_COMPANION` env var forced
+        /// this value for the current process launch. The persisted setting
+        /// still exists underneath but cannot change what's running.
+        case forced(Bool)
+
+        /// The resolved value, regardless of what decided it.
+        public var value: Bool {
+            switch self {
+            case .setting(let value), .forced(let value): return value
+            }
+        }
+
+        /// Whether an override is in force — the setting can't be changed
+        /// through the normal write path while this is `true`.
+        public var isForced: Bool {
+            if case .forced = self { return true }
+            return false
+        }
+    }
+
+    /// Resolve whether the companion server should run, in priority order: an
+    /// explicit argument → the `AUDIOUT_COMPANION` env var (`1`/`0` or
+    /// `on`/`off`, case-insensitive) → the persisted ``allowRemoteControl``
+    /// setting — same priority ``resolvedAllowRemoteControl(explicit:environment:settings:)``
+    /// uses, but returned alongside ``RemoteControlResolution`` so a UI can
+    /// render the override honestly instead of just reading the raw setting.
+    ///
+    /// This is an explicit knob, never a silent fallback (mirrors
+    /// `BackendKind.resolved`'s policy, OwnToneBackend.swift): an unrecognized
+    /// env value is treated as absent — it falls back to the setting and
+    /// prints one warning to stderr rather than silently guessing which way
+    /// to go.
+    public static func resolvedAllowRemoteControlWithSource(
+        explicit: Bool? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        settings: AppSettings
+    ) -> RemoteControlResolution {
+        if let explicit { return .forced(explicit) }
+
+        guard let raw = environment[allowRemoteControlEnvironmentVariableName] else {
+            return .setting(settings.allowRemoteControl)
+        }
+        switch raw.lowercased() {
+        case "1", "on":  return .forced(true)
+        case "0", "off": return .forced(false)
+        default:
+            FileHandle.standardError.write(
+                Data("warning: unrecognized \(allowRemoteControlEnvironmentVariableName) value \"\(raw)\" — falling back to the setting\n".utf8)
+            )
+            return .setting(settings.allowRemoteControl)
+        }
+    }
+
+    /// Convenience over ``resolvedAllowRemoteControlWithSource(explicit:environment:settings:)``
+    /// for callers that only need the resolved value (`AppDelegate`, which
+    /// only starts/stops the server and never has to explain the source).
+    public static func resolvedAllowRemoteControl(
+        explicit: Bool? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        settings: AppSettings
+    ) -> Bool {
+        resolvedAllowRemoteControlWithSource(explicit: explicit, environment: environment, settings: settings).value
     }
 
     /// Whether this Mac's sync trim has an ENTRY at all — the honest answer to

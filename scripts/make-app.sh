@@ -727,29 +727,47 @@ plutil -extract NSHumanReadableCopyright raw -o - "$PLIST" >/dev/null || { echo 
 # keys are needed and BOTH must be present or discovery silently finds nothing:
 #   NSLocalNetworkUsageDescription — the prompt's rationale (same plutil-not-
 #     PlistBuddy reasoning as above: the prose has apostrophes).
-#   NSBonjourServices — the service types we're allowed to browse; without it the
-#     browse is blocked even with the usage string. These MUST match every type
-#     the app browses: _airplay._tcp for AirPlay 2 and _raop._tcp for AP1
-#     (NativeDiscovery), _googlecast._tcp for Cast receivers
-#     (CastDeviceEnumerator), plus _audiout-pf._tcp — the service setup
-#     publishes and then browses for on this same Mac to PROVE the permission
-#     was granted (LocalNetworkPrimer's self-discovery). Leave that last one out
-#     and the self-browse is silently blocked, so setup can never confirm a
-#     grant on a network with no speaker switched on. That name is SHORT on
-#     purpose: Bonjour caps a service name at 15 characters, and the longer
+#   NSBonjourServices — the service types we're allowed to use; without it the
+#     operation is blocked even with the usage string. These MUST match every
+#     type the app touches: _airplay._tcp for AirPlay 2 and _raop._tcp for AP1
+#     (NativeDiscovery browses), _googlecast._tcp for Cast receivers
+#     (CastDeviceEnumerator), the type CompanionServer ADVERTISES
+#     (_audiout._tcp), and _audiout-pf._tcp — the service setup publishes
+#     and then browses for on this same Mac to PROVE the permission was granted
+#     (LocalNetworkPrimer's self-discovery). Leave that last one out and the
+#     self-browse is silently blocked, so setup can never confirm a grant on a
+#     network with no speaker switched on. That name is SHORT on purpose:
+#     Bonjour caps a service name at 15 characters, and the longer
 #     _audiout-preflight._tcp was rejected outright (BadParam), which is
 #     exactly as invisible as leaving it out. Keep it in step with
 #     LocalNetworkPrimer.selfServiceType.
+#
+#     _audiout._tcp is here because ADVERTISING is gated too, not just
+#     browsing. An earlier research note claimed NSBonjourServices covered
+#     browsing only, so a service the Mac merely advertises needed no entry.
+#     That is WRONG on macOS 15+: proven live 2026-07-27, where NWListener
+#     came up, logged success, and then failed asynchronously with
+#     `-65555: NoAuth` (kDNSServiceErr_NoAuth) — no socket, no advertisement,
+#     and nothing surfaced in the UI. Adding the type here fixes it.
 plutil -insert NSLocalNetworkUsageDescription -string "$LOCAL_NETWORK_USAGE" "$PLIST"
 plutil -insert NSBonjourServices -array "$PLIST"
 plutil -insert NSBonjourServices.0 -string "_airplay._tcp" "$PLIST"
 plutil -insert NSBonjourServices.1 -string "_raop._tcp" "$PLIST"
-plutil -insert NSBonjourServices.2 -string "_audiout-pf._tcp" "$PLIST"
-plutil -insert NSBonjourServices.3 -string "_googlecast._tcp" "$PLIST"
+plutil -insert NSBonjourServices.2 -string "_audiout._tcp" "$PLIST"
+#     _dacp._tcp is DACPServer's advertisement — the channel a speaker uses to
+#     report ITS OWN volume change back to us (turn the knob on a Sonos). Found
+#     failing `-65555: NoAuth` on every launch during the 2026-07-27 companion
+#     live gate: a PRE-EXISTING bug in the shipping app, same root cause, not
+#     introduced by the companion work. Without this entry speaker-initiated
+#     volume never reaches the Mac and nothing reports why.
+plutil -insert NSBonjourServices.3 -string "_dacp._tcp" "$PLIST"
+plutil -insert NSBonjourServices.4 -string "_audiout-pf._tcp" "$PLIST"
+plutil -insert NSBonjourServices.5 -string "_googlecast._tcp" "$PLIST"
 plutil -extract NSLocalNetworkUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSLocalNetworkUsageDescription missing from Info.plist" >&2; exit 1; }
 plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices missing from Info.plist" >&2; exit 1; }
-plutil -extract NSBonjourServices.2 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing the setup self-discovery type — setup could not prove a Local Network grant" >&2; exit 1; }
-plutil -extract NSBonjourServices.3 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing _googlecast._tcp — Cast discovery would be silently blocked" >&2; exit 1; }
+plutil -extract NSBonjourServices.2 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing _audiout._tcp — the companion server cannot advertise without it (fails -65555 NoAuth)" >&2; exit 1; }
+plutil -extract NSBonjourServices.4 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing the setup self-discovery type — setup could not prove a Local Network grant" >&2; exit 1; }
+plutil -extract NSBonjourServices.5 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing _googlecast._tcp — Cast discovery would be silently blocked" >&2; exit 1; }
 
 # Bluetooth (BT-CONNECT): reconnecting an already-paired speaker touches
 # IOBluetooth, which macOS gates behind the Bluetooth TCC prompt — and a

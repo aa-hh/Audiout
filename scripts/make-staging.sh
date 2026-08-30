@@ -14,6 +14,10 @@
 #   SKIP_NOTARIZE=1  skip both Apple notary waits (fast iteration; the artifact
 #                    will NOT pass Gatekeeper on a quarantined download)
 #   SKIP_DMG=1       ship the zip as the download instead of building a DMG
+#   VERIFY_KEY=<key> after uploading, re-download through the real /download
+#                    route with this staging licence key and check the artifact
+#                    the way a buyer's Mac will (Gatekeeper, stapled ticket,
+#                    /Applications drag target)
 #
 # razor: steps are NOT parallelized. Each one consumes the previous one's
 # output (stapled app → DMG → stapled DMG → EdDSA signature → upload), so
@@ -173,6 +177,57 @@ $WRANGLER r2 object put "$R2_BUCKET/releases/$DIST_NAME" --file "$DIST_FILE" -J 
 $WRANGLER r2 object put "$R2_BUCKET/releases/latest-v$MAJOR.json" --file "$OUTPUT_DIR/latest-v$MAJOR.json" -J "$R2_JURISDICTION"
 [ -n "$APPCAST" ] && $WRANGLER r2 object put "$R2_BUCKET/appcast-v$MAJOR.xml" --file "$APPCAST" -J "$R2_JURISDICTION"
 
+# --- Verify what a buyer will actually receive --------------------------------
+# Set VERIFY_KEY to an active staging licence key and this re-downloads the
+# artifact through the real /download route and checks it the way the buyer's
+# Mac will: Gatekeeper's verdict, the stapled notarisation ticket (so first
+# launch works offline), and the /Applications symlink that makes the install
+# a drag rather than a puzzle. Everything here is what the buyer's DOUBLE-CLICK
+# depends on; the drag itself is their gesture, not a build step.
+if [ -n "${VERIFY_KEY:-}" ]; then
+  step "Verify the published artifact end to end"
+  VERIFY_DIR="$OUTPUT_DIR/verify"
+  rm -rf "$VERIFY_DIR"; mkdir -p "$VERIFY_DIR"
+  VERIFY_FILE="$VERIFY_DIR/$DIST_NAME"
+
+  HTTP_CODE="$(curl -sS -w '%{http_code}' -o "$VERIFY_FILE" --max-time 300 "$AUDIOUT_LICENSE_URL/download?key=$VERIFY_KEY")" || { echo "ERROR: /download request failed outright" >&2; exit 1; }
+  [ "$HTTP_CODE" = "200" ] || { echo "ERROR: /download answered HTTP $HTTP_CODE, expected 200 — the buyer would get nothing" >&2; head -c 200 "$VERIFY_FILE" >&2; echo >&2; exit 1; }
+  echo "    ok — /download served HTTP 200"
+
+  # Byte-identical to what was uploaded, so R2 is serving this build.
+  [ "$(shasum -a 256 < "$VERIFY_FILE" | cut -d' ' -f1)" = "$(shasum -a 256 < "$DIST_FILE" | cut -d' ' -f1)" ] || { echo "ERROR: downloaded bytes differ from the uploaded artifact" >&2; exit 1; }
+  echo "    ok — bytes match the uploaded artifact"
+
+  if [ "${SKIP_NOTARIZE:-0}" != "1" ]; then
+    xcrun stapler validate "$VERIFY_FILE" >/dev/null 2>&1 || { echo "ERROR: no stapled notarisation ticket — a buyer with no network gets a Gatekeeper block on first launch" >&2; exit 1; }
+    echo "    ok — notarisation ticket is stapled"
+  fi
+
+  if [ "${SKIP_DMG:-0}" != "1" ]; then
+    MOUNT_DIR="$VERIFY_DIR/mnt"; mkdir -p "$MOUNT_DIR"
+    hdiutil attach "$VERIFY_FILE" -mountpoint "$MOUNT_DIR" -nobrowse -quiet -readonly || { echo "ERROR: the DMG would not mount" >&2; exit 1; }
+    # Always unmount, even if a check below fails.
+    trap 'hdiutil detach "$MOUNT_DIR" -quiet 2>/dev/null || true' EXIT
+    [ -d "$MOUNT_DIR/Audiout.app" ] || { echo "ERROR: no Audiout.app at the root of the DMG — Sparkle and the buyer both look for it there" >&2; exit 1; }
+    [ -L "$MOUNT_DIR/Applications" ] || { echo "ERROR: no /Applications symlink in the DMG — the buyer has no drag target and is likely to run it from Downloads, where translocation breaks the PTP helper's bundle path" >&2; exit 1; }
+    echo "    ok — Audiout.app and the /Applications drag target are both present"
+
+    if [ "${SKIP_NOTARIZE:-0}" != "1" ]; then
+      # The verdict Gatekeeper itself gives the app the buyer drags out.
+      spctl -a -t exec -vv "$MOUNT_DIR/Audiout.app" 2>&1 | grep -q "accepted" || { echo "ERROR: Gatekeeper rejects the app inside the DMG" >&2; spctl -a -t exec -vv "$MOUNT_DIR/Audiout.app" 2>&1 >&2; exit 1; }
+      echo "    ok — Gatekeeper accepts the app inside the DMG"
+    fi
+    hdiutil detach "$MOUNT_DIR" -quiet 2>/dev/null || true
+    trap - EXIT
+  fi
+  rm -rf "$VERIFY_DIR"
+fi
+
 step "Done"
 shasum -a 256 "$DIST_FILE"
-echo "    Try it: $AUDIOUT_LICENSE_URL/download?key=<a staging key> should now stream $DIST_NAME"
+if [ -n "${VERIFY_KEY:-}" ]; then
+  echo "    Verified through $AUDIOUT_LICENSE_URL/download — this is what a buyer receives."
+else
+  echo "    Try it: $AUDIOUT_LICENSE_URL/download?key=<a staging key> should now stream $DIST_NAME"
+  echo "    Or re-run with VERIFY_KEY=<staging key> to have this script check that automatically."
+fi

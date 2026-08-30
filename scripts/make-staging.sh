@@ -44,6 +44,8 @@ LICENSE_REPO="${LICENSE_REPO:-$HOME/Projects/Audiout License Server}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=lib/verify-plist-license.sh
+. "$SCRIPT_DIR/lib/verify-plist-license.sh"
 OUTPUT_DIR="${1:-$REPO_ROOT/build}"
 APP_BUNDLE="$OUTPUT_DIR/Audiout.app"
 DIST_ZIP="$OUTPUT_DIR/Audiout-${APP_VERSION}.zip"
@@ -212,6 +214,8 @@ if [ -n "${VERIFY_KEY:-}" ]; then
     # Always unmount, even if a check below fails.
     trap 'hdiutil detach "$MOUNT_DIR" -quiet 2>/dev/null || true' EXIT
     [ -d "$MOUNT_DIR/Audiout.app" ] || { echo "ERROR: no Audiout.app at the root of the DMG — Sparkle and the buyer both look for it there" >&2; exit 1; }
+    verify_app_plist_license_url "$MOUNT_DIR/Audiout.app" "$AUDIOUT_LICENSE_URL" || exit 1
+    echo "    ok — Info.plist AudioutLicenseServerURL matches $AUDIOUT_LICENSE_URL"
     [ -L "$MOUNT_DIR/Applications" ] || { echo "ERROR: no /Applications symlink in the DMG — the buyer has no drag target and is likely to run it from Downloads, where translocation breaks the PTP helper's bundle path" >&2; exit 1; }
     echo "    ok — Audiout.app and the /Applications drag target are both present"
 

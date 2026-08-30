@@ -47,6 +47,24 @@ schema), lives in https://github.com/aa-hh/audiout-shared. MIT, not GPL,
 because the closed-source iPhone app links the same code, and a repository of
 its own because SwiftPM cannot depend on a package inside a subdirectory of
 another repo. `AudioutCore` pins it by version.
+
+### Shared-code changes (AudioutProtocol / ProbeKit)
+
+The pin above makes `audiout-shared` read-only from inside this repo, which
+is exactly why a local copy of one of its types is the path of least
+resistance — and exactly what `.githooks/guard-shared-leak.sh` blocks. The
+sanctioned path for a wire-format field, a protocol case, or a ProbeKit
+tweak:
+
+1. Edit it in `~/Projects/audiout-shared` directly — never here.
+2. Test there: `swift test` (no wrapper scripts in that repo).
+3. Tag and push: `git tag X.Y.Z && git push origin main --tags`. Whether
+   that also needs a `CompanionProto.version` bump is audiout-shared's own
+   rule — see its AGENTS.md, don't re-derive it here.
+4. Bump the pin in **both** consumers in the same session — this repo
+   (`AudioutCore/Package.swift` + `Package.resolved`) and audiout-remote's
+   Xcode package pin. A protocol change ships to both apps together or not
+   at all.
 - [AirPlayEngine/](AirPlayEngine/AGENTS.md) — standalone package: a vendored
   AirPlay 2 sender wrapped in a Swift `actor`. No OwnTone runtime dependency.
 - [dev/](dev/AGENTS.md) — offline dev tooling, plus `dev/notes/`, the home for

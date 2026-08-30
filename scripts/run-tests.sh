@@ -39,6 +39,14 @@ repo_root=$(git rev-parse --show-toplevel)
 # the audiout-shared repo and runs there, against the tag this app pins.
 pkg=${AUDIOUT_TEST_PACKAGE:-AudioutCore}
 core="$repo_root/$pkg"
+# A name that is not a sibling directory fails HERE with the reason, not three
+# hundred lines later as a bare `cd` error. ProbeKit is the case people hit:
+# its suite moved to the audiout-shared repo and runs there.
+if [ ! -d "$core" ]; then
+    echo "  suite: no package directory '$pkg' in this repo." >&2
+    [ "$pkg" = "ProbeKit" ] && echo "  ProbeKit's tests live in the audiout-shared repo now (~/Projects/audiout-shared)." >&2
+    exit 64
+fi
 
 # Disk housekeeping (prune .prunable-flagged worktrees, cap .build caches) at
 # the moment disk pressure actually appears: a build starting. Best-effort by

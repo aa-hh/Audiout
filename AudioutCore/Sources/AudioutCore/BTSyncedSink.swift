@@ -1584,6 +1584,29 @@ final class BTSyncedSink: @unchecked Sendable {
         }
     }
 
+    /// Fan one block with a per-device split: `ownerUID`'s delay line takes
+    /// the sweep-carrying block, every other takes the sweep-free one. This is
+    /// the write-side half of a phone-driven sync run's staggered sweep
+    /// windows (`NativeCaptureCoordinator.stageCompanionMicProbe`).
+    ///
+    /// Feed-time, deliberately: the block a sink is HANDED is decided here,
+    /// before its delay line, so the sequencing is sample-accurate whatever
+    /// each speaker's delay turns out to be. Gating at the output with gain
+    /// instead would be gated by that same unknown delay — the thing the run
+    /// exists to measure.
+    ///
+    /// `ownerUID` of `nil` (a window whose reference is the Mac's own output,
+    /// so no Bluetooth sink is to hear it) hands every device the sweep-free
+    /// block.
+    func enqueue(sweepFrames: UnsafePointer<Float>, sweepFreeFrames: UnsafePointer<Float>,
+                 frameCount: Int, pts: timespec, ownerUID: String?) {
+        let sinks = tableLock.withLock { Array(sinksByUID.values) }
+        for sink in sinks {
+            let frames = sink.deviceUID == ownerUID ? sweepFrames : sweepFreeFrames
+            sink.enqueue(interleavedFrames: frames, frameCount: frameCount, pts: pts)
+        }
+    }
+
     // MARK: Internals
 
     private func makeSink(_ spec: DeviceSpec) -> BTDeviceSink {

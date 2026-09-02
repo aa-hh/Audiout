@@ -385,6 +385,17 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// dropped when the wizard injector is swapped.
     private var micProbeStarted: (() -> Void)?
     private var micProbeFinished: (() -> Void)?
+    /// Which Bluetooth device UID owns each staged sweep window, indexed by
+    /// the window number ``AlignmentTickInjector`` reports (0 = DOWN,
+    /// 1 = UP); `nil` at an index means no Bluetooth sink owns that window
+    /// (a Mac reference hears the DOWN sweep through the engine lane).
+    /// Non-empty ONLY for a companion run — the Mac's own wizard stages both
+    /// sweeps at once and needs no per-device routing. Pacer-queue confined.
+    private var companionProbeWindowUIDs: [String?] = []
+    /// A companion run owns this probe, so its completion must NOT hand over
+    /// to the by-ear tick grid — the phone decides what happens next.
+    /// Pacer-queue confined.
+    private var companionProbeActive = false
 
     /// The engine's fixed feed format, which the pacer synthesizes directly.
     private static let wizardFeedRate = 44_100.0
@@ -1364,6 +1375,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.pacerQueue.async { [weak self] in
                 self?.micProbeStarted = nil
                 self?.micProbeFinished = nil
+                self?.companionProbeWindowUIDs = []
+                self?.companionProbeActive = false
             }
             // Leaving `.wizard`: cancel and DRAIN the pacer before the new
             // snapshot goes out, so no in-flight pacer block can be delivered
@@ -1411,6 +1424,39 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         pacerQueue.async { [weak self] in
             guard let self, let injector = self.currentWizardInjector() else { return }
             injector.stageProbe()
+            self.micProbeStarted = onStarted
+            self.micProbeFinished = onFinished
+        }
+    }
+
+    /// Stage the calibration sweeps for a PHONE-driven run. Same feed, same
+    /// arm gate and same callbacks as ``stageWizardMicProbe(onStarted:onFinished:)``,
+    /// with two differences the companion run needs:
+    ///
+    /// - `staggered` lays the two sweeps a stagger apart instead of together,
+    ///   and `downWindowUID`/`upWindowUID` name the Bluetooth sink that is to
+    ///   HEAR each one. The fan-out then writes the sweep-carrying feed into
+    ///   that one sink's delay line and the sweep-free feed into every other,
+    ///   which is the only way to sequence two Bluetooth speakers: gating at
+    ///   the output with gain cannot do it, because each sink's delay line is
+    ///   exactly the unknown being measured. Either UID may be `nil` — a Mac
+    ///   reference hears the DOWN sweep through the engine lane instead.
+    /// - Completing the sweeps does NOT hand over to the by-ear tick grid.
+    ///   The phone owns what happens next, and the Mac stands the run down on
+    ///   its own a moment later.
+    public func stageCompanionMicProbe(staggered: Bool,
+                                       referenceOnEngine: Bool,
+                                       downWindowUID: String?,
+                                       upWindowUID: String?,
+                                       onStarted: @escaping () -> Void,
+                                       onFinished: @escaping () -> Void) {
+        pacerQueue.async { [weak self] in
+            guard let self, let injector = self.currentWizardInjector() else { return }
+            injector.stageProbe(
+                shape: staggered ? .staggered(referenceOnEngine: referenceOnEngine)
+                                 : .simultaneous)
+            self.companionProbeWindowUIDs = staggered ? [downWindowUID, upWindowUID] : []
+            self.companionProbeActive = true
             self.micProbeStarted = onStarted
             self.micProbeFinished = onFinished
         }
@@ -1491,14 +1537,24 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // speakers it is nothing but hiss. Same tick, same beat, both ways.
         var pcm = Data(count: frames * Self.wizardFeedChannels * MemoryLayout<Int16>.size)
         var bedded = Data()
-        injector.mixWizardVariants(into: &pcm, bedded: &bedded)
+        var beddedNoProbe = Data()
+        let window = injector.mixWizardVariants(
+            into: &pcm, bedded: &bedded, beddedNoProbe: &beddedNoProbe)
         if injector.takeProbeCompletion() {
             // The sweeps are fully in the feed: start the by-ear grid (a clean
             // interval away) and let the mic session know the tail is coming.
-            injector.armTicks()
+            // A COMPANION run skips the handover — the phone decides what
+            // follows a measurement, and ticking on unasked would put a
+            // metronome in the room while it is still thinking.
+            if !companionProbeActive { injector.armTicks() }
             let finished = micProbeFinished
             micProbeFinished = nil
             if let finished { DispatchQueue.global(qos: .userInitiated).async(execute: finished) }
+        }
+        // Which Bluetooth sink, if any, is to hear the sweep in THIS block.
+        let sweepOwnerUID = window.flatMap { index -> String? in
+            companionProbeWindowUIDs.indices.contains(index)
+                ? companionProbeWindowUIDs[index] : nil
         }
         // Host clock only, never a device clock (the standing rule), on the same
         // CLOCK_MONOTONIC timeline `CapturedBuffer.pts` rides.
@@ -1507,7 +1563,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         pacerEmittedFrames += frames
         deliver(pcm, pts: timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
                                    tv_nsec: Int(ptsNanos % 1_000_000_000)),
-                snapshot: snapshot, btPCM: bedded)
+                snapshot: snapshot, btPCM: bedded,
+                btSweepFreePCM: beddedNoProbe.isEmpty ? nil : beddedNoProbe,
+                btSweepOwnerUID: sweepOwnerUID)
     }
 
     private static func monotonicNanos() -> Int64 {
@@ -1774,8 +1832,17 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// block with the keep-alive bed added, while the engine and the Mac's own
     /// fan-out get it tick-only. `nil` — every other caller — means one feed for
     /// everybody, which is the rule the align tick depends on.
+    ///
+    /// `btSweepFreePCM`/`btSweepOwnerUID` narrow that divergence one step
+    /// further, for a phone-driven sync-calibration run whose sweeps are
+    /// sequenced across two Bluetooth speakers: the named device's delay line
+    /// takes `btPCM` (the block carrying the sweep), every other Bluetooth
+    /// device's takes `btSweepFreePCM`. Both `nil` — every run that is not
+    /// that one — leaves the fan-out the single write it has always been.
     private func deliver(_ pcm: Data, pts: timespec, snapshot: BufferSnapshot,
-                         btPCM: Data? = nil) {
+                         btPCM: Data? = nil,
+                         btSweepFreePCM: Data? = nil,
+                         btSweepOwnerUID: String? = nil) {
         // CAST-SYNC: with a Cast device in the mix the engine is fed audio from
         // `D` seconds ago under the LIVE pts — one block out per block in, same
         // frame count, so the sender sees the identical (byteCount, pts)
@@ -1833,7 +1900,22 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // (``resolveExcludedProcessObjectIDs()``) so their delayed output
         // can't loop back as an echo.
         if let btSink = snapshot.btSink, let btResampler = snapshot.btBaseResampler {
-            Self.fanOutToSyncedLocal(btPCM ?? pcm, pts: pts, into: btSink, resampler: btResampler)
+            if let btSweepFreePCM, btResampler.isIdentity {
+                Self.fanOutSplitToBT(sweep: btPCM ?? pcm, sweepFree: btSweepFreePCM,
+                                     pts: pts, into: btSink, ownerUID: btSweepOwnerUID)
+            } else {
+                // razor: the split needs BOTH variants base-resampled, and one
+                // streaming resampler cannot carry two independent feeds
+                // without corrupting its own filter state. The Bluetooth sink
+                // manager renders at the airplay rate in production
+                // (`OwnToneBackend`'s factory takes `BTSyncedSink`'s 44.1 kHz
+                // default), so identity is the real path and this arm is the
+                // honest fallback: one feed for everybody, which measures the
+                // two sweeps together instead of per speaker. Upgrade path if
+                // a non-44.1 kHz manager ever ships: a second
+                // `SyncedLocalBaseResampler` for the sweep-free variant.
+                Self.fanOutToSyncedLocal(btPCM ?? pcm, pts: pts, into: btSink, resampler: btResampler)
+            }
         }
 
         // CAST-FANOUT: the fourth consumer of the identical converted PCM+pts.
@@ -2372,6 +2454,44 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         }
     }
 
+    /// The identity-rate twin of ``fanOutToSyncedLocal(_:pts:into:resampler:)``
+    /// for a companion sync run's sweep window: widen BOTH variants and hand
+    /// them to the Bluetooth manager, which writes `sweep` into `ownerUID`'s
+    /// delay line and `sweepFree` into every other. No resampling — the caller
+    /// only takes this path when the manager already renders at the airplay
+    /// rate, so widening is the whole conversion.
+    static func fanOutSplitToBT(
+        sweep: Data, sweepFree: Data, pts: timespec,
+        into sink: SyncedLocalPCMSink, ownerUID: String?
+    ) {
+        let channelCount = PCMFormat.airplay.channels
+        let sampleCount = min(sweep.count, sweepFree.count) / MemoryLayout<Int16>.size
+        guard channelCount > 0, sampleCount >= channelCount else { return }
+        let frameCount = sampleCount / channelCount
+        let usableSamples = frameCount * channelCount
+        let scale: Float = 1.0 / 32768.0
+        func widen(_ s16le: Data) -> [Float] {
+            var floats = [Float](repeating: 0, count: usableSamples)
+            s16le.withUnsafeBytes { raw in
+                let p = raw.bindMemory(to: Int16.self)
+                for i in 0..<usableSamples {
+                    floats[i] = Float(Int16(littleEndian: p[i])) * scale
+                }
+            }
+            return floats
+        }
+        let sweepFloats = widen(sweep)
+        let sweepFreeFloats = widen(sweepFree)
+        sweepFloats.withUnsafeBufferPointer { sweepBuf in
+            sweepFreeFloats.withUnsafeBufferPointer { sweepFreeBuf in
+                guard let sweepBase = sweepBuf.baseAddress,
+                      let sweepFreeBase = sweepFreeBuf.baseAddress else { return }
+                sink.enqueue(sweepFrames: sweepBase, sweepFreeFrames: sweepFreeBase,
+                             frameCount: frameCount, pts: pts, ownerUID: ownerUID)
+            }
+        }
+    }
+
     // MARK: Level metering (RMS on S16LE, pure/testable)
 
     /// Root-mean-square level of an interleaved S16LE buffer, normalized to
@@ -2721,10 +2841,26 @@ public protocol SyncedLocalPCMSink: AnyObject, Sendable {
     /// airplay rate so a test spy that doesn't care about rate conversion (its
     /// feed then passes straight through, ratio 1.0) needn't implement it.
     var renderSampleRate: Double { get }
+
+    /// Fan one block with a PER-DEVICE split: the device named by `ownerUID`
+    /// gets `sweepFrames`, every other device gets `sweepFreeFrames`. Only the
+    /// Bluetooth sink manager implements it, and only a phone-driven sync run
+    /// calls it — the gate has to be at the FEED (which buffer enters which
+    /// delay line) rather than at the output, because each Bluetooth sink's
+    /// delay line is exactly the quantity the run is measuring. Default:
+    /// ignore the split and take the sweep-carrying feed, which is what every
+    /// single-consumer sink should do with it.
+    func enqueue(sweepFrames: UnsafePointer<Float>, sweepFreeFrames: UnsafePointer<Float>,
+                 frameCount: Int, pts: timespec, ownerUID: String?)
 }
 
 extension SyncedLocalPCMSink {
     var renderSampleRate: Double { Double(PCMFormat.airplay.sampleRate) }
+
+    public func enqueue(sweepFrames: UnsafePointer<Float>, sweepFreeFrames: UnsafePointer<Float>,
+                        frameCount: Int, pts: timespec, ownerUID: String?) {
+        enqueue(interleavedFrames: sweepFrames, frameCount: frameCount, pts: pts)
+    }
 }
 
 /// ``SyncedLocalSink`` already exposes exactly this shape — both the AVFoundation

@@ -18,6 +18,48 @@ import AudioutProtocol
 /// embed system error descriptions (they can carry local file paths); the
 /// detail goes to the local log instead.
 ///
+/// The Bluetooth actuators the alignment family of commands needs — injected
+/// for the same reason `applyStartBuffer` is: this type owns what each command
+/// MEANS (and is testable), while the wiring layer owns which backend, if any,
+/// can actually do the work. Every closure answers a refusal reason, or `nil`
+/// when it applied. Left unset, every alignment command is refused.
+///
+/// The three that OPEN something in the room — a run, a fine-tune session, a
+/// receipt — carry the requesting client, so the probe messages can be
+/// addressed back to the phone that staged the run and to nobody else, and so
+/// a phone that walks out of range takes whatever it left playing down with it.
+@MainActor
+public struct CompanionAlignmentActions {
+    public var startProbe: (_ targetID: String, _ clientID: UUID?) -> String?
+    public var cancelProbe: (_ targetID: String) -> String?
+    public var reportMeasurement: (_ targetID: String, _ offsetMs: Double, _ confidence: Double) -> String?
+    public var setTick: (_ targetID: String, _ active: Bool, _ clientID: UUID?) -> String?
+    public var nudgeTrim: (_ targetID: String, _ deltaMs: Double) -> String?
+    public var revertNudge: (_ targetID: String) -> String?
+    public var clearTuning: (_ targetID: String) -> String?
+    public var playDemo: (_ targetID: String, _ clientID: UUID?) -> String?
+
+    public init(
+        startProbe: @escaping (String, UUID?) -> String?,
+        cancelProbe: @escaping (String) -> String?,
+        reportMeasurement: @escaping (String, Double, Double) -> String?,
+        setTick: @escaping (String, Bool, UUID?) -> String?,
+        nudgeTrim: @escaping (String, Double) -> String?,
+        revertNudge: @escaping (String) -> String?,
+        clearTuning: @escaping (String) -> String?,
+        playDemo: @escaping (String, UUID?) -> String?
+    ) {
+        self.startProbe = startProbe
+        self.cancelProbe = cancelProbe
+        self.reportMeasurement = reportMeasurement
+        self.setTick = setTick
+        self.nudgeTrim = nudgeTrim
+        self.revertNudge = revertNudge
+        self.clearTuning = clearTuning
+        self.playDemo = playDemo
+    }
+}
+
 /// `@MainActor` for the same reason as `PopoverController`: both controllers
 /// it drives are plain (non-actor) classes only ever touched from the main
 /// thread; the companion server hops to main before calling `execute(_:)`
@@ -37,6 +79,10 @@ public final class CompanionCommandDispatcher {
         static let maxAppRoutes = 64
         static let maxBundleIDChars = 128
         static let maxDisplayNameChars = 128
+        /// Ceiling on a reported sweep-arrival offset. Ten seconds is far past
+        /// any real room plus the staging's own separation, and a measurement
+        /// becomes a persisted latency, so an absurd one stops here.
+        static let maxOffsetMs: Double = 10_000
     }
 
     /// Mirrors the wire `commandResult` message 1:1
@@ -83,6 +129,9 @@ public final class CompanionCommandDispatcher {
     /// `applied` immediately — the ~3-5s reconnect gap happens after the reply, same
     /// as the Mac's own "Apply & Reconnect" semantics (protocol sketch, D10).
     private let applyStartBuffer: (Int) async -> Void
+    /// The alignment family's actuators — see ``CompanionAlignmentActions``.
+    /// `nil` on a backend with no Bluetooth sink of its own.
+    private let alignmentActions: CompanionAlignmentActions?
 
     /// True while a `setStartBufferMs` apply Task is running. The apply tears
     /// every AirPlay stream down and back (~3-5s); overlapping runs would keep
@@ -104,7 +153,8 @@ public final class CompanionCommandDispatcher {
         settings: AppSettings,
         isExcluded: @escaping (String) -> Bool,
         setLocalPlaybackVolume: @escaping (Int, String) -> Void,
-        applyStartBuffer: @escaping (Int) async -> Void
+        applyStartBuffer: @escaping (Int) async -> Void,
+        alignmentActions: CompanionAlignmentActions? = nil
     ) {
         self.groupController = groupController
         self.appRouting = appRouting
@@ -112,6 +162,7 @@ public final class CompanionCommandDispatcher {
         self.isExcluded = isExcluded
         self.setLocalPlaybackVolume = setLocalPlaybackVolume
         self.applyStartBuffer = applyStartBuffer
+        self.alignmentActions = alignmentActions
     }
 
     /// Execute one command, mapping it to the exact controller method the
@@ -125,6 +176,15 @@ public final class CompanionCommandDispatcher {
     /// roll back so the reply matches the state the next snapshot shows).
     @discardableResult
     public func execute(_ command: CompanionCommand) -> Result {
+        execute(command, clientID: nil)
+    }
+
+    /// Client-aware twin: the alignment family's `startAlignmentProbe` needs to
+    /// know which phone staged the run, so the two probe messages can be sent
+    /// back to that one client. Every other command ignores it, which is why
+    /// ``execute(_:)`` above can forward a `nil`.
+    @discardableResult
+    public func execute(_ command: CompanionCommand, clientID: UUID?) -> Result {
         switch command {
         case .setDeviceSelected(let id, let selected):
             return Result(groupController.setDeviceSelected(id, selected))
@@ -224,9 +284,76 @@ public final class CompanionCommandDispatcher {
             // applied so the phone doesn't surface a spurious refusal toast.
             return .ok
 
+        case .startAlignmentProbe(let targetID):
+            return alignment(targetID) { actions, id in actions.startProbe(id, clientID) }
+
+        case .cancelAlignmentProbe(let targetID):
+            return alignment(targetID) { actions, id in actions.cancelProbe(id) }
+
+        case .reportAlignmentMeasurement(let targetID, let offsetMs, let confidence):
+            // A measurement turns straight into a persisted latency, so the
+            // numbers are bounded here rather than trusted. `maxOffsetMs` is
+            // generous over any staggered run's own separation; a value past
+            // it is a peer bug or a hostile one, never a room.
+            // Signed on purpose: the phone reports what its microphone heard,
+            // and a speaker that arrives AHEAD of the reference is a real
+            // result, not a bad one.
+            guard offsetMs.isFinite, abs(offsetMs) <= Limits.maxOffsetMs else {
+                return .refused("That measurement isn't a usable number.")
+            }
+            // `confidence` is a peak-to-sidelobe RATIO, not a fraction: the
+            // phone's own floor for reporting at all is 5 and it has no
+            // ceiling. Anything finite and non-negative is a number this side
+            // can accept; a 0...1 bound here refuses every real one.
+            guard confidence.isFinite, confidence >= 0 else {
+                return .refused("That measurement isn't a usable number.")
+            }
+            return alignment(targetID) { actions, id in
+                actions.reportMeasurement(id, offsetMs, confidence)
+            }
+
+        case .setAlignmentTick(let targetID, let active):
+            return alignment(targetID) { actions, id in actions.setTick(id, active, clientID) }
+
+        case .nudgeAlignmentTrim(let targetID, let deltaMs):
+            // One detent's worth. A delta bigger than the trim's whole range
+            // could only be a peer that has lost the plot.
+            guard deltaMs.isFinite, abs(deltaMs) <= BTSyncTrim.rangeMs else {
+                return .refused("That's further than the fine-tune can move.")
+            }
+            return alignment(targetID) { actions, id in actions.nudgeTrim(id, deltaMs) }
+
+        case .revertAlignmentNudge(let targetID):
+            return alignment(targetID) { actions, id in actions.revertNudge(id) }
+
+        case .clearAlignmentTuning(let targetID):
+            return alignment(targetID) { actions, id in actions.clearTuning(id) }
+
+        case .playAlignmentDemo(let targetID):
+            return alignment(targetID) { actions, id in actions.playDemo(id, clientID) }
+
         case .unknown(let name):
             return .refused("Unknown command: \(name).")
         }
+    }
+
+    // MARK: - Sync calibration (the alignment family)
+
+    /// Shared shape for all eight: validate the device id at the trust
+    /// boundary, refuse outright when this backend has no alignment actuators,
+    /// then run the action and turn its reason into a `Result`.
+    private func alignment(
+        _ targetID: String,
+        _ action: (CompanionAlignmentActions, String) -> String?
+    ) -> Result {
+        guard !targetID.isEmpty, targetID.count <= Limits.maxMemberIDChars else {
+            return .refused("Unknown device.")
+        }
+        guard let alignmentActions else {
+            return .refused("This Mac can't measure speaker timing.")
+        }
+        if let reason = action(alignmentActions, targetID) { return .refused(reason) }
+        return .ok
     }
 
     // MARK: - Group CRUD (validated + all-or-nothing)

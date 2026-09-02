@@ -6,8 +6,9 @@
 // Two levels are exercised:
 //   1. `WriteCadenceTracker` directly — deterministic control over the
 //      "wall-clock elapsed" input via a fixed, injected sample count/rate and
-//      real (but tiny, sleep-based) delays, so the deficit/overrun math is
-//      verified without any dependency on the full engine/dispatcher.
+//      real (but tiny, sleep-based) delays or an injected clock, so the
+//      deficit/overrun math is verified without any dependency on the full
+//      engine/dispatcher.
 //   2. `AirPlayEngine.write(pcm:pts:)` end-to-end in headless test mode —
 //      proves the hot path actually feeds the tracker, and that
 //      `writeCadenceSnapshot()` reflects it.
@@ -275,6 +276,60 @@ import CAirPlayEngine
         tracker.recordRefused(samples: samples, sampleRate: 44100)
 
         #expect(abs((tracker.snapshot().netDriftSeconds - before) - audioSeconds) <= 1e-9)
+    }
+
+    /// Pins the netting arithmetic to exact numbers, where
+    /// `symmetricJitterInflatesBucketsButNotNetDrift` only bounds it: four
+    /// known gaps, two behind and two ahead, must land in the two buckets and
+    /// in `netDriftSeconds` to the last decimal.
+    @Test func mixedGapsNetExactly() {
+        var simulatedSeconds: Double = 0
+        let tracker = WriteCadenceTracker(now: { simulatedSeconds })
+        let sampleRate = 44100
+        let samples = 441 // exactly 0.01s of audio per write
+
+        tracker.record(samples: samples, sampleRate: sampleRate) // seed
+        for advance in [0.03, 0.005, 0.04, 0.002] {              // gaps +0.02, -0.005, +0.03, -0.008
+            simulatedSeconds += advance
+            tracker.record(samples: samples, sampleRate: sampleRate)
+        }
+
+        let snap = tracker.snapshot()
+        #expect(abs(snap.deficitSeconds - 0.05) <= 1e-9)
+        #expect(abs(snap.overrunSeconds - 0.013) <= 1e-9)
+        #expect(abs(snap.netDriftSeconds - 0.037) <= 1e-9)
+        #expect(snap.stallCount == 0)
+        #expect(snap.writeCount == 5)
+    }
+
+    /// A lid-close or an overnight sleep must add nothing to the drift the
+    /// telemetry alarms on. The pre-launch review's 48-hour "deficit" came
+    /// from exactly this gap shape, so this drives a literal six-hour gap
+    /// through the PRODUCTION five-second threshold rather than an injected
+    /// one.
+    @Test func multiHourSleepGapContributesZeroDeficit() {
+        var simulatedSeconds: Double = 0
+        let tracker = WriteCadenceTracker(now: { simulatedSeconds })
+        let sampleRate = 44100
+        let samples = 441 // exactly 0.01s of audio per write
+
+        tracker.record(samples: samples, sampleRate: sampleRate) // seed
+        simulatedSeconds += 6 * 3600
+        tracker.record(samples: samples, sampleRate: sampleRate)
+
+        let slept = tracker.snapshot()
+        #expect(slept.deficitSeconds == 0)
+        #expect(slept.overrunSeconds == 0)
+        #expect(slept.netDriftSeconds == 0)
+        #expect(slept.stallCount == 1)
+        #expect(abs(slept.stalledSeconds - (6 * 3600 - 0.01)) <= 1e-6)
+
+        // Ordinary feeding resumes: the next small gap is drift again.
+        simulatedSeconds += 0.02
+        tracker.record(samples: samples, sampleRate: sampleRate)
+        let after = tracker.snapshot()
+        #expect(abs(after.deficitSeconds - 0.01) <= 1e-9)
+        #expect(after.stallCount == 1)
     }
 }
 

@@ -81,7 +81,17 @@ repo. `AudioutCore` pins it by version.
   `.app` with a stable bundle id, signed with a Developer ID identity when one
   is present in the keychain (auto-detected, override with `CODESIGN_IDENTITY`),
   else ad-hoc. Required for the `native` backend's TCC-gated process tap; a
-  bare `swift run` loses the grant.
+  bare `swift run` loses the grant. **Needs a `.env` with `POSTHOG_PROJECT_TOKEN`
+  and `POSTHOG_HOST` at the repo root, unconditionally — not gated for dev
+  builds like the license/buy/Sparkle keys are.** `.env` is gitignored, so a
+  fresh worktree doesn't have one; copy it from the primary checkout
+  (`cp "$(git rev-parse --path-format=absolute --git-common-dir)/../.env" .`)
+  before the first build there. Missing it makes the script exit before the
+  codesign step, leaving a half-built `.app` that ran through none of the
+  entitlements/hardened-runtime signing below — it will look present (and even
+  launch) but hold none of the TCC entitlements, so treat a `make-app.sh` run
+  as failed unless you check its actual exit code, never a file-freshness
+  heuristic.
 - [docs/SPEC.md](docs/SPEC.md) — the product spec. Code cites its sections ("SPEC.md §9").
 - `docs/plans/PLAN-*.md` — the phased execution plans and their resolved decisions.
 

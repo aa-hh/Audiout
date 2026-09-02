@@ -2428,6 +2428,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // same discipline as onCommand; if we're terminating, don't answer —
         // the server teardown closes the held connection, and no decision
         // gets persisted on the way out.
+        // Read per welcome, not captured once: a licence check-in that lands
+        // after the server started still reaches the next phone to connect.
+        companionServer.companionToken = { [settings] in settings.companionToken }
         companionServer.onApprovalRequest = { [weak self] clientID, clientName, decide in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }

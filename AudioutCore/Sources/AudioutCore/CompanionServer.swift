@@ -121,6 +121,13 @@ public final class CompanionServer: @unchecked Sendable {
     /// (un-helloed) connections are never counted.
     public var onClientCountChanged: (@Sendable (Int) -> Void)?
 
+    /// The licence server's companion token to hand each approved phone in
+    /// its `welcome` (`AppSettings.companionToken`), asked for at send time
+    /// so a check-in that lands mid-session reaches the next phone to
+    /// connect. Left nil, or answering nil, the `welcome` carries no token
+    /// and the phone stays locked — an unlicensed Mac unlocks nothing.
+    public var companionToken: (@Sendable () -> String?)?
+
     // MARK: - State (queue-confined)
 
     private let log = Logger(subsystem: "com.audiout.Audiout", category: "companion")
@@ -863,7 +870,8 @@ public final class CompanionServer: @unchecked Sendable {
     /// ``accept(_:)`` test seam exercises without ever starting a listener.
     private func sendWelcome(_ snapshot: Snapshot, to client: Client) {
         client.isWelcomed = true
-        send(.welcome(serverName: snapshot.serverName, protoVersion: CompanionProto.version, snapshot: snapshot), to: client)
+        send(.welcome(serverName: snapshot.serverName, protoVersion: CompanionProto.version, snapshot: snapshot,
+                      companionToken: companionToken?()), to: client)
     }
 
     private func send(_ message: CompanionMessage, to client: Client, whenDone: (@Sendable () -> Void)? = nil) {

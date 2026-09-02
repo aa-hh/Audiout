@@ -371,7 +371,7 @@ import AudioutProtocol
         let expected = rig.buildSnapshot()
         #expect(expected.devices.count == [Device].demoFleet.count, "sanity: the fleet is really in the snapshot")
         #expect(await waitUntil {
-            log.contains(.welcome(serverName: Rig.serverName, protoVersion: CompanionProto.version, snapshot: expected))
+            log.contains(.welcome(serverName: Rig.serverName, protoVersion: CompanionProto.version, snapshot: expected, companionToken: nil))
         }, "the client never received a welcome carrying the correct full snapshot")
     }
 

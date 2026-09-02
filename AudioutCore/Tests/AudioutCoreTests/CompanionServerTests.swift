@@ -236,8 +236,26 @@ import AudioutProtocol
         defer { client.cancel() }
         try sendHello(over: client)
 
-        #expect(waitUntil { log.contains(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snapshot)) },
+        #expect(waitUntil { log.contains(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snapshot, companionToken: nil)) },
                 "the client never received its welcome with the cached snapshot")
+    }
+
+    @Test func welcomeCarriesWhateverCompanionTokenTheWiringAnswers() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = makeAutoApprovingServer()
+        defer { server.stop() }
+        server.companionToken = { "eyJ2IjoxfQ.c2ln" }
+
+        let snapshot = makeSnapshot()
+        server.broadcast(snapshot)
+
+        let (client, log) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try sendHello(over: client)
+
+        #expect(waitUntil { log.contains(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snapshot, companionToken: "eyJ2IjoxfQ.c2ln")) },
+                "the welcome should carry the token the wiring answered at send time")
     }
 
     @Test func newerProtoHelloIsRefusedWithGoodbye() throws {
@@ -319,8 +337,8 @@ import AudioutProtocol
         try sendHello(over: clientA, name: "phoneA")
         try sendHello(over: clientB, name: "phoneB")
         try #require(waitUntil {
-            logA.contains(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snap1))
-                && logB.contains(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snap1))
+            logA.contains(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snap1, companionToken: nil))
+                && logB.contains(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snap1, companionToken: nil))
         }, "both clients must be welcomed before broadcasting")
 
         let snap2 = makeSnapshot(volume: 20)
@@ -413,7 +431,7 @@ import AudioutProtocol
         // first broadcast also exercises the deferred-welcome path.
         let snapshot = makeSnapshot()
         server.broadcast(snapshot)
-        #expect(waitUntil { keptLog.contains(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snapshot)) },
+        #expect(waitUntil { keptLog.contains(.welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snapshot, companionToken: nil)) },
                 "the within-cap client stopped working after a refusal")
         #expect(!keptLog.closed, "the within-cap client must stay connected")
     }

@@ -302,11 +302,19 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     /// ## Why a hands-free reading is held, not delivered
     /// A nominal-rate reading at or below 16 kHz on the device last delivered at a
     /// higher rate is a Bluetooth headset entering hands-free mode. It is withheld
-    /// for the settle window: a reading that returns above 16 kHz inside the
-    /// window never reaches a subscriber (no tap rebuild, no session reset). One
+    /// for the settle window, so a connect burst that dips and comes straight back
+    /// costs ONE rebuild instead of the four the raw notifications would buy. One
     /// that outlasts the window is delivered by the trailing edge and rebuilds like
     /// any other rate change. A device-identity change, or any rate above 16 kHz,
     /// inside a held window is delivered at once.
+    ///
+    /// That delivery is FORCED past the per-subscriber divergence check, and it has
+    /// to be. Holding the 16 kHz reading means no subscriber ever tracked it, so a
+    /// return to the rate they are already built on nets to "no change" and would
+    /// fire nothing — while the transition that started the burst has already
+    /// silenced their taps for good. Withholding the reading is safe; withholding
+    /// the rebuild that answers it is not. The hold buys back three of the four
+    /// rebuilds, not all four.
     ///
     /// The READ stays immediate regardless — ``current`` must never lag, and the
     /// rate listener has to follow an identity change right away or the new
@@ -334,8 +342,11 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
             }
         } else if leadingHeld, handsFreeHold(for: live) == nil {
             // The held window's first trustworthy reading (an identity change, or
-            // the rate back above the ceiling) spends the immediate delivery.
-            deliverToSubscribers()
+            // the rate back above the ceiling) spends the immediate delivery, and
+            // spends it FORCED: the held reading never reached a subscriber, so a
+            // return to the rate they still track diverges from nothing, yet the
+            // transition that opened the window already killed their taps.
+            deliverToSubscribers(forcingRebuild: true)
             settleDirty = false
         } else {
             // Inside the window — coalesce; the trailing edge reconciles.
@@ -387,7 +398,11 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     /// notification. Reads ``latest`` rather than closing over the snapshot that
     /// armed it, so what lands is the value that settled — never an intermediate
     /// one from inside the burst.
-    private func deliverToSubscribers() {
+    /// - Parameter forcingRebuild: deliver to every subscriber whether or not its
+    ///   tracked values diverge. Only the end of a held hands-free window sets it,
+    ///   for the reason ``handleNotification`` gives: the divergence check cannot
+    ///   see a transition whose reading was deliberately withheld.
+    private func deliverToSubscribers(forcingRebuild: Bool = false) {
         let live = latest
 
         subscribersLock.lock()
@@ -403,7 +418,7 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
                 currentDeviceID: live.deviceID, trackedDeviceID: tracked.deviceID)
             let rateDiverged = TapRebuildDecision.shouldRebuild(
                 currentRate: live.nominalRate, trackedRateInt: tracked.rate)
-            guard deviceDiverged || rateDiverged else { continue }
+            guard forcingRebuild || deviceDiverged || rateDiverged else { continue }
             fired += 1
             subscriber.onChange(live)
         }
@@ -413,6 +428,7 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
             "rate": live.nominalRate.map { String(Int($0.rounded())) } ?? "unreadable",
             "subscribers": "\(snapshot.count)",
             "fired": "\(fired)",
+            "forced": "\(forcingRebuild)",
         ])
         lastDelivered = live
         leadingHeld = false

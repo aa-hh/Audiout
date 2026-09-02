@@ -412,8 +412,14 @@ import CoreAudio
     }
 
     /// A 16k reading (a headset entering hands-free mode) that returns above 16k
-    /// inside the window never reaches a subscriber: no rebuild on a flip.
-    @Test func lowRateFlapReturningInsideWindowNeverDelivers() {
+    /// inside the window is withheld, but the RETURN still rebuilds — exactly once.
+    ///
+    /// The 16k transition has already silenced every tap by the time it is read,
+    /// and holding it means no subscriber ever tracked it, so the return diverges
+    /// from nothing. Left to the divergence check the flip would fire nothing and
+    /// the taps would stay silent for good. The hold's job is to collapse the four
+    /// rebuilds a connect burst would otherwise buy down to one, not to zero.
+    @Test func lowRateFlapReturningInsideWindowRebuildsOnceOnTheReturn() {
         let hal = FakeHAL()
         hal.rate = 44_100
         let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
@@ -422,12 +428,14 @@ import CoreAudio
         monitor.start()
 
         hal.rate = 16_000; hal.fire(rateSelector)
-        #expect(recorder.received.isEmpty)
+        #expect(recorder.received.isEmpty, "the hands-free dip itself is withheld")
         hal.rate = 44_100; hal.fire(rateSelector)
-        #expect(recorder.received.isEmpty)
+        #expect(recorder.received.count == 1,
+                "the return rebuilds the taps the dip silenced")
+        #expect(recorder.received.last?.nominalRate == 44_100)
 
         monitor._drainForTesting()
-        #expect(recorder.received.isEmpty)
+        #expect(recorder.received.count == 1, "the trailing edge adds no second rebuild")
         #expect(monitor.current.nominalRate == 44_100)
     }
 

@@ -1883,15 +1883,15 @@ extension TransportCommand {
 /// deficit or overrun since the last log) emits one `os_log` line via the
 /// `.default` level so sustained cadence trouble is visible without spamming
 /// a log line per write (which, at ~86.1 writes/sec, would be prohibitively
-/// noisy). The figure printed after the gap is the net drift, deficit minus
-/// overrun, the same number as `WriteCadenceSnapshot.netDriftSeconds`. That
-/// figure is the IOProc's own cadence — 512 frames /
+/// noisy). That figure is the IOProc's own cadence — 512 frames /
 /// 44100 Hz ≈ 11.61 ms per cycle → 1000/11.61 ≈ 86.1 — because `write` is
 /// called once per IOProc buffer, not once per RTP packet. (An earlier
 /// version of this comment claimed "~226 writes/sec for 352-sample frames at
 /// 44.1kHz" — both numbers were wrong: 44100/352 ≈ 125.3 is the RTP *packet*
 /// cadence [`AIRPLAY_SAMPLES_PER_PACKET`], a different quantity from the
 /// write cadence measured here. See plan §B.3/F25.)
+/// The figure printed after the gap is the net drift, deficit minus
+/// overrun, the same number as `WriteCadenceSnapshot.netDriftSeconds`.
 final class WriteCadenceTracker: @unchecked Sendable {
     private let lock = NSLock()
     private let log = Logger(subsystem: "com.airplayengine", category: "write-cadence")

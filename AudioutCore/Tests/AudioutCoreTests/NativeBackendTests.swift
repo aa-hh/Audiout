@@ -2267,7 +2267,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         backend.setOutputSet([device.id])
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
 
@@ -3410,7 +3410,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.setOutputSet([device.id])
 
         // Let all ops drain.
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             let d = backend.devices.first { $0.id == device.id }
             return d?.isSelected == true && engine.addedIDs.contains(device.outputID)
         }
@@ -3451,7 +3451,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.setOutputSet([]) // final: OFF
 
         // Settled: deselected AND every add was matched by a remove (net not added).
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.isSelected == false
                 && netAdded(engine, device.outputID) == false
         }
@@ -3484,7 +3484,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         for i in 0..<8 { backend.setOutputSet((i % 2 == 0) ? [device.id] : []) }
         backend.setOutputSet([device.id])
 
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.isSelected == true
         }
         try? await Task.sleep(nanoseconds: 100_000_000)
@@ -3530,7 +3530,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // "Try again" now succeeds — the device is not permanently wedged.
         backend.retryOutput(device.id)
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             let d = backend.devices.first { $0.id == device.id }
             return d?.isSelected == true && d?.isAvailable == true
         }
@@ -3611,7 +3611,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             outputID: device.outputID, isAirPlay2Supported: true)
         discovery.fire(.updated(restarted))
 
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
         #expect(backend.devices.first { $0.id == device.id }?.connectionState == .connected,
@@ -3638,7 +3638,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         engine.addFailures = []
         discovery.fire(.appeared(device))   // identical descriptor
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
         #expect(backend.devices.first { $0.id == device.id }?.connectionState == .connected,
@@ -3712,7 +3712,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // ON, let it fully settle (added contains id, selected).
         backend.setOutputSet([device.id])
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             let d = backend.devices.first { $0.id == device.id }
             return d?.isSelected == true && engine.addedIDs.contains(device.outputID)
         }
@@ -3725,7 +3725,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         engine.pushState(device.outputID, .streaming)
 
         // Eventually the device is off and the engine holds no session.
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             let d = backend.devices.first { $0.id == device.id }
             return d?.isSelected == false && !netAdded(engine, device.outputID)
         }
@@ -3802,7 +3802,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             else { return false }
         }, "a newly-desired-on device must go .connecting immediately, before the op resolves")
 
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
         let final = backend.devices.first { $0.id == device.id }
@@ -3883,7 +3883,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         backend.setOutputSet([device.id])
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
 
@@ -3934,7 +3934,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // "Try again": the dot must move .failed → .connecting → .connected.
         backend.retryOutput(device.id)
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
         let d = backend.devices.first { $0.id == device.id }
@@ -3957,7 +3957,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         backend.setOutputSet([device.id])
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
 
@@ -3965,7 +3965,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // The dot goes .off eagerly (synchronously, ahead of the removeOutput op
         // resolving) — wait for isSelected to catch up too so the assertion below
         // isn't racing the in-flight removal.
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             let d = backend.devices.first { $0.id == device.id }
             return d?.connectionState == .off && d?.isSelected == false
         }
@@ -4377,7 +4377,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         capture.fireState(.failed(.tapCreationFailed(reason: "test failure")))
 
-        await pollUntil(timeout: 2) { capture.startCount >= 2 }
+        await pollUntil { capture.startCount >= 2 }
         #expect(capture.startCount >= 2, "a transient whole-system-tap failure must self-heal via a backoff retry (T16, E10)")
     }
 
@@ -4530,7 +4530,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         #expect(backend.test_captureRetryCount() == 2, "the attempt counter still grows per failure (feeds the backoff delay)")
 
-        await pollUntil(timeout: 2) { capture.startCount > startsBefore }
+        await pollUntil { capture.startCount > startsBefore }
         // Past BOTH original timers' deadlines (0.06s and 0.02+0.12s) — if the
         // first had NOT been cancelled, this window would show a 2nd extra
         // start() beyond the one the surviving (2nd) timer produces. ~3x the
@@ -5071,7 +5071,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // attempt succeed.
         engine.addFailures = []
         capture.fireDeviceRateRebuild()
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             engine.addedIDs.filter { $0 == device.outputID }.count > addsAfterFirstAttempt
         }
         let addsAfterSecondRecapture = engine.addedIDs.filter { $0 == device.outputID }.count
@@ -5139,7 +5139,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // Let everything settle: the recovery's remove/add, then (if the
         // deselect's target survived) a requeued real convergeDevice removeOutput.
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             !backend.devices.contains { $0.id == device.id && $0.isSelected }
         }
         // Drain any trailing op that might still be mid-flight. Outlasts the
@@ -5201,11 +5201,11 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // signal of full convergence — `Device.isSelected` is written a step
         // later, inside the same locked block, so polling the op count directly
         // avoids a spurious poll-window miss on a slow CI runner).
-        await pollUntil(timeout: 10) {
+        await pollUntil {
             engine.addedIDs.filter { $0 == device.outputID }.count > addsBeforeToggle
         }
         // Give the post-add bookkeeping (the `applyLocal` write) a moment to run.
-        await pollUntil(timeout: 2) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.isSelected == true
         }
 
@@ -5266,7 +5266,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // a backed-off retry — the state the sleep has to clean up after.
         engine.addFailures = [device.outputID.rawValue]
         capture.fireDeviceRateRebuild()
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             engine.addedIDs.filter { $0 == device.outputID }.count > addsBeforeRebuild
         }
         let addsAfterFailedAttempt = engine.addedIDs.filter { $0 == device.outputID }.count
@@ -5275,13 +5275,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         engine.addFailures = []          // the receiver is reachable again after wake
         backend.handleSystemDidWake()
 
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             engine.addedIDs.filter { $0 == device.outputID }.count > addsAfterFailedAttempt
         }
         #expect(engine.addedIDs.filter { $0 == device.outputID }.count > addsAfterFailedAttempt,
                 Comment(rawValue: "wake must re-add a still-selected device even though a rebind recovery was mid-backoff when the Mac slept — a `converging` slot left held by that recovery makes the wake re-kick (and every later select) skip the device "
                     + "forever, which is silence with no self-recovery"))
-        await pollUntil(timeout: 2) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.isSelected == true
         }
         #expect(backend.devices.first { $0.id == device.id }!.isSelected,
@@ -5317,7 +5317,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         engine.flushFailures = [device.outputID.rawValue]
         engine.addFailures = [device.outputID.rawValue]
         capture.fireDeviceRateRebuild()   // emits recovering:true, then fails attempt 1
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             engine.addedIDs.filter { $0 == device.outputID }.count > addsBeforeRebuild
         }
 
@@ -5619,7 +5619,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // Give the async bind-tail a moment to run, then assert it never touched
         // the engine for this device — no bind, no rebind, no removeOutput.
-        await pollUntil(timeout: 1) { recorder.callCount > 0 }
+        await pollUntil { recorder.callCount > 0 }
         // No scheduled interval here — pure async-settle margin at the 100ms floor.
         try? await Task.sleep(nanoseconds: 100_000_000)
         #expect(engine.streamAddCalls.filter { $0.0 == device.outputID }.isEmpty,
@@ -6283,14 +6283,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // The scripted tap fails twice (processNotYetAudible) before succeeding —
         // the bounded retry must chase it down to a 3rd, successful attempt with
         // NO further updateAppRoutes call.
-        await pollUntil(timeout: 5) { tap.attemptsMade >= 3 }
+        await pollUntil { tap.attemptsMade >= 3 }
         #expect(tap.attemptsMade >= 3,
                                     "2 scripted failures + at least 1 successful retry, all self-driven")
 
         // Once recovered, the app rejoins the live mixer topology: the device
         // gets bound to a per-app stream — which only happens for a bundle ID
         // NOT excluded as dead.
-        await pollUntil(timeout: 5) { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
         #expect(engine.streamAddCalls.contains { $0.0 == device.outputID },
                       "after the bounded retry recovers the capture, the device must be bound to the app's stream")
     }
@@ -6324,11 +6324,11 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // 7 scripted failures + 1 success = at least 8 attempts — strictly past
         // the OLD hardcoded cap of 5, proving the retry is no longer bounded.
-        await pollUntil(timeout: 5) { tap.attemptsMade >= 8 }
+        await pollUntil { tap.attemptsMade >= 8 }
         #expect(tap.attemptsMade >= 8,
                                     "retries must continue past the old cap of 5 attempts")
 
-        await pollUntil(timeout: 5) { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
         #expect(engine.streamAddCalls.contains { $0.0 == device.outputID },
                       "the eventual success must still rejoin the live mixer topology")
     }
@@ -6361,7 +6361,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
 
         // Let a couple of retries happen first.
-        await pollUntil(timeout: 5) { tap.attemptsMade >= 2 }
+        await pollUntil { tap.attemptsMade >= 2 }
 
         // De-route: drop the route entirely.
         backend.updateAppRoutes([])
@@ -6380,29 +6380,27 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                        "no further retry may be scheduled once the route has been dropped")
     }
 
-    /// Bug 1 fix (tap resurrection race): a `.processNotYetAudible` retry
-    /// scheduled BEFORE a de-route must not resurrect a live (muted) Core Audio
-    /// tap for a bundle ID nobody wants any more if it fires AFTER the de-route
-    /// and happens to succeed (the app started playing audio in the interim).
+    /// A `.device` → `.noRedirect` demotion must cancel the bundle's pending
+    /// `.processNotYetAudible` retry, so a de-routed app's muted tap can never
+    /// restart itself behind the user's back.
     ///
-    /// Models the scripted-tap setup of `testProcessNotYetAudibleRetriesStopOnDeRoute`
-    /// above, but de-routes via a DESTINATION CHANGE (`.device` → `.noRedirect`,
-    /// bundle ID kept `stillPresent` in the route table) rather than removing the
-    /// route entirely. A full removal (`updateAppRoutes([])`) races
-    /// `updateAppRoutes`'s own `pendingRetries` cleanup (best-effort
-    /// `DispatchWorkItem.cancel()`, applied only to bundle IDs no longer present
-    /// in the table AT ALL) — which is exactly why
-    /// `testProcessNotYetAudibleRetriesStopOnDeRoute` only TOLERATES an
-    /// already-in-flight retry rather than asserting one occurs. This test needs
-    /// the retry to deterministically survive the de-route so it can prove what
-    /// happens when it lands, so it keeps "com.foo" in the table with
-    /// `.noRedirect`: that still clears `routedBundleIDs`/`localBundleIDs` (the
-    /// fix's membership guard) and still fully removes the coordinator's slot via
-    /// the ordinary `captureToStop` diff — but does NOT touch `pendingRetries`,
-    /// so the scheduled retry is guaranteed to still fire.
-    @Test func orphanedCaptureAfterDeRouteIsStoppedNotAccepted() async {
+    /// The route row stays `stillPresent` in the table here, so the cancellation
+    /// under test is R5's (keyed on the CAPTURE UNION), not the T8 cleanup's
+    /// (keyed on table membership, and therefore blind to a demotion).
+    ///
+    /// TRAP: this looks like the place to test
+    /// `handlePerAppCaptureHealthChange`'s `isOrphan` branch by letting the
+    /// retry fire after the demotion and asserting it is refused. R5 makes that
+    /// unreachable — no capture ever lands — and a wait for one that fails OPEN
+    /// leaves every assertion after it passing vacuously. The `isOrphan` branch
+    /// has no test of its own; it still guards a real production race, since
+    /// R5's `cancel()` cannot stop a work item that has already begun. Roadmap
+    /// 073 covers restoring it.
+    @Test func deRouteCancelsThePendingRetryRatherThanLettingItResurrectTheTap() async {
         // Fails once (`.processNotYetAudible`), then succeeds — the single
-        // failure is what schedules the retry that must survive the de-route.
+        // failure is what schedules the retry. The scripted SUCCESS is what
+        // makes the assertion meaningful: were the retry not cancelled it would
+        // fire and take, so a still-idle coordinator cannot be luck.
         let tap = FlakyThenSucceedsTap(failuresBeforeSuccess: 1)
         let perAppCapture = PerAppCaptureCoordinator(
             makeTap: { tap }, processResolver: singleProcessResolver(["com.foo": 4242]), muteBehavior: .mutedWhenTapped)
@@ -6428,12 +6426,12 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // Let the first (scripted) failure happen — its retry is now scheduled
         // ~0.3s out.
-        await pollUntil(timeout: 5) { tap.attemptsMade >= 1 }
+        await pollUntil { tap.attemptsMade >= 1 }
 
         // De-route WITHOUT removing "com.foo" from the table (destination ->
-        // .noRedirect instead of dropping the AppRoute entirely) — see the test's
-        // doc comment for why this is what makes the retry's survival
-        // deterministic rather than a tolerated race. Snapshot the per-device
+        // .noRedirect instead of dropping the AppRoute entirely), so the T8
+        // cleanup — which keys on table membership — cannot be what cancels the
+        // retry, and only R5's union-keyed cancellation can. Snapshot the per-device
         // bind count here: `updateAppRoutes` binds a device OPTIMISTICALLY from
         // route-table membership alone (see `testAppRouteBindsDeviceToNonZeroStream`),
         // so this device already has ONE bind from the very first
@@ -6445,30 +6443,25 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             AppRoute(bundleID: "com.foo", displayName: "Foo", destination: .noRedirect),
         ])
 
-        // The scheduled retry fires AFTER the de-route and SUCCEEDS per the
-        // script — this is the resurrection race: a capture lands, in a
-        // brand-new coordinator slot, for a bundle ID nobody wants any more.
-        await pollUntil(timeout: 5) { tap.attemptsMade >= 2 }
+        // R5 cancels the pending retry the moment the bundle leaves the capture
+        // union, which a `.device` -> `.noRedirect` demotion does. So the retry
+        // never fires and no second attempt is ever made.
+        await pollUntil { !backend.test_hasPendingRetry(bundleID: "com.foo") }
+        // Well past the 0.3s the cancelled retry was due at. A sleep, not
+        // `SuiteWait.settle` — this test is async, where settle does nothing.
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        #expect(tap.attemptsMade == 1,
+                "R5 must cancel the pending retry at the de-route — a second attempt means a de-routed app's muted tap can restart itself")
 
-        // The fix's orphan guard must stop it right back, not accept it. The stop
-        // is dispatched onto `captureControlQueue` (async — calling it inline
-        // from inside the coordinator's own state-change callback would deadlock
-        // its queue, see the `isOrphan` branch of `handlePerAppCaptureHealthChange`),
-        // so this must be polled rather than asserted synchronously.
-        await pollUntil(timeout: 5) {
-            if case .idle = perAppCapture.state(for: "com.foo") { return true }
-            return false
-        }
+        // Nothing ever recaptured, so the coordinator slot must be idle.
         if case .idle = perAppCapture.state(for: "com.foo") {} else {
-            Issue.record("an orphaned recapture (bundle ID no longer routed or local) must be stopped, not accepted — it stayed \(perAppCapture.state(for: "com.foo"))")
+            Issue.record("a de-routed bundle must leave no live coordinator slot — it stayed \(perAppCapture.state(for: "com.foo"))")
         }
 
-        // No leaked engine binding either: the orphaned capture landing must never
-        // cause a FRESH per-app stream bind for the de-routed device — the orphan
-        // branch returns before `republishMixerTopology()`/
-        // `resetAirPlaySessionForRoutedApp` ever run, so the mixer/engine never
-        // hear about this capture at all.
-        #expect(engine.streamAddCalls.filter { $0.0 == device.outputID }.count == bindCountAtDeRoute, "an orphaned recapture must never cause a fresh per-app stream bind for the de-routed device")
+        // And no leaked engine binding: with no capture landing there is nothing
+        // to reach `republishMixerTopology()`/`resetAirPlaySessionForRoutedApp`,
+        // so the de-routed device must gain no fresh per-app stream bind.
+        #expect(engine.streamAddCalls.filter { $0.0 == device.outputID }.count == bindCountAtDeRoute, "a de-routed device must gain no fresh per-app stream bind")
     }
 
     /// Bookkeeping-hygiene fix: `everCapturedBundleIDs` must forget a bundle
@@ -6631,7 +6624,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // `engine.streamAddCalls` poll above waits on. Wait for it explicitly:
         // `fireDeviceChange()` is a silent no-op until it exists (see
         // `RebindTriggerTap.isArmed`).
-        await pollUntil(timeout: 5) { tap.isArmed }
+        await pollUntil { tap.isArmed }
         #expect(tap.isArmed, "the per-app capture must have installed its device-change hook before a recapture is fired — otherwise fireDeviceChange() does nothing and every assertion below fails against an empty collection")
 
         // A tap rebuild with no death in between is a "recapture" — this drives
@@ -6639,7 +6632,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         tap.fireDeviceChange()
 
         // Attempt 1 is recorded (and fails, since addFailures is still set).
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             engine.streamAddCalls.filter { $0.0 == device.outputID }.count > firstBindCount
         }
 
@@ -6647,7 +6640,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         engine.addFailures = []
 
         // Attempt 2 (or later, bounded by maxRebindRecoveryAttempts=3) succeeds.
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             engine.streamAddCalls.filter { $0.0 == device.outputID }.count > firstBindCount + 1
         }
         let finalCount = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
@@ -6694,13 +6687,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // `engine.streamAddCalls` poll above waits on. Wait for it explicitly:
         // `fireDeviceChange()` is a silent no-op until it exists (see
         // `RebindTriggerTap.isArmed`).
-        await pollUntil(timeout: 5) { tap.isArmed }
+        await pollUntil { tap.isArmed }
         #expect(tap.isArmed, "the per-app capture must have installed its device-change hook before a recapture is fired — otherwise fireDeviceChange() does nothing and every assertion below fails against an empty collection")
 
         tap.fireDeviceChange()
 
         // Both bounded attempts (2) get recorded (and fail).
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             engine.streamAddCalls.filter { $0.0 == device.outputID }.count >= firstBindCount + 2
         }
         let countAtCeiling = engine.streamAddCalls.filter { $0.0 == device.outputID }.count
@@ -7953,7 +7946,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         discovery.fire(.updated(offline))
         discovery.fire(.updated(device))
 
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
         let d = backend.devices.first { $0.id == device.id }
@@ -7991,7 +7984,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         engine.addFailures = []
         backend.retryOutput(device.id)
 
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
         let d = backend.devices.first { $0.id == device.id }
@@ -8728,14 +8721,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // First attempt: the app is routed but silent, so the tap fails and no
         // exclusion refresh has happened yet — this is exactly the window in which
         // the app's audio would leak into the system mix if it started now.
-        await pollUntil(timeout: 5) { tap.attemptsMade >= 1 }
+        await pollUntil { tap.attemptsMade >= 1 }
         #expect(!capture.refreshedBundleIDs.contains("com.notyet.audible"),
                 "nothing should have refreshed yet — the app has never been audible")
 
         // The app starts playing: the retry's tap succeeds, capture health goes
         // `.capturing`, and THAT is the edge which must re-resolve the exclusion.
-        await pollUntil(timeout: 5) { tap.attemptsMade >= 2 }
-        await pollUntil(timeout: 5) { capture.refreshedBundleIDs.contains("com.notyet.audible") }
+        await pollUntil { tap.attemptsMade >= 2 }
+        await pollUntil { capture.refreshedBundleIDs.contains("com.notyet.audible") }
         #expect(capture.refreshedBundleIDs.contains("com.notyet.audible"),
                 Comment(rawValue: "the instant a routed app's per-app tap reaches .capturing, the whole-system tap's exclusion must re-resolve — its pid only became translatable now, so until this refresh the app is double-sent to its device AND the system mix"))
     }
@@ -8882,7 +8875,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             } after: { discovery.fire(.appeared(device)) }
         }
         backend.setOutputSet(Set(devices.map(\.id)))
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             devices.allSatisfy { engine.liveStream(of: $0.outputID) != nil }
         }
 
@@ -8892,7 +8885,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // The loser is the largest id: every group has one member, so admission
         // runs in ascending member order and the sixth is left out.
         let loser = devices.max { $0.id < $1.id }!
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.filter { $0.eqBypassReason != nil }.count == 1
         }
 
@@ -8934,7 +8927,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             } after: { discovery.fire(.appeared(device)) }
         }
         backend.setOutputSet(Set(devices.map(\.id)))
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             devices.allSatisfy { engine.liveStream(of: $0.outputID) != nil }
         }
         for (index, device) in devices.enumerated() {
@@ -8943,11 +8936,11 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         let loser = devices.max { $0.id < $1.id }!
         let departing = devices.first!
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.contains { $0.id == loser.id && $0.eqBypassReason == .streamBudget }
         }
         try #require(backend.devices.first { $0.id == loser.id }?.eqBypassReason == .streamBudget)
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             (engine.liveStream(of: departing.outputID) ?? 0) >= EQStreamAllocator.idBase
         }
         let departingStream = try #require(engine.liveStream(of: departing.outputID))
@@ -8956,13 +8949,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // only leave the plan — the loser's admission gets a fresh one.
         backend.setOutputSet(Set(devices.dropFirst().map(\.id)))
 
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == loser.id }?.eqBypassReason == nil
         }
         #expect(backend.devices.first { $0.id == loser.id }?.eqBypassReason == nil,
                 "the freed stream must un-bypass the device the budget had refused")
 
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             capture.eqPlans.last?.streams.contains { $0.streamID == departingStream } == false
         }
         #expect(capture.eqPlans.last?.streams.contains { $0.streamID == departingStream } == false,
@@ -8991,7 +8984,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             } after: { discovery.fire(.appeared(device)) }
         }
         backend.setOutputSet([scrubbed.id, untouched.id])
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             [scrubbed, untouched].allSatisfy { engine.liveStream(of: $0.outputID) != nil }
         }
 
@@ -8999,13 +8992,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // expressible in place and never recomputes topology.
         backend.setEQ(DeviceEQ(bassDB: 3), for: scrubbed.id, commit: true)
         backend.setEQ(DeviceEQ(trebleDB: -3), for: untouched.id, commit: true)
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             [scrubbed, untouched].allSatisfy {
                 (engine.liveStream(of: $0.outputID) ?? 0) >= EQStreamAllocator.idBase
             }
         }
         let otherStream = try #require(engine.liveStream(of: untouched.outputID))
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             capture.eqPlans.last?.streams
                 .contains { $0.streamID == otherStream && $0.processor != nil } == true
         }
@@ -9014,7 +9007,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let publishedPlans = capture.eqPlans.count
 
         backend.setEQ(DeviceEQ(bassDB: 4), for: scrubbed.id, commit: false)
-        await pollUntil(timeout: 5) { capture.eqPlans.count > publishedPlans }
+        await pollUntil { capture.eqPlans.count > publishedPlans }
         #expect(capture.eqPlans.count > publishedPlans, "the scrub must still reach the audio")
 
         let after = capture.eqPlans.last?.streams.first { $0.streamID == otherStream }?.processor
@@ -9045,7 +9038,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             } after: { discovery.fire(.appeared(device)) }
         }
         backend.setOutputSet([scrubbed.id, untouched.id])
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             [scrubbed, untouched].allSatisfy { engine.liveStream(of: $0.outputID) != nil }
         }
 
@@ -9053,13 +9046,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // and the drag is expressible in place.
         backend.setEQ(DeviceEQ(bassDB: 3), for: scrubbed.id, commit: true)
         backend.setEQ(DeviceEQ(trebleDB: -3), for: untouched.id, commit: true)
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             [scrubbed, untouched].allSatisfy {
                 (engine.liveStream(of: $0.outputID) ?? 0) >= EQStreamAllocator.idBase
             }
         }
         let ownStream = try #require(engine.liveStream(of: scrubbed.outputID))
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             capture.eqPlans.last?.streams
                 .contains { $0.streamID == ownStream && $0.processor != nil } == true
         }
@@ -9068,7 +9061,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let publishedPlans = capture.eqPlans.count
 
         backend.setEQ(DeviceEQ(bassDB: 4), for: scrubbed.id, commit: false)
-        await pollUntil(timeout: 5) { capture.eqPlans.count > publishedPlans }
+        await pollUntil { capture.eqPlans.count > publishedPlans }
         #expect(capture.eqPlans.count > publishedPlans, "the scrub must still reach the audio")
 
         let after = capture.eqPlans.last?.streams.first { $0.streamID == ownStream }?.processor
@@ -9121,14 +9114,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let eq = DeviceEQ(bassDB: 5)
         backend.setEQ(eq, for: device.id, commit: true)
         backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.eqBypassReason == .perAppRouting
         }
         #expect(backend.devices.first { $0.id == device.id }?.eqBypassReason == .perAppRouting,
                 "a per-app-claimed device's stored tone is not being applied, and must say why")
 
         backend.updateAppRoutes([])
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             backend.devices.first { $0.id == device.id }?.eqBypassReason == nil
         }
         #expect(backend.devices.first { $0.id == device.id }?.eqBypassReason == nil,
@@ -9153,7 +9146,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         defer { backend.stop() }
 
         backend.setEQ(DeviceEQ(bassDB: 4), for: device.id, commit: true)
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             (engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase
         }
         try #require((engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase,
@@ -9161,12 +9154,12 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let rebindsBeforeSleep = engine.rebindCalls.count
 
         backend.handleSystemWillSleep()
-        await pollUntil(timeout: 5) { engine.liveStream(of: device.outputID) == nil }
+        await pollUntil { engine.liveStream(of: device.outputID) == nil }
         try #require(engine.liveStream(of: device.outputID) == nil,
                      "precondition: sleep really tore the session down")
 
         backend.handleSystemDidWake()
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             (engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase
         }
         let woken = engine.liveStream(of: device.outputID) ?? 0
@@ -9175,7 +9168,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(engine.rebindCalls.count > rebindsBeforeSleep,
                 "the wake re-add lands on stream 0, so the move must be a FRESH engine rebind")
 
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             capture.eqPlans.last?.streams.contains { $0.streamID == woken } == true
         }
         #expect(capture.eqPlans.last?.streams
@@ -9350,7 +9343,7 @@ extension SerializedSharedState {
             tap.push(fingerprintedBuffer(fill: 0xAA, frames: 200, atSecond: i))
         }
 
-        await pollUntil(timeout: 5) { !driftLines().isEmpty }
+        await pollUntil { !driftLines().isEmpty }
         #expect(!driftLines().isEmpty, "a genuinely degraded cadence snapshot must log write_cadence_drift once the sample interval is crossed")
         #expect(driftLines().allSatisfy { $0.contains("\"path\":\"perApp\"") },
                       "the per-app call site must tag its own path — EngineSink's mirror in NativeCaptureCoordinator.swift tags \"wholeSystem\", and the two must stay distinguishable")
@@ -9519,7 +9512,7 @@ extension SerializedSharedState {
 
         // The demotion's trailing unbind resolves through the verify-first
         // settle and finds the session already on 0 — zero extra engine ops.
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             telemetryLines(box, evt: "unbind_downgraded", device: device.id)
                 .contains { $0["settled"] as? String == "noop" }
         }
@@ -9601,7 +9594,7 @@ extension SerializedSharedState {
 
         // The demotion's `.unbind` fires while the rebind is held → deferred,
         // not executed (case 3): the converge's outcome is unknowable now.
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             !telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty
         }
         #expect(!telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty,
@@ -9611,7 +9604,7 @@ extension SerializedSharedState {
 
         // Converge completes; its release consumes the pending settle; the
         // verify reads live == 0 → success with zero engine ops.
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             telemetryLines(box, evt: "unbind_downgraded", device: device.id)
                 .contains { $0["settled"] as? String == "noop" }
         }
@@ -9712,14 +9705,14 @@ extension SerializedSharedState {
         engine.flushNoOps = [device.outputID.rawValue]
         engine.addFailures = [device.outputID.rawValue]
         capture.fireDeviceRateRebuild()
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             telemetryLines(box, evt: "rebind", device: device.id)
                 .contains { $0["outcome"] as? String == "retry_scheduled" }
         }
 
         // The route lands while the recovery owns the device across its backoff.
         backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-        await pollUntil(timeout: 5) { backend.test_scopeConflict(deviceID: device.id) != nil }
+        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
         #expect(backend.test_scopeConflict(deviceID: device.id) != nil,
                 "the route must be demoted — the device is still selected")
         #expect(!engine.ops.contains { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") },
@@ -9729,7 +9722,7 @@ extension SerializedSharedState {
         // chain reaches a terminal exit, the release re-drives the route.
         backend.setOutputSet([])
         engine.addFailures = []
-        await pollUntil(timeout: 10) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
         #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
                 "after the deselect the demoted route must re-engage by itself")
         let bindOps = engine.ops.filter {
@@ -9778,7 +9771,7 @@ extension SerializedSharedState {
         await pollUntil { activator.holding }
         activator.release()
 
-        await pollUntil(timeout: 5) { engine.liveStream(of: device.outputID) == 0 }
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
         #expect(engine.liveStream(of: device.outputID) == 0,
                 "converge must arbitrate on engine truth and move the session to 0")
         #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
@@ -9790,7 +9783,7 @@ extension SerializedSharedState {
                 "the mid-op claim must surface as a queryable demotion")
         // The demotion's deferred unbind settles with a no-op verify — no
         // surviving per-app engine claim.
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             telemetryLines(box, evt: "unbind_downgraded", device: device.id)
                 .contains { $0["settled"] as? String == "noop" }
         }
@@ -9881,18 +9874,18 @@ extension SerializedSharedState {
         backend.setOutputSet([device.id])
         // Converge's boundStreamId read is FORCED to see nil (the per-app write
         // is still held), so it falls to the plain stream-0 add — held in turn.
-        await pollUntil(timeout: 5) { wsHold.entered }
+        await pollUntil { wsHold.entered }
 
         perAppHold.open()                        // per-app session lands: live → 1
         await pollUntil { engine.liveStream(of: device.outputID) == 1 }
         wsHold.open()                            // converge's add: silent .alreadyBound no-op
 
-        await pollUntil(timeout: 5) { engine.liveStream(of: device.outputID) == 0 }
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
         #expect(engine.liveStream(of: device.outputID) == 0,
                 "the settling unbind must heal the silent-no-op corruption back to stream 0")
         #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
                 "the heal must be the verify-first settle's rebindOutput(_, 0)")
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             telemetryLines(box, evt: "unbind_downgraded", device: device.id)
                 .contains { $0["settled"] as? String == "rebound" }
         }
@@ -9941,7 +9934,7 @@ extension SerializedSharedState {
         }
 
         backend.setOutputSet([device.id])
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             !telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty
         }
         #expect(!telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty,
@@ -9952,7 +9945,7 @@ extension SerializedSharedState {
         // provably queued AHEAD of anything the release later enqueues.
         activator.arm()
         backend.setOutputSet([])
-        await pollUntil(timeout: 5) { activator.holding }
+        await pollUntil { activator.holding }
         #expect(activator.holding,
                 "precondition: the restored route's bind must be parked pre-gate before the release runs")
 
@@ -9960,7 +9953,7 @@ extension SerializedSharedState {
         // now-undesired session down, and the release consumes the deferred
         // settle — which must be DROPPED, not re-enqueued behind the parked bind.
         rebindHold.open()
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             telemetryLines(box, evt: "unbind_redrive", device: device.id)
                 .contains { $0["outcome"] as? String == "dropped_route_reengaged" }
         }
@@ -10015,7 +10008,7 @@ extension SerializedSharedState {
         // `.routedApps` event that's emitted from the same `stateQueue.sync` block
         // — same pattern as
         // `testRebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt`.
-        await pollUntil(timeout: 5) { !bindFailedLines().isEmpty }
+        await pollUntil { !bindFailedLines().isEmpty }
         #expect(!bindFailedLines().isEmpty,
                 "a failed bind must log a Telemetry(.airplay, \"bind_failed\", ...) line")
         #expect(bindFailedLines().first?["op"] as? String == "bind",
@@ -10124,18 +10117,18 @@ extension SerializedSharedState {
         // `engine.streamAddCalls` poll above waits on. Wait for it explicitly:
         // `fireDeviceChange()` is a silent no-op until it exists (see
         // `RebindTriggerTap.isArmed`).
-        await pollUntil(timeout: 5) { tap.isArmed }
+        await pollUntil { tap.isArmed }
         #expect(tap.isArmed, "the per-app capture must have installed its device-change hook before a recapture is fired — otherwise fireDeviceChange() does nothing and every assertion below fails against an empty collection")
 
         // Two recaptures, back-to-back, no `await` in between.
         tap.fireDeviceChange()
         tap.fireDeviceChange()
 
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             rebindLines(gen: 2).contains { $0["outcome"] as? String == "retry_scheduled" }
         }
         engine.addFailures = []
-        await pollUntil(timeout: 5) {
+        await pollUntil {
             rebindLines(gen: 2).contains { $0["outcome"] as? String == "succeeded" }
         }
 
@@ -10211,7 +10204,7 @@ extension SerializedSharedState {
                     && $0["device"] as? String == device.id
             }
         }
-        await pollUntil(timeout: 5) { !ptpActivateLines().isEmpty }
+        await pollUntil { !ptpActivateLines().isEmpty }
         let lines = ptpActivateLines()
         #expect(lines.count == 1, "ptp_activate must fire exactly once per gate run")
         #expect(lines.first?["outcome"] as? String == "timingPortsUnavailable")

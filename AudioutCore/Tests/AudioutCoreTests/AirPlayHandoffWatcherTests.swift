@@ -300,9 +300,12 @@ import Testing
         watcher.start()
 
         // Poll for stabilization at 5 attempts (backoff sequence: 0.02, 0.04,
-        // 0.08, 0.16, 0.32 = ~0.62s total). Deadline is ~8x the sum (R4 #6) so
-        // suite contention cannot time the poll out before attempt 6 would fire.
-        let deadline = Date().addingTimeInterval(5.0)
+        // 0.08, 0.16, 0.32 = ~0.62s total). TRAP: the deadline must be the
+        // shared hang-stop, not a multiple of that sum — what starves this loop
+        // is scheduler latency under suite contention, which no margin over the
+        // backoff can cover. A deadline that expires first ends the loop at 5
+        // spawns, and the assertion below then reads as a give-up that never ran.
+        let deadline = Date().addingTimeInterval(SuiteWait.timeout)
         var lastCount = fake.startCallCount
         var stableCount = 0
         while Date() < deadline {

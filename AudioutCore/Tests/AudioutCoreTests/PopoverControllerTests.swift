@@ -1545,7 +1545,7 @@ import AudioutProtocol
         #expect(popover.test_appRowCount == 2, "one AppRowView per route")
         #expect(popover.test_appRowBundleIDs() == ["com.example.music", "com.example.safari"], "rows render in stable appRoutes order")
         // The card exists and is the LAST card (after System + Selected Devices).
-        #expect(popover.test_isCardCollapsed(title: "App Exceptions") != nil, "the Applications card is present")
+        #expect(popover.test_isCardCollapsed(title: "App Routing") != nil, "the Applications card is present")
     }
 
     /// Empty state: no routes ⇒ the card is still present with zero app rows (just
@@ -1555,7 +1555,7 @@ import AudioutProtocol
         let (popover, _, _) = try await makePopover(appRouting: appRouting,
                                                      runningAppsProvider: routedApps)
         #expect(popover.test_appRowCount == 0, "no routes ⇒ no app rows")
-        #expect(popover.test_isCardCollapsed(title: "App Exceptions") != nil, "the card is still present as the empty state (Add row only)")
+        #expect(popover.test_isCardCollapsed(title: "App Routing") != nil, "the card is still present as the empty state (Add row only)")
     }
 
     /// A row's destination menu leads with the standalone "No Redirect" entry
@@ -2137,7 +2137,7 @@ import AudioutProtocol
         let (popoverNone, _, _) = try await makePopover(appRouting: none,
                                                         runningAppsProvider: routedApps)
         popoverNone.test_simulateOpen()
-        #expect(popoverNone.test_isCardCollapsed(title: "App Exceptions") == true, "no routes ⇒ Applications starts collapsed")
+        #expect(popoverNone.test_isCardCollapsed(title: "App Routing") == true, "no routes ⇒ Applications starts collapsed")
 
         // A route on the neutral "No Redirect" default ⇒ NOW expanded (C5 change).
         let neutral = tempAppRoutingController()
@@ -2145,7 +2145,7 @@ import AudioutProtocol
         let (popoverNeutral, _, _) = try await makePopover(appRouting: neutral,
                                                            runningAppsProvider: routedApps)
         popoverNeutral.test_simulateOpen()
-        #expect(popoverNeutral.test_isCardCollapsed(title: "App Exceptions") == false, "any route (even .noRedirect) ⇒ Applications starts expanded (C5)")
+        #expect(popoverNeutral.test_isCardCollapsed(title: "App Routing") == false, "any route (even .noRedirect) ⇒ Applications starts expanded (C5)")
 
         // A redirected app ⇒ expanded on open (unchanged).
         let redirected = tempAppRoutingController()
@@ -2154,7 +2154,7 @@ import AudioutProtocol
         let (popover, _, _) = try await makePopover(appRouting: redirected,
                                                      runningAppsProvider: routedApps)
         popover.test_simulateOpen()
-        #expect(popover.test_isCardCollapsed(title: "App Exceptions") == false, "≥1 redirected app ⇒ Applications starts expanded")
+        #expect(popover.test_isCardCollapsed(title: "App Routing") == false, "≥1 redirected app ⇒ Applications starts expanded")
     }
 
     // MARK: Live level dispatch (task T8, extends the T5 meter wiring)

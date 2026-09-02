@@ -473,7 +473,7 @@ public final class DeviceRowView: NSView {
     ///   - appTintColors: display name → `AppTetherColor`-derived tint for
     ///     every app the HOST currently has a route for (Warm Signal v4.1
     ///     CORRECTIONS, extending T7/item 7) — the same map the host builds
-    ///     for the matching App Exceptions row, so both ends of a tether
+    ///     for the matching App Routing row, so both ends of a tether
     ///     agree on the color. Only names appearing in ``feedAppNames`` are
     ///     ever looked up; an unmapped name falls back to
     ///     `AppTetherColor.neutralFallback` (see ``appSegmentColor(for:)``).

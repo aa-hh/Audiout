@@ -136,12 +136,17 @@ import CoreAudio
     /// gain) or an ordinary settable device. Pinned explicitly rather than left to
     /// the production HAL read — on a machine where Audiout really IS the default
     /// output, that read would silently flip these tests.
-    private func makeBackend(macSelectedByDefault: Bool = false, weOwnVolume: Bool = false)
+    private func makeBackend(macSelectedByDefault: Bool = false, weOwnVolume: Bool = false,
+                             // The burst tests below shrink this; every other test keeps the
+                             // production value. The production default itself is pinned in
+                             // `NativeBackendTests`, not here.
+                             syncedLocalSettleWindow: TimeInterval = 0.5)
         -> (NativeBackend, SpySyncedLocalSink, LockedBool) {
         let backend = NativeBackend(
             engineControl: NoOpEngine(),
             discoverySource: NoOpDiscovery(),
             systemVolume: NoOpSystemVolume(),
+            syncedLocalSettleWindow: syncedLocalSettleWindow,
             aggregateControl: NoOpAggregateControl(),
             currentDefaultOutputUID: {
                 weOwnVolume ? AggregateOutputDevice.productUID : "BuiltInSpeakerDevice"
@@ -344,6 +349,127 @@ import CoreAudio
         waitFor { sink.calls.count >= 4 }
 
         #expect(sink.calls == ["start", "startObserving", "stop", "stopObserving"])
+    }
+
+    // MARK: Rapid Mac-toggle dropout regression (T3)
+    //
+    // The coalescing half of the fix (`scheduleSyncedLocalSettleLocked` /
+    // `fireSyncedLocalSettle`). The reset half lives in `NativeBackendTests`,
+    // where a real device can reach `added`: `resetAirPlaySessionForWholeSystem`
+    // is a silent no-op against `NoOpEngine`/`NoOpDiscovery`, which never put a
+    // device in `added`, so a reset assertion here would pass vacuously.
+
+    /// A rapid burst of toggle decisions, five of them well within one settle
+    /// window, must collapse into AT MOST ONE real sink transition, not one per
+    /// click. `on -> off -> on -> off -> on` (5 decisions, net ON).
+    ///
+    /// H-3: the window is 0.15 s. The burst must fit INSIDE one window for the
+    /// assertion to mean anything, and 50 ms is under plausible `stateQueue`
+    /// scheduling jitter on a loaded machine; a split burst produced a FALSE
+    /// failure.
+    @Test func rapidToggleBurstProducesAtMostOneTransition() {
+        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 0.15)
+        defer { backend.stop() }
+
+        macSelected.set(true);  backend.setOutputSet(["airplay-1"])
+        macSelected.set(false); backend.setOutputSet(["airplay-1"])
+        macSelected.set(true);  backend.setOutputSet(["airplay-1"])
+        macSelected.set(false); backend.setOutputSet(["airplay-1"])
+        macSelected.set(true);  backend.setOutputSet(["airplay-1"])   // net: ON
+
+        waitFor { !sink.calls.isEmpty }
+        // Give a wrongly-uncoalesced extra transition time to show up.
+        SuiteWait.settle(0.3)
+
+        #expect(sink.calls == ["start", "startObserving"],
+                "a rapid 5-decision burst must settle into exactly ONE transition (the trailing decision), never one per click")
+    }
+
+    /// A net-no-op burst, one that lands back on the currently-APPLIED state,
+    /// must do NOTHING at all: no sink call, because there is nothing to apply
+    /// (this is also what keeps the reset off this path in the
+    /// `NativeBackendTests` companion cases). 0.15 s window for the same jitter
+    /// headroom as the case above: the four flips must land in ONE window or the
+    /// "net" in "net no-op" is lost.
+    @Test func netNoOpBurstDoesNothing() {
+        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: true, syncedLocalSettleWindow: 0.15)
+        defer { backend.stop() }
+
+        // Settle into ON first (applied == true), same as every other test here.
+        backend.setOutputSet(["airplay-1"])
+        waitFor { !sink.calls.isEmpty }
+        #expect(sink.calls == ["start", "startObserving"])
+
+        // A burst that flips away and back to the ALREADY-applied state: net no-op.
+        macSelected.set(false); backend.setOutputSet(["airplay-1"])
+        macSelected.set(true);  backend.setOutputSet(["airplay-1"])
+        macSelected.set(false); backend.setOutputSet(["airplay-1"])
+        macSelected.set(true);  backend.setOutputSet(["airplay-1"])   // net: back to ON (already applied)
+
+        SuiteWait.settle(0.3)   // let the settle window elapse
+        #expect(sink.calls == ["start", "startObserving"],
+                "a burst that lands back on the already-applied state must call NOTHING further: no stop, no re-start")
+    }
+
+    /// `stop()` must cancel a still-pending trailing-edge settle so it can never
+    /// fire (and touch the sink, or anything else) against a torn-down backend.
+    ///
+    /// The PRIMARY assertion reads `test_hasPendingSyncedLocalSettle` directly:
+    /// with a long (1 s) settle window, the item is provably still armed right
+    /// before `stop()` and provably cleared right after. This catches dropping
+    /// the `pendingSyncedLocalSettle = nil` / `.cancel()` in `stop()`
+    /// specifically, independent of any other guard. The secondary
+    /// `sink.calls.isEmpty` check is weaker than it looks: `fireSyncedLocalSettle`
+    /// has its own `desired != applied` bail, and `stop()` resets both flags in the
+    /// same synchronous block, so even a stale settle would no-op by itself.
+    @Test func stopCancelsPendingSettle() {
+        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 1.0)
+
+        macSelected.set(true)
+        backend.setOutputSet(["airplay-1"])   // schedules a settle 1 s out
+        #expect(backend.test_hasPendingSyncedLocalSettle, "setOutputSet must have armed a pending settle")
+
+        backend.stop()                        // torn down well before it would fire
+        // `stop()` enqueues the clear on `stateQueue` (not synchronously), so this
+        // must be polled, never read once right after `stop()` returns. If it only
+        // turned false near the 1 s mark, nothing cancelled it early and it merely
+        // ran out its own clock (`fireSyncedLocalSettle` also nils it on ITS OWN
+        // fire), which is exactly the regression this case exists to catch.
+        waitFor { !backend.test_hasPendingSyncedLocalSettle }
+        #expect(!backend.test_hasPendingSyncedLocalSettle,
+                "stop() must clear the pending settle promptly, not leave it armed until its own natural deadline")
+
+        // Wait well past the settle window the pending item was armed for.
+        SuiteWait.settle(1.5)
+        #expect(sink.calls.isEmpty,
+                "stop() must cancel the pending settle: nothing may fire against a torn-down backend")
+    }
+
+    /// `stop()` must actually tear down an ALREADY-RUNNING synced-local sink, not
+    /// just reset its tracked `syncedLocalSinkEnabled`/`syncedLocalSinkApplied`
+    /// flags to `false` while leaving the real sink attached and started. Before
+    /// this fix, `stop()` force-reset those two flags without ever calling
+    /// `applySyncedLocalSinkTransition(enable: false)`: a flag/physical-state
+    /// mismatch that would double-`start()` an already-running sink if this same
+    /// instance were ever restarted and re-enabled. Proven directly against the
+    /// sink spy: `stop()` on a currently-enabled backend must append `stop` /
+    /// `stopObserving`, the same mirrored-order teardown a normal Mac-deselect
+    /// produces.
+    @Test func stopTearsDownAnAlreadyRunningSyncedLocalSink() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true, syncedLocalSettleWindow: 0.15)
+
+        backend.setOutputSet(["airplay-1"])   // Mac + AirPlay: enables the sink
+        waitFor { !sink.calls.isEmpty }
+        #expect(sink.calls == ["start", "startObserving"],
+                "precondition: the sink must be running before stop() is exercised")
+
+        backend.stop()
+        // The real teardown is ordered on `captureControlQueue`, off `stateQueue`
+        // (matching every other subsystem `stop()` tears down), so poll for it.
+        waitFor { sink.calls.count >= 4 }
+
+        #expect(sink.calls == ["start", "startObserving", "stop", "stopObserving"],
+                "stop() must physically stop/stop-observing an already-running sink, not merely reset the tracked flags out from under it")
     }
 
     // MARK: End-to-end over the GroupController → NativeBackend seam

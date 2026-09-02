@@ -6,16 +6,16 @@ import AppKit
 @testable import AudioutCore
 @testable import AudioutSettingsUI
 
-/// FIX-C: the Settings › General "Allow control from iPhone" checkbox must
+/// FIX-C: the Settings › General "Allow control from iPhone" switch must
 /// never misrepresent whether the companion LAN server is actually running.
 ///
 /// Before this fix, `GeneralSettingsViewController` rendered and wrote
 /// `AppSettings.allowRemoteControl` directly — the RAW persisted bool — while
 /// `AppDelegate` started/stopped the server from
 /// `AppSettings.resolvedAllowRemoteControl`, which lets `AUDIOUT_COMPANION`
-/// win over that same setting. With the env var set, the checkbox could show
+/// win over that same setting. With the env var set, the switch could show
 /// OFF on a fresh profile while a LAN server was running, and unchecking it
-/// did nothing — a checkbox that lies is the worst kind of security-relevant
+/// did nothing — a switch that lies is the worst kind of security-relevant
 /// UI bug. These assert the pane now reflects the EFFECTIVE (resolved) state,
 /// disables itself and explains why while an override is in force, and stays
 /// exactly as before when no override is present.
@@ -74,7 +74,7 @@ import AppKit
 
     @Test func garbageEnvValueBehavesAsNoOverride() {
         // An unrecognized env value falls back to the setting AND must not
-        // lock the checkbox — only a RECOGNIZED override may disable it.
+        // lock the switch — only a RECOGNIZED override may disable it.
         let settings = makeSettings()
         settings.allowRemoteControl = true
         let pane = makePane(settings: settings, environment: ["AUDIOUT_COMPANION": "banana"])
@@ -84,11 +84,11 @@ import AppKit
         #expect(pane.test_allowRemoteControlOverrideNote == nil)
     }
 
-    // MARK: Override present — the checkbox must be honest
+    // MARK: Override present — the switch must be honest
 
     @Test func overridePresentReflectsEffectiveValueAndDisables() {
         let settings = makeSettings()
-        // The setting says OFF; the env var forces ON. Pre-fix, the checkbox
+        // The setting says OFF; the env var forces ON. Pre-fix, the switch
         // rendered OFF (the raw setting) while the server actually ran.
         settings.allowRemoteControl = false
         let pane = makePane(settings: settings, environment: ["AUDIOUT_COMPANION": "1"])
@@ -122,7 +122,7 @@ import AppKit
         // control's action would run if somehow invoked.
         pane.test_toggleAllowRemoteControl(false)
 
-        // The checkbox bounces back to the effective (forced) value rather
+        // The switch bounces back to the effective (forced) value rather
         // than adopting the attempted state, the setting is untouched, and no
         // "changed" callback fires — nothing about reality actually changed.
         #expect(pane.test_allowRemoteControlIsOn)
@@ -131,7 +131,7 @@ import AppKit
     }
 }
 
-/// T24: the "Remembered iPhones" list under the remote-control checkbox —
+/// T24: the "Remembered iPhones" list under the remote-control switch —
 /// remembered phones render with their decision, revoking one removes it,
 /// persists the removal, and drops the live client; no controller injected
 /// (or no phones remembered) means no visible section at all.

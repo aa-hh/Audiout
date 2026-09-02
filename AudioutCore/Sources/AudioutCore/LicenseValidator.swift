@@ -83,6 +83,17 @@ public struct LicenseValidator {
                 if let maxMajor = body.maxMajor {
                     settings.licenseMaxMajor = maxMajor
                 }
+                // The companion token rides only an `.active` verdict. Any
+                // other verified status revokes it; `.active` with no token
+                // (old server, or the secret isn't configured) leaves the
+                // stored value as-is — its own expiry bounds the staleness.
+                if status == .active {
+                    if let token = body.companionToken, !token.isEmpty {
+                        settings.companionToken = token
+                    }
+                } else {
+                    settings.companionToken = nil
+                }
                 completion(.verified(status))
             }
         }
@@ -92,14 +103,15 @@ public struct LicenseValidator {
     /// transport error, a non-200, or JSON that isn't the documented shape.
     /// All of those are "no answer", never "the key is bad".
     private static func parse(data: Data?, response: URLResponse?)
-        -> (status: LicenseStatus?, key: String?, maxMajor: Int?)? {
+        -> (status: LicenseStatus?, key: String?, maxMajor: Int?, companionToken: String?)? {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let data,
               let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return nil }
         return ((object["status"] as? String).flatMap(LicenseStatus.init(rawValue:)),
                 object["key"] as? String,
-                object["max_major"] as? Int)
+                object["max_major"] as? Int,
+                object["companion_token"] as? String)
     }
 
     private func finish(_ result: Result, _ completion: @escaping (Result) -> Void) {

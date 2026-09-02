@@ -98,9 +98,11 @@ public struct AppSettings {
         static let licenseCheckInURL = "license.checkInURL"
         static let licenseStatus = "license.status"
         static let licenseMaxMajor = "license.maxMajor"
+        static let companionToken = "license.companionToken"
         static let telemetryOptIn = "telemetry.optIn"
         static let telemetryAsked = "telemetry.asked"
         static let touchBarControls = "general.touchBarControls"
+        static let mixerMembershipHintDismissed = "mixer.membershipHintDismissed"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -453,6 +455,14 @@ public struct AppSettings {
         nonmutating set { defaults.set(newValue, forKey: Keys.eqAdvancedExpanded) }
     }
 
+    /// Whether the Mixer's first-run membership hint has been dismissed. Set
+    /// the first time the user toggles a speaker's membership in the Mixer;
+    /// the hint shows on every Mixer open while this is `false`.
+    public var mixerMembershipHintDismissed: Bool {
+        get { defaults.bool(forKey: Keys.mixerMembershipHintDismissed) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.mixerMembershipHintDismissed) }
+    }
+
     /// The purchase licence key, entered once from the receipt (Settings ›
     /// General, roadmap 054). `nil` when unset — Audiout is fully functional
     /// without one (the Ardour model: the binary is what's sold, never a
@@ -463,7 +473,10 @@ public struct AppSettings {
         get { defaults.string(forKey: Keys.licenseKey) }
         nonmutating set {
             defaults.set(newValue, forKey: Keys.licenseKey)
-            if newValue == nil { licenseStatus = nil }
+            if newValue == nil {
+                licenseStatus = nil
+                companionToken = nil
+            }
         }
     }
 
@@ -501,6 +514,15 @@ public struct AppSettings {
             return stored == 0 ? nil : stored
         }
         nonmutating set { defaults.set(newValue, forKey: Keys.licenseMaxMajor) }
+    }
+
+    /// The opaque licence-server token for the companion server to forward
+    /// to approved iPhones in `welcome`, so the iOS app can unlock offline.
+    /// Written only by ``LicenseValidator``. `nil` when never issued, or
+    /// cleared alongside ``licenseKey``/``licenseStatus``.
+    public var companionToken: String? {
+        get { defaults.string(forKey: Keys.companionToken) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.companionToken) }
     }
 
     /// The license server this build talks to, from the bundle's

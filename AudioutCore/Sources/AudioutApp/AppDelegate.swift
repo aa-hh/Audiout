@@ -1099,6 +1099,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onLocalTrimEndPreview = { [weak self] keepMs in
             (self?.backend as? LocalSyncOffsetControlling)?.endLocalTrimPreview(keepMs: keepMs)
         }
+        // The Mixer's first-run hint: shown until the user's first membership
+        // toggle there, then never again.
+        popoverController.membershipHintShownProvider = { [weak self] in
+            !(self?.settings.mixerMembershipHintDismissed ?? true)
+        }
+        popoverController.onMembershipHintDismissed = { [weak self] in
+            self?.settings.mixerMembershipHintDismissed = true
+        }
         // Excluded apps (Settings › Audio) are un-routable: the popover reads this
         // to drop them from the Applications picker + rows.
         popoverController.isAppExcluded = { [weak self] bundleID in
@@ -2420,6 +2428,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // same discipline as onCommand; if we're terminating, don't answer —
         // the server teardown closes the held connection, and no decision
         // gets persisted on the way out.
+        // Read per welcome, not captured once: a licence check-in that lands
+        // after the server started still reaches the next phone to connect.
+        companionServer.companionToken = { [settings] in settings.companionToken }
         companionServer.onApprovalRequest = { [weak self] clientID, clientName, decide in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }

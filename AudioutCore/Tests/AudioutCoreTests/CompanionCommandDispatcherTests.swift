@@ -401,7 +401,7 @@ import AudioutProtocol
         ctx.appRouting.addRoute(bundleID: "com.apple.Music", displayName: "Music")
         let result = ctx.dispatcher.execute(.setAppDestination(bundleID: "com.apple.Music", kind: "device", deviceID: "office"))
         #expect(!result.applied)
-        #expect(result.refusalReason?.contains("Main Out") == true)
+        #expect(result.refusalReason?.contains("Main Audio") == true)
         #expect(ctx.appRouting.appRoutes.first?.destination == .noRedirect, "never applied")
     }
 

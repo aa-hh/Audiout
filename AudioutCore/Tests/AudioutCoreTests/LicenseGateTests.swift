@@ -233,6 +233,7 @@ import Testing
         let settings = settings()
         var passed = 0
         let content = makeContent(settings, Transport(), onPassed: { passed += 1 })
+        content.pasteboardAccessIsAlwaysAllowed = { true }
         content.pasteboardString = { "  \(Self.key)\n" }
         content.test_arrive()
 
@@ -247,11 +248,75 @@ import Testing
     @MainActor
     @Test func unrelatedClipboardIsIgnored() async {
         let content = makeContent(settings(), Transport())
+        content.pasteboardAccessIsAlwaysAllowed = { true }
         content.pasteboardString = { "https://example.com" }
         content.test_arrive()
 
         #expect(content.test_keyText.isEmpty)
         #expect(content.test_resultText == nil)
+    }
+
+    /// The READ is the thing that costs the user a system paste alert, so this
+    /// counts reads rather than results: unless the app is already allowed to
+    /// read the clipboard, arrival must not touch it at all.
+    @MainActor
+    @Test func arrivalNeverReadsTheClipboardWithoutAlwaysAllow() async {
+        let content = makeContent(settings(), Transport())
+        var reads = 0
+        content.pasteboardAccessIsAlwaysAllowed = { false }
+        content.pasteboardString = { reads += 1; return Self.key }
+        content.test_arrive()
+
+        #expect(reads == 0)
+        #expect(content.test_keyText.isEmpty)
+        #expect(content.test_resultText == nil)
+    }
+
+    /// The click is the gesture that earns the read: it fills the field even
+    /// where arrival may not look, replaces what was typed, and still leaves
+    /// the submitting to the buyer.
+    @MainActor
+    @Test func pasteKeyFillsFromTheClipboardOnClick() async {
+        let settings = settings()
+        var passed = 0
+        let content = makeContent(settings, Transport(), onPassed: { passed += 1 })
+        content.pasteboardAccessIsAlwaysAllowed = { false }
+        content.pasteboardString = { "  \(Self.key)\n" }
+        content.test_setKeyText("AUDT-OLD")
+        content.test_tapPasteKey()
+
+        #expect(content.test_keyText == Self.key)
+        #expect(content.test_resultText == "From your clipboard")
+        #expect(passed == 0)
+        #expect(settings.licenseKey == nil)
+    }
+
+    /// A clipboard with no key says so in the one gutter and changes nothing
+    /// else.
+    @MainActor
+    @Test func pasteKeyWithoutAKeySaysSo() async {
+        let content = makeContent(settings(), Transport())
+        content.pasteboardAccessIsAlwaysAllowed = { false }
+        content.pasteboardString = { "https://example.com" }
+        content.test_tapPasteKey()
+
+        #expect(content.test_keyText.isEmpty)
+        #expect(content.test_resultText == "No key on the clipboard. It starts with AUDT-.")
+    }
+
+    /// While the resend question borrows the field there is nothing to paste
+    /// into, so the link rests, greyed rather than hidden, because hiding it
+    /// would collapse the row and move the link beside it.
+    @MainActor
+    @Test func pasteKeyRestsDuringTheLostKeyDetour() async {
+        let content = makeContent(settings(), Transport())
+        #expect(content.test_pasteKeyIsEnabled)
+
+        content.test_tapLostKey()
+        #expect(!content.test_pasteKeyIsEnabled)
+
+        content.test_tapLostKey()
+        #expect(content.test_pasteKeyIsEnabled)
     }
 
     /// "I lost my key" morphs the SAME field and button — no sheet, no second

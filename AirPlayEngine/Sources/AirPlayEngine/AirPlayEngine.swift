@@ -1890,6 +1890,8 @@ extension TransportCommand {
 /// 44.1kHz" — both numbers were wrong: 44100/352 ≈ 125.3 is the RTP *packet*
 /// cadence [`AIRPLAY_SAMPLES_PER_PACKET`], a different quantity from the
 /// write cadence measured here. See plan §B.3/F25.)
+/// The figure printed after the gap is the net drift, deficit minus
+/// overrun, the same number as `WriteCadenceSnapshot.netDriftSeconds`.
 final class WriteCadenceTracker: @unchecked Sendable {
     private let lock = NSLock()
     private let log = Logger(subsystem: "com.airplayengine", category: "write-cadence")
@@ -1974,13 +1976,13 @@ final class WriteCadenceTracker: @unchecked Sendable {
         }
 
         if deficitSinceLog >= Self.logThresholdSeconds {
-            let total = deficitSeconds
+            let total = deficitSeconds - overrunSeconds
             deficitSinceLog = 0
-            log.notice("write-cadence deficit: +\(gap, format: .fixed(precision: 4))s gap, cumulative \(total, format: .fixed(precision: 3))s")
+            log.notice("write-cadence deficit: +\(gap, format: .fixed(precision: 4))s gap, net \(total, format: .fixed(precision: 3))s")
         } else if overrunSinceLog >= Self.logThresholdSeconds {
-            let total = overrunSeconds
+            let total = deficitSeconds - overrunSeconds
             overrunSinceLog = 0
-            log.notice("write-cadence overrun: \(gap, format: .fixed(precision: 4))s gap, cumulative \(total, format: .fixed(precision: 3))s")
+            log.notice("write-cadence overrun: \(gap, format: .fixed(precision: 4))s gap, net \(total, format: .fixed(precision: 3))s")
         }
     }
 

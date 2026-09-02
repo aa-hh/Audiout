@@ -3,8 +3,8 @@
 import AppKit
 import AudioutSharedUI
 
-/// One screen tab in the header: an icon-only button whose SELECTED state is a
-/// neutral filled disc behind the glyph.
+/// One screen tab in the header: an icon-and-label button whose SELECTED state
+/// is a neutral filled wash behind the icon and its name.
 ///
 /// Three of these replace the single `NSToolbarItemGroup` the header used to
 /// carry (live review 2026-08-29). The group drew the selection natively, but
@@ -27,9 +27,13 @@ final class SurfaceTabButton: NSButton {
     /// The screen this tab switches to.
     let screen: SurfaceScreen
 
-    /// Side of the button's square hit box, and so the disc's diameter. Sized
-    /// to sit inside the unified strip alongside the bordered Pin/Quit items.
+    /// Height of the button, and so the diameter of the pill's rounded ends.
+    /// Sized to sit inside the unified strip alongside the bordered Pin/Quit
+    /// items.
     static let side: CGFloat = 28
+
+    /// Padding between the pill's curved end and the icon/label pair, each side.
+    static let horizontalInset: CGFloat = 8
 
     /// Alpha of the selected tab's ``Tokens/Color/engagedChrome`` disc. Sits at
     /// the TOP of that token's documented alpha ladder — level with the mute
@@ -51,13 +55,26 @@ final class SurfaceTabButton: NSButton {
         self.action = action
         isBordered = false
         setButtonType(.momentaryChange)
-        imagePosition = .imageOnly
         image = SurfaceToolbarController.resolveSymbol(
             screen.symbolName, fallbacks: screen.fallbackSymbolNames,
             accessibilityDescription: screen.label)
-        // The tab names lost their on-screen labels with the icon-only strip;
-        // the tooltip and the spoken label are what carry them (plus ⌘1/⌘2/⌘3,
-        // which ride the shell panel's key-equivalent seam).
+        title = screen.label
+        imagePosition = .imageLeading
+        imageHugsTitle = true
+        // The tab NAME is drawn here, inside the button, beside its icon. It
+        // cannot come from the toolbar: `toolbar.displayMode` stays `.iconOnly`
+        // because every label-showing display mode spills the names beside the
+        // strip as loose text on macOS 26+ (reproduced on 27.0). The title is
+        // plain, never attributed: `contentTintColor` skips attributed text,
+        // so only a plain title follows the selected and unselected tint that
+        // `applySelectionTreatment` sets.
+        // The name draws at the button's own 13 pt system font, not a smaller
+        // header token: `item.view = button` re-stamps the cell's font, so a
+        // font set here is gone by the first layout pass and the pill ends up
+        // sized for type it never draws. The width constraint below is read
+        // from `intrinsicContentSize` at the same 13 pt that ships.
+        // The tooltip keeps the ⌘1/⌘2/⌘3 hint, which the visible name does not
+        // carry (the shortcuts ride the shell panel's key-equivalent seam).
         toolTip = "\(screen.label) (⌘\(screen.keyEquivalent))"
         // A tab is one option out of three, not an independent switch — the
         // role the segmented group used to report, kept by hand so VoiceOver
@@ -69,7 +86,8 @@ final class SurfaceTabButton: NSButton {
         layer?.cornerRadius = Self.side / 2
         applySelectionTreatment()
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: Self.side),
+            widthAnchor.constraint(
+                equalToConstant: intrinsicContentSize.width + 2 * Self.horizontalInset),
             heightAnchor.constraint(equalToConstant: Self.side),
         ])
     }
@@ -80,7 +98,9 @@ final class SurfaceTabButton: NSButton {
     /// layer — drawing only, behavior/keyboard/VoiceOver untouched. Same idiom
     /// as the mute pill (`DeviceRowView.updateMuteTint`), including its
     /// consequence: a `CGColor` does not follow the appearance, so this
-    /// re-stamps on every light/dark or Increase-Contrast switch.
+    /// re-stamps on every light/dark or Increase-Contrast switch. The tint
+    /// reaches the tab's name as well as its glyph, because the title is plain
+    /// text rather than an attributed string.
     private func applySelectionTreatment() {
         contentTintColor = isSelected ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
         setAccessibilityValue(isSelected)
@@ -106,12 +126,12 @@ final class SurfaceTabButton: NSButton {
 /// machinery; the system toolbar provides Liquid Glass on macOS 26+, the older
 /// material below, and Reduce Transparency handling on its own):
 ///
-/// - the three screens as three separate `SurfaceTabButton` items, ICON-ONLY
-///   (`toolbar.displayMode = .iconOnly`) and deliberately so: on macOS 26+
-///   (reproduced on 27.0) every label-showing display mode spills tab names
-///   beside the strip as loose text. The tab names survive the missing labels —
-///   per-tab tooltips ("Mixer (⌘1)"), the items' `label`s (VoiceOver and the
-///   overflow menu), and ⌘1/⌘2/⌘3;
+/// - the three screens as three separate `SurfaceTabButton` items, each drawing
+///   its own NAME beside its icon. `toolbar.displayMode` stays `.iconOnly`
+///   deliberately: on macOS 26+ (reproduced on 27.0) every label-showing
+///   display mode spills the tab names beside the strip as loose text, so the
+///   names are drawn inside the buttons instead. The tooltips ("Mixer (⌘1)"),
+///   the items' `label`s (VoiceOver and the overflow menu) and ⌘1/⌘2/⌘3 stay;
 /// - the brand mark beside "Audiout" as a centered LOCKUP item
 ///   (`centeredItemIdentifiers`) — the one place the app names itself in the
 ///   header, both profiles. The mark is decorative; the wordmark is what
@@ -270,9 +290,9 @@ final class SurfaceToolbarController: NSObject {
 
     /// The toolbar's materialized items, in display order.
     var test_itemIdentifiers: [NSToolbarItem.Identifier] { toolbar.items.map(\.itemIdentifier) }
-    /// The tabs' labels, in tab order.
+    /// The names the tabs actually DRAW, in tab order.
     var test_tabLabels: [String] {
-        SurfaceScreen.allCases.compactMap { tabButtons[$0]?.screen.label }
+        SurfaceScreen.allCases.compactMap { tabButtons[$0]?.title }
     }
     /// Whether every tab resolved a non-nil symbol image.
     var test_allTabImagesResolved: Bool {
@@ -299,6 +319,8 @@ final class SurfaceToolbarController: NSObject {
     /// The centered lockup's fitting height — must sit within the strip so
     /// nothing clips. `0` when the item never built.
     var test_centeredLockupFittingHeight: CGFloat { markView?.superview?.fittingSize.height ?? 0 }
+    /// The centered lockup's fitting width: the room the tabs must leave it.
+    var test_centeredLockupFittingWidth: CGFloat { markView?.superview?.fittingSize.width ?? 0 }
     /// The horizontal padding the lockup actually applies at each end.
     var test_centeredLockupHorizontalInset: CGFloat {
         (markView?.superview as? NSStackView)?.edgeInsets.left ?? 0
@@ -311,8 +333,16 @@ final class SurfaceToolbarController: NSObject {
     var test_quitItemHasImage: Bool {
         toolbar.items.first { $0.itemIdentifier == Self.quitItemIdentifier }?.image != nil
     }
+    /// The word Quit shows, `nil` if the item never built.
+    var test_quitItemTitle: String? {
+        toolbar.items.first { $0.itemIdentifier == Self.quitItemIdentifier }?.title
+    }
     /// A tab's live view, for geometry assertions about where the strip sits.
     func test_tabView(for screen: SurfaceScreen) -> NSView? { tabButtons[screen] }
+    /// The three tabs' fitting widths added up: the room the strip asks for.
+    var test_tabStripFittingWidth: CGFloat {
+        SurfaceScreen.allCases.reduce(0) { $0 + (tabButtons[$1]?.fittingSize.width ?? 0) }
+    }
     /// Fire a tab exactly as a click on it would — a REAL click through the
     /// button's own target/action, not a hand-run selector.
     func test_selectTab(_ screen: SurfaceScreen) {
@@ -429,13 +459,10 @@ extension SurfaceToolbarController: NSToolbarDelegate {
         case Self.quitItemIdentifier:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.isBordered = true
-            // An EXIT shape, not a speaker-power shape: `power` on a panel full
-            // of speakers reads as "turn the audio off", which is the one thing
-            // this button does not do. (SF Symbols 3 — safe on the macOS 14
-            // floor; `power` stays as the fallback.)
-            item.image = Self.resolveSymbol("rectangle.portrait.and.arrow.right",
-                                            fallbacks: ["power"],
-                                            accessibilityDescription: "Quit")
+            // The word, not a glyph: the exit-door shape read as "sign out of
+            // an account" in the launch review, and `power` on a panel full of
+            // speakers reads as "turn the audio off".
+            item.title = "Quit"
             item.label = "Quit"
             item.toolTip = "Quit Audiout"
             item.target = self

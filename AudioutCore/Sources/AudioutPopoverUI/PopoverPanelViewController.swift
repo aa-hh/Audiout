@@ -83,6 +83,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// Card-note labels (`addCardNote`) keyed by section title, in add order
     /// (A1 test hook).
     private var notesByHeader: [String: [NSTextField]] = [:]
+    /// Column-title labels created by `beginCard`, keyed by section title, in
+    /// creation order (the tooltip test hook).
+    private var columnTitleLabelsByHeader: [String: [NSTextField]] = [:]
     /// The SF Symbol name currently assigned to each chevron (there's no public
     /// getter for an `NSImage`'s symbol name pre-macOS-14, so we track it for the
     /// chevron-flip test hook — set wherever the chevron image is assigned).
@@ -488,6 +491,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         headerClickRecognizersByHeader.removeAll()
         accessoryButtonsByHeader.removeAll()
         notesByHeader.removeAll()
+        columnTitleLabelsByHeader.removeAll()
     }
 
     /// Start a new section **card** whose FIRST element is a single combined
@@ -551,11 +555,16 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// column (2026-08-28 header decision; the legend used to ride the
     /// subsection header lines). The anchor is the caller's, from
     /// `PopoverColumnGrid`, so the title cannot drift off its column.
+    ///
+    /// `trailingTitleToolTip` / `secondTrailingTitleToolTip` carry each column
+    /// legend's plain-speech explanation, shown on hover only.
     func beginCard(header: String,
                    trailingTitle: String? = nil,
                    trailingTitleLeadingFromTrailing: CGFloat? = nil,
+                   trailingTitleToolTip: String? = nil,
                    secondTrailingTitle: String? = nil,
                    secondTrailingTitleTrailing: CGFloat = 0,
+                   secondTrailingTitleToolTip: String? = nil,
                    trailingAccessory accessory: HeaderAccessory? = nil,
                    collapsible: Bool = false,
                    collapsed: Bool = false,
@@ -636,6 +645,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // up with the trailing control in the rows below.
         if let trailingTitle {
             let trailingLabel = Self.makeColumnHeaderLabel(trailingTitle)
+            trailingLabel.toolTip = trailingTitleToolTip
+            columnTitleLabelsByHeader[header, default: []].append(trailingLabel)
             headerWrap.addSubview(trailingLabel)
             // Centered over the reserved column by default; left-aligned on
             // the column's own content edge when the caller says the column's
@@ -661,6 +672,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // on its column's trailing edge — see the parameter doc above.
         if let secondTrailingTitle {
             let secondLabel = Self.makeColumnHeaderLabel(secondTrailingTitle)
+            secondLabel.toolTip = secondTrailingTitleToolTip
+            columnTitleLabelsByHeader[header, default: []].append(secondLabel)
             secondLabel.alignment = .right
             headerWrap.addSubview(secondLabel)
             NSLayoutConstraint.activate([
@@ -1574,6 +1587,11 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// if none were added or `title` isn't a card.
     func test_cardNotes(title: String) -> [NSTextField] {
         notesByHeader[title] ?? []
+    }
+
+    /// The tooltips on card `title`'s column-title labels, in creation order.
+    func test_columnTitleToolTips(title: String) -> [String?] {
+        columnTitleLabelsByHeader[title]?.map(\.toolTip) ?? []
     }
 
     /// The body rows of card `title` in display order. Empty if `title` isn't a

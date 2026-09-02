@@ -13,6 +13,13 @@ import CoreAudio
 /// held-silent join (sink gain 0 before audio, 1 on resolve), dismissal
 /// finality across backend instances, the give-up watchdog, and the W2 wizard
 /// trim preview/restore/persist plumbing.
+///
+/// Nested under ``SerializedSharedState`` because these tests install the
+/// process-global `Telemetry._installTestSink(_:)`. Outside that parent they
+/// race every other suite that installs it — one suite's `nil` teardown tears
+/// another's sink out mid-test, and the loser reads back nothing.
+extension SerializedSharedState {
+
 @Suite final class NativeBackendBTAlignmentInterceptTests: IsolatedSuite {
 
     // MARK: Doubles (per-suite copies, house style)
@@ -941,3 +948,5 @@ import CoreAudio
                 "got \(sink.offsets)")
     }
 }
+
+} // extension SerializedSharedState

@@ -1218,7 +1218,12 @@ never from this target. Rules that hold it together:
   `LicenseResend` (`/v1/resend`), landing the SAME neutral line on every
   outcome — anything more specific is an email-enumeration oracle. The
   clipboard offer (`pasteboardString` seam) pre-fills an `AUDT-` string and
-  NEVER auto-submits — a clipboard is not consent.
+  NEVER auto-submits — a clipboard is not consent. It is read on the "Paste
+  key" click, or on arrival ONLY where `pasteboardAccessIsAlwaysAllowed`
+  reports macOS 15.4+'s `NSPasteboard.accessBehavior == .alwaysAllow`: an
+  ungestured read of the general pasteboard raises the system paste alert
+  there, so an unconditional read on arrival would open every launch of the
+  paid build with a permission dialog nobody asked for.
 - **The field's scenes are uniform-driven, never CAAnimation** — that is why
   they survive Reduce Motion as recomposed stills. `surge(intensity: 1)` on
   `active` is still the window's ONE bright moment; errors make the room go

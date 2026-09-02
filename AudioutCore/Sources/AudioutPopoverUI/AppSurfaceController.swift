@@ -13,7 +13,7 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
     var label: String {
         switch self {
         case .mixer: return "Mixer"
-        case .groups: return "Groups"
+        case .groups: return "Scenes"
         case .settings: return "Settings"
         }
     }

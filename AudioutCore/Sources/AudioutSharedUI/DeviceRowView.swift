@@ -1712,7 +1712,7 @@ public final class DeviceRowView: NSView {
     /// the module's one copy: ``BTSyncDrawerView`` reads it rather than
     /// re-authoring the sentence.
     static let alignTooltip =
-        "Play alignment ticks on this speaker and the rest of the group — adjust sync until they land as one (⌥ for the guided alignment)"
+        "Play alignment ticks on this speaker and the rest of the scene — adjust sync until they land as one (⌥ for the guided alignment)"
 
     /// The chip's tabular-figures label font: monospaced DIGITS so a stepper
     /// change can't make the chip's number jitter in width under the fixed

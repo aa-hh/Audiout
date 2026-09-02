@@ -659,7 +659,7 @@ public final class GroupController {
     }
 
     /// Create a group from an explicit member list + optional per-member volumes
-    /// (the window's "New Group" / "New Group from Selection" paths). Dedups by
+    /// (the window's "New Scene" / "New Scene from Selection" paths). Dedups by
     /// member set: if a group with an identical set already exists, resolves to
     /// it (`alreadyExisted == true`) rather than making a copy — in that case
     /// `iconSymbolName` is NOT applied, since the existing group's own icon
@@ -704,15 +704,15 @@ public final class GroupController {
         )
     }
 
-    /// The default name a new group is offered: "Group N" for the lowest N not
+    /// The default name a new group is offered: "Scene N" for the lowest N not
     /// already taken. `groups.count + 1` — what both call sites used — collides
-    /// after a delete: "Group 1" and "Group 2" saved, "Group 1" deleted, and the
-    /// next suggestion is "Group 2" again.
+    /// after a delete: "Scene 1" and "Scene 2" saved, "Scene 1" deleted, and the
+    /// next suggestion is "Scene 2" again.
     public func nextDefaultGroupName() -> String {
         let taken = Set(groups.map(\.name))
         var n = 1
-        while taken.contains("Group \(n)") { n += 1 }
-        return "Group \(n)"
+        while taken.contains("Scene \(n)") { n += 1 }
+        return "Scene \(n)"
     }
 
     /// Remove a group. Deactivates it if it was active, and if Main Out pointed

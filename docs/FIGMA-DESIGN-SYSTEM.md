@@ -91,7 +91,7 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
 | Component · Group Rows | `45:23` |
 | Component · Chrome | `45:24` |
 | Screen · Popover | `45:26` |
-| Screen · Groups | `45:27` |
+| Screen · Scenes | `45:27` |
 | Screen · Settings | `45:28` |
 | Screen · Onboarding | `45:29` |
 | Screen · Menu Bar | `45:30` |
@@ -144,7 +144,7 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
 | Screen | Node ID | Swift source |
 |---|---|---|
 | Popover | `68:2` | `AudioutPopoverUI/PopoverPanelViewController.swift` |
-| Groups window | `70:2` | `AudioutWindowUI/MixerWindowController.swift` + `GroupEditorViewController.swift` + `SidebarViewController.swift` |
+| Scenes window | `70:2` | `AudioutWindowUI/MixerWindowController.swift` + `GroupEditorViewController.swift` + `SidebarViewController.swift` |
 | Settings · General | `71:287` | `AudioutSettingsUI/GeneralSettingsViewController.swift` |
 | Settings · Appearance | `71:342` | `AudioutSettingsUI/AppearanceSettingsViewController.swift` |
 | Settings · Audio | `71:433` | `AudioutSettingsUI/AudioSettingsViewController.swift` |

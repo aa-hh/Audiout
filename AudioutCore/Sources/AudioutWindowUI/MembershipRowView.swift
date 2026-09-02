@@ -32,7 +32,7 @@ public final class MembershipRowView: NSView {
     ///
     /// The row has exactly TWO hosts and they are visually different surfaces:
     /// the Groups editor is a WARM pane (`Tokens.Color.canvas` family), while
-    /// "New Group" is a standard AppKit sheet on the system's own white/grey.
+    /// "New Scene" is a standard AppKit sheet on the system's own white/grey.
     /// `ember` measures ~2.34–2.48:1 on that white — the gold node would be
     /// near-invisible there — so the rail is warm-pane-only and the sheet keeps
     /// plain stock rows. Do NOT warm the Apple sheet, and do NOT introduce a
@@ -41,7 +41,7 @@ public final class MembershipRowView: NSView {
         /// The Groups window's group editor: invisible checkbox cell + a gold
         /// `MembershipBusView` node, threaded by the pane-level rail overlay.
         case warmPane
-        /// The stock "New Group" sheet: an ordinary AppKit checkbox row.
+        /// The stock "New Scene" sheet: an ordinary AppKit checkbox row.
         case systemSheet
     }
 
@@ -285,7 +285,7 @@ public final class MembershipRowView: NSView {
     /// this.
     private func updateCheckboxAccessibilityLabel() {
         checkbox.setAccessibilityLabel(
-            checked ? "Remove \(device.name) from group" : "Add \(device.name) to group")
+            checked ? "Remove \(device.name) from scene" : "Add \(device.name) to scene")
     }
 
     /// Enable or disable the membership checkbox, with an optional tooltip

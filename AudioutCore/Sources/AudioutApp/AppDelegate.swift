@@ -1803,7 +1803,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // that one IS the macOS menu-bar convention (⌘,), unrelated to this rule.
         let settings = menu.addItem(withTitle: "Settings", action: #selector(menuOpenSettings), keyEquivalent: ",")
         settings.target = self
-        let groups = menu.addItem(withTitle: "Groups", action: #selector(menuOpenGroups), keyEquivalent: "")
+        let groups = menu.addItem(withTitle: "Scenes", action: #selector(menuOpenGroups), keyEquivalent: "")
         groups.target = self
         menu.addItem(.separator())
         // About carries NO ellipsis — it opens the About window and asks the

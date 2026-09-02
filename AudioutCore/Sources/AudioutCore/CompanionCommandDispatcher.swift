@@ -238,7 +238,7 @@ public final class CompanionCommandDispatcher {
             return refused
         }
         guard groupController.groups.count < Limits.maxGroups else {
-            return .refused("The Mac already has the maximum of \(Limits.maxGroups) groups.")
+            return .refused("The Mac already has the maximum of \(Limits.maxGroups) scenes.")
         }
         // Explicit id so a failed store write can be rolled back below.
         let newID = UUID().uuidString
@@ -248,7 +248,7 @@ public final class CompanionCommandDispatcher {
             // A dedup hit made NOTHING — saying `applied` would leave the phone
             // showing a success for a group that never appears.
             guard !created.alreadyExisted else {
-                return .refused("A group with those exact devices already exists (\(created.group.name)).")
+                return .refused("A scene with those exact devices already exists (\(created.group.name)).")
             }
             return .ok
         } catch {
@@ -268,7 +268,7 @@ public final class CompanionCommandDispatcher {
         // from a ≤50ms-stale snapshot resurrect a group the Mac just deleted —
         // and bypasses `createGroup`'s dedup-by-member-set invariant.
         guard let existing = groupController.groups.first(where: { $0.id == state.id }) else {
-            return .refused("That group no longer exists on the Mac.")
+            return .refused("That scene no longer exists on the Mac.")
         }
         let trimmedName = state.name.trimmingCharacters(in: .whitespacesAndNewlines)
         if let refused = groupShapeRefusal(trimmedName: trimmedName, memberIDs: state.memberIDs,
@@ -344,22 +344,22 @@ public final class CompanionCommandDispatcher {
         // Same rule as the Mac's own rename path (GroupEditorViewController):
         // an all-whitespace name is refused, never a blank sidebar row.
         guard !trimmedName.isEmpty else {
-            return .refused("A group needs a name.")
+            return .refused("A scene needs a name.")
         }
         guard trimmedName.count <= Limits.maxGroupNameChars else {
-            return .refused("Group names are limited to \(Limits.maxGroupNameChars) characters.")
+            return .refused("Scene names are limited to \(Limits.maxGroupNameChars) characters.")
         }
         guard !memberIDs.isEmpty else {
-            return .refused("A group needs at least one device.")
+            return .refused("A scene needs at least one device.")
         }
         guard memberIDs.count <= Limits.maxGroupMembers else {
-            return .refused("Groups are limited to \(Limits.maxGroupMembers) devices.")
+            return .refused("Scenes are limited to \(Limits.maxGroupMembers) devices.")
         }
         guard !memberIDs.contains(where: { $0.isEmpty || $0.count > Limits.maxMemberIDChars }) else {
-            return .refused("That group names an invalid device.")
+            return .refused("That scene names an invalid device.")
         }
         if let icon = iconSymbolName, icon.count > Limits.maxIconNameChars {
-            return .refused("That group's icon isn't valid.")
+            return .refused("That scene's icon isn't valid.")
         }
         return nil
     }
@@ -421,7 +421,7 @@ public final class CompanionCommandDispatcher {
 
     private func refusal(for error: Error) -> Result {
         if let groupError = error as? GroupController.GroupError, groupError == .emptyMembership {
-            return .refused("A group needs at least one device.")
+            return .refused("A scene needs at least one device.")
         }
         // Never ship a raw error description to a LAN peer — Cocoa NSErrors
         // carry `NSFilePath` (`/Users/<name>/Library/...`). Log the detail
@@ -438,7 +438,7 @@ public final class CompanionCommandDispatcher {
         case "group":
             guard let groupID = state.groupID,
                   groupController.groups.contains(where: { $0.id == groupID }) else {
-                return .refused("Unknown group.")
+                return .refused("Unknown scene.")
             }
             groupController.setMainOut(.group(id: groupID))
             return .ok

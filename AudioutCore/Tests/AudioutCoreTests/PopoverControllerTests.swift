@@ -103,7 +103,7 @@ import AudioutProtocol
         popover.test_saveCurrentSetup(); await drain(backend)
         let group = controller.groups[0]
         #expect(popover.test_mainOutRow.test_selectableTargets.contains(.group(id: group.id)), "the saved group is a Main Out option")
-        #expect(popover.test_mainOutRow.test_optionTitles.contains("Output Groups"), "groups are under an Output Groups header")
+        #expect(popover.test_mainOutRow.test_optionTitles.contains("Output Scenes"), "groups are under an Output Scenes header")
     }
 
     @Test func emptyGroupIsNotOfferedAsAMainOutOption() async throws {
@@ -2941,7 +2941,7 @@ import AudioutProtocol
 
         let menu = popover.test_outputDevicesPlusMenu()
         let index = try #require(menu.items.firstIndex {
-            $0.title == "Save Selected Devices as group"
+            $0.title == "Save Selected Devices as scene"
         })
         menu.performActionForItem(at: index)
 
@@ -2977,7 +2977,7 @@ import AudioutProtocol
 
         let menu = popover.test_outputDevicesPlusMenu()
         let index = try #require(menu.items.firstIndex {
-            $0.title == "Save Selected Devices as group"
+            $0.title == "Save Selected Devices as scene"
         })
         menu.performActionForItem(at: index)
 

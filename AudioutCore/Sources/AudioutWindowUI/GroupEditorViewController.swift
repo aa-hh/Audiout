@@ -5,7 +5,7 @@ import AudioutCore
 import AudioutSharedUI
 
 /// The group editor pane (design revamp: the Groups window is
-/// CONFIGURATION-ONLY — renaming, membership, and "Delete Group…" live here,
+/// CONFIGURATION-ONLY — renaming, membership, and "Delete Scene…" live here,
 /// but activation/routing never do; that stays in the popover only). This is
 /// the absorbed T-U3: the in-menu editable field is impossible (menu item
 /// views get no keyboard events — `dev/notes/p1-menu-brief.md` §3), so a real
@@ -30,7 +30,7 @@ import AudioutSharedUI
 ///   name when emptied — a Finder rename in a box;
 /// - a "Speakers" list of `MembershipRowView` rows, one per candidate device
 ///   (per HIG — checkboxes for membership, not switches), in a second section;
-/// - a "Delete Group…" `NSButton`.
+/// - a "Delete Scene…" `NSButton`.
 ///
 /// Edits write straight through the injected `GroupController`
 /// (`saveGroup`/`deleteGroup`): renaming and membership toggles call
@@ -147,7 +147,7 @@ public final class GroupEditorViewController: NSViewController {
     /// edited. An inactive group's editor states nothing, because nothing there
     /// is playing to change.
     ///
-    /// HEIGHT BUDGET: it sits BESIDE "Delete Group…" and is centred on it, with
+    /// HEIGHT BUDGET: it sits BESIDE "Delete Scene…" and is centred on it, with
     /// no bottom pin, so it rides inside the button's existing bottom margin and
     /// costs the pane ZERO fitting height. The pane has no scroll view and (at a
     /// seven-device fleet) no spare points at all — a new band above the button
@@ -239,7 +239,7 @@ public final class GroupEditorViewController: NSViewController {
         iconWell.isRailOrigin = true
         iconWell.widthAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
         iconWell.heightAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
-        iconWell.setAccessibilityLabel("Edit group icon")
+        iconWell.setAccessibilityLabel("Edit scene icon")
         iconWell.onClick = { [weak self] in
             guard let self else { return }
             self.presentIconPicker(anchoredTo: self.iconWell)
@@ -265,7 +265,7 @@ public final class GroupEditorViewController: NSViewController {
         // makes the swap correct regardless of which runs first.
         nameField.cell = WarmNameFieldCell(textCell: nameField.stringValue)
         nameField.translatesAutoresizingMaskIntoConstraints = false
-        nameField.placeholderString = "Group name"
+        nameField.placeholderString = "Scene name"
         nameField.font = Tokens.Font.heading
         nameField.textColor = Tokens.Color.label
         nameField.alignment = .natural   // left-aligned (LTR) to match the column
@@ -280,7 +280,7 @@ public final class GroupEditorViewController: NSViewController {
         nameField.drawsBackground = false
         nameField.usesSingleLineMode = true
         nameField.lineBreakMode = .byTruncatingTail
-        nameField.setAccessibilityLabel("Group name")
+        nameField.setAccessibilityLabel("Scene name")
         nameField.target = self
         nameField.action = #selector(nameCommitted(_:))
         nameField.delegate = self
@@ -305,7 +305,7 @@ public final class GroupEditorViewController: NSViewController {
         membershipStack.spacing = 6
 
         deleteButton.translatesAutoresizingMaskIntoConstraints = false
-        deleteButton.title = "Delete Group…"
+        deleteButton.title = "Delete Scene…"
         deleteButton.bezelStyle = .rounded
         deleteButton.target = self
         deleteButton.action = #selector(deleteTapped(_:))
@@ -686,7 +686,7 @@ public final class GroupEditorViewController: NSViewController {
         let isActive = groupController.activeGroupID == group.id
         isActiveGroup = isActive
         iconWell.isActiveGroup = isActive
-        iconWell.setAccessibilityValue(isActive ? "Active group" : "")
+        iconWell.setAccessibilityValue(isActive ? "Active scene" : "")
         // The ring is colour alone; these two say it in words — the marker
         // states that this group IS playing, and the line answers the question
         // that raises while its membership is being edited. Both are hidden for
@@ -774,7 +774,7 @@ public final class GroupEditorViewController: NSViewController {
     private func refreshIconWell(group: Group) {
         let symbolName = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
         iconWellSymbolName = symbolName
-        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Group icon")
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Scene icon")
         image?.isTemplate = true
         iconWell.iconImageView.image = image
         iconWell.iconImageView.contentTintColor = Tokens.Color.secondaryLabel
@@ -827,7 +827,7 @@ public final class GroupEditorViewController: NSViewController {
     private func pinSoleMember(memberSet: Set<String>) {
         guard memberSet.count == 1, let onlyMemberID = memberSet.first else { return }
         rowsByID[onlyMemberID]?.setCheckboxEnabled(
-            false, tooltip: "A group needs at least one device. Use \u{201C}Delete Group\u{2026}\u{201D} to remove it.")
+            false, tooltip: "A scene needs at least one device. Use \u{201C}Delete Scene\u{2026}\u{201D} to remove it.")
     }
 
     /// (Re)build the membership row list, checking members of `memberSet`.
@@ -958,7 +958,7 @@ public final class GroupEditorViewController: NSViewController {
         let alert = NSAlert()
         alert.messageText = "That name is already taken."
         alert.informativeText =
-            "Another group is named \u{201C}\(name)\u{201D}. Choose a different name."
+            "Another scene is named \u{201C}\(name)\u{201D}. Choose a different name."
         alert.alertStyle = .warning
         alert.beginSheetModal(for: window)
     }
@@ -970,7 +970,7 @@ public final class GroupEditorViewController: NSViewController {
         guard let window = view.window else { return }
         let alert = NSAlert()
         alert.messageText = message
-        alert.informativeText = "The group\u{2019}s saved settings couldn\u{2019}t be updated. Try again."
+        alert.informativeText = "The scene\u{2019}s saved settings couldn\u{2019}t be updated. Try again."
         alert.alertStyle = .warning
         alert.beginSheetModal(for: window)
     }
@@ -1049,7 +1049,7 @@ public final class GroupEditorViewController: NSViewController {
             }
         } else {
             // A group must keep at least one device — refuse to remove the last
-            // member (to remove the group entirely, use "Delete Group…"). Revert
+            // member (to remove the group entirely, use "Delete Scene…"). Revert
             // the checkbox so the row reflects the unchanged membership and bail
             // before persisting an empty group.
             guard group.memberIDs.contains(where: { $0 != deviceID }) else {
@@ -1109,8 +1109,8 @@ public final class GroupEditorViewController: NSViewController {
         view.window?.makeFirstResponder(nameField)
     }
 
-    /// Run the same confirm-then-delete flow the "Delete Group…" button does —
-    /// the sidebar's context-menu "Delete Group…" path.
+    /// Run the same confirm-then-delete flow the "Delete Scene…" button does —
+    /// the sidebar's context-menu "Delete Scene…" path.
     public func requestDelete() {
         deleteTapped(deleteButton)
     }
@@ -1147,9 +1147,9 @@ public final class GroupEditorViewController: NSViewController {
         let alert = NSAlert()
         alert.messageText = "Delete \u{201C}\(group.name)\u{201D}?"
         alert.informativeText = groupController.activeGroupID == group.id
-            ? "This group is playing now. Deleting it switches playback to Selected Devices; "
-              + "speakers that are only in this group will stop."
-            : "Deleting a group doesn't change which speakers are playing."
+            ? "This scene is playing now. Deleting it switches playback to Selected Devices; "
+              + "speakers that are only in this scene will stop."
+            : "Deleting a scene doesn't change which speakers are playing."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
@@ -1289,7 +1289,7 @@ public final class GroupEditorViewController: NSViewController {
         rowsByID[deviceID]?.test_clickRow()
     }
 
-    /// True when "Delete Group…" is currently visible (always true — the
+    /// True when "Delete Scene…" is currently visible (always true — the
     /// editor is edit-only).
     public var test_deleteButtonVisible: Bool { !deleteButton.isHidden }
 
@@ -1309,7 +1309,7 @@ public final class GroupEditorViewController: NSViewController {
             try groupController.deleteGroup(id: id)
         } catch {
             test_saveFailureReported = true
-            presentPersistFailureAlert(message: "Couldn\u{2019}t delete the group.")
+            presentPersistFailureAlert(message: "Couldn\u{2019}t delete the scene.")
             return
         }
         Analytics.capture("scene:deleted")
@@ -1332,7 +1332,7 @@ public final class GroupEditorViewController: NSViewController {
     /// name. Headless seam — the explanation is a window-guarded sheet.
     public private(set) var test_duplicateNameRefused = false
 
-    /// The confirmation the "Delete Group…" button would put up right now, or
+    /// The confirmation the "Delete Scene…" button would put up right now, or
     /// nil when nothing is being edited. Built through the real
     /// ``makeDeleteAlert(for:)``, so the copy and the button roles under test
     /// are the ones the user sees.
@@ -1563,7 +1563,7 @@ private final class BackBandView: NSView {
     var onActivate: (() -> Void)?
 
     private let glyphView = NSImageView()
-    private let label = NSTextField(labelWithString: "Groups")
+    private let label = NSTextField(labelWithString: "Scenes")
     private var trackingArea: NSTrackingArea?
     private var isHovered = false { didSet { updateTone() } }
 
@@ -1601,8 +1601,8 @@ private final class BackBandView: NSView {
 
         updateTone()
         setAccessibilityRole(.button)
-        setAccessibilityLabel("Back to Groups")
-        toolTip = "Back to Groups"
+        setAccessibilityLabel("Back to Scenes")
+        toolTip = "Back to Scenes"
     }
 
     /// Hover is a tone step from secondary to primary — text colours are

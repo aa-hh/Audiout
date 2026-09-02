@@ -305,9 +305,9 @@ import AppKit
         assertAllLabelsFrozen(in: content.view, host: "MixerWindowController content (footer + empty canvas)")
         #expect(window.test_isShowingOverview, "expected the overview with zero groups/devices")
         #expect(window.test_overview.test_isShowingEmptyCanvas)
-        #expect(window.test_overview.test_emptyMessageText == "Group your speakers")
+        #expect(window.test_overview.test_emptyMessageText == "Save your speakers as a scene")
         #expect(window.test_overview.test_emptySubtitleText ==
-                "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
+                "Save a set of speakers as a scene, then switch to it in two clicks from the menu bar.")
     }
 
     // MARK: 6. NEGATIVE — IconPickerViewController

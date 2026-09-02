@@ -10,12 +10,13 @@ import AudioutSharedUI
 /// material below, and Reduce Transparency handling on its own):
 ///
 /// - the three screens as three separate BORDERED items — the same control
-///   Pin and Quit are, so the header carries ONE button style. ICON-ONLY
-///   (`toolbar.displayMode = .iconOnly`) and deliberately so: on macOS 26+
-///   (reproduced on 27.0) every label-showing display mode spills tab names
-///   beside the strip as loose text. The tab names survive the missing labels —
-///   per-tab tooltips ("Mixer (⌘1)"), the items' `label`s (VoiceOver and the
-///   overflow menu), and ⌘1/⌘2/⌘3;
+///   Pin and Quit are, so the header carries ONE button style — each drawing
+///   its own NAME beside its icon, from the item's own `title`.
+///   `toolbar.displayMode` stays `.iconOnly` deliberately: on macOS 26+
+///   (reproduced on 27.0) every label-showing display mode spills the tab names
+///   beside the strip as loose text, so the name rides the item itself. The
+///   tooltips ("Mixer (⌘1)"), the items' `label`s (VoiceOver and the overflow
+///   menu) and ⌘1/⌘2/⌘3 stay;
 /// - the brand mark beside "Audiout" as a centered LOCKUP item
 ///   (`centeredItemIdentifiers`) — the one place the app names itself in the
 ///   header, both profiles. The mark is decorative; the wordmark is what
@@ -215,9 +216,9 @@ final class SurfaceToolbarController: NSObject {
 
     /// The toolbar's materialized items, in display order.
     var test_itemIdentifiers: [NSToolbarItem.Identifier] { toolbar.items.map(\.itemIdentifier) }
-    /// The tabs' labels, in tab order.
+    /// The names the tabs actually DRAW, in tab order.
     var test_tabLabels: [String] {
-        SurfaceScreen.allCases.compactMap { tabItems[$0]?.label }
+        SurfaceScreen.allCases.compactMap { tabItems[$0]?.title }
     }
     /// Whether every tab resolved a non-nil symbol image.
     var test_allTabImagesResolved: Bool {
@@ -255,6 +256,8 @@ final class SurfaceToolbarController: NSObject {
     /// The centered lockup's fitting height — must sit within the strip so
     /// nothing clips. `0` when the item never built.
     var test_centeredLockupFittingHeight: CGFloat { markView?.superview?.fittingSize.height ?? 0 }
+    /// The centered lockup's fitting width: the room the tabs must leave it.
+    var test_centeredLockupFittingWidth: CGFloat { markView?.superview?.fittingSize.width ?? 0 }
     /// The horizontal padding the lockup actually applies at each end.
     var test_centeredLockupHorizontalInset: CGFloat {
         (markView?.superview as? NSStackView)?.edgeInsets.left ?? 0
@@ -271,6 +274,10 @@ final class SurfaceToolbarController: NSObject {
     var test_pinItemLabel: String? { pinItem?.label }
     var test_quitItemHasImage: Bool {
         toolbar.items.first { $0.itemIdentifier == Self.quitItemIdentifier }?.image != nil
+    }
+    /// The word Quit shows, `nil` if the item never built.
+    var test_quitItemTitle: String? {
+        toolbar.items.first { $0.itemIdentifier == Self.quitItemIdentifier }?.title
     }
     /// Fire a tab exactly as a click on it would — a REAL click through the
     /// button's own target/action, not a hand-run selector.
@@ -325,9 +332,14 @@ extension SurfaceToolbarController: NSToolbarDelegate {
             item.action = #selector(tabTapped(_:))
             // The item's own NAME, for the overflow menu and VoiceOver.
             item.label = screen.label
-            // The tab names lost their on-screen labels with the icon-only
-            // strip; the tooltip carries them, alongside ⌘1/⌘2/⌘3 (which ride
-            // the shell panel's key-equivalent seam).
+            // And the name the tab actually DRAWS, beside its icon. `title` is
+            // the only route to an on-strip name here: `displayMode` stays
+            // `.iconOnly` because every label-showing mode spills the names
+            // beside the strip as loose text on macOS 26+. Quit carries its
+            // word the same way.
+            item.title = screen.label
+            // The tooltip repeats the name because it also carries ⌘1/⌘2/⌘3,
+            // which ride the shell panel's key-equivalent seam.
             item.toolTip = "\(screen.label) (⌘\(screen.keyEquivalent))"
             tabItems[screen] = item
             applySelectionToTabs()
@@ -406,13 +418,10 @@ extension SurfaceToolbarController: NSToolbarDelegate {
         case Self.quitItemIdentifier:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.isBordered = true
-            // An EXIT shape, not a speaker-power shape: `power` on a panel full
-            // of speakers reads as "turn the audio off", which is the one thing
-            // this button does not do. (SF Symbols 3 — safe on the macOS 14
-            // floor; `power` stays as the fallback.)
-            item.image = Self.resolveSymbol("rectangle.portrait.and.arrow.right",
-                                            fallbacks: ["power"],
-                                            accessibilityDescription: "Quit")
+            // The word, not a glyph: the exit-door shape read as "sign out of
+            // an account" in the launch review, and `power` on a panel full of
+            // speakers reads as "turn the audio off".
+            item.title = "Quit"
             item.label = "Quit"
             item.toolTip = "Quit Audiout"
             item.target = self

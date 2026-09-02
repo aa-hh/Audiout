@@ -60,9 +60,11 @@ import Testing
 ///
 /// ## Which suites belong here
 ///
-/// The five that share `Telemetry`'s process-global test seams
-/// (`_installTestSink(_:)` / `_resetForTesting(directory:)`) — confirmed by
-/// `git grep _installTestSink` over `Tests/AudioutCoreTests`:
+/// Every suite that touches `Telemetry`'s process-global test seams
+/// (`_installTestSink(_:)` / `_resetForTesting(directory:)`). Confirm the
+/// membership with `git grep -l _installTestSink Tests/AudioutCoreTests` rather
+/// than trusting this list — it went stale once already, and the two suites it
+/// had missed were still racing every suite below:
 ///
 ///  - `TelemetryTests`               (also the only user of `_resetForTesting`)
 ///  - `NativeCaptureCoordinatorTests`
@@ -74,6 +76,12 @@ import Testing
 ///                                    which had been installing the sink from
 ///                                    OUTSIDE this parent — a live collision
 ///                                    caught 2026-08-11)
+///  - `AggregateOutputDeviceWiringTests`
+///  - `BTSyncedSinkTests`, `SyncedLocalSinkTests`, `SyncedLocalFanoutTests`
+///  - `BTAlignmentWizardSessionTests`
+///  - `PTPHelperReconcilerTests`
+///  - `PTPHelperActivationTests`
+///  - `NativeBackendBTAlignmentInterceptTests`
 ///
 /// `NativeBackendTests` itself is deliberately NOT here: 183 of its 200 tests
 /// touch no process-global state, and holding them in this chain made it the

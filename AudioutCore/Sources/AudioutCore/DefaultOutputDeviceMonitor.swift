@@ -41,8 +41,10 @@ import Foundation
 /// whose format has drifted independently (it was built before the last
 /// renegotiation, or its aggregate reconciled to a different rate) must still be
 /// told, even when the device's rate looks unchanged from the monitor's point of
-/// view. So the monitor deliberately does NOT gate the fan-out on its own
-/// last-known snapshot; it gates each delivery on that subscriber's divergence.
+/// view. So the per-subscriber decision is never gated on the monitor's own
+/// last-known snapshot; the one thing the monitor keeps from its last delivered
+/// reading is the hands-free hold in ``handleNotification()``, which delays a
+/// delivery and never decides one.
 /// A subscriber that has not drifted gets nothing, so the loop-breaker still
 /// holds and the storm still stays broken.
 ///
@@ -154,6 +156,15 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     /// leading + trailing rather than trailing-only.
     private var settleDirty = false
 
+    /// The reading subscribers most recently had the chance to act on. Only ever touched on ``queue``.
+    private var lastDelivered = Snapshot(deviceID: nil, nominalRate: nil)
+
+    /// True while the current settle window's immediate delivery is being withheld. Only ever touched on ``queue``.
+    private var leadingHeld = false
+
+    /// A Bluetooth headset in hands-free mode reports 16000 (wideband) or 8000 (narrowband); no ordinary output device sits at or below this.
+    private static let handsFreeRateCeiling = 16_000
+
     // MARK: - Lifecycle
 
     /// - Parameter settleWindow: how long the reading must hold still before the
@@ -186,6 +197,7 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
             guard !started else { return }
             started = true
             latest = readLive()
+            lastDelivered = latest
             installDeviceListener()
             installRateListener(for: latest.deviceID)
             Telemetry.log(.captureWS, "default_output_monitor_started", [
@@ -204,6 +216,7 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
             pendingFanout?.cancel()
             pendingFanout = nil
             settleDirty = false
+            leadingHeld = false
             removeListeners()
         }
     }
@@ -279,10 +292,29 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     /// value a subscriber is built on (48k→44k→48k) nets to "no change" and fires
     /// nothing — yet the 48→44 transition already killed the tap, leaving it
     /// silent forever. To close that, the FIRST notification of a burst delivers
-    /// immediately (leading edge): whatever transition started the burst rebuilds
-    /// the tap at once, and an ordinary single device switch never eats a settle
-    /// window of silence either. Notifications inside the window then coalesce,
-    /// and one trailing delivery reconciles to the value that actually stuck.
+    /// immediately (leading edge), with the single exception of a held hands-free
+    /// reading described in the next section: whatever transition started the
+    /// burst rebuilds the tap at once, and an ordinary single device switch never
+    /// eats a settle window of silence either. Notifications inside the window
+    /// then coalesce, and one trailing delivery reconciles to the value that
+    /// actually stuck.
+    ///
+    /// ## Why a hands-free reading is held, not delivered
+    /// A nominal-rate reading at or below 16 kHz on the device last delivered at a
+    /// higher rate is a Bluetooth headset entering hands-free mode. It is withheld
+    /// for the settle window, so a connect burst that dips and comes straight back
+    /// costs ONE rebuild instead of the four the raw notifications would buy. One
+    /// that outlasts the window is delivered by the trailing edge and rebuilds like
+    /// any other rate change. A device-identity change, or any rate above 16 kHz,
+    /// inside a held window is delivered at once.
+    ///
+    /// That delivery is FORCED past the per-subscriber divergence check, and it has
+    /// to be. Holding the 16 kHz reading means no subscriber ever tracked it, so a
+    /// return to the rate they are already built on nets to "no change" and would
+    /// fire nothing — while the transition that started the burst has already
+    /// silenced their taps for good. Withholding the reading is safe; withholding
+    /// the rebuild that answers it is not. The hold buys back three of the four
+    /// rebuilds, not all four.
     ///
     /// The READ stays immediate regardless — ``current`` must never lag, and the
     /// rate listener has to follow an identity change right away or the new
@@ -293,14 +325,48 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
         retargetRateListenerIfNeeded(to: live.deviceID)
 
         if pendingFanout == nil {
-            // Leading edge — first notification of a (possibly one-shot) burst.
-            deliverToSubscribers()
+            if let held = handsFreeHold(for: live) {
+                // Leading edge, but a hands-free reading: withhold it for the
+                // window so a flip that returns never reaches a subscriber.
+                leadingHeld = true
+                settleDirty = true
+                Telemetry.log(.captureWS, "default_output_rate_held", [
+                    "device": String(held.deviceID),
+                    "rate": String(held.rate),
+                    "previousRate": String(held.previousRate),
+                ])
+            } else {
+                // Leading edge — first notification of a (possibly one-shot) burst.
+                deliverToSubscribers()
+                settleDirty = false
+            }
+        } else if leadingHeld, handsFreeHold(for: live) == nil {
+            // The held window's first trustworthy reading (an identity change, or
+            // the rate back above the ceiling) spends the immediate delivery, and
+            // spends it FORCED: the held reading never reached a subscriber, so a
+            // return to the rate they still track diverges from nothing, yet the
+            // transition that opened the window already killed their taps.
+            deliverToSubscribers(forcingRebuild: true)
             settleDirty = false
         } else {
             // Inside the window — coalesce; the trailing edge reconciles.
             settleDirty = true
         }
         scheduleTrailingFanout()
+    }
+
+    /// Non-nil when `reading` is a hands-free marker: the device ``lastDelivered``
+    /// named, now at or below ``handsFreeRateCeiling`` after being above it. Any
+    /// unreadable value is not a marker and is delivered as usual.
+    private func handsFreeHold(for reading: Snapshot)
+        -> (deviceID: AudioObjectID, rate: Int, previousRate: Int)? {
+        guard let deviceID = reading.deviceID, deviceID == lastDelivered.deviceID,
+              let rate = reading.nominalRate.map({ Int($0.rounded()) }),
+              rate <= Self.handsFreeRateCeiling,
+              let previousRate = lastDelivered.nominalRate.map({ Int($0.rounded()) }),
+              previousRate > Self.handsFreeRateCeiling
+        else { return nil }
+        return (deviceID, rate, previousRate)
     }
 
     /// Arm (or re-arm) the trailing delivery one settle window out. It fires only
@@ -332,7 +398,11 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
     /// notification. Reads ``latest`` rather than closing over the snapshot that
     /// armed it, so what lands is the value that settled — never an intermediate
     /// one from inside the burst.
-    private func deliverToSubscribers() {
+    /// - Parameter forcingRebuild: deliver to every subscriber whether or not its
+    ///   tracked values diverge. Only the end of a held hands-free window sets it,
+    ///   for the reason ``handleNotification`` gives: the divergence check cannot
+    ///   see a transition whose reading was deliberately withheld.
+    private func deliverToSubscribers(forcingRebuild: Bool = false) {
         let live = latest
 
         subscribersLock.lock()
@@ -348,7 +418,7 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
                 currentDeviceID: live.deviceID, trackedDeviceID: tracked.deviceID)
             let rateDiverged = TapRebuildDecision.shouldRebuild(
                 currentRate: live.nominalRate, trackedRateInt: tracked.rate)
-            guard deviceDiverged || rateDiverged else { continue }
+            guard forcingRebuild || deviceDiverged || rateDiverged else { continue }
             fired += 1
             subscriber.onChange(live)
         }
@@ -358,7 +428,10 @@ public final class DefaultOutputDeviceMonitor: @unchecked Sendable {
             "rate": live.nominalRate.map { String(Int($0.rounded())) } ?? "unreadable",
             "subscribers": "\(snapshot.count)",
             "fired": "\(fired)",
+            "forced": "\(forcingRebuild)",
         ])
+        lastDelivered = live
+        leadingHeld = false
     }
 
     /// Collapse the settle window NOW: if a fan-out is armed, cancel its timer

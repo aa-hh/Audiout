@@ -1500,6 +1500,273 @@ import Testing
         #expect(backend.gainWrites.last?.group == 42, "the pushed gain reflects the NEW target's group stage")
     }
 
+    // MARK: onStateDidChange — change hook (T2, PLAN-COMPANION-APP.md)
+
+    @Test func setDeviceSelectedFiresOnStateDidChangeOnRealChange() async throws {
+        let (controller, _) = try await makeController()
+        controller.setMainOut(.selectedDevices)
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        _ = controller.setDeviceSelected("office", true)
+
+        #expect(fireCount == 1)
+    }
+
+    @Test func setDeviceSelectedDoesNotFireOnStateDidChangeWhenAlreadySelected() async throws {
+        let (controller, _) = try await makeController()
+        controller.setMainOut(.selectedDevices)
+        _ = controller.setDeviceSelected("office", true)
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        _ = controller.setDeviceSelected("office", true)   // already selected — no-op
+
+        #expect(fireCount == 0, "selecting an already-selected device must not fire onStateDidChange")
+    }
+
+    @Test func setDeviceSelectedDoesNotFireOnStateDidChangeWhenDeselectingUnselectedDevice() async throws {
+        let (controller, _) = try await makeController()
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        _ = controller.setDeviceSelected("office", false)  // never selected — no-op
+
+        #expect(fireCount == 0, "deselecting a device that was never selected must not fire onStateDidChange")
+    }
+
+    // `.selectedDevices`, not `.group`: targeting a group routes through
+    // `applyRouting()` → `activateGroup(id:)`, which fires this same signal in
+    // its own right (see `activateGroupFiresOnStateDidChange`) — isolating the
+    // `.selectedDevices` branch here tests `setMainOut`'s own fire alone.
+    @Test func setMainOutFiresOnStateDidChange() async throws {
+        let (controller, _) = try await makeController()
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        controller.setMainOut(.selectedDevices)
+
+        #expect(fireCount == 1)
+    }
+
+    @Test func saveGroupFiresOnStateDidChange() async throws {
+        let (controller, _) = try await makeController()
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office"], memberVolumes: [:]))
+
+        #expect(fireCount == 1)
+    }
+
+    @Test func saveGroupDoesNotFireOnStateDidChangeWhenRejected() async throws {
+        let (controller, _) = try await makeController()
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        #expect(throws: GroupController.GroupError.emptyMembership) {
+            try controller.saveGroup(Group(id: "g1", name: "Empty", memberIDs: [], memberVolumes: [:]))
+        }
+
+        #expect(fireCount == 0, "a rejected (empty-membership) save must not fire onStateDidChange")
+    }
+
+    @Test func deleteGroupFiresOnStateDidChangeOnRealDeletion() async throws {
+        let (controller, _) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "X", memberIDs: ["office"], memberVolumes: [:]))
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        try controller.deleteGroup(id: "g1")
+
+        #expect(fireCount == 1)
+    }
+
+    @Test func deleteGroupDoesNotFireOnStateDidChangeForUnknownID() async throws {
+        let (controller, _) = try await makeController()
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        try controller.deleteGroup(id: "does-not-exist")
+
+        #expect(fireCount == 0, "deleting a group id that was never saved must not fire onStateDidChange")
+    }
+
+    @Test func activateGroupFiresOnStateDidChange() async throws {
+        let (controller, _) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "X", memberIDs: ["office"], memberVolumes: [:]))
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        controller.activateGroup(id: "g1")
+
+        #expect(fireCount == 1)
+    }
+
+    @Test func activateGroupDoesNotFireOnStateDidChangeForUnknownID() async throws {
+        let (controller, _) = try await makeController()
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        controller.activateGroup(id: "does-not-exist")
+
+        #expect(fireCount == 0, "activating an unknown group id is a no-op and must not fire onStateDidChange")
+    }
+
+    @Test func deactivateGroupFiresOnStateDidChangeWhenGroupWasActive() async throws {
+        let (controller, _) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "X", memberIDs: ["office"], memberVolumes: [:]))
+        controller.activateGroup(id: "g1")
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        controller.deactivateGroup()
+
+        #expect(fireCount == 1)
+    }
+
+    @Test func deactivateGroupDoesNotFireOnStateDidChangeWhenNoGroupActive() async throws {
+        let (controller, _) = try await makeController()
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        controller.deactivateGroup()
+
+        #expect(fireCount == 0, "deactivating when no group is active must not fire onStateDidChange")
+    }
+
+    @Test func syncActiveGroupToSelectionDoesNotFireOnStateDidChangeWhenAlreadyInSync() async throws {
+        let (controller, _) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Downstairs",
+                                       memberIDs: ["office", "sonos-move"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))   // activateGroup already settles activeGroupID == "g1"
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        #expect(controller.syncActiveGroupToSelection() == "g1")
+
+        #expect(fireCount == 0, "calling sync when activeGroupID already matches must not fire onStateDidChange")
+    }
+
+    /// Group identity is decided by MEMBERSHIP, order-independent (SPEC.md §9
+    /// dedup): two saved groups can share an identical member set.
+    /// `group(matchingMemberSet:)` resolves such a tie to the FIRST array match,
+    /// so activating the second and then reconciling moves `activeGroupID` back
+    /// to the first — a genuine change this method must fire for.
+    @Test func syncActiveGroupToSelectionFiresOnStateDidChangeWhenDedupResolvesToADifferentGroup() async throws {
+        let (controller, _) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "First", memberIDs: ["office", "sonos-move"], memberVolumes: [:]))
+        try controller.saveGroup(Group(id: "g2", name: "Second", memberIDs: ["office", "sonos-move"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g2"))
+        #expect(controller.activeGroupID == "g2")
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        #expect(controller.syncActiveGroupToSelection() == "g1", "dedup resolves to the first array match with an identical member set")
+
+        #expect(fireCount == 1, "reconciling activeGroupID from g2 to g1 is a real state change")
+    }
+
+    @Test func ensureDefaultSelectionFiresOnStateDidChangeOnce() async throws {
+        let (controller, _) = try await makeController()
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        controller.ensureDefaultSelection()
+        #expect(fireCount == 1, "establishing the out-of-the-box default is a real state change")
+
+        controller.ensureDefaultSelection()
+        #expect(fireCount == 1, "calling again once the default is established is a no-op and must not fire again")
+    }
+
+    @Test func setMutedFiresOnStateDidChangeOnSilenceEdgeOnly() async throws {
+        let (controller, _) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "X", memberIDs: ["office"], memberVolumes: [:]))
+        controller.activateGroup(id: "g1")
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        controller.setMuted(true, for: "office")
+        #expect(fireCount == 1, "the false→true mute edge must fire onStateDidChange")
+
+        controller.setMuted(true, for: "office")   // already muted — no edge
+        #expect(fireCount == 1, "re-muting an already-muted member is a no-op and must not fire again")
+
+        controller.setMuted(false, for: "office")
+        #expect(fireCount == 2, "the true→false unmute edge must fire onStateDidChange")
+    }
+
+    /// Observers read this controller back SYNCHRONOUSLY from the hook (the Mac's
+    /// popover repaints off it), so the mute must already be committed when it
+    /// fires. It used to fire from inside `applySilence`, one line before
+    /// `setMuted` wrote the state back — every observer saw the PRE-toggle mute
+    /// and repainted the popover with it.
+    @Test func setMutedFiresOnStateDidChangeOnlyAfterTheMuteIsCommitted() async throws {
+        let (controller, _) = try await makeController()
+        try controller.saveGroup(Group(id: "g1", name: "X", memberIDs: ["office"], memberVolumes: [:]))
+        controller.activateGroup(id: "g1")
+        var observed: [Bool] = []
+        controller.onStateDidChange = { observed.append(controller.isMuted("office")) }
+
+        controller.setMuted(true, for: "office")
+        controller.setMuted(false, for: "office")
+
+        #expect(observed == [true, false],
+                "the hook must see the mute it is announcing, not the value it replaced")
+    }
+
+    /// A member volume write echoes back as `BackendEvent.deviceUpdated`, so
+    /// firing `onStateDidChange` for it too would double-notify. The Main Out
+    /// MASTER is the opposite case and the reason this test is split: its user arm
+    /// has no echo at all (`setMasterGain` emits no event), so this hook is the
+    /// only thing that announces a master move — the Mac's popover and the
+    /// companion snapshot both hang off it. Edge-gated all the same: a re-push of
+    /// the value already stored announces nothing new, which is what keeps a held
+    /// volume key pinned at the top of the range from repainting and broadcasting
+    /// on every repeat (that arm rides a `.systemVolumeChanged` the host already
+    /// repaints from).
+    @Test func memberVolumeWritesDoNotFireOnStateDidChangeButTheMainOutMasterDoes() async throws {
+        let (controller, _) = try await makeController()
+        controller.setMainOut(.selectedDevices)
+        _ = controller.setDeviceSelected("office", true)
+        _ = controller.setDeviceSelected("sonos-move", true)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        controller.setMemberVolume(70, for: "office")
+        #expect(fireCount == 0,
+                "a member volume write echoes back as deviceUpdated and must never fire onStateDidChange")
+
+        controller.setMainOutMasterVolume(80)
+        #expect(fireCount == 1, "the master has no backend echo, so it must announce itself here")
+
+        controller.setMainOutMasterVolume(80)
+        #expect(fireCount == 1, "re-pushing the value already stored changes nothing and must not fire again")
+
+        controller.applyExternalSystemVolume(50)
+        #expect(fireCount == 2, "the volume-key read-back moves Main the same way, through the same setter")
+
+        controller.applyExternalSystemVolume(50)
+        #expect(fireCount == 2, "…and is edge-gated too — a held key at the clamp repeats the same value")
+    }
+
+    /// The one documented exception to "a member volume write never fires this":
+    /// with nothing but the Mac behind Main Out, `setMemberVolume` on the local row
+    /// redirects to the MASTER, so it announces like any other master move.
+    @Test func aLocalRowVolumeWriteFiresOnStateDidChangeWhileItDrivesMain() async throws {
+        let (controller, _) = try await makeController()
+        controller.ensureDefaultSelection()
+        #expect(controller.localRowDrivesMain, "precondition: nothing but the Mac is selected")
+        var fireCount = 0
+        controller.onStateDidChange = { fireCount += 1 }
+
+        controller.setMemberVolume(33, for: "local-mac")
+
+        #expect(controller.mainOutMasterVolume == 33, "the write landed on Main, not on a device level")
+        #expect(fireCount == 1, "and so it announced itself, unlike every other member volume write")
+    }
+
     // MARK: BT-GROUPCTL — Bluetooth selection matrix (PLAN-UNIVERSAL-SYNC)
     //
     // A `.bluetooth` device is NON-LOCAL, so every rule above applies to it

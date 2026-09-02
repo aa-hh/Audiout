@@ -13,6 +13,13 @@ import CoreAudio
 /// held-silent join (sink gain 0 before audio, 1 on resolve), dismissal
 /// finality across backend instances, the give-up watchdog, and the W2 wizard
 /// trim preview/restore/persist plumbing.
+///
+/// Nested under ``SerializedSharedState`` because these tests install the
+/// process-global `Telemetry._installTestSink(_:)`. Outside that parent they
+/// race every other suite that installs it — one suite's `nil` teardown tears
+/// another's sink out mid-test, and the loser reads back nothing.
+extension SerializedSharedState {
+
 @Suite final class NativeBackendBTAlignmentInterceptTests: IsolatedSuite {
 
     // MARK: Doubles (per-suite copies, house style)
@@ -206,12 +213,10 @@ import CoreAudio
         return (backend, bt, sink, collector)
     }
 
-    private func waitFor(timeout: TimeInterval = 3, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     private func device(_ backend: NativeBackend, _ id: String) -> Device? {
@@ -270,7 +275,7 @@ import CoreAudio
         waitFor { self.device(backend, self.btFlip.id) != nil }
 
         backend.setOutputSet([btMove.id])
-        waitFor(timeout: 0.5) { false }   // settle; nothing should fire
+        SuiteWait.settle(0.5)   // settle; nothing should fire
         #expect(events.promptedDeviceIDs().isEmpty)
 
         backend.setOutputSet([btMove.id, btFlip.id])
@@ -347,7 +352,7 @@ import CoreAudio
         waitFor { events.promptedDeviceIDs().count == 2 }
         backend.setOutputSet([btMove.id])
         backend.setOutputSet([btMove.id, btFlip.id])
-        waitFor(timeout: 0.5) { false }   // settle
+        SuiteWait.settle(0.5)   // settle
 
         #expect(events.promptedDeviceIDs().count == 2, "no re-prompt on re-forming the mix")
     }
@@ -614,7 +619,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
 
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
         waitFor { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
@@ -653,7 +663,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
 
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
         waitFor { sink.buffers.last == 2_000 }
@@ -679,7 +694,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
         let baseline = sink.reanchors.count
 
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
@@ -714,7 +734,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
 
         Telemetry._installTestSink { capture.append($0) }
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
@@ -747,7 +772,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
 
         Telemetry._installTestSink { capture.append($0) }
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
@@ -849,7 +879,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
 
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
         waitFor { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
@@ -875,7 +910,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
 
         Telemetry._installTestSink { capture.append($0) }
         backend.setBTWizardTickTempo(bpm: BTAlignmentWizardSession.searchTickBPM)
@@ -908,3 +948,5 @@ import CoreAudio
                 "got \(sink.offsets)")
     }
 }
+
+} // extension SerializedSharedState

@@ -278,13 +278,13 @@ func run() -> Int32 {
 
     // --- 14. Applications card: present, last, collapsed with zero routes.
     print("\n[14] Applications card — present + last + collapsed by default")
-    checks.expect(popover.test_isCardCollapsed(title: "App Exceptions") != nil,
+    checks.expect(popover.test_isCardCollapsed(title: "App Routing") != nil,
                   "Applications card exists")
-    checks.expectEqual(popover.test_isCardCollapsed(title: "App Exceptions"), true,
+    checks.expectEqual(popover.test_isCardCollapsed(title: "App Routing"), true,
                        "Applications card is collapsed with zero routes")
     checks.expectEqual(popover.test_appRowCount, 0, "no app rows with zero routes")
     let cardsBeforeRoute = topLevelCards(panelView: popover.test_panelView)
-    checks.expectEqual(cardIndex(titled: "App Exceptions", in: cardsBeforeRoute),
+    checks.expectEqual(cardIndex(titled: "App Routing", in: cardsBeforeRoute),
                        cardsBeforeRoute.count - 1,
                        "Applications card renders LAST")
 
@@ -303,7 +303,7 @@ func run() -> Int32 {
     appRouting.addRoute(bundleID: musicBundleID, displayName: "Music")
     appRouting.setDestination(.device(id: musicDestinationID), for: musicBundleID)
     popover.test_simulateOpen()   // reopen-style rebuild (T-5 recomputes defaults)
-    checks.expectEqual(popover.test_isCardCollapsed(title: "App Exceptions"), false,
+    checks.expectEqual(popover.test_isCardCollapsed(title: "App Routing"), false,
                        "Applications card is expanded once a route is redirected")
     checks.expectEqual(popover.test_appRowCount, 1, "one app row mounted for the seeded route")
 
@@ -372,7 +372,7 @@ func run() -> Int32 {
     appRouting.removeRoute(bundleID: musicBundleID)
     popover.test_simulateOpen()
     checks.expectEqual(popover.test_appRowCount, 0, "removing the last route empties the card")
-    checks.expectEqual(popover.test_isCardCollapsed(title: "App Exceptions"), true,
+    checks.expectEqual(popover.test_isCardCollapsed(title: "App Routing"), true,
                        "the card collapses again once no app is redirected")
 
     // --- 21. Membership bus (Warm Signal v3 §4, S-BUS): the origin stub on the

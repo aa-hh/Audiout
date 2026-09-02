@@ -120,7 +120,7 @@ public final class AppRowView: NSView {
         public let isRunning: Bool
         /// This app's `AppTetherColor` tint when it currently redirects to an
         /// AirPlay DEVICE (Warm Signal v4.1 CORRECTIONS, extending item 7's
-        /// "wire the same chip onto that app's App Exceptions redirect entry
+        /// "wire the same chip onto that app's App Routing redirect entry
         /// so the tether reads at both ends") — `nil` for "No Redirect" or
         /// "Current Device" (nothing on a device's own FEED column to match
         /// against). The HOST computes this the same way it computes the
@@ -162,11 +162,10 @@ public final class AppRowView: NSView {
     private var isRunning: Bool = true
     /// True iff the selected destination is the standalone "No Redirect" entry
     /// (`isStandalone`) — the neutral/unset state where the app just plays in the
-    /// whole-system mix. The slider stays visible but dims/disables ONLY in this
-    /// state: an app on "No Redirect" has no independent stream to level. Both
-    /// "Current Device" (Bug T2 — its own local built-in-speaker stream) and an
-    /// AirPlay device (its own remote stream) DO have an independent volume, so
-    /// the slider is live for them.
+    /// whole-system mix. It gates the ARMED fader fill ONLY — which means
+    /// "redirected to a stream of its own", not "has a volume". Every
+    /// destination has a live volume: below 100 an un-redirected app is
+    /// intercepted and summed back into the mix attenuated.
     private var isNoRedirect: Bool = true
 
     private let iconView = NSImageView()
@@ -241,8 +240,7 @@ public final class AppRowView: NSView {
     public func apply(_ configuration: Configuration) {
         self.appID = configuration.appID
         self.destinations = configuration.destinations
-        // Dim the slider ONLY for the standalone "No Redirect" entry. A missing
-        // selection (nothing matched) is treated as "No Redirect" (dimmed), the
+        // A missing selection (nothing matched) is treated as "No Redirect", the
         // safe neutral default.
         self.isNoRedirect = configuration.destinations
             .first { $0.id == configuration.selectedDestinationID }?.isStandalone ?? true
@@ -261,12 +259,12 @@ public final class AppRowView: NSView {
             slider.integerValue = configuration.volume
             readoutLabel.stringValue = VolumePercent.label(configuration.volume)
         }
-        // Always visible, dimmed/disabled ONLY on "No Redirect" — same dimming
-        // approach `DeviceRowView` uses for an unavailable/unselected row. "Current
-        // Device" (Bug T2) and AirPlay routes each have their own stream, so the
-        // slider is live for them.
-        slider.isEnabled = !isNoRedirect
-        readoutLabel.textColor = isNoRedirect ? Tokens.Color.tertiaryLabel : Tokens.Color.secondaryLabel
+        // Live for EVERY destination. "Current Device" (Bug T2) and AirPlay routes
+        // each level their own stream; an un-redirected app is intercepted below
+        // 100 and summed back into the whole-system mix at that volume, so there
+        // is no destination left whose volume does nothing.
+        slider.isEnabled = true
+        readoutLabel.textColor = Tokens.Color.secondaryLabel
         // Fader armed state (the app-row equivalent of the device rows' §3.3
         // predicate — spec §5.1: routed ∧ running, pure model): the gold fill
         // renders only while the redirect route is live; an unrouted or idle
@@ -1056,10 +1054,8 @@ public final class AppRowView: NSView {
 
     /// The currently displayed volume (structural assertions).
     public var test_volume: Int { slider.integerValue }
-    /// Whether the volume slider is currently dimmed/disabled — true iff the
-    /// destination is the standalone "No Redirect" entry. "Current Device" (Bug
-    /// T2) and AirPlay routes each have an independent stream, so their slider is
-    /// live (not dimmed).
+    /// Whether the volume slider is currently dimmed/disabled. Always false: every
+    /// destination — "No Redirect" included — has a volume that does something.
     public var test_isSliderDimmed: Bool { !slider.isEnabled }
     /// Whether the Warm fader would render its ENGAGED (gold-gradient) fill —
     /// the app-row armed predicate (routed ∧ running) ∧ slider enabled, read

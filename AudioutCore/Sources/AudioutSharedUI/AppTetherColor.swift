@@ -6,7 +6,7 @@ import AppKit
 /// `dev/notes/warm-signal-v4-rail-and-tether.md` "Derived-colour name tether").
 ///
 /// A redirect (an app routed to a device) is shown by TINTING the app's NAME —
-/// the same warm tint on both endpoints (App Exceptions row + the target
+/// the same warm tint on both endpoints (App Routing row + the target
 /// device's sublabel) is the tether; no line crosses the panel. This utility
 /// is the single, standalone, deterministic source of that tint. It does NOT
 /// draw anything — rows consume the API below to tint names.

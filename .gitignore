@@ -32,6 +32,7 @@ xcuserdata/
 *.xcworkspace/xcuserdata/
 DerivedData/
 .swiftpm/xcode/
+*.xcuserstate
 
 # Impeccable design-skill scratch state (local config + generated critique notes).
 .impeccable/

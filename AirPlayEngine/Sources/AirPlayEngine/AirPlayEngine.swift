@@ -1890,6 +1890,8 @@ extension TransportCommand {
 /// 44.1kHz" — both numbers were wrong: 44100/352 ≈ 125.3 is the RTP *packet*
 /// cadence [`AIRPLAY_SAMPLES_PER_PACKET`], a different quantity from the
 /// write cadence measured here. See plan §B.3/F25.)
+/// The figure printed after the gap is the net drift, deficit minus
+/// overrun, the same number as `WriteCadenceSnapshot.netDriftSeconds`.
 final class WriteCadenceTracker: @unchecked Sendable {
     private let lock = NSLock()
     private let log = Logger(subsystem: "com.airplayengine", category: "write-cadence")
@@ -1924,8 +1926,15 @@ final class WriteCadenceTracker: @unchecked Sendable {
     /// production always takes the default.
     private let stallGapSeconds: Double
 
-    init(stallGapSeconds: Double = 5.0) {
+    /// Same idiom as `stallGapSeconds` above: injectable so a test can drive
+    /// deterministic gaps without a real sleep. Production always takes the
+    /// default, which is the real monotonic clock this class exists to
+    /// measure against — nothing about a live producer's cadence changes.
+    private let now: () -> Double
+
+    init(stallGapSeconds: Double = 5.0, now: @escaping () -> Double = WriteCadenceTracker.monotonicSeconds) {
         self.stallGapSeconds = stallGapSeconds
+        self.now = now
     }
 
     /// Record one write's audio-time contribution against the wall clock.
@@ -1934,7 +1943,7 @@ final class WriteCadenceTracker: @unchecked Sendable {
     /// isolation (an actor hop is exactly what the hot path must avoid).
     func record(samples: Int, sampleRate: Int) {
         guard samples > 0, sampleRate > 0 else { return }
-        let now = Self.monotonicSeconds()
+        let now = self.now()
         let audioSeconds = Double(samples) / Double(sampleRate)
 
         lock.lock()
@@ -1967,13 +1976,13 @@ final class WriteCadenceTracker: @unchecked Sendable {
         }
 
         if deficitSinceLog >= Self.logThresholdSeconds {
-            let total = deficitSeconds
+            let total = deficitSeconds - overrunSeconds
             deficitSinceLog = 0
-            log.notice("write-cadence deficit: +\(gap, format: .fixed(precision: 4))s gap, cumulative \(total, format: .fixed(precision: 3))s")
+            log.notice("write-cadence deficit: +\(gap, format: .fixed(precision: 4))s gap, net \(total, format: .fixed(precision: 3))s")
         } else if overrunSinceLog >= Self.logThresholdSeconds {
-            let total = overrunSeconds
+            let total = deficitSeconds - overrunSeconds
             overrunSinceLog = 0
-            log.notice("write-cadence overrun: \(gap, format: .fixed(precision: 4))s gap, cumulative \(total, format: .fixed(precision: 3))s")
+            log.notice("write-cadence overrun: \(gap, format: .fixed(precision: 4))s gap, net \(total, format: .fixed(precision: 3))s")
         }
     }
 

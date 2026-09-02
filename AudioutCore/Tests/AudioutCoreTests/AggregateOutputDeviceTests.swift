@@ -734,12 +734,11 @@ extension SerializedSharedState {
         return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: true)
     }
 
-    private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return }
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
+    private func pollUntil(timeout: TimeInterval? = nil,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: @escaping () -> Bool
+    ) async {
+        await SuiteWait.until(timeout: timeout, sourceLocation: sourceLocation, condition)
     }
 
     /// Extends `makeBackend` with the handoff-specific collaborators (T5): a

@@ -44,8 +44,10 @@ import AudioutSharedUI
             .space,
             SurfaceToolbarController.quitItemIdentifier,
         ], "three spaced tabs lead, the app name sits centered, Pin and Quit trail with a gap")
-        #expect(controller.test_quitItemHasImage,
-                "Quit carries an exit glyph, resolved on this OS")
+        #expect(controller.test_quitItemTitle == "Quit",
+                "Quit is the word, not a glyph")
+        #expect(!controller.test_quitItemHasImage,
+                "Quit is the word, not a glyph")
         #expect(window.toolbar === controller.toolbar)
         #expect(window.toolbarStyle == .unified, "D1: unified — the toolbar IS the one header strip")
     }
@@ -56,6 +58,23 @@ import AudioutSharedUI
         #expect(controller.test_allTabImagesResolved,
                 "every tab resolved a system SF Symbol")
     }
+
+    /// SPEC.md §9 asks for icon+label tabs, and the display mode cannot supply
+    /// the labels: a label-showing mode spills them beside the strip as loose
+    /// text on macOS 26+. So each item draws its own name from its `title`
+    /// while the toolbar stays icon-only. AppKit owns the icon/name layout
+    /// inside a standard item, so there is nothing here to assert about it.
+    @Test func tabsShowTheirNamesBesideTheirIconsWithoutLeavingIconOnlyMode() {
+        let (controller, window) = makeAttached()
+        window.layoutIfNeeded()
+        #expect(controller.test_tabLabels == SurfaceScreen.allCases.map(\.label),
+                "every tab draws its own name")
+        #expect(controller.test_allTabImagesResolved,
+                "and keeps the icon beside it")
+        #expect(controller.toolbar.displayMode == .iconOnly,
+                "the names come from the items, never from a label-showing display mode")
+    }
+
 
     @Test func centeredAppNameItemExists() {
         let (controller, _) = makeAttached()
@@ -89,10 +108,13 @@ import AudioutSharedUI
                 "the ends get more room than the strip-bound vertical axis can give")
     }
 
-    @Test func pinAndQuitItemsResolveGlyphs() {
+    @Test func pinResolvesItsGlyphAndQuitIsAWord() {
         let (controller, _) = makeAttached()
         #expect(controller.test_pinItemHasImage)
-        #expect(controller.test_quitItemHasImage)
+        #expect(controller.test_quitItemTitle == "Quit",
+                "Quit is the word, not a glyph")
+        #expect(!controller.test_quitItemHasImage,
+                "Quit is the word, not a glyph")
     }
 
     // MARK: No segmented separators, and clicks that really land

@@ -229,7 +229,7 @@ public enum PopoverColumnGrid {
     /// CORRECTIONS "FEED needs the colour chip, not just tinted text") — a
     /// small square swatch in `AppTetherColor`'s tone, prefixed onto a
     /// redirected app's name segment. The SAME chip (same size/radius) marks
-    /// that app's name in the App Exceptions row so the tether reads at both
+    /// that app's name in the App Routing row so the tether reads at both
     /// ends. Edge length only — never the state-carrying halo ring or meter
     /// (house rule: tether colour lives on FEED/redirect app-name text only).
     /// Raised 5 → 7pt (2026-07-22, the same pass as the tuning-constant

@@ -3,6 +3,7 @@
 import Foundation
 import Testing
 import AppKit
+import AudioutProtocol
 @testable import AudioutCore
 @testable import AudioutPopoverUI
 @testable import AudioutSharedUI
@@ -292,6 +293,99 @@ import AppKit
         #expect(controller.mainOutMasterVolume == 30, "master volume is the dragged value")
         #expect(backend.devices.first { $0.id == "office" }?.volume == 40, "member volumes remain unchanged")
         #expect(backend.devices.first { $0.id == "homepod-bed" }?.volume == 80, "member volumes remain unchanged")
+    }
+
+    // MARK: A master move from OFF this Mac (the phone)
+
+    /// A phone's `setMainOutMasterVolume` produces NO `BackendEvent`, so nothing
+    /// calls `update(devices:)` and the popover's normal repaint tail never runs
+    /// for it. `GroupController.onStateDidChange` is the only announcement, and
+    /// `AppDelegate` chains `refreshMainOutMaster()` onto it. Without that pair
+    /// the Mac's slider sat frozen at its old value until some unrelated device
+    /// event happened to arrive. The hook is wired here the way
+    /// `AppDelegate.wireCompanionServer()` wires it (that file isn't reachable
+    /// from tests), and the move is driven through the REAL dispatcher.
+    @Test func aPhoneMasterMoveRepaintsTheMainOutRowWithNoBackendEvent() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // a real output — not the passthrough case
+        popover.test_selectMainOut(.selectedDevices); await drain(backend)
+        popover.test_dragMainOutMaster(to: 20); await drain(backend)
+        #expect(popover.test_mainOutRow.test_masterValue == 20, "precondition: the row starts where the Mac left it")
+
+        controller.onStateDidChange = { popover.refreshMainOutMaster() }
+        let dispatcher = CompanionCommandDispatcher(
+            groupController: controller,
+            appRouting: tempAppRoutingController(),
+            settings: AppSettings(),
+            isExcluded: { _ in false },
+            setLocalPlaybackVolume: { _, _ in },
+            applyStartBuffer: { _ in })
+
+        #expect(dispatcher.execute(.setMainOutMasterVolume(volume: 73)).applied)
+        await drain(backend)
+
+        #expect(controller.mainOutMasterVolume == 73, "precondition: the model took the phone's value")
+        #expect(popover.test_mainOutRow.test_masterValue == 73,
+                       "the Main Out slider follows a phone-originated master move with no backend event behind it")
+        // The READOUT, not `statusMasterVolume` — that reads the controller
+        // straight through (see its doc), so asserting it here would pass against
+        // a popover that never repainted at all. The label is a real painted
+        // surface and moves only if the repaint ran.
+        #expect(popover.test_mainOutRow.test_masterReadout == VolumePercent.label(73),
+                       "and the readout beside it, not just the thumb")
+    }
+
+    /// The passthrough half of the same repaint: with nothing but the Mac
+    /// selected, the Mac's DEVICE row slider reads Main, so a phone-driven master
+    /// move has to move that row too — not just the Main Out row.
+    @Test func aPhoneMasterMoveRepaintsTheMacRowInPassthrough() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        popover.test_selectMainOut(.selectedDevices); await drain(backend)
+        #expect(controller.localRowDrivesMain, "precondition: nothing but the Mac is selected")
+        // A known starting master, so the move below is a real change edge — the
+        // seed comes from `AppSettings`' persisted value, which this suite doesn't
+        // isolate and so can't assume.
+        popover.test_dragMainOutMaster(to: 12); await drain(backend)
+
+        controller.onStateDidChange = { popover.refreshMainOutMaster() }
+        controller.setMainOutMasterVolume(44); await drain(backend)
+
+        #expect(popover.test_deviceRow(for: "local-mac")?.test_sliderValue == 44,
+                       "the Mac's row follows Main while it is the thing driving Main")
+    }
+
+    /// The narrowed repaint's other half: with a real output in the target the
+    /// Mac's row is an ordinary member reading its OWN fader, so a master move
+    /// must leave it alone (`refreshMainOutMaster` skips the device sweep there).
+    @Test func aMasterMoveLeavesTheMacRowAloneWhenItIsAnOrdinaryMember() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        _ = popover.test_toggleDeviceEnabled(deviceID: "local-mac", on: true)   // mixed set — the Mac is just a member
+        popover.test_selectMainOut(.selectedDevices); await drain(backend)
+        let macFader = try #require(backend.devices.first { $0.id == "local-mac" }?.volume)
+
+        controller.onStateDidChange = { popover.refreshMainOutMaster() }
+        controller.setMainOutMasterVolume(macFader == 44 ? 45 : 44); await drain(backend)
+
+        #expect(popover.test_deviceRow(for: "local-mac")?.test_sliderValue == macFader,
+                       "the Mac's own stored fader is what its row shows once it shares the mix")
+    }
+
+    /// A master move from the phone must not land under a finger already dragging
+    /// the Mac's own master. The thumb was guarded; the readout beside it was not,
+    /// so the phone's number appeared next to the user's own position.
+    @Test func aPhoneMasterMoveLeavesBothThumbAndReadoutAloneMidDrag() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.test_selectMainOut(.selectedDevices); await drain(backend)
+        popover.test_dragMainOutMaster(to: 20); await drain(backend)
+
+        popover.test_mainOutRow.test_isDraggingMaster = true
+        controller.onStateDidChange = { popover.refreshMainOutMaster() }
+        controller.setMainOutMasterVolume(73); await drain(backend)
+
+        #expect(popover.test_mainOutRow.test_masterValue == 20, "the thumb stays under the finger")
+        #expect(popover.test_mainOutRow.test_masterReadout == VolumePercent.label(20), "and so does the number beside it")
     }
 
     // MARK: The passthrough exception — the Mac's row IS Main
@@ -1296,6 +1390,127 @@ import AppKit
         #expect(popover.test_availableAppsForPicker().isEmpty, "the picker excludes it now that it's routed (proves the rebuild/state refreshed)")
     }
 
+    /// A route added WITHOUT going through the popover — the phone's path,
+    /// which reaches `AppRoutingController` through the companion dispatcher —
+    /// must repaint the open card. It used to update the model and the backend
+    /// while the Applications card kept painting the old list until the next
+    /// open re-ingested it (reported live: "it only shows up if I open and
+    /// close the popover").
+    ///
+    /// These four tests drive `refreshAppRoutes()` through a hand-wired
+    /// `onRoutesDidChange`, because `AppDelegate` — which owns the real
+    /// assignment — lives in an executable target this test target can't
+    /// import (`Package.swift`), the same reason `CompanionEndToEndTests`
+    /// stands up its own AppDelegate-shaped wiring. What they prove is the
+    /// SEAM's behavior; that AppDelegate still calls it is not automatable
+    /// here.
+    @Test func aRouteAddedOutsideThePopoverRepaintsTheOpenCard() async throws {
+        let appRouting = tempAppRoutingController()
+        let fakeApps = [RunningAppInfo(bundleID: "com.example.music", displayName: "Music", icon: nil)]
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: { fakeApps })
+        appRouting.onRoutesDidChange = { popover.refreshAppRoutes() }
+
+        #expect(popover.test_appRow(for: "com.example.music") == nil, "no row before the route exists")
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+
+        // The rendered row, not a rebuild counter and not the model: only
+        // `makeAppRow` — which runs solely inside `rebuild()` — populates this.
+        #expect(popover.test_appRow(for: "com.example.music") != nil,
+                "the Applications card must have built a row for the new route")
+    }
+
+    /// The mirror case: a route REMOVED from the phone must take its row with
+    /// it, rather than leaving a row for a route that no longer exists.
+    @Test func aRouteRemovedOutsideThePopoverDropsItsRow() async throws {
+        let appRouting = tempAppRoutingController()
+        let fakeApps = [RunningAppInfo(bundleID: "com.example.music", displayName: "Music", icon: nil)]
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: { fakeApps })
+        appRouting.onRoutesDidChange = { popover.refreshAppRoutes() }
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        try #require(popover.test_appRow(for: "com.example.music") != nil)
+
+        appRouting.removeRoute(bundleID: "com.example.music")
+
+        #expect(popover.test_appRow(for: "com.example.music") == nil,
+                "the removed route's row must be gone from the card")
+    }
+
+    /// THE REGRESSION GUARD for this repaint hook. A volume write must NEVER
+    /// rebuild the open popover: `AppRowView`'s slider is `isContinuous`, so
+    /// the Mac's own drag fires `onRoutesDidChange` on every tick, and a
+    /// rebuild there replaces the row under the mouse and breaks the
+    /// NSSlider tracking loop (the invariant `appRow(_:didSetVolume:for:)`
+    /// documents). Driven through `test_setVolume`, which is the row's real
+    /// delegate path — the same one a live drag takes.
+    @Test func aVolumeDragNeverRebuildsTheOpenPopover() async throws {
+        let appRouting = tempAppRoutingController()
+        let fakeApps = [RunningAppInfo(bundleID: "com.example.music", displayName: "Music", icon: nil)]
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: { fakeApps })
+        appRouting.onRoutesDidChange = { popover.refreshAppRoutes() }
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let row = try #require(popover.test_appRow(for: "com.example.music"))
+
+        let baseline = popover.test_rebuildCount
+        for volume in 1...25 { row.test_setVolume(volume) }
+
+        #expect(popover.test_rebuildCount == baseline,
+                "a drag's per-tick volume writes must not rebuild the tree under the slider")
+        #expect(popover.test_appRow(for: "com.example.music") === row,
+                "the row under the mouse must be the same object throughout the drag")
+    }
+
+    /// A speaker toggled from the PHONE while a GROUP carries Main Out reaches
+    /// the model with no `BackendEvent` behind it — `setDeviceSelected` only
+    /// calls `applyRouting()` under a Selected-Devices target — so the row's
+    /// checkbox had nothing on the way to correct it and stayed stale until
+    /// the popover was reopened.
+    @Test func refreshDeviceMembershipRepaintsACheckboxChangedWithoutABackendEvent() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        let device = try #require(backend.devices.first { !$0.isLocalDevice })
+        popover.update(devices: backend.devices)
+        let row = try #require(popover.test_deviceRow(for: device.id))
+        let before = row.test_isEnabledOn
+
+        // Straight at the controller, the way the companion dispatcher does it
+        // — deliberately NOT through the row's own click.
+        _ = controller.setDeviceSelected(device.id, !before)
+        #expect(row.test_isEnabledOn == before, "nothing has repainted the row yet")
+
+        popover.refreshDeviceMembership()
+
+        #expect(row.test_isEnabledOn == !before, "the checkbox must follow the model")
+    }
+
+    /// The same call while CLOSED must not sweep the rows — the sweep re-runs
+    /// the energize reconcile and the rail extents, which is why
+    /// `refreshMainOutMaster` refuses to ride every state change.
+    @Test func refreshDeviceMembershipWhileClosedDoesNothing() async throws {
+        let (popover, _, backend) = try await makePopover()
+        popover.update(devices: backend.devices)
+        popover.test_isShownOverride = false
+
+        let baseline = popover.test_rebuildCount
+        popover.refreshDeviceMembership()
+
+        #expect(popover.test_rebuildCount == baseline)
+    }
+
+    /// The same mutation while CLOSED must NOT rebuild — audit B8's rule.
+    @Test func aRouteAddedWhileClosedDoesNotRebuild() async throws {
+        let appRouting = tempAppRoutingController()
+        let (popover, _, _) = try await makePopover(appRouting: appRouting)
+        popover.test_isShownOverride = false
+        appRouting.onRoutesDidChange = { popover.refreshAppRoutes() }
+
+        let baseline = popover.test_rebuildCount
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+
+        #expect(popover.test_rebuildCount == baseline, "a closed popover ingests the change without rebuilding; the next open re-reads it")
+    }
+
     // MARK: T-8 — Applications card wiring (PLAN §C decisions 3/4/6/7/8)
 
     /// Two fake running apps + one seeded route, so tests can inspect the card's
@@ -1330,7 +1545,7 @@ import AppKit
         #expect(popover.test_appRowCount == 2, "one AppRowView per route")
         #expect(popover.test_appRowBundleIDs() == ["com.example.music", "com.example.safari"], "rows render in stable appRoutes order")
         // The card exists and is the LAST card (after System + Selected Devices).
-        #expect(popover.test_isCardCollapsed(title: "App Exceptions") != nil, "the Applications card is present")
+        #expect(popover.test_isCardCollapsed(title: "App Routing") != nil, "the Applications card is present")
     }
 
     /// Empty state: no routes ⇒ the card is still present with zero app rows (just
@@ -1340,17 +1555,17 @@ import AppKit
         let (popover, _, _) = try await makePopover(appRouting: appRouting,
                                                      runningAppsProvider: routedApps)
         #expect(popover.test_appRowCount == 0, "no routes ⇒ no app rows")
-        #expect(popover.test_isCardCollapsed(title: "App Exceptions") != nil, "the card is still present as the empty state (Add row only)")
+        #expect(popover.test_isCardCollapsed(title: "App Routing") != nil, "the card is still present as the empty state (Add row only)")
     }
 
     /// A row's destination menu leads with the standalone "No Redirect" entry
     /// (no header — the new default/neutral choice), then splits into a
     /// "Current Device" section (the local device) and an "AirPlay Devices"
     /// section (the available non-local fleet). A freshly-added route selects
-    /// the "No Redirect" sentinel and dims the slider; an explicit "Current
-    /// Device" pick keeps the slider LIVE (Bug T2 — it's its own local stream),
-    /// so only "No Redirect" dims.
-    @Test func appRowDestinationMenuStructureAndLocalDimming() async throws {
+    /// the "No Redirect" sentinel; every destination — that one included — keeps
+    /// the slider LIVE, since an un-redirected app below 100 is levelled inside
+    /// the whole-system mix.
+    @Test func appRowDestinationMenuStructureAndSliderStaysLive() async throws {
         let appRouting = tempAppRoutingController()
         appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
         let (popover, _, _) = try await makePopover(appRouting: appRouting,
@@ -1373,11 +1588,11 @@ import AppKit
 
         // A freshly-added (never-touched) route defaults to No Redirect.
         #expect(popover.test_appRowSelectedDestinationID(for: "com.example.music") == PopoverController.noRedirectDestinationID, "a fresh route selects the sentinel No Redirect entry")
-        #expect(popover.test_appRowSliderDimmed(for: "com.example.music") == true, "the slider is dimmed on No Redirect (no independent stream to level)")
+        #expect(popover.test_appRowSliderDimmed(for: "com.example.music") == false, "the slider is live on No Redirect — below 100 the app is levelled inside the mix")
 
         // Bug T2: explicitly picking Current Device gives the app its OWN local
-        // stream (played on the Mac's built-in speakers), so its slider is LIVE —
-        // only No Redirect stays dimmed.
+        // stream (played on the Mac's built-in speakers), and its slider is LIVE
+        // too.
         let row = try #require(popover.test_appRow(for: "com.example.music"))
         row.test_selectDestination(PopoverController.currentDeviceDestinationID)
         #expect(popover.test_appRowSelectedDestinationID(for: "com.example.music") == PopoverController.currentDeviceDestinationID, "an explicit Current Device pick selects its own sentinel entry")
@@ -1440,8 +1655,8 @@ import AppKit
     }
 
     /// Selecting an AirPlay destination on a row calls through to
-    /// `AppRoutingController.setDestination` and repaints: the route is redirected,
-    /// the row's selected id updates, and the slider un-dims.
+    /// `AppRoutingController.setDestination` and repaints: the route is redirected
+    /// and the row's selected id updates.
     @Test func appRowDestinationChangeCallsThroughAndRepaints() async throws {
         let appRouting = tempAppRoutingController()
         appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
@@ -1677,7 +1892,7 @@ import AppKit
         #expect(popover.test_appRowSelectedDestinationID(for: "com.example.music") == "office",
                 "the row still selects the kept target, not the No Redirect sentinel")
         #expect(popover.test_appRowSliderDimmed(for: "com.example.music") == false,
-                "the row must not render as an unset No Redirect row (dimmed slider)")
+                "the row keeps a live slider for its kept target")
 
         let titles = try #require(popover.test_appRowDestinationTitles(for: "com.example.music"))
         #expect(titles.contains("Office"),
@@ -1922,7 +2137,7 @@ import AppKit
         let (popoverNone, _, _) = try await makePopover(appRouting: none,
                                                         runningAppsProvider: routedApps)
         popoverNone.test_simulateOpen()
-        #expect(popoverNone.test_isCardCollapsed(title: "App Exceptions") == true, "no routes ⇒ Applications starts collapsed")
+        #expect(popoverNone.test_isCardCollapsed(title: "App Routing") == true, "no routes ⇒ Applications starts collapsed")
 
         // A route on the neutral "No Redirect" default ⇒ NOW expanded (C5 change).
         let neutral = tempAppRoutingController()
@@ -1930,7 +2145,7 @@ import AppKit
         let (popoverNeutral, _, _) = try await makePopover(appRouting: neutral,
                                                            runningAppsProvider: routedApps)
         popoverNeutral.test_simulateOpen()
-        #expect(popoverNeutral.test_isCardCollapsed(title: "App Exceptions") == false, "any route (even .noRedirect) ⇒ Applications starts expanded (C5)")
+        #expect(popoverNeutral.test_isCardCollapsed(title: "App Routing") == false, "any route (even .noRedirect) ⇒ Applications starts expanded (C5)")
 
         // A redirected app ⇒ expanded on open (unchanged).
         let redirected = tempAppRoutingController()
@@ -1939,7 +2154,7 @@ import AppKit
         let (popover, _, _) = try await makePopover(appRouting: redirected,
                                                      runningAppsProvider: routedApps)
         popover.test_simulateOpen()
-        #expect(popover.test_isCardCollapsed(title: "App Exceptions") == false, "≥1 redirected app ⇒ Applications starts expanded")
+        #expect(popover.test_isCardCollapsed(title: "App Routing") == false, "≥1 redirected app ⇒ Applications starts expanded")
     }
 
     // MARK: Live level dispatch (task T8, extends the T5 meter wiring)
@@ -2977,12 +3192,14 @@ import AppKit
 
     // MARK: Takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md)
 
-    /// All four takeover states render their own copy, and the "Open Login
-    /// Items…" action button is present ONLY for state 1 (`.needsApproval`) —
-    /// states 2/3/4 have no remedy this button could offer (brief: state 2's
-    /// own doc says approval UX can't fix a missing bundle component, 3 is
-    /// transient, 4 needs a different app to yield).
-    @Test func takeoverStripRendersEachStateWithButtonOnlyForState1() async throws {
+    /// All four takeover states render their own copy, and the action button
+    /// is present ONLY for states 1 (`.needsApproval`) and 4 (`.timedOut`) —
+    /// states 2/3 have no remedy this button could offer (state 2's own doc
+    /// says approval UX can't fix a missing bundle component, 3 is
+    /// transient). State 4 is a genuine failure (WARNING severity, not the
+    /// other three states' info tier) and offers "Try Again" rather than the
+    /// old copy's unkept promise to retry on its own.
+    @Test func takeoverStripRendersEachStateWithButtonForStates1And4() async throws {
         let (popover, _, _) = try await makePopover()
 
         #expect(popover.test_systemAirPlayNoteText == nil, "no strip by default")
@@ -3000,11 +3217,26 @@ import AppKit
         #expect(!popover.test_systemAirPlayNoteHasActionButton, "the transient state has nothing to tap")
 
         popover.setTakeoverStatus(.timedOut)
-        #expect(popover.test_systemAirPlayNoteText == "Another app is using AirPlay's timing right now, so this connection couldn't complete. Try again in a moment.")
-        #expect(!popover.test_systemAirPlayNoteHasActionButton, "a different app must yield — no settings pane fixes that")
+        #expect(popover.test_systemAirPlayNoteText == "Speaker Sync couldn't get the speakers' clocks in step, so this connection couldn't complete.",
+                "honest about the outcome — the wait ran out and the connection genuinely failed")
+        #expect(popover.test_systemAirPlayNoteHasActionButton, "a failed connection offers Try Again")
 
         popover.setTakeoverStatus(nil)
         #expect(popover.test_systemAirPlayNoteText == nil, "clearing the status clears the strip")
+    }
+
+    /// Tapping state 4's action button invokes `onRetryTakeover`, wired by the
+    /// host (`AppDelegate`) to the same single-device re-kick the "Speakers
+    /// unreachable" fallback banner's own "Try again" already drives.
+    @Test func takeoverTimedOutActionButtonInvokesRetryCallback() async throws {
+        let (popover, _, _) = try await makePopover()
+
+        var retried = false
+        popover.onRetryTakeover = { retried = true }
+        popover.setTakeoverStatus(.timedOut)
+        popover.test_tapSystemAirPlayNoteAction()
+
+        #expect(retried, "tapping state 4's button must call onRetryTakeover")
     }
 
     /// Tapping state 1's action button invokes `onOpenPTPHelperLoginItems`,
@@ -3041,5 +3273,42 @@ import AppKit
 
         popover.setSystemAirPlayNoteActive(false)
         #expect(popover.test_systemAirPlayNoteText == nil, "both conditions ended — the slot is empty")
+    }
+
+    // MARK: First-run cues on the Output Devices card
+
+    @Test func membershipHintShowsUntilTheFirstToggleThenStaysGone() async throws {
+        let (popover, _, backend) = try await makePopover()
+        var dismissed = false
+        popover.membershipHintShownProvider = { !dismissed }
+        popover.onMembershipHintDismissed = { dismissed = true }
+        popover.rebuild()
+        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [PopoverController.membershipHintText],
+                "a first-run user gets the hint on the Output Devices card")
+
+        // Through the ROW's own delegate seam — the dismissal lives in
+        // `deviceRow(_:didToggleEnabled:for:)`, which `test_toggleDeviceEnabled`
+        // deliberately bypasses.
+        popover.test_deviceRow(for: "office")?.test_toggleEnabled(true)
+        await drain(backend)
+        #expect(dismissed, "the first membership toggle in the Mixer retires the hint")
+        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [],
+                "…and the card rebuilds without it in the same gesture")
+
+        popover.test_deviceRow(for: "office")?.test_toggleEnabled(false)
+        await drain(backend)
+        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "it never comes back")
+
+        let (fresh, _, _) = try await makePopover()
+        fresh.rebuild()
+        #expect(fresh.test_cardNoteTexts(title: "Output Devices") == [],
+                "no provider wired means never shown — what keeps the snapshot tools unchanged")
+    }
+
+    @Test func outputDevicesLegendsCarryPlainSpeechTooltips() async throws {
+        let (popover, _, _) = try await makePopover()
+        #expect(popover.test_columnTitleToolTips(title: "Output Devices")
+                    == [PopoverController.sourceColumnHelp, PopoverController.offsetColumnHelp],
+                "both column legends explain themselves on hover")
     }
 }

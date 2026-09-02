@@ -2,50 +2,22 @@
 
 ## Purpose
 
-Owns the argument grammar for `engine-probe` (`ProbeArgParsing.swift`): parses
-`argv` into `ProbeArgs`/`ProbeDevice`, and owns `usage()`. Split out of the
-`engine-probe` executable target purely so it can be unit-tested — code in an
-`main.swift` can't be imported by a test target. This library has no
-dependency on `AirPlayEngine` or any C target; it is pure `Foundation` string
-parsing. Boundary: it does not open sockets, print anything, or know about
-`AirPlayEngine` types (`DeviceDescriptor`, `OutputID`, etc.) — `engine-probe`'s
-`main.swift` converts `ProbeDevice` into engine calls.
+Owns the argument grammar for `engine-probe`, split into a library purely so
+it can be unit-tested. Pure Foundation string parsing: it opens no sockets,
+prints nothing, and knows no engine types.
 
-Keep this file up to date when the flag grammar changes (new per-device flags,
-changed commit rules) or when `ProbeArgs`/`ProbeDevice` gain/lose fields.
+## Rules
 
-## Notable Patterns
+- A device slot completes only once it has both an address and a device id.
+- Per-device flags amend the slot in progress in any order; committing early once split one device into two.
+- Per-device options given before the first address edit the defaults template, not device zero.
+- Anything ambiguous lands in the problems list; this library never exits or prints, so callers must check it.
+- The help text and the grammar comments must stay in lockstep, because the help text is the spec.
+- Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 
-- **Device-slot grammar**: a device slot is "complete" once it has both
-  `--address` and `--device-id` (`ProbeDevice.isComplete`). Per-device flags
-  (`--name`, `--port`, `--features`, `--model`, `--ipv6`, `--raop`,
-  `--password`) amend the in-progress slot in any order until it's complete;
-  the next per-device flag after that commits it and starts a new device.
-  This exists because an earlier parser committed early on flag arrival,
-  silently splitting one device into two on a 2026-07-17 live run — see the
-  file-header comment for the full incident and the full grammar rules.
-- **Defaults vs. in-progress slot**: per-device options given *before* the
-  first `--address` edit `defaults` (the template every later slot starts
-  from), not just device 0. `--device-id` is never a default.
-- **Loud-not-silent errors**: anything ambiguous (an incomplete slot
-  committed, trailing per-device flags with no address, an unknown flag) is
-  appended to `ProbeArgs.problems` rather than dropped or guessed. Callers
-  (`engine-probe`) must check `problems` and refuse to run — this library
-  itself never exits or prints.
-- `usage()` and the grammar comments in `ProbeArgParsing.swift` must be kept
-  in lockstep — the doc claims are what `engine-probe --help` prints.
+## Map
 
-## Key Types
-
-| Type | Role |
-|---|---|
-| `ProbeDevice` | One output device as described by the command line (address, port, device ID, features, model, ipv6, password, raop). |
-| `ProbeArgs` | Full parse result: `devices`, `pcmPath`, `gated`, `wantsHelp`, and the `problems` diagnostic list. |
-| `parseProbeArgs(_:)` | Entry point; turns `argv` into `ProbeArgs` per the device-slot grammar above. |
-| `usage()` | Returns the CLI's help text (also the ordering/grouping spec for the grammar). |
-
-## Tests
-
-| File | Focus |
-|---|---|
-| `../../Tests/AirPlayEngineTests/EngineProbeParsingTests.swift` | Unit tests for `parseProbeArgs` against the device-slot grammar (single/multi-device ordering, defaults-before-first-address, incomplete-slot problems, `--raop`). |
+- `ProbeDevice` → one output device as described by the command line.
+- `ProbeArgs` → the full parse result, including the problems list.
+- `parseProbeArgs` → entry point turning arguments into that result.
+- `usage` → the help text, and the ordering spec for the grammar.

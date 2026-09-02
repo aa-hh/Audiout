@@ -27,11 +27,18 @@ public final class ExcludedAppsController {
         self.excludedApps = loadPersisted ? ((try? store.load()) ?? []) : []
     }
 
+    /// Fired AFTER any mutation that actually changes the denylist (exclude /
+    /// remove), immediately after the change is persisted. No-op mutations
+    /// don't fire it (they return before `persist()`). Single-assignment per
+    /// house idiom — `AppDelegate` is the sole assignee.
+    public var onChange: (() -> Void)?
+
     /// A failed write is reported rather than swallowed: this list is the
     /// privacy denylist, so an entry that never reaches disk means the app the
     /// user excluded IS captured again at the next launch.
     private func persist() {
         do { try store.save(excludedApps) } catch { StoreRecovery.noteWriteFailure(error) }
+        onChange?()
     }
 
     private func index(of bundleID: String) -> Int? {

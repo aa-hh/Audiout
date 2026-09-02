@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import Foundation
+import ProbeKit
 import Testing
 @testable import AudioutCore
 
@@ -573,12 +574,10 @@ import AudioToolbox
         func parentPID(of pid: pid_t) -> pid_t? { nil }
     }
 
-    private func waitFor(timeout: TimeInterval = 8, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     @Test func tickReachesEngineAndBTFanoutIdenticallyAndOnlyWhileActive() {
@@ -862,6 +861,69 @@ import AudioToolbox
         #expect(!injector.takeProbeCompletion(), "…and only once")
         #expect(!injector.test_isArmed,
                 "the probe never arms the tick grid on its own")
+    }
+
+    /// The staggered shape a phone-driven run needs when two Bluetooth
+    /// speakers are audible: both sweeps on the Bluetooth lane, a stagger
+    /// apart, each in its own window — and a third variant carrying neither,
+    /// for the speakers that are not to hear the one currently playing.
+    @Test func theStaggeredProbeSeparatesTheTwoSweepsIntoOwnedWindows() {
+        let rate = 8_000.0
+        let injector = AlignmentTickInjector(
+            sampleRate: rate, channels: 2,
+            config: .init(bpm: AlignmentTickInjector.wizardSearchBPM,
+                          maxTicks: AlignmentTickInjector.unlimitedTicks,
+                          armedAtStart: false, bedEnabled: false,
+                          replacesProgram: true))
+        let amplitude = 0.35
+        injector.stageProbe(amplitude: amplitude, shape: .staggered(referenceOnEngine: false))
+        injector.armProbe()
+
+        let blockFrames = 1_600
+        var bluetooth: [Int16] = []
+        var sweepFree: [Int16] = []
+        var windowPerBlock: [Int?] = []
+        var completedAfterBlocks: Int?
+        for block in 0..<24 {
+            var pcm = zeroBuffer(frames: blockFrames)
+            var bedded = Data()
+            var plain = Data()
+            windowPerBlock.append(
+                injector.mixWizardVariants(into: &pcm, bedded: &bedded, beddedNoProbe: &plain))
+            bluetooth.append(contentsOf: channel0(bedded))
+            sweepFree.append(contentsOf: channel0(plain))
+            if completedAfterBlocks == nil, injector.takeProbeCompletion() {
+                completedAfterBlocks = block
+            }
+        }
+
+        let epoch = Int(AlignmentTickInjector.probeLeadSeconds * rate)
+        let stagger = Int(AlignmentTickInjector.probeStaggerSeconds * rate)
+        let down = SyncProbe.samples(.downSweep(sampleRate: rate, duration: 1.0))
+        let up = SyncProbe.samples(.upSweep(sampleRate: rate, duration: 1.0))
+        func expected(_ sweep: [Float], _ i: Int) -> Int16 {
+            Int16(clamping: Int32((Double(sweep[i]) * amplitude * 32_767.0).rounded()))
+        }
+        #expect((0..<down.count).allSatisfy { bluetooth[epoch + $0] == expected(down, $0) },
+                "the DOWN sweep opens the run at the epoch, at full amplitude")
+        #expect((0..<up.count).allSatisfy {
+                    bluetooth[epoch + stagger + $0] == expected(up, $0) },
+                "the UP sweep follows a whole stagger later")
+        #expect(bluetooth[(epoch + down.count)..<(epoch + stagger)].allSatisfy { $0 == 0 },
+                "and the gap between them is silent, so no block boundary can split one sweep across two owners")
+        #expect(sweepFree.allSatisfy { $0 == 0 },
+                "the sweep-free variant carries no sweep at all — it is what every non-owning speaker is fed")
+
+        #expect(windowPerBlock[epoch / blockFrames] == 0, "the DOWN window is reported first")
+        #expect(windowPerBlock[(epoch + stagger) / blockFrames] == 1, "then the UP window")
+        #expect(windowPerBlock[(epoch + down.count + blockFrames) / blockFrames] == nil,
+                "and no window at all in the gap between them")
+
+        #expect(injector.test_probeEndFrames == stagger + up.count,
+                "the run's own length is the LAST lane's end, not the first's")
+        let lastFrame = epoch + injector.test_probeEndFrames
+        #expect(completedAfterBlocks == lastFrame / blockFrames,
+                "completion waits for the LAST lane, not the first")
     }
 
     /// Roadmap 064 end to end at the coordinator: with a probe staged, the

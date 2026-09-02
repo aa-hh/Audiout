@@ -27,6 +27,13 @@ import Testing
 /// precheck must run BEFORE any Mach touch or wait, so the most common
 /// real-world failure (never approved) fails instantly instead of hanging
 /// out the full timeout.
+///
+/// Nested under ``SerializedSharedState`` because these tests install the
+/// process-global `Telemetry._installTestSink(_:)`. Outside that parent they
+/// race every other suite that installs it — one suite's `nil` teardown tears
+/// another's sink out mid-test, and the loser reads back nothing.
+extension SerializedSharedState {
+
 @Suite struct PTPHelperActivationTests {
 
     // MARK: Doubles
@@ -397,6 +404,8 @@ import Testing
                 "the cycle deferred by the in-flight guard fires once nobody is left waiting")
     }
 }
+
+} // extension SerializedSharedState
 
 private extension NSLock {
     func withLock<T>(_ body: () -> T) -> T {

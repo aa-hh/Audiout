@@ -52,9 +52,15 @@ import AudioutProtocol
 
     /// Spin (not block) until `condition` holds or `timeout` elapses —
     /// the `DACPServerTests.waitFor` idiom, generalized to a predicate.
-    /// Timeouts are generous: this machine runs several agents' suites at
-    /// once.
-    private func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+    ///
+    /// The default is `SuiteWait.timeout`, not a number of its own: this is a
+    /// hang-stop, and a private deadline sized against the operation measures
+    /// how promptly a contended machine gets round to the poll instead. A few
+    /// seconds is not generous here — it is the length of a starve, and the
+    /// test then reports as whatever it asserted next (a reply that never came).
+    /// An explicit `timeout:` still means "I meant this expiry" (a negative
+    /// check), matching `SuiteWait`'s rule.
+    private func waitUntil(timeout: TimeInterval = SuiteWait.timeout, _ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return true }

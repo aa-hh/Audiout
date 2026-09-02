@@ -33,7 +33,9 @@ import AudioutSharedUI
         let (controller, window) = makeAttached()
         #expect(controller.test_itemIdentifiers == [
             SurfaceToolbarController.tabItemIdentifier(for: .mixer),
+            .space,
             SurfaceToolbarController.tabItemIdentifier(for: .groups),
+            .space,
             SurfaceToolbarController.tabItemIdentifier(for: .settings),
             .flexibleSpace,
             SurfaceToolbarController.titleItemIdentifier,
@@ -41,7 +43,7 @@ import AudioutSharedUI
             SurfaceToolbarController.pinItemIdentifier,
             .space,
             SurfaceToolbarController.quitItemIdentifier,
-        ], "three separate tabs lead, the app name sits centered, Pin and Quit trail with a gap")
+        ], "three spaced tabs lead, the app name sits centered, Pin and Quit trail with a gap")
         #expect(controller.test_quitItemHasImage,
                 "Quit carries an exit glyph, resolved on this OS")
         #expect(window.toolbar === controller.toolbar)
@@ -116,22 +118,61 @@ import AudioutSharedUI
 
     /// The selection has to be visible without the segmented capsule doing it
     /// for us, and it has to be visible on exactly one tab.
-    @Test func onlyTheSelectedTabPaintsItsDisc() {
+    @Test func onlyTheSelectedTabIsFilled() {
         let (controller, _) = makeAttached()
-        #expect(controller.test_onlySelectedTabHasDisc, "Mixer starts selected, alone")
+        #expect(controller.test_onlySelectedTabIsFilled, "Mixer starts selected, alone")
 
         controller.setSelectedScreen(.settings)
 
-        #expect(controller.test_onlySelectedTabHasDisc, "the disc followed the selection")
+        #expect(controller.test_onlySelectedTabIsFilled, "the fill followed the selection")
     }
 
-    /// The disc is neutral on purpose: gold means signal — carrying audio —
+    /// One header, one button style (Alec, live review 2026-08-30). The tabs
+    /// had become custom-view items, which draw NO chrome — bare glyphs beside
+    /// Pin/Quit's bordered circles and the lockup's glass capsule, three styles
+    /// in one strip. Every tab is the same bordered item Pin and Quit are.
+    @Test func everyTabWearsTheSameControlAsPinAndQuit() {
+        let (controller, _) = makeAttached()
+        #expect(controller.test_allTabsAreBordered,
+                "the tabs are bordered items — the same control Pin and Quit are")
+        #expect(controller.test_pinItemIsBordered && controller.test_quitItemIsBordered,
+                "and Pin/Quit really are bordered, so that comparison means something")
+    }
+
+    /// The tabs are `.space`-separated so the strip cannot RESHAPE with the
+    /// selection. Adjacent bordered items merge into one shared capsule on
+    /// macOS 26+, and `.prominent` pulls the selected item out of that capsule —
+    /// measured live: Mixer gave circle + capsule(2), Groups gave three
+    /// circles, Settings gave capsule(2) + circle. Same wandering geometry the
+    /// segmented divider had.
+    @Test func theTabsAreSeparatedSoTheStripCannotReshape() {
+        let (controller, _) = makeAttached()
+        let ids = controller.test_itemIdentifiers
+        let tabs = SurfaceScreen.allCases.map(SurfaceToolbarController.tabItemIdentifier(for:))
+        for (first, second) in zip(tabs, tabs.dropFirst()) {
+            guard let a = ids.firstIndex(of: first), let b = ids.firstIndex(of: second) else {
+                Issue.record("a tab item is missing from the toolbar")
+                return
+            }
+            #expect(b == a + 2 && ids[a + 1] == .space,
+                    "a .space must sit between \(first.rawValue) and \(second.rawValue)")
+        }
+    }
+
+    /// The fill is neutral on purpose: gold means signal — carrying audio —
     /// and which screen you are on is chrome. Same rule that keeps the mute
-    /// pill and the row washes off the gold family.
-    @Test func theSelectionDiscIsNeutralNotGold() {
-        #expect(SurfaceTabButton.selectionWashAlpha > 0, "the disc is actually painted")
-        #expect(Tokens.Color.engagedChrome == Tokens.Color.label,
-                "the disc draws in engagedChrome, which is the neutral label tone")
+    /// pill and the row washes off the gold family. It is an authored grey
+    /// rather than the dynamic token because `.prominent` forces the glyph
+    /// WHITE in both appearances, and a token that goes near-white in dark
+    /// mode would hide it.
+    @Test func theSelectionFillIsNeutralNotGold() {
+        let fill = SurfaceToolbarController.selectedTabFill
+            .usingColorSpace(.sRGB) ?? .black
+        #expect(abs(fill.redComponent - fill.greenComponent) < 0.01
+                    && abs(fill.greenComponent - fill.blueComponent) < 0.01,
+                "the fill is a pure grey — no hue, and specifically not gold")
+        #expect(fill.brightnessComponent < 0.5,
+                "dark enough that the forced-white glyph reads on it in light mode too")
     }
 
     // MARK: Selection — host-confirmed round trip

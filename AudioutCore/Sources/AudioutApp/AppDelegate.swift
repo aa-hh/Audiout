@@ -1282,7 +1282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func warnIfTranslocated() {
         guard Bundle.main.bundleURL.path.contains("/AppTranslocation/") else { return }
-        NSApp.activate()
+        NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Audiout is running from a temporary location"
         alert.informativeText = """

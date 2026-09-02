@@ -3,110 +3,14 @@
 import AppKit
 import AudioutSharedUI
 
-/// One screen tab in the header: an icon-only button whose SELECTED state is a
-/// neutral filled disc behind the glyph.
-///
-/// Three of these replace the single `NSToolbarItemGroup` the header used to
-/// carry (live review 2026-08-29). The group drew the selection natively, but
-/// it drew it as a SEGMENTED control — and a segmented control puts a hairline
-/// separator between adjacent segments while suppressing the one next to the
-/// selected segment. So the strip showed one divider with Mixer selected, none
-/// with Groups, one on the other side with Settings: a line that moved when
-/// nothing about the tabs had changed. There is no API to draw the separators
-/// consistently, so the fix is to stop being one segmented control. Separate
-/// toolbar items merge into a single Liquid Glass capsule on macOS 26+ with no
-/// separators at all, and the selection is ours to draw.
-///
-/// The disc is deliberately ``Tokens/Color/engagedChrome`` and NOT the gold
-/// family: gold means signal — in the mix, carrying audio — and which screen
-/// you are looking at is chrome, not signal. Same reasoning that keeps the
-/// mute pill and the row washes neutral.
-@MainActor
-final class SurfaceTabButton: NSButton {
-
-    /// The screen this tab switches to.
-    let screen: SurfaceScreen
-
-    /// Side of the button's square hit box, and so the disc's diameter. Sized
-    /// to sit inside the unified strip alongside the bordered Pin/Quit items.
-    static let side: CGFloat = 28
-
-    /// Alpha of the selected tab's ``Tokens/Color/engagedChrome`` disc. Sits at
-    /// the TOP of that token's documented alpha ladder — level with the mute
-    /// pill rather than the row washes — for the reason the ladder gives: a
-    /// glyph-scale fill is small, and needs the extra weight to read at all.
-    static let selectionWashAlpha: CGFloat = 0.22
-
-    var isSelected = false {
-        didSet {
-            guard isSelected != oldValue else { return }
-            applySelectionTreatment()
-        }
-    }
-
-    init(screen: SurfaceScreen, target: AnyObject?, action: Selector) {
-        self.screen = screen
-        super.init(frame: .zero)
-        self.target = target
-        self.action = action
-        isBordered = false
-        setButtonType(.momentaryChange)
-        imagePosition = .imageOnly
-        image = SurfaceToolbarController.resolveSymbol(
-            screen.symbolName, fallbacks: screen.fallbackSymbolNames,
-            accessibilityDescription: screen.label)
-        // The tab names lost their on-screen labels with the icon-only strip;
-        // the tooltip and the spoken label are what carry them (plus ⌘1/⌘2/⌘3,
-        // which ride the shell panel's key-equivalent seam).
-        toolTip = "\(screen.label) (⌘\(screen.keyEquivalent))"
-        // A tab is one option out of three, not an independent switch — the
-        // role the segmented group used to report, kept by hand so VoiceOver
-        // still announces "selected" on the one you are on.
-        setAccessibilityRole(.radioButton)
-        setAccessibilityLabel(screen.label)
-        translatesAutoresizingMaskIntoConstraints = false
-        wantsLayer = true
-        layer?.cornerRadius = Self.side / 2
-        applySelectionTreatment()
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: Self.side),
-            heightAnchor.constraint(equalToConstant: Self.side),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    /// The selected disc is a static `CGColor` on the button's own backing
-    /// layer — drawing only, behavior/keyboard/VoiceOver untouched. Same idiom
-    /// as the mute pill (`DeviceRowView.updateMuteTint`), including its
-    /// consequence: a `CGColor` does not follow the appearance, so this
-    /// re-stamps on every light/dark or Increase-Contrast switch.
-    private func applySelectionTreatment() {
-        contentTintColor = isSelected ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
-        setAccessibilityValue(isSelected)
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = isSelected
-                ? Tokens.Color.engagedChrome.withAlphaComponent(Self.selectionWashAlpha).cgColor
-                : nil
-        }
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        applySelectionTreatment()
-    }
-
-    /// Whether the selected disc is currently painted (test seam).
-    var test_hasSelectionDisc: Bool { layer?.backgroundColor != nil }
-}
-
 /// The one-surface header, as a REAL window-attached `NSToolbar` (owner
 /// decision D1, live build review 2026-08-07 — supersedes the custom
 /// `PopoverHeaderView` strip and its three-tier glass/frost/opaque material
 /// machinery; the system toolbar provides Liquid Glass on macOS 26+, the older
 /// material below, and Reduce Transparency handling on its own):
 ///
-/// - the three screens as three separate `SurfaceTabButton` items, ICON-ONLY
+/// - the three screens as three separate BORDERED items — the same control
+///   Pin and Quit are, so the header carries ONE button style. ICON-ONLY
 ///   (`toolbar.displayMode = .iconOnly`) and deliberately so: on macOS 26+
 ///   (reproduced on 27.0) every label-showing display mode spills tab names
 ///   beside the strip as loose text. The tab names survive the missing labels —
@@ -117,6 +21,20 @@ final class SurfaceTabButton: NSButton {
 ///   header, both profiles. The mark is decorative; the wordmark is what
 ///   VoiceOver reads, so the name is spoken once;
 /// - Pin and Quit as trailing bordered items.
+///
+/// **Why the tabs are bordered items and not custom views** (live review
+/// 2026-08-30). Killing the `NSToolbarItemGroup` killed the wandering
+/// segment divider — a segmented control draws a hairline between adjacent
+/// segments and suppresses the one beside the SELECTED segment, so the line
+/// moved with the selection and no API draws them consistently. But the group
+/// was also the only thing giving the tabs any chrome: replacing it with
+/// custom-view items left three bare glyphs beside Pin/Quit's bordered circles
+/// and the lockup's glass capsule — three styles in one header. Bordered items
+/// have no separators to draw (they are not one segmented control) AND wear
+/// the same circle as Pin and Quit, so the divider stays dead and the header
+/// reads as one control set. Selection is `.prominent` — the filled variant of
+/// that same circle — and the tabs are `.space`-separated so that fill can
+/// never reshape the strip (see `toolbarDefaultItemIdentifiers`).
 ///
 /// **The name's glass capsule is not removable, and stays** (live review
 /// 2026-08-29). macOS 26+ draws EVERY toolbar item inside an
@@ -163,6 +81,16 @@ final class SurfaceToolbarController: NSObject {
     static let lockupHorizontalInset: CGFloat = 14
 
     static let titleItemIdentifier = NSToolbarItem.Identifier("SurfaceTitle")
+    /// Fill behind the SELECTED tab's glyph. `.prominent` is the only way a
+    /// standard toolbar item paints its own background, and it forces the
+    /// glyph WHITE in both appearances — so this fill must stay dark enough
+    /// for white to read on it in light AND dark mode, which a dynamic token
+    /// (near-black in light, near-white in dark) cannot do. Hence one authored
+    /// mid-dark neutral rather than ``Tokens/Color/engagedChrome``: same
+    /// reasoning as that token though — NOT the gold family, because gold
+    /// means signal and which screen you are on is chrome.
+    static let selectedTabFill = NSColor(white: 0.35, alpha: 1)
+
     static let pinItemIdentifier = NSToolbarItem.Identifier("SurfacePin")
     static let quitItemIdentifier = NSToolbarItem.Identifier("SurfaceQuit")
 
@@ -187,7 +115,7 @@ final class SurfaceToolbarController: NSObject {
 
     let toolbar: NSToolbar
 
-    private var tabButtons: [SurfaceScreen: SurfaceTabButton] = [:]
+    private var tabItems: [SurfaceScreen: NSToolbarItem] = [:]
     private var pinItem: NSToolbarItem?
     private var titleLabel: NSTextField?
     private var markView: NSImageView?
@@ -224,9 +152,23 @@ final class SurfaceToolbarController: NSObject {
         applyPinAppearance()
     }
 
+    /// The tabs wear the SAME control as Pin and Quit — a bordered toolbar
+    /// item — so the header carries one button style rather than three (Alec,
+    /// live review 2026-08-30: the custom-view tabs drew no chrome at all,
+    /// leaving bare glyphs beside bordered circles and a glass lockup).
+    /// Selection is the filled variant of that one control.
     private func applySelectionToTabs() {
-        for (screen, button) in tabButtons {
-            button.isSelected = screen == selectedScreen
+        for (screen, item) in tabItems {
+            let selected = screen == selectedScreen
+            if #available(macOS 26.0, *) {
+                item.style = selected ? .prominent : .plain
+                item.backgroundTintColor = selected ? Self.selectedTabFill : nil
+            }
+            // Below macOS 26 there is no prominent style, so the glyph tint is
+            // the whole cue — harmless to set on 26+, where prominent overrides it.
+            item.image = Self.resolveSymbol(screen.symbolName,
+                                            fallbacks: screen.fallbackSymbolNames,
+                                            accessibilityDescription: screen.label)
         }
     }
 
@@ -242,8 +184,11 @@ final class SurfaceToolbarController: NSObject {
     // MARK: Actions
 
     @objc private func tabTapped(_ sender: Any?) {
-        guard let button = sender as? SurfaceTabButton else { return }
-        onSelectScreen?(button.screen)
+        guard let item = sender as? NSToolbarItem,
+              let screen = SurfaceScreen.allCases
+                  .first(where: { Self.tabItemIdentifier(for: $0) == item.itemIdentifier })
+        else { return }
+        onSelectScreen?(screen)
         // Host-confirmed: whatever the callback decided (it normally called
         // `setSelectedScreen` synchronously), the strip shows exactly that.
         applySelectionToTabs()
@@ -272,23 +217,34 @@ final class SurfaceToolbarController: NSObject {
     var test_itemIdentifiers: [NSToolbarItem.Identifier] { toolbar.items.map(\.itemIdentifier) }
     /// The tabs' labels, in tab order.
     var test_tabLabels: [String] {
-        SurfaceScreen.allCases.compactMap { tabButtons[$0]?.screen.label }
+        SurfaceScreen.allCases.compactMap { tabItems[$0]?.label }
     }
     /// Whether every tab resolved a non-nil symbol image.
     var test_allTabImagesResolved: Bool {
-        let buttons = SurfaceScreen.allCases.compactMap { tabButtons[$0] }
-        return buttons.count == SurfaceScreen.allCases.count && buttons.allSatisfy { $0.image != nil }
+        let items = SurfaceScreen.allCases.compactMap { tabItems[$0] }
+        return items.count == SurfaceScreen.allCases.count && items.allSatisfy { $0.image != nil }
     }
     /// The index of the tab currently showing selected, `nil` if none does.
     var test_selectedTabIndex: Int? {
-        SurfaceScreen.allCases.first { tabButtons[$0]?.isSelected == true }?.rawValue
+        guard #available(macOS 26.0, *) else { return selectedScreen.rawValue }
+        return SurfaceScreen.allCases.first { tabItems[$0]?.style == .prominent }?.rawValue
     }
-    /// Whether exactly the selected tab paints its neutral disc.
-    var test_onlySelectedTabHasDisc: Bool {
-        SurfaceScreen.allCases.allSatisfy { screen in
-            guard let button = tabButtons[screen] else { return false }
-            return button.test_hasSelectionDisc == (screen == selectedScreen)
+    /// Whether exactly the selected tab wears the filled treatment, and every
+    /// tab wears the SAME bordered control Pin and Quit do.
+    var test_onlySelectedTabIsFilled: Bool {
+        guard #available(macOS 26.0, *) else { return true }
+        return SurfaceScreen.allCases.allSatisfy { screen in
+            guard let item = tabItems[screen] else { return false }
+            let wantsFill = screen == selectedScreen
+            return item.isBordered
+                && (item.style == .prominent) == wantsFill
+                && (item.backgroundTintColor != nil) == wantsFill
         }
+    }
+    /// Whether every tab is bordered — the same control as Pin and Quit.
+    var test_allTabsAreBordered: Bool {
+        let items = SurfaceScreen.allCases.compactMap { tabItems[$0] }
+        return items.count == SurfaceScreen.allCases.count && items.allSatisfy(\.isBordered)
     }
     /// The centered app-name label's text, `nil` if the item never built.
     var test_centeredTitleText: String? { titleLabel?.stringValue }
@@ -305,18 +261,22 @@ final class SurfaceToolbarController: NSObject {
     }
     /// Whether that mark is decorative (the wordmark speaks the name).
     var test_centeredMarkIsDecorative: Bool { markView?.isAccessibilityElement() == false }
+    /// Whether Pin and Quit are bordered — the control the tabs now match.
+    var test_pinItemIsBordered: Bool { pinItem?.isBordered == true }
+    var test_quitItemIsBordered: Bool {
+        toolbar.items.first { $0.itemIdentifier == Self.quitItemIdentifier }?.isBordered == true
+    }
     /// Whether the pin/quit items resolved symbol images.
     var test_pinItemHasImage: Bool { pinItem?.image != nil }
     var test_pinItemLabel: String? { pinItem?.label }
     var test_quitItemHasImage: Bool {
         toolbar.items.first { $0.itemIdentifier == Self.quitItemIdentifier }?.image != nil
     }
-    /// A tab's live view, for geometry assertions about where the strip sits.
-    func test_tabView(for screen: SurfaceScreen) -> NSView? { tabButtons[screen] }
     /// Fire a tab exactly as a click on it would — a REAL click through the
     /// button's own target/action, not a hand-run selector.
     func test_selectTab(_ screen: SurfaceScreen) {
-        tabButtons[screen]?.performClick(nil)
+        guard let item = tabItems[screen] else { return }
+        tabTapped(item)
     }
     /// Simulate clicking Pin / Quit.
     func test_tapPin() { pinTapped(nil) }
@@ -332,7 +292,18 @@ extension SurfaceToolbarController: NSToolbarDelegate {
         // click aimed at Pin could quit the app instead. Least-destructive
         // separation — Quit stays in the toolbar, it just stops being Pin's
         // neighbour.
-        SurfaceScreen.allCases.map(Self.tabItemIdentifier(for:))
+        // A `.space` BETWEEN the tabs, the same separator Pin and Quit use.
+        // Load-bearing, not cosmetic (live review 2026-08-30): adjacent
+        // bordered items MERGE into one shared capsule on macOS 26+, and
+        // `.prominent` then pulls the selected item out of that capsule to
+        // avoid tinting its neighbours' background. The container therefore
+        // RESHAPED as the selection moved — Mixer gave circle + capsule(2),
+        // Groups gave three circles, Settings gave capsule(2) + circle. That is
+        // the wandering-geometry bug the segmented divider was, wearing a
+        // different hat. Spaced items never merge, so every tab is a discrete
+        // circle in every state, matching Pin and Quit exactly.
+        Array(SurfaceScreen.allCases.map(Self.tabItemIdentifier(for:))
+                .flatMap { [$0, NSToolbarItem.Identifier.space] }.dropLast())
             + [.flexibleSpace, Self.titleItemIdentifier, .flexibleSpace,
                Self.pinItemIdentifier, .space, Self.quitItemIdentifier]
     }
@@ -347,13 +318,19 @@ extension SurfaceToolbarController: NSToolbarDelegate {
         if let screen = SurfaceScreen.allCases
             .first(where: { Self.tabItemIdentifier(for: $0) == itemIdentifier }) {
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            let button = SurfaceTabButton(screen: screen, target: self,
-                                          action: #selector(tabTapped(_:)))
-            button.isSelected = screen == selectedScreen
-            item.view = button
+            // Bordered: the same control Pin and Quit are, so the header has
+            // one button style.
+            item.isBordered = true
+            item.target = self
+            item.action = #selector(tabTapped(_:))
             // The item's own NAME, for the overflow menu and VoiceOver.
             item.label = screen.label
-            tabButtons[screen] = button
+            // The tab names lost their on-screen labels with the icon-only
+            // strip; the tooltip carries them, alongside ⌘1/⌘2/⌘3 (which ride
+            // the shell panel's key-equivalent seam).
+            item.toolTip = "\(screen.label) (⌘\(screen.keyEquivalent))"
+            tabItems[screen] = item
+            applySelectionToTabs()
             return item
         }
 

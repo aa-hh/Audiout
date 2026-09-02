@@ -128,7 +128,7 @@ documented in the package-root `../../AGENTS.md`.
 | `CompletionRegistry` | CompletionRegistry.swift | Bridges the C `outputs_engine_completion` callback to `async`/`await`, one-shot per `callbackId`, with a 12s timeout backstop. |
 | `StateStreamHub` | AirPlayEngine.swift (~1369) | Multicasts `(OutputID, OutputState)` transitions; feeds both `knownOutputs` reconcile and external subscribers. |
 | `RemoteEventHub` | AirPlayEngine.swift (~1435) | Multicasts `RemoteEvent` (speaker-originated transport/volume) from the vendored reverse-event thread. |
-| `WriteCadenceTracker` / `WriteLatencyProbe` | AirPlayEngine.swift (~1537, ~1671) | Diagnostic-only hot-path instrumentation; never gate a write. |
+| `WriteCadenceTracker` / `WriteLatencyProbe` | AirPlayEngine.swift (~1893, ~2222) | Diagnostic-only hot-path instrumentation; never gate a write. Read `WriteCadenceSnapshot.netDriftSeconds`; `deficitSeconds` alone is a one-sided sum, and gaps over `stallGapSeconds` (5 s) land in `stalledSeconds`, not the drift. |
 | `OutputID`, `DeviceDescriptor`, `OutputState`, `RemoteEvent`, `AirPlayEngineError`, `PCMFormat` | AirPlayTypes.swift | Public, OwnTone-free value types at the FFI boundary. |
 | `PTPClockProbe` | PTPClockProbe.swift | One-function connect-time readiness check (`ptpd_daemon_probe()`) for `AudioutCore`'s PTP-helper activation to poll. |
 

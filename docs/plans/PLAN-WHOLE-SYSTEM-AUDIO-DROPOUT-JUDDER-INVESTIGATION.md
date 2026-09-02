@@ -570,9 +570,9 @@ test file. New test files only — no production-code collision with I1.
 
 **T-4 — Owner steady-state ruler run** *(owner / live)* **[owner-live]**
 One 10-minute quiet-machine stream. At t≈0 and t≈10 min, measure click-to-sound
-latency by stopwatch (or camera) and note `deficitTotalSeconds` at both instants
-(§J.1 grep). **If latency growth ≈ deficit growth → the slide is real (audio path).
-If latency is flat while deficit grows → accounting artifact (tracker).** This single
+latency by stopwatch (or camera) and note `netDriftTotalSeconds` at both instants
+(§J.1 grep). **If latency growth ≈ drift growth → the slide is real (audio path).
+If latency is flat while drift grows → accounting artifact (tracker).** This single
 run halves J-1's candidate space.
 *Depends: nothing (today's telemetry suffices). Combine with T-8/T-9/T-10 in one
 live session.*
@@ -734,7 +734,7 @@ After the fact, the questions and their greps:
 
 | Question | Command |
 |---|---|
-| Is the anchor sliding, and how fast? | `grep write_cadence_drift ~/Library/Logs/Audiout/telemetry.jsonl \| tail -20` — read `deficitTotalSeconds` growth per timestamp. Healthy = flat; the known open defect = ~0.02 per 6 s. |
+| Is the anchor sliding, and how fast? | `grep write_cadence_drift ~/Library/Logs/Audiout/telemetry.jsonl \| tail -20` — read `netDriftTotalSeconds` growth per timestamp. Healthy = flat; the known open defect = ~0.02 per 6 s. |
 | Did writes stall (single gap)? | `grep send_sched ... \| tail -20` — `gap_max_ms` ≈ 11.8 is healthy cadence; hundreds/thousands = a starvation window (017's territory). |
 | Did anything re-anchor? | `grep -E 'session_reset\|rebuild_reanchored\|rebind_recover_flush' ... \| tail` |
 | Rebuild storm? | `grep -E 'aggregate_create\|aggregate_destroy' ... \| tail -30` — count creates/destroys inside one transition second. |

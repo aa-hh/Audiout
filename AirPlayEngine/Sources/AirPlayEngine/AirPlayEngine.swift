@@ -1883,7 +1883,9 @@ extension TransportCommand {
 /// deficit or overrun since the last log) emits one `os_log` line via the
 /// `.default` level so sustained cadence trouble is visible without spamming
 /// a log line per write (which, at ~86.1 writes/sec, would be prohibitively
-/// noisy). That figure is the IOProc's own cadence — 512 frames /
+/// noisy). The figure printed after the gap is the net drift, deficit minus
+/// overrun, the same number as `WriteCadenceSnapshot.netDriftSeconds`. That
+/// figure is the IOProc's own cadence — 512 frames /
 /// 44100 Hz ≈ 11.61 ms per cycle → 1000/11.61 ≈ 86.1 — because `write` is
 /// called once per IOProc buffer, not once per RTP packet. (An earlier
 /// version of this comment claimed "~226 writes/sec for 352-sample frames at
@@ -1974,13 +1976,13 @@ final class WriteCadenceTracker: @unchecked Sendable {
         }
 
         if deficitSinceLog >= Self.logThresholdSeconds {
-            let total = deficitSeconds
+            let total = deficitSeconds - overrunSeconds
             deficitSinceLog = 0
-            log.notice("write-cadence deficit: +\(gap, format: .fixed(precision: 4))s gap, cumulative \(total, format: .fixed(precision: 3))s")
+            log.notice("write-cadence deficit: +\(gap, format: .fixed(precision: 4))s gap, net \(total, format: .fixed(precision: 3))s")
         } else if overrunSinceLog >= Self.logThresholdSeconds {
-            let total = overrunSeconds
+            let total = deficitSeconds - overrunSeconds
             overrunSinceLog = 0
-            log.notice("write-cadence overrun: \(gap, format: .fixed(precision: 4))s gap, cumulative \(total, format: .fixed(precision: 3))s")
+            log.notice("write-cadence overrun: \(gap, format: .fixed(precision: 4))s gap, net \(total, format: .fixed(precision: 3))s")
         }
     }
 

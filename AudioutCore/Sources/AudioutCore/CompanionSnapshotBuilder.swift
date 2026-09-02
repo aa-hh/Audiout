@@ -87,6 +87,16 @@ public enum CompanionSnapshotBuilder {
     ///     startBufferOptionsMs: the Mac-authoritative settings slice —
     ///     passed through as-is so the phone always renders the Mac's
     ///     current range/options (`Snapshot.settings`).
+    ///   - alignmentFor: how fresh a Bluetooth device's stored sync
+    ///     calibration is (`BTAlignmentFreshness.report(uid:hasStoreEntry:)`
+    ///     on the caller's side, because the store and the connect edges live
+    ///     in the backend). `nil` — the default, and every non-native backend
+    ///     — leaves `DeviceState.alignment` unset, which the phone reads as
+    ///     "not reported". The reference half of that wire struct is NOT
+    ///     injected: it is a function of the whole live device list, so
+    ///     ``alignmentReferenceID(forTarget:among:isAudible:)`` computes it
+    ///     here and the phone's CTA and the Mac's staging can never disagree
+    ///     about which speaker a run would measure against.
     public static func build(
         devices: [Device],
         groupController: GroupController,
@@ -105,10 +115,14 @@ public enum CompanionSnapshotBuilder {
         connectVolumeMin: Int,
         connectVolumeMax: Int,
         startBufferMs: Int,
-        startBufferOptionsMs: [Int]
+        startBufferOptionsMs: [Int],
+        alignmentFor: (Device) -> BTAlignmentReport? = { _ in nil }
     ) -> Snapshot {
         let deviceStates = devices.map { device in
-            deviceState(for: device, groupController: groupController, iconFor: iconFor)
+            deviceState(for: device, groupController: groupController, iconFor: iconFor,
+                        alignment: alignmentState(for: device, among: devices,
+                                                  groupController: groupController,
+                                                  alignmentFor: alignmentFor))
         }
 
         // Live names win over the caller's last-known map — a rename arriving
@@ -186,10 +200,60 @@ public enum CompanionSnapshotBuilder {
         )
     }
 
+    /// The speaker a sync-calibration run for `targetID` would be measured
+    /// against, or `nil` when there is nothing usable — which is what turns
+    /// the phone's "Fix timing" CTA off.
+    ///
+    /// Mirrors the Mac wizard's own ordering
+    /// (`PopoverController.btWizardDefaultReference`): the Mac's own output
+    /// first (always present, always in step, nothing to set up), then any
+    /// other non-Bluetooth speaker, then a Bluetooth one. Cast is never
+    /// offered — a Cast receiver plays seconds behind live, which no
+    /// ±500 ms correction can resolve against.
+    ///
+    /// Restricted to devices the user currently has audio on: a reference that
+    /// is not playing makes no sound for the phone's microphone to hear, so
+    /// offering it would stage a run that cannot produce a measurement.
+    /// `isAudible` must be `GroupController.isMainOutMember(_:)` — the
+    /// group-aware read; `isSpeakerSelected(_:)` is blind to group membership
+    /// and would drop every member of an active group from the candidates.
+    public static func alignmentReferenceID(
+        forTarget targetID: String,
+        among devices: [Device],
+        isAudible: (String) -> Bool
+    ) -> String? {
+        let candidates = devices.filter {
+            $0.id != targetID && $0.isAvailable && !$0.isCast && isAudible($0.id)
+        }
+        if let local = candidates.first(where: \.isLocalDevice) { return local.id }
+        if let wired = candidates.first(where: { !$0.isBluetooth }) { return wired.id }
+        return candidates.first?.id
+    }
+
+    /// The wire alignment struct for one device: the caller's freshness report
+    /// plus the reference this builder computes. `nil` for every non-Bluetooth
+    /// device, and for a Bluetooth one the caller has no report for.
+    private static func alignmentState(
+        for device: Device,
+        among devices: [Device],
+        groupController: GroupController,
+        alignmentFor: (Device) -> BTAlignmentReport?
+    ) -> DeviceState.AlignmentState? {
+        guard device.kind == .bluetooth, let report = alignmentFor(device) else { return nil }
+        return DeviceState.AlignmentState(
+            status: report.status.rawValue,
+            staleReason: report.status == .stale ? BTAlignmentFreshness.staleReasonReconnected : nil,
+            referenceID: alignmentReferenceID(
+                forTarget: device.id, among: devices,
+                isAudible: groupController.isMainOutMember),
+            settleRemainingSeconds: report.settleRemainingSeconds)
+    }
+
     private static func deviceState(
         for device: Device,
         groupController: GroupController,
-        iconFor: (Device) -> String
+        iconFor: (Device) -> String,
+        alignment: DeviceState.AlignmentState?
     ) -> DeviceState {
         DeviceState(
             id: device.id,
@@ -212,7 +276,8 @@ public enum CompanionSnapshotBuilder {
             isMuted: groupController.isMuted(device.id),
             isSelected: groupController.isSpeakerSelected(device.id),
             isMainOutMember: groupController.isMainOutMember(device.id),
-            connection: connectionInfo(device.connectionState)
+            connection: connectionInfo(device.connectionState),
+            alignment: alignment
         )
     }
 

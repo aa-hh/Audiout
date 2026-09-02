@@ -157,10 +157,10 @@ let package = Package(
         // that lives inside a subdirectory of another repo — and the phone
         // now lives in `aa-hh/audiout-remote`. Pinned by range: this app
         // chooses when to follow the shared package, and `Package.resolved`
-        // records which tag it is actually on. 0.2.0 is the floor because
-        // that is the tag AudioutField landed in; 0.2.1 (field.json
-        // unchanged) fixed a DFT crash elsewhere in the package.
-        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.2.1"),
+        // records which tag it is actually on. 0.3.0 is the floor because
+        // that is the tag the alignment-probe wire family (the phone's
+        // chirp measurement) landed in.
+        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.3.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

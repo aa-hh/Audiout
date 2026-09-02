@@ -101,6 +101,7 @@ public struct AppSettings {
         static let telemetryOptIn = "telemetry.optIn"
         static let telemetryAsked = "telemetry.asked"
         static let touchBarControls = "general.touchBarControls"
+        static let mixerMembershipHintDismissed = "mixer.membershipHintDismissed"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -451,6 +452,14 @@ public struct AppSettings {
     public var eqAdvancedExpanded: Bool {
         get { defaults.bool(forKey: Keys.eqAdvancedExpanded) }
         nonmutating set { defaults.set(newValue, forKey: Keys.eqAdvancedExpanded) }
+    }
+
+    /// Whether the Mixer's first-run membership hint has been dismissed. Set
+    /// the first time the user toggles a speaker's membership in the Mixer;
+    /// the hint shows on every Mixer open while this is `false`.
+    public var mixerMembershipHintDismissed: Bool {
+        get { defaults.bool(forKey: Keys.mixerMembershipHintDismissed) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.mixerMembershipHintDismissed) }
     }
 
     /// The purchase licence key, entered once from the receipt (Settings ›

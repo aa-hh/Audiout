@@ -3274,4 +3274,41 @@ import AudioutProtocol
         popover.setSystemAirPlayNoteActive(false)
         #expect(popover.test_systemAirPlayNoteText == nil, "both conditions ended — the slot is empty")
     }
+
+    // MARK: First-run cues on the Output Devices card
+
+    @Test func membershipHintShowsUntilTheFirstToggleThenStaysGone() async throws {
+        let (popover, _, backend) = try await makePopover()
+        var dismissed = false
+        popover.membershipHintShownProvider = { !dismissed }
+        popover.onMembershipHintDismissed = { dismissed = true }
+        popover.rebuild()
+        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [PopoverController.membershipHintText],
+                "a first-run user gets the hint on the Output Devices card")
+
+        // Through the ROW's own delegate seam — the dismissal lives in
+        // `deviceRow(_:didToggleEnabled:for:)`, which `test_toggleDeviceEnabled`
+        // deliberately bypasses.
+        popover.test_deviceRow(for: "office")?.test_toggleEnabled(true)
+        await drain(backend)
+        #expect(dismissed, "the first membership toggle in the Mixer retires the hint")
+        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [],
+                "…and the card rebuilds without it in the same gesture")
+
+        popover.test_deviceRow(for: "office")?.test_toggleEnabled(false)
+        await drain(backend)
+        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "it never comes back")
+
+        let (fresh, _, _) = try await makePopover()
+        fresh.rebuild()
+        #expect(fresh.test_cardNoteTexts(title: "Output Devices") == [],
+                "no provider wired means never shown — what keeps the snapshot tools unchanged")
+    }
+
+    @Test func outputDevicesLegendsCarryPlainSpeechTooltips() async throws {
+        let (popover, _, _) = try await makePopover()
+        #expect(popover.test_columnTitleToolTips(title: "Output Devices")
+                    == [PopoverController.sourceColumnHelp, PopoverController.offsetColumnHelp],
+                "both column legends explain themselves on hover")
+    }
 }

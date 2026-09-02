@@ -1099,6 +1099,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onLocalTrimEndPreview = { [weak self] keepMs in
             (self?.backend as? LocalSyncOffsetControlling)?.endLocalTrimPreview(keepMs: keepMs)
         }
+        // The Mixer's first-run hint: shown until the user's first membership
+        // toggle there, then never again.
+        popoverController.membershipHintShownProvider = { [weak self] in
+            !(self?.settings.mixerMembershipHintDismissed ?? true)
+        }
+        popoverController.onMembershipHintDismissed = { [weak self] in
+            self?.settings.mixerMembershipHintDismissed = true
+        }
         // Excluded apps (Settings › Audio) are un-routable: the popover reads this
         // to drop them from the Applications picker + rows.
         popoverController.isAppExcluded = { [weak self] bundleID in

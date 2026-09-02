@@ -155,6 +155,22 @@ public final class AppSurfaceController {
     /// warm first open (fleet already known) can seed the settle tracker at once.
     private var lastDeviceIDs: Set<String> = []
 
+    /// When the device-id set last CHANGED (monotonic clock). The stream flows
+    /// while the surface is closed, so at click time this already knows whether
+    /// discovery has been quiet for the whole settle window — the case where
+    /// waiting it out again would be pure dead air on the user's click.
+    private var lastDeviceChangeAt: TimeInterval = -.infinity
+
+    /// Discovery has already been quiet for the settle window at this instant:
+    /// the fleet is known (an empty set is pre-discovery, not a settled
+    /// network) and nothing has changed for `revealQuietWindow`. Monotonic on
+    /// purpose — the clock pauses across sleep, which reads a wake as "not
+    /// quiet" and correctly defers while discovery re-runs.
+    private var discoveryAlreadySettled: Bool {
+        !lastDeviceIDs.isEmpty
+            && CACurrentMediaTime() - lastDeviceChangeAt >= Self.revealQuietWindow
+    }
+
     /// Whether the surface window is currently presented (show → close). The
     /// Mixer's `surfaceDidShow`/`surfaceDidHide` lifecycle keys off this so
     /// metering/monitors only run while a user can see the panel.
@@ -216,6 +232,10 @@ public final class AppSurfaceController {
     /// nothing for three seconds. A repeat click cuts the wait short on demand
     /// (`show(anchorRect:)`).
     static let revealCeiling: TimeInterval = 0.6
+    /// The reveal delay when discovery ALREADY settled before the click: one
+    /// immediate timer tick — just enough to land after the click's event
+    /// dispatch (see `show`), imperceptible against the settle wait it skips.
+    static let settledRevealDelay: TimeInterval = 0.05
 
     public init(popoverController: PopoverController,
                 settings: AppSettings = AppSettings(),
@@ -253,6 +273,9 @@ public final class AppSurfaceController {
         // open jump. A genuinely empty network reveals on the ceiling backstop.
         popoverController.onDeviceSnapshot = { [weak self] ids in
             guard let self else { return }
+            if ids != self.lastDeviceIDs {
+                self.lastDeviceChangeAt = CACurrentMediaTime()
+            }
             self.lastDeviceIDs = ids
             guard !ids.isEmpty else { return }
             self.settleTracker?.note(deviceIDs: ids)
@@ -347,6 +370,8 @@ public final class AppSurfaceController {
     /// first-open splash path it does NOT front the window yet — it waits for
     /// discovery to settle and fronts once, already at the settled size
     /// (`revealFirstOpen`), so the window never resizes in front of the user.
+    /// A fleet that ALREADY settled before the click skips that wait and
+    /// reveals on an immediate timer tick.
     /// Showing an ALREADY-shown surface (the pinned always-front click) only
     /// fronts it — re-running the Mixer's open ritual there would discard the
     /// user's mid-open collapse toggles for no reason (it is the same open
@@ -379,6 +404,27 @@ public final class AppSurfaceController {
             if SurfaceSplashView.wouldPresent {
                 isRevealPending = true
                 pendingRevealAnchor = anchorRect
+                // The wait exists to front the window ONCE, already settled.
+                // When the fleet has already been quiet for the whole window
+                // at click time — the common case: the app has been running
+                // and discovery finished long ago — there is nothing left to
+                // wait out, and waiting anyway is dead air on the user's
+                // click. Reveal over the measure just taken — but on an
+                // immediate timer tick, NEVER synchronously from inside the
+                // status-item click's own event dispatch: a panel fronted
+                // there lost key to the click's remaining focus churn and the
+                // resign/tuck machinery took it straight back off screen
+                // (live, 2026-08-29 — "shows up quickly and then
+                // disappears"). Every proven front runs after the click
+                // completes; this keeps that, minus the settle wait.
+                if discoveryAlreadySettled {
+                    revealCeilingTimer = Timer.scheduledTimer(
+                        withTimeInterval: Self.settledRevealDelay,
+                        repeats: false) { [weak self] _ in
+                        MainActor.assumeIsolated { self?.revealFirstOpen(alreadyMeasured: true) }
+                    }
+                    return
+                }
                 // A quiet window wider than the discovery trickle's gap between
                 // devices, so a stream that arrives one device at a time does
                 // NOT settle in a gap mid-stream (0.3 s settled between the
@@ -423,19 +469,27 @@ public final class AppSurfaceController {
     /// sight of the surface is the settled frame — nothing resizes, and the
     /// mark holds still because the frame it centres in never changes. Fires at
     /// most once (the tracker settles once, and this disarms the backstop).
-    private func revealFirstOpen() {
+    private func revealFirstOpen(alreadyMeasured: Bool = false) {
         guard isRevealPending else { return }
         isRevealPending = false
         revealCeilingTimer?.invalidate()
         revealCeilingTimer = nil
         settleTracker = nil
 
-        overflowReported = false
-        sessionContentSize = measureSessionContentSize()
+        // `alreadyMeasured` skips the re-measure when `show` measured and
+        // mounted in this same turn (the already-settled reveal) — nothing can
+        // have streamed in between. A reveal that waited re-measures the fleet
+        // that arrived during the wait.
+        if !alreadyMeasured {
+            overflowReported = false
+            sessionContentSize = measureSessionContentSize()
+            if selectedScreen == .mixer {
+                // Settled rows, not sliding — animated:false through the
+                // panel's own re-fit, still off screen.
+                mixerPanel?.panelContentDidChangeHeight(animated: false)
+            }
+        }
         if selectedScreen == .mixer {
-            // Settled rows, not sliding — animated:false through the panel's own
-            // re-fit, still off screen.
-            mixerPanel?.panelContentDidChangeHeight(animated: false)
             // Front at the FLOORED session size, not the Mixer's raw fit. AppKit
             // resizes the shell window to the content controller's
             // `preferredContentSize` and does so DEFERRED — a plain `setFrame`
@@ -817,6 +871,9 @@ public final class AppSurfaceController {
     var test_isRevealPending: Bool { isRevealPending }
     /// Drive the settle path exactly as a quiesced fleet would.
     func test_settleDiscovery() { settleTracker?.test_settleNow() }
+    /// Backdate the last device-set change past the quiet window, exactly as a
+    /// fleet that finished discovery minutes before the click reads.
+    func test_backdateDiscoveryQuiet() { lastDeviceChangeAt = -.infinity }
     /// Fire the first-open reveal backstop exactly as its ceiling timer would.
     func test_fireRevealCeiling() { revealFirstOpen() }
     /// Drive the pixel-visibility latch exactly as an occlusion change would —

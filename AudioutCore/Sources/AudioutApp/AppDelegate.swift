@@ -714,6 +714,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             let action = self.surface.clickAction(
                 setupIsOpen: self.onboardingWindowController != nil)
+            // The click's only immediate feedback: a first open can spend up
+            // to `AppSurfaceController.revealCeiling` settling before a pixel
+            // lands, and an unlit item reads as "the click did nothing." Hence
+            // ahead of the permission gates below, not after them. Every path
+            // that does NOT put the surface on screen — Setup re-front, the
+            // undetermined-grant diversion, a dismiss — must leave it unlit.
+            self.statusItemController.setHighlighted(action == .show || action == .front)
             if action == .refrontSetup {
                 self.onboardingWindowController?.present()
                 return
@@ -739,6 +746,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // underneath it in the same click.
             if SystemAudioCaptureTCC.effectiveStatus() == .undetermined,
                self.presentSetupForUndeterminedIfNeeded() {
+                self.statusItemController.setHighlighted(false)
                 return
             }
             // NOTHING asks about usage statistics on this click. That ask is
@@ -1125,6 +1133,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // tells it which screen the user is looking at.
         surface.onVisibleScreenChange = { [weak self] screen in
             self?.mixerWindowController?.setHostVisible(screen == .groups)
+            // Reconciles the menu-bar highlight for the opens no click ever
+            // sees — a Finder reopen, a deep link — and for anything that puts
+            // the surface away without closing the shell.
+            self?.statusItemController.setHighlighted(screen != nil)
             // Settings' panes are built once and cached for the process's
             // life, so a phone-driven connect-volume/buffer change would show
             // the launch-time value forever. Reconciled on appearance rather
@@ -1132,6 +1144,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // that is only now becoming visible.
             if screen == .settings { self?.settingsRootController?.reloadFromSettings() }
         }
+        // A close during the first-open settle wait never publishes a visible
+        // screen (the window was never fronted), so the highlight set at the
+        // click needs this second, unconditional way back off.
+        surface.onClose = { [weak self] in self?.statusItemController.setHighlighted(false) }
 
         // Enforce the precedence up front: prune any persisted route for an
         // already-excluded app (e.g. excluded in a previous session).

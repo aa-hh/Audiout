@@ -995,6 +995,60 @@ import AppKit
         }
     }
 
+    /// The settle wait exists to front the window once, already settled — so a
+    /// fleet that ALREADY settled before the click (the app running for a
+    /// while, discovery long finished) has nothing to wait out: the reveal is
+    /// armed on the immediate tick, no settle tracker. It still goes through a
+    /// timer — a panel fronted synchronously inside the status-item click's
+    /// own dispatch was knocked straight back off screen (live, 2026-08-29).
+    @Test func anAlreadySettledFleetRevealsOnTheImmediateTick() throws {
+        try asAFirstRealLaunch {
+            let (surface, popover, _, _) = makeSurface()
+            let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            popover.update(devices: backend.devices)
+            surface.test_backdateDiscoveryQuiet()
+
+            surface.show(anchorRect: nil)
+            #expect(surface.test_isRevealPending,
+                    "the reveal is armed, not run inside the click's own turn")
+            #expect(surface.test_settleTracker == nil,
+                    "a settled fleet arms no tracker — only the immediate tick")
+
+            surface.test_fireRevealCeiling()
+            #expect(!surface.test_isRevealPending)
+            let splash = try #require(surface.test_splash,
+                                      "the branded hold covers the immediate reveal")
+            #expect(splash.test_isVisible)
+        }
+    }
+
+    /// The immediate tick must stay imperceptible — far under the settle wait
+    /// it replaces, or the skip stops being a skip.
+    @Test func theSettledRevealDelayIsImperceptible() {
+        #expect(AppSurfaceController.settledRevealDelay <= 0.1)
+        #expect(AppSurfaceController.settledRevealDelay < AppSurfaceController.revealQuietWindow)
+    }
+
+    /// A fleet still changing at click time keeps the deferred reveal: quiet
+    /// is measured from the last device-set CHANGE, not from mere knowledge of
+    /// the fleet.
+    @Test func aFreshFleetChangeStillDefersTheFirstReveal() throws {
+        try asAFirstRealLaunch {
+            let (surface, popover, _, _) = makeSurface()
+            let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            popover.update(devices: backend.devices)
+
+            surface.show(anchorRect: nil)
+            #expect(surface.test_isRevealPending,
+                    "a change inside the quiet window still waits for discovery to settle")
+            #expect(surface.test_splash == nil)
+        }
+    }
+
     @Test func aClickTakesTheSplashAwayAtOnce() throws {
         try asAFirstRealLaunch {
             let (surface, _, _, _) = makeSurface()

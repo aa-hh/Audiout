@@ -54,6 +54,13 @@ final class StatusItemController {
     private var state: MenuBarStatus.State = .idle
     private var isMuted: Bool = false
 
+    /// Whether the item should currently be drawn pressed. Held as INTENT
+    /// rather than written once, because two things clear the button's own
+    /// highlight bit underneath us: the click's event dispatch, which is still
+    /// unwinding when the action returns, and any redraw from
+    /// `renderButtonImage()`. Both re-assert from here.
+    private var wantsHighlight = false
+
     /// Invoked when the user clicks the status button — the app toggles the
     /// popover relative to `button`.
     var onButtonClicked: ((NSStatusBarButton) -> Void)?
@@ -125,6 +132,27 @@ final class StatusItemController {
         onButtonClicked?(sender)
     }
 
+    /// Draw the button in its pressed state, the menu-bar convention for "this
+    /// item's window is open." Dumb plumbing: the caller decides when the
+    /// surface counts as open (R9 — policy lives in the library, this target
+    /// is invisible to the test suite).
+    func setHighlighted(_ flag: Bool) {
+        wantsHighlight = flag
+        applyHighlight()
+        // A press written from inside the button's own action does not survive
+        // the click's event dispatch, which is still unwinding when the action
+        // returns — the same shape as the surface's reveal, which cannot front
+        // there either. Re-asserting on the next turn is what keeps the item
+        // lit across the wait before the window appears; set from any other
+        // caller (the window-open reconcile, a close) the first write already
+        // holds and this is a harmless repeat.
+        DispatchQueue.main.async { [weak self] in self?.applyHighlight() }
+    }
+
+    private func applyHighlight() {
+        statusItem.button?.highlight(wantsHighlight)
+    }
+
     /// Update the master-volume level (0…1) the status symbol reflects, then
     /// rebuild the button image with the new `variableValue`. Rebuilding is the
     /// documented way to change an SF Symbol's variable value (brief gotcha #9).
@@ -156,6 +184,10 @@ final class StatusItemController {
     private func renderButtonImage() {
         guard let button = statusItem.button else { return }
         button.image = StatusItemIcon.make(state: state, masterVolume: masterVolume, isMuted: isMuted)
+        // A new image redraws the button, so re-assert the press: a speaker
+        // connecting (or a volume change) while the surface is open must not
+        // un-press the item under the user.
+        applyHighlight()
         // Opt-in dev disambiguator: when `AUDIOUT_STATUS_LABEL` is set, show it
         // as a text tag beside the icon so a side-by-side test build is visually
         // distinct from an installed copy (identical bundle glyphs otherwise look

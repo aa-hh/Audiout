@@ -42,8 +42,10 @@ import AudioutSharedUI
             .space,
             SurfaceToolbarController.quitItemIdentifier,
         ], "three separate tabs lead, the app name sits centered, Pin and Quit trail with a gap")
-        #expect(controller.test_quitItemHasImage,
-                "Quit carries an exit glyph, resolved on this OS")
+        #expect(controller.test_quitItemTitle == "Quit",
+                "Quit is the word, not a glyph")
+        #expect(!controller.test_quitItemHasImage,
+                "Quit is the word, not a glyph")
         #expect(window.toolbar === controller.toolbar)
         #expect(window.toolbarStyle == .unified, "D1: unified — the toolbar IS the one header strip")
     }
@@ -53,6 +55,35 @@ import AudioutSharedUI
         #expect(controller.test_tabLabels == ["Mixer", "Groups", "Settings"])
         #expect(controller.test_allTabImagesResolved,
                 "every tab resolved a system SF Symbol")
+    }
+
+    /// SPEC.md §9 asks for icon+label tabs, and the display mode cannot supply
+    /// the labels: a label-showing mode spills them beside the strip as loose
+    /// text on macOS 26+. So each button draws its own name beside its icon
+    /// while the toolbar stays icon-only.
+    @Test func tabsShowTheirNamesBesideTheirIconsWithoutLeavingIconOnlyMode() {
+        let (controller, window) = makeAttached()
+        window.layoutIfNeeded()
+        for screen in SurfaceScreen.allCases {
+            let button = controller.test_tabView(for: screen) as? SurfaceTabButton
+            #expect(button?.title == screen.label, "\(screen.label) draws its own name")
+            #expect(button?.imagePosition == .imageLeading, "icon leads, name follows")
+            #expect(button?.imageHugsTitle == true, "the pair is centred as one unit")
+        }
+        #expect(controller.toolbar.displayMode == .iconOnly,
+                "the names come from the buttons, never from a label-showing display mode")
+    }
+
+    /// The surface width is fixed and the app name is centred inside it, so a
+    /// labelled tab strip has to fit in the half beside it. Bounds only, since
+    /// AppKit's rounding grid varies per run, so no width is asserted exactly.
+    @Test func theLabelledTabStripLeavesRoomForTheCentredLockup() {
+        let (controller, _) = makeAttached()
+        #expect(controller.test_tabStripFittingWidth * 2
+                    + controller.test_centeredLockupFittingWidth < SurfaceLayout.width,
+                "the strip mirrored on both sides still clears the centred lockup")
+        #expect(controller.test_tabStripFittingWidth > 3 * SurfaceTabButton.side,
+                "the labels made the strip wider than three bare icons")
     }
 
     @Test func centeredAppNameItemExists() {
@@ -87,10 +118,13 @@ import AudioutSharedUI
                 "the ends get more room than the strip-bound vertical axis can give")
     }
 
-    @Test func pinAndQuitItemsResolveGlyphs() {
+    @Test func pinResolvesItsGlyphAndQuitIsAWord() {
         let (controller, _) = makeAttached()
         #expect(controller.test_pinItemHasImage)
-        #expect(controller.test_quitItemHasImage)
+        #expect(controller.test_quitItemTitle == "Quit",
+                "Quit is the word, not a glyph")
+        #expect(!controller.test_quitItemHasImage,
+                "Quit is the word, not a glyph")
     }
 
     // MARK: No segmented separators, and clicks that really land

@@ -126,7 +126,13 @@ and where the settings model types (`AppSettings`, `ExcludedAppsController`,
   change so it always states the current value's consequence — don't replace
   one with a static subtitle. Kill static explanation paragraphs instead: the
   Audio-buffer row's hint states the currently-applied value's consequence up
-  front rather than carrying a separate subtitle.
+  front rather than carrying a separate subtitle. A hint that belongs to a
+  `SettingsForm.row` is passed as `row(title:subtitleLabel:control:)` so it sits
+  2pt under its title like every other subtitle; mounting it as its own row in
+  the pane stack instead leaves an 18pt gap under the title, which is what the
+  General pane's reconnect and consent hints used to do. Keep each hint string
+  short enough to fit one caption line in the 303pt text column beside an
+  `NSSwitch`, or the row changes height every time the switch is flipped.
 - **Section headers and value readouts share one look across panes**
   (roadmap 050, `SettingsForm`): `sectionHeader(_:)` is a semibold caption in
   the secondary color; `readoutWell(_:width:)` draws a monospaced-digit value

@@ -255,12 +255,13 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// The one-shot calibration sweeps (roadmap 064): DOWN sweep for the
     /// engine/AirPlay/Mac fan-out, UP sweep for the Bluetooth fan-out — the
     /// per-lane orthogonality that lets one mic recording tell the two sides
-    /// apart. Empty until ``stageProbe()``.
-    private var probeEngineLane: [Int32] = []
-    private var probeBTLane: [Int32] = []
-    /// The frame the sweeps start on; `-1` until ``armProbe()``. One epoch for
-    /// both lanes, off the same cursor the tick grid reads — the shared start
-    /// is what the BeepBeep cancellation rests on.
+    /// apart. Empty until ``stageProbe(amplitude:shape:)``.
+    private var probeEngineLanes: [ProbeLane] = []
+    private var probeBTLanes: [ProbeLane] = []
+    /// The frame the sweeps are measured from; `-1` until ``armProbe()``. Each
+    /// lane sits at its own offset past this one instant, so a shape where the
+    /// sweeps overlap and one where they are seconds apart are the same code
+    /// path — and the shared origin is what the BeepBeep cancellation rests on.
     private var probeEpochFrame = -1
     /// One-shot completion latch — ``takeProbeCompletion()``.
     private var probeCompletionTaken = false
@@ -361,6 +362,44 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// Silence between the arm and the sweeps, so the probe never rides on the
     /// tail of whatever the gate interrupted.
     static let probeLeadSeconds = 0.5
+    /// How far the UP sweep sits behind the DOWN sweep in the staggered shape.
+    /// Comfortably longer than ``probeSweepSeconds``, so the two sweeps never
+    /// overlap and the fan-out's per-window routing switches owners in a gap
+    /// of silence rather than mid-sweep. The Mac subtracts this from the
+    /// phone's raw reported offset before any trim arithmetic; the phone
+    /// reports what it measured and knows nothing about it.
+    static let probeStaggerSeconds = 2.0
+
+    /// One staged sweep: its samples, where it sits past the probe epoch, and
+    /// which staging window it belongs to.
+    struct ProbeLane {
+        let samples: [Int32]
+        let offsetFrames: Int
+        /// Handed back by ``mixWizardVariants(into:bedded:beddedNoProbe:)`` so
+        /// the Bluetooth fan-out can route the sweep-carrying block to the one
+        /// sink that owns this window. `0` is the DOWN window, `1` the UP one.
+        let window: Int
+    }
+
+    /// What shape ``stageProbe(amplitude:shape:)`` lays the sweeps out in.
+    enum ProbeShape: Equatable {
+        /// Both sweeps at the probe epoch, DOWN on the engine lane and UP on
+        /// the Bluetooth one — the Mac's own wizard run, where the two sides
+        /// are told apart by which fan-out carries them.
+        case simultaneous
+        /// DOWN at the epoch, UP ``probeStaggerSeconds`` later, BOTH on the
+        /// Bluetooth lane — the shape a run needs when more than one Bluetooth
+        /// speaker is audible, or the reference is itself Bluetooth. Which
+        /// speaker hears which sweep is then the fan-out's business (one sink
+        /// gets the sweep-carrying feed per window, everyone else the
+        /// sweep-free one), because output-time gain gating cannot do it: each
+        /// sink's delay line is exactly the unknown being measured.
+        ///
+        /// `referenceOnEngine` puts the DOWN sweep on the engine lane as well,
+        /// for a run whose reference is the Mac's own output rather than a
+        /// Bluetooth speaker.
+        case staggered(referenceOnEngine: Bool)
+    }
 
     /// Pre-render the calibration sweeps so a later ``armProbe()`` starts them
     /// on the next block. Staging is separate from arming for the same reason
@@ -374,27 +413,52 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// loudness buys nothing and the probe is meant to be unobtrusive.
     /// Raising the Bluetooth lane instead was tried and rejected — a
     /// near-full-scale sweep is the "heavy static" complaint again.
-    func stageProbe(amplitude: Double = 0.35) {
-        func lane(_ design: SyncProbe.SweepDesign, _ amplitude: Double) -> [Int32] {
+    ///
+    /// `shape` chooses between the two layouts — see ``ProbeShape``. The
+    /// default is the Mac wizard's own simultaneous pair.
+    func stageProbe(amplitude: Double = 0.35, shape: ProbeShape = .simultaneous) {
+        func samples(_ design: SyncProbe.SweepDesign, _ amplitude: Double) -> [Int32] {
             let scale = amplitude * 32_767.0
             return SyncProbe.samples(design).map { Int32((Double($0) * scale).rounded()) }
         }
-        probeEngineLane = lane(
-            .downSweep(sampleRate: sampleRate, duration: Self.probeSweepSeconds),
-            amplitude * Self.probeEngineLaneScale)
-        probeBTLane = lane(
-            .upSweep(sampleRate: sampleRate, duration: Self.probeSweepSeconds),
-            amplitude)
+        let downSweep = SyncProbe.SweepDesign.downSweep(sampleRate: sampleRate,
+                                                        duration: Self.probeSweepSeconds)
+        // The −6 dB belongs to the LANE, not to the sweep: it is there because
+        // the microphone is inches from the Mac's own speaker. The same DOWN
+        // sweep played through a Bluetooth speaker metres away needs the full
+        // amplitude every other Bluetooth lane gets.
+        let downNear = samples(downSweep, amplitude * Self.probeEngineLaneScale)
+        let downFar = samples(downSweep, amplitude)
+        let up = samples(.upSweep(sampleRate: sampleRate, duration: Self.probeSweepSeconds),
+                         amplitude)
+        switch shape {
+        case .simultaneous:
+            probeEngineLanes = [ProbeLane(samples: downNear, offsetFrames: 0, window: 0)]
+            probeBTLanes = [ProbeLane(samples: up, offsetFrames: 0, window: 0)]
+        case .staggered(let referenceOnEngine):
+            let stagger = Int(Self.probeStaggerSeconds * sampleRate)
+            // The DOWN sweep is the reference's. A Bluetooth reference hears it
+            // through the Bluetooth lane's own window; a Mac one hears it
+            // through the engine lane, and the Bluetooth copy then reaches
+            // nobody — the fan-out hands every Bluetooth sink the sweep-free
+            // variant for a window no Bluetooth device owns.
+            probeEngineLanes = referenceOnEngine
+                ? [ProbeLane(samples: downNear, offsetFrames: 0, window: 0)] : []
+            probeBTLanes = [
+                ProbeLane(samples: downFar, offsetFrames: 0, window: 0),
+                ProbeLane(samples: up, offsetFrames: stagger, window: 1),
+            ]
+        }
     }
 
     /// How much quieter the engine/Mac probe lane plays than the Bluetooth
-    /// one — −6 dB. See ``stageProbe(amplitude:)``.
+    /// one — −6 dB. See ``stageProbe(amplitude:shape:)``.
     static let probeEngineLaneScale = 0.5
 
-    var probeStaged: Bool { !probeBTLane.isEmpty }
+    var probeStaged: Bool { !probeBTLanes.isEmpty }
 
     /// Start the sweeps ``probeLeadSeconds`` from here. Idempotent, like
-    /// ``armTicks()``. Inert until ``stageProbe()`` has run.
+    /// ``armTicks()``. Inert until ``stageProbe(amplitude:shape:)`` has run.
     func armProbe() {
         guard probeStaged, probeEpochFrame < 0 else { return }
         probeEpochFrame = cursor + Int(Self.probeLeadSeconds * sampleRate)
@@ -402,8 +466,16 @@ final class AlignmentTickInjector: @unchecked Sendable {
 
     private var probeArmed: Bool { probeEpochFrame >= 0 }
 
+    /// One past the last frame ANY staged lane occupies. The staggered shape's
+    /// lanes end at different instants, so completion is the LAST of them.
+    private var probeEndFrames: Int {
+        (probeEngineLanes + probeBTLanes)
+            .map { $0.offsetFrames + $0.samples.count }
+            .max() ?? 0
+    }
+
     private var probeFinished: Bool {
-        probeArmed && cursor >= probeEpochFrame + probeBTLane.count
+        probeArmed && cursor >= probeEpochFrame + probeEndFrames
     }
 
     /// True exactly once, on the first call after the staged sweeps have been
@@ -504,6 +576,25 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// advance covers both, which keeps the pacer the single consumer of this
     /// injector's lock-free cursor.
     func mixWizardVariants(into pcm: inout Data, bedded: inout Data) {
+        var unused = Data()
+        _ = mixWizardVariants(into: &pcm, bedded: &bedded, beddedNoProbe: &unused)
+    }
+
+    /// The three-variant render. `pcm` and `bedded` are exactly as above;
+    /// `beddedNoProbe` is the Bluetooth variant with NO sweep in it, for the
+    /// sinks that do not own the window currently playing — produced only for
+    /// the staggered shape (``ProbeShape/staggered(referenceOnEngine:)``),
+    /// which is the only one that routes sweeps per device. Every other run
+    /// leaves it empty and pays for nothing.
+    ///
+    /// Returns the window whose sweep frames landed in `bedded` during this
+    /// block, or `nil` when no sweep did — the fan-out's cue for which sink
+    /// gets `bedded` and which get `beddedNoProbe`. At most one window can
+    /// appear in a block: the pacer's blocks are milliseconds and the two
+    /// staggered windows are a second of silence apart.
+    @discardableResult
+    func mixWizardVariants(into pcm: inout Data, bedded: inout Data,
+                           beddedNoProbe: inout Data) -> Int? {
         let start = cursor
         // The ONE place a timbre is bound to a fan-out, which is what makes the
         // debug swap (see the type's header) a two-line hook rather than a
@@ -515,21 +606,43 @@ final class AlignmentTickInjector: @unchecked Sendable {
         // one: the two variants carry different ticks, so one cannot be built
         // by adding to the other.
         var beddedBlock = pcm
+        var noProbeBlock = splitsProbeByWindow ? pcm : Data()
         let frames = render(into: &pcm, from: start, tick: engineTick,
-                            probe: probeArmed ? probeEngineLane : nil, bed: false,
+                            probe: probeArmed ? probeEngineLanes : nil, bed: false,
                             replace: replacesProgram)
         _ = render(into: &beddedBlock, from: start, tick: bluetoothTick,
-                   probe: probeArmed ? probeBTLane : nil, bed: !bed.isEmpty,
+                   probe: probeArmed ? probeBTLanes : nil, bed: !bed.isEmpty,
                    replace: replacesProgram)
+        if splitsProbeByWindow {
+            _ = render(into: &noProbeBlock, from: start, tick: bluetoothTick,
+                       probe: nil, bed: !bed.isEmpty, replace: replacesProgram)
+        }
         bedded = beddedBlock
+        beddedNoProbe = noProbeBlock
         cursor += frames
+        return probeArmed ? window(overlapping: start, frames: frames) : nil
+    }
+
+    /// True once a staggered probe is staged — the shape whose sweeps are
+    /// routed per device, and the only one that needs the sweep-free variant.
+    private var splitsProbeByWindow: Bool { probeBTLanes.count > 1 }
+
+    /// Which Bluetooth lane's sweep frames fall inside `[start, start+frames)`.
+    private func window(overlapping start: Int, frames: Int) -> Int? {
+        for lane in probeBTLanes {
+            let laneStart = probeEpochFrame + lane.offsetFrames
+            if start < laneStart + lane.samples.count, laneStart < start + frames {
+                return lane.window
+            }
+        }
+        return nil
     }
 
     /// The one mixing loop. Returns the frame count it walked, so the caller
-    /// owns the cursor — ``mixWizardVariants(into:bedded:)`` renders the same
-    /// frames twice and advances once.
+    /// owns the cursor — ``mixWizardVariants(into:bedded:beddedNoProbe:)`` renders
+    /// the same frames two or three times and advances once.
     private func render(into pcm: inout Data, from start: Int,
-                        tick tickTable: [Int32]?, probe probeLane: [Int32]?,
+                        tick tickTable: [Int32]?, probe probeLanes: [ProbeLane]?,
                         bed useBed: Bool, replace: Bool) -> Int {
         let bytesPerFrame = channels * MemoryLayout<Int16>.size
         guard bytesPerFrame > 0 else { return 0 }
@@ -546,10 +659,12 @@ final class AlignmentTickInjector: @unchecked Sendable {
                     let phase = (position - tickEpochFrame) % beatFrames
                     if phase < tickTable.count { add += tickTable[phase] }
                 }
-                if let probeLane, probeEpochFrame >= 0 {
-                    let probeIndex = position - probeEpochFrame
-                    if probeIndex >= 0, probeIndex < probeLane.count {
-                        add += probeLane[probeIndex]
+                if let probeLanes, probeEpochFrame >= 0 {
+                    for lane in probeLanes {
+                        let probeIndex = position - probeEpochFrame - lane.offsetFrames
+                        if probeIndex >= 0, probeIndex < lane.samples.count {
+                            add += lane.samples[probeIndex]
+                        }
                     }
                 }
                 if replace {
@@ -577,5 +692,9 @@ final class AlignmentTickInjector: @unchecked Sendable {
     var test_bedFrameCount: Int { bed.count }
     var test_probeArmed: Bool { probeArmed }
     var test_probeEpochFrame: Int { probeEpochFrame }
-    var test_probeLaneFrames: Int { probeBTLane.count }
+    /// Frames of sweep on the Bluetooth side's FIRST lane — the whole lane in
+    /// the simultaneous shape, the DOWN window in the staggered one.
+    var test_probeLaneFrames: Int { probeBTLanes.first?.samples.count ?? 0 }
+    /// One past the last frame any staged lane occupies (see ``probeEndFrames``).
+    var test_probeEndFrames: Int { probeEndFrames }
 }

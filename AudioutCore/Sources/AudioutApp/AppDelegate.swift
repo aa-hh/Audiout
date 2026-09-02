@@ -393,6 +393,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Main-thread only, touched inside the command/disconnect main hops.
     private var companionRateLimiter = CompanionCommandRateLimiter()
 
+    /// Which phone staged the sync-calibration run for each device, so the
+    /// two probe messages go back to it alone and a client that vanishes
+    /// mid-run takes its run down with it. Main-thread only, touched inside
+    /// the command/disconnect main hops like the rate limiter above.
+    private var companionAlignmentClientByDeviceID: [String: UUID] = [:]
+
     /// Cached `.regular` running-app list backing `addableApps`/`isRunning`
     /// in the snapshot (FIX-B2 finding 2b). `NSWorkspace.runningApplications`
     /// enumeration per broadcast was the single biggest per-command cost;
@@ -1092,6 +1098,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         popoverController.onLocalTrimEndPreview = { [weak self] keepMs in
             (self?.backend as? LocalSyncOffsetControlling)?.endLocalTrimPreview(keepMs: keepMs)
+        }
+        // The Mixer's first-run hint: shown until the user's first membership
+        // toggle there, then never again.
+        popoverController.membershipHintShownProvider = { [weak self] in
+            !(self?.settings.mixerMembershipHintDismissed ?? true)
+        }
+        popoverController.onMembershipHintDismissed = { [weak self] in
+            self?.settings.mixerMembershipHintDismissed = true
         }
         // Excluded apps (Settings › Audio) are un-routable: the popover reads this
         // to drop them from the Applications picker + rows.
@@ -2245,7 +2259,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // snapped back. Mirrors the Mac pane's own ordering, where
                 // `onSettingChanged` fires after `await latency.apply`.
                 await self.scheduleCompanionBroadcast()
-            })
+            },
+            alignmentActions: makeCompanionAlignmentActions())
+
+        // A reconnect (or an alignment landing) changes what the phone's
+        // speaker row says, and nothing else broadcasts for it — the freshness
+        // store is the only thing that saw the edge.
+        (backend as? BTOutputControlling)?.onBTAlignmentChanged = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, !self.isTerminating else { return }
+                self.scheduleCompanionBroadcast()
+            }
+        }
 
         // Group/Main-Out/mute state — the broadest snapshot input, and the only
         // signal behind a USER-driven Main Out master move: that emits no
@@ -2322,7 +2347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.serveAppIconPages(requested, to: clientID)
                     return  // no snapshot broadcast — icons are not snapshot state
                 }
-                let result = self.companionDispatcher.execute(command)
+                let result = self.companionDispatcher.execute(command, clientID: clientID)
                 reply(CompanionServer.CommandResult(
                     applied: result.applied,
                     refusalReason: result.refusalReason,
@@ -2343,10 +2368,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // rewrites no device level — the immediate snapshot is exact.
                 // `setStartBufferMs` is async too; finding 1's post-apply
                 // schedule carries it.
+                // The alignment family is asynchronous for the same reason:
+                // what a run or a commit changes in the snapshot lands through
+                // the backend's own queues and the freshness store's callback,
+                // so an immediate rebuild is guaranteed to carry the state
+                // from before the command.
                 let effectIsAsynchronous: Bool
                 switch command {
                 case .setDeviceVolume, .setDeviceMuted,
-                     .setMainOutMuted, .setGroupMuted, .setStartBufferMs:
+                     .setMainOutMuted, .setGroupMuted, .setStartBufferMs,
+                     .startAlignmentProbe, .cancelAlignmentProbe,
+                     .reportAlignmentMeasurement, .setAlignmentTick,
+                     .nudgeAlignmentTrim, .revertAlignmentNudge,
+                     .clearAlignmentTuning, .playAlignmentDemo:
                     effectIsAsynchronous = true
                 default:
                     effectIsAsynchronous = false
@@ -2368,6 +2402,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
                 self.companionRateLimiter.forgetClient(clientID)
+                // A run, a fine-tune session and an A/B receipt are all
+                // per-client state, and a phone that walks out of range would
+                // otherwise leave the room holding a sweep feed with every
+                // other speaker silent, or a metronome nobody can stop. The
+                // backend's cancel is what each of them means when the client
+                // goes: a run is abandoned and its suspended nudge restored, a
+                // receipt is put back, and a fine-tune session ENDS — writing
+                // down what the user had already nudged, rather
+                // than throwing it away.
+                let orphaned = self.companionAlignmentClientByDeviceID
+                    .filter { $0.value == clientID }.map(\.key)
+                for deviceID in orphaned {
+                    self.companionAlignmentClientByDeviceID.removeValue(forKey: deviceID)
+                    (self.backend as? BTOutputControlling)?
+                        .cancelCompanionAlignmentProbe(targetID: deviceID)
+                }
             }
         }
 
@@ -2495,6 +2545,163 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .filter { !routedIDs.contains($0.bundleID) && !excludedApps.isExcluded($0.bundleID) }
     }
 
+    /// The live device list in a stable order, for the two Core-level
+    /// alignment rules that read the whole room.
+    @MainActor
+    private var companionAlignmentDevices: [Device] {
+        Array(devicesByID.values).sorted { $0.id < $1.id }
+    }
+
+    /// The speaker a run for `targetID` would be measured against — the SAME
+    /// rule, over the same inputs, that puts `referenceID` in every snapshot.
+    /// One function, so the phone's CTA and what a run actually plays can
+    /// never be two different speakers.
+    ///
+    /// `isMainOutMember` is the audible read, never `isSpeakerSelected`: under
+    /// a saved-group Main Out target the latter is wrong in both directions,
+    /// so it would hide every group member from the run's candidates and
+    /// publish no reference at all for a room that is plainly playing.
+    @MainActor
+    private func companionAlignmentReferenceID(forTarget targetID: String) -> String? {
+        CompanionSnapshotBuilder.alignmentReferenceID(
+            forTarget: targetID,
+            among: companionAlignmentDevices,
+            isAudible: groupController.isMainOutMember)
+    }
+
+    /// The eight sync-calibration actuators the companion dispatcher calls.
+    ///
+    /// Decision 5's preconditions and the sentences they refuse with live in
+    /// `CompanionAlignmentPreconditions` (Core), not here: this target is
+    /// invisible to the test suite, so a rule decided in it is untestable by
+    /// construction. What remains here is wiring — which backend, which live
+    /// device list, and which phone asked. The backend answers only what it
+    /// alone knows: whether the target has a live delay line, and whether
+    /// anything else is already running.
+    @MainActor
+    private func makeCompanionAlignmentActions() -> CompanionAlignmentActions {
+        CompanionAlignmentActions(
+            startProbe: { [weak self] targetID, clientID in
+                guard let self, let bt = self.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                let referenceID: String
+                switch CompanionAlignmentPreconditions.evaluate(
+                    targetID: targetID,
+                    among: self.companionAlignmentDevices,
+                    isAudible: self.groupController.isMainOutMember
+                ) {
+                case .refused(let reason):
+                    self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                    return reason
+                case .ready(let id):
+                    referenceID = id
+                }
+                let refusal = bt.startCompanionAlignmentProbe(
+                    targetID: targetID, referenceID: referenceID,
+                    onStarted: { [weak self] in
+                        self?.sendCompanionProbeEvent(targetID: targetID, started: true)
+                    },
+                    onFinished: { [weak self] in
+                        self?.sendCompanionProbeEvent(targetID: targetID, started: false)
+                    })
+                // Recorded only on a run that actually staged, and before any
+                // callback can be serviced: both fire through a main-queue hop
+                // that cannot run until this synchronous closure returns. A
+                // refusal drops any older entry rather than leaving one behind
+                // for a run that never started.
+                if refusal == nil, let clientID {
+                    self.companionAlignmentClientByDeviceID[targetID] = clientID
+                } else if refusal != nil {
+                    self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                }
+                return refusal
+            },
+            cancelProbe: { [weak self] targetID in
+                guard let self else { return nil }
+                self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                (self.backend as? BTOutputControlling)?
+                    .cancelCompanionAlignmentProbe(targetID: targetID)
+                return nil
+            },
+            reportMeasurement: { [weak self] targetID, offsetMs, _ in
+                // `confidence` rides the wire for the PHONE's own gate — it
+                // decides whether a recording was clean enough to report at
+                // all. A measurement that arrives has already passed that,
+                // and the Mac has nothing better to judge it with.
+                guard let self, let bt = self.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                return bt.applyCompanionAlignmentMeasurement(targetID: targetID, offsetMs: offsetMs)
+            },
+            setTick: { [weak self] targetID, active, clientID in
+                guard let self, let bt = self.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                let refusal = bt.setCompanionAlignmentTick(targetID: targetID, active: active)
+                // A fine-tune session is per-client state exactly as a run is,
+                // and it is the half that leaves a metronome in the room and
+                // the user's nudges unwritten if the phone vanishes. Registered
+                // on the same map, so the disconnect hop ends it.
+                if active, refusal == nil, let clientID {
+                    self.companionAlignmentClientByDeviceID[targetID] = clientID
+                } else if !active || refusal != nil {
+                    self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                }
+                return refusal
+            },
+            nudgeTrim: { [weak self] targetID, deltaMs in
+                guard let bt = self?.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                return bt.nudgeCompanionAlignmentTrim(targetID: targetID, deltaMs: deltaMs)
+            },
+            revertNudge: { [weak self] targetID in
+                guard let bt = self?.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                return bt.revertCompanionAlignmentNudge(targetID: targetID)
+            },
+            clearTuning: { [weak self] targetID in
+                guard let bt = self?.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                bt.clearCompanionAlignmentTuning(targetID: targetID)
+                return nil
+            },
+            playDemo: { [weak self] targetID, clientID in
+                guard let self, let bt = self.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                let refusal = bt.playCompanionAlignmentDemo(
+                    targetID: targetID,
+                    referenceID: self.companionAlignmentReferenceID(forTarget: targetID))
+                // Four seconds of held-silent speakers is short, but a phone
+                // that drops inside it must still put the room back.
+                if refusal == nil, let clientID {
+                    self.companionAlignmentClientByDeviceID[targetID] = clientID
+                } else if refusal != nil {
+                    self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                }
+                return refusal
+            })
+    }
+
+    /// Address one of the run's two moments back to the phone that staged it,
+    /// and to nobody else. Fired from the pacer's own thread, so it hops.
+    private func sendCompanionProbeEvent(targetID: String, started: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isTerminating,
+                  let clientID = self.companionAlignmentClientByDeviceID[targetID] else { return }
+            if started {
+                self.companionServer.sendAlignmentProbeStarted(deviceID: targetID, to: clientID)
+            } else {
+                self.companionServer.sendAlignmentProbeFinished(deviceID: targetID, to: clientID)
+            }
+        }
+    }
+
     /// Build the full snapshot from the live controllers and hand it to the
     /// server (which owns encoding + identical-snapshot suppression).
     @MainActor
@@ -2524,7 +2731,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             connectVolumeMin: AppSettings.minConnectVolume,
             connectVolumeMax: AppSettings.maxConnectVolume,
             startBufferMs: settings.startBufferMs,
-            startBufferOptionsMs: AppSettings.startBufferOptionsMs)
+            startBufferOptionsMs: AppSettings.startBufferOptionsMs,
+            // Bluetooth rows only, and only under a backend that keeps the
+            // store and watches the link edges — everything else reports no
+            // alignment at all, which the phone reads as "not reported".
+            alignmentFor: { [weak self] device in
+                (self?.backend as? BTOutputControlling)?.btAlignmentReport(forDevice: device.id)
+            })
         companionServer.broadcast(snapshot)
     }
 

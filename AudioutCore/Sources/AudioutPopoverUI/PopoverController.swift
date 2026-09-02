@@ -338,6 +338,15 @@ public final class PopoverController: NSObject {
     /// End a local preview: non-nil keeps (and persists) it, `nil` restores.
     public var onLocalTrimEndPreview: ((_ keepMs: Double?) -> Void)?
 
+    /// Whether the Mixer's first-run membership hint is still owed. `nil` — the
+    /// default, and what the tests and the snapshot tools leave it at — means
+    /// never show it, so no headless render can grow a card note.
+    public var membershipHintShownProvider: (() -> Bool)?
+    /// The user has just made their first membership toggle in the Mixer: the
+    /// host persists the dismissal, so the provider above reads `false` from
+    /// here on (including the reconcile that runs later in the same toggle).
+    public var onMembershipHintDismissed: (() -> Void)?
+
     /// A CAST receiver's BY-EAR offset (CAST-SYNC). Third store, same
     /// affordance: the chip and drawer are the Bluetooth ones, the value lives
     /// in its own file keyed by receiver id, and the range is
@@ -1603,9 +1612,11 @@ public final class PopoverController: NSObject {
         panel.beginCard(header: Self.outputDevicesCardTitle, trailingTitle: "Source",
                         trailingTitleLeadingFromTrailing:
                             PopoverColumnGrid.feedColumnLeadingFromTrailing,
+                        trailingTitleToolTip: Self.sourceColumnHelp,
                         secondTrailingTitle: showsOffsetTitle ? "Offset" : nil,
                         secondTrailingTitleTrailing:
                             PopoverColumnGrid.offsetTitleTrailingFromTrailing,
+                        secondTrailingTitleToolTip: showsOffsetTitle ? Self.offsetColumnHelp : nil,
                         collapsible: true,
                         collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
                         onToggle: { [weak self] in self?.toggleCard(Self.outputDevicesCardTitle) })
@@ -1619,6 +1630,13 @@ public final class PopoverController: NSObject {
         renderedDevicesCardNote = devicesCardNote
         if let note = devicesCardNote {
             panel.addCardNote(note)
+        }
+        // The first-run hint yields to the dormancy note: "Inactive" and "click
+        // a name to play here" cannot both be true of the same card.
+        let showsHint = membershipHintShouldShow(sections: sections)
+        renderedMembershipHint = showsHint
+        if showsHint {
+            panel.addCardNote(Self.membershipHintText)
         }
         // The Mac's own row is PINNED directly under the card header (header
         // decision 2026-08-28): no "This Mac" subsection wrapper any more — no
@@ -1682,7 +1700,7 @@ public final class PopoverController: NSObject {
             selectedAppBundleID = nil
         }
         let title = Self.applicationsCardTitle
-        panel.beginCard(header: title, trailingTitle: "Redirect",
+        panel.beginCard(header: title, trailingTitle: "Output",
                         collapsible: true,
                         collapsed: collapsedState(for: title, default: !applicationsDefaultExpanded),
                         onToggle: { [weak self] in self?.toggleCard(title) })
@@ -2124,16 +2142,28 @@ public final class PopoverController: NSObject {
     // MARK: Collapse-default policy (T-5, PLAN §B)
 
     /// The three card titles — Warm Signal §5.1's silkscreen vocabulary
-    /// ("System Audio" / "Output Devices" / "App Exceptions"; the panel renders as-is
+    /// ("System Audio" / "Output Devices" / "App Routing"; the panel renders as-is
     /// the displayed header, the title-case copy lives here). Named constants
     /// because the title string IS the card's lookup/collapse key. The System
     /// Audio card was "Main Audio" pre-v4 (§Call-1 renamed the SECTION header to
     /// "System Audio"; the ROW inside it is now titled "Main Audio").
     static let mainAudioCardTitle = "System Audio"
     static let outputDevicesCardTitle = "Output Devices"
+    /// Hover help for the Output Devices card's "Source" column legend.
+    static let sourceColumnHelp =
+        "What each speaker is playing. System is your Mac's audio. "
+        + "An app name means only that app is sent to this speaker."
+    /// Hover help for the same card's "Offset" column legend.
+    static let offsetColumnHelp =
+        "Shifts a speaker's timing so it plays in step with the others. "
+        + "Not set means it has never been tuned."
+    /// The first-run hint on the Output Devices card: the Mixer's rows are all
+    /// affordances and none of them says so.
+    static let membershipHintText =
+        "Click a speaker's name to play your audio on it. Click it again to stop."
     /// The Applications card's title, so its default is keyed identically to
     /// every other card even though the card itself isn't built yet (T-8).
-    static let applicationsCardTitle = "App Exceptions"
+    static let applicationsCardTitle = "App Routing"
 
     /// Warm Signal §5.9's locked empty-state copy for the Applications card.
     static let applicationsEmptyPlaceholderText =
@@ -2625,12 +2655,26 @@ public final class PopoverController: NSObject {
     /// `refreshDeviceRowsReconcilingCardNote()`).
     private var renderedDevicesCardNote: String?
 
+    /// Whether the LAST `rebuild()` rendered the first-run membership hint —
+    /// the hint's twin of `renderedDevicesCardNote`, for the same reason.
+    private var renderedMembershipHint = false
+
+    /// Whether the Devices card should currently carry the first-run hint: the
+    /// host still owes it, no dormancy note is taking the same slot, and there
+    /// is at least one speaker row besides the Mac to click.
+    private func membershipHintShouldShow(sections: [DeviceSection]) -> Bool {
+        guard membershipHintShownProvider?() == true else { return false }
+        guard devicesCardNoteText() == nil else { return false }
+        return sections.contains { $0.title != Self.thisMacSubsectionTitle && !$0.devices.isEmpty }
+    }
+
     /// In-place device-section repaint that escalates to a full `rebuild()` when
     /// the Devices card's dormancy note must appear/disappear/rename (a card-note
     /// change is structural — only `rebuild()` mounts/unmounts it). Everything
     /// else stays the cheap `refreshDeviceRows()` + `refreshMainOutRow()` path.
     private func refreshDeviceRowsReconcilingCardNote() {
-        if devicesCardNoteText() != renderedDevicesCardNote {
+        if devicesCardNoteText() != renderedDevicesCardNote
+            || membershipHintShouldShow(sections: deviceSections()) != renderedMembershipHint {
             rebuild()
             panel.panelContentDidChangeHeight(animated: true)
         } else {
@@ -3623,7 +3667,7 @@ public final class PopoverController: NSObject {
 
     /// This app's `AppTetherColor` tint (Warm Signal v4.1 CORRECTIONS,
     /// extending T7/item 7) — derived from the same icon `appIcon(for:)`
-    /// resolves for the App Exceptions row, so a routed-but-quit app (icon
+    /// resolves for the App Routing row, so a routed-but-quit app (icon
     /// falls back to the generic placeholder) and a running one resolve
     /// identically to whichever a redirect target's device row shows.
     /// `AppTetherColor.color(forBundleID:icon:)` caches per bundle id itself
@@ -3944,6 +3988,10 @@ public final class PopoverController: NSObject {
     public func test_cardNoteTexts(title: String) -> [String] {
         panel.test_cardNotes(title: title).map(\.stringValue)
     }
+    /// The tooltips on `title`'s column legends, in creation order.
+    public func test_columnTitleToolTips(title: String) -> [String?] {
+        panel.test_columnTitleToolTips(title: title)
+    }
     /// Whether the header accessory for `title` is enabled (`nil` if none) — F1.
     public func test_cardAccessoryEnabled(title: String) -> Bool? {
         panel.test_accessoryEnabled(title: title)
@@ -4255,6 +4303,13 @@ extension PopoverController: DeviceRowView.Delegate {
         if let kind = devicesByID[id]?.kind { props["kind"] = kind.rawValue }
         if let reason = result.refusalReason { props["refusal_reason"] = reason }
         Analytics.capture(on ? "mixer:device_selected" : "mixer:device_deselected", props)
+        // The first membership toggle made in the Mixer retires the first-run
+        // hint. The host flips the stored flag synchronously, so the reconcile
+        // inside `handleSelection` below already sees the provider go false.
+        if membershipHintShownProvider?() == true {
+            onMembershipHintDismissed?()
+            Analytics.capture("mixer:membership_hint_dismissed")
+        }
         // Any membership edit retires a standing offer; a live removal raises a
         // fresh one. A refused edit changed nothing, so it offers nothing.
         if wasLiveRemoval && result.refusalReason == nil {

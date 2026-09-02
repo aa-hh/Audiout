@@ -271,6 +271,16 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   therefore also compares the outgoing tap's `SystemAudioTap.tappedDeviceID` and rate
   against the incoming one's and resets on a real move. A tap that reports `nil`
   (the protocol default) abstains from the identity half rather than forcing a reset.
+- **Rapid Mac select/deselect is coalesced by a trailing settle** (`scheduleSyncedLocalSettleLocked` /
+  `fireSyncedLocalSettle`, `syncedLocalSettleWindow` 0.5 s): at most one real transition per burst, and the
+  whole-system AirPlay session is re-established once if the burst churned. Churn is detected two independent ways,
+  two or more toggle decisions coalesced into one settle OR two or more transitions applied inside the rolling
+  `syncedLocalTransitionHorizon` (2 s, monotonic clock), because a window alone left a cadence slower than the window
+  unprotected. TRAP: `syncedLocalCoalescedCount` increments per DESIRED-state flip (inside `if wantSyncedLocal !=
+  syncedLocalSinkEnabled`), never per `setOutputSet` call; scheduling unconditionally re-adds the redundant reset on
+  every ordinary connect (live-only, tests stay green). A normal single toggle satisfies neither condition and must
+  never take the reset branch. Accepted cost: selecting the Mac and changing your mind within about 2 s pays one brief
+  re-sync. The local row's meter keys off `syncedLocalSinkApplied`, never the desired flag, or it leads the audio.
 - **The silence fallback (R11) has its OWN always-on delay, decoupled from the
   wake-restore preference.** `armSilenceWatchdog` uses the always-on
   `silenceFallbackDelay` (`defaultSilenceFallbackDelay`, ~10 s, no UI, can't be

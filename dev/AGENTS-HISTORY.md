@@ -54,6 +54,8 @@ not the primary offline tool, which is the in-app `MockBackend` in
 | `notes/p2b-helper-productionization-brief.md` | PTP helper review, needs paid Developer ID (deferred). |
 | `notes/p2b-v2-smallwork-brief.md` | Smaller v2 backlog items (deferred). |
 | `notes/mic-probe-calibration-brief.md` | Mic-probe sync calibration: plan, constraints, HFP hazard. |
+| `notes/companion-approval-secret-brief.md` | Approval-secret fix for the companion link: design, sequencing, tests (not built). |
+| `notes/website-privacy-iphone-remote-spec.md` | Privacy-page sentences about the iPhone remote's local-network link, for the website owner. |
 | `notes/playback-meter-research.md` | Level-meter design research (not built). |
 | `notes/stability-audit-2026-07-18.md` | Crash/freeze audit ledger: findings, marker convention, resolved list. |
 | `notes/objc-exception-shim-handoff.md` | ObjC exception shim adoption brief for the per-app-routing branch. |

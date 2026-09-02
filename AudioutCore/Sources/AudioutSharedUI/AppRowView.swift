@@ -120,7 +120,7 @@ public final class AppRowView: NSView {
         public let isRunning: Bool
         /// This app's `AppTetherColor` tint when it currently redirects to an
         /// AirPlay DEVICE (Warm Signal v4.1 CORRECTIONS, extending item 7's
-        /// "wire the same chip onto that app's App Exceptions redirect entry
+        /// "wire the same chip onto that app's App Routing redirect entry
         /// so the tether reads at both ends") — `nil` for "No Redirect" or
         /// "Current Device" (nothing on a device's own FEED column to match
         /// against). The HOST computes this the same way it computes the

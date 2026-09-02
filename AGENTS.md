@@ -33,6 +33,8 @@ diagrams that restate imports.
 **Every symbol you name is a rot point** — Guard 2 verifies each one exists, so
 name only what earns it. Over budget means you are describing code.
 
+**Over-budget history goes in a sibling file, never here.** The dated decisions, incident write-ups and long-form trap explanations a folder accumulates live in that folder's `AGENTS-HISTORY.md` (archived verbatim, not maintained, never scanned by Guard 2) and `AGENTS.md` links it in one line. A one-line trap may keep its date. This root file carries repo-wide policy and is exempt from the three-section cap.
+
 Corollary for readers: **docs orient, code decides.** If an AGENTS.md names a
 symbol you cannot find in source, believe the source and fix the doc.
 

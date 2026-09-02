@@ -1682,7 +1682,7 @@ public final class PopoverController: NSObject {
             selectedAppBundleID = nil
         }
         let title = Self.applicationsCardTitle
-        panel.beginCard(header: title, trailingTitle: "Redirect",
+        panel.beginCard(header: title, trailingTitle: "Output",
                         collapsible: true,
                         collapsed: collapsedState(for: title, default: !applicationsDefaultExpanded),
                         onToggle: { [weak self] in self?.toggleCard(title) })
@@ -2124,7 +2124,7 @@ public final class PopoverController: NSObject {
     // MARK: Collapse-default policy (T-5, PLAN §B)
 
     /// The three card titles — Warm Signal §5.1's silkscreen vocabulary
-    /// ("System Audio" / "Output Devices" / "App Exceptions"; the panel renders as-is
+    /// ("System Audio" / "Output Devices" / "App Routing"; the panel renders as-is
     /// the displayed header, the title-case copy lives here). Named constants
     /// because the title string IS the card's lookup/collapse key. The System
     /// Audio card was "Main Audio" pre-v4 (§Call-1 renamed the SECTION header to
@@ -2133,7 +2133,7 @@ public final class PopoverController: NSObject {
     static let outputDevicesCardTitle = "Output Devices"
     /// The Applications card's title, so its default is keyed identically to
     /// every other card even though the card itself isn't built yet (T-8).
-    static let applicationsCardTitle = "App Exceptions"
+    static let applicationsCardTitle = "App Routing"
 
     /// Warm Signal §5.9's locked empty-state copy for the Applications card.
     static let applicationsEmptyPlaceholderText =
@@ -3623,7 +3623,7 @@ public final class PopoverController: NSObject {
 
     /// This app's `AppTetherColor` tint (Warm Signal v4.1 CORRECTIONS,
     /// extending T7/item 7) — derived from the same icon `appIcon(for:)`
-    /// resolves for the App Exceptions row, so a routed-but-quit app (icon
+    /// resolves for the App Routing row, so a routed-but-quit app (icon
     /// falls back to the generic placeholder) and a running one resolve
     /// identically to whichever a redirect target's device row shows.
     /// `AppTetherColor.color(forBundleID:icon:)` caches per bundle id itself

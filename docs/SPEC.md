@@ -426,15 +426,17 @@ Design cues from Rogue Amoeba's SoundSource (ahh's reference, screenshots
 trailing control, a device-selector dropdown as THE routing control.
 
 **Popover structure (SIMPLIFIED 2026-07-14b — two-section selector):**
-1. **System section — a single "Main Out" row** (name · volume · device
-   selector). The device selector is THE routing decision. Its dropdown has
-   **TWO** option sections:
+1. **System section — a single "Main Audio" row** (name · volume · device
+   selector). The row is titled "Main Audio" in the app (PRODUCT.md,
+   "Terminology in product"); the code symbol is still MainOutRowView. The
+   device selector is THE routing decision. Its dropdown has **TWO** option
+   sections:
    - **§1 "Selected Devices"** — the set composed by the toggles below. The
      Mac's own speakers are NOT a special selector entry — the current device is
      just one more device in the set. Passthrough is DERIVED: when the selected
      set is exactly {current device}, the app captures/streams nothing.
    - **§2 Output Groups** — the saved groups.
-   The Main Out **volume = a master GAIN, not a proportional master**. It holds
+   The Main Audio **volume = a master GAIN, not a proportional master**. It holds
    its own value; what reaches a device is `Main × Group × Device`, multiplied on
    the 0–100 scale before the dB/curve mapping. A device's own level is never
    rewritten by a Main move, and the effective product is never stored.
@@ -444,8 +446,8 @@ trailing control, a device-selector dropdown as THE routing control.
    button type) = membership in the Selected Devices set. **REVISED 2026-07-18:**
    the membership control shipped as, and stays, a checkbox under a SELECTED column
    header; the earlier toggles preference is superseded. Checkboxes compose the set;
-   routing is applied when Main Out targets Selected Devices (the default).
-   - **Default state: Current Device toggled ON**, Main Out = Selected Devices ⇒
+   routing is applied when Main Audio targets Selected Devices (the default).
+   - **Default state: Current Device toggled ON**, Main Audio = Selected Devices ⇒
      out-of-the-box the app is passthrough (normal local playback).
    - **Auto-swap rule:** toggling an AirPlay device ON while the current device
      is the ONLY selected device auto-untoggles the current device (switching to
@@ -462,7 +464,7 @@ trailing control, a device-selector dropdown as THE routing control.
    **always-visible** volume slider (`ControlCenterSlider`, dimmed/disabled
    while the destination is "Current device," matching `DeviceRowView`
    dimming) · a "redirect audio to…" `NSPopUpButton` with **exactly two
-   sections, Current Device and AirPlay Devices** (no Groups — Main Out's
+   sections, Current Device and AirPlay Devices** (no Groups — Main Audio's
    Output Groups entries are unaffected). A hover-revealed **✕** removes the
    route (`HoverActionButton` idiom, same discipline as other rows). A
    full-width **"+ Add application…"** row sits at the card's bottom; it is
@@ -532,7 +534,7 @@ trailing control, a device-selector dropdown as THE routing control.
   with a short note ("synced everywhere-audio arrives with the new engine") —
   because pre-engine, local can't sync with AirPlay (~2s buffer; §8.1). The
   native engine's synced localOutput lifts this.
-- Selecting a group/Selection in Main Out maps to OwnTone's output "selected"
+- Selecting a group/Selection in Main Audio maps to OwnTone's output "selected"
   set (Phase 1) / the native engine's active output list (Phase 2).
 
 ### Group setup (REVISED 2026-07-13 — quick-create in menu, edit in window)

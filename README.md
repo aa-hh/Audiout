@@ -84,7 +84,7 @@ build it — that path is supported and it always will be.
 
 **Control**
 - A volume fader and a mute for every speaker, live while audio plays
-- Main Out sits over everything as a ceiling — sent level is Main × Group × Device
+- Main Audio sits over everything as a ceiling — sent level is Main × Group × Device
 - Groups: save a set of speakers, switch to it in two clicks
 - Per-app routing — send one app to one room, leave the rest alone
 - Menu-bar popover you can pin open, plus a full window for groups and settings

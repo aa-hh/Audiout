@@ -443,7 +443,7 @@ public final class CompanionCommandDispatcher {
             groupController.setMainOut(.group(id: groupID))
             return .ok
         default:
-            return .refused("Unknown Main Out kind: \(state.kind).")
+            return .refused("Unknown Main Audio kind: \(state.kind).")
         }
     }
 
@@ -466,7 +466,7 @@ public final class CompanionCommandDispatcher {
             // honestly instead. The phone's own picker filters too (AppsView);
             // this guard is the trust boundary for any client.
             guard !groupController.isMainOutMember(deviceID) else {
-                return .refused("\u{201C}\(device.name)\u{201D} is carrying the Main Out — deselect it as a speaker first.")
+                return .refused("\u{201C}\(device.name)\u{201D} is carrying Main Audio — deselect it as a speaker first.")
             }
             destination = .device(id: deviceID)
         default:

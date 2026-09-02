@@ -176,6 +176,13 @@ flowchart TD
 default output device's identity and nominal sample rate: one HAL listener
 pair, fanned out to subscribers (both capture coordinators and
 `LocalPlaybackEngine`), watcher-only (never writes device config).
+A nominal-rate reading at or below 16 kHz on the device it last delivered at a
+higher rate is a Bluetooth headset entering hands-free mode: the monitor
+withholds it for its settle window instead of delivering it on the leading
+edge, so a reading that returns inside the window never reaches a subscriber,
+and one that outlasts it is delivered on the trailing edge and rebuilds as any
+other rate change. A device-identity change or any rate above 16 kHz still
+delivers at once.
 `TapRebuildLifecycle.swift` holds the two pieces of the two coordinators'
 tap-rebuild machinery that are genuinely identical (`TapRebuildCoalescer`,
 `TapReanchor`); the claim/teardown/commit choreography itself is still two

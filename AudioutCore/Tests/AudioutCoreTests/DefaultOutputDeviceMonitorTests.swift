@@ -320,11 +320,12 @@ import CoreAudio
 
     // MARK: - Settle window (F-SETTLE)
 
-    /// The BT headset burst collapses to at most TWO deliveries — an immediate
-    /// leading one (so a tap the first transition silenced rebuilds at once) plus
-    /// one trailing reconcile of the settled value — never one-per-notification.
-    /// (The Recorder's tracked rate is fixed at 48k, so both the leading and the
-    /// settled reading diverge from it and record.)
+    /// The BT headset burst collapses to at most TWO deliveries, never
+    /// one-per-notification: the first reading above 16 kHz lands at once (the
+    /// 16k that opens the burst is a hands-free marker and is held), plus one
+    /// trailing reconcile of the settled value. (The Recorder's tracked rate is
+    /// fixed at 48k, so both the immediate and the settled reading diverge and
+    /// record.)
     @Test func rapidFlapsCollapseToLeadingPlusOneTrailing() {
         let hal = FakeHAL()
         let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
@@ -333,14 +334,14 @@ import CoreAudio
         monitor.start()
 
         // Four rapid fires — like the WH-1000XM3 connect sequence.
-        hal.rate = 16_000; hal.fire(rateSelector)   // leading: delivers 16k now
-        hal.rate = 44_100; hal.fire(rateSelector)   // coalesced
+        hal.rate = 16_000; hal.fire(rateSelector)   // hands-free marker: held, not delivered
+        hal.rate = 44_100; hal.fire(rateSelector)   // first reading above 16k: delivers now
         hal.rate = 16_000; hal.fire(rateSelector)   // coalesced
         hal.rate = 44_100; hal.fire(rateSelector)   // coalesced
 
-        // Leading already landed before any drain.
+        // The immediate delivery already landed before any drain, and it is 44.1k.
         #expect(recorder.received.count == 1)
-        #expect(recorder.received.first?.nominalRate == 16_000)
+        #expect(recorder.received.first?.nominalRate == 44_100)
 
         monitor._drainForTesting()
 
@@ -408,5 +409,79 @@ import CoreAudio
         monitor.stop()                              // cancels the trailing
         monitor._drainForTesting()
         #expect(recorder.received.count == 1)       // trailing never ran
+    }
+
+    /// A 16k reading (a headset entering hands-free mode) that returns above 16k
+    /// inside the window never reaches a subscriber: no rebuild on a flip.
+    @Test func lowRateFlapReturningInsideWindowNeverDelivers() {
+        let hal = FakeHAL()
+        hal.rate = 44_100
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
+        let recorder = Recorder(deviceID: 42, rate: 44_100)
+        recorder.attach(to: monitor)
+        monitor.start()
+
+        hal.rate = 16_000; hal.fire(rateSelector)
+        #expect(recorder.received.isEmpty)
+        hal.rate = 44_100; hal.fire(rateSelector)
+        #expect(recorder.received.isEmpty)
+
+        monitor._drainForTesting()
+        #expect(recorder.received.isEmpty)
+        #expect(monitor.current.nominalRate == 44_100)
+    }
+
+    /// A 16k reading that outlasts the window is delivered on the trailing edge,
+    /// so a genuinely sustained hands-free device is still adopted.
+    @Test func sustainedLowRateIsDeliveredOnTheTrailingEdge() {
+        let hal = FakeHAL()
+        hal.rate = 44_100
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
+        let recorder = Recorder(deviceID: 42, rate: 44_100)
+        recorder.attach(to: monitor)
+        monitor.start()
+
+        hal.rate = 16_000; hal.fire(rateSelector); hal.fire(rateSelector)  // second fire: duplicate reading
+        #expect(recorder.received.isEmpty)
+
+        monitor._drainForTesting()
+        #expect(recorder.received.count == 1)
+        #expect(recorder.received.first?.nominalRate == 16_000)
+    }
+
+    /// A device-identity change inside a held window is delivered at once, so a
+    /// headset disconnect lands on the new default without a 16k rebuild first.
+    @Test func deviceChangeDuringHeldLowRateDeliversImmediately() {
+        let hal = FakeHAL()
+        hal.rate = 44_100
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
+        let recorder = Recorder(deviceID: 42, rate: 44_100)
+        recorder.attach(to: monitor)
+        monitor.start()
+
+        hal.rate = 16_000; hal.fire(rateSelector)
+        #expect(recorder.received.isEmpty)
+
+        hal.deviceID = 99; hal.fire(deviceSelector)
+        #expect(recorder.received.count == 1)
+        #expect(recorder.received.first?.deviceID == 99)
+
+        monitor._drainForTesting()
+        #expect(recorder.received.count == 1)
+    }
+
+    /// Leaving hands-free mode (16k back to 44.1k) is an ordinary rate change and
+    /// delivers on the leading edge; only the drop INTO 16k is held.
+    @Test func rateRiseOffLowRateDeliversImmediately() {
+        let hal = FakeHAL()
+        hal.rate = 16_000
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
+        let recorder = Recorder(deviceID: 42, rate: 16_000)
+        recorder.attach(to: monitor)
+        monitor.start()
+
+        hal.rate = 44_100; hal.fire(rateSelector)
+        #expect(recorder.received.count == 1)
+        #expect(recorder.received.first?.nominalRate == 44_100)
     }
 }

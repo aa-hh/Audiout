@@ -40,6 +40,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private let gutterLine = NSTextField(wrappingLabelWithString: "")
     private var registerButton: ProminentButton!
     private var resendButton: ProminentButton!
+    private let pasteKeyButton = NSButton()
     private let lostKeyButton = NSButton()
     private let buyButton = NSButton()
     private let quitButton = NSButton()
@@ -58,8 +59,20 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private var didLiftQuietRow = false
 
     /// Where a pre-filled key may come from, injectable so tests can offer one
-    /// without touching the user's real pasteboard.
+    /// without touching the user's real pasteboard. Read when the user clicks
+    /// "Paste key", or on arrival only when `pasteboardAccessIsAlwaysAllowed`
+    /// says this app may already read the pasteboard without being asked.
     public var pasteboardString: () -> String? = { NSPasteboard.general.string(forType: .string) }
+
+    /// Whether macOS is already set to let this app read the pasteboard
+    /// silently. Injectable beside the string seam so a test can pick either
+    /// arrival path.
+    public var pasteboardAccessIsAlwaysAllowed: () -> Bool = {
+        if #available(macOS 15.4, *) {
+            return NSPasteboard.general.accessBehavior == .alwaysAllow
+        }
+        return false
+    }
 
     /// The window's fixed content size. Wide enough for the emitters to sit
     /// out near the edges the way the site composes them; the calm-zone masks
@@ -158,11 +171,17 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         gutter.translatesAutoresizingMaskIntoConstraints = false
         gutter.addSubview(gutterLine)
 
+        pasteKeyButton.isBordered = false
+        pasteKeyButton.controlSize = .regular
+        pasteKeyButton.target = self
+        pasteKeyButton.action = #selector(pasteKeyTapped)
+        setPasteKeyEnabled(true)
+
         lostKeyButton.isBordered = false
         lostKeyButton.controlSize = .regular
         lostKeyButton.target = self
         lostKeyButton.action = #selector(lostKeyTapped)
-        setLostKeyTitle("I lost my key")
+        setQuietLinkTitle("I lost my key", on: lostKeyButton)
 
         buyButton.title = "Don’t have a key? Buy Audiout — €30"
         buyButton.bezelStyle = .rounded
@@ -184,8 +203,14 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         quitButton.alphaValue = Self.quietRestAlpha
         quitButton.translatesAutoresizingMaskIntoConstraints = false
 
+        let quietLinks = NSStackView(views: [pasteKeyButton, lostKeyButton])
+        quietLinks.orientation = .horizontal
+        quietLinks.alignment = .centerY
+        quietLinks.spacing = 16
+        quietLinks.translatesAutoresizingMaskIntoConstraints = false
+
         let column = NSStackView(views: [mark, headline, why, keyField, buttonSlot,
-                                         gutter, lostKeyButton])
+                                         gutter, quietLinks])
         column.orientation = .vertical
         column.alignment = .centerX
         column.spacing = 10
@@ -252,21 +277,32 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         return button
     }
 
-    /// The quiet tier's one link. `ProminentButton` stamps its own title, so
-    /// this one carries its ink itself.
-    private func setLostKeyTitle(_ title: String) {
-        lostKeyButton.attributedTitle = NSAttributedString(
+    /// The quiet tier's two links. `ProminentButton` stamps its own title, so
+    /// these carry their ink themselves.
+    private func setQuietLinkTitle(_ title: String, on button: NSButton,
+                                   ink: NSColor = Tokens.Color.secondaryLabel) {
+        button.attributedTitle = NSAttributedString(
             string: title,
-            attributes: [.foregroundColor: Tokens.Color.secondaryLabel,
+            attributes: [.foregroundColor: ink,
                          .font: Tokens.Font.body])
     }
 
+    /// The ink IS the disabled look: an attributed title carries its own
+    /// colour, so `isEnabled` alone leaves the link at full strength.
+    private func setPasteKeyEnabled(_ enabled: Bool) {
+        pasteKeyButton.isEnabled = enabled
+        setQuietLinkTitle("Paste key", on: pasteKeyButton,
+                          ink: enabled ? Tokens.Color.secondaryLabel
+                                       : Tokens.Color.tertiaryLabel)
+    }
+
     /// Authored rather than inferred from frames: field, the commit button,
-    /// the link, then the two bottom-edge buttons, and back.
+    /// the two links, then the two bottom-edge buttons, and back.
     private func applyTabOrder() {
         let commit: NSButton = mode == .resend ? resendButton : registerButton
         keyField.nextKeyView = commit
-        commit.nextKeyView = lostKeyButton
+        commit.nextKeyView = pasteKeyButton
+        pasteKeyButton.nextKeyView = lostKeyButton
         lostKeyButton.nextKeyView = buyButton
         buyButton.nextKeyView = quitButton
         quitButton.nextKeyView = keyField
@@ -283,20 +319,48 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// Arrival: offer whatever key is already on the clipboard, and start the
     /// clock on the bottom row's one lift.
     private func arrive() {
-        offerClipboardKey()
+        offerClipboardKeyOnArrival()
         armQuietLift()
     }
 
     /// A key sitting on the clipboard is almost always the one from the
     /// receipt the user just opened — so it is OFFERED, filled in and named,
     /// never submitted: the buyer presses Register, this window doesn't.
-    private func offerClipboardKey() {
-        guard mode == .key, keyField.stringValue.isEmpty else { return }
+    ///
+    /// Arrival reads the clipboard ONLY where the app is already set to always
+    /// allow pasteboard access. On macOS 15.4 and later a read nobody asked
+    /// for raises the system paste alert, so reading here unconditionally
+    /// would open every launch of the paid build with a permission dialog.
+    /// Everywhere else the key arrives through "Paste key" instead.
+    private func offerClipboardKeyOnArrival() {
+        guard mode == .key, keyField.stringValue.isEmpty,
+              pasteboardAccessIsAlwaysAllowed() else { return }
         let pasted = (pasteboardString() ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard pasted.hasPrefix("AUDT-") else { return }
         keyField.stringValue = pasted
         show("From your clipboard")
         updateSceneForText()
+    }
+
+    /// The clicked read: the click is the gesture macOS wants before an app
+    /// reads the clipboard. A paste REPLACES what is in the field, and still
+    /// never submits. Nothing happens while the field is locked: a check or a
+    /// resend is in flight, and a paste is an edit typing could not make
+    /// either.
+    @objc private func pasteKeyTapped() {
+        guard mode == .key, keyField.isEnabled else { return }
+        let pasted = (pasteboardString() ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard pasted.hasPrefix("AUDT-") else {
+            show("No key on the clipboard. It starts with AUDT-.")
+            Analytics.capture("license:key_pasted", ["outcome": "no_key"])
+            return
+        }
+        cancelQuietLift()
+        keyField.stringValue = pasted
+        show("From your clipboard")
+        updateSceneForText()
+        view.window?.makeFirstResponder(keyField)
+        Analytics.capture("license:key_pasted", ["outcome": "filled"])
     }
 
     // MARK: The bottom row's one lift
@@ -364,7 +428,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         registerButton.keyEquivalent = ""
         resendButton.isHidden = false
         resendButton.keyEquivalent = "\r"
-        setLostKeyTitle("Back to your key")
+        setQuietLinkTitle("Back to your key", on: lostKeyButton)
+        setPasteKeyEnabled(false)
         show("Enter the email you bought with.")
         applyTabOrder()
         view.window?.makeFirstResponder(keyField)
@@ -382,7 +447,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         resendButton.keyEquivalent = ""
         registerButton.isHidden = false
         registerButton.keyEquivalent = "\r"
-        setLostKeyTitle("I lost my key")
+        setQuietLinkTitle("I lost my key", on: lostKeyButton)
+        setPasteKeyEnabled(true)
         if !keepingLine { show("") }
         applyTabOrder()
         updateSceneForText()
@@ -564,6 +630,12 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         lostKeyTapped()
     }
 
+    /// Invoke "Paste key" as a click would.
+    public func test_tapPasteKey() {
+        _ = view
+        pasteKeyTapped()
+    }
+
     /// Invoke the Buy link as a click would.
     public func test_tapBuy() {
         _ = view
@@ -573,7 +645,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// Arrival, without the on-screen half of `viewDidAppear`.
     public func test_arrive() {
         _ = view
-        offerClipboardKey()
+        offerClipboardKeyOnArrival()
     }
 
     /// The gutter's text, or `nil` while it is empty.
@@ -594,6 +666,12 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     public var test_lostKeyTitle: String {
         _ = view
         return lostKeyButton.attributedTitle.string
+    }
+
+    /// Whether "Paste key" is live. The lost-key detour rests it.
+    public var test_pasteKeyIsEnabled: Bool {
+        _ = view
+        return pasteKeyButton.isEnabled
     }
 
     /// The key field's placeholder — the other half of the lost-key morph.

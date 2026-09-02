@@ -98,6 +98,7 @@ public struct AppSettings {
         static let licenseCheckInURL = "license.checkInURL"
         static let licenseStatus = "license.status"
         static let licenseMaxMajor = "license.maxMajor"
+        static let companionToken = "license.companionToken"
         static let telemetryOptIn = "telemetry.optIn"
         static let telemetryAsked = "telemetry.asked"
         static let touchBarControls = "general.touchBarControls"
@@ -472,7 +473,10 @@ public struct AppSettings {
         get { defaults.string(forKey: Keys.licenseKey) }
         nonmutating set {
             defaults.set(newValue, forKey: Keys.licenseKey)
-            if newValue == nil { licenseStatus = nil }
+            if newValue == nil {
+                licenseStatus = nil
+                companionToken = nil
+            }
         }
     }
 
@@ -510,6 +514,15 @@ public struct AppSettings {
             return stored == 0 ? nil : stored
         }
         nonmutating set { defaults.set(newValue, forKey: Keys.licenseMaxMajor) }
+    }
+
+    /// The opaque licence-server token for the companion server to forward
+    /// to approved iPhones in `welcome`, so the iOS app can unlock offline.
+    /// Written only by ``LicenseValidator``. `nil` when never issued, or
+    /// cleared alongside ``licenseKey``/``licenseStatus``.
+    public var companionToken: String? {
+        get { defaults.string(forKey: Keys.companionToken) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.companionToken) }
     }
 
     /// The license server this build talks to, from the bundle's

@@ -256,9 +256,9 @@ import AppKit
         _ = try makeGroup1(controller)
         window.update(devices: backend.devices)
 
-        #expect(window.test_sidebar.test_contextMenuItems(for: .groupsOverview) == ["New Group…"],
-                "Rename…/Delete Group… moved to the cards with the groups")
-        window.test_sidebar.test_clickContextMenuItem("New Group…", for: .groupsOverview)
+        #expect(window.test_sidebar.test_contextMenuItems(for: .groupsOverview) == ["New Scene…"],
+                "Rename…/Delete Scene… moved to the cards with the groups")
+        window.test_sidebar.test_clickContextMenuItem("New Scene…", for: .groupsOverview)
         #expect(window.test_isPresentingCreateSheet)
         window.test_createSheet?.test_cancel()
     }
@@ -272,7 +272,7 @@ import AppKit
         await drain()
 
         #expect(window.test_overview.test_contextMenuItems(forCard: saved.id)
-                == ["Rename…", "Delete Group…"])
+                == ["Rename…", "Delete Scene…"])
         window.test_overview.test_clickContextMenuItem("Rename…", forCard: saved.id)
         await drain()
 
@@ -287,7 +287,7 @@ import AppKit
         window.update(devices: backend.devices)
         await drain()
 
-        window.test_overview.test_clickContextMenuItem("Delete Group…", forCard: saved.id)
+        window.test_overview.test_clickContextMenuItem("Delete Scene…", forCard: saved.id)
         await drain()
         // The card's Delete lands in the editor's confirm flow. Headless there
         // is no window to host the confirmation sheet, and deleting without
@@ -357,7 +357,7 @@ import AppKit
         await drain()
         let sheet = try #require(window.test_createSheet)
 
-        #expect(sheet.test_titleText == "New Group", "the sheet names itself instead of opening as a bare form")
+        #expect(sheet.test_titleText == "New Scene", "the sheet names itself instead of opening as a bare form")
         #expect(sheet.test_iconWellShowsPencil, "bordered + pencil = editable — the icon well is editable, so it wears the same cue DeviceIconWellView does")
     }
 
@@ -463,7 +463,7 @@ import AppKit
 
     /// Reversed 2026-08-28 (Alec): an offline speaker MAY join a brand-new
     /// group — it simply plays when it is back — and listing it is also what
-    /// keeps the add bar's "New Group from N Speakers…" count honest when the
+    /// keeps the add bar's "New Scene from N Speakers…" count honest when the
     /// selection includes a sleeping speaker. Unavailable candidates sort to
     /// the bottom, matching every other list on the screen.
     @Test func createSheetOffersUnavailableDevicesLast() async throws {
@@ -642,7 +642,7 @@ import AppKit
         let alert = try #require(window.test_editor.test_makeDeleteAlert())
         #expect(alert.messageText == "Delete \u{201C}Group 1\u{201D}?",
                 "the sheet names the group being deleted, not \"this group\"")
-        #expect(alert.informativeText == "Deleting a group doesn't change which speakers are playing.",
+        #expect(alert.informativeText == "Deleting a scene doesn't change which speakers are playing.",
                 "an inactive group really is pure configuration")
         #expect(alert.buttons[0].title == "Delete")
         #expect(alert.buttons[0].hasDestructiveAction)
@@ -668,8 +668,8 @@ import AppKit
 
         let alert = try #require(window.test_editor.test_makeDeleteAlert())
         #expect(alert.informativeText
-                == "This group is playing now. Deleting it switches playback to Selected Devices; "
-                   + "speakers that are only in this group will stop.")
+                == "This scene is playing now. Deleting it switches playback to Selected Devices; "
+                   + "speakers that are only in this scene will stop.")
     }
 
     /// With no window there is no confirmation, so the sidebar's "Delete
@@ -1214,14 +1214,14 @@ import AppKit
 
     @Test func addButtonRetitlesWhileSpeakersAreMultiSelected() async throws {
         let (window, _, _) = try await makeWindow()
-        #expect(window.test_sidebar.test_addButtonTitle == "New Group…")
+        #expect(window.test_sidebar.test_addButtonTitle == "New Scene…")
 
         window.test_sidebar.test_selectDevices(["office", "sonos-move", "sonos-move-2"])
-        #expect(window.test_sidebar.test_addButtonTitle == "New Group from 3 Speakers…",
+        #expect(window.test_sidebar.test_addButtonTitle == "New Scene from 3 Speakers…",
                 "the button says what + will actually do while speakers are multi-selected")
 
         window.test_sidebar.test_selectDevices([])
-        #expect(window.test_sidebar.test_addButtonTitle == "New Group…")
+        #expect(window.test_sidebar.test_addButtonTitle == "New Scene…")
     }
 
     // MARK: Selection-seeded create-sheet name

@@ -11,7 +11,7 @@ import AppKit
 /// detail pane (design revamp, `../../Sources/AudioutWindowUI/AGENTS.md`).
 /// This view is CONFIGURATION-ONLY: it only ever renders a `Device` snapshot
 /// plus its saved-group memberships, and never activates a group or moves
-/// audio. Wiring it into the "Groups" window's sidebar selection is covered
+/// audio. Wiring it into the "Scenes" window's sidebar selection is covered
 /// separately in `MixerWindowControllerTests`; these cases construct the
 /// controller directly and drive it through its `test_*` hooks, since a
 /// headless run can't synthesize the real hover/click gestures.
@@ -223,14 +223,14 @@ import AppKit
         #expect(detail.test_groupMembershipText == "Kitchen")
     }
 
-    // MARK: The "Groups" membership section — rows, order, empty state
+    // MARK: The "Scenes" membership section — rows, order, empty state
 
     @Test func groupsSectionIsTitledGroups() {
         let detail = DeviceDetailViewController(groupController: makeController(),
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         _ = detail.view
         detail.show(device: makeDevice(id: "office"))
-        #expect(detail.test_groupsSectionTitleText == "Groups")
+        #expect(detail.test_groupsSectionTitleText == "Scenes")
     }
 
     @Test func groupRowsListEverySavedGroupContainingTheDeviceInSidebarOrder() throws {
@@ -257,7 +257,7 @@ import AppKit
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         _ = detail.view
         detail.show(device: makeDevice(id: "office"))
-        #expect(detail.test_groupRowTitles == ["Not in any group"],
+        #expect(detail.test_groupRowTitles == ["Not in any scene"],
                 "the section stays visible and says so, rather than disappearing")
     }
 
@@ -269,7 +269,7 @@ import AppKit
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         _ = detail.view
         detail.show(device: makeDevice(id: "office"))
-        #expect(detail.test_groupRowTitles == ["Not in any group"])
+        #expect(detail.test_groupRowTitles == ["Not in any scene"])
 
         var group = try #require(controller.groups.first { $0.id == "g1" })
         group.memberIDs = ["office"]
@@ -570,7 +570,7 @@ import AppKit
 
     // MARK: The Equalizer section
 
-    /// Loads the view (the Equalizer's delegate and the "Groups" title's two
+    /// Loads the view (the Equalizer's delegate and the "Scenes" title's two
     /// alternative top constraints are wired in `loadView`) and shows `device`.
     private func makeLoadedPane(device: Device) -> DeviceDetailViewController {
         let detail = DeviceDetailViewController(groupController: makeController(),
@@ -589,7 +589,7 @@ import AppKit
     @Test func equalizerSectionIsShownOnASpeaker() {
         let detail = makeLoadedPane(device: makeDevice())
         #expect(detail.test_eqSectionShown)
-        #expect(detail.test_slotTitles == ["Equalizer", "Groups", "About"])
+        #expect(detail.test_slotTitles == ["Equalizer", "Scenes", "About"])
         #expect(detail.test_cardFrames.count == 1,
                 "the Equalizer is the page's one instrument, so its one card")
     }
@@ -627,7 +627,7 @@ import AppKit
         detail.show(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
         #expect(detail.test_cardFrames.count == 0,
                 "This Mac has no instrument, so it has no card at all")
-        #expect(detail.test_slotTitles == ["Groups", "About"])
+        #expect(detail.test_slotTitles == ["Scenes", "About"])
     }
 
     /// Proves `settings:` actually threads from the host's `init` down to the
@@ -755,7 +755,7 @@ import AppKit
     }
 
     /// The scroll document's laid-out height — what collapses when the
-    /// "Groups" title has no top pin, since everything below it (down to the
+    /// "Scenes" title has no top pin, since everything below it (down to the
     /// About list that ties the column's bottom) hangs off that pin.
     private func documentHeight(_ detail: DeviceDetailViewController) -> CGFloat {
         let scroll = detail.view.subviews.compactMap { $0 as? NSScrollView }.first

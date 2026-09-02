@@ -86,13 +86,13 @@ public final class GroupRowView: NSView {
 
         activateButton.image = NSImage(
             systemSymbolName: isActive ? "checkmark.circle.fill" : "circle",
-            accessibilityDescription: isActive ? "Group is active" : "Activate group"
+            accessibilityDescription: isActive ? "Scene is active" : "Activate scene"
         )
         activateButton.contentTintColor = isActive ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
 
         chevronButton.image = NSImage(
             systemSymbolName: isExpanded ? "chevron.down" : "chevron.right",
-            accessibilityDescription: isExpanded ? "Collapse group" : "Expand group"
+            accessibilityDescription: isExpanded ? "Collapse scene" : "Expand scene"
         )
 
         // Group identity glyph — same resolve-with-fallback as every other icon
@@ -145,10 +145,10 @@ public final class GroupRowView: NSView {
         muteButton.setButtonType(.pushOnPushOff)
         muteButton.image = NSImage(
             systemSymbolName: "speaker.wave.2.fill",
-            accessibilityDescription: "Mute group")
+            accessibilityDescription: "Mute scene")
         muteButton.alternateImage = NSImage(
             systemSymbolName: "speaker.slash.fill",
-            accessibilityDescription: "Unmute group")
+            accessibilityDescription: "Unmute scene")
         muteButton.contentTintColor = Tokens.Color.secondaryLabel
         muteButton.target = self
         muteButton.action = #selector(muteClicked(_:))
@@ -377,7 +377,7 @@ public final class GroupRowView: NSView {
         setAccessibilityRole(.button)
         let state = isActive ? "active" : "inactive"
         let expanded = isExpanded ? "expanded" : "collapsed"
-        setAccessibilityLabel("Group \(group.name), \(state), \(expanded), master volume \(VolumePercent.spoken(masterVolume))")
+        setAccessibilityLabel("Scene \(group.name), \(state), \(expanded), master volume \(VolumePercent.spoken(masterVolume))")
 
         activateButton.setAccessibilityLabel(isActive ? "\(group.name) is active" : "Activate \(group.name)")
         chevronButton.setAccessibilityLabel(isExpanded ? "Collapse \(group.name)" : "Expand \(group.name)")

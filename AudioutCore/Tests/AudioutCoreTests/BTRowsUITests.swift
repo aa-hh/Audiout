@@ -529,7 +529,7 @@ import AppKit
 
         let menu = popover.test_outputDevicesPlusMenu()
         #expect(menu.items.map(\.title)
-                == ["Save Selected Devices as group", "Pair a Bluetooth speaker…"])
+                == ["Save Selected Devices as scene", "Pair a Bluetooth speaker…"])
         menu.performActionForItem(at: 1)   // real AppKit menu dispatch
         #expect(paired == 1)
     }

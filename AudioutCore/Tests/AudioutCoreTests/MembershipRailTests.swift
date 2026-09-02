@@ -206,7 +206,7 @@ import AppKit
             #expect(warm.test_checkboxAccessibilityLabel
                     == sheet.test_checkboxAccessibilityLabel)
             #expect(warm.test_checkboxAccessibilityLabel
-                    == (checked ? "Remove Office from group" : "Add Office to group"),
+                    == (checked ? "Remove Office from scene" : "Add Office to scene"),
                     "the exact wording shipped before the rail landed")
         }
     }
@@ -216,14 +216,14 @@ import AppKit
     /// device it had just added.
     @Test func checkboxLabelFollowsTheToggle() {
         let row = makeRow(.warmPane, checked: false)
-        #expect(row.test_checkboxAccessibilityLabel == "Add Office to group")
+        #expect(row.test_checkboxAccessibilityLabel == "Add Office to scene")
 
         row.test_toggle()
-        #expect(row.test_checkboxAccessibilityLabel == "Remove Office from group",
+        #expect(row.test_checkboxAccessibilityLabel == "Remove Office from scene",
                 "a user toggle re-announces the verb")
 
         row.isChecked = false
-        #expect(row.test_checkboxAccessibilityLabel == "Add Office to group",
+        #expect(row.test_checkboxAccessibilityLabel == "Add Office to scene",
                 "…and so does a host-driven refresh")
     }
 

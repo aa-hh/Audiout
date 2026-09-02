@@ -5,7 +5,7 @@ import AudioutCore
 import AudioutSharedUI
 
 /// The Groups screen's card overview: one card per saved group in a two-column
-/// grid, with the dashed "New Group" tile as the grid's last cell, and the
+/// grid, with the dashed "New Scene" tile as the grid's last cell, and the
 /// former empty pane absorbed as this screen's own zero-groups canvas.
 ///
 /// Direction C (`dev/notes/groups-speakers-split-direction-c-brief-2026-08-27.md`):
@@ -28,7 +28,7 @@ public final class GroupsOverviewViewController: NSViewController {
     public var onNewGroup: (() -> Void)?
     /// A card's "Rename…" context item was chosen.
     public var onRequestRename: ((String) -> Void)?
-    /// A card's "Delete Group…" context item was chosen.
+    /// A card's "Delete Scene…" context item was chosen.
     public var onRequestDelete: ((String) -> Void)?
 
     // MARK: Model
@@ -57,15 +57,15 @@ public final class GroupsOverviewViewController: NSViewController {
     // MARK: Views
 
     private let titleGlyph = NSImageView()
-    private let titleLabel = NSTextField(labelWithString: "Groups")
+    private let titleLabel = NSTextField(labelWithString: "Scenes")
     private let countLabel = NSTextField(labelWithString: "")
     private let scrollView = NSScrollView()
     private let collectionView = GridCollectionView()
 
     private let emptyContainer = NSView()
-    private let emptyMessageLabel = NSTextField(labelWithString: "Group your speakers")
+    private let emptyMessageLabel = NSTextField(labelWithString: "Save your speakers as a scene")
     private let emptySubtitleLabel = NSTextField(wrappingLabelWithString:
-        "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
+        "Save a set of speakers as a scene, then switch to it in two clicks from the menu bar.")
     private let emptyNewTile = NewGroupTileView()
 
     private static let cardItemIdentifier = NSUserInterfaceItemIdentifier("GroupCardItem")
@@ -223,7 +223,7 @@ public final class GroupsOverviewViewController: NSViewController {
         let activeID = groupController.activeGroupID
         plans = groups.map { plan(for: $0, isLive: $0.id == activeID) }
 
-        countLabel.stringValue = plans.count == 1 ? "1 group" : "\(plans.count) groups"
+        countLabel.stringValue = plans.count == 1 ? "1 scene" : "\(plans.count) scenes"
 
         let isEmpty = plans.isEmpty
         scrollView.isHidden = isEmpty
@@ -266,7 +266,7 @@ public final class GroupsOverviewViewController: NSViewController {
 
     // MARK: Grid contents
 
-    /// Saved groups plus the trailing dashed "New Group" tile.
+    /// Saved groups plus the trailing dashed "New Scene" tile.
     private var cellCount: Int { plans.count + 1 }
 
     private func isNewTileIndex(_ index: Int) -> Bool { index == plans.count }
@@ -309,7 +309,7 @@ public final class GroupsOverviewViewController: NSViewController {
         // No destructive styling: `NSMenuItem` has no equivalent of
         // `hasDestructiveAction`, and the confirmation the delete goes through
         // is the host's, not this menu's.
-        menu.addItem(contextMenuItem("Delete Group…", #selector(deleteMenuItemSelected(_:)), id))
+        menu.addItem(contextMenuItem("Delete Scene…", #selector(deleteMenuItemSelected(_:)), id))
         return menu
     }
 
@@ -830,7 +830,7 @@ private final class NewGroupTileView: NSView {
 
     private let ringView = NSView()
     private let plusView = NSImageView()
-    private let label = NSTextField(labelWithString: "New Group")
+    private let label = NSTextField(labelWithString: "New Scene")
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -875,7 +875,7 @@ private final class NewGroupTileView: NSView {
         ])
 
         setAccessibilityRole(.button)
-        setAccessibilityLabel("New Group")
+        setAccessibilityLabel("New Scene")
     }
 
     override func draw(_ dirtyRect: NSRect) {

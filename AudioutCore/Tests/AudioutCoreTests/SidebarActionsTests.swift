@@ -48,7 +48,7 @@ import AppKit
 
     @Test func groupsRowMenuOffersOnlyNewGroup() {
         let sidebar = makeSidebar()
-        #expect(sidebar.test_contextMenuItems(for: .groupsOverview) == ["New Group…"])
+        #expect(sidebar.test_contextMenuItems(for: .groupsOverview) == ["New Scene…"])
     }
 
     @Test func theGroupsRowMenuRunsTheAddPath() {
@@ -56,25 +56,25 @@ import AppKit
         var addCount = 0
         sidebar.onAddGroup = { addCount += 1 }
 
-        sidebar.test_clickContextMenuItem("New Group…", for: .groupsOverview)
+        sidebar.test_clickContextMenuItem("New Scene…", for: .groupsOverview)
 
         #expect(addCount == 1)
     }
 
-    /// The item NAMES what it will act on. "New Group from Selection…" named
+    /// The item NAMES what it will act on. "New Scene from Selection…" named
     /// nothing at all, on the one menu whose target changes with where you
     /// clicked.
     @Test func speakerRowMenuNamesTheClickedSpeaker() {
         let sidebar = makeSidebar()
         #expect(sidebar.test_contextMenuItems(for: .device(id: "kitchen"))
-                == ["New Group from \u{201C}Kitchen\u{201D}…"])
+                == ["New Scene from \u{201C}Kitchen\u{201D}…"])
     }
 
     @Test func speakerRowMenuCountsAMultiSelection() {
         let sidebar = makeSidebar()
         sidebar.test_selectDevices(["office", "patio"])
         #expect(sidebar.test_contextMenuItems(for: .device(id: "patio"))
-                == ["New Group from 2 Speakers…"],
+                == ["New Scene from 2 Speakers…"],
                 "the same wording the bottom bar retitles itself to")
     }
 
@@ -98,7 +98,7 @@ import AppKit
         sidebar.onNewGroupFromSelection = { created = $0 }
 
         sidebar.test_selectDevices(["office", "patio"])
-        sidebar.test_clickContextMenuItem("New Group from 2 Speakers…", for: .device(id: "patio"))
+        sidebar.test_clickContextMenuItem("New Scene from 2 Speakers…", for: .device(id: "patio"))
 
         #expect(created == ["office", "patio"], "a clicked row inside the selection keeps it")
     }
@@ -109,7 +109,7 @@ import AppKit
         sidebar.onNewGroupFromSelection = { created = $0 }
 
         sidebar.test_selectDevices(["office", "patio"])
-        sidebar.test_clickContextMenuItem("New Group from \u{201C}Kitchen\u{201D}…",
+        sidebar.test_clickContextMenuItem("New Scene from \u{201C}Kitchen\u{201D}…",
                                           for: .device(id: "kitchen"))
 
         #expect(created == ["kitchen"], "a clicked row outside the selection replaces it")
@@ -120,7 +120,7 @@ import AppKit
         var created: [String]?
         sidebar.onNewGroupFromSelection = { created = $0 }
 
-        sidebar.test_clickContextMenuItem("New Group from \u{201C}Office\u{201D}…",
+        sidebar.test_clickContextMenuItem("New Scene from \u{201C}Office\u{201D}…",
                                           for: .device(id: "office"))
 
         #expect(created == ["office"])
@@ -249,7 +249,7 @@ import AppKit
             sidebar.outlineView(NSOutlineView(), viewFor: nil,
                                 item: SidebarViewController.Node(.groupsOverview))
                 as? NSTableCellView)
-        #expect(activeCell.textField?.accessibilityLabel() == "Groups, playing now")
+        #expect(activeCell.textField?.accessibilityLabel() == "Scenes, playing now")
 
         let ordinaryCell = try #require(
             sidebar.outlineView(NSOutlineView(), viewFor: nil,

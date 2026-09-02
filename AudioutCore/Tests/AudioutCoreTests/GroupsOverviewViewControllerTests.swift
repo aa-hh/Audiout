@@ -194,7 +194,7 @@ import AppKit
             group("g1", "Downstairs", members: ["office"]),
         ])
 
-        #expect(overview.test_contextMenuItems(forCard: "g1") == ["Rename…", "Delete Group…"],
+        #expect(overview.test_contextMenuItems(forCard: "g1") == ["Rename…", "Delete Scene…"],
                 "the sidebar's old group-row titles, verbatim")
     }
 
@@ -209,7 +209,7 @@ import AppKit
         overview.onRequestDelete = { deleted.append($0) }
 
         overview.test_clickContextMenuItem("Rename…", forCard: "g2")
-        overview.test_clickContextMenuItem("Delete Group…", forCard: "g1")
+        overview.test_clickContextMenuItem("Delete Scene…", forCard: "g1")
 
         #expect(renamed == ["g2"])
         #expect(deleted == ["g1"])
@@ -223,9 +223,9 @@ import AppKit
         #expect(overview.test_cardGroupIDs.isEmpty)
         #expect(overview.test_isShowingEmptyCanvas,
                 "with nothing saved the overview IS the empty state — there is no separate pane")
-        #expect(overview.test_emptyMessageText == "Group your speakers")
+        #expect(overview.test_emptyMessageText == "Save your speakers as a scene")
         #expect(overview.test_emptySubtitleText ==
-                "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
+                "Save a set of speakers as a scene, then switch to it in two clicks from the menu bar.")
     }
 
     @Test func theEmptyCanvasTileRunsTheSameCreationPath() throws {

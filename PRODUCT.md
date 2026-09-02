@@ -21,17 +21,17 @@ Two native Apple surfaces, one product: a macOS menu-bar app (AppKit) and an iPh
 
 ## Product Purpose
 
-Send all system audio (not just Music/TV) to multiple AirPlay 2 speakers in perfect sync, with per-device volume and mute, saved groups, and per-app routing. Success: a household drives its whole speaker set from the menu bar (or the phone) without thinking about how.
+Send all system audio (not just Music/TV) to multiple AirPlay 2 speakers in perfect sync, with per-device volume and mute, saved scenes, and per-app routing. Success: a household drives its whole speaker set from the menu bar (or the phone) without thinking about how.
 
 ## Positioning
 
-**The mixer for your house.** Not just "AirPlay to two speakers": groups, per-device volume/EQ, per-app routing (Spotify → kitchen while Zoom stays local), master volume, and a phone remote — a mixing desk for the home, end to end. (Confirmed 2026-08-10 over the alternatives "free AirPlay 2 sync" and "routing is the moat".)
+**The mixer for your house.** Not just "AirPlay to two speakers": scenes, per-device volume/EQ, per-app routing (Spotify → kitchen while Zoom stays local), master volume, and a phone remote — a mixing desk for the home, end to end. (Confirmed 2026-08-10 over the alternatives "free AirPlay 2 sync" and "routing is the moat".)
 
 Design tension to protect, not resolve by accident: mixer-grade capability with general-consumer language. The power is the desk; the words are not allowed to be.
 
 ## Operating Context
 
-- Primary surface: macOS menu-bar popover (one-surface direction: pinnable popover hosting Mixer/Groups/Settings — roadmap 032); a fuller window exists for groups/settings.
+- Primary surface: macOS menu-bar popover (one-surface direction: pinnable popover hosting Mixer/Scenes/Settings — roadmap 032); a fuller window exists for scenes/settings.
 - Companion: iPhone app discovers the Mac over Bonjour and remote-controls it; it has no audio path of its own.
 - Audio is live in other rooms while the UI is used — volume and mute are high-stakes, time-pressured actions (dinner party, blasting speaker).
 - macOS TCC permissions gate the core capability (system audio capture, `kTCCServiceAudioCapture` on macOS 14.4+; Local Network on macOS 15+); permission UX is part of the product. The Mac app ships as a signed Developer ID `.app` because those grants require it.
@@ -46,7 +46,7 @@ Design tension to protect, not resolve by accident: mixer-grade capability with 
 - License: GPL-2.0-or-later (forced by the vendored GPL sender). AirPlayEngine is a separate package as a licensing boundary — no app concepts inside it. This licence is what makes paid enforcement unavailable — see Business Model.
 - Distribution: open source, direct download for the Mac app. The Mac App Store is **foreclosed, not merely declined**: detecting the system-audio grant needs a private path with no public API, and Alec confirmed Developer ID only. Alec personally owns App Store Connect/TestFlight for the iOS companion.
 - **iPhone companion is mid-build (2026-08-12):** connection and core control work end to end; several screens are still being built. It now ships from its own repository, `aa-hh/audiout-remote`.
-- Terminology in product: "Main Audio" (master output), "groups" (saved named speaker sets), "per-app routing". The Mac's snapshot is the single source of truth; the phone renders it and never invents state.
+- Terminology in product: "Main Audio" (master output), "scenes" (saved named speaker sets), "per-app routing". The Mac's snapshot is the single source of truth; the phone renders it and never invents state. **Naming note (2026-09-02):** the user-facing name is "scenes"; `group` remains the name in code, the wire protocol, and the on-disk format (`groups.json`) — that boundary is deliberate and does not migrate.
 
 ## Business Model
 

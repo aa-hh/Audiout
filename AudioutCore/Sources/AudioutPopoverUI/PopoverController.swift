@@ -2241,7 +2241,7 @@ public final class PopoverController: NSObject {
         // filtered here defensively rather than shown as a dead entry).
         let routableGroups = controller.groups.filter { !$0.memberIDs.isEmpty }
         if !routableGroups.isEmpty {
-            options.append(.init(title: "Output Groups", isHeader: true))
+            options.append(.init(title: "Output Scenes", isHeader: true))
             for group in routableGroups {
                 // A saved GROUP names ITSELF on the collapsed button ("→ Kitchen"),
                 // never its member devices — shorter, never truncates, and matches
@@ -2367,7 +2367,7 @@ public final class PopoverController: NSObject {
                                            controller: GroupController) -> String {
         switch target {
         case .selectedDevices: return "Selected Devices"
-        case .group(let id):   return controller.groups.first { $0.id == id }?.name ?? "the group"
+        case .group(let id):   return controller.groups.first { $0.id == id }?.name ?? "the scene"
         }
     }
 
@@ -2603,7 +2603,7 @@ public final class PopoverController: NSObject {
         guard let controller = groupController,
               case .group(let id) = controller.mainOut else { return nil }
         guard let group = controller.groups.first(where: { $0.id == id }) else {
-            return DevicesCardDivergence(groupName: "a group", targetMemberIDs: [])
+            return DevicesCardDivergence(groupName: "a scene", targetMemberIDs: [])
         }
         let target = Set(group.memberIDs)
         guard controller.selectedDeviceIDs != target else { return nil }
@@ -3023,7 +3023,7 @@ public final class PopoverController: NSObject {
     /// Build the "+" affordance's menu FRESH per presentation — two items
     /// dispatching through real `NSMenuItem` target/action (tests drive them
     /// via `NSMenu.performActionForItem(at:)`, never a bypass seam):
-    /// "Save Selected Devices as group" (enabled iff `canSaveCurrentSetup`),
+    /// "Save Selected Devices as scene" (enabled iff `canSaveCurrentSetup`),
     /// "Pair a Bluetooth speaker…" (device-tier decision 3 — never-paired
     /// speakers get NO rows; pairing is a one-tap Settings trip), and — the
     /// BT-LIST connected-only list's history surface — one "Connect '<name>'"
@@ -3031,7 +3031,7 @@ public final class PopoverController: NSObject {
     func makeOutputDevicesPlusMenu() -> NSMenu {
         let menu = NSMenu(title: "Add")
         menu.autoenablesItems = false
-        let save = NSMenuItem(title: "Save Selected Devices as group",
+        let save = NSMenuItem(title: "Save Selected Devices as scene",
                               action: #selector(plusMenuSaveGroup(_:)), keyEquivalent: "")
         save.target = self
         save.isEnabled = canSaveCurrentSetup
@@ -3650,7 +3650,7 @@ public final class PopoverController: NSObject {
 
     // MARK: Actions
 
-    /// "Save Selected Devices as group" is enabled iff there's a controller, the
+    /// "Save Selected Devices as scene" is enabled iff there's a controller, the
     /// Selected Devices set is non-empty, and it doesn't already equal a saved
     /// group (SPEC §9 dedup).
     private var canSaveCurrentSetup: Bool {
@@ -3659,7 +3659,7 @@ public final class PopoverController: NSObject {
         return controller.group(matchingMemberSet: controller.selectedDeviceIDs) == nil
     }
 
-    /// Whether the last "Save Selected Devices as group" failed to persist —
+    /// Whether the last "Save Selected Devices as scene" failed to persist —
     /// the headless-observable half of the alert below (hardening 11).
     public private(set) var test_saveGroupFailureReported = false
 
@@ -3687,8 +3687,8 @@ public final class PopoverController: NSObject {
     private func presentSaveGroupFailureAlert() {
         guard let window = panel.view.window else { return }
         let alert = NSAlert()
-        alert.messageText = "Couldn\u{2019}t save the group."
-        alert.informativeText = "The group\u{2019}s saved settings couldn\u{2019}t be written. Try again."
+        alert.messageText = "Couldn\u{2019}t save the scene."
+        alert.informativeText = "The scene\u{2019}s saved settings couldn\u{2019}t be written. Try again."
         alert.alertStyle = .warning
         alert.beginSheetModal(for: window)
     }

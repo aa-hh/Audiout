@@ -12,7 +12,7 @@ import AudioutSharedUI
 /// It owns an `NSSplitViewController` whose sidebar item is a source-list
 /// `NSOutlineView` (`SidebarViewController` — the device fleet) and whose
 /// content item is swapped between four panes: the saved-group card overview
-/// (`GroupsOverviewViewController`, the sidebar's pinned "Groups" row), the
+/// (`GroupsOverviewViewController`, the sidebar's pinned "Scenes" row), the
 /// group editor (`GroupEditorViewController`, pushed in place when a card is
 /// opened), the device detail pane (`DeviceDetailViewController`, when a device
 /// is selected), and the whole-mix `MainOutDetailViewController` (the sidebar's
@@ -100,7 +100,7 @@ public final class MixerWindowController {
     /// Hosts the swapped content pane (editor / detail / empty) PLUS the
     /// persistent footer caption pinned beneath it. SCOPED TO THE CONTENT
     /// SPLIT ITEM ONLY — the sidebar split item runs the full height of the
-    /// split view down to its own "New Group…" bar, with no footer stealing
+    /// split view down to its own "New Scene…" bar, with no footer stealing
     /// its bottom space (design review 2026-07-18: the footer used to wrap
     /// the whole split view, which left a gap above it under the sidebar
     /// too). The footer is content, not chrome — it ships wherever the
@@ -243,7 +243,7 @@ public final class MixerWindowController {
             self.showEditor(for: groupID)
             self.editorViewController.focusRenameField()
         }
-        // A card's "Delete Group…": open the group's editor and run the same
+        // A card's "Delete Scene…": open the group's editor and run the same
         // confirm-then-delete flow its button does.
         overviewViewController.onRequestDelete = { [weak self] groupID in
             guard let self else { return }
@@ -257,7 +257,7 @@ public final class MixerWindowController {
         editorViewController.onBack = { [weak self] in
             self?.showOverview()
         }
-        // The editor's "Delete Group…" falls back to the default content (the
+        // The editor's "Delete Scene…" falls back to the default content (the
         // overview, now one card lighter).
         editorViewController.onDidDeleteGroup = { [weak self] in
             self?.refreshAll()
@@ -442,9 +442,9 @@ public final class MixerWindowController {
     /// it undisturbed and tests can drive it. `nil` when no sheet is presenting.
     private var createSheetController: GroupCreationSheetController?
 
-    /// Present the standard macOS "New Group" sheet over the hosting window
+    /// Present the standard macOS "New Scene" sheet over the hosting window
     /// (revamp: replaces the old in-pane draft). The name is prefilled with the next
-    /// "Group N"; `preselected` seeds the membership checklist (from a device
+    /// "Scene N"; `preselected` seeds the membership checklist (from a device
     /// multi-selection, or empty). On create: refresh, select the resolved group
     /// in the sidebar, and open its editor — NO activation, CONFIG-ONLY.
     ///
@@ -482,7 +482,7 @@ public final class MixerWindowController {
 
     /// The name the create sheet prefills. A selection-seeded sheet names the
     /// group after what's in it ("Office + Sonos Move") instead of the
-    /// meaningless "Group N" — the field is auto-focused with the text
+    /// meaningless "Scene N" — the field is auto-focused with the text
     /// selected either way, so keeping the suggestion is one glance and
     /// replacing it is zero extra work.
     private func suggestedGroupName(preselected: [String], devices: [Device]) -> String {
@@ -763,7 +763,7 @@ final class ContentPaneHostViewController: NSViewController {
     /// zero-groups nudge (`GroupsOverviewViewController`'s empty canvas): the
     /// footer is the one full teaching line; that subtitle is a shorter
     /// contextual nudge shown only when there's nothing else on screen.
-    private let footerLabel = NSTextField(labelWithString: "Set up groups here — switch to the Mixer to play")
+    private let footerLabel = NSTextField(labelWithString: "Set up scenes here — switch to the Mixer to play")
 
     /// The container the swapped child view fills; sits above the footer.
     private let contentContainer = NSView()

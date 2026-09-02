@@ -224,18 +224,27 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     // MARK: Synced-local settle debounce (T1/T2)
     //
-    // Every Mac select/deselect calls `applySyncedLocalSinkTransition`, and each
-    // attach/detach forces the whole-system tap to rebuild AND re-fires the
-    // sink's ~977ms session anchor. RAPID toggling turned that into a storm
-    // (~19 tap rebuilds in 2.5s), none of which reset the AirPlay receiver's RTP
-    // session (an `.exclusionChange` rebuild deliberately skips that reset), which
-    // desyncs/corrupts the receiver → permanent silence. The fix coalesces a burst
-    // into AT MOST ONE real transition on the trailing edge of a quiet window, and
-    // re-establishes the receiver session exactly once IFF the burst actually
-    // churned (≥2 coalesced toggles). A normal single toggle collapses to exactly
-    // one coalesced decision and NEVER pays that re-sync — reintroducing a redundant
-    // RTP re-establish on every ordinary connect is the exact bug a prior fix
-    // removed (`dev/notes/synced-local-mixed-selection-dropout-fix.md`).
+    // Every Mac select/deselect used to call `applySyncedLocalSinkTransition`
+    // directly. On today's main a sink attach no longer rebuilds the whole-system
+    // tap (`setSyncedLocalSink` compares exclusion objects before rebuilding), but
+    // each applied transition still starts or stops the sink and re-fires its
+    // session anchor, and rapid toggling still left the AirPlay receiver desynced
+    // and silent while Mac-side capture reported healthy. The fix coalesces a
+    // burst into AT MOST ONE real transition on the trailing edge of a quiet
+    // window, and re-establishes the receiver session exactly once if the burst
+    // actually churned. A normal single toggle collapses to exactly one coalesced
+    // decision and NEVER pays that re-sync: reintroducing a redundant RTP
+    // re-establish on every ordinary connect is the exact bug a prior fix removed
+    // (`dev/notes/synced-local-mixed-selection-dropout-fix.md`).
+    //
+    // Churn is detected TWO independent ways, because a debounce window must never
+    // be the only protection:
+    //   1. COALESCED, cadence-dependent: two or more toggle decisions absorbed into
+    //      one settle window. Only catches clicking faster than the window.
+    //   2. APPLIED-TRANSITION HORIZON, cadence-independent: two or more transitions
+    //      this backend actually ran inside a rolling horizon. Catches a cadence
+    //      slower than the window but faster than the horizon, where every click
+    //      gets its own settle and detector 1 always reads exactly 1.
 
     /// What the last EXECUTED synced-local transition actually set — the applied
     /// state, distinct from the desired `syncedLocalSinkEnabled` above. The T1
@@ -244,20 +253,43 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private var syncedLocalSinkApplied = false
 
     /// The pending trailing-edge settle; a newer toggle cancels + reschedules it,
-    /// so a burst fires only once, 250ms after the LAST toggle. On `stateQueue`.
+    /// so a burst fires only once, one settle window after the LAST toggle. On
+    /// `stateQueue`.
     private var pendingSyncedLocalSettle: DispatchWorkItem?
 
     /// How many distinct synced-local toggle DECISIONS have coalesced into the
     /// currently-pending settle. `>= 2` when the settle fires means genuine churn
     /// (rapid clicking) and arms the one-shot T2 RTP re-sync; exactly `1` is a
-    /// normal single toggle and must never trigger it. Reset to 0 on each fire.
+    /// normal single toggle and must never trigger it by itself (the horizon below
+    /// is the other, cadence-independent arming path). Reset to 0 on each fire.
     /// On `stateQueue`.
     private var syncedLocalCoalescedCount = 0
 
     /// Trailing-edge quiet window for coalescing synced-local toggles. A single
     /// toggle still fires after just this delay (an accepted tradeoff — kept
-    /// simple, trailing-edge only, no leading-edge fast path).
-    private static let syncedLocalSettleWindow: TimeInterval = 0.25
+    /// simple, trailing-edge only, no leading-edge fast path). Injectable only
+    /// through the designated initializer (same seam shape as
+    /// `rebindRecoveryRetryDelay`) so tests can shrink it; production always gets
+    /// the default. The default moved from 0.25 s to 0.5 s because 250 ms sits
+    /// under a comfortable sustained click cadence (about 3 per second, about
+    /// 330 ms apart), so every click used to land in its own window.
+    private let syncedLocalSettleWindow: TimeInterval
+
+    /// Monotonic `DispatchTime.now().uptimeNanoseconds` stamps of the synced-local
+    /// transitions this backend really applied: appended only past
+    /// `fireSyncedLocalSettle`'s desired-versus-applied guard, never per toggle
+    /// decision, pruned to `syncedLocalTransitionHorizon` on each append, cleared
+    /// by `stop()`. On `stateQueue`.
+    private var syncedLocalTransitionTimes: [UInt64] = []
+
+    /// Rolling horizon over which two or more real applied transitions count as
+    /// churn, arming the one-shot re-sync no matter how the clicks were spaced.
+    /// 2 s: its floor is the settle window (a cadence just outside the window
+    /// would otherwise slip through the same hole), its ceiling is deliberate
+    /// reconsideration, and each transition already trails its click by the
+    /// window, so a 2 s gap between transitions is a 2 s gap between clicks.
+    /// Injectable through the designated initializer like the window.
+    private let syncedLocalTransitionHorizon: TimeInterval
 
     // MARK: Bluetooth outputs — sink-manager lifecycle (BT-BACKEND, R-partition)
 
@@ -1496,6 +1528,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `captureRetryDelay`/`captureRetryMaxBackoff` (T16, E10) tune the equivalent
     /// backoff for the WHOLE-SYSTEM tap's `.failed` retry — a separate knob since
     /// it's an unrelated subsystem; tests shrink it the same way.
+    /// `syncedLocalSettleWindow` and `syncedLocalTransitionHorizon` are test seams
+    /// that shrink the synced-local settle timing the same way; every production
+    /// call site (the convenience init included) gets the defaults.
     init(
         engineControl: EngineControlling,
         discoverySource: DiscoverySource,
@@ -1517,6 +1552,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         processNotYetAudibleMaxBackoff: TimeInterval = 10.0,
         maxRebindRecoveryAttempts: Int = 3,
         rebindRecoveryRetryDelay: TimeInterval = 0.5,
+        syncedLocalSettleWindow: TimeInterval = 0.5,
+        syncedLocalTransitionHorizon: TimeInterval = 2.0,
         captureRetryDelay: TimeInterval = 2.0,
         captureRetryMaxBackoff: TimeInterval = 10.0,
         takeoverStripDelay: TimeInterval = 3.0,
@@ -1590,6 +1627,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.processNotYetAudibleMaxBackoff = processNotYetAudibleMaxBackoff
         self.maxRebindRecoveryAttempts = maxRebindRecoveryAttempts
         self.rebindRecoveryRetryDelay = rebindRecoveryRetryDelay
+        self.syncedLocalSettleWindow = syncedLocalSettleWindow
+        self.syncedLocalTransitionHorizon = syncedLocalTransitionHorizon
         self.captureRetryDelay = captureRetryDelay
         self.captureRetryMaxBackoff = captureRetryMaxBackoff
         self.takeoverStripDelay = takeoverStripDelay
@@ -2292,6 +2331,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.pendingSyncedLocalSettle?.cancel()
             self.pendingSyncedLocalSettle = nil
             self.syncedLocalCoalescedCount = 0
+            // The horizon is per-session: a later start() must not inherit a
+            // pre-stop transition and arm the re-sync off it.
+            self.syncedLocalTransitionTimes.removeAll()
+            // Before this, stop() reset the desired/applied flags below while a
+            // running sink stayed attached and started. The disable path is
+            // idempotent (a nil or already-stopped sink is a no-op). Enqueued
+            // here, ahead of the `coordinator.stop()` enqueue further down, so the
+            // FIFO order on `captureControlQueue` is sink disable, coordinator
+            // stop, BT disable, Cast disable.
+            let gain = self.syncedLocalGain
+            self.captureControlQueue.async { [weak self] in
+                self?.applySyncedLocalSinkTransition(enable: false, gain: gain)
+            }
             self.syncedLocalSinkEnabled = false
             self.syncedLocalSinkApplied = false
             // BT-BACKEND: reset the BT decisions; the disable itself is enqueued
@@ -3293,20 +3345,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // both the tap-rebuild storm and the sink re-anchor storm (both are
                 // driven from `applySyncedLocalSinkTransition`).
                 self.scheduleSyncedLocalSettleLocked()
-                // Metering fix: re-emit the local device's combined `.level`
-                // immediately on this transition, mirroring the per-app "a
-                // torn-down stream gets a final combined .level" discipline
-                // (`updateRoutedSets`'s `unboundDevices` loop, below). Turning
-                // OFF must push a zero-system-contribution reading right away —
-                // `isMeterable` now returns false for the local device the
-                // instant `syncedLocalSinkEnabled` flips, so this is a genuine
-                // clear, not a stale nonzero value — so the row's meter can't
-                // stick at its last reading after the Mac (or the last AirPlay
-                // device) leaves the mix. Turning ON gets its first real
-                // reading a whole tap-buffer-interval sooner than waiting for
-                // the next `onLevel` drain. Unconditional (not metering-
-                // gated), matching that same precedent.
-                self.emitCombinedLevel(forDevice: Self.localDeviceID)
+                // The eager level emit moved into `fireSyncedLocalSettle`: metering keys off the
+                // applied state, so a reading here would describe a transition that has not happened (and may never).
             }
 
             // BT-BACKEND (R-partition): the other half of the partition the
@@ -4003,7 +4043,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // fires simply drops it — no double-firing, no stale work after a newer
         // decision landed.
         self.stateQueue.asyncAfter(
-            deadline: .now() + Self.syncedLocalSettleWindow, execute: work)
+            deadline: .now() + self.syncedLocalSettleWindow, execute: work)
     }
 
     /// T1/T2: the quiet window elapsed — run AT MOST one real transition for the
@@ -4023,13 +4063,34 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         guard desired != self.syncedLocalSinkApplied else { return }
         self.syncedLocalSinkApplied = desired
 
+        // The local row's meter tracks the applied state (`isMeterable`), so its
+        // clear or first reading belongs here, the instant the transition lands.
+        // Runs on `stateQueue`, which is `emitCombinedLevel`'s requirement.
+        self.emitCombinedLevel(forDevice: Self.localDeviceID)
+
+        // Record the real transition and count how many landed inside the rolling
+        // horizon. Monotonic clock, so a wall-clock jump can neither fabricate nor
+        // hide churn.
+        let now = DispatchTime.now().uptimeNanoseconds
+        let horizonNanos = UInt64(self.syncedLocalTransitionHorizon * 1_000_000_000)
+        self.syncedLocalTransitionTimes.removeAll { now &- $0 > horizonNanos }
+        self.syncedLocalTransitionTimes.append(now)
+        let recentTransitions = self.syncedLocalTransitionTimes.count
+
         // Churn = the settle absorbed ≥2 distinct toggle decisions (rapid
         // clicking). A NORMAL single toggle coalesces exactly one decision and
         // MUST NEVER take the reset branch — that redundant RTP re-establish on
         // every ordinary connect is the exact bug a prior fix removed
         // (`dev/notes/synced-local-mixed-selection-dropout-fix.md`). This is the
         // sharpest correctness constraint in the fix.
-        let churned = coalesced >= 2
+        // Either detector arms the reset: `coalesced >= 2` (two or more decisions
+        // in THIS settle) or `recentTransitions >= 2` (two or more transitions
+        // really applied inside the horizon, the cadence-independent path that
+        // recovers a click cadence slower than the window, where `coalesced` is
+        // always 1). A normal single toggle satisfies neither: one decision, and
+        // its own transition alone in the horizon. Two unhurried toggles further
+        // apart than the horizon likewise pay nothing.
+        let churned = coalesced >= 2 || recentTransitions >= 2
 
         // Runs on `captureControlQueue` — the same serial queue the capture gate's
         // start/stop is enqueued on — so a tap recreate triggered by
@@ -4047,9 +4108,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // `resetAirPlaySessionForWholeSystem` is already single-flighted
                 // (per-device `converging` claim + `rebindRecoveryGen`) and
                 // ownership-guarded (`stillOwnsRebind`), so this can't fight a
-                // concurrent converge or thrash a healthy session.
+                // concurrent converge or thrash a healthy session. That is also
+                // why a sustained storm needs no second rate limiter here: a
+                // device still recovering from the previous re-sync is
+                // `converging` and the next reset call skips it.
                 Telemetry.log(.airplay, "synced_local_churn_resync", [
-                    "coalesced": "\(coalesced)", "desired": "\(desired)",
+                    "coalesced": "\(coalesced)",
+                    "recentTransitions": "\(recentTransitions)",
+                    "desired": "\(desired)",
                 ])
                 self.resetAirPlaySessionForWholeSystem()
             }
@@ -7080,6 +7146,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// failed reconnect legitimately deselects the model row.
     var test_expectedSelected: Set<String> { stateQueue.sync { expectedSelected } }
 
+    /// Test-only (`@testable`): the settle window this instance was built with,
+    /// so a test can pin the production default rather than trust it.
+    var test_syncedLocalSettleWindow: TimeInterval { syncedLocalSettleWindow }
+
+    /// Test-only (`@testable`): the churn horizon this instance was built with,
+    /// pinned for the same reason as the window above.
+    var test_syncedLocalTransitionHorizon: TimeInterval { syncedLocalTransitionHorizon }
+
+    /// Test-only (`@testable`): whether a trailing-edge synced-local settle is
+    /// currently armed. `stop()` enqueues the clear on `stateQueue`, so a read
+    /// right after `stop()` returns can still see `true`: poll it, never read it once.
+    var test_hasPendingSyncedLocalSettle: Bool { stateQueue.sync { pendingSyncedLocalSettle != nil } }
+
     /// Test-only (`@testable`): whether the app currently holds the Mac's default
     /// output with its aggregate, and the pre-takeover output it remembers — the
     /// two pieces of state the deselect-to-Mac-only restore turns over.
@@ -9633,8 +9712,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// synced-local sink is genuinely rendering the same mix to the Mac's own
     /// speakers (the "Mac + AirPlay" scenario) — the local row's meter was
     /// permanently silent. Its real "streaming now" fact lives in
-    /// `syncedLocalSinkEnabled` instead, flipped by the SAME "Mac + ≥1 AirPlay"
-    /// decision in `setOutputSet` that starts/stops the sink — and the sink
+    /// `syncedLocalSinkApplied` instead. Applied, not desired: the desired flag
+    /// moves the instant the user clicks, a whole settle window before the sink
+    /// physically starts or stops, so keying off it made the meter lead the audio
+    /// both ways. `fireSyncedLocalSettle` flips the applied flag and emits the
+    /// local device's level right there. The sink
     /// renders the identical already-captured PCM this RMS was measured from
     /// (T-FANOUT), so reusing it is exact, not an approximation. This was a
     /// pre-existing gap (the synced-local sink and per-device metering shipped
@@ -9658,7 +9740,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func isMeterable(_ device: Device) -> Bool {
         if device.isBluetooth { return device.connectionState == .connected }
         if device.isCast { return castPlaying.contains(device.id) }
-        return device.isLocalDevice ? syncedLocalSinkEnabled : device.isSelected
+        return device.isLocalDevice ? syncedLocalSinkApplied : device.isSelected
     }
 
     /// Read whatever `noteSystemRMS` last stored (stream_id 0) and, if it is

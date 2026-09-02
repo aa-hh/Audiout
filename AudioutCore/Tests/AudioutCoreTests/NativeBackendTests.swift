@@ -606,7 +606,11 @@ private func makeBackend(
     systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = { false },
     /// The Mac's default-output UID. `nil` by default — no device, so the
     /// volume-ownership gate reads "not our aggregate" unless a test says otherwise.
-    currentDefaultOutputUID: @escaping @Sendable () -> String? = { nil }
+    currentDefaultOutputUID: @escaping @Sendable () -> String? = { nil },
+    /// The synced-local settle timing. The rapid-toggle tests shrink these; the
+    /// production defaults are pinned by tests that construct the backend directly.
+    syncedLocalSettleWindow: TimeInterval = 0.5,
+    syncedLocalTransitionHorizon: TimeInterval = 2.0
 ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
     let engine = SpyEngine()
     let discovery = FakeDiscovery()
@@ -617,6 +621,8 @@ private func makeBackend(
         connectVolume: connectVolume, processResolver: processResolver,
         injectedPerAppCapture: injectedPerAppCapture,
         injectedMeteringCapture: injectedMeteringCapture,
+        syncedLocalSettleWindow: syncedLocalSettleWindow,
+        syncedLocalTransitionHorizon: syncedLocalTransitionHorizon,
         captureRetryDelay: captureRetryDelay,
         captureRetryMaxBackoff: captureRetryMaxBackoff,
         // 0 = the old synchronous `.takingOver` emit. The suite's scripted
@@ -1361,9 +1367,14 @@ private final class LockedBool: @unchecked Sendable {
 /// `selectedDevicesQuery` reporting the Mac's membership from `macSelected`
 /// — everything `setOutputSet`'s "Mac + ≥1 AirPlay" decision needs, with no
 /// `AVAudioEngine`/real Core Audio in the loop.
-private func makeSyncedLocalBackend(macSelectedByDefault: Bool)
-    -> (NativeBackend, SpyEngine, FakeDiscovery, FakeCapture, SpySyncedLocalSink, LockedBool) {
-    let (backend, engine, discovery) = makeBackend()
+private func makeSyncedLocalBackend(
+    macSelectedByDefault: Bool,
+    syncedLocalSettleWindow: TimeInterval = 0.5,
+    syncedLocalTransitionHorizon: TimeInterval = 2.0
+) -> (NativeBackend, SpyEngine, FakeDiscovery, FakeCapture, SpySyncedLocalSink, LockedBool) {
+    let (backend, engine, discovery) = makeBackend(
+        syncedLocalSettleWindow: syncedLocalSettleWindow,
+        syncedLocalTransitionHorizon: syncedLocalTransitionHorizon)
     let capture = FakeCapture()
     backend.captureCoordinator = capture
     let sink = SpySyncedLocalSink()
@@ -7592,7 +7603,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     // `emitCombinedLevel` gated the whole-system contribution on
     // `Device.isSelected` — a flag the local device structurally never sets
     // (see "MARK: Current (local) output device (BUG B)"). `isMeterable` now
-    // substitutes `syncedLocalSinkEnabled` for the local device only.
+    // substitutes `syncedLocalSinkApplied` for the local device only.
 
     /// The core fix: with Mac + 1 AirPlay device selected (synced-local sink
     /// enabled) and metering active, the SAME whole-system-tap RMS that feeds
@@ -7685,6 +7696,217 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0 }
         #expect(levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0,
                        "disabling the synced-local sink must emit a final .level of 0, not leave a stuck bar")
+    }
+
+    // MARK: Rapid Mac-toggle dropout regression (T3 / H-1 / H-6)
+    //
+    // The coalescing half of the fix is covered in
+    // `NativeBackendSyncedLocalSelectionTests`. The cases below need the reset
+    // (`resetAirPlaySessionForWholeSystem`) to be observable, and that method only
+    // acts on devices in `added`, which this file's `SpyEngine`/`FakeDiscovery`/
+    // `connectAP2` can reach. A whole-system reset flushes each streaming device
+    // exactly once (`wholeSystemDeviceRateRebuildFlushesInsteadOfTearingDown`),
+    // so the reset signal here is one `SpyEngine.flushOutput` call for the device.
+
+    /// THE SHARPEST correctness constraint in the fix: a NORMAL SINGLE Mac toggle
+    /// (Mac joins Selected Devices alongside an already-connected AirPlay device)
+    /// must both apply the synced-local-sink transition and take ZERO resets. A
+    /// prior fix already removed a redundant RTP re-establish on every ordinary
+    /// connect (`dev/notes/synced-local-mixed-selection-dropout-fix.md` §7); this
+    /// guards against reintroducing it. The reset has two arming paths (coalesced
+    /// decisions, and real transitions inside the horizon) and a single toggle
+    /// must satisfy neither.
+    @Test func singleSyncedLocalToggleAppliesTransitionWithZeroResets() async {
+        let (backend, engine, discovery, _, sink, macSelected) =
+            makeSyncedLocalBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 0.15)
+        defer { backend.stop() }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Single Toggle Speaker")
+        await connectAP2(backend, engine, discovery, device)   // gets the device into `added`
+
+        // ONE toggle decision: the Mac joins alongside the already-connected device.
+        macSelected.set(true)
+        backend.setOutputSet([device.id])
+        await pollUntil { sink.calls == ["start", "startObserving"] }
+
+        // Give a wrongly-fired reset time to show up.
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 0,
+                "a normal single toggle must NEVER re-establish the AirPlay session: that is a latency regression a prior fix already removed once")
+        #expect(engine.removedIDs.filter { $0 == device.outputID }.isEmpty,
+                "a normal single toggle must not tear the session down either")
+    }
+
+    /// A churny settle (two or more coalesced toggle decisions absorbed into one
+    /// trailing-edge window) that lands on a genuinely NEW applied state must
+    /// fire the transition PLUS exactly ONE reset, proven against a real device
+    /// in `added`. This is the cadence-dependent arming path (clicks faster than
+    /// the window); its cadence-independent twin is
+    /// `slowCadenceToggleStormArmsExactlyOneReset` below. 0.15 s window: the three
+    /// flips must land in ONE window or the burst is not churny and the assertion
+    /// inverts into a false failure.
+    @Test func churnyToggleBurstLandingOnNewStateFiresTransitionPlusExactlyOneReset() async {
+        let (backend, engine, discovery, _, sink, macSelected) =
+            makeSyncedLocalBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 0.15)
+        defer { backend.stop() }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Churn Speaker")
+        await connectAP2(backend, engine, discovery, device)
+
+        // A rapid 3-decision burst inside one settle window, landing on a state
+        // (enabled) DIFFERENT from the currently-applied one (disabled):
+        //   off -> on -> off -> on   (3 coalesced decisions, net change)
+        macSelected.set(true);  backend.setOutputSet([device.id])
+        macSelected.set(false); backend.setOutputSet([device.id])
+        macSelected.set(true);  backend.setOutputSet([device.id])
+
+        await pollUntil { sink.calls == ["start", "startObserving"] }
+        await pollUntil { engine.flushedIDs.filter { $0 == device.outputID }.count >= 1 }
+        // Give a wrongly-repeated reset time to show up.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 1,
+                "genuine churn landing on a new state must re-establish the session EXACTLY ONCE, never zero and never more than once")
+    }
+
+    /// The cadence-independent half of the churn guard, and the regression test
+    /// for the hole the review found (H-1): a click cadence SLOWER than the settle
+    /// window but faster than deliberate use. Every click lands in its own window,
+    /// so the coalesce counter reads exactly 1 every time and a `coalesced >= 2`
+    /// guard alone is unreachable. Two Mac toggles about 330 ms apart against a
+    /// 0.05 s window: neither coalesces, both land inside the production 2 s
+    /// horizon, so the SECOND real transition must arm exactly one re-sync.
+    ///
+    /// The window here is deliberately SHORTER than the 0.15 s floor the burst
+    /// tests use. Their hazard is a burst SPLITTING across windows; this one's is
+    /// inverted: each click must fall OUTSIDE the window, so the short window is
+    /// the jitter-safe choice. Merging these two clicks would need a 280 ms
+    /// `stateQueue` stall, and a merge is the only way this test can go wrong
+    /// (2 flips coalesced = net no-op = no transition at all).
+    @Test func slowCadenceToggleStormArmsExactlyOneReset() async {
+        // The horizon stays at the helper's production-matching default (2 s): the
+        // point of the case is that clicks 330 ms apart are inside the REAL horizon.
+        let (backend, engine, discovery, _, sink, macSelected) =
+            makeSyncedLocalBackend(macSelectedByDefault: false, syncedLocalSettleWindow: 0.05)
+        defer { backend.stop() }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Slow Cadence Speaker")
+        await connectAP2(backend, engine, discovery, device)
+
+        // Click 1: the Mac joins. One transition, nothing else in the horizon, so
+        // the single-toggle invariant still holds: NO reset yet.
+        macSelected.set(true); backend.setOutputSet([device.id])
+        await pollUntil { sink.calls == ["start", "startObserving"] }
+        #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 0,
+                "the FIRST toggle of a storm is indistinguishable from a normal single toggle and must still take zero resets")
+
+        // About 330 ms later: outside the 0.05 s window, so this gets its OWN
+        // settle with coalesced == 1, the exact cadence that used to disarm the fix.
+        try? await Task.sleep(nanoseconds: 330_000_000)
+        macSelected.set(false); backend.setOutputSet([device.id])
+
+        await pollUntil { engine.flushedIDs.filter { $0 == device.outputID }.count >= 1 }
+        #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 1,
+                "two real transitions inside the horizon must re-establish the session EXACTLY ONCE: zero means the cadence-independent arming is gone")
+    }
+
+    /// The other side of the horizon: two DELIBERATE, unhurried toggles (select
+    /// the Mac, listen, change your mind) are ordinary use and must pay NOTHING.
+    /// The horizon is the only thing separating them from the storm above, so
+    /// it gets its own case: the same two transitions, spaced further apart than
+    /// the horizon. Scaled down from production to keep the test short: a 0.4 s
+    /// horizon with the toggles 1 s apart keeps the production 2.5x ratio.
+    @Test func twoUnhurriedTogglesOutsideTheHorizonArmNoReset() async {
+        let (backend, engine, discovery, _, sink, macSelected) = makeSyncedLocalBackend(
+            macSelectedByDefault: false, syncedLocalSettleWindow: 0.05, syncedLocalTransitionHorizon: 0.4)
+        defer { backend.stop() }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:95", name: "Unhurried Speaker")
+        await connectAP2(backend, engine, discovery, device)
+
+        macSelected.set(true); backend.setOutputSet([device.id])
+        await pollUntil { sink.calls == ["start", "startObserving"] }
+
+        try? await Task.sleep(nanoseconds: 1_000_000_000)   // 2.5x the horizon
+        macSelected.set(false); backend.setOutputSet([device.id])
+        await pollUntil { sink.calls.count >= 4 }
+        #expect(sink.calls == ["start", "startObserving", "stop", "stopObserving"],
+                "precondition: both toggles must really have applied, otherwise the zero-reset assertion below is vacuous")
+
+        // Give a wrongly-armed reset time to show up.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 0,
+                "two transitions further apart than the horizon are deliberate use, not churn: arming a re-sync there is the latency bug all over again")
+    }
+
+    /// The seam that lets tests shrink the synced-local settle window must NEVER
+    /// silently change what PRODUCTION waits. The pin goes through a path that
+    /// omits the argument, so it reads the designated init's real default, never
+    /// a helper literal (H-2).
+    @Test func syncedLocalSettleWindowProductionDefaultIsUnchanged() {
+        let backend = NativeBackend(
+            engineControl: SpyEngine(), discoverySource: FakeDiscovery(), dacpEndpoint: FakeDACPEndpoint(),
+            systemVolume: FakeSystemVolume(), aggregateControl: NoOpAggregateControl())
+        defer { backend.stop() }
+        #expect(abs(backend.test_syncedLocalSettleWindow - 0.5) < 0.0001)
+    }
+
+    /// The horizon's twin of the pin above: the cadence-independent arming is
+    /// only as good as the horizon production actually runs with, and the same
+    /// omit-the-argument discipline keeps this non-vacuous.
+    @Test func syncedLocalTransitionHorizonProductionDefaultIsUnchanged() {
+        let backend = NativeBackend(
+            engineControl: SpyEngine(), discoverySource: FakeDiscovery(), dacpEndpoint: FakeDACPEndpoint(),
+            systemVolume: FakeSystemVolume(), aggregateControl: NoOpAggregateControl())
+        defer { backend.stop() }
+        #expect(abs(backend.test_syncedLocalTransitionHorizon - 2.0) < 0.0001)
+    }
+
+    /// H-6: the local row's meter must track the APPLIED synced-local state, not
+    /// the DESIRED one. Keying off the desired flag made the meter LEAD physical
+    /// audio by a whole settle window in both directions: the bar cleared while
+    /// the Mac was still audibly playing, and moved while it was still silent.
+    ///
+    /// Driven in the gap the debounce opens: a long (0.6 s) window, the Mac
+    /// deselected, and a level sample fired BEFORE the settle runs. The sink is
+    /// provably still started at that instant, so the sample must still reach the
+    /// local row; only once the transition actually lands does the bar clear.
+    @Test func localDeviceMeterFollowsAppliedNotDesiredSyncedLocalState() async {
+        let (backend, engine, discovery, capture, sink, macSelected) =
+            makeSyncedLocalBackend(macSelectedByDefault: true, syncedLocalSettleWindow: 0.6)
+        defer { backend.stop() }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:96", name: "Applied-State Partner")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { sink.calls.contains("start") }
+        backend.setMeteringActive(true)
+        await pollUntil { capture.meteringActive }
+
+        let (levels, task) = subscribeLevels(backend); defer { task.cancel() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        capture.fireLevelIfActive(0.6)
+        await pollUntil { (levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) > 0 }
+
+        // The user deselects the Mac. The sink keeps running for the whole settle
+        // window: the Mac is STILL audibly playing the synced mix right here.
+        macSelected.set(false)
+        backend.setOutputSet([device.id])
+        #expect(!sink.calls.contains("stop"),
+                "precondition: the transition must NOT have run yet, or this case proves nothing")
+
+        capture.fireLevelIfActive(0.4)
+        await pollUntil { levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0.4 }
+        #expect(abs((levels.lastDeviceLevel(NativeBackend.localDeviceID) ?? 0) - 0.4) < 0.001,
+                "the meter must keep moving while the Mac is still physically playing: clearing on the DESIRED flag is a meter that leads the audio")
+
+        // And once the transition really lands, the bar clears: the eager clear
+        // moved with the flag it keys off, rather than being lost.
+        await pollUntil { sink.calls.contains("stop") }
+        await pollUntil { levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0 }
+        #expect(levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0,
+                "the applied transition must still push the final zero: moving the emit must not drop it")
     }
 
     // MARK: Remote-control stream (speaker transport keys + the speaker's own volume)

@@ -387,6 +387,35 @@ import AppKit
                 "the lockup fits within the strip — nothing clips (lockup \(lockup), strip \(strip))")
     }
 
+    /// The surface width is fixed and the app name is centred inside it, so a
+    /// NAMED tab strip has to fit in the half beside it. Measured off the
+    /// materialized item viewers: standard toolbar items expose no view and no
+    /// fitting width of their own, which is why this guard lives here with the
+    /// view-tree walk rather than in SurfaceToolbarTests.
+    ///
+    /// The tabs are the three LEADING items in the strip, so sorting the
+    /// viewers by their leading edge and taking the first three is what
+    /// identifies them — subview order is not display order. Bounds only, since
+    /// AppKit's rounding grid varies per run.
+    @Test func theNamedTabStripLeavesRoomForTheCentredLockup() throws {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        let window = try #require(surface.shell.window)
+        window.layoutIfNeeded()
+        let themeFrame = try #require(window.contentView?.superview)
+        let viewers = allViews(in: themeFrame, namedLike: "NSToolbarItemViewer")
+            .map { $0.convert($0.bounds, to: themeFrame) }
+            .sorted { $0.minX < $1.minX }
+        #expect(viewers.count >= SurfaceScreen.allCases.count,
+                "the toolbar materialized a viewer per item")
+        let stripWidth = viewers.prefix(SurfaceScreen.allCases.count)
+            .reduce(0) { $0 + $1.width }
+        #expect(stripWidth > 0, "the tab strip has real width to measure")
+        let lockup = surface.test_toolbarController.test_centeredLockupFittingWidth
+        #expect(stripWidth * 2 + lockup < SurfaceLayout.width,
+                "the strip mirrored on both sides still clears the centred lockup (strip \(stripWidth), lockup \(lockup))")
+    }
+
     @Test func toolbarTracksSelectionAndPin() {
         let (surface, _, _, _) = makeSurface()
         surface.show(anchorRect: nil)
@@ -695,12 +724,20 @@ import AppKit
         surface.show(anchorRect: nil)
         let window = try #require(surface.shell.window)
 
+        // The tabs are standard bordered items now, so they expose no custom
+        // `view`; AppKit wraps each in a private item viewer. Matched by class
+        // NAME, the idiom this suite already uses for private AppKit.
+        //
+        // The LEADING EDGE of the whole strip, not "whichever viewer the tree
+        // walk hits first": subview order is not display order, so picking the
+        // first match compares different items on different screens and the
+        // measurement wanders on its own.
         func tabStripLeadingX() throws -> CGFloat {
             window.layoutIfNeeded()
             let themeFrame = try #require(window.contentView?.superview)
-            let tab = try #require(surface.test_toolbarController.test_tabView(for: .mixer),
-                                   "the leading tab is in the window's chrome")
-            return tab.convert(tab.bounds, to: themeFrame).minX
+            let viewers = allViews(in: themeFrame, namedLike: "NSToolbarItemViewer")
+            #expect(!viewers.isEmpty, "the toolbar materialized item viewers in the chrome")
+            return viewers.map { $0.convert($0.bounds, to: themeFrame).minX }.min() ?? 0
         }
 
         // Mixer twice: the first layout pass of a freshly attached toolbar
@@ -725,6 +762,14 @@ import AppKit
         let settingsRoot = try #require(surface.test_settingsRoot)
         #expect(settingsRoot.test_sidebarSplitItem.behavior != .sidebar,
                 "and so is the Settings one")
+    }
+
+    /// Every view in `root`'s subtree whose class name contains `name`.
+    private func allViews(in root: NSView, namedLike name: String) -> [NSView] {
+        var found: [NSView] = []
+        if String(describing: type(of: root)).contains(name) { found.append(root) }
+        for subview in root.subviews { found += allViews(in: subview, namedLike: name) }
+        return found
     }
 
     /// The Groups screen is a SPLIT: the speaker sidebar on the left, the

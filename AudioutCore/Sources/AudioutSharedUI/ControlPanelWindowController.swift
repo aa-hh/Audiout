@@ -499,6 +499,26 @@ public final class ControlPanelWindowController: NSWindowController {
         return CACurrentMediaTime() - stamp <= interval
     }
 
+    /// Bring the app forward so the panel can actually take key.
+    ///
+    /// `NSApp.activate()` — the macOS 14+ cooperative form — is DECLINED when
+    /// the app is not already frontmost, which is exactly the state a menu-bar
+    /// status-item click leaves us in. Measured in a Developer ID signed bundle
+    /// (2026-08-30): after `show(anchorRect:)` had called it plus
+    /// `makeKeyAndOrderFront`, the panel still reported
+    /// `key=false appActive=false`. The panel then renders its whole header in
+    /// the unfocused appearance forever — every control at ~1.2:1 instead of
+    /// ~3.3:1, and the brand mark's gold washed to grey. Alec reported it as
+    /// "the header is always in a dismissed state", in the notarised build too.
+    ///
+    /// `activate(ignoringOtherApps:)` is deprecated but is NOT refusable, and
+    /// is the only form that reliably fronts an `.accessory` app from its own
+    /// status item. We ask for it only in response to a user gesture that
+    /// opened the surface, which is what the API is for.
+    private static func activateForSurface() {
+        NSApp?.activate(ignoringOtherApps: true)
+    }
+
     /// Show the panel anchored just under `anchorRect` (the menu-bar status
     /// item's frame, in screen coordinates); `nil` centers it.
     ///
@@ -519,7 +539,7 @@ public final class ControlPanelWindowController: NSWindowController {
 
         if isPinned {
             if !HeadlessRuntime.isActive {
-                NSApp?.activate()
+                Self.activateForSurface()
                 panel.makeKeyAndOrderFront(nil)
             }
             return
@@ -579,7 +599,7 @@ public final class ControlPanelWindowController: NSWindowController {
         // for the run's duration. Everything else (frame math, model state)
         // still runs so headless assertions stay exactly as strong.
         if !HeadlessRuntime.isActive {
-            NSApp?.activate()
+            Self.activateForSurface()
             panel.makeKeyAndOrderFront(nil)
         }
 

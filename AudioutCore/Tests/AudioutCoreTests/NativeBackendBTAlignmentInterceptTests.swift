@@ -442,7 +442,29 @@ extension SerializedSharedState {
         #expect(keepLine?.contains("\"latencyMs\":\"280\"") == true)
         #expect(keepLine?.contains("\"trimMs\":\"0\"") == true)
         #expect(keepLine?.contains("\"settleRemainingS\":\"nil\"") == true,
-                "no connect edge and no clock sample this session: no window to report")
+                "the Mac publishes a clock verdict, never a number of seconds")
+    }
+
+    /// A first pairing, and any speaker already connected when the app
+    /// launched, are the only link-up this process will ever see for that
+    /// device — so the first listing of a CONNECTED speaker opens a settle
+    /// window too (Alec, 2026-09-04). It stales nothing: with no alignment
+    /// instant recorded there is nothing for the connect to be after. A
+    /// speaker listed disconnected gets no window; its link-up comes later.
+    @Test func theFirstListingOfAConnectedSpeakerOpensASettleWindow() throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).save([btMove.id: 40])
+        let (backend, bt, _, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove, BTDeviceSnapshot(id: btFlip.id, name: btFlip.name, isConnected: false)])
+        waitFor { self.device(backend, self.btFlip.id) != nil }
+
+        let move = backend.btAlignmentReport(forDevice: btMove.id)
+        #expect(move?.clockState == .unknown, "the launch-time link-up opens the window")
+        #expect(move?.status == .tuned, "…and stales nothing: no alignment instant to be after")
+        #expect(backend.btAlignmentReport(forDevice: btFlip.id)?.clockState == .steady,
+                "a speaker that is not connected has had no link-up to settle from")
     }
 
     /// The Mac's own alignment paths go through the freshness store like the
@@ -488,7 +510,8 @@ extension SerializedSharedState {
         bt.fire([btMove])
         waitFor { report()?.status == .stale }
         #expect(report()?.staleReason == BTAlignmentFreshness.staleReasonReconnected)
-        #expect(report()?.settleRemainingSeconds == 60)
+        #expect(report()?.clockState == .unknown, "a new link, and no verdict on its clock yet")
+        #expect(report()?.settleRemainingSeconds == nil)
         #expect(changes.value == base + 2)
 
         backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 300)

@@ -246,7 +246,8 @@ public enum CompanionSnapshotBuilder {
             referenceID: alignmentReferenceID(
                 forTarget: device.id, among: devices,
                 isAudible: groupController.isMainOutMember),
-            settleRemainingSeconds: report.settleRemainingSeconds)
+            settleRemainingSeconds: report.settleRemainingSeconds,
+            clockState: report.clockState.rawValue)
     }
 
     private static func deviceState(

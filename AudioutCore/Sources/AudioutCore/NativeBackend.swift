@@ -8443,6 +8443,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // gets the value re-pushed on every arm, so the snapshot and
                     // what is audible agree.
                     eq: eqByDeviceID[id] ?? .flat)
+                // The first time this process lists a connected Bluetooth
+                // device is the only link-up it will ever see for it: a first
+                // pairing, or a speaker already up when the app launched. Both
+                // start a settle window (Alec, 2026-09-04); neither stales a
+                // stored tuning, because the store has no alignment instant to
+                // be earlier than (`BTAlignmentFreshness.status`).
+                if snapshot.isConnected { btAlignmentFreshness.noteConnected(uid: id) }
                 known[id] = device
                 order.append(id)
                 emit(.deviceAdded(device))

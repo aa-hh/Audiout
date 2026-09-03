@@ -47,11 +47,9 @@ import Testing
 
     // MARK: The settling window
 
-    @Test func theSettleWindowCountsDownFromTheConnectAndThenStops() {
+    @Test func theSettleFloorRunsFromTheConnectAndThenStops() {
         #expect(BTAlignmentFreshness.settleRemainingSeconds(
             lastConnectedAt: noon, now: noon) == 60)
-        // Rounded UP, so a phone counting down never reaches zero while the Mac
-        // still holds the window open.
         #expect(BTAlignmentFreshness.settleRemainingSeconds(
             lastConnectedAt: noon, now: noon.addingTimeInterval(30.4)) == 30)
         #expect(BTAlignmentFreshness.settleRemainingSeconds(
@@ -59,6 +57,31 @@ import Testing
         #expect(BTAlignmentFreshness.settleRemainingSeconds(
             lastConnectedAt: noon, now: noon.addingTimeInterval(60)) == nil)
         #expect(BTAlignmentFreshness.settleRemainingSeconds(lastConnectedAt: nil) == nil)
+    }
+
+    /// The clock verdict, without a clock: evidence it held beats everything,
+    /// then evidence it jumped, and the floor decides only the case with no
+    /// evidence at all.
+    @Test func theClockVerdictIsDecidedByEvidenceThenByTheFloor() {
+        func verdict(stableFor: Double, seenJump: Bool,
+                     connectedSecondsAgo: TimeInterval?) -> BTAlignmentFreshness.ClockState {
+            BTAlignmentFreshness.clockState(
+                stableForSeconds: stableFor, seenJump: seenJump,
+                lastConnectedAt: connectedSecondsAgo.map { noon.addingTimeInterval(-$0) },
+                now: noon)
+        }
+        #expect(verdict(stableFor: 10, seenJump: false, connectedSecondsAgo: 1) == .steady)
+        #expect(verdict(stableFor: 10, seenJump: true, connectedSecondsAgo: 1) == .steady,
+                "ten jump-free seconds settle it however badly the link started")
+        #expect(verdict(stableFor: 0, seenJump: true, connectedSecondsAgo: 1) == .settling)
+        #expect(verdict(stableFor: 4, seenJump: true, connectedSecondsAgo: 300) == .settling,
+                "a watched jump outlives the floor — this is the Sonos")
+        #expect(verdict(stableFor: 0, seenJump: false, connectedSecondsAgo: 1) == .unknown,
+                "inside the floor with nothing observed yet, the Mac has no verdict")
+        #expect(verdict(stableFor: 4, seenJump: false, connectedSecondsAgo: 300) == .steady,
+                "a whole minute with no evidence either way: nothing left to add")
+        #expect(verdict(stableFor: 0, seenJump: false, connectedSecondsAgo: nil) == .steady,
+                "no link-up this process watched")
     }
 
     // MARK: Recording
@@ -76,10 +99,12 @@ import Testing
         freshness.noteConnected(uid: "speaker-a", at: noon.addingTimeInterval(10))
         // The manual reconnect and the enumerator snapshot both report the SAME
         // link-up, moments apart. The second report must not restart the
-        // settling window under a phone that is already counting it down.
+        // settling window the first one opened.
         freshness.noteConnected(uid: "speaker-a", at: noon.addingTimeInterval(11))
-        #expect(freshness.report(uid: "speaker-a", hasStoreEntry: true,
-                                now: noon.addingTimeInterval(10)).settleRemainingSeconds == 60)
+        let justConnected = freshness.report(uid: "speaker-a", hasStoreEntry: true,
+                                            now: noon.addingTimeInterval(10))
+        #expect(justConnected.clockState == .unknown)
+        #expect(justConnected.settleRemainingSeconds == nil, "the Mac publishes a verdict, not a number")
         #expect(freshness.report(uid: "speaker-a", hasStoreEntry: true,
                                 now: noon.addingTimeInterval(20)).status == .stale)
         // The other speaker saw neither edge, so nothing about it moved.
@@ -141,68 +166,106 @@ import Testing
         freshness.report(uid: uid, hasStoreEntry: true, now: at(seconds))
     }
 
-    @Test func theFloorHoldsWhileTheClockIsStillUnproven() {
+    @Test func theVerdictStaysUnknownWhileTheClockIsStillUnproven() {
         let freshness = BTAlignmentFreshness()
         freshness.noteConnected(uid: "speaker-a", at: noon)
         advance(freshness, from: 1, count: 5)   // four stable seconds by noon+5
         #expect(!freshness.isStable(uid: "speaker-a"))
-        #expect(report(freshness, at: 5).settleRemainingSeconds == 55)
+        #expect(report(freshness, at: 5).clockState == .unknown)
+        #expect(report(freshness, at: 5).settleRemainingSeconds == nil)
     }
 
-    @Test func stableEndsTheWindowBeforeTheFloorRunsOut() {
+    /// The Sony class: this clock never steps, so ten quiet seconds settle it
+    /// about eleven seconds in, and the phone hears about it exactly once.
+    @Test func aCleanClockGoesSteadyOnTenQuietSecondsAndPublishesOnce() {
         let freshness = BTAlignmentFreshness()
         let changes = counting(freshness)
         freshness.noteConnected(uid: "speaker-a", at: noon)
-        advance(freshness, from: 1, count: 11)   // ten stable seconds at noon+11
+        // The first sample after a sink rebuild only sets the instant.
+        freshness.noteClockOutcome(uid: "speaker-a", outcome: .ignored, at: at(1))
+        advance(freshness, from: 2, count: 10)   // ten stable seconds at noon+11
         #expect(freshness.isStable(uid: "speaker-a"))
-        #expect(report(freshness, at: 11).settleRemainingSeconds == nil)
-        #expect(changes.value == 2, "the connect, then the one arrival at stable")
+        #expect(report(freshness, at: 11).clockState == .steady)
+        #expect(changes.value == 2, "the connect, then the one arrival at steady")
     }
 
-    @Test func aJumpPastTheFloorPublishesTheDetectorsOwnCountdown() {
+    /// The Sonos class: jumps for forty seconds. The verdict flips to settling
+    /// on the FIRST jump and stays there, so the phone is told once rather than
+    /// once per jump, and ten clean seconds after the last one end it.
+    @Test func aJumpingClockSettlesOnceAndSteadiesOnce() {
+        let freshness = BTAlignmentFreshness()
+        let changes = counting(freshness)
+        freshness.noteConnected(uid: "speaker-a", at: noon)
+        for second in stride(from: 1.0, through: 39.0, by: 2.0) {
+            freshness.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: 30),
+                                       at: at(second))
+        }
+        #expect(report(freshness, at: 40).clockState == .settling)
+        #expect(changes.value == 2, "the connect, then unknown → settling on the first jump")
+
+        advance(freshness, from: 41, count: 11)
+        #expect(report(freshness, at: 51).clockState == .steady)
+        #expect(changes.value == 3, "…and one more when it finally holds")
+    }
+
+    /// A jump against a clock the Mac had already called steady reopens the
+    /// verdict, once.
+    @Test func aJumpWhileSteadyReopensTheVerdict() {
         let freshness = BTAlignmentFreshness()
         let changes = counting(freshness)
         freshness.noteConnected(uid: "speaker-a", at: noon)
         advance(freshness, from: 1, count: 11)
         #expect(changes.value == 2)
         freshness.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: 30), at: at(70))
-        #expect(changes.value == 3, "a jump past the floor re-publishes the estimate")
-        #expect(report(freshness, at: 70).settleRemainingSeconds == 10)
-        advance(freshness, from: 71, count: 2)   // two stable seconds by noon+72
-        #expect(report(freshness, at: 72).settleRemainingSeconds == 8)
-        #expect(changes.value == 3, "ordinary advancing samples publish nothing")
+        #expect(changes.value == 3, "steady → settling")
+        #expect(report(freshness, at: 70).clockState == .settling)
+        freshness.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: 30), at: at(71))
+        advance(freshness, from: 72, count: 2)
+        #expect(changes.value == 3, "a second jump and ordinary samples move nothing")
+        #expect(report(freshness, at: 73).clockState == .settling)
     }
 
-    @Test func aJumpInsideTheFloorPublishesNothingNew() {
+    /// The deadlock guard: a speaker that produces no sample at all is not held
+    /// at "no verdict yet" forever. The floor expires and it reads steady,
+    /// which is what a Mac reporting no clock state gives the phone. A clock
+    /// the Mac HAS watched jump is the other case: it stays settling until ten
+    /// clean seconds arrive, and it strands nobody, because a speaker silent
+    /// enough to produce no samples fails the run's own precondition first.
+    @Test func aSpeakerThatNeverPlaysGoesSteadyWhenTheFloorExpires() {
         let freshness = BTAlignmentFreshness()
+        freshness.noteConnected(uid: "speaker-a", at: noon)
+        #expect(report(freshness, at: 59).clockState == .unknown)
+        #expect(report(freshness, at: 61).clockState == .steady)
+
+        let jumpy = BTAlignmentFreshness()
+        jumpy.noteConnected(uid: "speaker-a", at: noon)
+        jumpy.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: 12), at: at(70))
+        #expect(report(jumpy, at: 200).clockState == .settling)
+        jumpy.noteClockOutcome(uid: "speaker-a", outcome: .frozen, at: at(201))
+        #expect(report(jumpy, at: 201).clockState == .settling, "a frozen sample says nothing")
+    }
+
+    /// Nothing fires at the instant the floor expires — the detector only
+    /// speaks while the speaker plays — so the link-up arms its own re-check.
+    /// The connect instant is backdated so the shortened timer lands past the
+    /// floor.
+    @Test func theFloorsExpiryRebroadcastsWhenNoEvidenceEverCame() {
+        let freshness = BTAlignmentFreshness(floorRebroadcastDelay: 0.05)
         let changes = counting(freshness)
-        freshness.noteConnected(uid: "speaker-a", at: noon)
-        freshness.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: 5), at: at(20))
-        #expect(changes.value == 1, "the phone is already counting the floor down")
-        #expect(report(freshness, at: 20).settleRemainingSeconds == 40)
+        freshness.noteConnected(
+            uid: "speaker-a",
+            at: Date().addingTimeInterval(-BTAlignmentFreshness.settleSeconds - 1))
+        #expect(changes.value == 1, "the connect itself")
+        SuiteWait.untilOnRunLoop("the floor's expiry to rebroadcast") { changes.value == 2 }
+        #expect(changes.value == 2, "the verdict flipped on a clock, so the phone has to be told")
+        #expect(freshness.report(uid: "speaker-a", hasStoreEntry: true).clockState == .steady)
     }
 
-    /// The deadlock guard: past the floor, a device producing no advancing
-    /// sample would otherwise publish 10 forever and the phone's Measure
-    /// button would never go live.
-    @Test func anIdleDevicePastTheFloorPublishesNoEstimate() {
-        let freshness = BTAlignmentFreshness()
-        freshness.noteConnected(uid: "speaker-a", at: noon)
-        freshness.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: 12), at: at(70))
-        #expect(report(freshness, at: 73).settleRemainingSeconds == 10, "within 3 s of a sample")
-        #expect(report(freshness, at: 73.5).settleRemainingSeconds == nil, "and past it, nothing")
-        freshness.noteClockOutcome(uid: "speaker-a", outcome: .frozen, at: at(80))
-        #expect(report(freshness, at: 80).settleRemainingSeconds == nil, "frozen is not advancing")
-
-        let never = BTAlignmentFreshness()
-        never.noteConnected(uid: "speaker-a", at: noon)
-        #expect(report(never, at: 61).settleRemainingSeconds == nil, "no sample at all, ever")
-    }
-
-    /// A clock the Mac has never sampled is unknown, not settling: with no
-    /// window running and no sample seen, an alignment stays ordinary. This
-    /// is what keeps a device whose clock query never answers from marking
-    /// every alignment early forever.
+    /// A clock with no evidence either way reads steady once the floor is
+    /// spent, so an alignment made against it stays ordinary. This is what
+    /// keeps a device whose clock query never answers from marking every
+    /// alignment early forever. A watched jump is the other side of the same
+    /// rule: it marks the alignment early however long ago the link came up.
     @Test func anAlignmentWithNoWindowAndNoSamplesIsNotMarkedEarly() {
         let freshness = BTAlignmentFreshness()
         freshness.noteAligned(uid: "speaker-a", at: noon)
@@ -214,11 +277,12 @@ import Testing
         #expect(pastTheFloor.status == .tuned, "the floor ran out and no sample ever came")
         #expect(pastTheFloor.staleReason == nil)
 
-        // One sample that did not yet hold is a reason: it is settling.
-        freshness.noteClockOutcome(uid: "speaker-a", outcome: .ignored, at: at(81))
-        freshness.noteClockOutcome(uid: "speaker-a", outcome: .advanced, at: at(82))
+        // A watched jump IS a reason, floor or no floor.
+        freshness.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: 12), at: at(81))
         freshness.noteAligned(uid: "speaker-a", at: at(83))
-        #expect(report(freshness, at: 83).staleReason == BTAlignmentFreshness.staleReasonMeasuredWhileSettling)
+        let early = report(freshness, at: 83)
+        #expect(early.clockState == .settling)
+        #expect(early.staleReason == BTAlignmentFreshness.staleReasonMeasuredWhileSettling)
     }
 
     @Test func aMeasurementMadeWhileSettlingIsMarkedUntilOneMadeWhileStable() {
@@ -254,22 +318,23 @@ import Testing
         freshness.noteAligned(uid: "speaker-a", at: at(12))
         #expect(changes.value == 3)
         freshness.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: 4), at: at(13))
+        #expect(changes.value == 4, "the clock stepped: steady → settling")
         freshness.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: -4), at: at(14))
-        #expect(changes.value == 3, "8 ms summed is under the line")
+        #expect(changes.value == 4, "8 ms summed is under the line, and the verdict has not moved")
         #expect(report(freshness, at: 15).status == .tuned)
         freshness.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: 3), at: at(15))
-        #expect(changes.value == 4, "11 ms: published once")
+        #expect(changes.value == 5, "11 ms: published once")
         let moved = report(freshness, at: 16)
         #expect(moved.status == .stale)
         #expect(moved.staleReason == BTAlignmentFreshness.staleReasonMoved)
         freshness.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: 5), at: at(16))
-        #expect(changes.value == 4, "and not again")
+        #expect(changes.value == 5, "and not again")
 
         // The next alignment made while stable clears it.
         advance(freshness, from: 17, count: 11)
         freshness.noteAligned(uid: "speaker-a", at: at(28))
         #expect(report(freshness, at: 29).status == .tuned)
-        #expect(changes.value == 6)
+        #expect(changes.value == 7, "the return to steady, then the alignment")
     }
 
     @Test func aLostBaselineRestartsTheSumWithoutAPrompt() {
@@ -282,7 +347,10 @@ import Testing
         freshness.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: 4), at: at(14))
         freshness.noteClockOutcome(uid: "speaker-a", outcome: .rebaselined, at: at(15))
         freshness.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: 4), at: at(16))
-        #expect(changes.value == 3, "the 8 ms before the restart is gone; 4 ms since is under the line")
+        #expect(changes.value == 4,
+                "one publish for steady → settling; the 8 ms before the restart is gone and the 4 ms since is under the line")
+        #expect(report(freshness, at: 17).clockState == .settling,
+                "a rebaseline loses the baseline, not the fact that this link's clock jumps")
         #expect(report(freshness, at: 17).status == .tuned)
     }
 
@@ -293,13 +361,16 @@ import Testing
         freshness.noteAligned(uid: "speaker-a", at: at(12))
         freshness.noteClockOutcome(uid: "speaker-a", outcome: .jumped(magnitudeMs: 12), at: at(13))
         #expect(report(freshness, at: 14).staleReason == BTAlignmentFreshness.staleReasonMoved)
+        #expect(report(freshness, at: 14).clockState == .settling)
 
         freshness.noteDisconnected(uid: "speaker-a")
         freshness.noteConnected(uid: "speaker-a", at: at(30))
         var again = report(freshness, at: 30)
         #expect(again.status == .stale)
         #expect(again.staleReason == BTAlignmentFreshness.staleReasonReconnected)
-        #expect(again.settleRemainingSeconds == 60, "a new link is a new clock: the floor restarts")
+        #expect(again.clockState == .unknown,
+                "a new link is a new clock: the floor restarts and the jump memory is gone")
+        #expect(again.settleRemainingSeconds == nil)
         #expect(!freshness.isStable(uid: "speaker-a"))
 
         freshness.noteAligned(uid: "speaker-a", at: at(32))

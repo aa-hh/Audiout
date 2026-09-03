@@ -334,7 +334,19 @@ public final class GroupCreationSheetController: NSViewController {
         updateCreateEnabled()
     }
 
-    private var isCreateEnabled: Bool { !checkedIDs.isEmpty }
+    /// The saved group whose members are exactly what is ticked right now, if
+    /// any. `createGroup` resolves an identical set onto that group rather than
+    /// making a copy, so this is the state Create CANNOT be pressed into.
+    private var groupMatchingChecked: Group? {
+        groupController.group(matchingMemberSet: checkedIDs)
+    }
+
+    /// Create needs at least one speaker, and a set that isn't already a saved
+    /// group. Saying so on the checklist — Create dimmed, the count line naming
+    /// the group — is what keeps the user OUT of the refusal that used to be
+    /// the only way to learn it (Alec, 2026-09-03: "I just don't want to get to
+    /// that strange error state").
+    private var isCreateEnabled: Bool { !checkedIDs.isEmpty && groupMatchingChecked == nil }
 
     private func updateCreateEnabled() {
         createButton.isEnabled = isCreateEnabled
@@ -342,7 +354,13 @@ public final class GroupCreationSheetController: NSViewController {
 
     private func updateCountLabel() {
         let count = checkedIDs.count
-        countLabel.stringValue = count == 1 ? "1 speaker selected" : "\(count) speakers selected"
+        let selected = count == 1 ? "1 speaker selected" : "\(count) speakers selected"
+        guard let existing = groupMatchingChecked else {
+            countLabel.stringValue = selected
+            return
+        }
+        countLabel.stringValue =
+            selected + " \u{2014} already saved as \u{201C}\(existing.name)\u{201D}"
     }
 
     // MARK: Actions
@@ -395,6 +413,20 @@ public final class GroupCreationSheetController: NSViewController {
     /// `memberVolumes` entry is that device's current backend volume.
     private func commit() {
         guard isCreateEnabled else { return }
+        // ONCE. Return in the name field and the default button's own Return
+        // both land here, and a second landing arrives AFTER the first has
+        // already saved the group — so the sheet refused the name it had just
+        // created, on a first-ever group ("that name is already taken",
+        // live-caught 2026-09-03). Everything below is re-runnable after a
+        // REFUSAL (the flag is only set once a group actually exists), so a
+        // corrected name still commits.
+        guard !hasCreatedGroup else { return }
+        // An alert this sheet raised is still up. The second landing
+        // would raise a SECOND alert on a window that already has one
+        // attached, and AppKit hosts that orphan on a blank window of
+        // its own — live-caught 2026-09-03, a grey "Untitled" window
+        // behind the dedup alert.
+        guard !isShowingAlert else { return }
         let trimmed = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = trimmed.isEmpty ? "New Group" : trimmed
         // TAKEN NAME first: refusing the name wins over resolving the member
@@ -428,6 +460,7 @@ public final class GroupCreationSheetController: NSViewController {
                 informativeText: "The group couldn\u{2019}t be saved. Try again.")
             return
         }
+        hasCreatedGroup = !result.alreadyExisted
         Analytics.capture("scene:created", [
             "source": "sheet",
             "member_count": String(memberIDs.count),
@@ -442,6 +475,24 @@ public final class GroupCreationSheetController: NSViewController {
         }
         finish((group: result.group, alreadyExisted: result.alreadyExisted))
     }
+
+    /// Set once ``commit()`` has actually saved a NEW group, so a second
+    /// Return or click cannot run the form again against the group it just
+    /// made. Not set when the member set resolved onto an existing group —
+    /// nothing was written, and the user may still go back and change the
+    /// selection.
+    private var hasCreatedGroup = false
+
+    /// Whether an alert this sheet raised is on screen and unanswered.
+    private var alertIsUp = false
+
+    /// `nil` = read the real state. A real alert cannot be begun headlessly
+    /// without putting a sheet on the developer's screen, so the re-entry
+    /// guard is unreachable in `swift test` without this — same seam shape as
+    /// `ControlPanelWindowController.test_hasAttachedSheetOverride`.
+    public var test_alertIsUpOverride: Bool?
+
+    private var isShowingAlert: Bool { test_alertIsUpOverride ?? alertIsUp }
 
     /// Whether any saved group already carries `name` (case-insensitively).
     private func isNameTaken(_ name: String) -> Bool {
@@ -459,7 +510,8 @@ public final class GroupCreationSheetController: NSViewController {
         alert.messageText = messageText
         alert.informativeText = informativeText
         alert.alertStyle = .warning
-        alert.beginSheetModal(for: window)
+        alertIsUp = true
+        alert.beginSheetModal(for: window) { [weak self] _ in self?.alertIsUp = false }
     }
 
     /// "These speakers are already a group" — a CHOICE, not a redirect: open
@@ -473,7 +525,9 @@ public final class GroupCreationSheetController: NSViewController {
         alert.informativeText = "You can open that group, or go back and change the selection."
         alert.addButton(withTitle: "Open \u{201C}\(result.group.name)\u{201D}")
         alert.addButton(withTitle: "Go Back")
+        alertIsUp = true
         alert.beginSheetModal(for: window) { [weak self] response in
+            self?.alertIsUp = false
             guard response == .alertFirstButtonReturn else { return }
             self?.finish((group: result.group, alreadyExisted: result.alreadyExisted))
         }

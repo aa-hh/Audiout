@@ -906,8 +906,7 @@ private final class NewGroupTileView: NSView {
     //
     // The pane this tile replaced put a stock `NSButton` on the empty canvas,
     // which came with all of the following for free. Being a bare `NSView`
-    // this one hand-rolls it, exactly as `DeviceIconWellView` and the editor's
-    // `BackBandView` do.
+    // this one hand-rolls it, exactly as `DeviceIconWellView` does.
 
     override var acceptsFirstResponder: Bool { isKeyboardFocusable }
 

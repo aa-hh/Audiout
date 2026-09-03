@@ -128,6 +128,42 @@ import AppKit
         }
     }
 
+    /// The two authored inks the Groups screen carries for de-emphasised and
+    /// unavailable text clear the 4.5:1 BODY floor on every ground this screen
+    /// can put them on. They exist because their stock aliases could not:
+    /// `tertiaryLabelColor` and `.disabledControlTextColor` are black at 25.88%
+    /// and 24.71% alpha, so they composite against their ground and cap at
+    /// 1.88:1 and 1.82:1 — unreachable floors on any surface, which is what
+    /// earned the measured-floor carve-out in `GroupsWindowTextColorLockTests`.
+    /// This test is that carve-out's arithmetic, so it fails a build rather
+    /// than living in a doc comment.
+    @Test func authoredInksClearTheBodyFloorOnEveryGroupsGround() {
+        let floor: CGFloat = 4.5
+        let grounds: [(String, NSColor)] = [
+            ("panel", Tokens.Color.panel),
+            ("raised", Tokens.Color.raised),
+            ("well", Tokens.Color.well),
+            ("sidebarWarmTint", Tokens.Color.sidebarWarmTint),
+        ]
+
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            for (inkName, ink) in [("inkTertiary", Tokens.Color.inkTertiary),
+                                   ("inkSecondary", Tokens.Color.inkSecondary)] {
+                let resolvedInk = resolved(ink, appearanceName: appearanceName)
+                for (groundName, ground) in grounds {
+                    let ratio = contrastRatio(resolvedInk,
+                                              resolved(ground, appearanceName: appearanceName))
+                    #expect(ratio >= floor,
+                            Comment(rawValue: "\(inkName) on \(groundName) " +
+                            "(\(appearanceName.rawValue)): \(ratio):1 below the \(floor):1 body " +
+                            "floor — this ink exists BECAUSE its stock alias could not reach that " +
+                            "floor from any surface; if the authored one cannot either, the " +
+                            "carve-out has stopped paying for itself"))
+                }
+            }
+        }
+    }
+
     /// The dividers INSIDE that card are drawn in `hairline` on the same
     /// `raised` fill, so the lighter weight carries the same separator floor
     /// on the same ground. This is the interior half of the pair above; both

@@ -97,7 +97,7 @@ public final class GroupsOverviewViewController: NSViewController {
 
         countLabel.translatesAutoresizingMaskIntoConstraints = false
         countLabel.font = Tokens.Font.caption
-        countLabel.textColor = Tokens.Color.tertiaryLabel
+        countLabel.textColor = Tokens.Color.inkTertiary
 
         let layout = NSCollectionViewFlowLayout()
         layout.itemSize = NSSize(width: GroupsOverviewLayout.cardWidth,
@@ -134,7 +134,7 @@ public final class GroupsOverviewViewController: NSViewController {
         emptyMessageLabel.alignment = .center
 
         emptySubtitleLabel.font = Tokens.Font.subtitleLarge
-        emptySubtitleLabel.textColor = Tokens.Color.tertiaryLabel
+        emptySubtitleLabel.textColor = Tokens.Color.inkTertiary
         emptySubtitleLabel.alignment = .center
         emptySubtitleLabel.isSelectable = false
         // A PARAGRAPH, not a width driver: on one line this sentence is the
@@ -610,7 +610,7 @@ private final class GroupCardView: NSView {
 
         metaLabel.translatesAutoresizingMaskIntoConstraints = false
         metaLabel.font = Tokens.Font.caption
-        metaLabel.textColor = Tokens.Color.tertiaryLabel
+        metaLabel.textColor = Tokens.Color.inkTertiary
         metaLabel.lineBreakMode = .byTruncatingTail
         metaLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -682,7 +682,7 @@ private final class GroupCardView: NSView {
         let attributed = NSMutableAttributedString(
             string: text,
             attributes: [.font: Tokens.Font.caption,
-                         .foregroundColor: Tokens.Color.tertiaryLabel])
+                         .foregroundColor: Tokens.Color.inkTertiary])
         guard plan.isLive, let liveRange = text.range(of: "Playing now") else { return attributed }
         attributed.addAttribute(.foregroundColor, value: Tokens.Color.gold,
                                 range: NSRange(liveRange, in: text))
@@ -760,7 +760,7 @@ private final class MemberChipView: NSView {
         label.translatesAutoresizingMaskIntoConstraints = false
         label.stringValue = overflowText
         label.font = Tokens.Font.caption
-        label.textColor = Tokens.Color.tertiaryLabel
+        label.textColor = Tokens.Color.inkTertiary
         label.alignment = .center
         addSubview(label)
         NSLayoutConstraint.activate([
@@ -854,7 +854,7 @@ private final class NewGroupTileView: NSView {
 
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = Tokens.Font.caption
-        label.textColor = Tokens.Color.tertiaryLabel
+        label.textColor = Tokens.Color.inkTertiary
 
         addSubview(ringView)
         addSubview(label)

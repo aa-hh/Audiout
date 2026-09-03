@@ -642,15 +642,34 @@ public enum Tokens {
         /// luminance (spec's own formula; component-scaled sRGB).
         public static var ember: NSColor {
             accentDynamic(name: "ember",
-                          // Light re-tuned #9C7E3C → #947637 (IC #9A7A2E →
-                          // #8F702F, kept strictly darker than base) for the
-                          // same well deepening: measured 3.21:1 on well /
-                          // 4.13:1 on panel, still gold's dimmer, duller
-                          // companion (sat gap 0.19, same hue family).
+                          // LIGHT IS DEEP ENOUGH TO BE TELLABLE FROM GOLD, and
+                          // that is a harder constraint than its own floor.
+                          // Pinning both inks just over the 3:1 non-text floor
+                          // on the same ground leaves them ~1.03:1 apart — a 3%
+                          // luminance difference on a 2 pt line, which no one
+                          // reads. ``spineTone(armed:)`` would then resolve to
+                          // one visible colour in light and the rail could not
+                          // report liveness at all, which is the one thing gold
+                          // exists to say. Dark's own pair sits at 2.72:1; light
+                          // has to buy a comparable gap, and depth is the only
+                          // axis available once both are floor-bound.
+                          //
+                          // Full light `#6F5629`: 1.67:1 from gold, 6.06:1 on
+                          // raised, 5.18:1 on well, 6.67:1 on panel. Hue 38.6°
+                          // against gold's 41.4° (same family, inside the
+                          // reserved gold band), saturation 0.63 against gold's
+                          // 0.82 — a 0.186 gap, so ember stays the duller ink
+                          // by chroma AND is now the darker one by luminance,
+                          // which is exactly the relationship dark already has.
+                          // Subtle light `#6E6039` separates by luminance
+                          // rather than chroma (1.50:1 from Subtle gold): the
+                          // muted column is meant to be muted, and darkening it
+                          // is the only axis left that does not re-saturate it.
+                          // IC variants stay strictly darker than their bases.
                           full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
-                                             light: 0x947637, lightHighContrast: 0x8F702F),
+                                             light: 0x6F5629, lightHighContrast: 0x5E4922),
                           subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
-                                               light: 0x877750, lightHighContrast: 0x8A744C),
+                                               light: 0x6E6039, lightHighContrast: 0x5C5030),
                           systemAccentScale: 0.55)
         }
 

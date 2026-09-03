@@ -560,8 +560,13 @@ import AudioutCore
                                  isAvailable: false)
         let unavailableRow = DeviceRowView(device: unavailable)
         unavailableRow.apply(unavailable, selected: false)
-        #expect(unavailableRow.test_nameColor == .disabledControlTextColor,
-                "unavailable keeps the row-level text dim")
+        // The authored ink, not `.disabledControlTextColor`: that is black at
+        // 24.7% alpha, so it composites to 1.80:1 on this row's ground — under
+        // half the 4.5:1 body floor. `inkTertiary` is also what this row's own
+        // "Unavailable" sublabel already draws in, so the name and the word
+        // naming its state speak at one level.
+        #expect(unavailableRow.test_nameColor == Tokens.Color.inkTertiary,
+                "unavailable keeps the row-level text dim, in the authored ink")
         #expect(unavailableRow.test_statusText == "Unavailable",
                 "…plus its own sublabel — a distinct negative signature (R5)")
     }

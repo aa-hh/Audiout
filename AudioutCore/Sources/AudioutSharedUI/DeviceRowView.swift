@@ -2042,7 +2042,7 @@ public final class DeviceRowView: NSView {
     /// not in the Selected Devices set), then normal.
     private var rowTextColor: NSColor {
         if isInMenu, enclosingMenuItem?.isHighlighted == true { return .selectedMenuItemTextColor }
-        if !device.isAvailable { return .disabledControlTextColor }
+        if !device.isAvailable { return Tokens.Color.inkTertiary }
         return isSelectedInSet ? Tokens.Color.label : Tokens.Color.secondaryLabel
     }
 

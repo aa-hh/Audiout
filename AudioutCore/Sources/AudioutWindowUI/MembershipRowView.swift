@@ -240,7 +240,12 @@ public final class MembershipRowView: NSView {
     /// in this group". No-op on `.systemSheet`, which mounts no node at all.
     private func updateBus() {
         guard surface == .warmPane else { return }
-        busView.apply(node: checked ? .member : .nonMember, armed: railArmed)
+        // The node dims with the rest of the row. It was the one element that
+        // opted out of the unavailable treatment while three others carried it,
+        // so an offline speaker's node read exactly as live as an online one's.
+        busView.apply(node: checked ? .member : .nonMember,
+                      dimmed: !device.isAvailable,
+                      armed: railArmed)
     }
 
     // MARK: Model
@@ -264,10 +269,27 @@ public final class MembershipRowView: NSView {
                                           weight: .regular)
 
         nameLabel.stringValue = device.name
-        // Dimmed like the sidebar's unavailable devices — de-emphasized, still
-        // fully interactive (an unavailable device stays checkable/uncheckable
-        // so an existing member can be removed even while offline).
-        nameLabel.textColor = device.isAvailable ? Tokens.Color.label : .disabledControlTextColor
+        // ONE unavailable tone, and all three elements take it together. The
+        // name, the glyph and the WORD each state the same fact, so splitting
+        // them across tones makes the row argue with itself — set one of these
+        // three and you have to set all three.
+        //
+        // `inkTertiary` is authored, ships all four variants, and measures
+        // 5.57:1 on `raised`. It is also what the popover's device rows already
+        // use for this exact state (`DeviceRowView.showSublabel("Unavailable",
+        // …)`), so the two surfaces name the state in one voice.
+        //
+        // NOT `.disabledControlTextColor`: it is black at 24.7% alpha, so it
+        // composites against its ground to 1.80:1 on `raised` — under half the
+        // 4.5:1 text floor — and being a system colour it carries no
+        // Increase-Contrast variant and no measured floor to fail on.
+        //
+        // Still fully interactive: an unavailable device stays
+        // checkable/uncheckable so an existing member can be removed offline.
+        let unavailableTone = Tokens.Color.inkTertiary
+        nameLabel.textColor = device.isAvailable ? Tokens.Color.label : unavailableTone
+        iconView.contentTintColor = device.isAvailable ? Tokens.Color.secondaryLabel : unavailableTone
+        unavailableLabel.textColor = unavailableTone
 
         unavailableLabel.isHidden = device.isAvailable
 

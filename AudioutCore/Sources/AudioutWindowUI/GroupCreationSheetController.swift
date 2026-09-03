@@ -403,6 +403,12 @@ public final class GroupCreationSheetController: NSViewController {
         // REFUSAL (the flag is only set once a group actually exists), so a
         // corrected name still commits.
         guard !hasCreatedGroup else { return }
+        // An alert this sheet raised is still up. The second landing
+        // would raise a SECOND alert on a window that already has one
+        // attached, and AppKit hosts that orphan on a blank window of
+        // its own — live-caught 2026-09-03, a grey "Untitled" window
+        // behind the dedup alert.
+        guard !isShowingAlert else { return }
         let trimmed = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = trimmed.isEmpty ? "New Group" : trimmed
         // TAKEN NAME first: refusing the name wins over resolving the member
@@ -459,6 +465,17 @@ public final class GroupCreationSheetController: NSViewController {
     /// selection.
     private var hasCreatedGroup = false
 
+    /// Whether an alert this sheet raised is on screen and unanswered.
+    private var alertIsUp = false
+
+    /// `nil` = read the real state. A real alert cannot be begun headlessly
+    /// without putting a sheet on the developer's screen, so the re-entry
+    /// guard is unreachable in `swift test` without this — same seam shape as
+    /// `ControlPanelWindowController.test_hasAttachedSheetOverride`.
+    public var test_alertIsUpOverride: Bool?
+
+    private var isShowingAlert: Bool { test_alertIsUpOverride ?? alertIsUp }
+
     /// Whether any saved group already carries `name` (case-insensitively).
     private func isNameTaken(_ name: String) -> Bool {
         groupController.groups.contains {
@@ -475,7 +492,8 @@ public final class GroupCreationSheetController: NSViewController {
         alert.messageText = messageText
         alert.informativeText = informativeText
         alert.alertStyle = .warning
-        alert.beginSheetModal(for: window)
+        alertIsUp = true
+        alert.beginSheetModal(for: window) { [weak self] _ in self?.alertIsUp = false }
     }
 
     /// "These speakers are already a group" — a CHOICE, not a redirect: open
@@ -489,7 +507,9 @@ public final class GroupCreationSheetController: NSViewController {
         alert.informativeText = "You can open that group, or go back and change the selection."
         alert.addButton(withTitle: "Open \u{201C}\(result.group.name)\u{201D}")
         alert.addButton(withTitle: "Go Back")
+        alertIsUp = true
         alert.beginSheetModal(for: window) { [weak self] response in
+            self?.alertIsUp = false
             guard response == .alertFirstButtonReturn else { return }
             self?.finish((group: result.group, alreadyExisted: result.alreadyExisted))
         }

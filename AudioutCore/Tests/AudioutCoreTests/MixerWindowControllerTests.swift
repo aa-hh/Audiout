@@ -904,6 +904,31 @@ import AppKit
                 "the sheet never refuses the name of the group it just created")
     }
 
+    /// A second Return while the sheet's own alert is still up used to raise a
+    /// second alert on a window that already had one attached, which AppKit
+    /// hosts on a blank window of its own. Live-caught 2026-09-03.
+    @Test func theSheetRaisesNoSecondAlertWhileOneIsStillUp() async throws {
+        let (window, controller, _) = try await makeWindow()
+        let existing = try makeGroup1(controller)   // "Group 1"
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+
+        // The member set that already belongs to "Group 1" — the dedup path,
+        // which is what reports an outcome (headlessly it completes rather
+        // than raising the alert a presented sheet would).
+        for id in existing.memberIDs { sheet.test_setMembership(deviceID: id, isChecked: true) }
+        sheet.test_setName("Kitchen")
+        var completed = false
+        sheet.onComplete = { _ in completed = true }
+        sheet.test_alertIsUpOverride = true
+        sheet.test_commit()
+        await drain()
+
+        #expect(!completed, "the second landing does nothing at all while the alert is up")
+        #expect(controller.groups.count == 1, "and writes nothing")
+    }
+
     // MARK: The creation sheet reports a failed save (P1-4)
 
     @Test func createSheetReportsAFailedSaveAndKeepsTheForm() async throws {

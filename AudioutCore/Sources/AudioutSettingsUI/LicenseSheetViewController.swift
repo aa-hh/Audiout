@@ -131,8 +131,7 @@ public final class LicenseSheetViewController: NSViewController {
         // never set it either, and `onboardingActionButton` sets it only for
         // the constraint-hosted card slot.
         registerButton = ProminentButton(title: "Register", target: self,
-                                         action: #selector(registerTapped),
-                                         fill: Tokens.Color.gold)
+                                         action: #selector(registerTapped))
         registerButton.keyEquivalent = "\r"
 
         let spacer = NSView()

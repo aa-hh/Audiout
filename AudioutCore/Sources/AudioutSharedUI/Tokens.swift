@@ -619,8 +619,8 @@ public enum Tokens {
         /// Increase Contrast. That flip is forced, not stylistic: light-IC
         /// `gold` `#8A6614` gives `#171104` only 3.57:1 and even pure black
         /// 3.99:1 — no dark ink clears 4.5:1 on it — while white gives 5.26:1
-        /// (6.32:1 on Subtle light-IC `#6F5E33`). It is the same measured flip
-        /// `ProminentButton` already performs live.
+        /// (6.32:1 on Subtle light-IC `#6F5E33`). The flip is authored into
+        /// the token, so `ProminentButton` measures nothing at runtime.
         ///
         /// CONTRAST RATIONALE (measured, on `gold`): Full dark 10.18:1, dark
         /// Increase Contrast 11.72:1, light 4.94:1, light Increase Contrast

@@ -88,6 +88,10 @@ enum AboutCredits {
     (github.com/sparkle-project/Sparkle). Copyright (c) Sparkle Project \
     contributors.
 
+    Clash Display Semibold — Copyright 2021 Indian Type Foundry. Clash is a \
+    trademark of the Indian Type Foundry. Licensed under the ITF Free Font \
+    License (fontshare.com/terms).
+
     All third-party files retain their original copyright notices and \
     license headers in source. The repository's NOTICE file is the \
     authoritative, complete per-file breakdown.
@@ -179,8 +183,12 @@ public final class AboutViewController: NSViewController {
         versionLabel.font = Tokens.Font.caption
         versionLabel.textColor = Tokens.Color.secondaryLabel
 
-        // The face's own name table (id 13) asks for this credit; the ITF Free
-        // Font License does not require it.
+        // The ITF Free Font License REQUIRES this credit: the face's own name
+        // table (id 13) reads "You agree to identify the ITF fonts by name and
+        // credit the ITF's ownership of the trademarks and copyrights in any
+        // design or production credits." This line identifies the face; the
+        // ownership half is discharged by `AboutCredits.thirdPartyNoticesText`
+        // and the repo's NOTICE, which carry the copyright and trademark.
         let typeCreditLabel = SettingsForm.label("Clash Display by Indian Type Foundry")
         typeCreditLabel.font = Tokens.Font.caption
         typeCreditLabel.textColor = Tokens.Color.label3

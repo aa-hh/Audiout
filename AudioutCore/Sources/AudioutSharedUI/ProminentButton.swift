@@ -7,8 +7,10 @@ import AppKit
 /// A gold-filled push button (`bezelColor`) whose title stays legible whether
 /// or not its window is key.
 ///
-/// One rule for the whole app: every call to action is `Tokens.Color.gold`
-/// fill with `Tokens.Color.inkOnFill` ink.
+/// One rule for the whole app, and not a per-call choice: every call to
+/// action is `Tokens.Color.gold` fill with `Tokens.Color.inkOnFill` ink. The
+/// ink is authored for that one fill, so a settable fill could only ever put
+/// gold's ink on some other colour.
 ///
 /// The bug this exists to fix (ahh, deselecting the setup window): AppKit drops
 /// a `bezelColor` fill to a plain bezel when the window resigns key — correct,
@@ -29,18 +31,17 @@ import AppKit
 public final class ProminentButton: NSButton {
 
     private let plainTitle: String
-    /// The bezel fill this button was built with (`bezelColor` carries it).
-    public let fill: NSColor
+    /// The bezel fill (`bezelColor` carries it). Public so a caller can prove
+    /// the button is the gold one (`OnboardingViewController`'s CTA check).
+    public let fill = Tokens.Color.gold
     /// The title's font. `Tokens.Font.body` for the everyday Allow buttons;
     /// the finale CTA passes the emphasized weight for more presence.
     private let titleFont: NSFont
     private var keyStateObservers: [NSObjectProtocol] = []
 
     public init(title: String, target: AnyObject?, action: Selector?,
-                fill: NSColor = Tokens.Color.gold,
                 titleFont: NSFont = Tokens.Font.body) {
         self.plainTitle = title
-        self.fill = fill
         self.titleFont = titleFont
         super.init(frame: .zero)
         self.title = title

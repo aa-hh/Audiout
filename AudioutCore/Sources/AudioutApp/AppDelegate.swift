@@ -345,6 +345,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// unset, so a fresh install advertises without being asked twice — the
     /// Local Network grant is already the user's consent to this.
     private let companionServer = CompanionServer()
+    /// The last token pushed to connected phones (`applyLicenseState()`), so
+    /// the many callers of that method don't resend an unchanged one.
+    private var pushedCompanionToken: String?
 
     /// The per-phone approval model (T24): remembers each phone's
     /// allow/deny answer (`CompanionApprovalStore`, alongside the other
@@ -2146,6 +2149,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             && (key.isEmpty || status == .unknown || status == .invalid || status == .revoked)
         popoverController?.setUnregisteredNoteActive(unregistered)
         updaterController?.updater.httpHeaders = key.isEmpty ? nil : ["Authorization": "Bearer \(key)"]
+
+        // A licence that lands while phones are connected: push the token
+        // their welcome would have carried, once per distinct token.
+        if let token = settings.companionToken, token != pushedCompanionToken {
+            pushedCompanionToken = token
+            companionServer.sendCompanionToken(token)
+        }
 
         // License identity for analytics (PRODUCT.md Data Collection stream 1,
         // owner-approved): the installID stays the identity even when the

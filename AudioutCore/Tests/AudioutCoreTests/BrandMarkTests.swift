@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-import XCTest
+import Testing
 import AppKit
 @testable import AudioutSharedUI
 
@@ -8,10 +8,10 @@ import AppKit
 /// is actually reachable through `Bundle.module` and decodes to a drawable
 /// `NSImage`. A missing/unbundled resource fails silently at the call site
 /// (a blank lockup), so pin it here.
-final class BrandMarkTests: XCTestCase {
-    func test_brandMark_loadsFromBundle() throws {
-        let image = try XCTUnwrap(BrandMark.image, "brand-mark SVG did not load from Bundle.module")
-        XCTAssertEqual(image.size, NSSize(width: 1024, height: 1024))
-        XCTAssertFalse(image.representations.isEmpty)
+@Suite struct BrandMarkTests {
+    @Test func brandMarkLoadsFromBundle() throws {
+        let image = try #require(BrandMark.image, "brand-mark SVG did not load from Bundle.module")
+        #expect(image.size == NSSize(width: 1024, height: 1024))
+        #expect(!image.representations.isEmpty)
     }
 }

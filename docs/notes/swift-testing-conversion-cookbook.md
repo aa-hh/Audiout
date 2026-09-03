@@ -761,7 +761,7 @@ Plus the non-`XCT*` XCTest surface: `expectation(description:)`,
 
 ## Files owned by T2 — do not edit
 
-`IsolatedTestCase.swift`, `AudioHardwareTestGate.swift`, `HeadlessRuntime.swift`.
+`IsolatedSuite.swift`, `AudioHardwareTestGate.swift`, `HeadlessRuntime.swift`.
 If your file subclasses `IsolatedTestCase` or calls `AudioHardwareTestGate`,
 convert everything else and follow T2's replacement API for those seams.
 
@@ -778,13 +778,12 @@ safe. **Read §16–§18 before converting any file that subclasses
 
 ## 16. `IsolatedTestCase` → `IsolatedSuite`
 
-`Tests/AudioutCoreTests/IsolatedTestCase.swift` now holds **three** types:
+`Tests/AudioutCoreTests/IsolatedSuite.swift` holds **two** types:
 
 | Type | Use |
 | --- | --- |
 | `TestIsolation` | The mechanism (scratch dir, isolated defaults, unique names, cleanup). You normally don't touch it directly. |
 | `IsolatedSuite` | **The swift-testing base class. Inherit this.** |
-| `IsolatedTestCase` | The legacy XCTest base, unchanged. Kept only so unconverted suites still compile. |
 
 The two bases expose an **identical** member set over the same mechanism, so
 migrating is a base-class swap and nothing else:
@@ -824,10 +823,8 @@ final class MixerWindowControllerTests: IsolatedTestCase {
   `scratchDir`, `PermissionModeTests` → `isolatedDefaults`,
   `MixerWindowControllerTests` → `uniqueName`); the rest inherit for safety and
   convert with the base-class swap alone.
-- **When the last one is converted**, delete `IsolatedTestCase` and the file's
-  `import XCTest`. `git grep IsolatedTestCase` should then find only its own
-  declaration. (A T20 cleanup item — do not delete it early or you break every
-  file not yet converted.)
+- **Done** (the T20 cleanup item): the legacy XCTest base and the file's
+  `import XCTest` are deleted. `git grep IsolatedTestCase` finds nothing.
 
 ### `override func tearDown()` on a subclass → `deinit`
 

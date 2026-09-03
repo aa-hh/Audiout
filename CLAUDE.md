@@ -143,6 +143,15 @@ that know about the second Mac, the machine-wide concurrency cap and the
 unchanged-sources cache; typing the bare command opts out of all three and pins
 the work to this machine, which is also the one running every other agent.
 
+Both Macs' selected developer directory must be a full Xcode install, not
+Command Line Tools — check with `xcode-select -p`; a path under
+`/Library/Developer/CommandLineTools` cannot run `swift test` for any package
+on macOS. `run-tests.sh` refuses with a message rather than let this surface as
+a mysterious build failure, and its message names the exact command for the
+Xcode it finds: `sudo xcode-select -s
+/Applications/<Xcode>.app/Contents/Developer`. `AUDIOUT_TEST_MODE=serial`
+runs the suite strictly one test at a time, for flake hunting.
+
 ## Critical workflow rules
 
 - **`main` is merge-only.** Never `git commit` on `main`. Work in a worktree branch; reach `main` via merge only. Guard 1 enforces this.

@@ -3,8 +3,6 @@
 
 import Foundation
 import Testing
-// LEGACY: only for `skipUnlessEnabled` below. Remove with it.
-import XCTest
 
 /// Opt-in gate for tests that drive REAL Core Audio against the Mac's actual
 /// output hardware.
@@ -116,19 +114,5 @@ enum AudioHardwareTestGate {
     /// call from a test body.
     static var trait: ConditionTrait {
         .enabled(if: isEnabled, Comment(rawValue: skipReason))
-    }
-
-    /// LEGACY (XCTest only) — skip the calling test unless real-hardware audio
-    /// tests are opted in.
-    ///
-    /// Kept only until `LocalPlaybackEngineTests` is converted to swift-testing;
-    /// its replacement is `trait` above. Delete this function, and this file's
-    /// `import XCTest`, once `git grep skipUnlessEnabled` finds nothing but this
-    /// declaration.
-    static func skipUnlessEnabled(
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) throws {
-        try XCTSkipUnless(isEnabled, skipReason, file: file, line: line)
     }
 }

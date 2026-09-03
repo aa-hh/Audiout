@@ -7,6 +7,7 @@ colors:
   panel: "#1D1915"
   raised: "#241F1A"
   well: "#100D0A"
+  iconSeatFill: "#100D0A"
   hairline: "#3A332B"
   containerEdge: "#3A332B"
   sidebarWarmTint: "#1F1A15"
@@ -138,6 +139,10 @@ components:
     backgroundColor: "{colors.canvas}"
     typography: "{typography.body}"
     height: "42px"
+  icon-seat:
+    backgroundColor: "{colors.iconSeatFill}"
+    rounded: "{rounded.chip}"
+    size: "24px (member chip) / 64px (device icon well)"
   halo-ring:
     textColor: "{colors.ringConnected}"
     size: "30px"
@@ -204,7 +209,7 @@ and a set of instrument hues that don't.
 ### Primary
 
 - **Lit Brass** (`#E8B84B` dark / `#9E761D` light): THE accent. The membership bus node, the route-armed dot, the meter's hot end, the ring around a speaker that is carrying audio. Measured 9.5:1 against dark panel; the light value is deepened to 3.11:1 against the light well, the darkest ground it is ever drawn on. Nothing decorative wears it.
-- **Banked Ember** (`#8A6A2F` dark / `#947637` light): gold's dim companion — the bus line itself, the filled node's rim, the meter's low end. Dimmer than gold by luminance in dark; in light both inks are pinned just over the 3:1 floor, so ember reads as *less chromatic* rather than lighter (saturation 0.41 against gold's 0.48 at the same ~42° hue).
+- **Banked Ember** (`#8A6A2F` dark / `#7A5E2A` light): gold's dim companion — the bus line itself, the filled node's rim, the meter's low end. Dimmer than gold by luminance in both appearances: dark clears 2.72:1, light 1.46:1 — the floor a rail needs to tell an armed spine from an idle one at a glance. Light holds the gap by depth rather than by desaturating further, so ember reads as a *dimmer brass* rather than a brown; push past ~1.60:1 and it stops being ember and starts being mud.
 - **Bloom** (`#FFD97A` dark / `#E8B84B` light): the halo and arm-transition bloom under an armed dot. Floor-exempt on purpose — it never carries meaning alone; the ≥3:1 gold disc beneath it does.
 - **Deep Brass** (`#815E0E` dark / `#775913` light): the one gold a text-bearing control may be filled with — the Setup finale CTA. The flagship gold gives white only 3.80:1; this is deepened until white ink wins decisively (5.93:1 dark, 6.52:1 light) while the fill still clears 3:1 against the window canvas behind it.
 
@@ -245,7 +250,8 @@ The scaffolding — the half of the system that themes.
 - **Container Edge** (`#3A332B` dark / `#C4C0B4` light): the heavier of the two hairline weights — a container's own outer stroke, where Hairline rules that container's interior. In light it clears the divider by 1.143:1, enough to rank the two without reading as a second material. In dark it resolves to Hairline's own values, because dark still has a fill ladder and light does not.
 - **Sidebar Warm Tint** (`#1F1A15` dark / `#F5F4ED` light): the source-list ground in the Groups and Settings screens.
 - **Warm Ink** (`#B4ADA0` dark / `#5C574C` light) and **Faded Ink** (`#969083` dark / `#665F4C` light): secondary and tertiary text where the system's own label colours sit under the text floor on the warm ground.
-- **Dormant Rail** (`#7D7466` dark / `#8A8272` light): the membership rail before anything is armed.
+- **Dormant Rail** (`#7D7466` dark / `#8A8272` light): the membership rail before anything is armed. Also an unavailable member's disc fill — see the Membership Bus component.
+- **Icon Seat Fill** (`#100D0A` dark / `#FBFBF9` light): the fill behind a device glyph — the group card's member chip and the 64 pt editable icon well. Dark reuses `well`'s recess; light goes the opposite direction, a step *lighter* than the `raised` card it sits in, because the seat needed to read as a hole for the glyph rather than one more slab in the ladder. `label` on it clears 14.68:1 light / 13.96:1 dark.
 
 Everything else in the app draws in stock semantic colours — `labelColor`,
 `separatorColor`, `systemRed`, `systemOrange`, `systemBlue`. Those already
@@ -273,6 +279,26 @@ text and no instrument contrast. In light, `canvas`, `canvasHi` and `panel` are
 the same `#FBFBF9`, so a container's edge is the only boundary pixel it has;
 that is what the heavier weight exists for. Dark needs no second value and
 does not get one.
+
+**The One Wire Rule.** A membership rail is one line from the hook to the
+terminus, and every segment of it wears the spine's tone — gold on an armed
+spine, ember on an idle one, resolved once through `spineTone(armed:)` and
+reused, never re-derived per segment. A segment that *feeds* a member node and
+a segment that merely *passes by* a non-member (the detour arc) are both still
+the same wire carrying the same thing, so neither changes tone. Exactly two
+exceptions earn their own colour, because the segment itself means something:
+a `connecting` segment wears `ember` for the energize sweep, and a `failed` or
+whole-rail-dormant one wears `railDormant`. Anything else that makes one rail
+show two tones is a bug, not a state.
+
+**The Rim Belongs To The Rail Rule.** On a membership node the rim reports
+*membership* and the fill reports *availability*. A node's rim always draws in
+the rail's own tone, so an unavailable member still reads as ON the wire and IN
+the group; only its disc goes `railDormant` where the rim's tone would be —
+same seat, grey where gold. A hollow node has no fill, so "unavailable" is
+invisible on a non-member, which is correct: *not in the group* already has
+nothing to grey out. Failure is exempt in both directions — a failed node is
+never dimmed, because the red ring is already carrying the worse news.
 
 **The Measured Floor Rule.** Every custom colour ships light, dark,
 light-Increase-Contrast, and dark-Increase-Contrast values, each with a written
@@ -411,6 +437,7 @@ is:
 - **11 px** — inset warning and note banners.
 - **10 px** — the grouped inset-list card, modelled directly on the System Settings idiom (onboarding's permission card, the Groups window's sections). Its 1 pt outer stroke is `containerEdge`; the dividers between its rows are `hairline`.
 - **7 px** — pills and the row selection highlight: the mute pill, the selection wash inset 5 pt horizontally and 2 pt vertically.
+- **6 px / 12 px** — the two icon seats: the group card's 24 pt member chip and the editor's 64 pt device icon well. Both take a 1 pt `containerEdge` rim at rest.
 - **5 px** — the FEED pill, at 4 pt horizontal and 2 pt vertical padding.
 - **4 px / 2.5 px** — the fader thumb (10 × 17 pt) and its 5 pt track.
 - **1 px** — the 7 pt FEED chip, small enough that the radius is barely a chamfer.
@@ -449,6 +476,20 @@ meter track is a quiet warm recess (`meterTrack`) that stays visible at zero,
 because a meter reports a ratio and the denominator has to be there. The fill
 runs ember at the low end to gold at the hot end, ceilinged at caution.
 
+### Icon Seat
+
+The rounded square a device glyph sits in, in two sizes: the 24 pt member chip
+along a group card's bottom edge (r 6), and the 64 pt editable icon well at the
+top of the group editor and the device detail panes (r 12). Both fill
+`iconSeatFill`, take a 1 pt `containerEdge` rim at rest, and tint their glyph
+`label` — near-black in light, near-white in dark, which is what makes the glyph
+the most legible thing in the seat rather than a grey shape on a grey shape.
+
+The well swaps its resting rim for a 1.5 pt gold or ember ring when it is
+active or is the rail's origin; that ring is an instrument and outranks the
+seat's own edge. The chip's glyph is set at 11 pt medium so its strokes have
+body at 13 pt.
+
 ### Halo Ring
 
 A 30 pt ring around the speaker icon carrying connection state by stroke, not by
@@ -467,12 +508,20 @@ dark, full label in light, because secondary text on the light fill measured
 
 ### Membership Bus
 
-The signature component. A 2 pt line in ember running a 30 pt gutter, with gold
-nodes (13 pt filled, 15 pt selected, 11 pt unselected) rimmed at 1.5 pt in ember,
-hooking into the Main Audio ring at the top. Line and ring resolve their tone
-from one place (`spineTone(armed:)`) because the two are required to read as a
-single continuous line — when they each picked their own colour, the accent dial
-moved one and not the other.
+The signature component. A 2 pt line running a 30 pt gutter, with nodes (13 pt
+filled, 15 pt selected, 11 pt unselected) rimmed at 1.5 pt, hooking into the
+Main Audio ring at the top. Line, nodes and ring all resolve their tone from one
+place (`spineTone(armed:)`) — gold on an armed spine, ember on an idle one —
+because they are required to read as a single continuous line. When they each
+picked their own colour, the accent dial moved one and not the other, and a
+segment passing a non-member drew ember while the rest of the same wire drew
+gold. See The One Wire Rule and The Rim Belongs To The Rail Rule.
+
+A node's fill is the one part that answers a different question: an unavailable
+member fills `railDormant` while keeping its rim in the rail's tone. Dark
+separates that grey from gold by brightness (2.50:1); light currently separates
+it by chroma alone (1.09:1), which is an open weakness rather than a settled
+choice.
 
 ### Alignment Stage
 
@@ -500,11 +549,13 @@ popover header carries icon-only tabs between the three screens.
 
 - **Do** add every new colour to `Tokens.swift` with all four variants and a written contrast measurement against the surfaces it is actually drawn on, and pin the numbers in a test.
 - **Do** reach for a stock semantic colour, font, or control first. The custom palette exists for instruments; everything else should be indistinguishable from the rest of macOS.
-- **Do** measure a light instrument against `well`, not just `panel` — the Groups editor fills its sections with `well`, so the rail and its nodes run over the darker of the two grounds.
+- **Do** measure a light instrument against every ground it is actually drawn on, not against `panel` by default. The Groups editor's card is `raised` and the overview's member chips sit on `well`, so the rail, its nodes and the seats each run over a different surface.
 - **Do** read row geometry from `PopoverColumnGrid` and surface geometry from `SurfaceLayout`.
 - **Do** use `Tokens.Motion.collapseRevealDuration` (0.15 s, `.easeInEaseOut`) for anything that folds. One value means an expand is the exact mirror of its collapse; a second constant kept in step by hand silently drifts.
 - **Do** re-resolve colour on `viewDidChangeEffectiveAppearance`, on `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification`, and — if the view stamps `gold`, `ember`, or `glow` into a `CALayer` — on `Tokens.accentStyleDidChangeNotification`.
 - **Do** stroke a container's outer edge with `containerEdge` and rule its interior with `hairline`. On the light ground a card's edge is the only thing separating it from the page.
+- **Do** resolve a rail's tone once through `spineTone(armed:)` and reuse it. A second call site for the same wire can pick a tone the first one didn't, and one rail showing two tones is a bug.
+- **Do** fill a device glyph's seat with `iconSeatFill`, rim it with `containerEdge`, and tint the glyph `label`. The seat exists so the glyph is legible; a grey glyph on a grey seat defeats it.
 - **Do** give a state-branching view an `else` branch. A resting halo with no else branch was an invisible bare fill at 1.000:1 on the flat light ground.
 
 ### Don't:
@@ -518,5 +569,7 @@ popover header carries icon-only tabs between the three screens.
 - **Don't** cache a resolved `.cgColor` outside a live draw or an appearance refresh. A frozen colour sits outside Increase Contrast forever.
 - **Don't** apply a case transform to authored copy, and don't change the height of a line to make room for a state word.
 - **Don't** give `containerEdge` a third value in dark. Dark already has both a fill ladder and a hairline sitting where light's edge lands; a separate dark value buys nothing and starts drawing frames around things.
+- **Don't** dim a node's rim to report availability. The rim is the rail's, and a member stays visibly in its group whether or not it is reachable — only the fill answers that question.
+- **Don't** give a rail segment its own tone because of the node it happens to run past. Only `connecting`, `failed` and a whole-rail dormant state earn a tone of their own.
 - **Don't** treat the light appearance as the dark one lightened. Light is Circuit: neutral, near-white, with hairlines doing the separating.
 - **Don't** promote the depth behaviour described above into doctrine without asking. That decision is open.

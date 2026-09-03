@@ -251,6 +251,61 @@ import AppKit
         #expect(window.test_sidebar.test_groupsRowIsSelected)
     }
 
+    /// The surface's Escape asks this: an open editor pops and reports so;
+    /// with nothing to pop the answer is `false` and Escape closes the window.
+    @Test func dismissEditorPopsAnOpenEditorAndRefusesWhenNoneIsOpen() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        await drain()
+        #expect(window.test_isShowingOverview)
+        #expect(!window.dismissEditor(), "nothing to step back from")
+
+        window.test_overview.test_clickCard(id: saved.id)
+        await drain()
+        #expect(window.test_isShowingEditor)
+
+        #expect(window.dismissEditor())
+        #expect(window.test_isShowingOverview)
+        #expect(!window.dismissEditor(), "a second press has nothing left to pop")
+    }
+
+    @Test func doneAndCommandBracketBothReturnToTheOverview() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+
+        window.test_overview.test_clickCard(id: saved.id)
+        await drain()
+        #expect(window.test_isShowingEditor)
+        window.test_editor.test_done()
+        await drain()
+        #expect(window.test_isShowingOverview, "Done leaves the editor")
+
+        window.test_overview.test_clickCard(id: saved.id)
+        await drain()
+        #expect(window.test_isShowingEditor)
+        #expect(window.test_editor.test_performBackKeyEquivalent(), "the editor claims ⌘[")
+        await drain()
+        #expect(window.test_isShowingOverview, "⌘[ leaves the editor")
+    }
+
+    @Test func clickingTheSelectedGroupsRowReturnsToTheOverview() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_overview.test_clickCard(id: saved.id)
+        await drain()
+        #expect(window.test_isShowingEditor)
+        #expect(window.test_sidebar.test_groupsRowIsSelected)
+
+        window.test_sidebar.test_clickGroupsRow()
+        await drain()
+
+        #expect(window.test_isShowingOverview,
+                "the highlighted Groups row is a way back, not a dead click")
+    }
+
     @Test func theGroupsRowMenuOffersOnlyNewGroup() async throws {
         let (window, controller, backend) = try await makeWindow()
         _ = try makeGroup1(controller)

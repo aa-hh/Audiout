@@ -449,14 +449,14 @@ import AppKit
         #expect(!editor.test_rowNodePreviewsClick(for: "a"))
     }
 
-    // MARK: "Playing now" + the reassurance line (the active editor only)
+    // MARK: "Playing now" + the reassurance line
 
-    @Test func onlyTheActiveGroupsEditorSaysPlayingNowAndReassures() throws {
+    @Test func everyEditorSaysEditsAreSavedAndOnlyTheActiveOneSaysPlayingNow() throws {
         let (editor, controller, devices) = try makeEditor()
         #expect(!editor.test_playingBadgeVisible,
                 "an inactive group is not playing, so it must not claim to be")
-        #expect(!editor.test_reassuranceVisible,
-                "…and its editor raises no fear to answer")
+        #expect(editor.test_reassuranceVisible)
+        #expect(editor.test_reassuranceText == "Changes are saved as you go.")
 
         let group = try #require(controller.groups.first)
         controller.activateGroup(id: group.id)
@@ -465,8 +465,18 @@ import AppKit
         #expect(editor.test_playingBadgeVisible)
         #expect(editor.test_reassuranceVisible)
         #expect(editor.test_reassuranceText
-                == "Changes here are saved for next time \u{2014} they don\u{2019}t change "
-                + "what\u{2019}s playing now.")
+                == "Changes are saved as you go. They don\u{2019}t change what\u{2019}s playing now.")
+    }
+
+    @Test func doneLeavesTheEditorTheWayTheBackBandDoes() throws {
+        let (editor, _, _) = try makeEditor()
+        var backs = 0
+        editor.onBack = { backs += 1 }
+        #expect(editor.test_doneButtonTitle == "Done")
+
+        editor.test_done()
+
+        #expect(backs == 1)
     }
 
     @Test func theActiveMarkersNeverMoveTheHeaderBand() throws {

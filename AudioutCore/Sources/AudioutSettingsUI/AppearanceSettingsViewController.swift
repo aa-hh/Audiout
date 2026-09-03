@@ -144,12 +144,6 @@ public final class AppearanceSettingsViewController: NSViewController {
         onAccentChanged?(style)
     }
 
-    public override func viewDidLoad() {
-        super.viewDidLoad()
-        view.layoutSubtreeIfNeeded()
-        preferredContentSize = NSSize(width: SettingsForm.contentWidth, height: view.fittingSize.height)
-    }
-
     private func makeTile(for theme: AppearanceTheme) -> ThemeTileButton {
         let tile = ThemeTileButton(theme: theme)
         tile.translatesAutoresizingMaskIntoConstraints = false

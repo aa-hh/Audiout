@@ -226,18 +226,10 @@ public enum BackendEvent: Sendable, Equatable {
     /// never do.
     case routingBlockedNeedsDefault(Bool)
 
-    /// The first-mix alignment intercept (W3, PLAN-UNIVERSAL-SYNC "ALIGNMENT
-    /// WIZARD UX LOCKED"): the selection that FIRST puts a never-aligned
-    /// Bluetooth speaker (no saved SYNC trim, no recorded "Not now") into a
-    /// mix with any other device connected it and started its stream but is
-    /// HOLDING IT SILENT; the UI answers with an anchored card offering
-    /// align-with-music / align-with-ticks / Not now, each resolving through
-    /// ``BTOutputControlling/resolveBTAlignmentPrompt(forDevice:dismissed:)``
-    /// (which releases the hold). The backend re-emits at most once per device
-    /// per launch and never again once a trim or dismissal is recorded; a
-    /// backend-side watchdog releases an unanswered hold so a surfacing
-    /// failure can never strand a speaker silent. Only ``NativeBackend``
-    /// emits it — it's the only backend with Bluetooth sinks.
+    /// A never-aligned Bluetooth speaker just joined its first mix and is
+    /// playing as-is; the UI offers alignment under its row. At most once per
+    /// device per session. Only ``NativeBackend`` emits it — it's the only
+    /// backend with Bluetooth sinks.
     case btFirstMixAlignmentPrompt(deviceID: String)
 
     /// The takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md): a

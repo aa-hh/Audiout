@@ -23,7 +23,9 @@ folder renders; routing arithmetic lives in Core.
 - A live scrub applies to audio but must not persist until committed.
 - The alignment wizard is a sheet the popover cannot close under.
 - A selected Bluetooth device that loses availability is deselected here, on the edge.
-- EQ never lives on the Mixer (2026-08-22); tone lives elsewhere.
+- The Mixer carries an equalizer DOOR (the row button beside mute, and the row menu) and one mark (magenta border when the curve is not flat). No editor, no curve, no tone control on the Mixer (2026-08-22, amended 2026-09-03).
+- A never-aligned Bluetooth row's chip IS the wizard's door; a measured one opens the drawer.
+- A first-join alignment note is session state: ✕ hides it, nothing is written down.
 - Known stability findings in this target carry `STABILITY(id)` inline markers — details and fix sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 

@@ -206,6 +206,11 @@ public enum PopoverColumnGrid {
     /// The speaker/mute glyph column, sitting **left of the slider** in every row
     /// (per-device mute on device rows, master mute on Main Out and group rows).
     public static let muteWidth: CGFloat = 24
+    /// Width (and height — it is square) of the row's Equalizer button, the
+    /// door beside mute on every row that has an equalizer.
+    public static let eqButtonWidth: CGFloat = 24
+    /// Gap between the Equalizer button and the mute glyph it leads.
+    public static let eqToMuteGap: CGFloat = 6
     /// The trailing control column, sized to the **widest** trailing control so
     /// the slider column clears it in every row: the Main Out row's named
     /// destination dropdown (task B). The device row's small mute button and the
@@ -742,11 +747,12 @@ public enum PopoverColumnGrid {
     //
     // The panel that opens underneath a Bluetooth row: ONE horizontal band,
     //
-    //     [♪ Align by ear] [Revert]     hold ⇧ for 10 ms   [ − | −414 ms | + ]
+    //     [⑂ Align again…] [♪ Align by ear] [Reset alignment]   hold ⇧ for 10 ms   [ − | −414 ms | + ]
     //
-    // The align/revert pair sits at the far LEADING edge, deliberately as far
-    // as the band allows from the steppers, so Revert cannot be mis-tapped
-    // mid-adjustment. The value cluster hugs the TRAILING edge so it lands
+    // The two alignment doors and Reset sit at the far LEADING edge,
+    // deliberately as far as the band allows from the steppers, so Reset
+    // cannot be mis-tapped mid-adjustment. The value cluster hugs the
+    // TRAILING edge so it lands
     // directly beneath the SYNC chip that opened the drawer. Everything in the
     // band shares ``syncDrawerControlHeight`` and is vertically centred, sized
     // to sit WITH the row's own controls — two earlier versions were redone for
@@ -758,23 +764,22 @@ public enum PopoverColumnGrid {
     public static let syncDrawerHorizontalInset: CGFloat = 12
     /// Vertical inset of the drawer's content from its top/bottom edges.
     public static let syncDrawerVerticalInset: CGFloat = 12
-    /// The ONE height every element of the band shares — the align and revert
+    /// The ONE height every element of the band shares — the three leading
     /// buttons and the whole value cluster. Sized to a `.rounded`-bezel
     /// `.small` `NSButton`'s natural height, so the pair reads as stock chrome
     /// rather than a stretched bezel.
     public static let syncDrawerControlHeight: CGFloat = 22
+    /// Width of the "Align again…" push button that leads the band — fits the
+    /// title with its leading tuning-fork glyph at ``Tokens/Font/caption``.
+    public static let syncDrawerAlignAgainButtonWidth: CGFloat = 104
     /// Width of the align-by-ear toggle — fits "Align by ear" with its leading
     /// metronome glyph at ``Tokens/Font/caption``.
     public static let syncDrawerAlignButtonWidth: CGFloat = 104
-    /// Width of the Revert push button.
-    public static let syncDrawerRevertButtonWidth: CGFloat = 58
-    /// Width of the "Reset alignment" push button — wider than Revert because
-    /// it spells out what it clears: Revert restores the value this drawer
-    /// opened on, Reset deletes the stored alignment entirely, and a two-button
-    /// pair reading "Revert"/"Reset" would be one glance from a wrong click.
+    /// Width of the "Reset alignment" push button — it spells out what it
+    /// clears, which is longer than either alignment door beside it.
     public static let syncDrawerResetButtonWidth: CGFloat = 108
-    /// Gap between the align toggle and the Revert button beside it — they are
-    /// one pair, so this is tight.
+    /// Gap between the band's leading buttons — they are one group, so this is
+    /// tight.
     public static let syncDrawerButtonGap: CGFloat = 6
     /// Gap between the "hold ⇧" hint and the value cluster it describes.
     public static let syncDrawerHintToClusterGap: CGFloat = 12

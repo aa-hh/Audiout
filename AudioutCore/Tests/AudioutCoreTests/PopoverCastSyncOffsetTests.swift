@@ -218,18 +218,15 @@ import AppKit
         #expect(titles.contains("Equalizer…"), "…but tone is unaffected")
     }
 
-    @Test func theDrawersOptionClickWizardDoorIsRefusedForCast() {
+    @Test func theDrawerCarriesNoAlignAgainDoorForCast() {
         let isolation = TestIsolation(owner: "PopoverCastSyncOffsetTests")
         let (popover, _, _) = makePopover(isolation)
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         _ = popover.test_toggleDeviceEnabled(deviceID: "cast-tv", on: true)
 
         popover.test_deviceRow(for: "cast-tv")?.test_fireSyncChipClick()
-        let drawer = popover.test_syncDrawer
-        drawer?.test_optionModifierOverride = true
-        drawer?.test_fireAlignClick()
 
-        #expect(popover.test_btWizardView() == nil,
-                "the hidden ⌥ door is refused too, not just the visible menu item")
+        #expect(popover.test_syncDrawer?.test_alignAgainVisible == false,
+                "no wizard for this receiver, so no door to it — never a dead button")
     }
 }

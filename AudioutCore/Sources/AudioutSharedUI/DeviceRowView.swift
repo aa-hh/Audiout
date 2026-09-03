@@ -60,17 +60,20 @@ public final class DeviceRowView: NSView {
         /// it never edits selection. Default no-op for non-BT hosts.
         func deviceRowDidRequestReconnect(_ row: DeviceRowView)
         /// The user asked for the guided alignment wizard on this Bluetooth
-        /// row — the "Align speaker…" context-menu item (the metronome button
-        /// moved into the sync drawer, whose ⌥-click is the other route).
-        /// Default no-op for hosts without the wizard.
-        func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView)
-        /// The user asked for this speaker's Equalizer — the "Equalizer…"
-        /// context-menu item, or a click on the row ICON, which pops the same
-        /// menu. The host DEEP-LINKS to the Groups screen's detail pane; the
+        /// row — the "Align speaker…" context-menu item, or the untuned row's
+        /// own chip. `door` says which, so the host's telemetry can tell them
+        /// apart. Default no-op for hosts without the wizard.
+        func deviceRow(_ row: DeviceRowView, didRequestAlignmentWizardFor id: String,
+                       door: BTAlignmentWizardDoor)
+        /// The user asked for this speaker's Equalizer through one of the
+        /// row's two doors: the button beside mute (`fromButton`), or the
+        /// "Equalizer…" context-menu item, which a click on the row ICON also
+        /// pops. The host DEEP-LINKS to the Groups screen's detail pane; the
         /// row itself edits no tone and holds no tone state (owner decision
-        /// 2026-08-22: EQ never lives on the Mixer). Default no-op for hosts
-        /// with nowhere to link to.
-        func deviceRowDidRequestEqualizer(_ row: DeviceRowView)
+        /// 2026-08-22, amended 2026-09-03: the Mixer carries the DOOR and one
+        /// mark, never an editor). Default no-op for hosts with nowhere to
+        /// link to.
+        func deviceRowDidRequestEqualizer(_ row: DeviceRowView, fromButton: Bool)
         /// The user clicked this Bluetooth row's SYNC value chip
         /// (PLAN-BT-SYNC-DRAWER T6). The chip is READ-ONLY — it neither edits
         /// nor clamps a trim; it asks the host to open (or, on a second
@@ -290,6 +293,16 @@ public final class DeviceRowView: NSView {
     /// the slider like the Main Out row, on the same shared column).
     private let readoutLabel = NSTextField(labelWithString: "")
     private let muteButton = NSButton()
+    /// The Equalizer door, leading of mute on every row with an equalizer.
+    /// Mounted only when ``supportsEqualizer``; the layout reserves its slot on
+    /// every row either way, so the name truncates identically across rows.
+    private let eqButton = NSButton()
+    /// The door's glyph — three band faders, the equalizer's own picture.
+    /// Named because ``updateEQButton`` re-makes the image to change its
+    /// WEIGHT and must ask for the same symbol the builder mounted.
+    private static let eqSymbolName = "slider.horizontal.3"
+    /// The point size every accessory glyph on this row is drawn at.
+    private static let accessoryGlyphPointSize: CGFloat = 13
 
     /// The under-name VU meter (Warm Signal v4 §Call-1), mounted inside the
     /// identity stack only when `showsMeter` — the mixer window and
@@ -496,8 +509,10 @@ public final class DeviceRowView: NSView {
                       syncMeasuredLatencyMs: Double? = nil,
                       syncDrawerExpanded: Bool = false,
                       removalUndoOffered: Bool = false,
-                      volumePendingApply: Bool = false) {
+                      volumePendingApply: Bool = false,
+                      isEQShaped: Bool = false) {
         self.device = device
+        self.isEQShaped = isEQShaped
         self.isSelectedInSet = selected
         self.energizePending = energizePending
         self.removalUndoOffered = removalUndoOffered
@@ -690,6 +705,7 @@ public final class DeviceRowView: NSView {
         // the instant they mute.
         slider.isEnabled = device.isAvailable && controllable
         muteButton.isEnabled = device.isAvailable && controllable
+        updateEQButton()
         muteButton.state = device.isMuted ? .on : .off
         updateMuteTint()
         // V7 + v4 §Call-1: the `%` readout dims in lockstep with the slider's
@@ -893,11 +909,42 @@ public final class DeviceRowView: NSView {
         }
     }
 
+    /// The Equalizer door's one MARK: the glyph itself goes GOLD and a step
+    /// heavier when this speaker's curve is not flat.
+    ///
+    /// It is the response scope's own language, scaled down to 13 pt. That
+    /// scope draws a shaped curve in `gold` at `shapedLineWidth`, and a flat
+    /// one as a neutral `scopeFlatLine` hairline — "gold means signal, and
+    /// flat is the absence of shaping" (`EQResponseCurveView`). The door onto
+    /// that scope now says the same thing in the same two variables, hue and
+    /// weight, so the mark carries a non-colour cue as well as a colour one.
+    ///
+    /// Two things this mark deliberately is NOT. It is not `partySignal`:
+    /// that magenta is the alignment wizard's REFERENCE-LIGHT colour, meaning
+    /// "this is the other speaker in the run", and spending it here would make
+    /// one hue carry two unrelated meanings. And it is not a border: the mute
+    /// button immediately trailing already says "engaged" with a filled pill,
+    /// so a second shape for the same idea would give one row three
+    /// vocabularies. One mark per control.
+    private func updateEQButton() {
+        guard supportsEqualizer else { return }
+        eqButton.setAccessibilityLabel("Equalizer for \(device.name)")
+        eqButton.setAccessibilityValue(isEQShaped ? "Shaped" : "Flat")
+        eqButton.contentTintColor = isEQShaped ? Tokens.Color.gold : Tokens.Color.secondaryLabel
+        // The symbol image is re-made rather than re-tinted: weight lives in
+        // the `SymbolConfiguration`, not in the tint.
+        eqButton.image = NSImage(systemSymbolName: Self.eqSymbolName,
+                                 accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: Self.accessoryGlyphPointSize,
+                                           weight: isEQShaped ? .semibold : .regular))
+    }
+
     /// The pill's engaged fill is a static `CGColor` — re-stamp on a live
     /// light/dark or Increase-Contrast switch (the dot/ring/bus subviews all
     /// handle their own re-resolution).
     public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
+        updateEQButton()
         updateMuteTint()
     }
 
@@ -1324,6 +1371,10 @@ public final class DeviceRowView: NSView {
 
     private var isDraggingSlider = false
 
+    /// Whether this speaker's saved curve is anything but flat — PUSHED by the
+    /// host through `apply(...)`; the row reads no tone store of its own.
+    private var isEQShaped = false
+
     private func buildSubviews() {
         wantsLayer = true
         // Leading edge of the row's first control (task B shared grid). Members
@@ -1453,6 +1504,13 @@ public final class DeviceRowView: NSView {
 
         configureAccessoryButton(muteButton, symbol: "speaker.wave.2.fill",
                                   action: #selector(muteToggled(_:)))
+        // Same accessory voice as mute, but a plain push button: this one is a
+        // DOOR (it opens the Groups screen's equalizer), never a toggle.
+        configureAccessoryButton(eqButton, symbol: Self.eqSymbolName,
+                                 action: #selector(equalizerButtonClicked(_:)))
+        eqButton.setButtonType(.momentaryChange)
+        eqButton.title = ""          // a door, not a labelled control
+        eqButton.toolTip = "Equalizer"
 
         // Leading VU meter (task T3): mounted only when `showsMeter` — the
         // mixer window/GroupRowView never pass `true`, so their layout is
@@ -1492,6 +1550,7 @@ public final class DeviceRowView: NSView {
         addSubview(slider)
         addSubview(readoutLabel)
         addSubview(muteButton)
+        if supportsEqualizer { addSubview(eqButton) }
         // FEED column (v4.1 item 3): only a bus row has the free trailing slot.
         if busActive {
             addSubview(feedStack)
@@ -1535,13 +1594,16 @@ public final class DeviceRowView: NSView {
                 constant: -PopoverColumnGrid.statusDotInset),
 
             // Identity cluster: leading off the icon, centred vertically as a
-            // group; its trailing yields to the mute glyph so the name truncates.
+            // group; its trailing yields to the EQ SLOT — reserved on every
+            // row, button or not — so the name truncates at the same width
+            // whether or not this speaker has an equalizer.
             identityStack.leadingAnchor.constraint(equalTo: iconView.trailingAnchor,
                                                     constant: PopoverColumnGrid.iconToName),
             identityStack.centerYAnchor.constraint(equalTo: centerYAnchor),
             identityStack.trailingAnchor.constraint(
                 lessThanOrEqualTo: muteButton.leadingAnchor,
-                constant: -PopoverColumnGrid.iconToName),
+                constant: -(PopoverColumnGrid.iconToName + PopoverColumnGrid.eqButtonWidth
+                            + PopoverColumnGrid.eqToMuteGap)),
 
             // Mute speaker glyph sits LEFT of the slider (task B grid).
             muteButton.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -1664,6 +1726,20 @@ public final class DeviceRowView: NSView {
             ])
         }
 
+        // The Equalizer door fills the slot the identity stack already yields
+        // on every row, so a row WITH one and a row without truncate their
+        // names at the same width.
+        if supportsEqualizer {
+            constraints.append(contentsOf: [
+                eqButton.trailingAnchor.constraint(
+                    equalTo: muteButton.leadingAnchor,
+                    constant: -PopoverColumnGrid.eqToMuteGap),
+                eqButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+                eqButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.eqButtonWidth),
+                eqButton.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.eqButtonWidth),
+            ])
+        }
+
         // Icon leading: at `firstElementLeading` on meter/bus rows (reserving the
         // left rail gutter, unchanged x from the pre-v4 leading-meter layout),
         // else flush at the plain leading inset (mixer-window rows, unchanged).
@@ -1697,7 +1773,8 @@ public final class DeviceRowView: NSView {
         // fixed on `symbol` in both states — no alternate/slash image (ahh wants
         // the icon to never change on toggle). Mute state is reflected only via
         // `button.state` and the accessibility label update in `apply`.
-        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        let config = NSImage.SymbolConfiguration(pointSize: Self.accessoryGlyphPointSize,
+                                                 weight: .regular)
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
         button.imagePosition = .imageOnly
@@ -1713,7 +1790,21 @@ public final class DeviceRowView: NSView {
     /// the module's one copy: ``BTSyncDrawerView`` reads it rather than
     /// re-authoring the sentence.
     static let alignTooltip =
-        "Play alignment ticks on this speaker and the rest of the group — adjust sync until they land as one (⌥ for the guided alignment)"
+        "Play alignment ticks on this speaker and the rest of the group — adjust sync until they land as one"
+
+    /// What the chip says on a never-measured Bluetooth speaker, where it is
+    /// the wizard's door rather than a value.
+    static let chipAlignTooltip =
+        "This speaker plays a little behind the others until it’s aligned. Click to align it."
+
+    /// Whether this row's chip is the wizard's door instead of a sync readout.
+    /// Bluetooth speakers only: a Cast receiver has no run to give and this
+    /// Mac's own trim is a setting, not a measurement — both keep "Not set"
+    /// and their drawer.
+    private var chipOffersWizard: Bool {
+        device.isBluetooth && !device.isCast && !device.isLocalDevice
+            && !(syncTrimIsSet || syncMeasuredLatencyMs != nil)
+    }
 
     /// The chip's tabular-figures label font: monospaced DIGITS so a stepper
     /// change can't make the chip's number jitter in width under the fixed
@@ -1777,11 +1868,16 @@ public final class DeviceRowView: NSView {
     private func updateSyncChip() {
         let engaged = syncDrawerExpanded
         let tuned = syncTrimIsSet || syncMeasuredLatencyMs != nil
-        let title = tuned ? Self.syncChipValueText(syncChipValueMs) : "Not set"
+        // An untuned Bluetooth speaker's chip is not a readout of nothing: it
+        // is the wizard's door, reading `Align` behind a tuning fork — the
+        // same glyph the phone's row carries. Every other row (tuned, Cast,
+        // this Mac) keeps the value chip and its drawer.
+        let offersWizard = chipOffersWizard
+        let title = offersWizard ? "Align" : (tuned ? Self.syncChipValueText(syncChipValueMs) : "Not set")
         let color: NSColor
         if engaged {
             color = Tokens.Color.engagedChrome
-        } else if tuned {
+        } else if tuned || offersWizard {
             color = Tokens.Color.label
         } else {
             color = Tokens.Color.inkTertiary
@@ -1789,13 +1885,27 @@ public final class DeviceRowView: NSView {
         syncChipButton.attributedTitle = NSAttributedString(
             string: title,
             attributes: [.font: Self.syncChipFont, .foregroundColor: color])
-        syncChipChevronName = engaged ? "chevron.down" : "chevron.right"
-        syncChipButton.image = NSImage(systemSymbolName: syncChipChevronName,
-                                       accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold))
+        if offersWizard {
+            syncChipChevronName = ""
+            syncChipButton.image = NSImage(systemSymbolName: "tuningfork",
+                                           accessibilityDescription: nil)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold))
+            syncChipButton.imagePosition = .imageLeading
+        } else {
+            syncChipChevronName = engaged ? "chevron.down" : "chevron.right"
+            syncChipButton.image = NSImage(systemSymbolName: syncChipChevronName,
+                                           accessibilityDescription: nil)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold))
+            syncChipButton.imagePosition = .imageTrailing
+        }
         syncChipButton.contentTintColor = color
         syncChipCell.isEngaged = engaged
         syncChipCell.isUntuned = !tuned
+        if offersWizard {
+            syncChipButton.toolTip = Self.chipAlignTooltip
+            syncChipButton.setNeedsDisplay(syncChipButton.bounds)
+            return
+        }
         // The tooltip is where the DIRECTION lives: the chip is too narrow for
         // D7's "later"/"earlier" phrasing, and a bare signed number is exactly
         // the ambiguity D7 warns about — so hover (and VoiceOver, below) spell
@@ -1857,11 +1967,16 @@ public final class DeviceRowView: NSView {
         return "\(whole < 0 ? "−" : "")\(abs(whole)) ms"
     }
 
-    /// The chip's one job: ask the host to open — or, on a second click,
-    /// close — this device's sync drawer (T7 owns the state and the
-    /// one-at-a-time rule). It never edits the trim itself.
+    /// The chip's job: ask the host to open — or, on a second click, close —
+    /// this device's sync drawer (T7 owns the state and the one-at-a-time
+    /// rule). It never edits the trim itself. On a never-measured Bluetooth
+    /// speaker the chip is the wizard's door instead, and goes straight there.
     @objc private func syncChipTapped(_ sender: NSButton) {
-        delegate?.deviceRow(self, didToggleSyncDrawerFor: device.id)
+        if chipOffersWizard {
+            delegate?.deviceRow(self, didRequestAlignmentWizardFor: device.id, door: .chip)
+        } else {
+            delegate?.deviceRow(self, didToggleSyncDrawerFor: device.id)
+        }
     }
 
     // MARK: Live-removal undo
@@ -1957,11 +2072,16 @@ public final class DeviceRowView: NSView {
     }
 
     @objc private func alignSpeakerMenuItemSelected(_ sender: NSMenuItem) {
-        delegate?.deviceRowDidRequestAlignmentWizard(self)
+        delegate?.deviceRow(self, didRequestAlignmentWizardFor: device.id, door: .menu)
     }
 
     @objc private func equalizerMenuItemSelected(_ sender: NSMenuItem) {
-        delegate?.deviceRowDidRequestEqualizer(self)
+        delegate?.deviceRowDidRequestEqualizer(self, fromButton: false)
+    }
+
+    /// The row's Equalizer BUTTON — the same place the menu item opens.
+    @objc private func equalizerButtonClicked(_ sender: NSButton) {
+        delegate?.deviceRowDidRequestEqualizer(self, fromButton: true)
     }
 
     // MARK: Actions
@@ -2333,6 +2453,20 @@ public final class DeviceRowView: NSView {
     /// `.secondaryLabelColor` otherwise. The glyph itself never changes; only
     /// this tint does.
     public var test_muteTintColor: NSColor? { muteButton.contentTintColor }
+    /// Whether this row mounted the Equalizer door at all.
+    public var test_hasEQButton: Bool { eqButton.superview != nil }
+    public var test_eqButtonFrame: NSRect { eqButton.frame }
+    public var test_eqButtonHasTitle: Bool { !eqButton.title.isEmpty }
+    /// The Equalizer door's not-flat mark: its glyph tint (`gold` when shaped,
+    /// `secondaryLabel` at rest) and the symbol weight that rides with it.
+    public var test_eqTintColor: NSColor? { eqButton.contentTintColor }
+    public var test_eqSymbolIsHeavy: Bool {
+        eqButton.image?.symbolConfiguration == NSImage.SymbolConfiguration(
+            pointSize: Self.accessoryGlyphPointSize, weight: .semibold)
+    }
+    public func test_clickEQButton() { eqButton.performClick(nil) }
+    public var test_muteButtonFrame: NSRect { muteButton.frame }
+    public var test_identityStackFrame: NSRect { identityStack.frame }
 
     /// Whether the mute button is currently drawing its ENGAGED pill (S3, spec
     /// §3.4/§3.5): `.on` state + the accent pill fill stamped on its layer.
@@ -2959,7 +3093,17 @@ public final class DeviceRowView: NSView {
         // bare signed number), and `accessibilityExpanded` carrying the
         // drawer's state, so VoiceOver announces the open/close the click
         // performs instead of leaving it a silent visual change.
-        if showsSyncControls {
+        if chipOffersWizard {
+            // The chip is the wizard's door here, not a disclosure control:
+            // an expanded state and a "not set" value would both be lying.
+            syncChipButton.setAccessibilityLabel("Align \(device.name)")
+            syncChipButton.setAccessibilityValue(nil)
+            syncChipButton.setAccessibilityHelp(Self.chipAlignTooltip)
+            // No drawer behind this chip, so no expanded state to announce —
+            // a stale `true` from a previous apply would promise a disclosure
+            // the click no longer performs.
+            syncChipButton.setAccessibilityExpanded(false)
+        } else if showsSyncControls {
             syncChipButton.setAccessibilityLabel("Sync offset for \(device.name)")
             syncChipButton.setAccessibilityValue(
                 syncTrimIsSet || syncMeasuredLatencyMs != nil
@@ -3103,10 +3247,11 @@ public extension DeviceRowView.Delegate {
     /// only it can open a drawer (PLAN-BT-SYNC-DRAWER T6/T7).
     func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String) {}
     /// Default no-op — only the popover hosts the alignment wizard.
-    func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView) {}
+    func deviceRow(_ row: DeviceRowView, didRequestAlignmentWizardFor id: String,
+                   door: BTAlignmentWizardDoor) {}
     /// Default no-op — only the popover can deep-link to the Groups screen's
     /// Equalizer page.
-    func deviceRowDidRequestEqualizer(_ row: DeviceRowView) {}
+    func deviceRowDidRequestEqualizer(_ row: DeviceRowView, fromButton: Bool) {}
     /// Default no-op — only the popover offers the live-removal undo.
     func deviceRowDidRequestUndoRemoval(_ row: DeviceRowView) {}
 }

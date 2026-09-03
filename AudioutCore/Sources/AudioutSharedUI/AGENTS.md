@@ -17,6 +17,9 @@ store, or `GroupController`.
 - Always write `NSApp?.`, never bare `NSApp.`, which force-unwraps and crashes.
 - TRAP: `CATransition` ignores a custom animation key; it files under "transition".
 - The "Removed, Undo" offer is host state; the row draws it and decides nothing.
+- A never-measured Bluetooth row's SYNC chip is the alignment wizard's door, not a readout.
+- The row's Equalizer button is a DOOR plus one mark; the row edits and stores no tone.
+- The identity stack yields the Equalizer slot on EVERY row, so names truncate alike.
 - Instruments reconcile accessibility-display changes live; the accent dial is a third trigger.
 - `setContent`'s `defaultSize:` seeds only the first mount of a content controller.
 - `ControlPanelBackingView` is an approved custom-drawn exception; NSPanel has no arrow.

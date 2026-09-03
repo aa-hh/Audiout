@@ -20,7 +20,7 @@ import AudioutSharedUI
     /// orders in.
     private func makeAttached() -> (SurfaceToolbarController, NSWindow) {
         let controller = SurfaceToolbarController()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 623, height: 400),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 400),
                               styleMask: [.titled, .closable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         controller.attach(to: window)

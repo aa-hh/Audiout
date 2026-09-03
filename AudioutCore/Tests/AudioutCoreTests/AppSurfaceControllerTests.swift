@@ -71,7 +71,7 @@ import AppKit
             groupsContent: {
                 groupsBuilds += 1
                 let vc = NSViewController()
-                vc.view = NSView(frame: NSRect(x: 0, y: 0, width: 623, height: 464))
+                vc.view = NSView(frame: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 464))
                 return vc
             },
             settingsContent: { [self] in
@@ -189,7 +189,7 @@ import AppKit
         let contentHeight = window.contentRect(forFrameRect: frame).height
         #expect(abs(contentHeight - max(600, panel.preferredContentSize.height)) < 0.5,
                 "the frame is the Mixer's fit, floored at 600 (got \(contentHeight))")
-        #expect(frame.width == 623, "the one fixed width")
+        #expect(frame.width == SurfaceLayout.width, "the one fixed width")
 
         surface.select(.groups)
         #expect(window.frame == frame, "Groups wears the same frame, and does not move it")
@@ -930,10 +930,10 @@ import AppKit
                           .mainOut] {
             groups.test_select(selection)
             screen.view.layoutSubtreeIfNeeded()
-            #expect(screen.content.view.fittingSize.width <= 623,
+            #expect(screen.content.view.fittingSize.width <= SurfaceLayout.width,
                     Comment(rawValue: "\(selection) asks for "
                             + "\(screen.content.view.fittingSize.width)pt of width"))
-            #expect(window.frame.width == 623,
+            #expect(window.frame.width == SurfaceLayout.width,
                     Comment(rawValue: "\(selection) widened the window"))
         }
     }

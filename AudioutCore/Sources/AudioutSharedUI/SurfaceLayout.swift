@@ -10,7 +10,7 @@ import AppKit
 /// these, never a literal.
 public enum SurfaceLayout {
     /// The one fixed surface frame's width (window content width, every screen).
-    public static let width: CGFloat = 623
+    public static let width: CGFloat = 653
 
     /// Pinned min == max sidebar thickness shared by the Groups and Settings
     /// source-list sidebars.

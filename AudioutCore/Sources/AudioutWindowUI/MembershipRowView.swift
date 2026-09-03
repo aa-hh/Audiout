@@ -89,6 +89,11 @@ public final class MembershipRowView: NSView {
         self.iconSymbolName = iconSymbolName
         self.surface = surface
         super.init(frame: NSRect(x: 0, y: 0, width: 280, height: Self.rowHeight))
+        // A checked device here is dimmed for exactly one reason — it's
+        // physically unavailable, not merely outside some other target — so
+        // the rim carries the extra weight the popover's own dimmed member
+        // (a configuration divergence, still fully reachable) doesn't need.
+        busView.emphasizesDimmedMemberRim = true
         buildSubviews()
         apply(device: device, checked: checked, iconSymbolName: iconSymbolName)
     }

@@ -842,19 +842,29 @@ public enum Tokens {
                        light: 0x9E8D6B, lightHighContrast: 0x8A7550)
         }
 
-        /// The route-armed dot's **dark/empty socket** resting fill (spec §3.3
-        /// "dark/empty socket when not armed"; the spec's original `#34302A`
-        /// dark measured 1.33:1 vs `panel` and read as absent rather than
-        /// quiet, so on 2026-08-28 the Increase-Contrast value was promoted to
-        /// standard and IC stepped one deeper to keep its delta). CONTRAST
-        /// RATIONALE: deliberately QUIET — the socket is the "nothing armed"
-        /// state, spec'd with no floor (it must not compete with the lit gold
-        /// dot; measured dark `#4A443B` = 1.81:1 vs `panel`, a visible-but-
-        /// quiet recess). Light `#E0D8C6` (= 1.34:1 vs light `panel`, the
-        /// symmetrical quiet recess) is unchanged — my pick, flagged for the
-        /// Wave-5 sweep like `ringConnected`'s hexes. IC variants deepen the
-        /// recess for definition without making it a signal (dark `#5A5347`
-        /// = 2.30:1; light `#C4B89E` = 1.85:1).
+        /// The **dark/empty socket** an unlit gold instrument rests in. Two
+        /// consumers, same meaning: the route-armed dot when nothing is armed
+        /// (spec §3.3), and the membership node's disc when the row is dimmed
+        /// (`MembershipBusView`'s `dimmed`) — in both, the seat stays and the
+        /// gold is lifted out of it. Because it is always ringed (the dot by
+        /// its icon corner, the node by the rail's own rim), it is measured
+        /// against the tone that rings it rather than the ground behind it.
+        /// The spec's original `#34302A` dark measured 1.33:1 vs `panel` and
+        /// read as absent rather than quiet, so the Increase-Contrast value
+        /// was promoted to standard and IC stepped one deeper to keep its
+        /// delta.
+        ///
+        /// CONTRAST RATIONALE: deliberately QUIET against its GROUND — it must
+        /// not compete with the lit gold it stands in for, so it carries no
+        /// ground floor (measured dark `#4A443B` = 1.81:1 vs `panel`, light
+        /// `#E0D8C6` = 1.34:1 vs light `panel` — symmetrical quiet recesses;
+        /// IC deepens both for definition without making either a signal, dark
+        /// `#5A5347` = 2.30:1, light `#C4B89E` = 1.85:1). The floor it DOES
+        /// carry is against the RING: >=1.4:1 from both `ember` and `gold`, in
+        /// both appearances, on both dial columns, so the seat can always be
+        /// told from whatever rings it (worst cell 1.47:1 — Subtle dark
+        /// `ember`). Light's hexes are my pick, flagged for the Wave-5 sweep
+        /// like `ringConnected`'s.
         public static var dotSocket: NSColor {
             warmDynamic(name: "dotSocket", dark: 0x4A443B, darkHighContrast: 0x5A5347,
                        light: 0xE0D8C6, lightHighContrast: 0xC4B89E)

@@ -1004,13 +1004,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onAlignTickActiveChange = { [weak self] active in
             (self?.backend as? BTOutputControlling)?.setBTAlignTickActive(active)
         }
-        // W3/W4 — the first-mix alignment intercept + wizard: the card's and
-        // panel's four backend actuators, capability-gated like everything
-        // above (nil casts on MockBackend/OwnToneBackend degrade to no-ops).
-        popoverController.onResolveBTAlignmentPrompt = { [weak self] deviceID, dismissed in
-            (self?.backend as? BTOutputControlling)?
-                .resolveBTAlignmentPrompt(forDevice: deviceID, dismissed: dismissed)
+        // The row's Equalizer door wears one mark when the curve is not flat.
+        // The answer comes off `Device.eq` on the device model — the same
+        // field the Groups screen's detail pane reads, seeded by the backend
+        // from `DeviceEQStore` — so the Mixer holds no tone state of its own.
+        popoverController.deviceEQIsShaped = { [weak self] deviceID in
+            self?.devicesByID[deviceID]?.eq.isFlat == false
         }
+        // W4 — the alignment wizard's backend actuators, capability-gated like
+        // everything above (nil casts on MockBackend/OwnToneBackend degrade to
+        // no-ops).
         popoverController.onBTWizardTrimPreview = { [weak self] ms, deviceID in
             (self?.backend as? BTOutputControlling)?
                 .setBTWizardTrimPreview(ms, forDevice: deviceID)
@@ -1948,6 +1951,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // gesture that ends it does both — the backends make that split.
         controller.onSetDeviceEQ = { [weak self] eq, deviceID, committed in
             self?.backend.setEQ(eq, for: deviceID, commit: committed)
+            // A committed write moves the Mixer row's Equalizer mark; a live
+            // scrub does not, because nothing was saved yet.
+            if committed {
+                self?.devicesByID[deviceID]?.eq = eq
+                self?.repaintFromCurrentState()
+            }
         }
         controller.onSetMainOutEQ = { [weak self] eq, committed in
             self?.backend.setMainOutEQ(eq, commit: committed)
@@ -3001,10 +3010,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         case .btFirstMixAlignmentPrompt(let deviceID):
             // W3: a never-aligned BT speaker just joined its first mix and is
-            // being held silent — surface the anchored alignment card under its
-            // row. The popover controller resolves it back through
-            // `onResolveBTAlignmentPrompt`; no device model changed here.
-            popoverController.showBTAlignmentPrompt(deviceID: deviceID)
+            // playing as-is — offer alignment in a note under its row. No
+            // device model changed here.
+            popoverController.offerBTAlignment(deviceID: deviceID)
             logEvent(event)
             return
         }
@@ -3130,7 +3138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .routingBlockedNeedsDefault(let active):
             return "routingBlockedNeedsDefault(\(active)) — \(active ? "actively routing but the aggregate isn't the Mac's default output" : "aggregate is default again / routing stopped")"
         case .btFirstMixAlignmentPrompt(let deviceID):
-            return "btFirstMixAlignmentPrompt(\(deviceID)) — never-aligned BT speaker held silent in its first mix"
+            return "btFirstMixAlignmentPrompt(\(deviceID)) — never-aligned BT speaker joined its first mix, playing as-is"
         }
     }
 

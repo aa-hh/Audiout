@@ -65,6 +65,13 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
 - **Layout collection** — every `PopoverColumnGrid` constant, slash-grouped:
   `insets/ rail/ meter/ mainAudioRing/ columns/ anchors/ feed/ statusBadge/
   halo/ rows/ gaps/ fader/ field/ alphas/ surfaces/`.
+  Awaiting mirroring (2026-09-03): `syncDrawerAlignAgainButtonWidth` (104),
+  `eqButtonWidth` (24) and `eqToMuteGap` (6) are new;
+  `syncDrawerRevertButtonWidth` is deleted with the drawer's Revert button.
+  The surface frame also widened, `SurfaceLayout.width` 623 → 653, so every
+  frame built at the old width needs resizing — the trailing columns are
+  anchored from the trailing edge and do not move; the name column absorbs
+  the 30 pt.
 
 ### Pages
 

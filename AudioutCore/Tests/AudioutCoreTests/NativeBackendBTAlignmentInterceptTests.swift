@@ -187,8 +187,7 @@ extension SerializedSharedState {
     private let btFlip = BTDeviceSnapshot(id: "70-99-1C-51-8F-A8:output", name: "Flip 5", isConnected: true)
 
     private func makeBackend(
-        storeDirectory: URL? = nil,
-        holdTimeout: TimeInterval = 120
+        storeDirectory: URL? = nil
     ) -> (NativeBackend, FakeBTEnumerator, SpyBTSink, EventCollector) {
         let bt = FakeBTEnumerator()
         let backend = NativeBackend(
@@ -206,7 +205,6 @@ extension SerializedSharedState {
             })
         let sink = SpyBTSink()
         backend.btSyncedSinkFactory = { sink }
-        backend.btAlignmentHoldTimeout = holdTimeout
         backend.btDeviceIDForUID = { uid in AudioObjectID(1000 + UInt32(abs(uid.hashValue % 1000))) }
         let collector = EventCollector()
         collector.attach(to: backend)
@@ -232,21 +230,24 @@ extension SerializedSharedState {
 
     // MARK: - Trigger matrix
 
-    /// Never-aligned + first mix (two BT devices) → both prompt and both join
-    /// held silent (gain 0 lands at the sink).
-    @Test func neverAlignedFirstMixFiresAndHoldsSilent() {
+    /// Never-aligned + first mix (two BT devices) → both offer alignment and
+    /// both PLAY: the offer never silences a speaker, it only asks the UI to
+    /// put a note under the row.
+    @Test func neverAlignedFirstMixFiresAndStaysAudible() {
         let (backend, bt, sink, events) = makeBackend()
         defer { backend.stop() }
         backend.start()
         bt.fire([btMove, btFlip])
         waitFor { self.device(backend, self.btMove.id) != nil && self.device(backend, self.btFlip.id) != nil }
+        setFullVolume(backend, btMove.id, btFlip.id)
 
         backend.setOutputSet([btMove.id, btFlip.id])
         waitFor { events.promptedDeviceIDs().count == 2 && sink.gains.count >= 2 }
+        waitFor { sink.lastGain(for: self.btMove.id) == 1 && sink.lastGain(for: self.btFlip.id) == 1 }
 
         #expect(Set(events.promptedDeviceIDs()) == [btMove.id, btFlip.id])
-        #expect(sink.lastGain(for: btMove.id) == 0, "held silent while the card is up")
-        #expect(sink.lastGain(for: btFlip.id) == 0)
+        #expect(sink.lastGain(for: btMove.id) == 1, "the offer plays the speaker as-is")
+        #expect(sink.lastGain(for: btFlip.id) == 1)
     }
 
     /// Solo BT never fires — a lone speaker has nothing to align with.
@@ -306,39 +307,6 @@ extension SerializedSharedState {
         #expect(sink.lastGain(for: btMove.id) == 1)
     }
 
-    /// "Not now" is FINAL: the dismissal persists, and a FRESH backend over
-    /// the same store never re-fires.
-    @Test func dismissalIsFinalAcrossBackendInstances() {
-        let dir = scratchDir
-        do {
-            let (backend, bt, sink, events) = makeBackend(storeDirectory: dir)
-            backend.start()
-            bt.fire([btMove, btFlip])
-            waitFor { self.device(backend, self.btFlip.id) != nil }
-            setFullVolume(backend, btMove.id, btFlip.id)
-            backend.setOutputSet([btMove.id, btFlip.id])
-            waitFor { events.promptedDeviceIDs().count == 2 }
-
-            backend.resolveBTAlignmentPrompt(forDevice: btMove.id, dismissed: true)
-            backend.resolveBTAlignmentPrompt(forDevice: btFlip.id, dismissed: true)
-            waitFor { sink.lastGain(for: self.btMove.id) == 1 && sink.lastGain(for: self.btFlip.id) == 1 }
-            #expect(sink.lastGain(for: btMove.id) == 1, "resolving releases the hold")
-            backend.stop()
-        }
-
-        let (backend, bt, sink, events) = makeBackend(storeDirectory: dir)
-        defer { backend.stop() }
-        backend.start()
-        bt.fire([btMove, btFlip])
-        waitFor { self.device(backend, self.btFlip.id) != nil }
-        setFullVolume(backend, btMove.id, btFlip.id)
-        backend.setOutputSet([btMove.id, btFlip.id])
-        waitFor { !sink.gains.isEmpty }
-
-        #expect(events.promptedDeviceIDs().isEmpty, "dismissed devices are never auto-prompted again")
-        #expect(sink.lastGain(for: btMove.id) == 1)
-    }
-
     /// Un-resolved (abandoned) prompts don't re-fire within the session —
     /// once ever per device on its own.
     @Test func promptFiresOncePerSession() {
@@ -357,88 +325,10 @@ extension SerializedSharedState {
         #expect(events.promptedDeviceIDs().count == 2, "no re-prompt on re-forming the mix")
     }
 
-    /// Deselecting a held device releases its hold (gain back to 1) so the
-    /// next select — never re-intercepted — plays audibly.
-    @Test func deselectReleasesTheHold() {
-        let (backend, bt, sink, events) = makeBackend()
-        defer { backend.stop() }
-        backend.start()
-        bt.fire([btMove, btFlip])
-        waitFor { self.device(backend, self.btFlip.id) != nil }
-        setFullVolume(backend, btMove.id, btFlip.id)
-
-        backend.setOutputSet([btMove.id, btFlip.id])
-        waitFor { events.promptedDeviceIDs().count == 2 }
-        backend.setOutputSet([btFlip.id])
-        waitFor { sink.lastGain(for: self.btMove.id) == 1 }
-        #expect(sink.lastGain(for: btMove.id) == 1)
-    }
-
-    /// The give-up watchdog: an unanswered hold un-mutes on its own — a
-    /// silent speaker with no visible cause must be impossible.
-    @Test func watchdogReleasesAnUnansweredHold() {
-        let (backend, bt, sink, events) = makeBackend(holdTimeout: 0.2)
-        defer { backend.stop() }
-        backend.start()
-        bt.fire([btMove, btFlip])
-        waitFor { self.device(backend, self.btFlip.id) != nil }
-        setFullVolume(backend, btMove.id, btFlip.id)
-
-        backend.setOutputSet([btMove.id, btFlip.id])
-        waitFor { events.promptedDeviceIDs().count == 2 }
-        waitFor { sink.lastGain(for: self.btMove.id) == 1 && sink.lastGain(for: self.btFlip.id) == 1 }
-        #expect(sink.lastGain(for: btMove.id) == 1)
-        #expect(sink.lastGain(for: btFlip.id) == 1)
-    }
-
-    // MARK: - Hold × user volume (one composed product)
-
-    /// A slider write DURING the hold cannot un-mute: the composed gain is 0
-    /// for a held uid regardless of the level — and the resolve then pushes
-    /// the level the user chose mid-hold, never a hardcoded 1.
-    @Test func volumeDuringHoldStaysSilentAndResolvePushesComposed() {
-        let (backend, bt, sink, events) = makeBackend()
-        defer { backend.stop() }
-        backend.start()
-        bt.fire([btMove, btFlip])
-        waitFor { self.device(backend, self.btFlip.id) != nil }
-
-        backend.setOutputSet([btMove.id, btFlip.id])
-        waitFor { events.promptedDeviceIDs().count == 2 }
-        waitFor { sink.lastGain(for: self.btMove.id) == 0 }
-
-        backend.setVolume(40, for: btMove.id)
-        waitFor { self.device(backend, self.btMove.id)?.volume == 40 }
-        #expect(sink.lastGain(for: btMove.id) == 0, "held stays silent through a slider write")
-
-        backend.resolveBTAlignmentPrompt(forDevice: btMove.id, dismissed: false)
-        waitFor { sink.lastGain(for: self.btMove.id).map { abs($0 - 0.4) < 0.001 } == true }
-        #expect(sink.lastGain(for: btMove.id).map { abs($0 - 0.4) < 0.001 } == true,
-                "the release pushes the composed user gain, not 1")
-    }
-
-    /// The watchdog release is composed too — giving up on the card must not
-    /// blow away the user's level.
-    @Test func watchdogReleasePushesComposedNotUnity() {
-        let (backend, bt, sink, events) = makeBackend(holdTimeout: 0.2)
-        defer { backend.stop() }
-        backend.start()
-        bt.fire([btMove, btFlip])
-        waitFor { self.device(backend, self.btFlip.id) != nil }
-        backend.setVolume(40, for: btMove.id)
-        setFullVolume(backend, btFlip.id)
-
-        backend.setOutputSet([btMove.id, btFlip.id])
-        waitFor { events.promptedDeviceIDs().count == 2 }
-        waitFor { sink.lastGain(for: self.btMove.id).map { abs($0 - 0.4) < 0.001 } == true }
-        #expect(sink.lastGain(for: btMove.id).map { abs($0 - 0.4) < 0.001 } == true)
-        #expect(sink.lastGain(for: btFlip.id) == 1)
-    }
-
-    /// The wizard's entry release, end to end: the popover answers the prompt
-    /// with `dismissed: false` before the run starts, and the target must come
-    /// out of the hold AUDIBLE. A guided run against a gain-0 sink asks the
-    /// user which speaker ticked first while one of them is muted.
+    /// The wizard's own hold, end to end: nothing holds the target on the way
+    /// IN (there is no first-mix hold any more), and the run's hold on the
+    /// other speakers clears when the run ends. A guided run against a gain-0
+    /// sink asks the user which speaker ticked first while one of them is muted.
     @Test func theWizardsReleaseLeavesTheTargetAudible() {
         let (backend, bt, sink, events) = makeBackend()
         defer { backend.stop() }
@@ -449,13 +339,17 @@ extension SerializedSharedState {
 
         backend.setOutputSet([btMove.id, btFlip.id])
         waitFor { events.promptedDeviceIDs().count == 2 }
-        waitFor { sink.lastGain(for: self.btMove.id) == 0 }
-
-        // What `PopoverController.startBTAlignmentWizard` sends on every door
-        // into the wizard.
-        backend.resolveBTAlignmentPrompt(forDevice: btMove.id, dismissed: false)
         waitFor { sink.lastGain(for: self.btMove.id) == 1 }
+        #expect(sink.lastGain(for: btMove.id) == 1, "the offer never held the target")
+
+        backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id,
+                                      btReferenceDeviceID: "mac")
+        waitFor { sink.lastGain(for: self.btFlip.id) == 0 }
         #expect(sink.lastGain(for: btMove.id) == 1, "the wizard's target ticks audibly")
+
+        backend.endBTWizardRun()
+        waitFor { sink.lastGain(for: self.btFlip.id) == 1 }
+        #expect(sink.lastGain(for: btFlip.id) == 1, "the wizard's own hold clears on end-run")
     }
 
     // MARK: - Wizard preview plumbing (W2)
@@ -815,10 +709,6 @@ extension SerializedSharedState {
         setFullVolume(backend, btMove.id, btFlip.id)
         backend.setOutputSet([btMove.id, btFlip.id])
         waitFor { sink.gains.count >= 2 }
-        // Clear the first-mix holds so the only silence left to explain is the
-        // wizard's own.
-        backend.resolveBTAlignmentPrompt(forDevice: btMove.id, dismissed: false)
-        backend.resolveBTAlignmentPrompt(forDevice: btFlip.id, dismissed: false)
         waitFor { sink.lastGain(for: self.btMove.id) == 1
             && sink.lastGain(for: self.btFlip.id) == 1 }
 
@@ -849,9 +739,6 @@ extension SerializedSharedState {
         setFullVolume(backend, btMove.id, btFlip.id, btThird.id)
         backend.setOutputSet([btMove.id, btFlip.id, btThird.id])
         waitFor { sink.gains.count >= 3 }
-        for id in [btMove.id, btFlip.id, btThird.id] {
-            backend.resolveBTAlignmentPrompt(forDevice: id, dismissed: false)
-        }
         waitFor { sink.lastGain(for: btThird.id) == 1 }
 
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id,

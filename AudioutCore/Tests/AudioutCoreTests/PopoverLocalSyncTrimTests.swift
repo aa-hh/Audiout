@@ -182,7 +182,7 @@ import AppKit
         _ = popover.test_toggleDeviceEnabled(deviceID: "mac", on: true)
         #expect(popover.test_isSpeakerSelected("mac"))
 
-        popover.startBTAlignmentWizard(deviceID: "mac")
+        popover.startBTAlignmentWizard(deviceID: "mac", door: .menu)
         let wizard = popover.test_btWizardView()
         #expect(wizard != nil, "the Mac's own row opens the same wizard")
         #expect(popover.test_btWizardReferenceID() == "office",

@@ -420,7 +420,12 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   the Bluetooth sinks' arm-time trim replay — a reselected receiver must come
   back carrying its offset, not whatever the last armed stretch left behind.
 - **A Bluetooth sink held at gain 0 must always have a live release path.**
-  The first-mix alignment intercept (W3) is the ONLY sanctioned writer of a
+  **REMOVED 2026-09-03: the first-mix HOLD is gone** — a never-aligned speaker
+  joining a mix now plays as-is, and the only hold left is the WIZARD's own
+  (`btWizardHeldUIDs`, released by the run ending or backend `stop()`). The
+  paragraph below describes the removed intercept; the composed-gain rule at
+  its end is unchanged and still binding.
+  The first-mix alignment intercept (W3) was the ONLY sanctioned writer of a
   0 gain (`BTDeviceSink.setGain` → `mainMixerNode.outputVolume` — the session,
   delay gate and drift loop keep running; un-muting is a property write, never
   a rebuild). Every hold is released by exactly one of: the card's answer

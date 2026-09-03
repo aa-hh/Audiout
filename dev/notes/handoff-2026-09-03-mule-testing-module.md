@@ -1,35 +1,38 @@
-# The mule is silently dead: `no such module 'Testing'`
+# The mule looked dead. The cause was its developer directory.
 
-Handover, 2026-09-03. Written after losing ~90 minutes to the downstream
-symptoms. The bug is not in any product code.
+2026-09-03. **Answered — see `claude/xctest-retirement` (PR #105), which carries
+the fix.** This note began as a handover for an open investigation; it is kept
+because the false trail is worth recognising, not because the question is open.
 
-## What is actually happening
+## The answer
 
-`scripts/run-tests.sh` prefers the remote Mac (`alechamilton@SUMUP-M9Y197RFVG.local`).
-The remote run **fails to compile the test target**, so `remote_run` returns
-non-zero, and the wrapper falls back to the local machine:
+The mule's developer-directory link pointed at an `/Applications/Xcode.app`
+that had been removed, so `/usr/bin/swift` fell back to the Command Line Tools.
+CLT ships no platform path, so SwiftPM fails before any test bundle loads — for
+**every** package, `AirPlayEngine` included, whether or not it contains a single
+test. The error that surfaced was:
 
 ```
-suite: sending to remote alechamilton@SUMUP-M9Y197RFVG.local (preferred) ...
-suite: remote reported FAILURES — re-running locally to confirm.
+error: '--num-workers' is only supported when testing with XCTest
 ```
 
-That fallback is deliberate and correct (`run-tests.sh:141-152`): a remote on a
-different toolchain must never be what refuses a commit. But it also **hides the
-remote's real error**, so this reads as "the mule found bugs" when the mule
-never ran a test.
+which reads as a code problem and is actually *wrong developer directory*.
+Three independent investigations converged on this.
 
-**Every full-suite run in the repo is therefore executing locally.** On a box at
-load 27-31 (8 cores) that produces random async/deadline failures — a different
-set each run. Seen: `CompanionEndToEndTests` `waitUntil` timeouts,
-`PopoverControllerTests.diagnosisPanelViewIsActuallyMountedInViewTree`
-(`panel.superview == nil`), `NativeBackendTests.bindBowsOutDuringWholeSystemTeardownAndIsRedriven`
-(empty telemetry). None are real. Do not chase them; check `uptime` and check
-whether the run reached the mule.
+PR #105 makes the runner fail fast instead: `run-tests.sh` exits 78 when
+`xcode-select -p` sits under `/Library/Developer/CommandLineTools`, naming the
+path and the fix. It also drops `--num-workers` outright (it only ever fanned
+XCTest across worker processes; Swift Testing runs in one process), and makes
+`AUDIOUT_TEST_MODE=serial` actually serialise via `--no-parallel`.
 
-## How to see the real error
+## Why it cost ninety minutes, and what to do differently
 
-The remote output is only in the full log, above the fallback line:
+**The wrapper hides the remote's real error.** On a remote failure `run-tests.sh`
+discards the remote output and re-runs locally — deliberately, so a remote on a
+different toolchain can never be what refuses a commit (`run-tests.sh:141-152`). The
+consequence is that a broken mule presents as "the mule found bugs in your
+code". The remote's actual error is only in the full log, above the fallback
+line:
 
 ```bash
 LOG=/tmp/mule.log
@@ -38,77 +41,23 @@ sed -n "1,$(grep -n 're-running locally' "$LOG" | head -1 | cut -d: -f1)p" "$LOG
   | grep -vE "housekeeping|^ +[MA?] " | tail -30
 ```
 
-Never `grep` for the failure by name. A test-target COMPILE failure surfaces as
-a bare `error: fatalError` with no test name, which looks like a runtime trap
-and matches none of the obvious patterns.
+**Read the log; never grep it.** A test-target compile failure surfaces from
+`swift test` as a bare `error: fatalError` with no test name. It matches none of the
+obvious patterns and reads exactly like a runtime trap. Grepping for
+`fatalError|failed|Test run with` hides the compiler diagnostic sitting thirty
+lines above it.
 
-## The two causes, in order
+**A changing failure set is the machine, not the code.** While the mule was
+unusable every full suite ran locally. On a box at load 27-31 across 8 cores,
+async and deadline tests fail at random and a *different* set each run
+(`CompanionEndToEndTests` `waitUntil`, `PopoverControllerTests`
+`panel.superview`, `NativeBackendTests` telemetry drain). Check `uptime`, and
+check whether the run actually reached the mule, before believing any of it.
 
-**1. `--num-workers` is XCTest-only. FIXED IN PRINCIPLE, NOT COMMITTED.**
-
-```
-error: '--num-workers' is only supported when testing with XCTest
-```
-
-`run_remote()` builds `rargs="$engine --parallel --num-workers $workers"`
-(`run-tests.sh:129`). Swift Testing rejects `--num-workers` and exits before
-running anything. `--parallel` alone is right — Swift Testing picks its own
-worker count. The local path (`:370`, `:372`) passes the same flag and the local
-toolchain tolerates it, which is why only the remote broke.
-
-The one-line change was written and verified to remove this error, then reverted
-to keep an unrelated commit clean. Re-apply it; it is necessary but **not
-sufficient**.
-
-**2. `no such module 'Testing'` on the mule. OPEN. This is the real one.**
-
-```
-/Users/alechamilton/audiout-remote-tests/container-edge/AudioutCore/Tests/AudioutCoreTests/AboutSectionTests.swift:4:8:
-error: no such module 'Testing'
-```
-
-Compilation reaches ~[187/189] and every test file fails the same way.
-
-### Ruled out — do not re-check these
-
-| Hypothesis | Finding |
-|---|---|
-| Old/missing toolchain on the mule | Identical to local: Xcode-beta, Swift 6.4 (`swiftlang-6.4.0.33.1`) |
-| `Testing.swiftmodule` absent for macOS | Present at `Xcode-beta.app/.../MacOSX.platform/Developer/Library/Frameworks/Testing.framework/Modules/` |
-| Homebrew `swift` shadowing Xcode's via the `PATH` export in `remote_run` | No Homebrew swift on either machine; `which swift` = `/usr/bin/swift` on both |
-| `DEVELOPER_DIR` pointing elsewhere in the non-interactive ssh shell | Unset on both; `xcode-select -p` = Xcode-beta on both |
-| `xcrun` resolving a different SDK | `xcrun -f swift` and `--show-sdk-path` both resolve inside Xcode-beta; SDK 27.0 |
-| Stale/corrupt `.build` in the mule's scratch copy | No `.build` present in `/Users/alechamilton/audiout-remote-tests/container-edge` |
-| Mule too loaded or out of disk | load 3.44/8 cores, 34Gi free — idle and healthy |
-
-### Where to look next
-
-- The remote command runs **non-interactively over `ssh -tt`** with only
-  `export PATH=/opt/homebrew/bin:$PATH` (`lib/remote.sh:207-211`). Compare a
-  full `swift build --build-tests` run in that exact shell against the same
-  command in an interactive ssh session — if they differ, the environment
-  gap is the answer, not the toolchain.
-- `swift test` on the mule may be resolving a **different destination/SDK** than
-  `xcrun` reports. Try `--destination`/`--sdk` explicitly, and print
-  `swift build --build-tests -v` on the mule to see the actual `-sdk` flag and
-  the framework search paths passed to the test target.
-- The macOS `Testing` module ships inside the **platform's** Frameworks
-  directory, not the toolchain's `lib/swift`. If the remote build is missing the
-  `-F .../MacOSX.platform/Developer/Library/Frameworks` search path that the
-  local build gets, that is exactly this error.
-- Check whether the mule ever built this test target successfully. If it never
-  has, this is not a regression and there is no "last good" state to diff.
-
-## Reproduce in one command
-
-```bash
-cd .claude/worktrees/<any-worktree>
-AUDIOUT_TEST_PREFER=remote bash scripts/run-tests.sh --filter AboutSectionTests > /tmp/mule.log 2>&1
-sed -n "1,$(grep -n 're-running locally' /tmp/mule.log | head -1 | cut -d: -f1)p" /tmp/mule.log | tail -20
-```
-
-## Why it is worth fixing properly
-
-The mule is idle and roughly twice as fast as the primary Mac, which is
-routinely at load 30 with several agents on it. Restoring it removes the largest
-current source of false test failures and roughly halves full-suite wall time.
+**What I ruled out, wrongly confident.** `xcode-select -p`, `xcrun -f swift`,
+`xcrun --show-sdk-path` and `swift --version` were all checked over ssh and all
+looked identical to the local Mac — which is what made the toolchain look
+innocent. Whatever those printed in that shell, the runner's own
+non-interactive invocation resolved differently. A hypothesis is only ruled out
+by reproducing the failing command's exact environment, not by inspecting a
+neighbouring one.

@@ -160,6 +160,7 @@ extension SerializedSharedState {
         let panel = Tokens.Color.panel
         let raised = Tokens.Color.raised
         let well = Tokens.Color.well
+        let iconSeatFill = Tokens.Color.iconSeatFill
         let feedPillFill = Tokens.Color.feedPillFill
         let scopeGround = Tokens.Color.scopeGround
 
@@ -171,7 +172,8 @@ extension SerializedSharedState {
             ContrastEntry(name: "inkSecondary", token: Tokens.Color.inkSecondary, floor: 4.5,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
             ContrastEntry(name: "inkTertiary", token: Tokens.Color.inkTertiary, floor: 4.5,
-                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("well", well)])),
+                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("well", well),
+                                                  ("iconSeatFill", iconSeatFill)])),
             ContrastEntry(name: "warningText", token: Tokens.Color.warningText, floor: 4.5,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel)])),
             ContrastEntry(name: "feedPillText", token: Tokens.Color.feedPillText, floor: 4.5,

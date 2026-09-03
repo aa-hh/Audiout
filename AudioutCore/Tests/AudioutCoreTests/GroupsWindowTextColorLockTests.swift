@@ -89,6 +89,7 @@ import AppKit
             ("panel", Tokens.Color.panel),
             ("raised", Tokens.Color.raised),
             ("well", Tokens.Color.well),
+            ("iconSeatFill", Tokens.Color.iconSeatFill),
             ("hairline", Tokens.Color.hairline),
             ("containerEdge", Tokens.Color.containerEdge),
             ("meterTrack", Tokens.Color.meterTrack),

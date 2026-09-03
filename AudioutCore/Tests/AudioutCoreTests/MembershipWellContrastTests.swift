@@ -128,6 +128,26 @@ import AppKit
         }
     }
 
+    /// The device seats (`MemberChipView` on the overview cards,
+    /// `DeviceIconWellView` on the detail/editor panes) fill with
+    /// `iconSeatFill` and edge with `containerEdge`. The edge carries the
+    /// separation: light `iconSeatFill` on `raised` is exactly 1.100:1, the
+    /// same raised-on-panel pair this file deliberately leaves unpinned
+    /// above, so there is NO fill floor here either — only the edge's. The
+    /// edge's other side (`containerEdge` vs `raised`) is pinned by
+    /// `containerEdgeClearsTheCardEdgeFloorAndOutranksTheDivider`.
+    @Test func containerEdgeClearsTheSeparatorFloorOnTheIconSeat() {
+        let floor: CGFloat = 1.25
+
+        for appearanceName in [NSAppearance.Name.darkAqua, .aqua] {
+            let ratio = contrastRatio(resolved(Tokens.Color.containerEdge, appearanceName: appearanceName),
+                                      resolved(Tokens.Color.iconSeatFill, appearanceName: appearanceName))
+            #expect(ratio >= floor,
+                    Comment(rawValue: "containerEdge vs iconSeatFill (\(appearanceName.rawValue)): " +
+                    "\(ratio):1 below the \(floor):1 separator floor"))
+        }
+    }
+
     /// The two authored inks the Groups screen carries for de-emphasised and
     /// unavailable text clear the 4.5:1 BODY floor on every ground this screen
     /// can put them on. They exist because their stock aliases could not:

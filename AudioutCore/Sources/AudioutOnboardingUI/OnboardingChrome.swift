@@ -235,9 +235,11 @@ func bluetoothRuneImage(height: CGFloat) -> NSImage? {
 
 // MARK: - Appearance-adaptive rounded views
 
-/// A small rounded tile holding an SF Symbol. Every tile rests on the same
-/// neutral `Tokens.Color.raised` well with a hairline rim (Q3 of the
-/// colour-return pass — the FILL/RIM are never coloured, only the glyph);
+/// A small rounded tile holding an SF Symbol. Every onboarding tile rests on
+/// the same neutral `Tokens.Color.raised` well with a hairline rim (Q3 of the
+/// colour-return pass — the FILL/RIM are never coloured, only the glyph); the
+/// Groups window's device seats (`MemberChipView`, `DeviceIconWellView`) use
+/// `iconSeatFill` + `containerEdge` instead, tuned for a `label` glyph;
 /// the SYMBOL's tint is caller-supplied (`color`, one of the four
 /// `Tokens.Color.permission*` hues for the onboarding rows) and PERMANENT —
 /// granting never recolours it (Alec, 2026-08-11: the retired

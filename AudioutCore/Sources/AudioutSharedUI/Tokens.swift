@@ -557,6 +557,60 @@ public enum Tokens {
             name: "railDormant", dark: 0x7D7466, darkHighContrast: 0x948C7C,
             light: 0x8A8272, lightHighContrast: 0x7A7263)
 
+        /// An UNAVAILABLE membership node's disc fill — the grey that takes
+        /// the place of `gold`/`ember` inside a rim still drawn in the rail's
+        /// own tone (``spineTone(armed:)``). Its whole job is to be told apart
+        /// from that rim, and from the live disc one row up, at 13 pt and at a
+        /// glance.
+        ///
+        /// THE RULE: the unavailable disc must clear its rim by LUMINANCE, not
+        /// by chroma alone. A small mark is read on the luminance channel —
+        /// two inks at one brightness separate only on close inspection, which
+        /// is not how anyone reads a speaker list. So the fill sits at least
+        /// 2:1 from `gold` in every appearance, and it buys that gap by going
+        /// AWAY from the ground: darker on paper, and in dark mode the
+        /// dormant grey is already well below gold, so dark keeps
+        /// ``railDormant``'s own values.
+        ///
+        /// Separate from ``railDormant`` because that token is also the whole
+        /// rail's dormant WIRE, and a wire and a disc want opposite depths in
+        /// light: a dormant wire has to read QUIETER than the armed gold one
+        /// (light `railDormant` is the palest ink on the rail, 1.09:1 from
+        /// gold), while an unavailable disc has to read DIFFERENT from a live
+        /// one. One value cannot be both, and the wire's job is the one that
+        /// breaks if it moves.
+        ///
+        /// The fill is a solid tint, never alpha: alpha would composite
+        /// against whichever ground the node landed on (`panel` in the
+        /// popover, `raised` on the group card) and the measured gap below
+        /// would drift per surface, and the disc's edge would pick up the rim.
+        ///
+        /// CONTRAST RATIONALE (measured, WCAG relative luminance; >=3:1 vs
+        /// canvas/panel/raised like ``railDormant``, plus a >=2:1 gap from
+        /// `gold` and >=1.45:1 from `ember` wherever the value can hold one):
+        /// dark `#7D7466` = 2.50:1 from `gold` `#E8B84B`, 3.79:1 vs `panel`,
+        /// 3.55:1 vs `raised`; light `#46423A` = 2.41:1 from `gold` `#9E761D`
+        /// and 1.65:1 from `ember` `#7A5E2A`, 9.65:1 vs `panel`, 8.77:1 vs
+        /// `raised`, 7.49:1 vs `well`. IC variants (house rule 3): dark
+        /// `#948C7C` = 2.08:1 from IC `gold`; light `#2E2B26` = 2.68:1 from
+        /// IC `gold` `#8A6614` and 1.65:1 from IC `ember` `#5E4922`. Neutral
+        /// by construction — hue 36-40 degrees, saturation 0.16-0.19, the
+        /// same warm-neutral band the surface ladder and ``railDormant`` sit
+        /// in, so it cannot be mistaken for a third instrument hue.
+        ///
+        /// KNOWN LIMIT, on file rather than hidden: against an `ember` rim in
+        /// DARK mode the gap is 1.09:1 and the separation is chroma
+        /// only. Nothing fixes it from this token — dark `ember` sits at
+        /// luminance 0.159 and the >=3:1 floor on `raised` forbids anything
+        /// below 0.143, so the band under ember is 1.08:1 wide, and the only
+        /// value that clears ember upward (~0.30) drags the gold gap down to
+        /// 1.65:1 and makes an unavailable disc BRIGHTER than a live one.
+        /// The armed rail is the popover — the surface this is read on all
+        /// day — so the gold gap keeps the budget.
+        public static let nodeUnavailableFill: NSColor = warmDynamic(
+            name: "nodeUnavailableFill", dark: 0x7D7466, darkHighContrast: 0x948C7C,
+            light: 0x46423A, lightHighContrast: 0x2E2B26)
+
         /// The earned-checkmark green — the rehearsal-led Setup spine/ribbon's
         /// granted-state glyph (Direction 04). No existing green token: the
         /// checkmarks it replaces used the bare `.systemGreen` alias, which

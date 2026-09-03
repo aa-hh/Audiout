@@ -74,21 +74,21 @@ public final class MembershipBusView: NSView {
     /// device): a tint, never alpha. It reaches the FILL only. The rim belongs
     /// to the rail — the node is still ON the wire, still in the group — so a
     /// dimmed `.member` keeps its rim in the spine's tone and fills its disc in
-    /// `railDormant` where gold would be: same seat, grey where gold. A hollow
-    /// node has no fill, so a dimmed `.nonMember` draws exactly like a live
-    /// one — "not in the group" already has nothing to grey out. `.failed` is
-    /// never dimmed (the red ring carries it); the whole-rail dormant tone is
-    /// the overlay's own flag, not this one.
+    /// `nodeUnavailableFill` where gold would be: same seat, grey where gold. A
+    /// hollow node has no fill, so a dimmed `.nonMember` draws exactly like a
+    /// live one — "not in the group" already has nothing to grey out. `.failed`
+    /// is never dimmed (the red ring carries it); the whole-rail dormant tone
+    /// is the overlay's own flag, not this one.
     ///
-    /// Measured (WCAG luminance ratios, `python3`): dark `railDormant`
-    /// `#7D7466` sits 2.50:1 from `gold` `#E8B84B` and 3.55:1 from `raised`
-    /// `#241F1A`; light `#8A8272` sits 1.09:1 from `gold` `#9E761D` and 3.34:1
-    /// from `raised` `#F2F0EA`. So in dark the grey disc reads as "not gold"
-    /// by luminance; in light it separates from gold by chroma alone (grey vs
-    /// saturated ochre), the luminance is a wash. Against the ember rim the
-    /// disc measures 1.09:1 in dark (`#8A6A2F`) and 1.82:1 in light
-    /// (`#6F5629`, `Tokens.swift`'s full-accent light ember) — on an idle
-    /// (ember-rimmed) dark rail the rim is a hue edge, not a brightness edge.
+    /// Measured (WCAG luminance ratios, `python3`), fill against the rim it
+    /// sits inside: dark `#7D7466` is 2.50:1 from `gold` `#E8B84B`; light
+    /// `#46423A` is 2.41:1 from `gold` `#9E761D` and 1.65:1 from `ember`
+    /// `#7A5E2A`. Those gaps are what make "unavailable" legible on a 13 pt
+    /// disc — a small mark is read on the luminance channel, so a grey that
+    /// merely differs in chroma does not report anything at a glance. The one
+    /// pairing that cannot buy a luminance gap is the dark `ember` rim
+    /// (`#8A6A2F`, 1.09:1); `Tokens.Color.nodeUnavailableFill` carries the
+    /// arithmetic for why, and `TokenContrastMatrixTests` pins the rest.
     private var dimmed = false
     /// Whether the `.origin` hook draws GOLD (the Main Audio spine is armed —
     /// connected members are feeding it) vs the quiet `ember` idle tone (v4
@@ -254,9 +254,9 @@ public final class MembershipBusView: NSView {
             if node == .member {
                 // Rim in the spine's own tone: gold on an armed rail, ember on
                 // an idle one (same split the wire draws with). The fill is the
-                // same tone, or `railDormant` when dimmed — see `dimmed`.
+                // same tone, or `nodeUnavailableFill` when dimmed — see `dimmed`.
                 let rim = Tokens.Color.spineTone(armed: armed)
-                let fill = dimmed ? Tokens.Color.railDormant : rim
+                let fill = dimmed ? Tokens.Color.nodeUnavailableFill : rim
                 fill.setFill()
                 NSBezierPath(ovalIn: rect).fill()
                 strokeNodeRim(in: rect, color: rim, dashed: false)
@@ -355,9 +355,10 @@ public final class MembershipBusView: NSView {
     /// The node rendering currently drawn (structural hook — the same `node` the
     /// drawing reads, so it can't drift from the pixels).
     public var test_node: Node { node }
-    /// Whether this row's node FILL is the de-emphasis tint (`railDormant`) —
-    /// a tint, never alpha. The rim is never dimmed, and a hollow node has no
-    /// fill, so on a `.nonMember` this flag changes no pixel (see `dimmed`).
+    /// Whether this row's node FILL is the de-emphasis tint
+    /// (`nodeUnavailableFill`) — a tint, never alpha. The rim is never dimmed,
+    /// and a hollow node has no fill, so on a `.nonMember` this flag changes no
+    /// pixel (see `dimmed`).
     public var test_dimmed: Bool { dimmed }
     /// The disc radius this row's node draws at THIS frame — mid-tween while a
     /// hover is travelling. Structural hook, same value `draw` reads, so it

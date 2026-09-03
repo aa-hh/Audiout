@@ -201,6 +201,8 @@ extension SerializedSharedState {
                          groundsFor: sameGrounds([("well", well)])),
             ContrastEntry(name: "railDormant", token: Tokens.Color.railDormant, floor: 3.0,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
+            ContrastEntry(name: "nodeUnavailableFill", token: Tokens.Color.nodeUnavailableFill, floor: 3.0,
+                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
             ContrastEntry(name: "scopeFlatLine", token: Tokens.Color.scopeFlatLine, floor: 3.0,
                          groundsFor: sameGrounds([("scopeGround", scopeGround)])),
             ContrastEntry(name: "scopeBypassLine", token: Tokens.Color.scopeBypassLine, floor: 3.0,
@@ -276,6 +278,56 @@ extension SerializedSharedState {
             #expect(increased > base, Comment(rawValue: "\(appearanceName.rawValue): IC ember \(increased):1 on panel is not past base \(base):1"))
             if appearanceName == .aqua {
                 #expect(increasedLuminance < baseLuminance, Comment(rawValue: "light IC ember \(increasedLuminance) is not darker than base \(baseLuminance)"))
+            }
+        }
+    }
+
+    // MARK: - Test C0: the unavailable node's fill stays tellable from its rim
+
+    /// A dimmed membership node keeps its rim in the rail's own tone and swaps
+    /// ONLY its disc fill, so the fill-against-rim difference is the entire
+    /// "this speaker is unavailable" signal. At 13 pt that reading rides on
+    /// the luminance channel: a grey that differs from `gold` in chroma alone
+    /// reports nothing at a glance. The fill is its own token rather than
+    /// `railDormant` because that value is also the dormant WIRE, which has to
+    /// stay QUIET in light while this disc has to go deep. Swept over
+    /// appearance x Increase Contrast because both move the rim as well as
+    /// the fill — and it lives in this file rather than
+    /// `MembershipWellContrastTests` for the IC seam, the same serialization
+    /// reason the rest of this suite has.
+    ///
+    /// `ember` is asserted in LIGHT only. Dark `ember` sits at luminance
+    /// 0.159 while the >=3:1 floor on `raised` forbids any fill below 0.143,
+    /// so the band beneath it is 1.08:1 wide and nothing clears it — the full
+    /// arithmetic, and why the gold gap keeps the budget instead, is on the
+    /// token.
+    @Test func unavailableNodeFillStaysTellableFromItsRim() {
+        Tokens.accentStyle = .fullGold
+        defer { Tokens.test_increaseContrastOverride = nil }
+        let goldFloor: CGFloat = 2.0
+        let emberFloor: CGFloat = 1.45
+
+        for appearance: NSAppearance.Name in [.aqua, .darkAqua] {
+            for icOn in [false, true] {
+                Tokens.test_increaseContrastOverride = icOn
+                let fill = resolved(Tokens.Color.nodeUnavailableFill, appearanceName: appearance)
+
+                let goldGap = contrastRatio(fill, resolved(Tokens.Color.gold, appearanceName: appearance))
+                #expect(goldGap >= goldFloor,
+                        Comment(rawValue: "unavailable fill vs its gold rim (\(appearance.rawValue) " +
+                        "ic=\(icOn)): \(String(format: "%.2f", goldGap)):1 under \(goldFloor):1 — an " +
+                        "unavailable disc and a live one are then the same brightness"))
+
+                #expect(fill.saturationComponent <= 0.25,
+                        Comment(rawValue: "unavailable fill saturation \(fill.saturationComponent) " +
+                        "(\(appearance.rawValue) ic=\(icOn)) — it must stay a neutral, not become a " +
+                        "third instrument hue"))
+
+                guard appearance == .aqua else { continue }
+                let emberGap = contrastRatio(fill, resolved(Tokens.Color.ember, appearanceName: appearance))
+                #expect(emberGap >= emberFloor,
+                        Comment(rawValue: "unavailable fill vs its ember rim (light ic=\(icOn)): " +
+                        "\(String(format: "%.2f", emberGap)):1 under \(emberFloor):1"))
             }
         }
     }

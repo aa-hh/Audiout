@@ -146,6 +146,14 @@ public final class GroupCreationSheetController: NSViewController {
         nameField.setAccessibilityLabel("Group name")
         nameField.target = self
         nameField.action = #selector(nameFieldReturnPressed(_:))
+        // RETURN ONLY. A text field also sends its action whenever editing
+        // ENDS — tabbing out, clicking elsewhere, the sheet closing. So
+        // dismissing this sheet after a refusal ran `commit()` once more,
+        // against a window already leaving the screen, and AppKit hosted that
+        // second alert on a blank "Untitled" window of its own. Live-caught
+        // 2026-09-03, on a build that already had both re-entry guards in
+        // `commit()` — they only cover a landing while the first alert is up.
+        nameField.cell?.sendsActionOnEndEditing = false
 
         iconWellButton.translatesAutoresizingMaskIntoConstraints = false
         iconWellButton.widthAnchor.constraint(equalToConstant: Self.iconWellSize).isActive = true
@@ -413,19 +421,16 @@ public final class GroupCreationSheetController: NSViewController {
     /// `memberVolumes` entry is that device's current backend volume.
     private func commit() {
         guard isCreateEnabled else { return }
-        // ONCE. Return in the name field and the default button's own Return
-        // both land here, and a second landing arrives AFTER the first has
-        // already saved the group — so the sheet refused the name it had just
-        // created, on a first-ever group ("that name is already taken",
-        // live-caught 2026-09-03). Everything below is re-runnable after a
-        // REFUSAL (the flag is only set once a group actually exists), so a
-        // corrected name still commits.
+        // ONCE. The name field used to send its action whenever editing
+        // ended, so dismissing the sheet landed here a second time — after
+        // the first landing had saved the group (it then refused its own
+        // name), or after a refusal (a second alert, which AppKit hosted on a
+        // blank "Untitled" window). Both live-caught 2026-09-03. The field
+        // now fires on Return only (`loadView`); these two guards stay as
+        // backstops. Everything below is re-runnable after a REFUSAL (the
+        // flag is only set once a group actually exists), so a corrected
+        // name still commits.
         guard !hasCreatedGroup else { return }
-        // An alert this sheet raised is still up. The second landing
-        // would raise a SECOND alert on a window that already has one
-        // attached, and AppKit hosts that orphan on a blank window of
-        // its own — live-caught 2026-09-03, a grey "Untitled" window
-        // behind the dedup alert.
         guard !isShowingAlert else { return }
         let trimmed = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = trimmed.isEmpty ? "New Group" : trimmed
@@ -560,6 +565,15 @@ public final class GroupCreationSheetController: NSViewController {
     /// The name field's current text (the caller-provided prefill until the
     /// user edits it).
     public var test_nameFieldText: String { nameField.stringValue }
+
+    /// Whether the name field would also fire `commit()` when editing merely
+    /// ends (tab out, click away, sheet closing) rather than on Return only.
+    /// `loadViewIfNeeded()` first: the wiring lives in `loadView`, which a
+    /// headless run never reaches on its own (same as `test_titleText`).
+    public var test_nameFieldCommitsOnEndEditing: Bool {
+        loadViewIfNeeded()
+        return nameField.cell?.sendsActionOnEndEditing ?? true
+    }
 
     /// Simulate ticking/unticking a candidate's membership checkbox.
     public func test_setMembership(deviceID: String, isChecked: Bool) {

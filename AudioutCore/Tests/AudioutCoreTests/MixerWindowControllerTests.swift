@@ -936,6 +936,21 @@ import AppKit
         #expect(controller.groups.count == 1, "and writes nothing")
     }
 
+    /// A text field sends its action whenever editing ENDS unless told
+    /// otherwise, so closing the sheet after a refusal ran `commit()` once
+    /// more — against a window already leaving the screen, and AppKit hosted
+    /// that alert on a blank "Untitled" window. Live-caught 2026-09-03 on a
+    /// build that already had both re-entry guards above.
+    @Test func theCreateSheetNameFieldCommitsOnReturnOnly() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+
+        #expect(!sheet.test_nameFieldCommitsOnEndEditing,
+                "tabbing out of the name field, or the sheet closing, must not commit")
+    }
+
     // MARK: The creation sheet reports a failed save (P1-4)
 
     @Test func createSheetReportsAFailedSaveAndKeepsTheForm() async throws {

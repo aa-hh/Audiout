@@ -14,8 +14,10 @@ import AppKit
 /// - **Fill** `Tokens.Color.raised` — the same surface the icon well beside it
 ///   is filled with, so the two halves of the header band read as one pair of
 ///   controls rather than a control and a bare string.
-/// - **Border** `Tokens.Color.hairline` at `borderWidth` (1 pt, matching
-///   `DeviceIconWellView`'s resting edge).
+/// - **Border** `Tokens.Color.containerEdge` at `borderWidth` (1 pt) — the
+///   field's fill is `raised`, and `hairline` is never drawn on `raised`
+///   (1.154:1 dark); `containerEdge` measures 1.55:1 on it in dark and 2.02:1
+///   on the flat light ground, where it is the whole field.
 /// - **Hover wash** `Tokens.Color.label` at
 ///   `PopoverColumnGrid.rowHoverWashAlpha` — byte-identical to the icon well's
 ///   highlighted state (spec §4.8: hover is a neutral wash, never gold, and
@@ -114,7 +116,7 @@ public final class WarmNameFieldCell: NSTextFieldCell {
             box.fill()
         }
 
-        Tokens.Color.hairline.setStroke()
+        Tokens.Color.containerEdge.setStroke()
         box.lineWidth = Self.borderWidth
         box.stroke()
 

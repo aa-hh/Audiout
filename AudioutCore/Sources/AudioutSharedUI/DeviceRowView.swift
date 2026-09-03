@@ -113,7 +113,7 @@ public final class DeviceRowView: NSView {
         case none
         /// `.connecting` / `.reconnecting` — the dashed breathing ring.
         case connecting
-        /// `.connected` — the solid `ringConnected` ring.
+        /// `.connected` — the solid `rim` ring.
         case connected
         /// `.failed` — the solid red `failure` ring.
         case failed
@@ -193,6 +193,8 @@ public final class DeviceRowView: NSView {
     private var hasLiveFeeds = false
     /// The armed predicate's last computed value (what the dot renders).
     private var isRouteArmed = false
+    /// The main-mix term of the armed predicate, read by the FEED column's pill tint.
+    private var isMainMixArmed = false
     /// Whether the row's volume/mute gesture is pending its Cast feed-gain
     /// apply moment — mirrors `faderCell.isPendingApply`; stored so
     /// `configureAccessibility()` (called outside `apply`'s own scope) can
@@ -206,16 +208,18 @@ public final class DeviceRowView: NSView {
     /// unavailable — see ``resolveSublabel()``. Failed/unavailable and the
     /// routing/redirect composite all moved to ``feedStack`` (the FEED column).
     private let statusLabel = NSTextField(labelWithString: "")
-    /// The trailing **FEED** column: a LEFT-ALIGNED row of small bordered
-    /// pills (`FeedPillView`, one per visible feed value — the product
+    /// The trailing **FEED** column: a LEFT-ALIGNED row of small `well`+`rim`
+    /// capsules (`FeedPillView`, one per visible feed value — the product
     /// owner's ported-verbatim call against the old single packed-string
     /// composite joined by " · "), hosted in a plain horizontal `NSStackView`.
-    /// The neutral main-mix segment (``mainMixSourceName``, "System" or the
-    /// active group's name) gets a plain pill; one tinted pill per redirected
-    /// app (``feedAppNames``) carries the derived-colour `FeedChip` square
-    /// INSIDE it, beside the name. A `.failed`/unavailable device OVERRIDES
+    /// Every pill carries TEXT ONLY; its tint says whether the value it names
+    /// is sounding (D7): the main-mix segment (``mainMixSourceName``, "System"
+    /// or the active group's name) reads `goldText` while the main mix is
+    /// armed here, an app pill reads `goldText` while its feed is live, and
+    /// both fall back to `label2` (`label3` while the row is not adjustable).
+    /// A `.failed`/unavailable device OVERRIDES
     /// this with a SINGLE failure-red pill instead ("Couldn't connect" /
-    /// "Unavailable"), no chip. Mounted and constrained ONLY on a bus row
+    /// "Unavailable"). Mounted and constrained ONLY on a bus row
     /// (``busActive``) — that's the one host where the trailing control column
     /// (`PopoverColumnGrid.trailingControlWidth`, centered at
     /// `trailingControlCenterFromTrailing`) is otherwise reserved-but-EMPTY
@@ -250,13 +254,6 @@ public final class DeviceRowView: NSView {
     /// (`routedAppNames`), mirroring the retired sublabel's own T9 precedence.
     /// Recomputed every `apply`.
     private var feedAppNames: [String] = []
-    /// The host-supplied per-app tether tint (Warm Signal v4.1 CORRECTIONS,
-    /// extending T7/item 7): app display name → `AppTetherColor`-derived
-    /// color, computed once per bundle id and cached there — this row only
-    /// looks names up, it never derives a color itself (it doesn't hold app
-    /// icons/bundle ids, only the display names `feedAppNames` carries). Set
-    /// every `apply`; read by ``appSegmentColor(for:)``.
-    private var appTintColors: [String: NSColor] = [:]
     /// Whether the row's controls currently render the "muted-unconnected"
     /// treatment (v4 §Call-1 + v4.1 item 8): desaturated fader/readout AND —
     /// new in item 8 — dimmed FEED text. Stored (not just a local in
@@ -374,14 +371,6 @@ public final class DeviceRowView: NSView {
     /// toggle).
     private let showsToggle: Bool
 
-    /// Whether the row paints the accent-wash pill behind a row that's IN the
-    /// Selected Devices set. The popover (2026-07-14 — ahh: no longer needed,
-    /// the row's accent icon tint + switch state already say "on") passes
-    /// `false`; the mixer window keeps it (its rows have no card background to
-    /// separate them, so the wash still carries useful row-to-row separation).
-    /// Defaults to `true` so existing callers (the mixer window) are unchanged.
-    private let paintsSelectionBackground: Bool
-
     /// True when this row is drawn in the menu (paint the menu highlight);
     /// false in the mixer window (no `enclosingMenuItem` — let standard control
     /// appearance show). Computed live from `enclosingMenuItem` so the same
@@ -389,12 +378,11 @@ public final class DeviceRowView: NSView {
     private var isInMenu: Bool { enclosingMenuItem != nil }
 
     public init(device: Device, indented: Bool = false, showsToggle: Bool = true,
-               paintsSelectionBackground: Bool = true, showsMeter: Bool = false,
-               showsBus: Bool = false, showsSyncControls: Bool = false) {
+               showsMeter: Bool = false, showsBus: Bool = false,
+               showsSyncControls: Bool = false) {
         self.device = device
         self.indented = indented
         self.showsToggle = showsToggle
-        self.paintsSelectionBackground = paintsSelectionBackground
         self.showsMeter = showsMeter
         self.showsBus = showsBus
         self.showsSyncControls = showsSyncControls
@@ -483,22 +471,12 @@ public final class DeviceRowView: NSView {
     ///     Defaults to `nil`, in which case the row behaves exactly as before —
     ///     `device.kind.symbolName` is used directly. Existing callers all omit
     ///     this, so their behavior is byte-for-byte unchanged.
-    ///   - appTintColors: display name → `AppTetherColor`-derived tint for
-    ///     every app the HOST currently has a route for (Warm Signal v4.1
-    ///     CORRECTIONS, extending T7/item 7) — the same map the host builds
-    ///     for the matching App Routing row, so both ends of a tether
-    ///     agree on the color. Only names appearing in ``feedAppNames`` are
-    ///     ever looked up; an unmapped name falls back to
-    ///     `AppTetherColor.neutralFallback` (see ``appSegmentColor(for:)``).
-    ///     Defaults to empty so a caller that never redirects anything here
-    ///     is unaffected.
     public func apply(_ device: Device,
                       selected: Bool,
                       controllable: Bool = false,
                       selectionDimmed: Bool = false,
                       routedAppNames: [String] = [],
                       liveAppNames: [String] = [],
-                      appTintColors: [String: NSColor] = [:],
                       masterMuted: Bool = false,
                       inActiveTarget: Bool? = nil,
                       mainOutTargetsGroupName: String? = nil,
@@ -575,7 +553,7 @@ public final class DeviceRowView: NSView {
         // accent-when-selected fill. Selection reads from the switch state; the
         // on-icon corner dot carries the connection status instead. (This also
         // covers unsupported/AP1 rows — no accent regardless of stale selection.)
-        iconView.contentTintColor = Tokens.Color.secondaryLabel
+        iconView.contentTintColor = Tokens.Color.label2
         // The icon is the visible door to the row's menu — armed only when
         // there IS a menu (This Mac has none, so its icon stays a picture).
         iconView.onPress = buildContextMenu() == nil
@@ -583,7 +561,6 @@ public final class DeviceRowView: NSView {
             : { [weak self] in self?.presentIconMenu() }
         iconView.setAccessibilityLabel("Speaker options")
         nameLabel.stringValue = device.name
-        nameLabel.textColor = rowTextColor
         alphaValue = 1.0
 
         // Connection halo ring: driven off `connectionState` ALONE (spec §3.2 /
@@ -610,8 +587,10 @@ public final class DeviceRowView: NSView {
         let isConnected: Bool
         if case .connected = device.connectionState { isConnected = true } else { isConnected = false }
         let mainMixArmed = activeMember && isConnected && !device.isMuted && !masterMuted
+        isMainMixArmed = mainMixArmed
         isRouteArmed = mainMixArmed || hasLiveFeeds
         armedDotView.apply(armed: isRouteArmed)
+        nameLabel.textColor = rowTextColor
 
         // FEED column (v4.1 item 3): main-mix segment wording — "System" for a
         // manual member, the active group's name for a group-target member;
@@ -620,7 +599,6 @@ public final class DeviceRowView: NSView {
         // VoiceOver feed clause share one source of truth.
         self.mainMixSourceName = activeMember ? (mainOutTargetsGroupName ?? "System") : nil
         self.feedAppNames = liveAppNames.isEmpty ? routedAppNames : liveAppNames
-        self.appTintColors = appTintColors
         // The fader's engaged (gold) fill reuses the EXACT same predicate the
         // dot renders — one armed truth, two instruments (spec §3.3 / §5).
         faderCell.isRouteArmed = isRouteArmed
@@ -708,11 +686,17 @@ public final class DeviceRowView: NSView {
         updateEQButton()
         muteButton.state = device.isMuted ? .on : .off
         updateMuteTint()
-        // V7 + v4 §Call-1: the `%` readout dims in lockstep with the slider's
-        // enabled state OR the muted-unconnected state — a disabled / unavailable
-        // / connecting / failed row reads as fully de-emphasized.
-        readoutLabel.textColor = (slider.isEnabled && !controlsMuted)
-            ? Tokens.Color.secondaryLabel : Tokens.Color.tertiaryLabel
+        // The `%` readout has three states (D6): sounding here reads `goldText`,
+        // a stored-but-idle level reads `emberText`, and a row that is not
+        // adjustable — slider disabled, or the muted-unconnected treatment —
+        // drops to the cool dim `labelCool2`.
+        if !slider.isEnabled || controlsMuted {
+            readoutLabel.textColor = Tokens.Color.labelCool2
+        } else if isRouteArmed {
+            readoutLabel.textColor = Tokens.Color.goldText
+        } else {
+            readoutLabel.textColor = Tokens.Color.emberText
+        }
 
         // Under-name meter visibility (v4 §Call-1): the meter is shown ONLY on
         // armed + unmuted + connected rows (the §3.3 armed predicate captures
@@ -899,7 +883,7 @@ public final class DeviceRowView: NSView {
     /// `viewDidChangeEffectiveAppearance` (the pill fill is a static CGColor).
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
-        muteButton.contentTintColor = engaged ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
+        muteButton.contentTintColor = engaged ? Tokens.Color.engagedChrome : Tokens.Color.label2
         muteButton.wantsLayer = true
         muteButton.layer?.cornerRadius = PopoverColumnGrid.mutePillCornerRadius
         effectiveAppearance.performAsCurrentDrawingAppearance {
@@ -930,7 +914,7 @@ public final class DeviceRowView: NSView {
         guard supportsEqualizer else { return }
         eqButton.setAccessibilityLabel("Equalizer for \(device.name)")
         eqButton.setAccessibilityValue(isEQShaped ? "Shaped" : "Flat")
-        eqButton.contentTintColor = isEQShaped ? Tokens.Color.gold : Tokens.Color.secondaryLabel
+        eqButton.contentTintColor = isEQShaped ? Tokens.Color.gold : Tokens.Color.label2
         // The symbol image is re-made rather than re-tinted: weight lives in
         // the `SymbolConfiguration`, not in the tint.
         eqButton.image = NSImage(systemSymbolName: Self.eqSymbolName,
@@ -1004,7 +988,7 @@ public final class DeviceRowView: NSView {
             // failed halo ring.
             showSublabel("Couldn't connect", color: Tokens.Color.failure)
         } else if !device.isAvailable {
-            showSublabel("Unavailable", color: Tokens.Color.inkTertiary)
+            showSublabel("Unavailable", color: Tokens.Color.labelCool2)
         } else if let routing = legacyRoutingLine() {
             // S3 (spec §3.5): a ROW-muted device prepends the Muted token to
             // its EXISTING feed sublabel — never to a single-line row (this
@@ -1015,7 +999,7 @@ public final class DeviceRowView: NSView {
             if device.isMuted {
                 showLegacyMutedSublabel(feeds: routing)
             } else {
-                showSublabel(routing, color: Tokens.Color.secondaryLabel)
+                showSublabel(routing, color: isRouteArmed ? Tokens.Color.label2 : Tokens.Color.labelCool2)
             }
         } else {
             hideSublabel()
@@ -1042,8 +1026,8 @@ public final class DeviceRowView: NSView {
         statusLabel.attributedStringValue = NSAttributedString(
             string: "Muted",
             attributes: [.font: Tokens.Font.microLabel,
-                         .foregroundColor: Tokens.Color.secondaryLabel])
-        statusLabel.textColor = Tokens.Color.secondaryLabel
+                         .foregroundColor: Tokens.Color.label2])
+        statusLabel.textColor = Tokens.Color.label2
         applyNameStackLayout(twoLine: true)
     }
 
@@ -1056,13 +1040,13 @@ public final class DeviceRowView: NSView {
         let composed = NSMutableAttributedString(
             string: "Muted",
             attributes: [.font: Tokens.Font.microLabel,
-                         .foregroundColor: Tokens.Color.secondaryLabel])
+                         .foregroundColor: Tokens.Color.label2])
         composed.append(NSAttributedString(
             string: Self.routingTokenSeparator + feeds,
             attributes: [.font: bodyFont,
-                         .foregroundColor: Tokens.Color.secondaryLabel]))
+                         .foregroundColor: Tokens.Color.label2]))
         statusLabel.attributedStringValue = composed
-        statusLabel.textColor = Tokens.Color.secondaryLabel
+        statusLabel.textColor = Tokens.Color.label2
         applyNameStackLayout(twoLine: true)
     }
 
@@ -1140,19 +1124,22 @@ public final class DeviceRowView: NSView {
             }
         }
         var segments: [FeedSegment] = []
-        // The neutral main-mix segment (spec item 3's own word "carries" the
-        // reason) NEVER wears a chip — only a redirected app does (v4.1
-        // CORRECTIONS "keep neutral segments … untinted"). Item 8: while the
-        // row is in the muted-unconnected treatment, both segment kinds dim —
-        // the neutral word drops to `tertiaryLabel`, an app's tether tint
-        // desaturates (never discarded outright, so the association still
-        // reads once the row brightens back).
-        let neutralColor = controlsMuted ? Tokens.Color.tertiaryLabel : Tokens.Color.feedPillText
-        if let mainMixSourceName { segments.append(.init(text: mainMixSourceName, color: neutralColor, hasChip: false)) }
+        // Pill tint says what is SOUNDING (D7): the main-mix pill goes
+        // `goldText` while the main mix is armed on this row, an app pill goes
+        // `goldText` while its feed is confirmed live, and anything not
+        // sounding wears the chrome tone. A row in the muted-unconnected
+        // treatment drops the whole column to `label3`.
+        if let mainMixSourceName {
+            let color = controlsMuted
+                ? Tokens.Color.label3
+                : (isMainMixArmed ? Tokens.Color.goldText : Tokens.Color.label2)
+            segments.append(.init(text: mainMixSourceName, color: color))
+        }
         for name in feedAppNames {
-            var color = appSegmentColor(for: name)
-            if controlsMuted { color = color.withAlphaComponent(Self.feedMutedTintAlpha) }
-            segments.append(.init(text: name, color: color, hasChip: true))
+            let color = controlsMuted
+                ? Tokens.Color.label3
+                : (hasLiveFeeds ? Tokens.Color.goldText : Tokens.Color.label2)
+            segments.append(.init(text: name, color: color))
         }
         setFeedSegments(segments)
         // Tooltip (P1-5): the FULL, uncapped feed list — the "+N" cap is a
@@ -1176,32 +1163,11 @@ public final class DeviceRowView: NSView {
         return names
     }
 
-    /// Alpha applied to an app-tint FEED segment while the row is in the
-    /// muted-unconnected treatment (v4.1 item 8's "muted feed text") —
-    /// desaturates the tether tint rather than discarding it, so the
-    /// app↔device association still reads once the row brightens back.
-    private static let feedMutedTintAlpha: CGFloat = 0.5
-
-    /// One FEED value: its text, its resolved color, and whether it wears the
-    /// derived-colour chip (an app-redirect value does; the neutral main-mix
-    /// value never does) — each renders as its own `FeedPillView`.
+    /// One FEED value: its text and its resolved text colour (D7) — each
+    /// renders as its own `FeedPillView`.
     private struct FeedSegment {
         let text: String
         let color: NSColor
-        let hasChip: Bool
-    }
-
-    /// Resolves the tint for one FEED app-name segment (Warm Signal v4.1
-    /// CORRECTIONS, extending T7/item 7): the host-supplied ``appTintColors``
-    /// map (an `AppTetherColor` tint per bundle id, computed and cached
-    /// there), keyed by display name since that's all this row carries for a
-    /// feed entry. A name the host never mapped (defensive — every real
-    /// caller populates the map from the same routes that produced
-    /// `feedAppNames`) falls back to `AppTetherColor.neutralFallback` rather
-    /// than the flat `feedPillText` a neutral segment uses, so an app
-    /// segment always reads as "a specific app," never as the neutral word.
-    private func appSegmentColor(for appName: String) -> NSColor {
-        appTintColors[appName] ?? AppTetherColor.neutralFallback
     }
 
     /// Empty `feedStack` and hide it — the "nothing to show at all" case
@@ -1216,7 +1182,7 @@ public final class DeviceRowView: NSView {
         feedStack.toolTip = nil
     }
 
-    /// Render a SINGLE failure-red pill (no chip) — the "Couldn't
+    /// Render a SINGLE failure-red pill — the "Couldn't
     /// connect" / "Unavailable" rungs.
     private func setFeedText(_ text: String, color: NSColor) {
         let attr = NSAttributedString(
@@ -1240,16 +1206,10 @@ public final class DeviceRowView: NSView {
         // Item 8: the "+N" overflow pill dims in lockstep with the pills it
         // sits beside — the same `controlsMuted` gate ``updateFeedText()``
         // used to build `segments`.
-        let chromeColor = controlsMuted ? Tokens.Color.tertiaryLabel : Tokens.Color.feedPillText
+        let chromeColor = controlsMuted ? Tokens.Color.label3 : Tokens.Color.label2
 
         func attributed(_ segment: FeedSegment) -> NSAttributedString {
             let result = NSMutableAttributedString()
-            // The chip (Warm Signal v4.1 CORRECTIONS "[chip] Music," now
-            // living INSIDE the pill beside the name) — an app segment only,
-            // never the neutral main-mix segment.
-            if segment.hasChip {
-                result.append(FeedChip.attachmentString(color: segment.color, font: font))
-            }
             result.append(NSAttributedString(string: segment.text, attributes: [.font: font, .foregroundColor: segment.color]))
             return result
         }
@@ -1431,7 +1391,7 @@ public final class DeviceRowView: NSView {
         // shows/hides it and `applyNameStackLayout` centers the name accordingly.
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.font = .systemFont(ofSize: 10)
-        statusLabel.textColor = Tokens.Color.secondaryLabel
+        statusLabel.textColor = Tokens.Color.labelCool2
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -1465,7 +1425,7 @@ public final class DeviceRowView: NSView {
         // the "Removed —" half stays secondary text.
         removalUndoLabel.translatesAutoresizingMaskIntoConstraints = false
         removalUndoLabel.font = Tokens.Font.caption
-        removalUndoLabel.textColor = Tokens.Color.secondaryLabel
+        removalUndoLabel.textColor = Tokens.Color.label2
         removalUndoButton.translatesAutoresizingMaskIntoConstraints = false
         removalUndoButton.bezelStyle = .accessoryBar
         removalUndoButton.isBordered = false
@@ -1497,8 +1457,8 @@ public final class DeviceRowView: NSView {
         // `%` readout, right-aligned, small secondary — hangs off the slider's
         // trailing edge (change 4) so the number reads tight against the slider.
         readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = Tokens.Font.caption
-        readoutLabel.textColor = Tokens.Color.secondaryLabel
+        readoutLabel.font = Tokens.Font.readout
+        readoutLabel.textColor = Tokens.Color.emberText
         readoutLabel.alignment = .right
         readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -1778,7 +1738,7 @@ public final class DeviceRowView: NSView {
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
         button.imagePosition = .imageOnly
-        button.contentTintColor = Tokens.Color.secondaryLabel
+        button.contentTintColor = Tokens.Color.label2
         button.target = self
         button.action = action
     }
@@ -1854,7 +1814,7 @@ public final class DeviceRowView: NSView {
     ///
     /// - **tuned** — "22.4 ms" in the normal label colour inside a solid
     ///   hairline border;
-    /// - **untuned** (D10) — "Not set" in `tertiaryLabel` inside a DASHED
+    /// - **untuned** (D10) — "Not set" in `label3` inside a DASHED
     ///   border: the discoverability affordance, since zero reads as finished
     ///   while "Not set" reads as an invitation;
     /// - **drawer open** — the app's established ENGAGED-CONTROL treatment,
@@ -1880,7 +1840,7 @@ public final class DeviceRowView: NSView {
         } else if tuned || offersWizard {
             color = Tokens.Color.label
         } else {
-            color = Tokens.Color.inkTertiary
+            color = Tokens.Color.label3
         }
         syncChipButton.attributedTitle = NSAttributedString(
             string: title,
@@ -2158,13 +2118,14 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRow(self, didToggleEnabled: flipped, for: device.id)
     }
 
-    /// The name/label colour for the current state: menu highlight wins, then a
-    /// dropped device greys out, then a not-selected device de-emphasizes (it's
-    /// not in the Selected Devices set), then normal.
+    /// The name colour for the current state: a menu highlight wins, then an
+    /// unavailable device takes the cool dim ink, then liveness decides — a
+    /// sounding row (`isRouteArmed`) reads warm `label`, a silent one reads the
+    /// cool `labelCool`.
     private var rowTextColor: NSColor {
         if isInMenu, enclosingMenuItem?.isHighlighted == true { return .selectedMenuItemTextColor }
-        if !device.isAvailable { return Tokens.Color.inkTertiary }
-        return isSelectedInSet ? Tokens.Color.label : Tokens.Color.secondaryLabel
+        if !device.isAvailable { return Tokens.Color.labelCool2 }
+        return isRouteArmed ? Tokens.Color.label : Tokens.Color.labelCool
     }
 
     // MARK: Test-support hooks
@@ -2289,7 +2250,7 @@ public final class DeviceRowView: NSView {
     }
 
     /// The halo ring's current stroke color (resolved against the effective
-    /// appearance) — asserts connected (`ringConnected`) vs failed (`failure`)
+    /// appearance) — asserts connected (`rim`) vs failed (`failure`)
     /// use distinct hues.
     public var test_ringStrokeColor: NSColor? { haloRingView.test_strokeColor }
 
@@ -2340,8 +2301,7 @@ public final class DeviceRowView: NSView {
     }
 
     /// The FEED column's current plain-text content, or `nil` when it has
-    /// nothing to show. Joins each pill's own text (chip object-replacement
-    /// characters already stripped by `FeedPillView.test_text`) with the same
+    /// nothing to show. Joins each pill's own text with the same
     /// " · " a test already reads between values — including a trailing
     /// "+N" pill when present — so a test can assert the rendered WORDS
     /// across the whole
@@ -2351,15 +2311,6 @@ public final class DeviceRowView: NSView {
         guard !pills.isEmpty else { return nil }
         let text = pills.map(\.test_text).joined(separator: Self.feedSegmentSeparator)
         return text.isEmpty ? nil : text
-    }
-
-    /// The number of derived-colour chips CURRENTLY rendered across the FEED
-    /// column's pills (Warm Signal — chip now lives INSIDE its pill) — one
-    /// per app-redirect pill, never for the neutral main-mix pill or an error
-    /// override. Reads each pill's own painted attachment run, so a test
-    /// asserts what's actually painted.
-    public var test_feedChipCount: Int {
-        feedPills.filter(\.test_hasChip).count
     }
 
     /// Whether the FEED column is CURRENTLY rendering the failure-red override
@@ -2378,9 +2329,9 @@ public final class DeviceRowView: NSView {
     }
 
     /// The FEED column's leading pill's CURRENTLY-painted foreground color
-    /// (the neutral main-mix pill when not an error override) — item 8's
-    /// "muted feed text" dims this from `secondaryLabel` to `tertiaryLabel`
-    /// while ``controlsMuted``. Reads what's actually painted, like
+    /// (the main-mix pill when not an error override): `label3` while
+    /// ``controlsMuted``, `goldText` while the main mix is sounding here,
+    /// `label2` otherwise. Reads what's actually painted, like
     /// ``test_feedIsErrorColored``.
     public var test_feedNeutralColor: NSColor? {
         feedPills.first?.test_leadingRunColor
@@ -2419,14 +2370,6 @@ public final class DeviceRowView: NSView {
         (feedStack.frame, syncChipButton.frame)
     }
 
-    /// The color a FEED app-name segment for `appName` currently resolves to —
-    /// the seam T7 rewires (``appSegmentColor(for:)``) to `AppTetherColor`.
-    /// Exposed so a test can pin today's flat `secondaryLabel` value; T7's swap
-    /// then shows up as an intentional, asserted change rather than silent drift.
-    public func test_feedAppSegmentColor(for appName: String) -> NSColor {
-        appSegmentColor(for: appName)
-    }
-
     /// Whether the connecting/reconnecting ring's breathing pulse is installed
     /// (on screen + Reduce Motion off). Lets tests assert the animation hook.
     public var test_ringIsBreathing: Bool { haloRingView.test_isBreathing }
@@ -2444,13 +2387,13 @@ public final class DeviceRowView: NSView {
     /// resets it whenever the row isn't a playing output).
     public func test_meterLevel() -> Float { lastMeterLevel }
 
-    /// The row's icon tint. Always `.secondaryLabelColor` (the
+    /// The row's icon tint. Always `label2` (the
     /// icon is neutral identity-only; selection reads from the switch, status
     /// from the on-icon dot). Retained for the T-U8 reset test.
     public var test_iconTint: NSColor? { iconView.contentTintColor }
 
-    /// The mute button's current tint (V1) — `.controlAccentColor` while muted,
-    /// `.secondaryLabelColor` otherwise. The glyph itself never changes; only
+    /// The mute button's current tint (V1) — `engagedChrome` while muted,
+    /// `label2` otherwise. The glyph itself never changes; only
     /// this tint does.
     public var test_muteTintColor: NSColor? { muteButton.contentTintColor }
     /// Whether this row mounted the Equalizer door at all.
@@ -2458,7 +2401,7 @@ public final class DeviceRowView: NSView {
     public var test_eqButtonFrame: NSRect { eqButton.frame }
     public var test_eqButtonHasTitle: Bool { !eqButton.title.isEmpty }
     /// The Equalizer door's not-flat mark: its glyph tint (`gold` when shaped,
-    /// `secondaryLabel` at rest) and the symbol weight that rides with it.
+    /// `label2` at rest) and the symbol weight that rides with it.
     public var test_eqTintColor: NSColor? { eqButton.contentTintColor }
     public var test_eqSymbolIsHeavy: Bool {
         eqButton.image?.symbolConfiguration == NSImage.SymbolConfiguration(
@@ -2482,11 +2425,8 @@ public final class DeviceRowView: NSView {
     public var test_routeArmed: Bool { armedDotView.test_isLit }
 
     /// The dot's current fill color (resolved) — gold when armed, the
-    /// dark/empty `dotSocket` otherwise.
+    /// dark/empty `socket` otherwise.
     public var test_dotFillColor: NSColor? { armedDotView.test_fillColor }
-
-    /// Whether the lit dot's STATIC glow halo is on (armed only).
-    public var test_dotHasGlow: Bool { armedDotView.test_hasGlow }
 
     /// Whether the one-shot arm bloom is currently mid-flight (fires only on a
     /// transition INTO armed after the first apply, on screen, Reduce Motion
@@ -2520,9 +2460,9 @@ public final class DeviceRowView: NSView {
         meterView.test_setDisplayedLevel(level)
     }
 
-    /// The `%` readout's current text colour (V7) — dims to `.tertiaryLabelColor`
-    /// in lockstep with the slider's disabled state, `.secondaryLabelColor`
-    /// otherwise.
+    /// The `%` readout's current text colour (D6) — `goldText` while the row is
+    /// sounding, `emberText` while it holds an idle level, and `labelCool2`
+    /// while the slider is disabled or the row is not adjustable.
     public var test_readoutColor: NSColor? { readoutLabel.textColor }
 
     /// Whether the Warm fader would render its ENGAGED (gold-gradient) fill —
@@ -2928,17 +2868,18 @@ public final class DeviceRowView: NSView {
             nameLabel.textColor = rowTextColor
         } else {
             // Menu-less host (popover card / mixer window). A rounded pill behind
-            // the row: a subtle accent wash when the device is IN the Selected
-            // Devices set (Control Center "on" look), else a fainter hover wash on
-            // pointer-over. Both are driven off state that ``apply`` resets, so a
-            // deselected row returns to a fully clean background (T-U8 bug fix).
+            // the row: a gold 12 % wash while the row is SOUNDING (D1 —
+            // `isRouteArmed`, the iPhone's "gold at 12% behind a live row"),
+            // else a fainter neutral hover wash on pointer-over. Both are driven
+            // off state that ``apply`` resets, so a row that stops sounding
+            // returns to a fully clean background (T-U8 bug fix).
             let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
                                       dy: PopoverColumnGrid.selectionHighlightInsetY)
             let path = NSBezierPath(roundedRect: rect,
                                     xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
                                     yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
-            if isSelectedInSet && paintsSelectionBackground {
-                Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha).setFill()
+            if isRouteArmed {
+                Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha).setFill()
                 path.fill()
             } else if isHovered {
                 Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha).setFill()
@@ -2958,13 +2899,12 @@ public final class DeviceRowView: NSView {
     /// layer never touches those flags or calls `setNeedsDisplay`, so a flash
     /// can never corrupt the persistent hover/selection state (the same
     /// transient-vs-persistent discipline documented on `isHovered` above).
-    /// The one place on this row that keeps `Tokens.Color.accent`, on purpose:
-    /// the flash is an ATTENTION signal ("look here, now"), not engaged-control
-    /// chrome, and it is over in under a second. ``Tokens/Color/engagedChrome``
+    /// The flash is an attention signal in `gold` — "look here, now", over in
+    /// under a second, so it is not a resting gold. ``Tokens/Color/engagedChrome``
     /// is neutral by design, which is exactly what a flash must not be.
     private lazy var flashLayer: CALayer = {
         let layer = CALayer()
-        layer.backgroundColor = Tokens.Color.accent.cgColor
+        layer.backgroundColor = Tokens.Color.gold.cgColor
         layer.opacity = 0
         layer.cornerRadius = PopoverColumnGrid.selectionHighlightCornerRadius
         return layer
@@ -3013,13 +2953,9 @@ public final class DeviceRowView: NSView {
     /// Simulate a host asking this row to flash (A4 test hook).
     public func test_flashRow() { flashRow() }
 
-    /// Whether the row is currently painting its selected-row background. A
-    /// deselected row MUST report `false` — the visual property that encodes the
-    /// highlight, asserted by the T-U8 deselect-reset test. Always `false` when
-    /// `paintsSelectionBackground` is off (the popover, 2026-07-14).
-    public var test_isShowingSelectedBackground: Bool {
-        !isInMenu && isSelectedInSet && paintsSelectionBackground
-    }
+    /// Whether the row is currently painting its live gold wash. It follows the
+    /// armed predicate (D1) — a row that stops sounding MUST report `false`.
+    public var test_isShowingLiveWash: Bool { !isInMenu && isRouteArmed }
     /// Whether a transient hover wash is currently active (must reset on deselect).
     public var test_isHovered: Bool { isHovered }
 
@@ -3223,12 +3159,12 @@ private final class SyncChipCell: NSButtonCell {
         return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha)
     }
 
-    /// Engaged borrows the engaged-chrome tone; untuned uses the `tertiaryLabel` its
+    /// Engaged borrows the engaged-chrome tone; untuned uses the `label3` its
     /// "Not set" text does (one de-emphasis, spoken twice); a tuned resting
     /// chip wears the shared `hairline`, the codebase's border tone.
     var borderColor: NSColor {
         if isEngaged { return Tokens.Color.engagedChrome }
-        return isUntuned ? Tokens.Color.inkTertiary : Tokens.Color.hairline
+        return isUntuned ? Tokens.Color.label3 : Tokens.Color.hairline
     }
 }
 

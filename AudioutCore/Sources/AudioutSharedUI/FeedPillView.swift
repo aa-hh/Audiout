@@ -2,23 +2,20 @@
 
 import AppKit
 
-/// One **bordered pill** in `DeviceRowView`'s FEED column (Warm Signal — the
+/// One **capsule** in `DeviceRowView`'s FEED column (Warm Signal — the
 /// product owner's ported-verbatim call: "each feed value gets its own
 /// bordered pill, not one packed string joined by middle dots").
 /// `DeviceRowView` hosts a left-aligned horizontal row of these, one per
 /// visible feed segment (plus an optional trailing "+N" overflow pill and a
 /// single error-override pill), inside a plain `NSStackView`.
 ///
-/// A pill hosts a text label — optionally prefixed with the same
-/// derived-colour `FeedChip` square a redirected app's tether wears elsewhere
-/// — inside a filled rounded rect, so even a short value like "System" reads
-/// as a small object instead of floating in empty space. The pill reads by
-/// FILL ALONE — no border: a 1 px hairline outline measures 1.14:1 dark /
-/// 1.00:1 light against the pill's own fill, decorative in both modes — and
-/// an error pill signals via its failure-red TEXT (3.24:1 on the dark fill),
-/// not an outline. The neutral main-mix segment (and the
-/// failure-red "Couldn't connect"/"Unavailable" override, and the "+N"
-/// overflow pill) carry NO chip — only a redirected app's own pill does.
+/// A pill carries TEXT ONLY, inside a `well` fill with a `rim` edge, rounded
+/// to a full capsule — the iPhone companion's destination-pill recipe — so
+/// even a short value like "System" reads as a small object instead of
+/// floating in empty space. The edge is load-bearing here (`rim` measures
+/// 4.38:1 on `well` dark, 4.15:1 light) because the fill sits barely off the
+/// row ground. What the TEXT colour says is whether the value is sounding
+/// (D7), and an error pill signals in failure red plus its own glyph.
 ///
 /// Drawing/layout-only, non-interactive (`hitTest` returns `nil`, mirroring
 /// `LevelMeterView`/`RouteArmedDotView`'s "small self-contained view" house
@@ -48,7 +45,7 @@ final class FeedPillView: NSView {
     init() {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = PopoverColumnGrid.feedPillCornerRadius
+        layer?.borderWidth = 1
 
         label.translatesAutoresizingMaskIntoConstraints = false
         label.lineBreakMode = .byClipping
@@ -105,11 +102,10 @@ final class FeedPillView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     /// Push this pill's content. `attributedText` is pre-composed by the row
-    /// (already carrying a leading `FeedChip` attachment when the segment is
-    /// a redirected app, and/or the leading AP1 micro-tag prefix on the FIRST
-    /// visible pill) — this view only draws the fill chrome around it. An
+    /// (carrying the leading AP1 micro-tag prefix on the FIRST visible pill,
+    /// where there is one) — this view only draws the capsule around it. An
     /// error pill ALSO gets a leading triangle glyph (P2-6), so it reads by
-    /// shape, not colour alone; the fill is one token for every pill.
+    /// shape, not colour alone; the fill and edge are one pair for every pill.
     func configure(attributedText: NSAttributedString, isError: Bool) {
         label.attributedStringValue = attributedText
         if isError {
@@ -123,20 +119,26 @@ final class FeedPillView: NSView {
         updateAppearance()
     }
 
-    /// The fill is a static `CGColor` on the layer, so a live light/dark or
-    /// Increase-Contrast switch needs a manual re-stamp (same discipline as
-    /// `DeviceRowView.updateMuteTint()`): light/dark arrives via
-    /// `viewDidChangeEffectiveAppearance` below, and a mid-session
-    /// Increase-Contrast-ONLY toggle — which fires neither `apply` nor that
-    /// appearance callback — is covered by the `accessibilityDisplayOptionsDidChange`
-    /// observer registered in `init` (design P2-5, mirrors `LevelMeterView`).
-    /// `Tokens.Color.feedPillFill` is the pill's dedicated wash — a stock
-    /// `quaternaryLabelColor` wash measures a near-invisible 1.31:1 dark /
-    /// 1.21:1 light against the canvas.
+    /// Both the `well` fill and the `rim` edge are static `CGColor`s on the
+    /// layer, so a live light/dark or Increase-Contrast switch needs a manual
+    /// re-stamp (same discipline as `DeviceRowView.updateMuteTint()`):
+    /// light/dark arrives via `viewDidChangeEffectiveAppearance` below, and a
+    /// mid-session Increase-Contrast-ONLY toggle — which fires neither `apply`
+    /// nor that appearance callback — is covered by the
+    /// `accessibilityDisplayOptionsDidChange` observer registered in `init`
+    /// (design P2-5, mirrors `LevelMeterView`).
     private func updateAppearance() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = Tokens.Color.feedPillFill.cgColor
+            layer?.backgroundColor = Tokens.Color.well.cgColor
+            layer?.borderColor = Tokens.Color.rim.cgColor
         }
+    }
+
+    /// The capsule radius follows the pill's own height, so it stays a capsule
+    /// at whatever the label's font and padding produce.
+    override func layout() {
+        super.layout()
+        layer?.cornerRadius = bounds.height / 2
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -147,25 +149,8 @@ final class FeedPillView: NSView {
     // MARK: Test hooks — `DeviceRowView`'s `test_feed*` accessors read these
     // across every pill currently in its `feedStack`.
 
-    /// This pill's plain-text content, with the chip attachment's object-
-    /// replacement character stripped (mirrors the retired `feedLabel`'s own
-    /// `test_feedText` stripping) so a test reading WORDS never has to know a
-    /// chip exists.
-    var test_text: String {
-        label.attributedStringValue.string
-            .replacingOccurrences(of: FeedChip.objectReplacementCharacter, with: "")
-    }
-
-    /// Whether this pill CURRENTLY hosts a derived-colour `FeedChip` — only a
-    /// redirected app's pill does.
-    var test_hasChip: Bool {
-        let attr = label.attributedStringValue
-        var found = false
-        attr.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attr.length)) { value, _, _ in
-            if value != nil { found = true }
-        }
-        return found
-    }
+    /// This pill's plain-text content.
+    var test_text: String { label.attributedStringValue.string }
 
     /// Whether this pill's leading run is CURRENTLY painted in the
     /// failure-red tone — reads what's actually painted (not just the

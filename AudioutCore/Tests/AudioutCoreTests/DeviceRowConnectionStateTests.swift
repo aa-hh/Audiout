@@ -6,8 +6,8 @@ import AudioutCore
 /// Row-focused tests for the connection **halo ring** (Warm Signal v3 §3.2) +
 /// the sublabel precedence ladder: the four `ConnectionState` ring renderings
 /// (`test_statusKind`/`test_ringForm`/`test_statusText`), the ring's per-state
-/// FORM (dashed connecting vs solid connected/failed), the failure-exclusive
-/// hues (`ringConnected` vs `failure`) and heavier failed stroke, the VoiceOver
+/// FORM (dashed connecting vs solid connected/failed), the per-state hues
+/// (`ring` connecting, `rim` connected, `failure`) and heavier failed stroke, the VoiceOver
 /// spoken equivalent per state, the name-click-toggles-enabled wiring
 /// (`test_clickName`) through the checkbox, the routing sublabel composed from
 /// `selected` + `routedAppNames`, and that a repeated `apply` cleanly
@@ -89,7 +89,7 @@ import AudioutCore
         #expect(!row.test_ringIsDashed, "the failed ring is solid, not dashed")
     }
 
-    // MARK: Ring HUE + weight — `ringConnected` vs failure-exclusive red (§3.2/R8)
+    // MARK: Ring HUE + weight — `ring` / `rim` vs failure-exclusive red (§3.2/R8)
     //
     // Ring colors are stamped as resolved `CGColor`s (the dynamic token resolved
     // against the effective appearance), so they're compared by resolved sRGB
@@ -107,21 +107,26 @@ import AudioutCore
         #expect(abs(a.blueComponent - b.blueComponent) < 0.01, "\(message)", sourceLocation: sourceLocation)
     }
 
-    @Test func connectingAndConnectedRingsShareTheSameHue() {
-        // "Form, not color, carries pending" (spec §3.2): both use `ringConnected`.
+    @Test func connectingRingIsRingAndConnectedRingIsRim() {
+        // The connecting form now carries colour as well as dash.
         let connecting = DeviceRowView(device: makeDevice(connectionState: .connecting))
         let connected = DeviceRowView(device: makeDevice(connectionState: .connected))
-        assertSameHue(connecting.test_ringStrokeColor, connected.test_ringStrokeColor,
-                      "connecting and connected rings share the ringConnected hue")
+        assertSameHue(connecting.test_ringStrokeColor, Tokens.Color.ring,
+                      "the connecting ring is the steel-blue ring token")
+        assertSameHue(connected.test_ringStrokeColor, Tokens.Color.rim,
+                      "the connected ring is the cool rim")
+        let a = connecting.test_ringStrokeColor?.usingColorSpace(.sRGB)
+        let b = connected.test_ringStrokeColor?.usingColorSpace(.sRGB)
+        #expect(a?.blueComponent != b?.blueComponent, "connecting ≠ connected")
     }
 
-    @Test func connectedRingUsesRingConnectedToken() {
+    @Test func connectedRingUsesRimToken() {
         let row = DeviceRowView(device: makeDevice(connectionState: .connected))
-        assertSameHue(row.test_ringStrokeColor, Tokens.Color.ringConnected,
-                      "the connected ring is the ringConnected warm-grey")
+        assertSameHue(row.test_ringStrokeColor, Tokens.Color.rim,
+                      "the connected ring is the cool rim")
     }
 
-    @Test func failedRingUsesTheFailureHueNotRingConnected() {
+    @Test func failedRingUsesTheFailureHueNotRim() {
         let failed = DeviceRowView(device: makeDevice(connectionState: .failed(.init(cause: .notResponding))))
         let connected = DeviceRowView(device: makeDevice(connectionState: .connected))
         assertSameHue(failed.test_ringStrokeColor, Tokens.Color.failure,
@@ -129,7 +134,7 @@ import AudioutCore
         // And it must be a DIFFERENT hue from the connected ring.
         let f = failed.test_ringStrokeColor?.usingColorSpace(.sRGB)
         let c = connected.test_ringStrokeColor?.usingColorSpace(.sRGB)
-        #expect(f?.redComponent != c?.redComponent, "failed red ≠ connected warm-grey")
+        #expect(f?.redComponent != c?.redComponent, "failed red ≠ the connected rim")
     }
 
     @Test func failedRingIsHeavierThanConnectedRing() {
@@ -512,14 +517,14 @@ import AudioutCore
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
 
-        #expect(row.test_muteTintColor == Tokens.Color.secondaryLabel, "unmuted reads as the neutral secondary tint")
+        #expect(row.test_muteTintColor == Tokens.Color.label2, "unmuted reads as the neutral label2 tint")
     }
 
     @Test func muteTintUpdatesInstantlyOnLiveClick() {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isMuted: false)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
-        #expect(row.test_muteTintColor == Tokens.Color.secondaryLabel)
+        #expect(row.test_muteTintColor == Tokens.Color.label2)
 
         // `test_toggleMute` drives the exact same path a real click does
         // (AppKit's own state flip, then `muteToggled(_:)`'s `updateMuteTint()`)
@@ -529,28 +534,40 @@ import AudioutCore
                 "a live click updates the tint instantly")
 
         row.test_toggleMute(false)
-        #expect(row.test_muteTintColor == Tokens.Color.secondaryLabel, "toggling back off reverts the tint instantly")
+        #expect(row.test_muteTintColor == Tokens.Color.label2, "toggling back off reverts the tint instantly")
     }
 
     // MARK: V7 — the `%` readout dims with the slider's disabled state
 
-    @Test func readoutDimsWhenSliderDisabled() {
-        // Not controllable ⇒ slider disabled ⇒ readout should read tertiary.
+    @Test func readoutDimsToLabelCool2WhenSliderDisabled() {
+        // Not controllable ⇒ slider disabled ⇒ readout takes the cool dim ink.
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: false, controllable: false)
 
         #expect(!row.test_isSliderEnabled)
-        #expect(row.test_readoutColor == Tokens.Color.label3, "readout dims alongside a disabled slider")
+        #expect(row.test_readoutColor == Tokens.Color.labelCool2, "readout dims alongside a disabled slider")
     }
 
-    @Test func readoutIsSecondaryWhenSliderEnabled() {
+    @Test func readoutIsEmberTextWhenEnabledAndIdle() {
+        // `.off`, so the row is not armed: the readout holds a stored level.
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
 
         #expect(row.test_isSliderEnabled)
-        #expect(row.test_readoutColor == Tokens.Color.secondaryLabel, "readout is the normal secondary color when enabled")
+        assertSameHue(row.test_readoutColor, Tokens.Color.emberText,
+                      "an enabled but silent row's readout is emberText")
+    }
+
+    @Test func readoutIsGoldTextWhenLive() {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod,
+                            connectionState: .connected)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: true, controllable: true)
+
+        assertSameHue(row.test_readoutColor, Tokens.Color.goldText,
+                      "a sounding row's readout is goldText")
     }
 
     // MARK: R5 — unavailable dims the row-level text
@@ -560,15 +577,32 @@ import AudioutCore
                                  isAvailable: false)
         let unavailableRow = DeviceRowView(device: unavailable)
         unavailableRow.apply(unavailable, selected: false)
-        // The authored ink, not `.disabledControlTextColor`: that is black at
+        // The cool dim ink, not `.disabledControlTextColor`: that is black at
         // 24.7% alpha, so it composites to 1.80:1 on this row's ground — under
-        // half the 4.5:1 body floor. `inkTertiary` is also what this row's own
+        // half the 4.5:1 body floor. `labelCool2` is also what this row's own
         // "Unavailable" sublabel already draws in, so the name and the word
         // naming its state speak at one level.
-        #expect(unavailableRow.test_nameColor == Tokens.Color.inkTertiary,
-                "unavailable keeps the row-level text dim, in the authored ink")
+        #expect(unavailableRow.test_nameColor == Tokens.Color.labelCool2,
+                "unavailable keeps the row-level text dim, in the cool ink")
         #expect(unavailableRow.test_statusText == "Unavailable",
                 "…plus its own sublabel — a distinct negative signature (R5)")
+    }
+
+    // MARK: Name ink follows liveness (D1)
+
+    @Test func liveRowNameIsLabelAndIdleRowNameIsLabelCool() {
+        let live = Device(id: "dev-1", name: "Test Speaker", kind: .homePod,
+                          connectionState: .connected)
+        let liveRow = DeviceRowView(device: live)
+        liveRow.apply(live, selected: true)
+        #expect(liveRow.test_nameColor == Tokens.Color.label,
+                "a sounding row's name is the warm label")
+
+        let idle = Device(id: "dev-2", name: "Other Speaker", kind: .homePod)
+        let idleRow = DeviceRowView(device: idle)
+        idleRow.apply(idle, selected: true)
+        #expect(idleRow.test_nameColor == Tokens.Color.labelCool,
+                "a silent row's name is the cool labelCool")
     }
 
     // MARK: A5 — slider stays live while muted (mute ≠ frozen volume)

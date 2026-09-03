@@ -193,7 +193,6 @@ import AudioutCore
         postDisplayOptionsChanged()
         #expect(!(dot.test_isBlooming), "Reduce Motion strips the in-flight bloom immediately")
         #expect(dot.test_isLit, "the model layer was already settled — still lit gold")
-        #expect(dot.test_hasGlow, "the static resting glow is state, not animation — it stays")
     }
 
     @Test func noBloomFiresAtAllUnderReduceMotion() {
@@ -284,12 +283,12 @@ import AudioutCore
 
     @Test func meterGradientSurvivesDisplayOptionsChange() {
         // Same shape for the meter: the notification re-stamps the warm ramp
-        // (ember → gold → gold) — three stops, and never failure red
+        // (ember → gold) — two stops, and never failure red
         // (house rule 8), before and after.
         let meter = LevelMeterView()
         postDisplayOptionsChanged()
         let colors = meter.test_gradientColors
-        #expect(colors.count == 3, "the warm ramp survives the re-stamp intact")
+        #expect(colors.count == 2, "the warm ramp survives the re-stamp intact")
         guard let failure = Tokens.Color.failure.usingColorSpace(.sRGB) else {
             Issue.record("failure token did not resolve")
             return

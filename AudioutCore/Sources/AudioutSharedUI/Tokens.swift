@@ -404,18 +404,20 @@ public enum Tokens {
             light: 0x5F6A73, lightHighContrast: 0x464E55)
 
         /// The membership rail's ONE dormancy tone (§4.7 — dormancy is one
-        /// flag, one tone): a hue-neutral warm grey, `static let` for the same
-        /// instance-identity reason as ``label2``. A graphical object held to
-        /// a 3:1 floor, not a 4.5:1 text floor.
+        /// flag, one tone): one cool chrome grey — the same values as ``rim``,
+        /// so a dormant wire, an idle connected ring and an unarmed fader fill
+        /// read as one tone. `static let` for the same instance-identity reason
+        /// as ``label2``. A graphical object held to a 3:1 floor, not a 4.5:1
+        /// text floor.
         ///
         /// CONTRAST RATIONALE (>=3:1 vs canvas/panel/raised, both
-        /// appearances; measured): dark `#7D7466` = 4.30:1 vs canvas / 3.90:1
-        /// vs panel / 3.42:1 vs raised; light `#8A8272` = 3.65:1 vs the flat
-        /// ground / 3.16:1 vs well. IC variants: dark `#948C7C` = 5.94:1 /
-        /// 5.39:1 / 4.73:1; light `#7A7263` = 4.56:1 / 3.95:1.
+        /// appearances; measured): dark `#6B767D` = 4.25:1 vs canvas / 3.86:1
+        /// vs panel / 3.39:1 vs raised (IC raised 4.53, well 5.85); light
+        /// `#66717A` = 4.78:1 vs the flat ground / 4.15:1 vs well (IC well
+        /// 5.18, ground 5.98).
         public static let railDormant: NSColor = warmDynamic(
-            name: "railDormant", dark: 0x7D7466, darkHighContrast: 0x948C7C,
-            light: 0x8A8272, lightHighContrast: 0x7A7263)
+            name: "railDormant", dark: 0x6B767D, darkHighContrast: 0x818B90,
+            light: 0x66717A, lightHighContrast: 0x586269)
 
         // MARK: Gold accent instruments (spec §1, S-BUS)
         //
@@ -586,8 +588,9 @@ public enum Tokens {
 
         // MARK: Glow + socket (accent halo and the routed dot's seat)
 
-        /// The gold bloom/halo hue — the route-armed dot's static halo and its
-        /// arm-transition bloom (§3.3). CONTRAST RATIONALE: NO floor
+        /// The gold bloom/halo hue — the rail bead, the ring's arrival pulse
+        /// and the header-dot bloom: transient strokes and fills, never a
+        /// shadow (the armed dot carries no halo). CONTRAST RATIONALE: NO floor
         /// (transient/halo only — it never carries meaning alone; the ≥3:1
         /// `gold` disc under it does). Measured for the record: dark `#FFD97A`
         /// = 13.22:1 vs `panel`; light `#E8B84B` = 1.77:1 vs the flat ground
@@ -766,9 +769,7 @@ public enum Tokens {
         // column and `.subtle` to the authored SUBTLE column (the dial
         // genuinely mutes these five).
         //
-        // RESERVED BANDS (`AppTetherColor.ReservedBand` applies the identical
-        // reasoning to derived tether hues; the bands themselves are declared
-        // there, not duplicated here): every hue below clears the gold/amber
+        // RESERVED BANDS: every hue below clears the gold/amber
         // window `[28°,68°)` — landing in it would misread an ungranted row as
         // already "granted" — and the failure-red window
         // `[0°,12°) ∪ [350°,360°)`. Measured hues (own-theme Full column,
@@ -778,14 +779,12 @@ public enum Tokens {
         // bands), `permissionLocalNetwork` ~265-272° (indigo warmed toward
         // magenta), `permissionRemoteControl` ~319-325° (purple warmed toward
         // pink), `permissionSpeakerSync` ~23-26° — strictly BELOW the gold
-        // band's 28° floor, the same terracotta corridor
-        // `AppTetherColor.steer` escapes a raw hue into when it steers off
-        // gold. That keeps all four ≥45° apart (measured minimum 47°) from
+        // band's 28° floor, in the terracotta corridor just short of gold.
+        // That keeps all four ≥45° apart (measured minimum 47°) from
         // each other and from both reserved bands in every one of the 32
         // authored hexes (mutual-distinguishability check, Q1 criterion 4).
         //
-        // CONTRAST (WCAG 2.x relative luminance — same formula as
-        // `AppTetherColorTests.relativeLuminance`/`contrastRatio`): every one
+        // CONTRAST (WCAG 2.x relative luminance): every one
         // of the 32 hexes below (4 tokens x {Full,Subtle} x {dark,
         // darkHighContrast,light,lightHighContrast}) measures >=3:1 against
         // BOTH `Tokens.Color.panel` and `Tokens.Color.raised` in its own theme
@@ -874,8 +873,8 @@ public enum Tokens {
         /// a deepened "brass"; the row's PERMANENT identity tint (see
         /// ``permissionSystemAudio``). Hue ~23-25° in every
         /// column/appearance: strictly BELOW the gold/amber reserved band's
-        /// 28° floor (the same terracotta corridor `AppTetherColor.steer`
-        /// escapes a raw hue into off gold), so the row reads as warm/golden-
+        /// 28° floor (the terracotta corridor just short of gold), so the
+        /// row reads as warm/golden-
         /// adjacent WITHOUT impersonating the accent `gold` (~42°) the app's
         /// armed instruments wear — also clear of the failure-red band.
         /// CONTRAST RATIONALE (measured): Full dark `#B86F41` = 5.08:1 vs
@@ -1050,8 +1049,6 @@ public enum Tokens {
         public static var inkSecondary: NSColor { label2 }
         @available(*, deprecated, renamed: "label2")
         public static var warningText: NSColor { label2 }
-        @available(*, deprecated, renamed: "label2")
-        public static var feedPillText: NSColor { label2 }
         @available(*, deprecated, renamed: "label3")
         public static var tertiaryLabel: NSColor { label3 }
         @available(*, deprecated, renamed: "label3")
@@ -1060,20 +1057,10 @@ public enum Tokens {
         public static var canvasHi: NSColor { canvas }
         @available(*, deprecated, renamed: "raised")
         public static var iconSeatFill: NSColor { raised }
-        @available(*, deprecated, renamed: "raised")
-        public static var faderThumb: NSColor { raised }
         @available(*, deprecated, renamed: "panel")
         public static var sidebarWarmTint: NSColor { panel }
-        @available(*, deprecated, renamed: "well")
-        public static var feedPillFill: NSColor { well }
-        @available(*, deprecated, renamed: "rim")
-        public static var ringConnected: NSColor { rim }
-        @available(*, deprecated, renamed: "rim")
-        public static var faderRim: NSColor { rim }
         @available(*, deprecated, renamed: "rim")
         public static var plateRim: NSColor { rim }
-        @available(*, deprecated, renamed: "gold")
-        public static var caution: NSColor { gold }
         @available(*, deprecated, renamed: "gold")
         public static var success: NSColor { gold }
         @available(*, deprecated, renamed: "gold")
@@ -1082,16 +1069,10 @@ public enum Tokens {
         public static var goldCTA: NSColor { gold }
         @available(*, deprecated, renamed: "failure")
         public static var warning: NSColor { failure }
-        @available(*, deprecated, renamed: "failure")
-        public static var destructive: NSColor { failure }
         @available(*, deprecated, renamed: "ring")
         public static var info: NSColor { ring }
         @available(*, deprecated, renamed: "inkOnFill")
         public static var inkOnGold: NSColor { inkOnFill }
-        @available(*, deprecated, renamed: "socket")
-        public static var dotSocket: NSColor { socket }
-        @available(*, deprecated, renamed: "meter")
-        public static var meterTrack: NSColor { meter }
         @available(*, deprecated, renamed: "wireCore")
         public static var syncSignal: NSColor { wireCore }
         @available(*, deprecated, renamed: "party")
@@ -1146,6 +1127,13 @@ public enum Tokens {
         /// (sublabels, readouts, hints, footers). Alias of
         /// `NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)`.
         public static var caption: NSFont { .systemFont(ofSize: NSFont.smallSystemFontSize) }
+        /// The row `%` readout (iOS Readout: bold, tabular digits) at the
+        /// caption size so it keeps fitting the 40 pt readout column; semibold
+        /// is the system face's cut nearest iOS's 700. `goldText` while
+        /// sounding, `emberText` while idle, `labelCool2` while not adjustable.
+        public static var readout: NSFont {
+            .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        }
         /// Caption text, medium weight (appearance-tile labels, section
         /// sub-headers in the popover header row).
         public static var captionMedium: NSFont {

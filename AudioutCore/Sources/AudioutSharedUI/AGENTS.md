@@ -3,8 +3,8 @@
 ## Purpose
 
 AppKit row views and window chrome shared by the popover and the Groups screen.
-Pure UI: controls route out through a delegate, never touching a backend, a
-store, or `GroupController`.
+Pure UI: controls route out through a delegate, never a backend, store,
+or `GroupController`.
 
 ## Rules
 
@@ -21,10 +21,11 @@ store, or `GroupController`.
 - The row's Equalizer button is a DOOR plus one mark; the row edits and stores no tone.
 - The identity stack yields the Equalizer slot on EVERY row, so names truncate alike.
 - Instruments reconcile accessibility-display changes live; the accent dial is a third trigger.
+- Warm ink and a gold wash mean `isRouteArmed`; cool ink means silent. Instruments are flat — no `CALayer` shadow blooms.
 - `setContent`'s `defaultSize:` seeds only the first mount of a content controller.
 - `ControlPanelBackingView` is an approved custom-drawn exception; NSPanel has no arrow.
-- Known stability findings in this target carry `STABILITY(id)` inline markers — details and fix sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
-- Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
+- Stability findings carry `STABILITY(id)` markers; sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
+- Long-form traps and changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md); grep before debugging.
 
 ## Map
 

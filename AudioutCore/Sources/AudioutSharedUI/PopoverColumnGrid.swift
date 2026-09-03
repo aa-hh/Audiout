@@ -230,41 +230,6 @@ public enum PopoverColumnGrid {
     /// STATIC "+N" overflow measurement.
     public static let feedColumnWidth: CGFloat = trailingControlWidth - 4
 
-    /// The FEED composite's derived-colour app CHIP (Warm Signal v4.1
-    /// CORRECTIONS "FEED needs the colour chip, not just tinted text") — a
-    /// small square swatch in `AppTetherColor`'s tone, prefixed onto a
-    /// redirected app's name segment. The SAME chip (same size/radius) marks
-    /// that app's name in the App Routing row so the tether reads at both
-    /// ends. Edge length only — never the state-carrying halo ring or meter
-    /// (house rule: tether colour lives on FEED/redirect app-name text only).
-    /// Raised 5 → 7pt (2026-07-22, the same pass as the tuning-constant
-    /// contrast raise above): the owner's live-build feedback was that even a
-    /// correctly-contrasted chip was too small to read as a colour swatch at
-    /// all rather than a fleck. `feedColumnWidth` itself is UNCHANGED — the
-    /// STATIC "+N" overflow measurement in `DeviceRowView.setFeedSegments`
-    /// reads `feedChipSize`/`feedChipGap` live via `FeedChip.attachmentString`
-    /// and `pillWidth(_:)`, so a wider chip correctly eats into the same
-    /// margin rather than needing a second constant updated in lockstep; see
-    /// `FeedColumnTests` for the still-passing (now slightly-earlier-tripping)
-    /// two-app overflow cases this shifts by construction, not regression.
-    public static let feedChipSize: CGFloat = 7
-    /// Visual gap between a chip and the app-name text that follows it, baked
-    /// into the chip's own attachment width (no separate space glyph) so
-    /// stripping the attachment character back out of `attributedStringValue`
-    /// never leaves a stray leading space in a test's plain-text read. Kept
-    /// tight — the FEED column's `feedColumnWidth` is unchanged by this
-    /// task, so a multi-segment composite's existing STATIC "+N" overflow
-    /// threshold must not shift just because a chip was added to it (a
-    /// two-chip composite like "System · Music · Safari" measured ~119pt of
-    /// ~136pt available before chips; each chip's `feedChipSize + feedChipGap`
-    /// eats straight into that ~17pt margin).
-    public static let feedChipGap: CGFloat = 2
-    /// Corner radius of the chip's rounded square — a soft chip, not a bare
-    /// square or a full pill (spec reference `v41-fixes.html` `.feed .chip`).
-    /// Proportionally small relative to `feedChipSize` (unlike the
-    /// reference's 9px/2px ratio) so the chip still reads as a SQUARE at the
-    /// compact size the FEED column's tight width budget forces it to.
-    public static let feedChipCornerRadius: CGFloat = 1
 
     // MARK: FEED pills (per-value bordered pills, replacing the packed
     // " · "-joined composite string)
@@ -282,10 +247,6 @@ public enum PopoverColumnGrid {
     /// Vertical padding inside a FEED pill, between its rounded-rect border
     /// and the text/chip it hosts.
     public static let feedPillVerticalPadding: CGFloat = 2
-    /// Corner radius of a FEED pill's rounded-rect border — soft, not a
-    /// capsule (deliberately distinct from the mute button's fuller-rounded
-    /// `mutePillCornerRadius`, which signals "engaged control," not "value").
-    public static let feedPillCornerRadius: CGFloat = 5
     /// Horizontal gap between adjacent FEED pills — the mock's "small gap
     /// between pills," replacing the retired `feedSegmentSeparator` middle
     /// dot as the thing that visually separates one feed value from the next.
@@ -413,19 +374,15 @@ public enum PopoverColumnGrid {
     // below the retired 10 pt connection beacon) reads as a deliberate
     // indicator while the parchment punch-out border keeps it separated from
     // the glyph. Paired with the `routeArmedDotBoxSize` bump so the larger disc
-    // plus its glow halo isn't clipped.
+    // isn't clipped.
     public static let routeArmedDotDiameter: CGFloat = 8
-    /// Blur radius of the lit dot's STATIC `glow` halo (spec §3.3 "subtle
-    /// glow" — a resting shadow, not an animation; energy rule intact).
-    public static let routeArmedGlowRadius: CGFloat = 3.5
-    /// Opacity of the lit dot's static `glow` halo shadow.
-    public static let routeArmedGlowOpacity: Float = 0.6
     /// Duration of the one-shot `ember → gold` bloom when a dot transitions
     /// INTO armed while visible (spec §6 first-light bloom, ≤450 ms ease-out;
     /// instant under Reduce Motion; never fires on initial render).
     public static let routeArmedBloomDuration: CFTimeInterval = 0.45
     /// Side length of the square overlay view hosting the dot — big enough to
-    /// contain the disc plus its glow halo without clipping.
+    /// contain the disc with a margin (unchanged from the halo era; geometry
+    /// is not re-tuned in this pass).
     public static let routeArmedDotBoxSize: CGFloat = 18
 
     // MARK: Membership bus — the LEFT SPINE (Warm Signal v4 §Call-1)
@@ -471,7 +428,7 @@ public enum PopoverColumnGrid {
     /// Rim width for a SELECTED-but-unavailable member (`MembershipBusView`'s
     /// `emphasizesDimmedMemberRim`, set true only by the Groups editor's own
     /// row) — 2x `busNodeRimWidth`, so the seat that already carries the
-    /// visual weight (`dotSocket`) reads as emphasized rather than merely
+    /// visual weight (`socket`) reads as emphasized rather than merely
     /// dim.
     public static let busNodeDimmedRimWidth: CGFloat = busNodeRimWidth * 2
     /// The unstroked VERTICAL gap between a node's edge and where the rail line
@@ -553,9 +510,13 @@ public enum PopoverColumnGrid {
     /// DeviceRowView and AppRowView to establish consistent hover interaction.
     public static let rowHoverWashAlpha: CGFloat = 0.10
     /// Alpha for the selection wash, drawn in ``Tokens/Color/engagedChrome``.
-    /// Shared by AppRowView's single-selection highlight and DeviceRowView's
-    /// mixer-window selection pill.
+    /// Shared by AppRowView's single-selection highlight and GroupRowView's
+    /// selection pill.
     public static let rowSelectionWashAlpha: CGFloat = 0.18
+    /// Alpha of the gold wash behind a SOUNDING row (`DeviceRowView.isRouteArmed`,
+    /// `AppRowView`'s routed ∧ running) — the iPhone's 12 % (`gold.opacity(0.12)`);
+    /// measured 1.256:1 on dark `panel`, 1.140:1 on the light ground.
+    public static let rowLiveWashAlpha: CGFloat = 0.12
 
     // MARK: Engaged mute pill (Warm Signal v3 §3.4/§3.5, S3)
     //
@@ -568,9 +529,8 @@ public enum PopoverColumnGrid {
     /// alpha in that token's ladder, since a pill is smaller than a row wash
     /// and needs the extra weight to read at glyph scale.
     public static let mutePillFillAlpha: CGFloat = 0.22
-    /// Corner radius of the engaged pill (capsule-ish over the `muteWidth`
-    /// column's glyph box). Tuned live.
-    public static let mutePillCornerRadius: CGFloat = 7
+    /// Corner radius of the engaged pill — the control radius (iOS Shapes).
+    public static let mutePillCornerRadius: CGFloat = Tokens.Layout.Radius.control
 
     // MARK: Single-selection highlight (AppRowView, 2026-07-17)
     //
@@ -585,8 +545,10 @@ public enum PopoverColumnGrid {
     /// the row's bounds — matches `DeviceRowView`'s hover/selection pill inset.
     public static let selectionHighlightInsetX: CGFloat = 5
     public static let selectionHighlightInsetY: CGFloat = 2
-    /// Corner radius of the selection-highlight rounded rect.
-    public static let selectionHighlightCornerRadius: CGFloat = 7
+    /// Corner radius of the selection-highlight rounded rect — the control
+    /// radius, shared by the device/app rows' live+hover pills, GroupRowView
+    /// and the panel header's hover pill.
+    public static let selectionHighlightCornerRadius: CGFloat = Tokens.Layout.Radius.control
 
     // MARK: Applications card ± footer (T3, 2026-07-17)
     //
@@ -614,17 +576,16 @@ public enum PopoverColumnGrid {
     /// gradient's dim end and the unarmed fill read at a glance — the 4 pt
     /// line was part of why the fader sank into the warm canvas.
     public static let faderTrackHeight: CGFloat = 5
-    /// Corner radius of the fader trough (fully rounds the 5 pt track ends).
-    public static let faderTrackCornerRadius: CGFloat = 2.5
+    /// Corner radius of the fader trough — a capsule at the track's height.
+    public static let faderTrackCornerRadius: CGFloat = faderTrackHeight / 2
     /// Width of the rounded-rect fader thumb (replaces the stock circle).
     /// Grown 9×15 → 10×17 in the fader-legibility pass so the handle reads
-    /// as a grabbable object at arm's length (alongside the `faderThumb`
-    /// token's ≥3:1 fill).
+    /// as a grabbable object at arm's length.
     public static let faderThumbWidth: CGFloat = 10
     /// Height of the rounded-rect fader thumb.
     public static let faderThumbHeight: CGFloat = 17
-    /// Corner radius of the fader thumb.
-    public static let faderThumbCornerRadius: CGFloat = 4
+    /// Corner radius of the fader thumb — a capsule cap, as on the iOS fader.
+    public static let faderThumbCornerRadius: CGFloat = faderThumbWidth / 2
     /// Alpha the fader's interior drawing (fill/rim/thumb) dims to while the
     /// slider is disabled — matches `selectionDimmedAlpha`'s dim-not-hide idiom.
     public static let faderDisabledAlpha: CGFloat = 0.4
@@ -649,11 +610,9 @@ public enum PopoverColumnGrid {
     /// (rather than a label with a box around it) while still fitting beside
     /// the 64 pt icon well in the side-by-side header band.
     public static let titleFieldHeight: CGFloat = 28
-    /// Corner radius of the inline rename field. Deliberately NOT a capsule:
-    /// the fully-rounded shape is already spoken for by the engaged mute pill
-    /// (`mutePillCornerRadius`), which means "control engaged" — a capsule here
-    /// would collide with that vocabulary. A soft rounded rect reads as "field."
-    public static let titleFieldCornerRadius: CGFloat = 6
+    /// Corner radius of the inline rename field — the control radius every
+    /// field and button in the app wears.
+    public static let titleFieldCornerRadius: CGFloat = Tokens.Layout.Radius.control
 
     // MARK: Edit-affordance alphas (Groups window header)
     //

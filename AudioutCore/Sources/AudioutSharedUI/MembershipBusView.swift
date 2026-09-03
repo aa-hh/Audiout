@@ -74,7 +74,7 @@ public final class MembershipBusView: NSView {
     /// device): a tint, never alpha. It reaches the FILL only. The rim belongs
     /// to the rail — the node is still ON the wire, still in the group — so a
     /// dimmed `.member` keeps its rim in the spine's tone and fills its disc
-    /// with `dotSocket` — the same unlit seat the route-armed dot rests in
+    /// with `socket` — the same unlit seat the route-armed dot rests in
     /// when nothing is armed: same seat, gold lifted out. A hollow node has no
     /// fill, so a dimmed `.nonMember` draws exactly like a live one — "not in
     /// the group" already has nothing to grey out. `.failed` is never dimmed
@@ -267,10 +267,10 @@ public final class MembershipBusView: NSView {
             if node == .member {
                 // Rim in the spine's own tone: gold on an armed rail, ember on
                 // an idle one (same split the wire draws with). The fill is the
-                // same tone, or the unlit `dotSocket` seat when dimmed — see
+                // same tone, or the unlit `socket` seat when dimmed — see
                 // `dimmed`.
                 let rim = Tokens.Color.spineTone(armed: armed)
-                let fill = dimmed ? Tokens.Color.dotSocket : rim
+                let fill = dimmed ? Tokens.Color.socket : rim
                 fill.setFill()
                 NSBezierPath(ovalIn: rect).fill()
                 strokeNodeRim(in: rect, color: rim, dashed: false)
@@ -374,7 +374,7 @@ public final class MembershipBusView: NSView {
     /// The node rendering currently drawn (structural hook — the same `node` the
     /// drawing reads, so it can't drift from the pixels).
     public var test_node: Node { node }
-    /// Whether this row's node FILL is the de-emphasis tint (`dotSocket`) —
+    /// Whether this row's node FILL is the de-emphasis tint (`socket`) —
     /// a tint, never alpha. The rim is never dimmed, and a hollow node has no
     /// fill, so on a `.nonMember` this flag changes no pixel (see `dimmed`).
     public var test_dimmed: Bool { dimmed }

@@ -450,7 +450,7 @@ import AudioutProtocol
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         let row = try #require(popover.test_deviceRow(for: "office"))
         #expect(row.isSelectedInSet, "selected after ON")
-        #expect(!(row.test_isShowingSelectedBackground), "popover row paints no selected-background pill, even when selected")
+        #expect(row.test_isShowingLiveWash == row.test_routeArmed, "the wash follows the armed predicate, not selection")
         #expect(row.test_isEnabledOn, "switch is ON")
         // The icon is neutral in BOTH states now (2026-07-17 redesign): identity
         // only, no accent-when-selected fill. Selection reads from the switch.
@@ -459,7 +459,7 @@ import AudioutProtocol
         // Toggle it OFF — the row must return to the unselected appearance.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
         #expect(!(row.isSelectedInSet), "not selected after OFF")
-        #expect(!(row.test_isShowingSelectedBackground), "deselected row paints NO selected background (no stale highlight)")
+        #expect(!(row.test_isShowingLiveWash), "a deselected row is not armed, so no wash")
         #expect(!(row.test_isHovered), "no stale hover wash after deselect")
         #expect(!(row.test_isEnabledOn), "switch returned to OFF")
         #expect(row.test_iconTint == Tokens.Color.secondaryLabel, "icon tint stays neutral (always secondary)")

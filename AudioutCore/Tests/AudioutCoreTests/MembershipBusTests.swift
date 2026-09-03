@@ -27,7 +27,7 @@ import AudioutCore
 
     private func makeBusRow(device: Device? = nil) -> DeviceRowView {
         DeviceRowView(device: device ?? makeDevice(), showsToggle: true,
-                      paintsSelectionBackground: false, showsMeter: true, showsBus: true)
+                      showsMeter: true, showsBus: true)
     }
 
     // MARK: Node ↦ state mapping (§4.3/§4.4/§4.6, matrix §3.6)
@@ -83,7 +83,7 @@ import AudioutCore
         // §4.6 group members: showsToggle == false rows carry no membership
         // control, so they keep NO bus node even under a bus host.
         let row = DeviceRowView(device: makeDevice(), indented: true, showsToggle: false,
-                                paintsSelectionBackground: false, showsMeter: true,
+                                showsMeter: true,
                                 showsBus: true)
         #expect(row.test_busNode == nil, "a showsToggle=false (group-member) row keeps no bus node")
     }

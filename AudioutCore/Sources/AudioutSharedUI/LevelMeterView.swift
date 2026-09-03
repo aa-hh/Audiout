@@ -11,14 +11,13 @@ import QuartzCore
 /// from the fader (thin, thumb-less, in the identity cluster not the slider
 /// column) — killing the v3 "two gold bars, which is which?" confusion.
 ///
-/// **Warm meter gradient (Warm Signal v3 §1/§3.3, S2):** the fill is the
-/// position-fixed warm ramp `ember → gold` with the right zone at `caution` —
-/// the meter's CEILING hue. The old green/red vocabulary is retired, and
-/// FAILURE RED NEVER APPEARS IN A METER (house rule 8): a loud party can
-/// never impersonate a failure; `caution` is as hot as a meter gets. The
-/// gradient is anchored to the TRACK, not the bar — a full-width
-/// `CAGradientLayer` revealed through a leading-anchored mask — so the hues
-/// live at fixed widths (left = ember, right = caution) and the bar
+/// **Warm meter gradient (C3):** the fill is the position-fixed warm ramp
+/// `ember → gold`, gold being the meter's CEILING hue. The old green/red
+/// vocabulary is retired, and FAILURE RED NEVER APPEARS IN A METER (house
+/// rule 8): a loud party can never impersonate a failure; gold is as hot as a
+/// meter gets. The gradient is anchored to the TRACK, not the bar — a
+/// full-width `CAGradientLayer` revealed through a leading-anchored mask — so
+/// the hues live at fixed widths (left = ember, right = gold) and the bar
 /// "uncovers" them as it grows, like a hardware LED ladder.
 ///
 /// Three layers on one custom `CALayer`-backed view: a faint rounded "track"
@@ -70,17 +69,9 @@ public final class LevelMeterView: NSView {
     /// at rest and the display link is torn down.
     private static let restEpsilon: CGFloat = 0.001
 
-    /// Gradient stop for where `ember` has fully warmed to `gold` (fraction of
-    /// the track width). Left of this the bar reads ember-dim; the healthy
-    /// listening band reads gold.
-    static let meterGoldStop: NSNumber = 0.7
-    /// The `caution` right-zone onset: gold blends toward the `caution` ceiling
-    /// across the final stretch of the track (spec: "meters top out HERE").
-    static let meterCautionStop: NSNumber = 1.0
-
     private let trackLayer = CALayer()
-    /// The full-width, position-fixed warm gradient (`ember → gold →
-    /// caution`), revealed through ``fillMaskLayer``.
+    /// The full-width, position-fixed warm gradient (`ember → gold`),
+    /// revealed through ``fillMaskLayer``.
     private let fillLayer = CAGradientLayer()
     /// Leading-anchored mask over ``fillLayer`` — its width IS the displayed
     /// level; the gradient itself never moves or rescales.
@@ -110,10 +101,10 @@ public final class LevelMeterView: NSView {
         fillMaskLayer.cornerRadius = thickness / 2
         fillMaskLayer.backgroundColor = NSColor.black.cgColor   // opaque = revealed
         // Left-to-right ramp: startPoint is the bar's base (ember, leading),
-        // endPoint the track's ceiling (caution, trailing).
+        // endPoint the track's ceiling (gold, trailing).
         fillLayer.startPoint = CGPoint(x: 0, y: 0.5)
         fillLayer.endPoint = CGPoint(x: 1, y: 0.5)
-        fillLayer.locations = [0, Self.meterGoldStop, Self.meterCautionStop]
+        fillLayer.locations = [0, 1]
         fillLayer.mask = fillMaskLayer
         layer?.addSublayer(trackLayer)
         layer?.addSublayer(fillLayer)
@@ -177,17 +168,16 @@ public final class LevelMeterView: NSView {
     private func updateLayerColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             // The empty track must stay visible at every level so the meter's
-            // full scale (the ratio's denominator) always reads — `meterTrack`
+            // full scale (the ratio's denominator) always reads — `meter`
             // is a warm recess with a measured floor, replacing the near-
             // invisible `tertiarySystemFill` (UX contrast pass, 2026-07-23).
-            trackLayer.backgroundColor = Tokens.Color.meterTrack.cgColor
-            // The warm ramp (S2): ember low end → gold body → caution ceiling.
-            // NEVER `failure` red (house rule 8). Re-stamped on every
-            // appearance/Increase-Contrast change since CGColors are static.
+            trackLayer.backgroundColor = Tokens.Color.meter.cgColor
+            // The warm ramp (C3): ember low end → gold ceiling. Never
+            // `failure` red. Re-stamped on every appearance/Increase-Contrast
+            // change since CGColors are static.
             fillLayer.colors = [
                 Tokens.Color.ember.cgColor,
                 Tokens.Color.gold.cgColor,
-                Tokens.Color.caution.cgColor,
             ]
         }
     }
@@ -340,7 +330,7 @@ public final class LevelMeterView: NSView {
     public var test_displayedLevel: CGFloat { displayed }
 
     /// The warm gradient's current fill colors, bottom → top (resolved against
-    /// the effective appearance) — asserts the `ember → gold → caution` ramp
+    /// the effective appearance) — asserts the `ember → gold` ramp
     /// and that failure red never appears in a meter (house rule 8).
     public var test_gradientColors: [NSColor] {
         (fillLayer.colors as? [CGColor])?.compactMap { NSColor(cgColor: $0) } ?? []

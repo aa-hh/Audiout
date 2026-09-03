@@ -115,7 +115,7 @@ public final class EQEditorView: NSView {
     private let trebleCaption = NSTextField(labelWithString: "Treble")
     private let balanceCaption = NSTextField(labelWithString: "Balance")
 
-    private let advancedHairline = HairlineView()
+    private let advancedDivider = ContainerEdgeView()
     private let advancedHeader = NSStackView()
     private let advancedDisclosure = NSButton()
     private let advancedTitle = NSButton()
@@ -371,8 +371,8 @@ public final class EQEditorView: NSView {
         advancedReadout.widthAnchor.constraint(
             equalToConstant: EQEditorView.eqDrawerReadoutWidth).isActive = true
 
-        advancedHairline.translatesAutoresizingMaskIntoConstraints = false
-        advancedHairline.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        advancedDivider.translatesAutoresizingMaskIntoConstraints = false
+        advancedDivider.heightAnchor.constraint(equalToConstant: 1).isActive = true
 
         let headerSpacer = NSView()
         headerSpacer.translatesAutoresizingMaskIntoConstraints = false
@@ -413,7 +413,7 @@ public final class EQEditorView: NSView {
         advancedClipCollapsed.isActive = true
         advancedContent.isHidden = true
 
-        addFullWidthRow(advancedHairline)
+        addFullWidthRow(advancedDivider)
         addFullWidthRow(header)
         contentStack.addArrangedSubview(advancedClip)
         advancedClip.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
@@ -849,7 +849,7 @@ public final class EQEditorView: NSView {
     public var test_bassSliderFrame: NSRect { frameInEditor(bassSlider) }
     public var test_balanceSliderFrame: NSRect { frameInEditor(balanceSlider) }
     public var test_loudnessCheckboxFrame: NSRect { frameInEditor(loudnessCheckbox) }
-    public var test_advancedHairlineFrame: NSRect { frameInEditor(advancedHairline) }
+    public var test_advancedDividerFrame: NSRect { frameInEditor(advancedDivider) }
     public var test_advancedRowFrame: NSRect { frameInEditor(advancedHeader) }
     public var test_advancedReadoutFrame: NSRect { frameInEditor(advancedReadout) }
 
@@ -896,18 +896,18 @@ public final class EQEditorView: NSView {
     }
 }
 
-/// A one-token divider line above the Advanced section row. Copy of
-/// `AudioutWindowUI`'s `HairlineView` (`MixerWindowController.swift`),
-/// which is internal to that module and not visible from here.
-/// `draw(_:)`-based rather than a frozen layer color so `Tokens.Color.hairline`
-/// re-resolves per appearance and Increase Contrast on every paint.
+/// A one-token divider above the Advanced row. The editor sits in a `raised`
+/// card (`GroupedSectionView`), and `hairline` is never drawn on `raised`
+/// (1.154:1 dark) — `containerEdge` measures 1.55:1 dark / 2.02:1 light there.
+/// `draw(_:)`-based rather than a frozen layer color so the token re-resolves
+/// per appearance and Increase Contrast on every paint.
 /// Non-interactive — pure chrome, never an `NSBox` (`test_hasBoxDivider`).
-private final class HairlineView: NSView {
+private final class ContainerEdgeView: NSView {
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
-        Tokens.Color.hairline.setFill()
+        Tokens.Color.containerEdge.setFill()
         bounds.fill()
     }
 

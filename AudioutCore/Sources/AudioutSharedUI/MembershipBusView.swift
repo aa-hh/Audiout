@@ -86,8 +86,8 @@ public final class MembershipBusView: NSView {
     /// from `raised` `#F2F0EA`. So in dark the grey disc reads as "not gold"
     /// by luminance; in light it separates from gold by chroma alone (grey vs
     /// saturated ochre), the luminance is a wash. Against the ember rim the
-    /// disc measures 1.09:1 in dark (`#8A6A2F`) and 1.82:1 in light
-    /// (`#6F5629`, `Tokens.swift`'s full-accent light ember) — on an idle
+    /// disc measures 1.09:1 in dark (`#8A6A2F`) and 1.59:1 in light
+    /// (`#7A5E2A`, `Tokens.swift`'s full-accent light ember) — on an idle
     /// (ember-rimmed) dark rail the rim is a hue edge, not a brightness edge.
     private var dimmed = false
     /// Whether the `.origin` hook draws GOLD (the Main Audio spine is armed —

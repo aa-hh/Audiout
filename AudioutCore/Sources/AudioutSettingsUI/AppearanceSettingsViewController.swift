@@ -358,11 +358,11 @@ final class ThemeTileButton: NSButton {
 
         drawPreview(in: thumb)
 
-        // Selection ring (accent) / hover ring (subtle), around the thumbnail.
+        // Selection ring (gold) / hover ring (subtle), around the thumbnail.
         let ringRect = thumb.insetBy(dx: -2.5, dy: -2.5)
         let ring = NSBezierPath(roundedRect: ringRect, xRadius: ringCornerRadius, yRadius: ringCornerRadius)
         if isSelectedTile {
-            Tokens.Color.accent.setStroke()
+            Tokens.Color.gold.setStroke()
             ring.lineWidth = 2.5
             ring.stroke()
         } else if isHovered {

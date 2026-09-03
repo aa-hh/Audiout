@@ -271,7 +271,6 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private func goldButton(title: String, action: Selector) -> ProminentButton {
         let button = ProminentButton(title: title, target: self, action: action,
                                      fill: Tokens.Color.goldCTA,
-                                     picksInkFromFill: true,
                                      titleFont: Tokens.Font.heading)
         button.translatesAutoresizingMaskIntoConstraints = false
         return button

@@ -357,24 +357,28 @@ public final class BusRailOverlayView: NSView {
             }
             let onSpine = Self.onSpine(stop.node)
             let stopR = MembershipBusView.nodeRadius(for: stop.node)
-            // Segment tone (Warm Signal v4 §Call-1 + v4.1 items 3/4/9):
-            //   • member (connected)  → the SPINE TONE (`originColor`) — gold on
-            //     an armed spine, ember on an idle one. It reuses the HOOK's own
-            //     resolution rather than naming `gold` again, because the hook's
-            //     corner and the line leaving it are one continuous stroke: a
-            //     second call site here can pick a tone the corner didn't,
+            // Segment tone (Warm Signal v4 §Call-1 + v4.1 items 3/4/9). The
+            // wire is ONE line from the hook to the terminus, so every segment
+            // wears the SPINE TONE (`originColor` — gold on an armed spine,
+            // ember on an idle one) unless the segment itself means something:
             //   • connecting          → ember (the energize "coming online" sweep
             //     — the segment, not the node, carries the ember tone),
             //   • FAILED               → DIM (item 9 — the red node carries failure).
+            // A member segment FEEDS its node and a non-member segment PASSES
+            // BY its node (the detour arc); neither changes what the line is
+            // carrying, so both keep the spine's tone. Reusing the HOOK's own
+            // resolution rather than naming `gold` again matters because the
+            // hook's corner and the line leaving it are one continuous stroke:
+            // a second call site here can pick a tone the corner didn't.
             // A DORMANT rail skips the split entirely: `originColor` is already
             // the one quiet tone, so every segment inherits it.
             let segColor: NSColor
             if plan.dormant || stop.node == .failed {
                 segColor = Tokens.Color.railDormant
-            } else if stop.node == .member {
-                segColor = originColor
-            } else {
+            } else if stop.node == .connecting {
                 segColor = Tokens.Color.ember
+            } else {
+                segColor = originColor
             }
 
             if onSpine {

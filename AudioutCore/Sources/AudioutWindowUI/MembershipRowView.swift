@@ -240,9 +240,9 @@ public final class MembershipRowView: NSView {
     /// in this group". No-op on `.systemSheet`, which mounts no node at all.
     private func updateBus() {
         guard surface == .warmPane else { return }
-        // The node dims with the rest of the row. It was the one element that
-        // opted out of the unavailable treatment while three others carried it,
-        // so an offline speaker's node read exactly as live as an online one's.
+        // The node dims with the rest of the row — fill only: an unavailable
+        // member keeps its seat and rim on the rail and goes grey where it
+        // would be gold, so it still reads as "in this group, not playing".
         busView.apply(node: checked ? .member : .nonMember,
                       dimmed: !device.isAvailable,
                       armed: railArmed)

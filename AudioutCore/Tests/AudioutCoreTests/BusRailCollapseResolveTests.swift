@@ -222,4 +222,63 @@ import Testing
         #expect(abs(terminusDotY - plan.railTopY) <= 0.001,
                        "the cut dot is clamped to railTop so it never draws above the origin")
     }
+
+    // MARK: Segment tone — the wire is ONE line
+
+    /// Resolve a dynamic token under an explicit appearance, the way AppKit
+    /// resolves it at draw time (token objects compare by identity, not ink).
+    private func resolved(_ color: NSColor, _ appearanceName: NSAppearance.Name) -> NSColor {
+        var out = color
+        NSAppearance(named: appearanceName)?.performAsCurrentDrawingAppearance {
+            out = color.usingColorSpace(.sRGB) ?? color
+        }
+        return out
+    }
+
+    private func sameInk(_ a: NSColor, _ b: NSColor) -> Bool {
+        let a = resolved(a, .darkAqua), b = resolved(b, .darkAqua)
+        return abs(a.redComponent - b.redComponent) <= 0.005
+            && abs(a.greenComponent - b.greenComponent) <= 0.005
+            && abs(a.blueComponent - b.blueComponent) <= 0.005
+    }
+
+    private func toneInput(gold: Bool, nodes: [MembershipBusView.Node]) -> RailPlan.Input {
+        var input = expandedInput()
+        input.gold = gold
+        input.stops = zip([420, 380, 340, 300], nodes).map { .init(y: $0, node: $1) }
+        return input
+    }
+
+    /// A segment that detours PAST a non-member keeps the spine's tone: the
+    /// line carries the same signal past that node as it does into the member
+    /// below, so nothing on the wire changes colour between hook and terminus.
+    @Test func detourPastNonMembersKeepsTheArmedSpineTone() {
+        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.nonMember, .nonMember, .member]))
+        let runs = BusRailOverlayView().wireRuns(for: plan)
+        #expect(runs.count > 1, "hook plus at least one segment")
+        let spine = Tokens.Color.spineTone(armed: true)
+        #expect(runs.allSatisfy { sameInk($0.color, spine) }, "every run wears the armed spine tone")
+    }
+
+    @Test func detourPastNonMembersKeepsTheIdleSpineTone() {
+        let plan = RailPlan.resolve(toneInput(gold: false, nodes: [.nonMember, .nonMember, .member]))
+        let runs = BusRailOverlayView().wireRuns(for: plan)
+        #expect(runs.count > 1, "hook plus at least one segment")
+        let spine = Tokens.Color.spineTone(armed: false)
+        #expect(runs.allSatisfy { sameInk($0.color, spine) }, "every run wears the idle spine tone")
+    }
+
+    /// The one segment that IS allowed to step is the connecting one — the
+    /// energize sweep's ember, brightening to gold once the node connects.
+    @Test func onlyTheConnectingSegmentWearsEmber() {
+        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.connecting, .member]))
+        let runs = BusRailOverlayView().wireRuns(for: plan)
+        let spine = Tokens.Color.spineTone(armed: true)
+        let ember = Tokens.Color.ember
+        // Path order: hook, run above the connecting node, run above the member.
+        #expect(runs.count == 3, "hook + two on-spine runs")
+        #expect(sameInk(runs[0].color, spine), "the hook is the spine tone")
+        #expect(sameInk(runs[1].color, ember), "the connecting segment is ember")
+        #expect(sameInk(runs[2].color, spine), "the member segment is the spine tone")
+    }
 }

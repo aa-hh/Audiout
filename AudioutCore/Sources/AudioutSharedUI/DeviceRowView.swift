@@ -768,10 +768,11 @@ public final class DeviceRowView: NSView {
             // unavailable, so this is BT-scoped on purpose.
             node = .connecting
         } else if !device.isAvailable {
-            // Unavailable signature (spec §3.6 matrix): a HOLLOW, tinted node the
-            // line detours — an unavailable device is not currently in the mix,
-            // whatever its held checkbox state says. The `Unavailable` sublabel +
-            // row-level text dim keep it distinct from blocked (R5).
+            // Unavailable signature (spec §3.6 matrix): a HOLLOW node the line
+            // detours — an unavailable device is not currently in the mix,
+            // whatever its held checkbox state says. The dim flag reaches a
+            // fill only, so the hollow node draws like any non-member; the
+            // `Unavailable` FEED word + row-level text dim carry the state (R5).
             node = .nonMember
             dim = true
         } else if energizePending, !reduceMotion, case .off = device.connectionState {
@@ -2424,10 +2425,11 @@ public final class DeviceRowView: NSView {
     /// so it can't drift from the pixels.
     public var test_busNode: MembershipBusView.Node? { busActive ? busView.test_node : nil }
 
-    /// Whether the bus node is ACTUALLY drawn in the de-emphasis tint — reads
-    /// the drawn value (dormant tint, unavailable tint, and the failed-member
-    /// never-dim exemption included), unlike `test_isSelectionDimmed` which
-    /// reports the host-driven dormancy input. `nil` when the row has no bus.
+    /// Whether the bus node's FILL is the de-emphasis tint — reads the drawn
+    /// value (dormant tint, unavailable tint, and the failed-member never-dim
+    /// exemption included), unlike `test_isSelectionDimmed` which reports the
+    /// host-driven dormancy input. The rim is never tinted, so on a hollow
+    /// node the flag is carried but draws nothing. `nil` when the row has no bus.
     public var test_busNodeDimmed: Bool? { busActive ? busView.test_dimmed : nil }
 
     // MARK: Bluetooth SYNC chip (T6) test hooks

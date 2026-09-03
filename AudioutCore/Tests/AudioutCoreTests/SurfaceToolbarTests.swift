@@ -38,12 +38,10 @@ import AudioutSharedUI
             .space,
             SurfaceToolbarController.tabItemIdentifier(for: .settings),
             .flexibleSpace,
-            SurfaceToolbarController.titleItemIdentifier,
-            .flexibleSpace,
             SurfaceToolbarController.pinItemIdentifier,
             .space,
             SurfaceToolbarController.quitItemIdentifier,
-        ], "three spaced tabs lead, the app name sits centered, Pin and Quit trail with a gap")
+        ], "three spaced tabs lead, Pin and Quit trail with a gap and nothing sits between")
         #expect(controller.test_quitItemTitle == "Quit",
                 "Quit is the word, not a glyph")
         #expect(!controller.test_quitItemHasImage,
@@ -59,54 +57,27 @@ import AudioutSharedUI
                 "every tab resolved a system SF Symbol")
     }
 
-    /// SPEC.md §9 asks for icon+label tabs, and the display mode cannot supply
-    /// the labels: a label-showing mode spills them beside the strip as loose
-    /// text on macOS 26+. So each item draws its own name from its `title`
-    /// while the toolbar stays icon-only. AppKit owns the icon/name layout
-    /// inside a standard item, so there is nothing here to assert about it.
-    @Test func tabsShowTheirNamesBesideTheirIconsWithoutLeavingIconOnlyMode() {
+    /// The tabs are ICON-ONLY (Alec, 2026-09-03). Names on the items' `title`
+    /// were tried and removed: translated labels would widen the strip until
+    /// AppKit swept the tabs into the overflow menu, and primary navigation
+    /// cannot live behind a chevron. The names still reach the reader through
+    /// the tooltip, the `label`, and ⌘1/⌘2/⌘3 — none of which costs width.
+    @Test func tabsDrawNoNameSoTheStripCannotGrowWithTranslation() {
         let (controller, window) = makeAttached()
         window.layoutIfNeeded()
+        // Hoisted out of `#expect`: the macro decomposes the call, and
+        // `allSatisfy` is `rethrows`, so the expansion refuses to compile.
+        let noTabDrawsAName = controller.test_tabTitles.allSatisfy(\.isEmpty)
+        #expect(noTabDrawsAName, "no tab draws a name")
         #expect(controller.test_tabLabels == SurfaceScreen.allCases.map(\.label),
-                "every tab draws its own name")
+                "but every tab still carries its name for VoiceOver and the overflow menu")
+        #expect(controller.test_tabToolTips == SurfaceScreen.allCases.map { "\($0.label) (⌘\($0.keyEquivalent))" },
+                "and the tooltip spells it out with the shortcut")
         #expect(controller.test_allTabImagesResolved,
-                "and keeps the icon beside it")
-        #expect(controller.toolbar.displayMode == .iconOnly,
-                "the names come from the items, never from a label-showing display mode")
+                "the glyph is what the tab shows")
+        #expect(controller.toolbar.displayMode == .iconOnly)
     }
 
-
-    @Test func centeredAppNameItemExists() {
-        let (controller, _) = makeAttached()
-        #expect(controller.test_centeredTitleText == "Audiout",
-                "the header carries the app name as a centered toolbar item (D1)")
-        if #available(macOS 13.0, *) {
-            #expect(controller.toolbar.centeredItemIdentifiers
-                        .contains(SurfaceToolbarController.titleItemIdentifier))
-        }
-    }
-
-    @Test func theCenteredItemIsALockupWhoseMarkIsDecorative() {
-        let (controller, _) = makeAttached()
-        #expect(controller.test_centeredMarkHasImage,
-                "the brand mark leads the wordmark")
-        #expect(controller.test_centeredMarkIsDecorative,
-                "the wordmark speaks the name — the mark must not say it twice")
-    }
-
-    /// The lockup's capsule is drawn by AppKit around the item's view, so its
-    /// padding IS the stack's edge insets. The ends get more than the top and
-    /// bottom on purpose (Alec, 2026-08-29): at equal insets the wordmark sat
-    /// close enough to the glass edge to read as a cramped chip, and the
-    /// horizontal axis is the one the strip height does not pin.
-    @Test func theCenteredLockupBreathesInsideItsCapsule() {
-        let (controller, _) = makeAttached()
-        #expect(controller.test_centeredLockupHorizontalInset
-                    == SurfaceToolbarController.lockupHorizontalInset)
-        #expect(SurfaceToolbarController.lockupHorizontalInset
-                    > SurfaceToolbarController.lockupVerticalInset,
-                "the ends get more room than the strip-bound vertical axis can give")
-    }
 
     @Test func pinResolvesItsGlyphAndQuitIsAWord() {
         let (controller, _) = makeAttached()
@@ -151,7 +122,7 @@ import AudioutSharedUI
 
     /// One header, one button style (Alec, live review 2026-08-30). The tabs
     /// had become custom-view items, which draw NO chrome — bare glyphs beside
-    /// Pin/Quit's bordered circles and the lockup's glass capsule, three styles
+    /// Pin/Quit's bordered circles, two styles
     /// in one strip. Every tab is the same bordered item Pin and Quit are.
     @Test func everyTabWearsTheSameControlAsPinAndQuit() {
         let (controller, _) = makeAttached()

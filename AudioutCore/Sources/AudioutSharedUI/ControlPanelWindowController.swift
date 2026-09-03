@@ -240,18 +240,27 @@ public final class ControlPanelWindowController: NSWindowController {
             // NO separate visible title bar (owner decision 2026-08-07, live
             // build review): the window-attached toolbar the surface installs
             // IS the one header strip, and `titleVisibility` stays `.hidden`
-            // so the title-bar text never stacks a second strip above it (the
-            // toolbar carries a centered app-name item instead; `window.title`
-            // remains set for VoiceOver / Mission Control). The title bar
-            // area keeps its system material pinned (`titlebarAppearsTransparent
-            // = false`) — the system draws the unified-toolbar strip, Liquid
-            // Glass on macOS 26+, the older material below, Reduce
-            // Transparency handled for free. Appearance bits only: the style
-            // mask is NOT touched (see `makePanel`), so `.fullSizeContentView`
-            // stays on — the hosted content still spans the whole frame,
-            // including under the toolbar strip, and content that needs to
-            // clear it has to inset itself.
-            panel.titlebarAppearsTransparent = false
+            // so the title-bar text never stacks a second strip above it
+            // (`window.title` remains set for VoiceOver / Mission Control).
+            //
+            // The title bar is TRANSPARENT in both manners, so the strip shows
+            // the window's own `backgroundColor` — the same warm `panel` the
+            // body carries. Pinned used to leave it opaque and let the system
+            // paint the unified-strip material, which in dark mode is a
+            // NEUTRAL grey against a warm near-black body: a hard horizontal
+            // seam across the window, exactly under the header (live check,
+            // 2026-09-03). Warm Signal owns backgrounds, so the ground has to
+            // run edge to edge. Nothing is given up to get it: the window is
+            // opaque with an authored fill, so there is no translucency for
+            // Reduce Transparency to reduce, and the toolbar ITEMS still draw
+            // their own macOS 26+ glass capsules — those are the controls, not
+            // the ground.
+            //
+            // Appearance bits only: the style mask is NOT touched (see
+            // `makePanel`), so `.fullSizeContentView` stays on — the hosted
+            // content still spans the whole frame, including under the toolbar
+            // strip, and content that needs to clear it has to inset itself.
+            panel.titlebarAppearsTransparent = true
             panel.titleVisibility = .hidden
             // Pinned shows the standard close button (an ordinary window's
             // close affordance); unpinned hides it — the menu-bar click and

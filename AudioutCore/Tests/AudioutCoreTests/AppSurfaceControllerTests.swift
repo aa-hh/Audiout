@@ -361,43 +361,22 @@ import AppKit
                 "the surface's toolbar IS the shell window's toolbar")
         #expect(window.toolbarStyle == .unified)
         #expect(window.titleVisibility == .hidden,
-                "no separate title bar ever — the centered toolbar item carries the name")
-        #expect(surface.test_toolbarController.test_centeredTitleText == "Audiout")
+                "no separate title bar ever — the toolbar IS the one header strip")
         #expect(window.titlebarAccessoryViewControllers.isEmpty,
-                "one header line only — the name rides the toolbar, never a second row")
+                "one header line only, never a second row")
     }
 
-    /// Task A: the centered brand lockup fits WITHIN the unified strip, so the
-    /// mark's top no longer clips against the strip and the bubble's rounded
-    /// corner. The mark scales down to its box (never up), and the whole lockup
-    /// sits inside the measured strip height — the horizontal padding widens
-    /// the capsule, it must never grow it downward.
-    @Test func theHeaderLockupFitsTheToolbarStripUnclipped() throws {
-        let (surface, _, _, _) = makeSurface()
-        surface.show(anchorRect: nil)
-        surface.shell.window?.layoutIfNeeded()
-        let toolbar = surface.test_toolbarController
-        #expect(toolbar.test_centeredMarkScalesToFit,
-                "the mark scales to fit its box — the whole figure, un-clipped")
-        let strip = surface.test_chromeTopInset
-        #expect(strip > 0, "the unified strip has real height to measure against")
-        let lockup = toolbar.test_centeredLockupFittingHeight
-        #expect(lockup > 0, "the centered lockup materialized")
-        #expect(lockup <= strip,
-                "the lockup fits within the strip — nothing clips (lockup \(lockup), strip \(strip))")
-    }
-
-    /// The surface width is fixed and the app name is centred inside it, so a
-    /// NAMED tab strip has to fit in the half beside it. Measured off the
-    /// materialized item viewers: standard toolbar items expose no view and no
-    /// fitting width of their own, which is why this guard lives here with the
-    /// view-tree walk rather than in SurfaceToolbarTests.
+    /// The surface width is FIXED, so every header item has to fit inside it —
+    /// AppKit's answer to a strip that does not fit is to sweep items into the
+    /// overflow chevron, and primary navigation cannot live behind one. This is
+    /// the guard that says so, and the reason the tabs draw no name: three
+    /// translated labels are exactly what would push the strip past this line.
     ///
-    /// The tabs are the three LEADING items in the strip, so sorting the
-    /// viewers by their leading edge and taking the first three is what
-    /// identifies them — subview order is not display order. Bounds only, since
-    /// AppKit's rounding grid varies per run.
-    @Test func theNamedTabStripLeavesRoomForTheCentredLockup() throws {
+    /// Measured off the materialized item viewers, since standard toolbar items
+    /// expose no view and no fitting width of their own — which is why the
+    /// guard lives here with the view-tree walk rather than in
+    /// SurfaceToolbarTests. Bounds only: AppKit's rounding grid varies per run.
+    @Test func everyHeaderItemFitsTheFixedSurfaceWidth() throws {
         let (surface, _, _, _) = makeSurface()
         surface.show(anchorRect: nil)
         let window = try #require(surface.shell.window)
@@ -408,12 +387,13 @@ import AppKit
             .sorted { $0.minX < $1.minX }
         #expect(viewers.count >= SurfaceScreen.allCases.count,
                 "the toolbar materialized a viewer per item")
-        let stripWidth = viewers.prefix(SurfaceScreen.allCases.count)
-            .reduce(0) { $0 + $1.width }
-        #expect(stripWidth > 0, "the tab strip has real width to measure")
-        let lockup = surface.test_toolbarController.test_centeredLockupFittingWidth
-        #expect(stripWidth * 2 + lockup < SurfaceLayout.width,
-                "the strip mirrored on both sides still clears the centred lockup (strip \(stripWidth), lockup \(lockup))")
+        var used: CGFloat = 0
+        for frame in viewers {
+            used += frame.width
+        }
+        #expect(used > 0, "the header has real width to measure")
+        let fits = used < SurfaceLayout.width
+        #expect(fits, "every header item fits the fixed surface width (used \(used), width \(SurfaceLayout.width))")
     }
 
     @Test func toolbarTracksSelectionAndPin() {

@@ -662,7 +662,7 @@ final class IconLabelCellView: NSTableCellView {
         v.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold))
         v.image?.isTemplate = true
-        v.contentTintColor = Tokens.Color.tertiaryLabel
+        v.contentTintColor = Tokens.Color.inkTertiary
         v.isHidden = true
         v.setAccessibilityElement(false)
         v.setContentHuggingPriority(.required, for: .horizontal)
@@ -965,9 +965,9 @@ extension SidebarViewController: NSOutlineViewDelegate {
         // fill instead, via `.isTemplate` (which `DeviceIcon.image` sets) plus
         // an explicit `contentTintColor`.
         cell.imageView?.image = DeviceIcon.image(symbol)
-        cell.imageView?.contentTintColor = dimmed ? .disabledControlTextColor : Tokens.Color.label
+        cell.imageView?.contentTintColor = dimmed ? Tokens.Color.inkTertiary : Tokens.Color.label
         cell.textField?.stringValue = text
-        cell.textField?.textColor = dimmed ? .disabledControlTextColor : Tokens.Color.label
+        cell.textField?.textColor = dimmed ? Tokens.Color.inkTertiary : Tokens.Color.label
         cell.setActiveMarkerVisible(showsActiveMarker)
         cell.setDisclosureVisible(showsDisclosure)
         // Both states were COLOUR/GLYPH ONLY: a dimmed row and a gold marker

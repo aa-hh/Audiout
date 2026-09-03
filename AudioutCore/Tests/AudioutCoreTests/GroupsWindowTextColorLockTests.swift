@@ -90,6 +90,7 @@ import AppKit
             ("raised", Tokens.Color.raised),
             ("well", Tokens.Color.well),
             ("hairline", Tokens.Color.hairline),
+            ("containerEdge", Tokens.Color.containerEdge),
             ("meterTrack", Tokens.Color.meterTrack),
             ("sidebarWarmTint", Tokens.Color.sidebarWarmTint),
             ("ringConnected", Tokens.Color.ringConnected),
@@ -108,6 +109,28 @@ import AppKit
     /// is included because plain unstyled `NSTextField`s (e.g. an editable name
     /// field nobody explicitly re-colors) default to it — still a stock system
     /// semantic, still within the deal.
+    ///
+    /// THE MEASURED-FLOOR CARVE-OUT (Alec, 2026-09-03). Two authored tokens are
+    /// allowed here, and only on the same grounds: a stock semantic that CANNOT
+    /// reach its WCAG floor by any surface change is not a text colour this
+    /// screen may keep, because the frozen-text deal was always "lift contrast
+    /// from surfaces" — and for these two there is no surface that lifts it.
+    ///
+    /// - ``Tokens/Color/secondaryLabel`` was the first: the stock alias sits
+    ///   under the text floor in light, so the token resolves an authored warm
+    ///   hex there and leaves dark on the system colour.
+    /// - ``Tokens/Color/inkTertiary`` is the second. `tertiaryLabelColor` is
+    ///   black at 25.88% alpha, so it COMPOSITES against whatever it sits on:
+    ///   1.87:1 on `panel`, 1.86:1 on `raised`, 1.84:1 on `well`. Sweeping every
+    ///   possible light ground from mid-grey to pure white, the best ratio the
+    ///   alias can reach is 1.88:1 — the 4.5:1 floor is unreachable at that
+    ///   alpha on any surface that could ever be painted under it. `inkTertiary`
+    ///   is authored, ships all four variants, and measures 6.13:1 on `panel` /
+    ///   5.57:1 on `raised` / 4.76:1 on `well`.
+    ///
+    /// This carve-out is NOT a licence to re-tone text for separation, which is
+    /// the thing the frozen decision exists to stop. Adding a third entry means
+    /// showing the same arithmetic: the floor is unreachable from the surface.
     private var stockSemantics: [(name: String, color: NSColor)] {
         [
             ("labelColor", .labelColor),
@@ -116,7 +139,8 @@ import AppKit
             ("quaternaryLabelColor", .quaternaryLabelColor),
             ("disabledControlTextColor", .disabledControlTextColor),
             ("controlTextColor", .controlTextColor),
-            ("Tokens.Color.secondaryLabel (mode-aware token)", Tokens.Color.secondaryLabel),
+            ("Tokens.Color.secondaryLabel (measured-floor carve-out)", Tokens.Color.secondaryLabel),
+            ("Tokens.Color.inkTertiary (measured-floor carve-out)", Tokens.Color.inkTertiary),
         ]
     }
 

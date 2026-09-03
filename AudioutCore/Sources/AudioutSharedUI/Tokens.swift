@@ -322,6 +322,44 @@ public enum Tokens {
                        light: 0xD0CDC3, lightHighContrast: 0x76716B)
         }
 
+        /// A container's OWN outer edge — the stroke around a grouped section
+        /// or an inset seat. ``hairline`` above is its sibling one rank down:
+        /// the dividers BETWEEN rows INSIDE such a container. Two weights of
+        /// one mechanism, and the mechanism is free, because nothing in this
+        /// app is ever drawn ON a hairline — each is only ever a stroke or a
+        /// divider fill — so ranking them spends no text and no instrument
+        /// contrast.
+        ///
+        /// WHY LIGHT NEEDS A SECOND WEIGHT AND DARK DOES NOT. In light,
+        /// `canvas`/`canvasHi`/`panel` are all one value (`#FBFBF9`), so a
+        /// `panel`-filled container on the canvas measures **1.000:1** — its
+        /// edge is the only boundary pixel that exists. (Light does have a
+        /// ladder above that: `raised` `#F2F0EA` is 1.100:1 on `panel` and
+        /// `well` `#E2DFD3` is 1.289:1. Neither rescues the `panel` case, and
+        /// neither is what a container edge is measured against.) Dark keeps a
+        /// real ladder throughout — `panel` vs `canvas` 1.060:1, `raised` vs
+        /// `panel` 1.070:1, `well` vs `panel` 1.109:1 — AND a `hairline`
+        /// already measuring 1.404:1 vs `panel`, 1.489:1 vs `canvas`, 1.558:1
+        /// vs `well`, at or above where light's edge lands. So **dark resolves
+        /// to `hairline`'s own two values**. A third dark value would buy
+        /// separation dark already has, and start drawing frames around things.
+        ///
+        /// CONTRAST RATIONALE (WCAG relative luminance; each ratio is against
+        /// the surface that edge actually borders). LIGHT `#C4C0B4` — 1.755:1 vs `canvas`/`panel`, 1.596:1 vs
+        /// `raised`, 1.362:1 vs `well`, all over the 1.25:1 separator floor
+        /// (`MembershipWellContrastTests`). It clears the `hairline` divider by
+        /// 1.143:1 — enough to rank the two, short of reading as two different
+        /// materials. LIGHT Increase Contrast `#6C6761` — 5.404:1 vs
+        /// `canvas`/`panel`, 4.914:1 vs `raised`, 4.194:1 vs `well`, and
+        /// 1.158:1 over the IC divider `#76716B`, so the container-vs-divider
+        /// rank survives the mode whose users most depend on structure. Same
+        /// neutral-greige hue line as that divider (R−B = 11): a warm-tan edge
+        /// reads off-family on the neutral Circuit ground.
+        public static var containerEdge: NSColor {
+            warmDynamic(name: "containerEdge", dark: 0x3A332B, darkHighContrast: 0x786B5A,
+                       light: 0xC4C0B4, lightHighContrast: 0x6C6761)
+        }
+
         /// The under-name level meter's EMPTY-track fill (`LevelMeterView`'s
         /// `trackLayer`). Added in the UX spacing/contrast pass (2026-07-23,
         /// owner live-build feedback): the track was `NSColor.tertiarySystemFill`,
@@ -604,15 +642,34 @@ public enum Tokens {
         /// luminance (spec's own formula; component-scaled sRGB).
         public static var ember: NSColor {
             accentDynamic(name: "ember",
-                          // Light re-tuned #9C7E3C → #947637 (IC #9A7A2E →
-                          // #8F702F, kept strictly darker than base) for the
-                          // same well deepening: measured 3.21:1 on well /
-                          // 4.13:1 on panel, still gold's dimmer, duller
-                          // companion (sat gap 0.19, same hue family).
+                          // LIGHT IS DEEP ENOUGH TO BE TELLABLE FROM GOLD, and
+                          // that is a harder constraint than its own floor.
+                          // Pinning both inks just over the 3:1 non-text floor
+                          // on the same ground leaves them ~1.03:1 apart — a 3%
+                          // luminance difference on a 2 pt line, which no one
+                          // reads. ``spineTone(armed:)`` would then resolve to
+                          // one visible colour in light and the rail could not
+                          // report liveness at all, which is the one thing gold
+                          // exists to say. Dark's own pair sits at 2.72:1; light
+                          // has to buy a comparable gap, and depth is the only
+                          // axis available once both are floor-bound.
+                          //
+                          // Full light `#6F5629`: 1.67:1 from gold, 6.06:1 on
+                          // raised, 5.18:1 on well, 6.67:1 on panel. Hue 38.6°
+                          // against gold's 41.4° (same family, inside the
+                          // reserved gold band), saturation 0.63 against gold's
+                          // 0.82 — a 0.186 gap, so ember stays the duller ink
+                          // by chroma AND is now the darker one by luminance,
+                          // which is exactly the relationship dark already has.
+                          // Subtle light `#6E6039` separates by luminance
+                          // rather than chroma (1.50:1 from Subtle gold): the
+                          // muted column is meant to be muted, and darkening it
+                          // is the only axis left that does not re-saturate it.
+                          // IC variants stay strictly darker than their bases.
                           full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
-                                             light: 0x947637, lightHighContrast: 0x8F702F),
+                                             light: 0x6F5629, lightHighContrast: 0x5E4922),
                           subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
-                                               light: 0x877750, lightHighContrast: 0x8A744C),
+                                               light: 0x6E6039, lightHighContrast: 0x5C5030),
                           systemAccentScale: 0.55)
         }
 

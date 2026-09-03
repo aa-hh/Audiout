@@ -145,11 +145,18 @@ remote_sweep_orphans() {
 }
 
 # Delete remote trees to keep the disk usable. Two rules, applied in order:
-#   1. AGE  — a tree unused for 7+ days goes, unconditionally.
+#   1. AGE  — a tree unused for 24h+ goes, unconditionally.
 #   2. SPACE — while free space is under the floor, evict the least recently
 #      used tree, until it clears or nothing is left to take.
 #
-# Rule 1 alone bounds nothing, and twice now that has taken the remote down.
+# Rule 1 was 7 days and bounded nothing -- twice that took the remote down.
+# `.last-used` is re-stamped every run, so with a fleet of agents cycling
+# branches no tree ever reached 7 days and the rule never fired once. 24h is
+# short enough to actually bite. NOTE the BSD find quirk: `-mtime +1` means
+# older than TWO days (the fraction is truncated), so "older than 24h" is
+# `-mtime +0` -- the same predicate rule 2 uses to protect a live run.
+# Cost of cutting it this fine: returning to a worktree after a day pays one
+# re-sync plus one cold build, a few minutes.
 # Each tree carries a ~1.6 GB .build cache, and `.last-used` is re-stamped on
 # every run -- so a fleet of agents cycling through branches keeps 60+ trees
 # permanently "fresh". First 79 dead trees / 93 GB (Aug 2026), then 62 LIVE
@@ -165,7 +172,7 @@ remote_prune_stale() {
     ssh -o BatchMode=yes "$remote_host" \
         "cd \"$remote_root\" 2>/dev/null || exit 0; \
          for d in */; do d=\${d%/}; s=\"\$d/.last-used\"; [ -f \"\$s\" ] || s=\"\$d\"; \
-             [ -n \"\$(find \"\$s\" -maxdepth 0 -mtime +7 2>/dev/null)\" ] && rm -rf \"\$d\"; \
+             [ -n \"\$(find \"\$s\" -maxdepth 0 -mtime +0 2>/dev/null)\" ] && rm -rf \"\$d\"; \
          done; \
          while [ \"\$(df -m . | awk 'NR==2{print \$4}')\" -lt $remote_free_floor ]; do \
              _v=\$(for d in */; do d=\${d%/}; s=\"\$d/.last-used\"; [ -f \"\$s\" ] || s=\"\$d\"; \

@@ -2653,8 +2653,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, let bt = self.backend as? BTOutputControlling else {
                     return "This Mac can't measure speaker timing."
                 }
-                self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
-                return bt.applyCompanionAlignmentMeasurement(targetID: targetID, offsetMs: offsetMs)
+                let clientID = self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                switch bt.applyCompanionAlignmentMeasurement(targetID: targetID, offsetMs: offsetMs) {
+                case .refused(let reason):
+                    return reason
+                case .applied(let measuredMs, let correctedMs):
+                    // Enqueued on the server queue before this command's own
+                    // reply is, so it reaches the phone first — but the phone
+                    // does not lean on that order.
+                    if let clientID {
+                        self.companionServer.sendAlignmentApplied(
+                            deviceID: targetID, measuredMs: measuredMs,
+                            correctedMs: correctedMs, to: clientID)
+                    }
+                    return nil
+                }
             },
             setTick: { [weak self] targetID, active, clientID in
                 guard let self, let bt = self.backend as? BTOutputControlling else {

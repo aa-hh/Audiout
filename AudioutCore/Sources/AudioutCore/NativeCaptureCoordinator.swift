@@ -1366,6 +1366,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             case .off: nil
             case .manual: .manual
             case .wizard: .wizard
+            case .companion: .companion
             }
             guard self.tickConfig != config else { return }
             self.tickConfig = config
@@ -1444,6 +1445,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// - Completing the sweeps does NOT hand over to the by-ear tick grid.
     ///   The phone owns what happens next, and the Mac stands the run down on
     ///   its own a moment later.
+    /// - The microphone is the phone's, at the listening position, so the
+    ///   engine lane plays at full amplitude. Its usual −6 dB pays for a Mac
+    ///   speaker inches from the Mac's own mic, which is not this run.
     public func stageCompanionMicProbe(staggered: Bool,
                                        referenceOnEngine: Bool,
                                        downWindowUID: String?,
@@ -1454,7 +1458,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             guard let self, let injector = self.currentWizardInjector() else { return }
             injector.stageProbe(
                 shape: staggered ? .staggered(referenceOnEngine: referenceOnEngine)
-                                 : .simultaneous)
+                                 : .simultaneous,
+                engineLaneScale: 1)
             self.companionProbeWindowUIDs = staggered ? [downWindowUID, upWindowUID] : []
             self.companionProbeActive = true
             self.micProbeStarted = onStarted

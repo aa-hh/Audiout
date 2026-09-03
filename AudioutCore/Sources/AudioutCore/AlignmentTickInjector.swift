@@ -11,6 +11,9 @@ public enum AlignTickMode: Equatable, Sendable {
     case off
     case manual
     case wizard
+    /// The phone's by-ear fine-tune session: the row's metronome on a budget
+    /// long enough to tune by, since the phone sends no timer of its own.
+    case companion
 }
 
 /// What the keep-alive under the ticks is made of — see
@@ -71,6 +74,8 @@ public enum KeepAliveKind: Equatable, Sendable {
 /// default tempo) it stops emitting on its own, so a UI that forgets to switch
 /// it off can only ever leak silence, not a metronome. The WIZARD is the
 /// deliberate exception (``Config/unlimitedTicks``) — see ``Config/wizard``.
+/// The phone's by-ear session sits between the two at ~10 min
+/// (``Config/companion``), long enough to tune by and still bounded.
 ///
 /// **Keep-alive bed** (live finding 2026-08-07): the Sonos Move power-gates
 /// its amplifier after silence and swallows short transients — the first
@@ -99,6 +104,9 @@ final class AlignmentTickInjector: @unchecked Sendable {
     static let defaultMaxTicks = 36
     /// No self-limit at all — the wizard's budget (see ``Config/wizard``).
     static let unlimitedTicks = Int.max
+    /// ~10 min at 72 BPM — the phone's by-ear session, whose real switch-off is
+    /// the session ending.
+    static let companionMaxTicks = 720
     /// The wizard's coarse-search tempo: one tick every 3 s. Wide enough that
     /// no reachable Bluetooth latency can alias into an apparent lead.
     static let wizardSearchBPM: Double = 20
@@ -219,6 +227,7 @@ final class AlignmentTickInjector: @unchecked Sendable {
         static let toneRMSdBFS: Double = -40
 
         static let manual = Config()
+        static let companion = Config(maxTicks: AlignmentTickInjector.companionMaxTicks)
         static let wizard = Config(bpm: AlignmentTickInjector.wizardSearchBPM,
                                    maxTicks: AlignmentTickInjector.unlimitedTicks,
                                    armedAtStart: false, replacesProgram: true)
@@ -414,9 +423,14 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// Raising the Bluetooth lane instead was tried and rejected — a
     /// near-full-scale sweep is the "heavy static" complaint again.
     ///
+    /// All of which holds only while the microphone is the Mac's own. A
+    /// phone-driven run listens from the sofa instead, where the Mac's speaker
+    /// has no head start to give away, so it passes `engineLaneScale: 1`.
+    ///
     /// `shape` chooses between the two layouts — see ``ProbeShape``. The
     /// default is the Mac wizard's own simultaneous pair.
-    func stageProbe(amplitude: Double = 0.35, shape: ProbeShape = .simultaneous) {
+    func stageProbe(amplitude: Double = 0.35, shape: ProbeShape = .simultaneous,
+                    engineLaneScale: Double = AlignmentTickInjector.probeEngineLaneScale) {
         func samples(_ design: SyncProbe.SweepDesign, _ amplitude: Double) -> [Int32] {
             let scale = amplitude * 32_767.0
             return SyncProbe.samples(design).map { Int32((Double($0) * scale).rounded()) }
@@ -427,7 +441,7 @@ final class AlignmentTickInjector: @unchecked Sendable {
         // the microphone is inches from the Mac's own speaker. The same DOWN
         // sweep played through a Bluetooth speaker metres away needs the full
         // amplitude every other Bluetooth lane gets.
-        let downNear = samples(downSweep, amplitude * Self.probeEngineLaneScale)
+        let downNear = samples(downSweep, amplitude * engineLaneScale)
         let downFar = samples(downSweep, amplitude)
         let up = samples(.upSweep(sampleRate: sampleRate, duration: Self.probeSweepSeconds),
                          amplitude)
@@ -452,7 +466,7 @@ final class AlignmentTickInjector: @unchecked Sendable {
     }
 
     /// How much quieter the engine/Mac probe lane plays than the Bluetooth
-    /// one — −6 dB. See ``stageProbe(amplitude:shape:)``.
+    /// one — −6 dB. See ``stageProbe(amplitude:shape:engineLaneScale:)``.
     static let probeEngineLaneScale = 0.5
 
     var probeStaged: Bool { !probeBTLanes.isEmpty }

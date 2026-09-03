@@ -10515,8 +10515,11 @@ public protocol BTOutputControlling: AnyObject {
     /// Apply the phone's raw measurement: the target's currently applied
     /// latency plus the reported offset, less whatever stagger the staging
     /// used. Persisted through the same path the Mac wizard's Keep takes
-    /// (measured latency written, trim zeroed).
-    func applyCompanionAlignmentMeasurement(targetID: String, offsetMs: Double) -> String?
+    /// (measured latency written, trim zeroed). The success case carries the
+    /// two numbers the phone cannot derive — the de-staggered measurement and
+    /// how far the stored latency actually moved.
+    func applyCompanionAlignmentMeasurement(targetID: String,
+                                            offsetMs: Double) -> CompanionAlignmentApplyResult
 
     /// Start/stop the by-ear fine-tune metronome for `targetID`. The `true`
     /// edge records the trim to revert to; the `false` edge persists whatever
@@ -10565,8 +10568,9 @@ extension BTOutputControlling {
         "This Mac can't measure speaker timing."
     }
     public func cancelCompanionAlignmentProbe(targetID: String) {}
-    public func applyCompanionAlignmentMeasurement(targetID: String, offsetMs: Double) -> String? {
-        "This Mac can't measure speaker timing."
+    public func applyCompanionAlignmentMeasurement(targetID: String,
+                                                   offsetMs: Double) -> CompanionAlignmentApplyResult {
+        .refused("This Mac can't measure speaker timing.")
     }
     public func setCompanionAlignmentTick(targetID: String, active: Bool) -> String? {
         "This Mac can't measure speaker timing."
@@ -10752,9 +10756,12 @@ extension NativeBackend: BTOutputControlling {
     private static let companionDemoLegSeconds: TimeInterval = 2
 
     /// How long a stood-down run waits for the phone's measurement before
-    /// giving up and putting the suspended trim back. Matches the phone's own
-    /// recording timeout, so whichever side gives up first the other is not
-    /// left holding state for a run that will never report.
+    /// giving up and putting the suspended trim back. The timer starts at audio
+    /// stand-down — the pipeline tail after the last sweep frame — and the
+    /// phone measures at that same tail, reports, then waits its own 20 s
+    /// (`AlignmentRunController.applyTimeoutSeconds`) for the Mac's answer. So
+    /// both sides give up about 20 s past the tail, and neither is left holding
+    /// a run the other has abandoned.
     private static let companionReportTimeoutSeconds: TimeInterval = 20
 
     public var onBTAlignmentChanged: (@Sendable () -> Void)? {
@@ -10927,9 +10934,10 @@ extension NativeBackend: BTOutputControlling {
         setBTWizardTrimPreview(run.trimAtSessionStartMs, forDevice: run.targetUID)
     }
 
-    public func applyCompanionAlignmentMeasurement(targetID: String, offsetMs: Double) -> String? {
+    public func applyCompanionAlignmentMeasurement(targetID: String,
+                                                   offsetMs: Double) -> CompanionAlignmentApplyResult {
         guard let run = takeCompanionProbeRun({ $0.targetUID == targetID }) else {
-            return "That measurement isn't running any more — start it again."
+            return .refused("That measurement isn't running any more — start it again.")
         }
         // A phone quick enough to report before the tail elapsed leaves the
         // sweeps still playing; silence them here rather than letting the
@@ -10953,11 +10961,17 @@ extension NativeBackend: BTOutputControlling {
         // Lowers the raised Bluetooth reference and releases the holds. A run
         // already stood down did both at the tail, and both are idempotent.
         endBTWizardRun()
-        return nil
+        return .applied(measuredMs: offsetMs - run.staggerMs,
+                        correctedMs: Swift.max(0, value) - applied)
     }
 
     public func setCompanionAlignmentTick(targetID: String, active: Bool) -> String? {
         if active {
+            // A user who walked out of the A/B demo straight into fine-tune
+            // ends it here rather than being refused for it. The demo's two
+            // pending blocks are left to fire: the 2 s one re-pushes the
+            // stored latency, the 4 s one finds the demo already over.
+            endCompanionDemo(targetID: targetID)
             let claimed = btTrimLock.withLock { () -> Bool in
                 if let run = companionAlignmentRun {
                     // Already ticking for this device: idempotent.
@@ -10973,9 +10987,11 @@ extension NativeBackend: BTOutputControlling {
             guard claimed else {
                 return "This Mac is already measuring a speaker — finish that first."
             }
-            // The row's own metronome, which self-limits at ~30 s of ticks, so
-            // a phone that walks away can only leak silence.
-            setBTAlignTickActive(true)
+            // The companion budget is ~10 min, long enough that a by-ear
+            // session is never cut off mid-tune. The real switch-off is the
+            // session's own exits — tick-off, cancel, a client that vanished —
+            // and the budget only bounds a phone that walked away.
+            captureCoordinator?.setAlignTickMode(.companion)
         } else {
             endCompanionTickSession(targetID: targetID, persist: true)
         }
@@ -10991,6 +11007,10 @@ extension NativeBackend: BTOutputControlling {
     /// live value instead, so a tick-off arriving after it cannot recreate the
     /// entry Clear just deleted. A device with no session left is a no-op
     /// either way, whichever order the phone sends the two in.
+    ///
+    /// A session whose trim never moved writes nothing at all, so merely
+    /// opening and closing the ticks cannot mint an alignment entry for a
+    /// device that had none.
     private func endCompanionTickSession(targetID: String, persist: Bool) {
         let ended = btTrimLock.withLock { () -> CompanionAlignmentRun? in
             guard let run = companionAlignmentRun,
@@ -11000,7 +11020,7 @@ extension NativeBackend: BTOutputControlling {
         }
         guard let ended else { return }
         setBTAlignTickActive(false)
-        guard persist else { return }
+        guard persist, ended.liveTrimMs != ended.trimAtSessionStartMs else { return }
         // The session's nudges were live-only until here; ending it is what
         // writes them down.
         setBTSyncTrim(ended.liveTrimMs, forDevice: targetID, persist: true)

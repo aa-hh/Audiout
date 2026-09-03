@@ -288,9 +288,13 @@ import AppKit
         let editor = window.test_editor
 
         // The pane's own coordinates are NOT flipped (the scroll DOCUMENT is),
-        // so "above" is a larger y.
-        #expect(editor.test_backControlFrame.minY > editor.test_headerIconFrame.maxY,
-                "the band clears the identity card's icon")
+        // so "above" is a larger y. A bare `>` here once passed on a 0.5 pt
+        // gap — assert the real minimum clearance instead so a future change
+        // that spends the gap down to nothing fails loudly.
+        let clearance = editor.test_backControlFrame.minY - editor.test_headerIconFrame.maxY
+        #expect(clearance >= 8,
+                Comment(rawValue: "the band needs at least 8 pt of clearance above the " +
+                "identity card's icon, not just any gap"))
         #expect(abs(editor.test_headerSectionFrame.maxY
                     - (editor.view.frame.height - GroupsPaneLayout.columnTopInset)) <= 0.5,
                 Comment(rawValue: "the form still starts at the inset both detail panes use — a band " +

@@ -212,16 +212,22 @@ public final class GroupEditorViewController: NSViewController {
     private static let saveTitle = "Save"
 
     /// The top action band's inset from the document's top. The band holds the
-    /// two controls that leave this pane, and it rides INSIDE the header
-    /// section's own bare top padding rather than pushing the form down: the
-    /// column still starts at `GroupsPaneLayout.columnTopInset`, so the icon
-    /// well and the name stay at exactly the y the device detail pane puts
-    /// theirs. HEADER PARITY IS GEOMETRIC (`GroupsHeaderParityTests` asserts
-    /// the two panes' real laid-out title frames), so a band that PUSHED the
-    /// header down would make every sidebar swap between a group and a speaker
-    /// twitch. The section draws nothing (`.bare`), so the only thing the band
-    /// overlaps is empty padding.
-    private static let topBandTopInset: CGFloat = 4
+    /// two controls that leave this pane, and it needs its own margin from the
+    /// toolbar chrome above it (Alec, 2026-09-03) while still clearing the
+    /// icon well below by at least `topBandControlGap`-worth of room — the
+    /// back button overlaps the icon well horizontally, so if the band drops
+    /// low enough the icon tile draws on top of it. There is no room to buy
+    /// that clearance from this constant alone: raising `topBandTopInset` on
+    /// its own eats straight into the gap and lands the tile on the button.
+    /// So this constant and `GroupsPaneLayout.columnTopInset` move TOGETHER,
+    /// by the same amount, whenever the band's margin changes — that keeps the
+    /// 8 pt of clearance below the band constant while giving the band more
+    /// air above it. HEADER PARITY IS GEOMETRIC (`GroupsHeaderParityTests`
+    /// asserts the two panes' real laid-out title frames), so the column must
+    /// not move relative to the device detail pane's — moving both constants
+    /// together keeps the column pinned to the shared `columnTopInset`, it
+    /// just shifts that shared value too.
+    private static let topBandTopInset: CGFloat = 12
     /// Smallest gap between the two controls on that band before the back
     /// control has to give way.
     private static let topBandControlGap: CGFloat = 8

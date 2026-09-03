@@ -2,6 +2,7 @@
 
 import AppKit
 import AudioutCore
+import AudioutSharedUI
 
 /// The "Enter License…" sheet (Settings › General): the ONLY place a key is
 /// typed. The pane itself never shows an editable field — the convention every
@@ -33,7 +34,7 @@ public final class LicenseSheetViewController: NSViewController {
     private let buyButton = NSButton()
     private let removeButton = NSButton()
     private let cancelButton = NSButton()
-    private let registerButton = NSButton()
+    private var registerButton: ProminentButton!
 
     /// Fired exactly once, whatever ends the sheet — Register (verified or
     /// key-saved-unverified), Remove, or Cancel — so the pane re-reads
@@ -118,11 +119,20 @@ public final class LicenseSheetViewController: NSViewController {
         cancelButton.target = self
         cancelButton.action = #selector(cancelTapped)
 
-        registerButton.title = "Register"
-        registerButton.bezelStyle = .rounded
+        // One action, one treatment: Register here is the same act as Register
+        // on the first-open licence gate (`LicenseGateViewController.swift:148`),
+        // so it wears the same gold. The folder's "no gold in these panes" rule
+        // holds — a sheet is not a pane.
+        //
+        // It is also the folder's exception to "every view sets
+        // `translatesAutoresizingMaskIntoConstraints = false`": this button is
+        // an arranged subview of `buttonRow` below, which owns that flag, and
+        // setting it here would fight the stack. The sheet's four other buttons
+        // never set it either, and `onboardingActionButton` sets it only for
+        // the constraint-hosted card slot.
+        registerButton = ProminentButton(title: "Register", target: self,
+                                         action: #selector(registerTapped))
         registerButton.keyEquivalent = "\r"
-        registerButton.target = self
-        registerButton.action = #selector(registerTapped)
 
         let spacer = NSView()
         spacer.translatesAutoresizingMaskIntoConstraints = false

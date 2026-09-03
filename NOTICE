@@ -112,3 +112,21 @@ can vary with the Homebrew version used to build. This NOTICE describes
 the top-level libraries and the bundling mechanism; the authoritative
 exact file list for any given build is whatever is actually present in
 that build's `Contents/Frameworks/`, not a list frozen here.
+
+## Bundled fonts
+
+- Clash Display Semibold (`ClashDisplay-Semibold.otf`), the wordmark face
+  (`Tokens.Font.wordmark`)
+- Copyright 2021 Indian Type Foundry. Clash is a trademark of the Indian
+  Type Foundry.
+- Licensed under the ITF Free Font License (https://fontshare.com/terms).
+  The licence permits embedding the face in a desktop app and requires
+  identifying the font by name and crediting ITF's ownership in any
+  design or production credits — Audiout does so in About's credits
+  surface and here.
+- The `.otf` is NOT in this repository: the ITF Free Font License forbids
+  redistributing the file through a public repo, so
+  `scripts/fetch-wordmark-font.sh` fetches it from Fontshare at assembly,
+  checked against a pinned sha256, and it lands only in `build/`
+  (gitignored) and inside the shipped `.app`'s `Contents/Resources`
+  alongside the licence text.

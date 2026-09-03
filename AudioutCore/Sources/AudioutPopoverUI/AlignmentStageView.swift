@@ -11,10 +11,10 @@ import AudioutSharedUI
 /// between them IS the uncertainty, so they can meet but never cross, and the
 /// lit span of the wire between them is the interval itself. Colour names
 /// WHICH speaker, never state (wizard-stage v2 spec §2): the target light is
-/// `syncSignal`, the reference `partySignal`, and the two fuse to `fuseWhite`
-/// at the lock. The stage IS the plate — it fills its own bounds with
-/// `stagePlate`, so every hue inside it is an instrument value, fixed in both
-/// appearances.
+/// `wireCore`, the reference `ring` (pinned to its dark hex, below), and the
+/// two fuse to `fuseWhite` at the lock. The stage IS the plate — it fills its
+/// own bounds with `stagePlate`, so every hue inside it is an instrument
+/// value, fixed in both appearances.
 ///
 /// **The ladder is the system** (spec §5). Confidence is not a continuous
 /// dial: the run climbs eight named RUNGS, each with one settled look, and the
@@ -59,8 +59,10 @@ import AudioutSharedUI
 /// and is present in every render.
 ///
 /// Layer colors are stamped `CGColor`s, so the view re-stamps on appearance
-/// flips, accessibility-display changes AND the accent dial (the three live
-/// re-resolution triggers, `AudioutSharedUI/AGENTS.md`). Model values stay
+/// flips and accessibility-display changes. The accent dial is the third
+/// re-resolution trigger for instruments generally
+/// (`AudioutSharedUI/AGENTS.md`), but no token this stage draws is remapped by
+/// it, so the stage does not listen for it. Model values stay
 /// SETTLED underneath every transient, so snapshots are deterministic and the
 /// test seams read the truth rather than a frame. Decorative to
 /// accessibility — the readout caption beside the stage carries the same
@@ -242,7 +244,7 @@ final class AlignmentStageView: NSView {
     /// circle adrift in a blob).
     ///
     /// Three things move together, and none of them is a free multiply.
-    /// **The halos scale with the rings**, or the glow stops being a glow —
+    /// **The halos scale with the rings**, or the halo stops reading as light —
     /// which is what forces `stageHeight` up to 132. **The line widths rise
     /// sub-linearly** (×1.25 rather than ×1.8): a stroke that scaled with the
     /// radius would read as a drawn hoop instead of a lit edge. **And the
@@ -343,7 +345,7 @@ final class AlignmentStageView: NSView {
     /// 112 until the lights were scaled 1.8× (see `look(for:)`), and the 20 pt
     /// it grew by is the price of that scale rather than a separate decision —
     /// the halo is the tallest thing on the plate, and a halo that did not
-    /// grow with its ring would have stopped reading as glow. It feeds
+    /// grow with its ring would have stopped reading as a halo. It feeds
     /// `BTAlignmentWizardView.chassisHeight` 1:1, so it is also the sheet's
     /// height: every screen gets 20 pt taller, none of them reflows, and the
     /// stage goes from 27 % of the question sheet to 30 % — the ratio the
@@ -361,8 +363,10 @@ final class AlignmentStageView: NSView {
     /// screen. It stays a constant of the plate's own height, so the wire never
     /// moves between screens — the fixed chassis rule.
     private static let wireYFraction: CGFloat = 0.5
-    /// The stage IS the plate: a rounded-12 `stagePlate` ground under it all.
-    private static let plateCornerRadius: CGFloat = 12
+    /// The stage IS the plate: a `stagePlate` ground at the row radius (iOS
+    /// Shapes: a strip-sized card, not the Main Out deck's panel radius) under
+    /// it all.
+    private static let plateCornerRadius: CGFloat = Tokens.Layout.Radius.row
     /// The window never zooms tighter than this, whatever the rung asks for.
     private static let minWindowSpanMs: Double = 40
     /// The sticky centre's dead-band: the interval plus this much of the
@@ -473,7 +477,7 @@ final class AlignmentStageView: NSView {
     /// The wire, in two halves: OUTSIDE the field, because the rail does not
     /// move with the camera — it is the fixed thing the ruler slides under.
     /// Two layers so that, fused and locked, each side can carry its own
-    /// voice up to the ring (green from the left, magenta from the right)
+    /// voice up to the ring (green from the left, steel blue from the right)
     /// instead of one rule running straight through it.
     private let wireLeft = CAShapeLayer()
     private let wireRight = CAShapeLayer()
@@ -481,8 +485,8 @@ final class AlignmentStageView: NSView {
     /// seeded push-in reads as an iris rather than as content spilling out.
     private let fieldLayer = CALayer()
     private let tickLayer = CAShapeLayer()
-    /// The credible interval: a `syncSignal → partySignal` bar between the two
-    /// lights, with a low `fuseWhite` glow.
+    /// The credible interval: a `wireCore → ring` bar between the two
+    /// lights, with a low `fuseWhite` bloom (the span's shadow).
     private let spanLayer = CAGradientLayer()
     private let targetHalo = CALayer()
     private let targetRing = CAShapeLayer()
@@ -556,14 +560,11 @@ final class AlignmentStageView: NSView {
             addSubview(label)
         }
 
-        // The three live re-resolution triggers (see the type comment).
+        // The live re-resolution triggers (see the type comment).
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(accessibilityDisplayOptionsDidChange),
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
             object: nil)
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(accentStyleDidChange),
-            name: Tokens.accentStyleDidChangeNotification, object: nil)
 
         setAccessibilityElement(false)
     }
@@ -1075,8 +1076,10 @@ final class AlignmentStageView: NSView {
                     haloDiameter: look.haloDiameter,
                     haloOpacity: fused || locked ? 0 : haloOpacity,
                     ringRadius: fused ? look.ringRadius + 6 : look.ringRadius,
-                    // ×0.85, not the table's ×0.55: over the green halo the
-                    // outer ring measured dusty mauve, not magenta.
+                    // ×0.85, not the table's ×0.55: measured against the
+                    // magenta-era ring over the green halo (dusty mauve at
+                    // 0.55); not re-measured for `ring` — owed eye check
+                    // (PR 8).
                     ringOpacity: locked ? 0 : (fused ? look.ringOpacity * 0.85
                                                      : look.ringOpacity),
                     ringLineWidth: ringLineWidth,
@@ -1272,8 +1275,8 @@ final class AlignmentStageView: NSView {
 
     // MARK: - Flourishes
 
-    /// The promotion's DETENT: the notch the push-in lands in. The span's glow
-    /// swells and takes the instrument's own gold voice for a moment, and the
+    /// The promotion's DETENT: the notch the push-in lands in. The span's
+    /// bloom swells and brightens to `stageInk` for a moment, and the
     /// target ring overshoots its new weight by a hair. Span shadow only — the
     /// identity hues never move.
     private func fireDetent(at begin: TimeInterval, look: Look) {
@@ -1382,7 +1385,7 @@ final class AlignmentStageView: NSView {
         // releases it, then cross to white with it.
         let crosses: [(layer: CALayer, keyPath: String, from: Any?)] = [
             (targetRing, "strokeColor", resolvedTargetLight),
-            (targetHalo, "contents", Self.haloImage(color: Tokens.Color.syncSignal)),
+            (targetHalo, "contents", Self.haloImage(color: Tokens.Color.wireCore)),
         ]
         for (layer, keyPath, from) in crosses {
             let cross = CABasicAnimation(keyPath: keyPath)
@@ -1406,7 +1409,8 @@ final class AlignmentStageView: NSView {
     }
 
     /// Beat 2: two bars sweep the wire's light into the ring — green from the
-    /// left, magenta from the right, each keeping its own hue as it arrives.
+    /// left, steel blue from the right, each keeping its own hue as it
+    /// arrives.
     ///
     /// The fixed edge is the one AT THE RING, so the bar collapses INTO it —
     /// the beat is a GATHER, and light draining outward would read as the
@@ -1626,6 +1630,18 @@ final class AlignmentStageView: NSView {
     private var resolvedTargetLight: CGColor = NSColor.clear.cgColor
     private var resolvedReferenceLight: CGColor = NSColor.clear.cgColor
 
+    /// The reference speaker's light, pinned to ``Tokens/Color/ring``'s dark
+    /// hex in BOTH appearances, like every other stage token: the stage is a
+    /// fixed instrument, and the themed light hex measures 3.43:1 on the plate
+    /// against the green's 14.73:1 (dark hex 8.60:1).
+    private static var referenceLight: NSColor {
+        var resolved = Tokens.Color.ring
+        NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
+            resolved = Tokens.Color.ring.usingColorSpace(.sRGB) ?? resolved
+        }
+        return resolved
+    }
+
     private func stampColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             let dormant = rung == .dormant
@@ -1636,8 +1652,8 @@ final class AlignmentStageView: NSView {
             // Armed: no belief yet, so no identity on the span either.
             let neutralSpan = dormant || rung == .armed
             let rule = Tokens.Color.stageRule
-            let target = Tokens.Color.syncSignal
-            let reference = Tokens.Color.partySignal
+            let target = Tokens.Color.wireCore
+            let reference = Self.referenceLight
             let fuse = Tokens.Color.fuseWhite
             let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
 
@@ -1645,7 +1661,7 @@ final class AlignmentStageView: NSView {
             // A recessed screen's bezel: faint in the dark chassis, a real
             // warm rim in light, where the plate is a black rectangle on
             // white without it.
-            plateLayer.borderColor = Tokens.Color.plateRim
+            plateLayer.borderColor = Tokens.Color.rim
                 .withAlphaComponent(isDark ? 0.35 : 0.9).cgColor
             // Fused/locked, the two halves of the wire carry their own voice
             // up to the ring; otherwise one rule.
@@ -1654,7 +1670,7 @@ final class AlignmentStageView: NSView {
             tickLayer.strokeColor = rule.cgColor
 
             // The interval reads as the two speakers' hues meeting at a
-            // crisp seam: green from the target's end, magenta from the
+            // crisp seam: green from the target's end, blue from the
             // reference's. No blend between them — a gradient's pale
             // midpoint made the instrument look half-fused all run, and
             // turned the lock's white into a hue shift instead of an arrival.
@@ -1676,11 +1692,10 @@ final class AlignmentStageView: NSView {
             resolvedSpanGlow = fuse.cgColor
             resolvedTargetLight = target.cgColor
             resolvedReferenceLight = reference.cgColor
-            // The detent is the INSTRUMENT's own voice acknowledging banked
-            // progress, so it is gold — the one gold left on the stage. The
-            // subtle dial has no gold to spend, so it falls back to ember.
-            resolvedDetentAccent = (Tokens.accentStyle == .subtle
-                                    ? Tokens.Color.ember : Tokens.Color.glow).cgColor
+            // The detent is the instrument acknowledging banked progress in
+            // its OWN ink (S6, 2026-09-03): a brightness pulse, never gold —
+            // the CTA plate is the only gold on this sheet.
+            resolvedDetentAccent = Tokens.Color.stageInk.cgColor
         }
     }
 
@@ -1726,13 +1741,6 @@ final class AlignmentStageView: NSView {
         reconcileBreathing()
     }
 
-    @objc private func accentStyleDidChange() {
-        cancelInFlight()
-        stampColors()
-        applyGeometry(Self.instantScript)
-        reconcileBreathing()
-    }
-
     private var reduceMotion: Bool {
         test_reduceMotionOverride
             ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -1758,6 +1766,12 @@ final class AlignmentStageView: NSView {
     }
     /// The target ring's settled stroke — `fuseWhite` once locked.
     var test_targetRingColor: NSColor? { targetRing.strokeColor.map(NSColor.init(cgColor:)) ?? nil }
+    /// The reference ring's settled stroke — `ring`'s dark hex in both appearances.
+    var test_referenceRingColor: NSColor? {
+        referenceRing.strokeColor.map(NSColor.init(cgColor:)) ?? nil
+    }
+    /// The colour the promotion detent pulses the span's shadow to.
+    var test_detentAccent: NSColor? { NSColor(cgColor: resolvedDetentAccent) }
     var test_isBreathing: Bool {
         targetHalo.animation(forKey: Self.breatheKey) != nil
     }

@@ -73,10 +73,14 @@ public extension BTSyncDrawerViewDelegate {
 ///
 /// **Colour:** the background is ``Tokens/Color/well`` — the recessed/inset
 /// fill already used behind slider troughs, darker than the row card in BOTH
-/// themes, which is what "opens downward" needs to read. No drawn edge or
-/// border (live feedback): the well fill alone reads as a recess belonging to
-/// the row above. The align-by-ear button keeps the exact
-/// accent/secondaryLabel treatment it has on the row today
+/// themes, which is what "opens downward" needs to read. The recess is
+/// bounded by a 1 pt ``Tokens/Color/containerEdge`` rim on all four sides
+/// (2026-09-03): the drawer is a full-width row clip, so its sides are flush
+/// with the card and its top meets the device row, and on the flat light
+/// ground the well is only 1.154:1 from the card — iOS separates by edge
+/// weight there (containerEdge 1.75:1 on `well` light, 2.01:1 dark). A card's
+/// own edge is `containerEdge`, never `hairline`. The align-by-ear button
+/// keeps the exact `engagedChrome`/`label2` treatment it has on the row today
 /// (`DeviceRowView.alignTapped`). The background is drawn in `draw(_:)`, not
 /// stamped into a `CALayer`, so it re-resolves live on every pass with no
 /// `viewDidChangeEffectiveAppearance` observer needed. Every control in the
@@ -285,7 +289,7 @@ public final class BTSyncDrawerView: NSView {
                 break
             }
         }
-        alignButton.contentTintColor = Tokens.Color.secondaryLabel
+        alignButton.contentTintColor = Tokens.Color.label2
         // `DeviceRowView.alignTooltip` — one string, shared across its module
         // (both types live in `AudioutSharedUI`), not re-authored here.
         alignButton.toolTip = DeviceRowView.alignTooltip
@@ -305,7 +309,7 @@ public final class BTSyncDrawerView: NSView {
         alignAgainButton.image = NSImage(systemSymbolName: "tuningfork",
                                          accessibilityDescription: nil)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .regular))
-        alignAgainButton.contentTintColor = Tokens.Color.secondaryLabel
+        alignAgainButton.contentTintColor = Tokens.Color.label2
         alignAgainButton.toolTip = Self.alignAgainTooltip
         alignAgainButton.setAccessibilityLabel("Align again")
         alignAgainButton.setAccessibilityHelp(Self.alignAgainTooltip)
@@ -333,7 +337,7 @@ public final class BTSyncDrawerView: NSView {
         // nobody is told about does not exist.
         hintLabel.stringValue = "hold \u{21E7} for 10 ms"
         hintLabel.font = Tokens.Font.caption
-        hintLabel.textColor = Tokens.Color.tertiaryLabel
+        hintLabel.textColor = Tokens.Color.label3
 
     }
 
@@ -417,12 +421,16 @@ public final class BTSyncDrawerView: NSView {
         alignLeadingToEdge?.isActive = !canAlignAgain
     }
 
-    // MARK: Drawing — background only, no border (see header comment)
+    // MARK: Drawing — well fill + containerEdge rim
 
     public override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         Tokens.Color.well.setFill()
         bounds.fill()
+        let rim = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
+        rim.lineWidth = 1
+        Tokens.Color.containerEdge.setStroke()
+        rim.stroke()
     }
 
 
@@ -444,7 +452,7 @@ public final class BTSyncDrawerView: NSView {
         self.canAlignAgain = canAlignAgain
         alignButton.state = alignTickActive ? .on : .off
         alignButton.contentTintColor = alignTickActive
-            ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
+            ? Tokens.Color.engagedChrome : Tokens.Color.label2
         refreshDisplay()
     }
 
@@ -532,7 +540,7 @@ public final class BTSyncDrawerView: NSView {
         // so the toggle reads immediately, before the host's re-apply echoes
         // it — mirrors `DeviceRowView.alignTapped` exactly.
         alignButton.contentTintColor = sender.state == .on
-            ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
+            ? Tokens.Color.engagedChrome : Tokens.Color.label2
         delegate?.syncDrawer(self, didToggleAlignTick: sender.state == .on)
     }
 

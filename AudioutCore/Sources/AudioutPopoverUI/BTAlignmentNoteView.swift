@@ -35,7 +35,7 @@ final class BTAlignmentNoteView: NSView {
     }
     private static let verticalInset: CGFloat = 4
     private static let contentPadding: CGFloat = 10
-    private static let backgroundCornerRadius: CGFloat = 7
+    private static let backgroundCornerRadius: CGFloat = Tokens.Layout.Radius.control
     private static let copyToHideGap: CGFloat = 8
     private static let hideButtonSize: CGFloat = 16
 
@@ -96,7 +96,7 @@ final class BTAlignmentNoteView: NSView {
         hideButton.imageScaling = .scaleProportionallyDown
         hideButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Hide")?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
-        hideButton.contentTintColor = Tokens.Color.inkTertiary
+        hideButton.contentTintColor = Tokens.Color.label3
         hideButton.target = self
         hideButton.action = #selector(hideClicked(_:))
         hideButton.setAccessibilityLabel("Hide")
@@ -148,7 +148,7 @@ final class BTAlignmentNoteView: NSView {
         let text = NSMutableAttributedString(
             string: noteLead(name: name),
             attributes: [.font: Tokens.Font.detail,
-                         .foregroundColor: Tokens.Color.secondaryLabel,
+                         .foregroundColor: Tokens.Color.label2,
                          .paragraphStyle: paragraph])
         text.append(NSAttributedString(
             string: noteAlignCall,

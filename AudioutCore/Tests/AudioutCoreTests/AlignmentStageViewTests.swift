@@ -87,6 +87,49 @@ import AudioutSharedUI
                 "the locked ring is stamped fuseWhite, got \(locked)")
     }
 
+    /// The stage is a fixed instrument: the reference light is `ring`'s DARK
+    /// hex whichever appearance the sheet is in, the way every other stage
+    /// token passes one hex for both.
+    @Test func referenceRingIsRingsDarkHexInBothAppearances() throws {
+        let pinned = try #require(resolved(Tokens.Color.ring, appearanceName: .darkAqua)
+            .usingColorSpace(.sRGB))
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            let stage = makeStage()
+            stage.appearance = NSAppearance(named: appearanceName)
+            stage.apply(.question(intervalMs: 30...50, range: range), animated: false)
+            let drawn = try #require(stage.test_referenceRingColor?.usingColorSpace(.sRGB))
+            #expect(abs(drawn.redComponent - pinned.redComponent) < 0.02
+                        && abs(drawn.greenComponent - pinned.greenComponent) < 0.02
+                        && abs(drawn.blueComponent - pinned.blueComponent) < 0.02,
+                    "\(appearanceName.rawValue): the reference ring is the pinned ring, got \(drawn)")
+        }
+    }
+
+    /// S6: the promotion detent is a brightness pulse in the instrument's own
+    /// ink, not the gold the CTA plate owns.
+    @Test func detentFlashIsStageInkNotGold() throws {
+        let stage = makeStage()
+        stage.apply(.question(intervalMs: 30...50, range: range), animated: false)
+        let accent = try #require(stage.test_detentAccent?.usingColorSpace(.sRGB))
+        let ink = try #require(Tokens.Color.stageInk.usingColorSpace(.sRGB))
+        #expect(abs(accent.redComponent - ink.redComponent) < 0.02
+                    && abs(accent.greenComponent - ink.greenComponent) < 0.02
+                    && abs(accent.blueComponent - ink.blueComponent) < 0.02,
+                "the detent is stamped stageInk, got \(accent)")
+        #expect(accent.redComponent - accent.blueComponent < 0.1,
+                "gold would lead red by ~0.52; the detent is near-neutral")
+    }
+
+    /// Force-resolves a dynamic `Tokens.Color` under a fixed appearance — the
+    /// same idiom `AlignmentTokenContrastTests` measures with.
+    private func resolved(_ color: NSColor, appearanceName: NSAppearance.Name) -> NSColor {
+        var result = color
+        NSAppearance(named: appearanceName)?.performAsCurrentDrawingAppearance {
+            result = color.usingColorSpace(.sRGB) ?? color
+        }
+        return result
+    }
+
     @Test func dormantKeepsThePreviousDisplayRange() {
         let stage = makeStage()
         stage.apply(.question(intervalMs: 100...160, range: range), animated: false)

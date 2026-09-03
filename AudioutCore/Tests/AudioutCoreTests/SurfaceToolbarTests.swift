@@ -39,13 +39,7 @@ import AudioutSharedUI
             SurfaceToolbarController.tabItemIdentifier(for: .settings),
             .flexibleSpace,
             SurfaceToolbarController.pinItemIdentifier,
-            .space,
-            SurfaceToolbarController.quitItemIdentifier,
-        ], "three spaced tabs lead, Pin and Quit trail with a gap and nothing sits between")
-        #expect(controller.test_quitItemTitle == "Quit",
-                "Quit is the word, not a glyph")
-        #expect(!controller.test_quitItemHasImage,
-                "Quit is the word, not a glyph")
+        ], "three spaced tabs lead and Pin trails; Quit left the strip for the menus")
         #expect(window.toolbar === controller.toolbar)
         #expect(window.toolbarStyle == .unified, "D1: unified — the toolbar IS the one header strip")
     }
@@ -82,10 +76,6 @@ import AudioutSharedUI
     @Test func pinResolvesItsGlyphAndQuitIsAWord() {
         let (controller, _) = makeAttached()
         #expect(controller.test_pinItemHasImage)
-        #expect(controller.test_quitItemTitle == "Quit",
-                "Quit is the word, not a glyph")
-        #expect(!controller.test_quitItemHasImage,
-                "Quit is the word, not a glyph")
     }
 
     // MARK: No segmented separators, and clicks that really land
@@ -111,13 +101,13 @@ import AudioutSharedUI
 
     /// The selection has to be visible without the segmented capsule doing it
     /// for us, and it has to be visible on exactly one tab.
-    @Test func onlyTheSelectedTabIsFilled() {
+    @Test func onlyTheSelectedTabIsMarked() {
         let (controller, _) = makeAttached()
-        #expect(controller.test_onlySelectedTabIsFilled, "Mixer starts selected, alone")
+        #expect(controller.test_onlySelectedTabIsMarked, "Mixer starts selected, alone")
 
         controller.setSelectedScreen(.settings)
 
-        #expect(controller.test_onlySelectedTabIsFilled, "the fill followed the selection")
+        #expect(controller.test_onlySelectedTabIsMarked, "the fill followed the selection")
     }
 
     /// One header, one button style (Alec, live review 2026-08-30). The tabs
@@ -128,7 +118,7 @@ import AudioutSharedUI
         let (controller, _) = makeAttached()
         #expect(controller.test_allTabsAreBordered,
                 "the tabs are bordered items — the same control Pin and Quit are")
-        #expect(controller.test_pinItemIsBordered && controller.test_quitItemIsBordered,
+        #expect(controller.test_pinItemIsBordered,
                 "and Pin/Quit really are bordered, so that comparison means something")
     }
 
@@ -152,20 +142,29 @@ import AudioutSharedUI
         }
     }
 
-    /// The fill is neutral on purpose: gold means signal — carrying audio —
-    /// and which screen you are on is chrome. Same rule that keeps the mute
-    /// pill and the row washes off the gold family. It is an authored grey
-    /// rather than the dynamic token because `.prominent` forces the glyph
-    /// WHITE in both appearances, and a token that goes near-white in dark
-    /// mode would hide it.
-    @Test func theSelectionFillIsNeutralNotGold() {
-        let fill = SurfaceToolbarController.selectedTabFill
-            .usingColorSpace(.sRGB) ?? .black
-        #expect(abs(fill.redComponent - fill.greenComponent) < 0.01
-                    && abs(fill.greenComponent - fill.blueComponent) < 0.01,
-                "the fill is a pure grey — no hue, and specifically not gold")
-        #expect(fill.brightnessComponent < 0.5,
-                "dark enough that the forced-white glyph reads on it in light mode too")
+    /// Selection is AppKit's own, not an authored fill. This test replaces
+    /// `theSelectionFillIsNeutralNotGold`, which pinned the bug it was written
+    /// to prevent: it required a PURE grey darker than 0.5 brightness, which
+    /// forbade both a warm value and any value bright enough to clear the
+    /// unselected capsule in dark mode.
+    ///
+    /// `selectedItemIdentifier` is version-free — the old cue lived inside
+    /// `if #available(macOS 26.0, *)` while the package deploys to 14.2, so
+    /// macOS 14–25 had no cue at all — and it is the selection AppKit exposes
+    /// to VoiceOver, which a rendering style never was.
+    @Test func theToolbarCarriesSelectionItselfOnEveryVersion() {
+        let (controller, _) = makeAttached()
+        // Asked of the delegate, because NSToolbar exposes no
+        // `selectableItemIdentifiers` property — only the delegate method.
+        #expect(controller.toolbarSelectableItemIdentifiers(controller.toolbar)
+                    == SurfaceScreen.allCases.map(SurfaceToolbarController.tabItemIdentifier(for:)),
+                "the three screens are the selectable set — without it AppKit draws no highlight")
+        for screen in SurfaceScreen.allCases {
+            controller.setSelectedScreen(screen)
+            #expect(controller.toolbar.selectedItemIdentifier
+                        == SurfaceToolbarController.tabItemIdentifier(for: screen),
+                    "\(screen.label) is what the toolbar reports as selected")
+        }
     }
 
     // MARK: Selection — host-confirmed round trip
@@ -212,20 +211,16 @@ import AudioutSharedUI
         #expect(controller.test_selectedTabIndex == SurfaceScreen.groups.rawValue)
     }
 
-    // MARK: Pin / Quit
+    // MARK: Pin
 
-    @Test func pinAndQuitFireTheirCallbacks() {
+    @Test func pinFiresItsCallback() {
         let (controller, _) = makeAttached()
         var pinned = false
-        var quit = false
         controller.onTogglePin = { pinned = true }
-        controller.onQuit = { quit = true }
 
         controller.test_tapPin()
-        controller.test_tapQuit()
 
         #expect(pinned)
-        #expect(quit)
     }
 
     @Test func pinItemReflectsThePinnedState() {

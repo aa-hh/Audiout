@@ -241,7 +241,6 @@ public final class AppSurfaceController {
         // chrome inset is measurable from the first mount.
         toolbarController.onSelectScreen = { [weak self] in self?.select($0) }
         toolbarController.onTogglePin = { [weak self] in self?.togglePin() }
-        toolbarController.onQuit = { NSApp?.terminate(nil) }
 
         // The discovery stream feeds the first-open reveal's settle tracker (nil
         // outside a first open — a plain no-op then), and is remembered so a
@@ -264,7 +263,6 @@ public final class AppSurfaceController {
             // `contentLayoutRect` until AppKit's first layout pass), so
             // `chromeTopInset` measures the real strip from the first mount.
             window.layoutIfNeeded()
-            mountHeaderBackdrop(in: window)
         }
         syncToolbar()
 
@@ -759,42 +757,6 @@ public final class AppSurfaceController {
     /// mounted split view widen the window to its own minimum (probed, 560 →
     /// 707); the one legitimate materialization pass runs at attach time in
     /// `init`.
-    private var headerBackdrop: HeaderBackdropView?
-
-    /// The header's ground, for tests that assert it exists and tracks the
-    /// strip.
-    var test_headerBackdrop: HeaderBackdropView? { headerBackdrop }
-    var test_headerBackdropHeight: CGFloat { headerBackdrop?.frame.height ?? 0 }
-
-    /// Put the header's own ground behind the strip. The title bar is
-    /// transparent in both manners (see `ControlPanelWindowController`), so
-    /// without this the strip shows the bare window fill; with it the header
-    /// carries system glass tinted warm, and follows the reader's glass
-    /// setting because the system — not this app — decides how much of it to
-    /// draw. Mounted below every screen's content.
-    ///
-    /// Its bottom edge is AppKit's own `contentLayoutGuide`, never a copy of
-    /// `chromeTopInset`. That number is read at specific moments, and a
-    /// constant set from it at mount came back an order out (512 against a
-    /// real 52) because the window has laid out once here but is not yet at
-    /// its session frame — and the stale height then fed into the content's
-    /// fitting size and raised the mixer. The guide tracks the strip through
-    /// every frame change with no number for anyone to keep in sync.
-    private func mountHeaderBackdrop(in window: NSWindow) {
-        guard headerBackdrop == nil,
-              let contentView = window.contentView,
-              let guide = window.contentLayoutGuide as? NSLayoutGuide else { return }
-        let backdrop = HeaderBackdropView()
-        contentView.addSubview(backdrop, positioned: .below, relativeTo: nil)
-        NSLayoutConstraint.activate([
-            backdrop.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            backdrop.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            backdrop.topAnchor.constraint(equalTo: contentView.topAnchor),
-            backdrop.bottomAnchor.constraint(equalTo: guide.topAnchor),
-        ])
-        headerBackdrop = backdrop
-    }
-
     private var chromeTopInset: CGFloat {
         guard let window = shell.window,
               let contentView = window.contentView else { return 0 }

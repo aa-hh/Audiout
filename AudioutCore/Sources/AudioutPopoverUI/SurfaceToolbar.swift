@@ -50,32 +50,8 @@ import AudioutSharedUI
 @MainActor
 final class SurfaceToolbarController: NSObject {
 
-    /// Fill behind the SELECTED tab's glyph. `.prominent` is the only way a
-    /// standard toolbar item paints its own background, and it forces the
-    /// glyph WHITE in both appearances — so this fill must stay dark enough
-    /// for white to read on it in light AND dark mode. That rules out any
-    /// SEMANTIC token, which inverts (near-black in light, near-white in
-    /// dark) and would put white on white.
-    ///
-    /// It does NOT rule out an authored pair, and one value is not enough
-    /// (live check, 2026-09-03). A single mid-dark neutral reads perfectly in
-    /// light mode against the near-white unbordered capsule, and vanishes in
-    /// dark mode, where the UNSELECTED capsule is already about this grey —
-    /// three identical circles and no way to tell which screen you are on.
-    /// The fill has to contrast with its NEIGHBOURS, not just carry white.
-    ///
-    /// So: darker in dark mode, not lighter. Both values keep a white glyph
-    /// legible, and each sits well clear of the unselected capsule in its own
-    /// appearance. Still NOT the gold family — gold means signal, and which
-    /// screen you are on is chrome.
-    static let selectedTabFill = NSColor(name: "selectedTabFill") { appearance in
-        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            ? NSColor(white: 0.08, alpha: 1)
-            : NSColor(white: 0.35, alpha: 1)
-    }
 
     static let pinItemIdentifier = NSToolbarItem.Identifier("SurfacePin")
-    static let quitItemIdentifier = NSToolbarItem.Identifier("SurfaceQuit")
 
     /// One stable, non-localized identifier per screen.
     static func tabItemIdentifier(for screen: SurfaceScreen) -> NSToolbarItem.Identifier {
@@ -89,7 +65,6 @@ final class SurfaceToolbarController: NSObject {
     /// The Pin item was clicked.
     var onTogglePin: (() -> Void)?
     /// The Quit item was clicked.
-    var onQuit: (() -> Void)?
 
     // MARK: State (pushed by the host)
 
@@ -137,15 +112,33 @@ final class SurfaceToolbarController: NSObject {
     /// live review 2026-08-30: the custom-view tabs drew no chrome at all,
     /// leaving bare glyphs beside bordered circles and a glass lockup).
     /// Selection is the filled variant of that one control.
+    /// Mark the current screen through AppKit's OWN toolbar selection
+    /// (`selectedItemIdentifier` + `toolbarSelectableItemIdentifiers`), not an
+    /// authored fill.
+    ///
+    /// This is the Mac idiom and the iOS one differs on purpose: iOS puts
+    /// top-level navigation in a tab bar, where the selected tab is a tint and
+    /// a filled glyph. macOS has no tab bar at all — Apple's own guidance is
+    /// that tab views serve that role — so a toolbar that navigates marks its
+    /// place the way AppKit draws it, and AppKit has drawn that highlight
+    /// since 10.0.
+    ///
+    /// What this replaces, and why: every cue used to sit inside
+    /// `if #available(macOS 26.0, *)` while the package deploys to 14.2, so
+    /// macOS 14–25 showed three identical circles and no current screen — and
+    /// the suite reported green, because the seams asserted the intent rather
+    /// than the pixels. The authored fill could not be rescued by tuning
+    /// either: it has to clear the UNSELECTED capsule, and in dark mode that
+    /// capsule already sat at the same grey, so the selected tab rendered as
+    /// the darkest thing in the strip — the user's own location reading as an
+    /// absence.
+    ///
+    /// It also carries the accessibility state. `.prominent` is a rendering
+    /// property that VoiceOver never speaks; `selectedItemIdentifier` is the
+    /// selection AppKit itself exposes.
     private func applySelectionToTabs() {
+        toolbar.selectedItemIdentifier = Self.tabItemIdentifier(for: selectedScreen)
         for (screen, item) in tabItems {
-            let selected = screen == selectedScreen
-            if #available(macOS 26.0, *) {
-                item.style = selected ? .prominent : .plain
-                item.backgroundTintColor = selected ? Self.selectedTabFill : nil
-            }
-            // Below macOS 26 there is no prominent style, so the glyph tint is
-            // the whole cue — harmless to set on 26+, where prominent overrides it.
             item.image = Self.resolveSymbol(screen.symbolName,
                                             fallbacks: screen.fallbackSymbolNames,
                                             accessibilityDescription: screen.label)
@@ -175,7 +168,6 @@ final class SurfaceToolbarController: NSObject {
     }
 
     @objc private func pinTapped(_ sender: Any?) { onTogglePin?() }
-    @objc private func quitTapped(_ sender: Any?) { onQuit?() }
 
     /// Resolve an SF Symbol, falling through `fallbacks` in order so an item
     /// is never glyph-less (the retired header's defense-in-depth idiom; all
@@ -213,22 +205,25 @@ final class SurfaceToolbarController: NSObject {
         let items = SurfaceScreen.allCases.compactMap { tabItems[$0] }
         return items.count == SurfaceScreen.allCases.count && items.allSatisfy { $0.image != nil }
     }
-    /// The index of the tab currently showing selected, `nil` if none does.
+    /// The index of the tab the TOOLBAR reports as selected, `nil` if none is.
+    ///
+    /// Reads `selectedItemIdentifier` — what AppKit actually draws and speaks
+    /// — rather than the old `.prominent` check, which was gated on macOS 26
+    /// and fell back to returning `selectedScreen.rawValue` unconditionally:
+    /// on 14–25 it reported the answer the caller already had, so the suite
+    /// stayed green while no cue was drawn at all.
     var test_selectedTabIndex: Int? {
-        guard #available(macOS 26.0, *) else { return selectedScreen.rawValue }
-        return SurfaceScreen.allCases.first { tabItems[$0]?.style == .prominent }?.rawValue
+        guard let selected = toolbar.selectedItemIdentifier else { return nil }
+        return SurfaceScreen.allCases.first { Self.tabItemIdentifier(for: $0) == selected }?.rawValue
     }
-    /// Whether exactly the selected tab wears the filled treatment, and every
-    /// tab wears the SAME bordered control Pin and Quit do.
-    var test_onlySelectedTabIsFilled: Bool {
-        guard #available(macOS 26.0, *) else { return true }
-        return SurfaceScreen.allCases.allSatisfy { screen in
-            guard let item = tabItems[screen] else { return false }
-            let wantsFill = screen == selectedScreen
-            return item.isBordered
-                && (item.style == .prominent) == wantsFill
-                && (item.backgroundTintColor != nil) == wantsFill
+    /// Whether the toolbar marks EXACTLY the current screen, and every tab
+    /// still wears the bordered control Pin does.
+    var test_onlySelectedTabIsMarked: Bool {
+        guard toolbar.selectedItemIdentifier == Self.tabItemIdentifier(for: selectedScreen) else {
+            return false
         }
+        let items = SurfaceScreen.allCases.compactMap { tabItems[$0] }
+        return items.count == SurfaceScreen.allCases.count && items.allSatisfy(\.isBordered)
     }
     /// Whether every tab is bordered — the same control as Pin and Quit.
     var test_allTabsAreBordered: Bool {
@@ -237,19 +232,9 @@ final class SurfaceToolbarController: NSObject {
     }
     /// Whether Pin and Quit are bordered — the control the tabs now match.
     var test_pinItemIsBordered: Bool { pinItem?.isBordered == true }
-    var test_quitItemIsBordered: Bool {
-        toolbar.items.first { $0.itemIdentifier == Self.quitItemIdentifier }?.isBordered == true
-    }
     /// Whether the pin/quit items resolved symbol images.
     var test_pinItemHasImage: Bool { pinItem?.image != nil }
     var test_pinItemLabel: String? { pinItem?.label }
-    var test_quitItemHasImage: Bool {
-        toolbar.items.first { $0.itemIdentifier == Self.quitItemIdentifier }?.image != nil
-    }
-    /// The word Quit shows, `nil` if the item never built.
-    var test_quitItemTitle: String? {
-        toolbar.items.first { $0.itemIdentifier == Self.quitItemIdentifier }?.title
-    }
     /// Fire a tab exactly as a click on it would — a REAL click through the
     /// button's own target/action, not a hand-run selector.
     func test_selectTab(_ screen: SurfaceScreen) {
@@ -258,7 +243,6 @@ final class SurfaceToolbarController: NSObject {
     }
     /// Simulate clicking Pin / Quit.
     func test_tapPin() { pinTapped(nil) }
-    func test_tapQuit() { quitTapped(nil) }
 }
 
 // MARK: - NSToolbarDelegate
@@ -283,7 +267,14 @@ extension SurfaceToolbarController: NSToolbarDelegate {
         Array(SurfaceScreen.allCases.map(Self.tabItemIdentifier(for:))
                 .flatMap { [$0, NSToolbarItem.Identifier.space] }.dropLast())
             + [.flexibleSpace,
-               Self.pinItemIdentifier, .space, Self.quitItemIdentifier]
+               Self.pinItemIdentifier]
+    }
+
+    /// The three screens are the selectable set — this is what turns on
+    /// AppKit's selection highlight at all. Without it `selectedItemIdentifier`
+    /// is stored and never drawn.
+    func toolbarSelectableItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        SurfaceScreen.allCases.map(Self.tabItemIdentifier(for:))
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -322,19 +313,6 @@ extension SurfaceToolbarController: NSToolbarDelegate {
             item.action = #selector(pinTapped(_:))
             pinItem = item
             applyPinAppearance()
-            return item
-
-        case Self.quitItemIdentifier:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.isBordered = true
-            // The word, not a glyph: the exit-door shape read as "sign out of
-            // an account" in the launch review, and `power` on a panel full of
-            // speakers reads as "turn the audio off".
-            item.title = "Quit"
-            item.label = "Quit"
-            item.toolTip = "Quit Audiout"
-            item.target = self
-            item.action = #selector(quitTapped(_:))
             return item
 
         default:

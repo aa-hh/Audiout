@@ -396,32 +396,6 @@ import AppKit
         #expect(fits, "every header item fits the fixed surface width (used \(used), width \(SurfaceLayout.width))")
     }
 
-    /// The header's ground is tied to the SAME strip height the screens inset
-    /// by, so the warm band behind the toolbar and the gap the content leaves
-    /// for it can never disagree. It carries real glass where the OS has it,
-    /// which is the only way to follow the reader's own glass setting — no API
-    /// reports that setting, so using the system material IS the mechanism —
-    /// and falls back to a flat fill under Reduce Transparency.
-    @Test func theHeaderGroundMatchesTheStripAndYieldsToReduceTransparency() throws {
-        let (surface, _, _, _) = makeSurface()
-        surface.show(anchorRect: nil)
-        surface.shell.window?.layoutIfNeeded()
-        let backdrop = try #require(surface.test_headerBackdrop,
-                                    "the header ground mounted behind the strip")
-        let strip = surface.test_chromeTopInset
-        #expect(strip > 0, "the unified strip has real height to measure against")
-        #expect(surface.test_headerBackdropHeight == strip,
-                "the ground is exactly the strip the screens inset by")
-        if #available(macOS 26.0, *) {
-            backdrop.test_reduceTransparencyOverride = false
-            #expect(backdrop.test_isShowingGlass,
-                    "glass carries the reader's own setting when they allow it")
-            backdrop.test_reduceTransparencyOverride = true
-            #expect(!backdrop.test_isShowingGlass,
-                    "and yields to the flat fill when they ask for less")
-        }
-    }
-
     @Test func toolbarTracksSelectionAndPin() {
         let (surface, _, _, _) = makeSurface()
         surface.show(anchorRect: nil)

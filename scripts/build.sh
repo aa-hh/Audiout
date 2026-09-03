@@ -47,8 +47,9 @@ if [ "${AUDIOUT_BUILD_LOCAL:-0}" != "1" ] && remote_wins; then
         echo "  build: compiled clean on remote $remote_host." >&2
         exit 0
     elif [ "$rrc" -eq 2 ]; then
-        # Ran and failed. Do NOT report it as the caller's error: the toolchains
-        # differ (local Swift 6.4 / macOS 27 SDK vs remote 6.3.1 / macOS 26), so
+        # Ran and failed. Do NOT report it as the caller's error: both Macs run
+        # Swift 6.4 but against different SDKs (macOS 27 here, macOS 26 there),
+        # and the remote has been out of disk and starved before, so
         # a remote-only failure is as likely to be skew as a real break. Same
         # asymmetry run-tests.sh uses — a remote PASS is accepted, a remote
         # FAILURE is re-confirmed here before anyone acts on it.

@@ -785,8 +785,8 @@ safe. **Read §16–§18 before converting any file that subclasses
 | `TestIsolation` | The mechanism (scratch dir, isolated defaults, unique names, cleanup). You normally don't touch it directly. |
 | `IsolatedSuite` | **The swift-testing base class. Inherit this.** |
 
-The two bases expose an **identical** member set over the same mechanism, so
-migrating is a base-class swap and nothing else:
+`IsolatedSuite` exposed the same members as the legacy `IsolatedTestCase`
+base, so each migration was a base-class swap and nothing else:
 
 ```swift
 // BEFORE
@@ -824,7 +824,9 @@ final class MixerWindowControllerTests: IsolatedTestCase {
   `MixerWindowControllerTests` → `uniqueName`); the rest inherit for safety and
   convert with the base-class swap alone.
 - **Done** (the T20 cleanup item): the legacy XCTest base and the file's
-  `import XCTest` are deleted. `git grep IsolatedTestCase` finds nothing.
+  `import XCTest` are deleted. No Swift declaration named `IsolatedTestCase`
+  remains — `git grep IsolatedTestCase -- '*.swift'` finds nothing; the name
+  survives only in prose and plans.
 
 ### `override func tearDown()` on a subclass → `deinit`
 

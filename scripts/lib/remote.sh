@@ -202,8 +202,9 @@ remote_prune_stale() {
 #   2  ran remotely and FAILED
 #
 # A remote that cannot be reached, synced or set up must NEVER surface as "your
-# code is broken". The toolchains differ (local Swift 6.4 / macOS 27 SDK vs
-# remote 6.3.1 / macOS 26), so callers accept a remote PASS but re-confirm a
+# code is broken". Both Macs run Swift 6.4 but against different SDKs (macOS 27
+# here, macOS 26 there), and the remote has been out of disk and starved
+# before, so callers accept a remote PASS but re-confirm a
 # remote FAILURE locally before letting it block anything. The asymmetry is
 # deliberate: the expensive error is a false refusal, not a false pass.
 remote_run() {
@@ -231,6 +232,11 @@ remote_run() {
     # (directory missing, no toolchain) as opposed to "the work failed". Without it,
     # a broken remote reports as a failure of the caller's code — exactly the
     # confusion this function exists to prevent.
+    # Two probes guard it, because one is not enough: /usr/bin/swift exists
+    # under Command Line Tools, so `command -v` cannot see a CLT-selected
+    # remote. `xcrun --show-sdk-platform-path` is what SwiftPM calls before
+    # running any test bundle, and it fails under CLT — the remote twin of
+    # run-tests.sh's exit-78 check.
     # -tt ties the remote command's life to this connection: with a tty, sshd
     # HUPs the remote process group the moment the local side dies — even
     # SIGKILL, since the kernel still closes the socket. Without it an
@@ -244,6 +250,7 @@ remote_run() {
          cd \"$_rdir\" || exit 97; \
          touch .last-used; \
          command -v $remote_toolchain >/dev/null 2>&1 || exit 97; \
+         xcrun --show-sdk-platform-path >/dev/null 2>&1 || exit 97; \
          _s=''; _n=1; \
          while [ \$_n -le $remote_slots ]; do \
              if /usr/bin/shlock -f /tmp/audiout-remote-work.lock.\$_n -p \$\$; then \
@@ -264,7 +271,7 @@ remote_run() {
     _marker=$(printf '%s\n' "$_out" | grep '^REMOTE_EXIT:' | tail -1 | cut -d: -f2 || true)
 
     if [ "$_rc" -eq 97 ]; then
-        echo "  remote: environment not usable (missing dir or toolchain) — staying local." >&2
+        echo "  remote: environment not usable (missing dir, no toolchain, or Command Line Tools selected instead of Xcode) — staying local." >&2
         return 1
     fi
     # 98: the remote is at its job cap. Not an error and not a failure of the
@@ -284,6 +291,38 @@ remote_run() {
     fi
     remote_status="$_marker"
     [ "$remote_status" -eq 0 ] && return 0
+    # Say WHAT kind of failure it was. The case this exists for: a remote suite
+    # whose test process died with a signal after 3294 passes, where the caller
+    # saw one anonymous "FAILURES" and no way to tell that from a compile error
+    # or from real failing tests. Matched on plain words only — the per-test
+    # lines arrive with SF Symbols glyphs and ANSI colour codes around them.
+    # Only for the swift toolchain: xcodebuild (ios.sh) prints neither of these
+    # words, so classifying its output would call every iOS failure a build failure.
+    if [ "$remote_toolchain" = swift ]; then
+        _failed=$(printf '%s\n' "$_out" | grep ' Test ' | grep ' failed after ' \
+            | sed -e 's/.* Test //' -e 's/ failed after .*//' \
+            | grep -v '^run with ' || true)
+        _nfailed=$(printf '%s' "$_failed" | grep -c . || true)
+        if [ "$_nfailed" -gt 0 ]; then
+            _names=$(printf '%s' "$_failed" | tr '\n' ' ' | sed 's/ *$//')
+            echo "  remote: ran and FAILED there — $_nfailed test(s) failed: $_names" >&2
+        else
+            # Pattern match, not `grep -q`: under pipefail grep -q exits at the first
+            # match, printf takes SIGPIPE, and `!` inverts the resulting 141 — which
+            # read a transcript with an early "Build complete!" as a build that never
+            # finished.
+            case "$_out" in
+                *"Build complete!"*)
+                    _npassed=$(printf '%s\n' "$_out" | grep -v ' Test run with ' \
+                        | grep -c ' Test .* passed after ' || true)
+                    echo "  remote: ran and FAILED there — exit $remote_status, no test verdict in the output ($_npassed tests passed, no failure lines, no summary line)" >&2
+                    ;;
+                *)
+                    echo "  remote: ran and FAILED there — the build did not finish (no \"Build complete!\" line); the compiler errors are in the output above" >&2
+                    ;;
+            esac
+        fi
+    fi
     return 2
 }
 

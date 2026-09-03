@@ -52,39 +52,43 @@ hk="$repo_root/scripts/housekeeping.sh"
 [ -x "$hk" ] || hk="$(cd "$(dirname "$0")" && pwd)/housekeeping.sh"
 if [ -x "$hk" ]; then "$hk" --current "$repo_root" || true; fi
 
-# Which build engine the suite compiles with. PINNED rather than defaulted,
-# because the two machines DISAGREE and an unpinned run silently uses a
-# different engine depending on where it lands: Swift 6.4 here defaults to
-# `swiftbuild`, while the remote's Swift 6.3.1 does not carry that engine at
-# all and offers only `native`. Same suite, two compilers, results that cannot
-# be compared -- and, locally, two full .build trees (`out` AND
-# `arm64-apple-macosx`) at ~1.3 GB apiece, since scripts/build.sh and
-# scripts/make-app.sh already pin native. That duplication is what filled this
-# disk: 10 of 33 worktrees were holding both.
+# Which build engine the suite compiles with. PINNED rather than defaulted, for
+# the reason scripts/build.sh gives: Swift 6.4 defaults to `swiftbuild`, which
+# does not forward a C target's cSettings unsafeFlags (AirPlayEngine/
+# Package.swift's Homebrew -I paths) into the clang module dependency scan, so
+# `import CAirPlayEngine` fails to resolve.
 #
-# `native` is the only engine BOTH machines have, so it is the only available
-# choice today. scripts/build.sh pins it for the same reason.
+# The second reason is disk. The two engines keep SEPARATE .build trees (`out`
+# AND `arm64-apple-macosx`) at ~1.3 GB apiece, so an unpinned test run beside
+# the pinned scripts/build.sh and scripts/make-app.sh doubles every worktree's
+# cache. That duplication is what filled this disk: 10 of 33 worktrees were
+# holding both.
 #
 # razor: `native` is deprecated in Swift 6.4 and will be removed eventually.
-# The ceiling is the remote Mac -- pinned to macOS 26, so it cannot reach a
-# toolchain where swiftbuild exists. Upgrade path: once the remote runs
-# macOS 27+/Swift 6.4+, move this and build.sh to swiftbuild together, or drop
-# the pin once both machines default to the same engine.
+# The ceiling is swiftbuild's unsafeFlags forwarding, not either machine --
+# both Macs run Swift 6.4. Upgrade path: once swiftbuild can build
+# AirPlayEngine, move run-tests.sh, build.sh and make-app.sh to it together.
 engine="--build-system native"
 
 # Command Line Tools cannot run `swift test` for ANY package, XCTest or not —
 # measured: SwiftPM calls `xcrun --sdk macosx --show-sdk-platform-path` before
 # running any test bundle, and that lookup itself fails under CLT ("unable to
 # lookup item 'PlatformPath'"). Fail fast here with a clear reason, rather than
-# let it surface as a Guard 4 refusal that looks like broken code. Local check
-# only — the remote path is out of scope.
+# let it surface as a Guard 4 refusal that looks like broken code. The remote
+# twin of this check is remote_run's exit-97 gate in scripts/lib/remote.sh.
 selected_devdir=$(xcode-select -p 2>/dev/null || echo '')
 case "$selected_devdir" in
     /Library/Developer/CommandLineTools*)
         echo "  suite: the selected developer directory is Command Line Tools" >&2
         echo "  ($selected_devdir) — it ships no platform path, so 'swift test'" >&2
         echo "  cannot run any package on macOS, this one included." >&2
-        xcode_app=$(ls -d /Applications/Xcode*.app 2>/dev/null | head -1)
+        # The glob sorts Xcode-beta.app ahead of Xcode.app ('-' sorts before
+        # '.'), so a Mac with both was told to select the beta.
+        if [ -d /Applications/Xcode.app ]; then
+            xcode_app=/Applications/Xcode.app
+        else
+            xcode_app=$(ls -d /Applications/Xcode*.app 2>/dev/null | head -1)
+        fi
         if [ -n "$xcode_app" ]; then
             echo "  Fix: sudo xcode-select -s $xcode_app/Contents/Developer" >&2
         else
@@ -166,8 +170,10 @@ run_remote() {
     rrc=0
     remote_run "$repo_root" "cd $pkg && swift test $rargs$qargs" || rrc=$?
     if [ "$rrc" -eq 2 ]; then
-        # "Ran, but failed" — re-run locally rather than trusting the verdict. A
-        # machine on a different Swift/SDK must never be what REFUSES a commit:
+        # "Ran, but failed" — re-run locally rather than trusting the verdict.
+        # The remote compiles against a different SDK (macOS 26 there, 27 here),
+        # and that shared machine has been out of disk and starved
+        # before, so it must never be what REFUSES a commit:
         # Guard 4 blocks on this result, and a toolchain difference presenting
         # as "your code is broken" would send an agent hunting a bug that does
         # not exist. A remote PASS is still accepted — the asymmetry is

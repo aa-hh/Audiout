@@ -74,10 +74,6 @@ import Testing
 ///  - The gate's skip *reason* still surfaces per test in the output
 ///    (`Test x() skipped: "Real Core Audio hardware test…"`), so the lost
 ///    coverage stays legible exactly as it did under `XCTSkipUnless`.
-///  - `makeStartedEngine()` (and any other shared helper) moves into the nested
-///    suite alongside the tests that use it, and its `try
-///    AudioHardwareTestGate.skipUnlessEnabled()` line is deleted — the trait
-///    has already made that decision by the time the body runs.
 ///  - The trait condition is evaluated at discovery time, so it must not depend
 ///    on per-test state. Reading the environment (all this does) is fine.
 ///

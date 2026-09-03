@@ -654,22 +654,30 @@ public enum Tokens {
                           // has to buy a comparable gap, and depth is the only
                           // axis available once both are floor-bound.
                           //
-                          // Full light `#6F5629`: 1.67:1 from gold, 6.06:1 on
-                          // raised, 5.18:1 on well, 6.67:1 on panel. Hue 38.6°
+                          // The gap has a floor AND a ceiling: under ~1.40:1
+                          // the two inks merge on a 2 pt line; much past 1.55:1
+                          // ember stops reading as a dimmer brass and turns
+                          // into a brown that muddies the whole rail. Depth is
+                          // bought with value, never with chroma — dropping
+                          // saturation on the way down is what makes a brown.
+                          //
+                          // Full light `#7A5E2A`: 1.46:1 from gold, 5.32:1 on
+                          // raised, 4.54:1 on well, 5.85:1 on panel. Hue 39.0°
                           // against gold's 41.4° (same family, inside the
-                          // reserved gold band), saturation 0.63 against gold's
-                          // 0.82 — a 0.186 gap, so ember stays the duller ink
-                          // by chroma AND is now the darker one by luminance,
-                          // which is exactly the relationship dark already has.
-                          // Subtle light `#6E6039` separates by luminance
-                          // rather than chroma (1.50:1 from Subtle gold): the
-                          // muted column is meant to be muted, and darkening it
-                          // is the only axis left that does not re-saturate it.
-                          // IC variants stay strictly darker than their bases.
+                          // reserved gold band), saturation 0.66 against gold's
+                          // 0.82 — a 0.161 gap, so ember stays the duller ink
+                          // by chroma AND the darker one by luminance, which is
+                          // exactly the relationship dark has.
+                          // Subtle light `#71613B` separates by luminance
+                          // rather than chroma (1.47:1 from Subtle gold, 4.53:1
+                          // on well): the muted column is meant to be muted,
+                          // and value is the only axis that does not
+                          // re-saturate it. IC variants stay strictly darker
+                          // than their bases.
                           full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
-                                             light: 0x6F5629, lightHighContrast: 0x5E4922),
+                                             light: 0x7A5E2A, lightHighContrast: 0x5E4922),
                           subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
-                                               light: 0x6E6039, lightHighContrast: 0x5C5030),
+                                               light: 0x71613B, lightHighContrast: 0x5C5030),
                           systemAccentScale: 0.55)
         }
 

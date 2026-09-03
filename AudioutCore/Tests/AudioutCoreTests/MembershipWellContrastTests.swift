@@ -257,6 +257,21 @@ import AppKit
                 "…while staying in the same warm family, not becoming a second hue")
     }
 
+    /// The light idle/armed gap has a floor AND a ceiling. `spineTone(armed:)`
+    /// resolves to `gold` or `ember`; under ~1.40:1 the two are one visible
+    /// colour on a 2 pt line and the rail cannot report armed vs idle — the
+    /// only reason ember has a light depth of its own. Past 1.60:1 ember has
+    /// dropped far enough to read as a brown that muddies the whole rail, so
+    /// a future "make it clearer" cannot buy the gap with depth alone.
+    @Test func lightEmberStaysTellableFromGold() {
+        let gold = resolved(Tokens.Color.gold, appearanceName: .aqua)
+        let ember = resolved(Tokens.Color.ember, appearanceName: .aqua)
+        let gap = contrastRatio(gold, ember)
+
+        #expect(gap >= 1.40, Comment(rawValue: "gold vs ember \(gap):1 — the idle rail merges into the armed one"))
+        #expect(gap <= 1.60, Comment(rawValue: "gold vs ember \(gap):1 — ember has sunk into a muddy brown"))
+    }
+
     // MARK: Structural — the editor's checklist actually wears the new surface
 
     /// A group editor showing two members over a four-device candidate list,

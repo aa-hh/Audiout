@@ -254,6 +254,30 @@ extension SerializedSharedState {
         }
     }
 
+    // MARK: - Test B2: Increase Contrast pushes ember away from its ground
+
+    /// Ember's Increase-Contrast variant must sit strictly further from
+    /// `panel` than its base in both appearances — darker in light, lighter
+    /// in dark — never drifting back toward the ground (or toward `gold`).
+    /// Lives here, not in `MembershipWellContrastTests`, because it drives
+    /// the process-global `test_increaseContrastOverride` seam (this file's
+    /// serialization reason, above).
+    @Test func emberIncreaseContrastIsStrictlyFurtherFromPanelThanBase() {
+        defer { Tokens.test_increaseContrastOverride = nil }
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            Tokens.test_increaseContrastOverride = false
+            let base = measuredRatio(Tokens.Color.ember, over: Tokens.Color.panel, appearanceName: appearanceName)
+            let baseLuminance = relativeLuminance(resolved(Tokens.Color.ember, appearanceName: appearanceName))
+            Tokens.test_increaseContrastOverride = true
+            let increased = measuredRatio(Tokens.Color.ember, over: Tokens.Color.panel, appearanceName: appearanceName)
+            let increasedLuminance = relativeLuminance(resolved(Tokens.Color.ember, appearanceName: appearanceName))
+            #expect(increased > base, Comment(rawValue: "\(appearanceName.rawValue): IC ember \(increased):1 on panel is not past base \(base):1"))
+            if appearanceName == .aqua {
+                #expect(increasedLuminance < baseLuminance, Comment(rawValue: "light IC ember \(increasedLuminance) is not darker than base \(baseLuminance)"))
+            }
+        }
+    }
+
     // MARK: - Test C: accent-dial re-stamp (P1-1/P1-2 regression)
 
     /// Regression guard for the fix in this pass: a layer-color instrument

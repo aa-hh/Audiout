@@ -81,16 +81,16 @@ if [ -f "$g8" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# GUARD 3 (WARN-ONLY): new test code must not reach cross-process shared state.
+# GUARD 3 (WARN-ONLY): new test code must not reach shared process-global state.
 #
-# `swift test --parallel --num-workers 4` (the default full-run command — see
-# AudioutCore/AGENTS.md) runs each test CLASS in its own process. Processes
-# share nothing in memory, but they DO share `UserDefaults.standard` (one
-# on-disk plist) and a fixed `FileManager.default.temporaryDirectory` path. Two
-# suites writing the same defaults key or temp filename race and flake. The
-# blessed fix is to subclass `IsolatedTestCase` (Tests/AudioutCoreTests/
-# IsolatedTestCase.swift) and use `scratchDir` / `isolatedDefaults` /
-# `makeDefaults()` / `uniqueName(_:)` instead of the shared globals.
+# Tests run concurrently (Swift Testing, all in one process — the reasoning is
+# in the header of Tests/AudioutCoreTests/IsolatedSuite.swift). Concurrently
+# running tests share `UserDefaults.standard` (one on-disk plist) and a fixed
+# `FileManager.default.temporaryDirectory` path. Two suites writing the same
+# defaults key or temp filename race and flake. The blessed fix is
+# `IsolatedSuite` (Tests/AudioutCoreTests/IsolatedSuite.swift) and its
+# `scratchDir` / `isolatedDefaults` / `makeDefaults()` / `uniqueName(_:)`
+# instead of the shared globals.
 #
 # `UserDefaults(suiteName:)` is flagged too, for a different reason: it isolates
 # correctly but every distinct name is a permanent `~/Library/Preferences` plist
@@ -104,7 +104,7 @@ fi
 staged_tests=$(git diff --cached --name-only --diff-filter=AM -- '*Tests*.swift' 2>/dev/null)
 iso_hits=""
 for f in $staged_tests; do
-    case "$f" in */IsolatedTestCase.swift) continue ;; esac
+    case "$f" in */IsolatedSuite.swift) continue ;; esac
     added=$(git diff --cached -U0 -- "$f" 2>/dev/null | grep -E '^\+[^+]')
     bad=$(printf '%s\n' "$added" \
         | grep -Ei 'UserDefaults\.standard|UserDefaults\(suiteName:|FileManager\.default\.temporaryDirectory' \
@@ -115,9 +115,9 @@ for f in $staged_tests; do
 done
 if [ -n "$iso_hits" ]; then
     echo "" >&2
-    echo "  NOTE (non-blocking): new test lines reach cross-process shared state." >&2
-    echo "  Under 'swift test --parallel' these can flake. Prefer subclassing" >&2
-    echo "  IsolatedTestCase and using scratchDir / isolatedDefaults / uniqueName()." >&2
+    echo "  NOTE (non-blocking): new test lines reach state shared between tests." >&2
+    echo "  Under 'swift test --parallel' these can flake. Prefer" >&2
+    echo "  IsolatedSuite and using scratchDir / isolatedDefaults / uniqueName()." >&2
     printf "%b\n" "$iso_hits" >&2
     echo "" >&2
     echo "  If a line truly must touch a global (e.g. AppKit setFrameAutosaveName)," >&2
@@ -212,7 +212,7 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     # keep reading the commit's real index.
     nogit='env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE'
     if ! { if [ -n "$run_suite" ]; then $nogit "$run_suite"; \
-           else ( cd "$repo_root/AudioutCore" && $nogit swift test --build-system native --parallel --num-workers 4 >&2 ); fi; }; then
+           else ( cd "$repo_root/AudioutCore" && $nogit swift test --build-system native --parallel >&2 ); fi; }; then
         echo "" >&2
         echo "  REFUSED: full test suite failed. Fix the failures" >&2
         echo "  (or 'git commit --no-verify' for a real emergency)." >&2
@@ -231,13 +231,12 @@ fi
 # should be written `import Testing` / `@Suite` / `@Test`, not `import XCTest`.
 #
 # This only fires on a newly ADDED `import XCTest` line (diffs the STAGED
-# content with `git diff --cached -U0`, same technique as Guard 3), so it never
-# nags about a file's pre-existing `import XCTest` — e.g.
-# `IsolatedTestCase.swift`'s legacy XCTest base, which legitimately still has
-# one, or any not-yet-converted file — unless someone is actively re-adding a
-# line there. Warn-only: this repo's migration was never enforced with a
-# blocking gate, so backsliding away from it shouldn't be either. It just needs
-# to be visible so it doesn't happen quietly.
+# content with `git diff --cached -U0`, same technique as Guard 3) — no file
+# under AudioutCore/Tests carries a pre-existing `import XCTest` any more, so
+# this only trips if someone actively adds one back. Warn-only: this repo's
+# migration was never enforced with a blocking gate, so backsliding away from
+# it shouldn't be either. It just needs to be visible so it doesn't happen
+# quietly.
 staged_swift_pkgs=$(git diff --cached --name-only --diff-filter=AM -- \
     'AudioutCore/' 'AirPlayEngine/' 2>/dev/null | grep '\.swift$')
 xctest_hits=""

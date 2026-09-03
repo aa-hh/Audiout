@@ -2,27 +2,22 @@
 # Machine-wide serialised runner for the AudioutCore suite.
 #
 # WHY THIS EXISTS: every worktree's pre-commit Guard 4 runs the full suite, and
-# each run politely caps itself at `--num-workers 4`. But that cap is
-# PER-PROCESS — nothing coordinates across worktrees. With four agents
-# committing at once the machine sees 4 full suites x 4 workers = 16 concurrent
-# xctest processes plus 4 independent compiles, on 8 cores. Measured 15-minute
-# load average during a normal multi-agent session: 73.
-#
-# Serialising is strictly better than throttling here. Test runs are
-# CPU-saturating, so running two at once does not overlap any idle time — it
-# just makes both slower and the machine unusable. One run at a time, given
-# more workers than the timid shared-machine cap, finishes each run FASTER than
-# today while leaving headroom for everything else.
+# nothing coordinates across worktrees. With four agents committing at once the
+# machine sees 4 full suites compiling and testing at the same time, on 8 cores.
+# Measured 15-minute load average during a normal multi-agent session: 73.
 #
 # Two mechanisms:
-#   1. A machine-wide lock (/tmp, so it spans every worktree). Waiters queue.
+#   1. A machine-wide slot cap on concurrent RUNS (/tmp, so it spans every
+#      worktree). A run that finds every slot taken queues for one to free.
 #   2. A content-addressed pass cache. Agents routinely run the suite by hand
 #      and then commit, which fires Guard 4 on byte-identical sources
 #      immediately afterwards. The second run is pure waste; the cache skips it.
 #
 # Usage:  scripts/run-tests.sh [extra swift-test args...]
 # Env:
-#   AUDIOUT_TEST_WORKERS   worker count once the lock is held (default 6)
+#   AUDIOUT_TEST_MODE      serial runs strictly one test at a time
+#                            (--no-parallel; for flake hunting, slower).
+#                            Anything else or unset runs --parallel.
 #   AUDIOUT_TEST_NO_LOCK=1 run immediately, no lock (for a deliberate
 #                            foreground run when you know the machine is idle)
 #   AUDIOUT_TEST_NO_CACHE=1 always run, never consult or write the cache
@@ -77,7 +72,29 @@ if [ -x "$hk" ]; then "$hk" --current "$repo_root" || true; fi
 # the pin once both machines default to the same engine.
 engine="--build-system native"
 
-workers=${AUDIOUT_TEST_WORKERS:-6}
+# Command Line Tools cannot run `swift test` for ANY package, XCTest or not —
+# measured: SwiftPM calls `xcrun --sdk macosx --show-sdk-platform-path` before
+# running any test bundle, and that lookup itself fails under CLT ("unable to
+# lookup item 'PlatformPath'"). Fail fast here with a clear reason, rather than
+# let it surface as a Guard 4 refusal that looks like broken code. Local check
+# only — the remote path is out of scope.
+selected_devdir=$(xcode-select -p 2>/dev/null || echo '')
+case "$selected_devdir" in
+    /Library/Developer/CommandLineTools*)
+        echo "  suite: the selected developer directory is Command Line Tools" >&2
+        echo "  ($selected_devdir) — it ships no platform path, so 'swift test'" >&2
+        echo "  cannot run any package on macOS, this one included." >&2
+        xcode_app=$(ls -d /Applications/Xcode*.app 2>/dev/null | head -1)
+        if [ -n "$xcode_app" ]; then
+            echo "  Fix: sudo xcode-select -s $xcode_app/Contents/Developer" >&2
+        else
+            echo "  Fix: install Xcode from the App Store or developer.apple.com," >&2
+            echo "  then sudo xcode-select -s /Applications/<Xcode>.app/Contents/Developer" >&2
+        fi
+        exit 78
+        ;;
+esac
+
 lock_timeout=${AUDIOUT_TEST_LOCK_TIMEOUT:-1800}
 # How many suite runs may proceed at once, machine-wide. Configurable the same
 # way remote_slots is (see lib/remote.sh) — `git config --local
@@ -121,12 +138,20 @@ run_remote() {
     fi
 
     # Mode for the REMOTE run is decided independently of the local machine:
-    # the whole reason we are here is that this Mac is busy and that one is not,
-    # so the remote gets the fast parallel path (~1.8x quicker on an idle host).
+    # the whole reason we are here is that this Mac is busy and that one is not.
     # An explicitly forced AUDIOUT_TEST_MODE is still honoured.
-    case "${AUDIOUT_TEST_MODE:-auto}" in
-        serial) rargs="$engine" ;;
-        *)      rargs="$engine --parallel --num-workers $workers" ;;
+    #
+    # `--disable-keychain` is remote-only. Over ssh the mule's login keychain
+    # cannot raise an approval dialog (errSecInteractionNotAllowed, -25308), so
+    # SwiftPM's credential lookup for github.com fails while it fetches the
+    # Sparkle binary artifact and the run exits 1 even though the build
+    # finished. Skipping the lookup is safe here: everything this package
+    # fetches is public (audiout-shared, Sparkle, posthog-ios; AirPlayEngine is
+    # a local path), and the private iOS repo is reached over ssh by a
+    # different script.
+    case "${AUDIOUT_TEST_MODE:-parallel}" in
+        serial) rargs="$engine --disable-keychain --no-parallel" ;;
+        *)      rargs="$engine --disable-keychain --parallel" ;;
     esac
 
     # The remote command is a STRING the far shell re-parses, so caller flags
@@ -243,13 +268,11 @@ fi
 # `slots` independent shlock files where a run takes the first one it can get.
 #
 # Why not one exclusive lock (the obvious first design, and what this was):
-# that assumed a test run saturates the CPU, so overlapping two would gain
-# nothing. MEASUREMENT SAYS OTHERWISE — a warm `--parallel --num-workers 6` run
-# uses 411s user + 66s sys over 181s wall, i.e. only ~2.6 of 8 cores. The suite
-# is WAIT-bound (timers, expectations), not CPU-bound. Two or three concurrent
-# runs genuinely do overlap, so serialising to exactly one would idle most of
-# the machine AND make four agents queue behind each other for no reason.
-# The cap exists to stop unbounded pile-up, not to enforce single-file.
+# the suite is WAIT-bound (timers, expectations), not CPU-bound — see the slot
+# comment above for the current measurement. Two or three concurrent runs
+# genuinely do overlap, so serialising to exactly one would idle most of the
+# machine AND make four agents queue behind each other for no reason. The cap
+# exists to stop unbounded pile-up, not to enforce single-file.
 acquired=0
 slot_file=""
 if [ "${AUDIOUT_TEST_NO_LOCK:-0}" = "1" ]; then
@@ -325,67 +348,22 @@ else
 fi
 
 # --- serial vs parallel -----------------------------------------------------
-# MEASURED (1025 tests, same machine, same work):
-#
-#   --parallel 6   wall 127s   user 358s   sys 51.7s
-#   --parallel 2   wall 278s   user 316s   sys 46.6s
-#   serial         wall 124s   user  69.7s sys  6.0s
-#
-# Serial does the identical work for ~1/5 the CPU and ~1/8 the system time.
-# `swift test --parallel` parallelises at the test-CLASS level — one fresh OS
-# process per class, and this suite has 57 — so each spawn re-execs and re-links
-# a large AppKit/CoreAudio/AirPlayEngine binary just to run a handful of tests.
-# Real test work is only ~70 CPU-seconds; parallel burns ~290 MORE on fork/exec
-# and dyld. That overhead is also why lowering --num-workers barely helps: it
-# does not remove the 57 spawns, it just staggers them.
-#
-# On an IDLE machine parallel is still ~1.8x faster in wall time (~70s vs ~124s
-# warm), which is what a human watching the terminal wants. With several agents
-# testing at once nobody is watching a clock, and 5x the CPU is precisely what
-# makes the machine unusable. So: pick by conditions rather than fixing one.
-#
-# AUDIOUT_TEST_MODE=auto (default) | parallel | serial
-mode=${AUDIOUT_TEST_MODE:-auto}
-
-# Is anything else already testing? Two sources, because the second is the one
-# that actually bites: other runner slots, AND bare `swift test` invocations
-# that never went through this script at all (an agent typing it by hand is the
-# dominant real-world case — observed driving load average past 40).
-machine_busy=0
-n=1
-while [ "$n" -le "$slots" ]; do
-    f="${lock_file}.$n"
-    if [ "$f" != "$slot_file" ] && [ -f "$f" ]; then
-        # Liveness-check the PID: a stale file left by a killed run must not
-        # permanently force everyone onto the slow path.
-        p=$(cat "$f" 2>/dev/null || echo '')
-        if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then machine_busy=1; fi
-    fi
-    n=$((n + 1))
-done
-if pgrep -f 'swift-test|xctest' >/dev/null 2>&1; then machine_busy=1; fi
+# Swift Testing runs tests concurrently inside one process whether or not
+# `--parallel` is passed (measured: 57 in flight with no flag). `--parallel` is
+# passed because SwiftPM accepts it for both frameworks, and no worker count
+# goes with it: a worker count only fans out XCTest's one-process-per-class
+# model, and one process has nothing to fan out. `AUDIOUT_TEST_MODE=serial`
+# passes `--no-parallel`, which does serialise (measured: 1 in flight) and
+# exists for flake hunting.
+mode=${AUDIOUT_TEST_MODE:-parallel}
 
 case "$mode" in
-    serial)   test_args="" ;;
-    parallel) test_args="--parallel --num-workers $workers" ;;
-    *)        if [ "$machine_busy" -eq 1 ]; then test_args=""
-              else test_args="--parallel --num-workers $workers"; fi ;;
+    serial) test_args="--no-parallel" ;;
+    *)      test_args="--parallel" ;;
 esac
 
 if [ "$acquired" -eq 1 ]; then
-    # State the REASON accurately: an explicitly forced mode was not a decision
-    # this script made, and printing "machine idle" next to a mode the caller
-    # pinned would be a lie the next reader has to debug.
-    if [ "$mode" = "auto" ]; then
-        why=$([ "$machine_busy" -eq 1 ] && echo "machine busy" || echo "machine idle")
-    else
-        why="AUDIOUT_TEST_MODE=$mode"
-    fi
-    if [ -z "$test_args" ]; then
-        echo "  suite: slot $(basename "$slot_file") of $slots — SERIAL ($why; ~1/5 the CPU of parallel)." >&2
-    else
-        echo "  suite: slot $(basename "$slot_file") of $slots — parallel, $workers workers ($why)." >&2
-    fi
+    echo "  suite: slot $(basename "$slot_file") of $slots — $test_args." >&2
 fi
 
 # --- cold checkouts: resolve solo first --------------------------------------
@@ -403,9 +381,9 @@ fi
 # `set -e` is off for this one command so a failure reaches the cache logic
 # (which must NOT write a stamp) and the trap, rather than exiting immediately.
 set +e
-# $test_args is deliberately UNQUOTED: it must word-split into flags (or expand
-# to nothing at all in serial mode). "$@" stays quoted so caller arguments with
-# spaces survive.
+# $test_args is deliberately UNQUOTED: it must reach swift test as a flag
+# (`--parallel` or `--no-parallel`) rather than as one quoted word. "$@" stays
+# quoted so caller arguments with spaces survive.
 # shellcheck disable=SC2086
 ( cd "$core" && swift test $engine $test_args "$@" ) >&2
 status=$?

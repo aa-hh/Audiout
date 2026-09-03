@@ -95,7 +95,7 @@ import Testing
 /// Add a suite here when — and only when — it mutates state that outlives the
 /// test instance and is shared process-wide. Per-test temp dirs and
 /// `UserDefaults` suites are NOT that: `IsolatedSuite`
-/// (`IsolatedTestCase.swift`) already gives each test its own, and those suites
+/// (`IsolatedSuite.swift`) already gives each test its own, and those suites
 /// stay parallel. Over-adding here is not free — everything under this parent
 /// runs strictly one at a time.
 @Suite(.serialized)

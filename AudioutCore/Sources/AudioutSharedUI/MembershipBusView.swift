@@ -73,22 +73,26 @@ public final class MembershipBusView: NSView {
     /// De-emphasis tint (spec §4.7 dormant-divergent, and an unavailable
     /// device): a tint, never alpha. It reaches the FILL only. The rim belongs
     /// to the rail — the node is still ON the wire, still in the group — so a
-    /// dimmed `.member` keeps its rim in the spine's tone and fills its disc in
-    /// `railDormant` where gold would be: same seat, grey where gold. A hollow
-    /// node has no fill, so a dimmed `.nonMember` draws exactly like a live
-    /// one — "not in the group" already has nothing to grey out. `.failed` is
-    /// never dimmed (the red ring carries it); the whole-rail dormant tone is
-    /// the overlay's own flag, not this one.
+    /// dimmed `.member` keeps its rim in the spine's tone and fills its disc
+    /// with `dotSocket` — the same unlit seat the route-armed dot rests in
+    /// when nothing is armed: same seat, gold lifted out. A hollow node has no
+    /// fill, so a dimmed `.nonMember` draws exactly like a live one — "not in
+    /// the group" already has nothing to grey out. `.failed` is never dimmed
+    /// (the red ring carries it); the whole-rail dormant tone is the overlay's
+    /// own flag, not this one.
     ///
-    /// Measured (WCAG luminance ratios, `python3`): dark `railDormant`
-    /// `#7D7466` sits 2.50:1 from `gold` `#E8B84B` and 3.55:1 from `raised`
-    /// `#241F1A`; light `#8A8272` sits 1.09:1 from `gold` `#9E761D` and 3.34:1
-    /// from `raised` `#F2F0EA`. So in dark the grey disc reads as "not gold"
-    /// by luminance; in light it separates from gold by chroma alone (grey vs
-    /// saturated ochre), the luminance is a wash. Against the ember rim the
-    /// disc measures 1.09:1 in dark (`#8A6A2F`) and 1.59:1 in light
-    /// (`#7A5E2A`, `Tokens.swift`'s full-accent light ember) — on an idle
-    /// (ember-rimmed) dark rail the rim is a hue edge, not a brightness edge.
+    /// The seat is NOT `railDormant`, which is the WIRE's dormancy tone and is
+    /// pinned to a 3:1 floor against the surfaces. That floor is what parks it
+    /// beside the rim it has to be told from: `railDormant` measures 1.09:1
+    /// against dark `ember` and 1.09:1 against light `gold`, so on an idle
+    /// dark rail — or an armed light one — the rim was a hue edge with no
+    /// brightness behind it. A disc ringed by its own rim carries no ground
+    /// floor (the rim does that job), so the seat is free to drop clear of
+    /// both rim tones instead. Measured (WCAG luminance ratios): dark
+    /// `#4A443B` sits 1.92:1 from `ember` and 5.22:1 from `gold`; light
+    /// `#E0D8C6` sits 4.28:1 from `ember` and 2.92:1 from `gold`. Every dial
+    /// column x appearance x Increase-Contrast cell is swept by
+    /// `TokenContrastMatrixTests.dimmedNodeSeatSeparatesFromBothRimTones`.
     private var dimmed = false
     /// Whether the `.origin` hook draws GOLD (the Main Audio spine is armed —
     /// connected members are feeding it) vs the quiet `ember` idle tone (v4
@@ -254,9 +258,10 @@ public final class MembershipBusView: NSView {
             if node == .member {
                 // Rim in the spine's own tone: gold on an armed rail, ember on
                 // an idle one (same split the wire draws with). The fill is the
-                // same tone, or `railDormant` when dimmed — see `dimmed`.
+                // same tone, or the unlit `dotSocket` seat when dimmed — see
+                // `dimmed`.
                 let rim = Tokens.Color.spineTone(armed: armed)
-                let fill = dimmed ? Tokens.Color.railDormant : rim
+                let fill = dimmed ? Tokens.Color.dotSocket : rim
                 fill.setFill()
                 NSBezierPath(ovalIn: rect).fill()
                 strokeNodeRim(in: rect, color: rim, dashed: false)
@@ -355,7 +360,7 @@ public final class MembershipBusView: NSView {
     /// The node rendering currently drawn (structural hook — the same `node` the
     /// drawing reads, so it can't drift from the pixels).
     public var test_node: Node { node }
-    /// Whether this row's node FILL is the de-emphasis tint (`railDormant`) —
+    /// Whether this row's node FILL is the de-emphasis tint (`dotSocket`) —
     /// a tint, never alpha. The rim is never dimmed, and a hollow node has no
     /// fill, so on a `.nonMember` this flag changes no pixel (see `dimmed`).
     public var test_dimmed: Bool { dimmed }

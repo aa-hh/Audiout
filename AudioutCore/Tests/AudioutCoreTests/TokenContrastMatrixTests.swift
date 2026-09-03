@@ -34,7 +34,8 @@ import AppKit
 ///  - `glow`, `dotSocket`, `meterTrack`, `sidebarWarmTint`, and the surface
 ///    ladder itself (`canvas`/`canvasHi`/`panel`/`raised`/`well`) — each
 ///    documented as a floor-exempt quiet backdrop in its own Tokens.swift
-///    rationale.
+///    rationale. `dotSocket` is exempt from a GROUND floor only: it is always
+///    ringed, and Test D below pins it against the ring.
 ///  - The bare `warning`/`destructive`/`info` system-alias tokens — OS-owned
 ///    values, not this module's hexes to pin. KNOWN failure carried forward:
 ///    bare `warning` measures ~2.1:1 as a light glyph; its one TEXT consumer
@@ -276,6 +277,48 @@ extension SerializedSharedState {
             #expect(increased > base, Comment(rawValue: "\(appearanceName.rawValue): IC ember \(increased):1 on panel is not past base \(base):1"))
             if appearanceName == .aqua {
                 #expect(increasedLuminance < baseLuminance, Comment(rawValue: "light IC ember \(increasedLuminance) is not darker than base \(baseLuminance)"))
+            }
+        }
+    }
+
+    // MARK: - Test D: the unlit seat vs the ring around it
+
+    /// `dotSocket` fills two instruments that are always RINGED — the
+    /// route-armed dot on its icon corner, and a dimmed membership node inside
+    /// the rail's own rim — so the pairing that decides whether it reads is
+    /// seat-vs-ring, not seat-vs-ground. It carries no ground floor by design
+    /// (Tokens.swift), so nothing else in this matrix measures it at all.
+    ///
+    /// 1.4:1 rather than a stock UI floor because both rim tones are dim
+    /// companions to gold, not grounds. It is calibrated against the tone that
+    /// CANNOT do this job: `railDormant`, the wire's dormancy tone, is held to
+    /// 3:1 against the surfaces, and that floor lands it at 1.09:1 from dark
+    /// `ember` and 1.09:1 from light `gold` — a ring with no brightness edge
+    /// behind it in each appearance. Swept over appearance x Increase Contrast
+    /// x dial column because both rim tones are accent-remapped and every
+    /// variant moves independently; the tightest cell is Subtle dark `ember`,
+    /// 1.47:1.
+    @Test func dimmedNodeSeatSeparatesFromBothRimTones() {
+        defer {
+            Tokens.accentStyle = .fullGold
+            Tokens.test_increaseContrastOverride = nil
+        }
+        let floor: CGFloat = 1.4
+
+        for style in [AccentStyle.fullGold, .subtle] {
+            Tokens.accentStyle = style
+            for increaseContrast in [false, true] {
+                Tokens.test_increaseContrastOverride = increaseContrast
+                for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+                    let seat = resolved(Tokens.Color.dotSocket, appearanceName: appearanceName)
+                    for (rimName, rim) in [("ember", Tokens.Color.ember), ("gold", Tokens.Color.gold)] {
+                        let ratio = contrastRatio(seat, resolved(rim, appearanceName: appearanceName))
+                        #expect(ratio >= floor, Comment(rawValue:
+                            "dotSocket vs \(rimName) (\(style), " +
+                            "IC \(increaseContrast), \(appearanceName.rawValue)): " +
+                            "\(String(format: "%.2f", ratio)):1 under \(floor):1"))
+                    }
+                }
             }
         }
     }

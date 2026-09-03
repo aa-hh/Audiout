@@ -679,7 +679,7 @@ public enum PopoverColumnGrid {
     // AirPlay row's pills use, and the SYNC chip closes the slot at the
     // trailing inset (under "Offset"). The slider/% columns keep their exact
     // trailing anchors, so cross-section alignment is untouched. Named
-    // constants only — the Figma design-system contract mirrors this file 1:1.
+    // constants only.
     //
     // That order SUPERSEDES BT-OFFSET-UI's locked "chip left, feed pill far
     // right" spec, which predates the column legends: with the controls the
@@ -756,8 +756,7 @@ public enum PopoverColumnGrid {
     // directly beneath the SYNC chip that opened the drawer. Everything in the
     // band shares ``syncDrawerControlHeight`` and is vertically centred, sized
     // to sit WITH the row's own controls — two earlier versions were redone for
-    // being oversized. Named constants only — the Figma design-system contract
-    // mirrors this file.
+    // being oversized. Named constants only.
 
     /// Horizontal inset of the drawer's content from its container edges. No
     /// accent edge or border (live feedback — see `BTSyncDrawerView`'s header).

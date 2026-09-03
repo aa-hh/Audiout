@@ -39,8 +39,7 @@ import AppKit
 /// Every color goes through `Tokens`, resolved at DRAW time under the
 /// control's effective appearance (AppKit sets the drawing appearance before
 /// calling the cell), so light/dark, Increase Contrast, and the accent dial
-/// (spec §1.3 — `gold`/`ember` remap; under `.systemAccent` the engaged fill
-/// resolves to `controlAccentColor` and its ×0.55 companion) all land with no
+/// (spec §1.3 — `gold`/`ember` remap) all land with no
 /// code here knowing about them. The drawing is steady state — no animation,
 /// no layers — so `cacheDisplay` snapshots are byte-deterministic.
 public final class WarmFaderCell: NSSliderCell {
@@ -115,8 +114,7 @@ public final class WarmFaderCell: NSSliderCell {
             trough.addClip()
             if isRouteArmed && isEnabled {
                 // Engaged: the gold instrument gradient (accent-dial aware via
-                // the tokens themselves — under `.systemAccent` this resolves
-                // to controlAccentColor and its dimmed companion). The dim end
+                // the tokens themselves). The dim end
                 // is `ember` pre-blended toward `gold` so the low-value end of
                 // the fill clears the trough (ratios in the header doc);
                 // blending two live tokens at draw time keeps the accent dial

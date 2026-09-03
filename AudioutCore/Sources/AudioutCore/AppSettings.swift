@@ -15,17 +15,17 @@ public enum AppearanceTheme: String, CaseIterable, Sendable {
 }
 
 /// The accent dial (Settings › Appearance › Accent — Warm Signal spec §1.3,
-/// decision i): how strongly the gold instrument tokens (`gold`/`ember`/`glow`)
-/// render. `.fullGold` is the flagship default; `.subtle` desaturates the gold
-/// channel and removes the glow; `.systemAccent` pulls the Mac's accent color
-/// into every gold slot. The dial remaps ONLY the gold channel — `failure`,
-/// `caution`, `ring-connected`, and all text tokens are never remapped. Core
-/// owns only the persisted choice; the token remap itself lives with the token
-/// module (`AudioutSharedUI.Tokens`), since Core imports no AppKit.
+/// decision i): how strongly the gold instrument tokens render. TWO positions
+/// — `.fullGold` is the flagship default; `.subtle` desaturates the gold
+/// channel and removes the glow. The dial remaps ONLY the gold channel;
+/// `failure`, the edge tokens and every text token are never remapped. A value
+/// persisted by a build that had a third position no longer decodes, and the
+/// getter's existing `?? .fullGold` fallback catches it. Core owns only the
+/// persisted choice; the token remap itself lives with the token module
+/// (`AudioutSharedUI.Tokens`), since Core imports no AppKit.
 public enum AccentStyle: String, CaseIterable, Sendable {
     case fullGold
     case subtle
-    case systemAccent
 }
 
 /// What the license server last said about the stored key (`POST /v1/validate`).

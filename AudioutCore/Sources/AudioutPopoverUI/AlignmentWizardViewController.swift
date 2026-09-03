@@ -246,7 +246,7 @@ private final class RoomSpillView: NSView {
 
     /// Peak spill alpha: 0.10 dark (spec §2.2). OFF in light: measured at
     /// both 0.07 and 0.12 the wash was <1% neutral darkening with no chroma —
-    /// invisible as a tint, visible only as banding on the Circuit ground.
+    /// invisible as a tint, visible only as banding on the flat light ground.
     private var peakOpacity: CGFloat { isDarkAppearance ? 0.10 : 0 }
 
     private var leftTint: NSColor {

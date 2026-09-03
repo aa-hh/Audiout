@@ -118,9 +118,34 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         mark.translatesAutoresizingMaskIntoConstraints = false
         mark.setAccessibilityElement(false)
 
+        // ONLY the product name is set in the wordmark face; the words around
+        // it stay system bold. The wordmark run is 25 pt against the line's
+        // 24 pt so the two runs share a cap height: measured cap-height ratios
+        // are 0.70459 for system bold and 0.670 for ClashDisplay-Semibold, and
+        // 24 × 0.70459 / 0.670 = 25.24 pt.
+        //
+        // Two RUNS of one attributed string rather than two labels: the line is
+        // centred, and one string on one baseline is what a centred paragraph
+        // style gives for free.
+        //
+        // Outside an assembled `.app` there is no `.otf` to register, so
+        // `Tokens.Font.wordmark(size:)` returns system bold at 25 and the name
+        // renders 1 pt taller than the rest of the line. That is the normal
+        // path under `swift run`, `swift test` and the snapshot tools.
         let headline = NSTextField(labelWithString: "Welcome to Audiout")
-        headline.font = Tokens.Font.displayLarge
-        headline.textColor = Tokens.Color.label
+        let centred = NSMutableParagraphStyle()
+        centred.alignment = .center
+        let line = NSMutableAttributedString(
+            string: "Welcome to ",
+            attributes: [.font: Tokens.Font.displayLarge,
+                         .foregroundColor: Tokens.Color.label])
+        line.append(NSAttributedString(
+            string: "Audiout",
+            attributes: [.font: Tokens.Font.wordmark(size: 25),
+                         .foregroundColor: Tokens.Color.label]))
+        line.addAttribute(.paragraphStyle, value: centred,
+                          range: NSRange(location: 0, length: line.length))
+        headline.attributedStringValue = line
         headline.alignment = .center
         headline.setAccessibilityRole(.staticText)
         headline.setAccessibilitySubrole(NSAccessibility.Subrole(rawValue: "AXHeading"))

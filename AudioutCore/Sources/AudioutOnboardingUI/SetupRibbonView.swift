@@ -159,7 +159,10 @@ final class SetupPreviewFrameView: NSView {
     static let labelBandHeight: CGFloat = 24
     /// Air around the surface playing inside the frame.
     static let bodyPadding: CGFloat = 8
-    private static let cornerRadius: CGFloat = 10
+    /// The control rung, not the row one: the well clips `DemoPaneView`'s mock
+    /// macOS windows, which draw their own ~10 pt corners, and a wider frame
+    /// around them reads as two mismatched roundings.
+    private static let cornerRadius: CGFloat = Tokens.Layout.Radius.control
     private static let labelInset: CGFloat = 12
 
     /// Where the caller installs whatever plays in here (the demo pane). Its
@@ -328,6 +331,10 @@ final class SetupRibbonView: NSView {
     private static let statusGap: CGFloat = 6
     /// Gap between the buttons in the bar.
     private static let buttonGap: CGFloat = 8
+    /// The symbol a status line uses when something is wrong. Held here rather
+    /// than read off the controller: this view takes its content as a plain
+    /// tuple and knows nothing else about who filled it in.
+    private static let alertSymbol = "exclamationmark.triangle.fill"
 
     private let stack = NSStackView()
     private let statusRow = NSStackView()
@@ -440,7 +447,12 @@ final class SetupRibbonView: NSView {
             if let symbolName = status.symbolName, !status.spins {
                 statusGlyph.image = NSImage(systemSymbolName: symbolName,
                                             accessibilityDescription: nil)
-                statusGlyph.contentTintColor = status.color
+                // The triangle is the problem mark and always carries the
+                // problem hue. The line's own words stay ordinary secondary
+                // ink: `failure` is barred from body text, where it measures
+                // 4.04:1 on dark `raised`.
+                statusGlyph.contentTintColor =
+                    symbolName == Self.alertSymbol ? Tokens.Color.failure : status.color
             }
             statusSpinner.isHidden = !status.spins
             if status.spins { statusSpinner.startAnimation(nil) } else { statusSpinner.stopAnimation(nil) }

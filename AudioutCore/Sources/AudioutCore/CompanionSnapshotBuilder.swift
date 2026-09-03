@@ -242,7 +242,7 @@ public enum CompanionSnapshotBuilder {
         guard device.kind == .bluetooth, let report = alignmentFor(device) else { return nil }
         return DeviceState.AlignmentState(
             status: report.status.rawValue,
-            staleReason: report.status == .stale ? BTAlignmentFreshness.staleReasonReconnected : nil,
+            staleReason: report.staleReason,
             referenceID: alignmentReferenceID(
                 forTarget: device.id, among: devices,
                 isAudible: groupController.isMainOutMember),

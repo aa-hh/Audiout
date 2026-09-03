@@ -37,14 +37,33 @@ public final class BTAlignmentFreshness: @unchecked Sendable {
         case stale
     }
 
-    /// The only ``Status/stale`` reason v1 can produce
-    /// (`DeviceState.AlignmentState.staleReason` on the wire).
+    /// The ``Status/stale`` reasons (`DeviceState.AlignmentState.staleReason`
+    /// on the wire). A reconnect supersedes the other two.
     public static let staleReasonReconnected = "reconnected"
+    /// The alignment was applied while the speaker's clock was still settling.
+    public static let staleReasonMeasuredWhileSettling = "measuredWhileSettling"
+    /// The speaker's clock has stepped 10 ms or more, summed, since the
+    /// alignment was applied.
+    public static let staleReasonMoved = "moved"
 
     /// How long after a baseband reconnect a Bluetooth speaker's clock is
-    /// still settling. Measuring inside this window measures the settling, not
-    /// the speaker, so the phone counts it down before offering the run.
+    /// assumed to be settling when the clock detector has not yet said
+    /// otherwise. A floor under ``BTClockStability``: the detector ends the
+    /// window early the moment it sees 10 jump-free seconds, and extends it
+    /// past the floor while jumps continue.
+    /// razor: one fixed floor for every speaker. The ceiling is a learned
+    /// per-device prior.
     public static let settleSeconds: TimeInterval = 60
+    /// Past the floor, the detector's estimate is published only while the
+    /// device produced an advancing sample this recently.
+    /// razor: three missed 1 Hz samples means the device is not running IO,
+    /// and the Mac then has nothing to add to the fixed window. Without this
+    /// an idle or unsinked speaker would publish 10 forever and the phone's
+    /// Measure button would never go live.
+    static let advancingSampleMaxAgeSeconds: TimeInterval = 3
+    /// Summed jump magnitude since the alignment at which the row asks for a
+    /// re-check: 2.5 times the ±4 ms "in step" band, 5 times the jump floor.
+    static let movedThresholdMs = 10.0
 
     /// Fired after any recorded change, so the wiring layer can rebuild and
     /// rebroadcast the companion snapshot. Called on whichever queue recorded
@@ -59,6 +78,14 @@ public final class BTAlignmentFreshness: @unchecked Sendable {
     private var lastConnectedAtByUID: [String: Date] = [:]
     private var alignedAtByUID: [String: Date] = [:]
     private var linkUpUIDs: Set<String> = []
+    // The clock detector's view of each device, as ``noteClockOutcome`` folds
+    // it in. Seconds of jump-free advance; when the last advancing sample
+    // arrived; summed |jump| since the alignment instant.
+    private var stableForSecondsByUID: [String: Double] = [:]
+    private var lastAdvanceAtByUID: [String: Date] = [:]
+    private var jumpSumSinceAlignedMsByUID: [String: Double] = [:]
+    private var measuredWhileSettlingUIDs: Set<String> = []
+    private var movedUIDs: Set<String> = []
 
     public init() {}
 
@@ -76,6 +103,13 @@ public final class BTAlignmentFreshness: @unchecked Sendable {
         let changed = lock.withLock { () -> (@Sendable () -> Void)? in
             guard linkUpUIDs.insert(uid).inserted else { return nil }
             lastConnectedAtByUID[uid] = date
+            // A new link is a new clock: whatever the detector knew about the
+            // old one is gone, and a reconnect supersedes both marks.
+            stableForSecondsByUID[uid] = 0
+            lastAdvanceAtByUID[uid] = nil
+            jumpSumSinceAlignedMsByUID[uid] = 0
+            measuredWhileSettlingUIDs.remove(uid)
+            movedUIDs.remove(uid)
             return _onChange
         }
         changed?()
@@ -89,37 +123,162 @@ public final class BTAlignmentFreshness: @unchecked Sendable {
     }
 
     /// An alignment landed for this device — a reported measurement applied,
-    /// or a by-ear fine-tune committed.
+    /// a by-ear fine-tune committed, or the Mac wizard's Keep.
+    ///
+    /// Decides here, not at the call sites, whether it was made too early:
+    /// an alignment applied while the clock detector is not stable for this
+    /// device is marked "measured while settling", one made while stable
+    /// clears that mark. Early only when the Mac has a reason to think so: a
+    /// settle window is running, or the detector has sampled this clock and
+    /// not yet seen it hold. A clock it has never sampled is unknown, not
+    /// settling, so an alignment on it stays ordinary; otherwise a device
+    /// whose clock query never answers would mark every alignment early
+    /// forever and the phone would re-check it without end. Either way the
+    /// jump sum restarts and a standing "moved" mark clears: this alignment
+    /// is the new instant to move from.
     public func noteAligned(uid: String, at date: Date = Date()) {
         let changed = lock.withLock { () -> (@Sendable () -> Void)? in
             alignedAtByUID[uid] = date
+            jumpSumSinceAlignedMsByUID[uid] = 0
+            movedUIDs.remove(uid)
+            let settling = !isStableLocked(uid)
+                && (Self.settleRemainingSeconds(lastConnectedAt: lastConnectedAtByUID[uid], now: date) != nil
+                    || lastAdvanceAtByUID[uid] != nil)
+            if settling {
+                measuredWhileSettlingUIDs.insert(uid)
+            } else {
+                measuredWhileSettlingUIDs.remove(uid)
+            }
             return _onChange
         }
         changed?()
     }
 
     /// This device's tuning was cleared, so there is no alignment instant left
-    /// for a later connect to be measured against.
+    /// for a later connect to be measured against, and nothing for either
+    /// mark to be about.
     public func clearAligned(uid: String) {
         let changed = lock.withLock { () -> (@Sendable () -> Void)? in
             alignedAtByUID.removeValue(forKey: uid)
+            measuredWhileSettlingUIDs.remove(uid)
+            movedUIDs.remove(uid)
             return _onChange
         }
         changed?()
     }
 
+    /// One sample's verdict from this device's ``BTClockStability``, on the
+    /// watcher's queue once a second. Fires ``onChange`` ONLY when something
+    /// the phone can see flips: the first arrival at stable (estimate to
+    /// `nil`), a jump after the floor has run out (re-published estimate), and
+    /// the jump sum crossing the "moved" line for an aligned device, once.
+    /// Never on an ordinary advancing or frozen sample. A rebaseline (the
+    /// device's clock origin moved under a running sink) restarts the count
+    /// and the sum silently: the baseline is lost, and a prompt on a guess is
+    /// a spurious prompt. A first sample (`.ignored`) only holds: it follows
+    /// every sink rebuild, and a measurement run rebuilds the sink twice, so
+    /// resetting there would leave a speaker "settling" for as long as it was
+    /// being measured and mark every apply early. Seen live 2026-09-03.
+    public func noteClockOutcome(uid: String, outcome: BTClockStability.Outcome, at date: Date = Date()) {
+        let changed = lock.withLock { () -> (@Sendable () -> Void)? in
+            var publish = false
+            switch outcome {
+            case .frozen:
+                return nil
+            case .ignored:
+                lastAdvanceAtByUID[uid] = date
+            case .rebaselined:
+                stableForSecondsByUID[uid] = 0
+                lastAdvanceAtByUID[uid] = date
+                jumpSumSinceAlignedMsByUID[uid] = 0
+            case .advanced:
+                let wasStable = isStableLocked(uid)
+                if let last = lastAdvanceAtByUID[uid] {
+                    stableForSecondsByUID[uid, default: 0] += date.timeIntervalSince(last)
+                }
+                lastAdvanceAtByUID[uid] = date
+                publish = !wasStable && isStableLocked(uid)
+            case .jumped(let magnitudeMs):
+                stableForSecondsByUID[uid] = 0
+                lastAdvanceAtByUID[uid] = date
+                publish = Self.settleRemainingSeconds(
+                    lastConnectedAt: lastConnectedAtByUID[uid], now: date) == nil
+                if alignedAtByUID[uid] != nil {
+                    jumpSumSinceAlignedMsByUID[uid, default: 0] += abs(magnitudeMs)
+                    // Not evaluated while the early mark stands: that row is
+                    // already asking for a re-check.
+                    if !measuredWhileSettlingUIDs.contains(uid),
+                       jumpSumSinceAlignedMsByUID[uid, default: 0] >= Self.movedThresholdMs,
+                       movedUIDs.insert(uid).inserted {
+                        publish = true
+                    }
+                }
+            }
+            return publish ? _onChange : nil
+        }
+        changed?()
+    }
+
+    /// Whether the clock detector has seen ``BTClockStability/stableAfterSeconds``
+    /// of jump-free advance for this device since the last connect or jump.
+    public func isStable(uid: String) -> Bool {
+        lock.withLock { isStableLocked(uid) }
+    }
+
+    /// The summed |jump| since this device's alignment, when that alignment
+    /// was made while settling; `nil` when no such mark stands. Read by the
+    /// apply path before it records the re-check, for one telemetry line.
+    public func earlyAlignmentJumpSumMs(uid: String) -> Double? {
+        lock.withLock {
+            measuredWhileSettlingUIDs.contains(uid) ? jumpSumSinceAlignedMsByUID[uid, default: 0] : nil
+        }
+    }
+
+    private func isStableLocked(_ uid: String) -> Bool {
+        stableForSecondsByUID[uid, default: 0] >= BTClockStability.stableAfterSeconds
+    }
+
     // MARK: Reading
 
     /// Everything the snapshot needs for one device.
+    ///
+    /// `settleRemainingSeconds` is the Mac's estimate of seconds until this
+    /// speaker's clock is trustworthy: `nil` once the detector says stable;
+    /// the 60 s floor while it runs; past the floor, the detector's own
+    /// countdown while the device is still producing samples; and `nil` past
+    /// the floor for a device producing none, because the Mac then has nothing
+    /// to add. The phone counts whichever number it gets down locally and
+    /// treats a published `nil` and its own count reaching 0 alike.
     public func report(uid: String, hasStoreEntry: Bool, now: Date = Date()) -> BTAlignmentReport {
-        let (connected, aligned) = lock.withLock {
-            (lastConnectedAtByUID[uid], alignedAtByUID[uid])
+        let (connected, aligned, stableFor, lastAdvance, stale) = lock.withLock {
+            (lastConnectedAtByUID[uid], alignedAtByUID[uid],
+             stableForSecondsByUID[uid, default: 0], lastAdvanceAtByUID[uid],
+             movedUIDs.contains(uid)
+                ? Self.staleReasonMoved
+                : measuredWhileSettlingUIDs.contains(uid) ? Self.staleReasonMeasuredWhileSettling : nil)
         }
-        return BTAlignmentReport(
-            status: Self.status(hasStoreEntry: hasStoreEntry,
-                                lastConnectedAt: connected,
-                                alignedAt: aligned),
-            settleRemainingSeconds: Self.settleRemainingSeconds(lastConnectedAt: connected, now: now))
+        var status = Self.status(hasStoreEntry: hasStoreEntry, lastConnectedAt: connected, alignedAt: aligned)
+        var staleReason: String?
+        if status == .stale {
+            staleReason = Self.staleReasonReconnected
+        } else if status == .tuned, let stale {
+            status = .stale
+            staleReason = stale
+        }
+        let stable = stableFor >= BTClockStability.stableAfterSeconds
+        let settleRemaining: Int?
+        if stable {
+            settleRemaining = nil
+        } else if let floor = Self.settleRemainingSeconds(lastConnectedAt: connected, now: now) {
+            settleRemaining = floor
+        } else if let lastAdvance,
+                  now.timeIntervalSince(lastAdvance) <= Self.advancingSampleMaxAgeSeconds {
+            settleRemaining = Int((BTClockStability.stableAfterSeconds - stableFor).rounded(.up))
+        } else {
+            settleRemaining = nil
+        }
+        return BTAlignmentReport(status: status, settleRemainingSeconds: settleRemaining,
+                                 staleReason: staleReason)
     }
 
     /// The whole staleness rule, as a pure function of the three inputs — so
@@ -206,10 +365,15 @@ public enum CompanionAlignmentApplyResult: Equatable {
 public struct BTAlignmentReport: Equatable, Sendable {
     public let status: BTAlignmentFreshness.Status
     public let settleRemainingSeconds: Int?
+    /// Set exactly when `status` is ``BTAlignmentFreshness/Status/stale``:
+    /// one of the three `staleReason*` strings.
+    public let staleReason: String?
 
-    public init(status: BTAlignmentFreshness.Status, settleRemainingSeconds: Int?) {
+    public init(status: BTAlignmentFreshness.Status, settleRemainingSeconds: Int?,
+                staleReason: String? = nil) {
         self.status = status
         self.settleRemainingSeconds = settleRemainingSeconds
+        self.staleReason = staleReason
     }
 }
 

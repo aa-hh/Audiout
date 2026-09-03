@@ -441,6 +441,76 @@ extension SerializedSharedState {
                 "Keep logs its own line: \(keepLine ?? "none")")
         #expect(keepLine?.contains("\"latencyMs\":\"280\"") == true)
         #expect(keepLine?.contains("\"trimMs\":\"0\"") == true)
+        #expect(keepLine?.contains("\"settleRemainingS\":\"nil\"") == true,
+                "no connect edge and no clock sample this session: no window to report")
+    }
+
+    /// The Mac's own alignment paths go through the freshness store like the
+    /// phone's do: Keep, Reset and a persisted trim each move the row, a
+    /// reconnect stales a Keep made before it, and a Keep made while the clock
+    /// is still settling is marked early without any extra code at the site.
+    @Test func theMacsOwnAlignmentPathsMoveTheRowsFreshness() throws {
+        let (backend, bt, _, _) = makeBackend(storeDirectory: scratchDir)
+        defer { backend.stop() }
+        final class ChangeCount: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _value = 0
+            var value: Int { lock.withLock { _value } }
+            func bump() { lock.withLock { _value += 1 } }
+        }
+        let changes = ChangeCount()
+        backend.onBTAlignmentChanged = { changes.bump() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        let uid = btMove.id
+        func report() -> BTAlignmentReport? { backend.btAlignmentReport(forDevice: uid) }
+        /// Eleven advancing samples a second apart: ten stable seconds, and
+        /// the store's one publish on arriving there.
+        func settleTheClock() {
+            let from = Date()
+            for s in 0...10 {
+                backend.btAlignmentFreshness.noteClockOutcome(
+                    uid: uid, outcome: .advanced, at: from.addingTimeInterval(Double(s)))
+            }
+        }
+
+        settleTheClock()
+        let base = changes.value
+        backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 280)
+        #expect(report()?.status == .tuned, "a Keep while stable is an ordinary alignment")
+        #expect(changes.value == base + 1)
+
+        // The link drops and comes back. Nobody in this process asked, so
+        // only the enumerator's availability edge can report it.
+        bt.fire([BTDeviceSnapshot(id: uid, name: btMove.name, isConnected: false)])
+        waitFor { self.device(backend, uid)?.isAvailable == false }
+        bt.fire([btMove])
+        waitFor { report()?.status == .stale }
+        #expect(report()?.staleReason == BTAlignmentFreshness.staleReasonReconnected)
+        #expect(report()?.settleRemainingSeconds == 60)
+        #expect(changes.value == base + 2)
+
+        backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 300)
+        #expect(report()?.status == .stale, "a Keep before the clock settles again is early")
+        #expect(report()?.staleReason == BTAlignmentFreshness.staleReasonMeasuredWhileSettling)
+        #expect(changes.value == base + 3)
+
+        settleTheClock()
+        backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 310)
+        #expect(report()?.status == .tuned, "…and one after it settles clears the mark")
+        #expect(report()?.staleReason == nil)
+        #expect(changes.value == base + 5, "the arrival at stable, then the Keep")
+
+        backend.resetBTAlignment(forDevice: uid)
+        #expect(report()?.status == .notSet)
+        #expect(changes.value == base + 6)
+
+        backend.setBTSyncTrim(12, forDevice: uid, persist: true)
+        #expect(report()?.status == .tuned, "a persisted nudge is an alignment")
+        #expect(changes.value == base + 7)
+        backend.setBTSyncTrim(13, forDevice: uid, persist: false)
+        #expect(changes.value == base + 7, "a scrub is not")
     }
 
     /// The candidate range a run may present ignores the device's trim, because

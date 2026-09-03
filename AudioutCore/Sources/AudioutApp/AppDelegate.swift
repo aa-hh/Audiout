@@ -2654,16 +2654,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     .cancelCompanionAlignmentProbe(targetID: targetID)
                 return nil
             },
-            reportMeasurement: { [weak self] targetID, offsetMs, _ in
+            reportMeasurement: { [weak self] targetID, offsetMs, confidence in
                 // `confidence` rides the wire for the PHONE's own gate — it
                 // decides whether a recording was clean enough to report at
-                // all. A measurement that arrives has already passed that,
-                // and the Mac has nothing better to judge it with.
+                // all. A measurement that arrives has already passed that, and
+                // the Mac has nothing better to judge it with, so it does not
+                // gate on it — it only records it, for the measurement log.
                 guard let self, let bt = self.backend as? BTOutputControlling else {
                     return "This Mac can't measure speaker timing."
                 }
                 let clientID = self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
-                switch bt.applyCompanionAlignmentMeasurement(targetID: targetID, offsetMs: offsetMs) {
+                switch bt.applyCompanionAlignmentMeasurement(
+                    targetID: targetID, offsetMs: offsetMs, confidence: confidence) {
                 case .refused(let reason):
                     return reason
                 case .applied(let measuredMs, let correctedMs):

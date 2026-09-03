@@ -10447,7 +10447,8 @@ public protocol BTOutputControlling: AnyObject {
     /// two numbers the phone cannot derive — the de-staggered measurement and
     /// how far the stored latency actually moved.
     func applyCompanionAlignmentMeasurement(targetID: String,
-                                            offsetMs: Double) -> CompanionAlignmentApplyResult
+                                            offsetMs: Double,
+                                            confidence: Double) -> CompanionAlignmentApplyResult
 
     /// Start/stop the by-ear fine-tune metronome for `targetID`. The `true`
     /// edge records the trim to revert to; the `false` edge persists whatever
@@ -10497,7 +10498,8 @@ extension BTOutputControlling {
     }
     public func cancelCompanionAlignmentProbe(targetID: String) {}
     public func applyCompanionAlignmentMeasurement(targetID: String,
-                                                   offsetMs: Double) -> CompanionAlignmentApplyResult {
+                                                   offsetMs: Double,
+                                                   confidence: Double) -> CompanionAlignmentApplyResult {
         .refused("This Mac can't measure speaker timing.")
     }
     public func setCompanionAlignmentTick(targetID: String, active: Bool) -> String? {
@@ -10531,6 +10533,9 @@ extension NativeBackend: BTOutputControlling {
         // reader mid-drag should see what the user is hearing.
         if persist {
             do { try btTrimStore?.save(all) } catch { StoreRecovery.noteWriteFailure(error) }
+            // A persisted nudge is an alignment, wherever it came from: the
+            // Mac's ruler, the wizard's trim Keep, or the phone's fine-tune.
+            btAlignmentFreshness.noteAligned(uid: id)
         }
         captureControlQueue.async { [weak self] in
             self?.btSink?.setTrimMs(value, forDeviceUID: id)
@@ -10554,6 +10559,7 @@ extension NativeBackend: BTOutputControlling {
         // delete, which `save`/`saveLatencies` (whole-map overwrites) could
         // only express by round-tripping the maps back out again.
         do { try btTrimStore?.clearAlignment(deviceUID: id) } catch { StoreRecovery.noteWriteFailure(error) }
+        btAlignmentFreshness.clearAligned(uid: id)
         // The reference floor is a function of the slowest KNOWN latency, so
         // dropping one can move it — same ordering as the wizard's Keep: the
         // reference first, then the sink's own two terms, both hops enqueued
@@ -10863,7 +10869,8 @@ extension NativeBackend: BTOutputControlling {
     }
 
     public func applyCompanionAlignmentMeasurement(targetID: String,
-                                                   offsetMs: Double) -> CompanionAlignmentApplyResult {
+                                                   offsetMs: Double,
+                                                   confidence: Double) -> CompanionAlignmentApplyResult {
         guard let run = takeCompanionProbeRun({ $0.targetUID == targetID }) else {
             return .refused("That measurement isn't running any more — start it again.")
         }
@@ -10881,7 +10888,43 @@ extension NativeBackend: BTOutputControlling {
         let range = btWizardLatencyRangeMs(forDevice: targetID)
         let corrected = BTSyncTrim.snap(applied + (offsetMs - run.staggerMs))
         let value = Swift.min(Swift.max(corrected, range.lowerBound), range.upperBound)
+        // Every measurement, whether the run offered a re-check or not: what
+        // the microphone heard (`rawOffsetMs`) with the phone's own confidence
+        // (a peak-to-sidelobe ratio: ~1 is noise, a clean arrival runs to the
+        // hundreds), what it became after the stagger and the stored latency
+        // (`correctedMs`), and what was actually kept once clamped to the
+        // sink's reachable range (`keptMs`). A `keptMs` pinned to a range edge
+        // with `clamped=1` is a measurement the range could not express — the
+        // scatter to chase separately from a low confidence, which is a
+        // recording the room or the levels spoiled. Diagnostic while the
+        // one-shot measurement is proven on hardware; drop it once it is.
+        Telemetry.log(.localPlayback, "bt_align_measurement", [
+            "uid": targetID,
+            "confidence": String(format: "%.1f", confidence),
+            "rawOffsetMs": String(format: "%.1f", offsetMs),
+            "staggerMs": String(format: "%.1f", run.staggerMs),
+            "priorLatencyMs": String(Int(applied)),
+            "correctedMs": String(format: "%.1f", corrected),
+            "keptMs": String(format: "%.1f", value),
+            "clamped": value == corrected ? "0" : "1",
+            "rangeLoMs": String(Int(range.lowerBound)),
+            "rangeHiMs": String(Int(range.upperBound)),
+            "settleRemainingS": btAlignmentReport(forDevice: targetID)?.settleRemainingSeconds
+                .map(String.init) ?? "nil",
+        ])
         btTrimLock.withLock { companionPreMeasurementLatencyMsByUID[targetID] = applied }
+        // A re-check after a measurement made while the clock was still
+        // settling: how far the early number was off, and how much the clock
+        // stepped in between. Gathered from real use, never acted on. Read
+        // BEFORE the apply below, which records this measurement over the mark.
+        if let jumpSumMs = btAlignmentFreshness.earlyAlignmentJumpSumMs(uid: targetID) {
+            Telemetry.log(.localPlayback, "bt_align_recheck_after_early", [
+                "uid": targetID,
+                "earlyMs": String(Int(applied)),
+                "jumpSumMs": String(format: "%.1f", jumpSumMs),
+                "recheckMs": String(format: "%.1f", offsetMs - run.staggerMs),
+            ])
+        }
         // The Mac wizard's Keep, exactly: measured latency written, trim
         // zeroed (it was a manual stand-in for the latency just measured).
         endBTWizardLatencyPreview(forDevice: targetID, keepMs: value)
@@ -11188,14 +11231,21 @@ extension NativeBackend: BTOutputControlling {
             } catch {
                 StoreRecovery.noteWriteFailure(error)
             }
+            // The Mac's own Keep is an alignment like the phone's: the row
+            // and the sheet must read it as one, and the store marks it early
+            // if the clock was still settling.
+            btAlignmentFreshness.noteAligned(uid: id)
             // The run's receipt, in one line: what was measured and what the
             // nudge was left at — the two halves of the delay term Keep writes,
-            // so a live report never has to infer one from the other. UI-thread
-            // call site (the popover's Keep), never the render or tap thread.
+            // so a live report never has to infer one from the other — plus
+            // how far into the settling window it was made. UI-thread call
+            // site (the popover's Keep), never the render or tap thread.
             Telemetry.log(.localPlayback, "wizard_keep", [
                 "uid": id,
                 "latencyMs": String(Int(value)),
                 "trimMs": "0",
+                "settleRemainingS": btAlignmentReport(forDevice: id)?.settleRemainingSeconds
+                    .map(String.init) ?? "nil",
             ])
             // The reference floor is a function of the slowest known latency, so
             // a new measurement can move it — and it must move FIRST: pushing a

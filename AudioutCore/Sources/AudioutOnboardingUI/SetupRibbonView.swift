@@ -448,9 +448,9 @@ final class SetupRibbonView: NSView {
                 statusGlyph.image = NSImage(systemSymbolName: symbolName,
                                             accessibilityDescription: nil)
                 // The triangle is the problem mark and always carries the
-                // problem hue. The line's own words stay ordinary secondary
-                // ink: `failure` is barred from body text, where it measures
-                // 4.04:1 on dark `raised`.
+                // problem hue, whatever ink the line's own words take. On this
+                // ribbon's `panel` ground `failure` measures 4.60:1 dark and
+                // 6.01:1 light, so the red mark carries on its own.
                 statusGlyph.contentTintColor =
                     symbolName == Self.alertSymbol ? Tokens.Color.failure : status.color
             }
@@ -584,6 +584,9 @@ final class SetupRibbonView: NSView {
     // MARK: Test-support hooks
 
     var test_statusText: String? { statusRow.isHidden ? nil : statusLabel.stringValue }
+    /// The status glyph's tint — `failure` on the alert triangle, the line's
+    /// own colour on any other symbol.
+    var test_statusGlyphTint: NSColor? { statusGlyph.isHidden ? nil : statusGlyph.contentTintColor }
     var test_bodyText: String? { bodyLabel.isHidden ? nil : bodyLabel.stringValue }
     /// Whether a wait is on screen (the spinner beat).
     var test_isWaiting: Bool { !statusRow.isHidden && !statusSpinner.isHidden }

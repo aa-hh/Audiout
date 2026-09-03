@@ -10,26 +10,20 @@ import MetalKit
 /// radiating concentric rings across a warm field, drawn by a Metal fragment
 /// shader.
 ///
-/// A native port of the marketing site's WebGL hero, running the site's own
-/// warm `"Chill out"` ramp. Every SHARED number — orbit, squash, ring speed
-/// and density, ring shape, falloff, the breathing group, gain and paper
-/// lift — is READ from ``AudioutField/defaults`` (the `field.json` in
-/// audiout-shared that the site's `fields/emitters.js` also reads) and
-/// interpolated into ``shaderSource``. Nothing shared is retyped here, so the
-/// brand's one moving image cannot silently fork.
-///
-/// The COLOUR is shared too: `lo`, `mid` and `peak` come straight from
-/// ``AudioutField/ramps`` under `"Chill out"`, the same three stops in both
-/// appearances. The only appearance-dependent value left is `bg`, which is
-/// `canvas`; light mode does not invert the stops, because the shared
-/// `paperLift` is the field's own answer to a white ground. The stops are
-/// fixed brand data, so this field is the one surface in the app whose
-/// colours do NOT follow the accent dial.
+/// A native port of the marketing site's WebGL hero, remapped from the site's
+/// green to the app's warm gold ramp (`canvas` → `ember` → `accent` → a
+/// lifted peak). Every SHARED number — orbit, squash, ring speed and density,
+/// ring shape, falloff, the breathing group, gain and paper lift — is READ
+/// from ``AudioutField/defaults`` (the `field.json` in audiout-shared that
+/// the site's `fields/emitters.js` also reads) and interpolated into
+/// ``shaderSource``. Nothing shared is retyped here, so the brand's one
+/// moving image cannot silently fork.
 ///
 /// Exactly one shared value is deviated from, and it is one number:
-/// ``stageScale`` — see its own comment for why. The only thing left that
-/// this file authors is a PER-SURFACE choice the field explicitly leaves open
-/// (the placements in ``emitters``), so it carries no drift risk.
+/// ``stageScale`` — see its own comment for why. Everything else this file
+/// authors is a PER-SURFACE choice the field explicitly leaves open (the
+/// placements in ``emitters`` and the colour ramp), so it carries no drift
+/// risk.
 ///
 /// The composition is deliberately QUIET. Three sources sit past or on the
 /// window's edges, each with a `reach` cap, so what the window shows is the
@@ -147,15 +141,6 @@ final class EmitterFieldView: NSView {
     /// Base energy of the field — the shared `gain`, unmodified. The surge
     /// envelope adds on top of it.
     private static let baseGain = Float(AudioutField.defaults.gain)
-    /// The field's three colour stops, read whole from the shared file. The
-    /// key names the site's warm scene, and a missing one is a broken
-    /// dependency pin rather than anything that can happen at runtime.
-    private static let ramp: FieldRamp = {
-        guard let ramp = AudioutField.ramps["Chill out"] else {
-            fatalError("AudioutField: field.json has no \"Chill out\" ramp — the package is broken.")
-        }
-        return ramp
-    }()
     /// The site composes its stills at t = 40 s and starts its live clock
     /// there, so frame one is a developed field rather than three points
     /// snapping outward from nothing. Same here.
@@ -513,12 +498,33 @@ final class EmitterFieldView: NSView {
     private func makeUniforms(drawableSize: CGSize) -> Uniforms {
         let isLight = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua
         var bg = SIMD3<Float>(repeating: 0)
+        var lo = SIMD3<Float>(repeating: 0)
+        var mid = SIMD3<Float>(repeating: 0)
+        var peak = SIMD3<Float>(repeating: 0)
         effectiveAppearance.performAsCurrentDrawingAppearance {
+            // `Tokens.Color.accent` is the SEMANTIC alias (`controlAccentColor`,
+            // i.e. system blue by default) — the field's hue is the authored
+            // `gold`, which also follows the accent dial.
+            let accent = Tokens.Color.gold
             bg = Self.components(of: Tokens.Color.canvas)
+            // The site's light ramp inverts — a PALE wash deepening into ink
+            // on paper, instead of blooming white out of the dark. So light
+            // mode's low stop is a near-paper gold and its peak is the darkest
+            // stop; dark mode runs ember → gold → lifted cream.
+            lo = Self.components(of: isLight
+                ? accent.blended(withFraction: 0.6, of: .white) ?? accent
+                : Tokens.Color.ember)
+            mid = Self.components(of: accent)
+            // The dark peak lifts gold by 0.25, not the 0.7 it used to: at
+            // 0.7 a crest resolved to #F5E4B4, a near-cream that was the
+            // brightest thing on the window and outshone the gold Register
+            // button it sits behind. 0.25 gives #EEC978 — the same warm gold
+            // family, and close to the shared "Chill out" ramp's own peak
+            // (#FFD97A) that the site paints this field with.
+            peak = Self.components(of: isLight
+                ? accent.blended(withFraction: 0.55, of: .black) ?? accent
+                : accent.blended(withFraction: 0.25, of: .white) ?? accent)
         }
-        let lo = Self.components(of: Self.ramp.lo)
-        let mid = Self.components(of: Self.ramp.mid)
-        let peak = Self.components(of: Self.ramp.peak)
 
         let now = CACurrentMediaTime()
         // A still renders at the clock's current reading, which for a field
@@ -555,12 +561,6 @@ final class EmitterFieldView: NSView {
         return SIMD3<Float>(Float(srgb.redComponent),
                             Float(srgb.greenComponent),
                             Float(srgb.blueComponent))
-    }
-
-    /// One stop of a shared ramp. ``AudioutField/FieldRamp`` declares each stop
-    /// as an RGB triple in 0…1, so the three indices are guaranteed by the type.
-    private static func components(of stop: [Double]) -> SIMD3<Float> {
-        SIMD3<Float>(Float(stop[0]), Float(stop[1]), Float(stop[2]))
     }
 
     // MARK: Test-support hooks

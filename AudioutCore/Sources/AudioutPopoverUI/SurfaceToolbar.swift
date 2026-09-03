@@ -10,17 +10,14 @@ import AudioutSharedUI
 /// material below, and Reduce Transparency handling on its own):
 ///
 /// - the three screens as three separate BORDERED items — the same control
-///   Pin and Quit are, so the header carries ONE button style — each drawing
-///   its own NAME beside its icon, from the item's own `title`.
-///   `toolbar.displayMode` stays `.iconOnly` deliberately: on macOS 26+
-///   (reproduced on 27.0) every label-showing display mode spills the tab names
-///   beside the strip as loose text, so the name rides the item itself. The
-///   tooltips ("Mixer (⌘1)"), the items' `label`s (VoiceOver and the overflow
-///   menu) and ⌘1/⌘2/⌘3 stay;
-/// - the brand mark beside "Audiout" as a centered LOCKUP item
-///   (`centeredItemIdentifiers`) — the one place the app names itself in the
-///   header, both profiles. The mark is decorative; the wordmark is what
-///   VoiceOver reads, so the name is spoken once;
+///   Pin and Quit are, so the header carries ONE button style. ICON-ONLY, and
+///   deliberately so: names were tried on the items' `title` (#95, #97) and
+///   removed again (Alec, 2026-09-03) because three translated labels would
+///   widen the strip until AppKit swept the tabs into the overflow menu, and
+///   primary navigation cannot live behind a chevron. Nothing is lost to a
+///   reader: the tooltips ("Mixer (⌘1)"), the items' `label`s (VoiceOver and
+///   the overflow menu) and ⌘1/⌘2/⌘3 all still carry the names, and none of
+///   them costs strip width in any language;
 /// - Pin and Quit as trailing bordered items.
 ///
 /// **Why the tabs are bordered items and not custom views** (live review
@@ -29,22 +26,13 @@ import AudioutSharedUI
 /// segments and suppresses the one beside the SELECTED segment, so the line
 /// moved with the selection and no API draws them consistently. But the group
 /// was also the only thing giving the tabs any chrome: replacing it with
-/// custom-view items left three bare glyphs beside Pin/Quit's bordered circles
-/// and the lockup's glass capsule — three styles in one header. Bordered items
+/// custom-view items left three bare glyphs beside Pin/Quit's bordered
+/// circles — two styles in one header. Bordered items
 /// have no separators to draw (they are not one segmented control) AND wear
 /// the same circle as Pin and Quit, so the divider stays dead and the header
 /// reads as one control set. Selection is `.prominent` — the filled variant of
 /// that same circle — and the tabs are `.space`-separated so that fill can
 /// never reshape the strip (see `toolbarDefaultItemIdentifiers`).
-///
-/// **The name's glass capsule is not removable, and stays** (live review
-/// 2026-08-29). macOS 26+ draws EVERY toolbar item inside an
-/// `NSGlassEffectView` platter — verified by walking the item view's ancestor
-/// chain, and `NSToolbarItem` offers no opt-out. Moving the lockup to a
-/// titlebar accessory row escapes the platter, and was built and rejected: a
-/// second header line costs more than the capsule does. So the capsule stays
-/// and the lockup is given room inside it instead — see
-/// `lockupHorizontalInset`.
 ///
 /// One toolbar per process: unlike the retired per-screen header instances,
 /// the toolbar belongs to the shell WINDOW, so there is nothing to keep in
@@ -57,43 +45,13 @@ import AudioutSharedUI
 /// ⌘1/⌘2/⌘3 do NOT live here: the surface installs them on the shell panel's
 /// `keyEquivalentHandler` seam instead.
 ///
-/// Lives in AudioutPopoverUI, not the shell: the header names the three
+/// Lives in AudioutPopoverUI, not the shell: the header switches the three
 /// screens, and the shell stays content-agnostic.
 @MainActor
 final class SurfaceToolbarController: NSObject {
 
-    /// Side of the centered brand mark's square box. Sized so the halo's thin
-    /// top ring survives the macOS 26/27 Liquid Glass capsule's compositing
-    /// (see the lockup builder) while staying inside the unified strip so it
-    /// does not grow the toolbar. Alec's "the one constant" — bump it here.
-    static let markSide: CGFloat = 22
-
-    /// Padding above and below the brand lockup inside its capsule. Bounded,
-    /// not chosen: `markSide + 2 * lockupVerticalInset` must stay within the
-    /// unified strip's height, or the strip grows (see `chromeTopInset`).
-    static let lockupVerticalInset: CGFloat = 7
-
-    /// Padding at each END of the brand lockup. Deliberately DOUBLE the
-    /// vertical (Alec, 2026-08-29): the capsule sizes itself to this stack, so
-    /// this inset is the capsule's, and at the vertical value the wordmark sat
-    /// close enough to the glass edge to read as a cramped chip rather than a
-    /// title. Horizontal is the free axis — widening it costs nothing, while
-    /// the vertical one is pinned by the strip.
-    static let lockupHorizontalInset: CGFloat = 14
-
-    static let titleItemIdentifier = NSToolbarItem.Identifier("SurfaceTitle")
-    /// Fill behind the SELECTED tab's glyph. `.prominent` is the only way a
-    /// standard toolbar item paints its own background, and it forces the
-    /// glyph WHITE in both appearances — so this fill must stay dark enough
-    /// for white to read on it in light AND dark mode, which a dynamic token
-    /// (near-black in light, near-white in dark) cannot do. Hence one authored
-    /// mid-dark neutral rather than ``Tokens/Color/engagedChrome``: same
-    /// reasoning as that token though — NOT the gold family, because gold
-    /// means signal and which screen you are on is chrome.
-    static let selectedTabFill = NSColor(white: 0.35, alpha: 1)
 
     static let pinItemIdentifier = NSToolbarItem.Identifier("SurfacePin")
-    static let quitItemIdentifier = NSToolbarItem.Identifier("SurfaceQuit")
 
     /// One stable, non-localized identifier per screen.
     static func tabItemIdentifier(for screen: SurfaceScreen) -> NSToolbarItem.Identifier {
@@ -107,7 +65,6 @@ final class SurfaceToolbarController: NSObject {
     /// The Pin item was clicked.
     var onTogglePin: (() -> Void)?
     /// The Quit item was clicked.
-    var onQuit: (() -> Void)?
 
     // MARK: State (pushed by the host)
 
@@ -118,8 +75,6 @@ final class SurfaceToolbarController: NSObject {
 
     private var tabItems: [SurfaceScreen: NSToolbarItem] = [:]
     private var pinItem: NSToolbarItem?
-    private var titleLabel: NSTextField?
-    private var markView: NSImageView?
 
     override init() {
         toolbar = NSToolbar(identifier: "SurfaceToolbar")
@@ -129,7 +84,6 @@ final class SurfaceToolbarController: NSObject {
         toolbar.allowsUserCustomization = false
         toolbar.autosavesConfiguration = false
         if #available(macOS 13.0, *) {
-            toolbar.centeredItemIdentifiers = [Self.titleItemIdentifier]
         }
     }
 
@@ -158,15 +112,33 @@ final class SurfaceToolbarController: NSObject {
     /// live review 2026-08-30: the custom-view tabs drew no chrome at all,
     /// leaving bare glyphs beside bordered circles and a glass lockup).
     /// Selection is the filled variant of that one control.
+    /// Mark the current screen through AppKit's OWN toolbar selection
+    /// (`selectedItemIdentifier` + `toolbarSelectableItemIdentifiers`), not an
+    /// authored fill.
+    ///
+    /// This is the Mac idiom and the iOS one differs on purpose: iOS puts
+    /// top-level navigation in a tab bar, where the selected tab is a tint and
+    /// a filled glyph. macOS has no tab bar at all — Apple's own guidance is
+    /// that tab views serve that role — so a toolbar that navigates marks its
+    /// place the way AppKit draws it, and AppKit has drawn that highlight
+    /// since 10.0.
+    ///
+    /// What this replaces, and why: every cue used to sit inside
+    /// `if #available(macOS 26.0, *)` while the package deploys to 14.2, so
+    /// macOS 14–25 showed three identical circles and no current screen — and
+    /// the suite reported green, because the seams asserted the intent rather
+    /// than the pixels. The authored fill could not be rescued by tuning
+    /// either: it has to clear the UNSELECTED capsule, and in dark mode that
+    /// capsule already sat at the same grey, so the selected tab rendered as
+    /// the darkest thing in the strip — the user's own location reading as an
+    /// absence.
+    ///
+    /// It also carries the accessibility state. `.prominent` is a rendering
+    /// property that VoiceOver never speaks; `selectedItemIdentifier` is the
+    /// selection AppKit itself exposes.
     private func applySelectionToTabs() {
+        toolbar.selectedItemIdentifier = Self.tabItemIdentifier(for: selectedScreen)
         for (screen, item) in tabItems {
-            let selected = screen == selectedScreen
-            if #available(macOS 26.0, *) {
-                item.style = selected ? .prominent : .plain
-                item.backgroundTintColor = selected ? Self.selectedTabFill : nil
-            }
-            // Below macOS 26 there is no prominent style, so the glyph tint is
-            // the whole cue — harmless to set on 26+, where prominent overrides it.
             item.image = Self.resolveSymbol(screen.symbolName,
                                             fallbacks: screen.fallbackSymbolNames,
                                             accessibilityDescription: screen.label)
@@ -196,7 +168,6 @@ final class SurfaceToolbarController: NSObject {
     }
 
     @objc private func pinTapped(_ sender: Any?) { onTogglePin?() }
-    @objc private func quitTapped(_ sender: Any?) { onQuit?() }
 
     /// Resolve an SF Symbol, falling through `fallbacks` in order so an item
     /// is never glyph-less (the retired header's defense-in-depth idiom; all
@@ -216,69 +187,54 @@ final class SurfaceToolbarController: NSObject {
 
     /// The toolbar's materialized items, in display order.
     var test_itemIdentifiers: [NSToolbarItem.Identifier] { toolbar.items.map(\.itemIdentifier) }
-    /// The names the tabs actually DRAW, in tab order.
+    /// The tabs' names, in tab order — spoken, not drawn.
     var test_tabLabels: [String] {
+        SurfaceScreen.allCases.compactMap { tabItems[$0]?.label }
+    }
+    /// What the tabs DRAW, in tab order — empty strings once they are
+    /// icon-only. The guard against a name creeping back onto the strip.
+    var test_tabTitles: [String] {
         SurfaceScreen.allCases.compactMap { tabItems[$0]?.title }
+    }
+    /// The tabs' tooltips, in tab order — where the name and shortcut live.
+    var test_tabToolTips: [String] {
+        SurfaceScreen.allCases.compactMap { tabItems[$0]?.toolTip }
     }
     /// Whether every tab resolved a non-nil symbol image.
     var test_allTabImagesResolved: Bool {
         let items = SurfaceScreen.allCases.compactMap { tabItems[$0] }
         return items.count == SurfaceScreen.allCases.count && items.allSatisfy { $0.image != nil }
     }
-    /// The index of the tab currently showing selected, `nil` if none does.
+    /// The index of the tab the TOOLBAR reports as selected, `nil` if none is.
+    ///
+    /// Reads `selectedItemIdentifier` — what AppKit actually draws and speaks
+    /// — rather than the old `.prominent` check, which was gated on macOS 26
+    /// and fell back to returning `selectedScreen.rawValue` unconditionally:
+    /// on 14–25 it reported the answer the caller already had, so the suite
+    /// stayed green while no cue was drawn at all.
     var test_selectedTabIndex: Int? {
-        guard #available(macOS 26.0, *) else { return selectedScreen.rawValue }
-        return SurfaceScreen.allCases.first { tabItems[$0]?.style == .prominent }?.rawValue
+        guard let selected = toolbar.selectedItemIdentifier else { return nil }
+        return SurfaceScreen.allCases.first { Self.tabItemIdentifier(for: $0) == selected }?.rawValue
     }
-    /// Whether exactly the selected tab wears the filled treatment, and every
-    /// tab wears the SAME bordered control Pin and Quit do.
-    var test_onlySelectedTabIsFilled: Bool {
-        guard #available(macOS 26.0, *) else { return true }
-        return SurfaceScreen.allCases.allSatisfy { screen in
-            guard let item = tabItems[screen] else { return false }
-            let wantsFill = screen == selectedScreen
-            return item.isBordered
-                && (item.style == .prominent) == wantsFill
-                && (item.backgroundTintColor != nil) == wantsFill
+    /// Whether the toolbar marks EXACTLY the current screen, and every tab
+    /// still wears the bordered control Pin does.
+    var test_onlySelectedTabIsMarked: Bool {
+        guard toolbar.selectedItemIdentifier == Self.tabItemIdentifier(for: selectedScreen) else {
+            return false
         }
+        let items = SurfaceScreen.allCases.compactMap { tabItems[$0] }
+        return items.count == SurfaceScreen.allCases.count && items.allSatisfy(\.isBordered)
     }
     /// Whether every tab is bordered — the same control as Pin and Quit.
     var test_allTabsAreBordered: Bool {
         let items = SurfaceScreen.allCases.compactMap { tabItems[$0] }
         return items.count == SurfaceScreen.allCases.count && items.allSatisfy(\.isBordered)
     }
-    /// The centered app-name label's text, `nil` if the item never built.
-    var test_centeredTitleText: String? { titleLabel?.stringValue }
-    /// Whether the centered lockup's brand mark resolved its image.
-    var test_centeredMarkHasImage: Bool { markView?.image != nil }
-    /// Whether the mark scales DOWN to fit its box (never clipping).
-    var test_centeredMarkScalesToFit: Bool { markView?.imageScaling == .scaleProportionallyDown }
-    /// The centered lockup's fitting height — must sit within the strip so
-    /// nothing clips. `0` when the item never built.
-    var test_centeredLockupFittingHeight: CGFloat { markView?.superview?.fittingSize.height ?? 0 }
-    /// The centered lockup's fitting width: the room the tabs must leave it.
-    var test_centeredLockupFittingWidth: CGFloat { markView?.superview?.fittingSize.width ?? 0 }
-    /// The horizontal padding the lockup actually applies at each end.
-    var test_centeredLockupHorizontalInset: CGFloat {
-        (markView?.superview as? NSStackView)?.edgeInsets.left ?? 0
-    }
-    /// Whether that mark is decorative (the wordmark speaks the name).
-    var test_centeredMarkIsDecorative: Bool { markView?.isAccessibilityElement() == false }
     /// Whether Pin and Quit are bordered — the control the tabs now match.
     var test_pinItemIsBordered: Bool { pinItem?.isBordered == true }
-    var test_quitItemIsBordered: Bool {
-        toolbar.items.first { $0.itemIdentifier == Self.quitItemIdentifier }?.isBordered == true
-    }
     /// Whether the pin/quit items resolved symbol images.
     var test_pinItemHasImage: Bool { pinItem?.image != nil }
     var test_pinItemLabel: String? { pinItem?.label }
-    var test_quitItemHasImage: Bool {
-        toolbar.items.first { $0.itemIdentifier == Self.quitItemIdentifier }?.image != nil
-    }
-    /// The word Quit shows, `nil` if the item never built.
-    var test_quitItemTitle: String? {
-        toolbar.items.first { $0.itemIdentifier == Self.quitItemIdentifier }?.title
-    }
     /// Fire a tab exactly as a click on it would — a REAL click through the
     /// button's own target/action, not a hand-run selector.
     func test_selectTab(_ screen: SurfaceScreen) {
@@ -287,7 +243,6 @@ final class SurfaceToolbarController: NSObject {
     }
     /// Simulate clicking Pin / Quit.
     func test_tapPin() { pinTapped(nil) }
-    func test_tapQuit() { quitTapped(nil) }
 }
 
 // MARK: - NSToolbarDelegate
@@ -311,8 +266,15 @@ extension SurfaceToolbarController: NSToolbarDelegate {
         // circle in every state, matching Pin and Quit exactly.
         Array(SurfaceScreen.allCases.map(Self.tabItemIdentifier(for:))
                 .flatMap { [$0, NSToolbarItem.Identifier.space] }.dropLast())
-            + [.flexibleSpace, Self.titleItemIdentifier, .flexibleSpace,
-               Self.pinItemIdentifier, .space, Self.quitItemIdentifier]
+            + [.flexibleSpace,
+               Self.pinItemIdentifier]
+    }
+
+    /// The three screens are the selectable set — this is what turns on
+    /// AppKit's selection highlight at all. Without it `selectedItemIdentifier`
+    /// is stored and never drawn.
+    func toolbarSelectableItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        SurfaceScreen.allCases.map(Self.tabItemIdentifier(for:))
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -332,14 +294,11 @@ extension SurfaceToolbarController: NSToolbarDelegate {
             item.action = #selector(tabTapped(_:))
             // The item's own NAME, for the overflow menu and VoiceOver.
             item.label = screen.label
-            // And the name the tab actually DRAWS, beside its icon. `title` is
-            // the only route to an on-strip name here: `displayMode` stays
-            // `.iconOnly` because every label-showing mode spills the names
-            // beside the strip as loose text on macOS 26+. Quit carries its
-            // word the same way.
-            item.title = screen.label
-            // The tooltip repeats the name because it also carries ⌘1/⌘2/⌘3,
-            // which ride the shell panel's key-equivalent seam.
+            // No `title`: the tabs are icon-only, so the name reaches the
+            // reader through the tooltip (which also carries ⌘1/⌘2/⌘3, riding
+            // the shell panel's key-equivalent seam), the `label` above, and
+            // the shortcut itself. Quit keeps its word — one short string that
+            // no tab strip has to make room for.
             item.toolTip = "\(screen.label) (⌘\(screen.keyEquivalent))"
             tabItems[screen] = item
             applySelectionToTabs()
@@ -347,65 +306,6 @@ extension SurfaceToolbarController: NSToolbarDelegate {
         }
 
         switch itemIdentifier {
-        case Self.titleItemIdentifier:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            let label = NSTextField(labelWithString: "Audiout")
-            label.font = NSFont.titleBarFont(ofSize: NSFont.systemFontSize)
-            label.textColor = .labelColor
-            label.setAccessibilityRole(.staticText)
-            // The brand mark leads the wordmark, one lockup. The image is
-            // DECORATIVE — the label beside it already speaks the name, and two
-            // elements saying "Audiout" is the name spoken twice.
-            let mark = NSImageView()
-            mark.image = BrandMark.image
-            // Scale the portrait mark DOWN to fit its box, never up past it, so
-            // the whole figure renders inside the box.
-            mark.imageScaling = .scaleProportionallyDown
-            mark.setAccessibilityElement(false)
-            mark.translatesAutoresizingMaskIntoConstraints = false
-            let lockup = NSStackView(views: [mark, label])
-            lockup.orientation = .horizontal
-            lockup.alignment = .centerY
-            // 4, not the usual 8: the mark is a PORTRAIT figure inside a square
-            // image, so its own transparent margin already contributes ~4 pt of
-            // air on the wordmark's side.
-            lockup.spacing = 4
-            // The capsule sizes itself to this stack, so these insets ARE the
-            // capsule's padding. The two axes are not the same number on
-            // purpose — see `lockupHorizontalInset`.
-            lockup.edgeInsets = NSEdgeInsets(top: Self.lockupVerticalInset,
-                                             left: Self.lockupHorizontalInset,
-                                             bottom: Self.lockupVerticalInset,
-                                             right: Self.lockupHorizontalInset)
-            // TRAP: the halo is a THIN gold ring at the very top of the figure,
-            // and on macOS 26/27 the centered item renders inside a Liquid Glass
-            // capsule (`NSGlassEffectView`) whose compositing ERASES that ring
-            // when the mark is small — the halo has too few pixels at ~16 pt to
-            // survive the effect, and its top comes out sliced flat. This is NOT
-            // a view-bounds clip (every ancestor is `clipsToBounds = false`) and
-            // NOT the image view (a 16 pt retina render off-glass shows the full
-            // round halo), so tying the box to the wordmark's ~16 pt height —
-            // the smallest the mark can be — was exactly the worst case and left
-            // the halo clipped. `Self.markSide` is the smallest box at which the
-            // halo survives the glass with margin (verified against real
-            // system-rendered captures, 20 pt threshold); it stays well inside
-            // the unified strip's height, so the strip does not grow and the
-            // measured chrome inset is unchanged. A CONSTANT box (not tied to
-            // the label) so the 1024 px image's intrinsic size can never leak
-            // into the lockup's fitting height.
-            NSLayoutConstraint.activate([
-                mark.widthAnchor.constraint(equalToConstant: Self.markSide),
-                mark.heightAnchor.constraint(equalToConstant: Self.markSide),
-            ])
-            item.view = lockup
-            // The item's own NAME, for the customization sheet and the
-            // overflow menu — the lockup is a view, and an unnamed item shows
-            // up as a blank entry there.
-            item.label = "Audiout"
-            titleLabel = label
-            markView = mark
-            return item
-
         case Self.pinItemIdentifier:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.isBordered = true
@@ -413,19 +313,6 @@ extension SurfaceToolbarController: NSToolbarDelegate {
             item.action = #selector(pinTapped(_:))
             pinItem = item
             applyPinAppearance()
-            return item
-
-        case Self.quitItemIdentifier:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.isBordered = true
-            // The word, not a glyph: the exit-door shape read as "sign out of
-            // an account" in the launch review, and `power` on a panel full of
-            // speakers reads as "turn the audio off".
-            item.title = "Quit"
-            item.label = "Quit"
-            item.toolTip = "Quit Audiout"
-            item.target = self
-            item.action = #selector(quitTapped(_:))
             return item
 
         default:

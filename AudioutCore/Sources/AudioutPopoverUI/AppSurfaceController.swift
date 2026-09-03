@@ -247,7 +247,6 @@ public final class AppSurfaceController {
         // chrome inset is measurable from the first mount.
         toolbarController.onSelectScreen = { [weak self] in self?.select($0) }
         toolbarController.onTogglePin = { [weak self] in self?.togglePin() }
-        toolbarController.onQuit = { NSApp?.terminate(nil) }
 
         // The discovery stream feeds the first-open reveal's settle tracker (nil
         // outside a first open — a plain no-op then), and is remembered so a

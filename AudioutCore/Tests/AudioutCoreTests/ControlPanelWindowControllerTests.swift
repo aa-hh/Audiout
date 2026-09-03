@@ -385,7 +385,8 @@ struct ControlPanelWindowControllerTests {
         #expect(panel.level == .normal)
         #expect(!panel.hidesOnDeactivate, "a pinned window may sit behind other apps")
         #expect(panel.isMovable)
-        #expect(!panel.titlebarAppearsTransparent)
+        #expect(panel.titlebarAppearsTransparent,
+                "the strip carries the window's own warm ground in BOTH manners; opaque, the system paints a neutral strip and dark mode gets a seam under the header")
         #expect(panel.titleVisibility == .hidden,
                 "no separate title bar ever — D1; the toolbar is the one strip")
         #expect(panel.isOpaque, "with the bubble gone the window has to paint itself")

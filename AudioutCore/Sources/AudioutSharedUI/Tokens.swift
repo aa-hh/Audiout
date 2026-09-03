@@ -163,8 +163,8 @@ public enum Tokens {
         /// the gold route-armed corner dot in a later task, spec §3.3, re-adopts
         /// this punch-out border.)
         public static var underPageBackground: NSColor { .underPageBackgroundColor }
-        /// Hover/selection wash background for list rows (`GroupRowView`,
-        /// `AppRowView`, `DeviceRowView`). Alias of
+        /// Hover/selection wash background for list rows (`AppRowView`,
+        /// `DeviceRowView`). Alias of
         /// `NSColor.selectedContentBackgroundColor`.
         public static var selectedContentBackground: NSColor { .selectedContentBackgroundColor }
         /// Opaque shadow color for card/panel drop shadows (`CardView`). Alias
@@ -337,9 +337,11 @@ public enum Tokens {
         }
 
         /// The **FAILURE-EXCLUSIVE** hue (house rule 8): the failed connection
-        /// ring, the failed row's sublabel, and the diagnosis panel — never a
-        /// meter (a loud party can never impersonate a failure) and never
-        /// remapped by the accent dial (red stays red in every mode).
+        /// ring, the failed row's sublabel, the diagnosis panel, and both
+        /// banners' problem tier (`SilenceFallbackBannerView`,
+        /// `SystemAirPlayNoteBannerView`'s `.warning`) — never a meter (a loud
+        /// party can never impersonate a failure) and never remapped by the
+        /// accent dial (red stays red in every mode).
         ///
         /// NEVER BODY TEXT: it measures 4.04:1 on dark `raised`, under the
         /// 4.5:1 body floor. It is a graphical-object hue held to 3:1.
@@ -354,9 +356,9 @@ public enum Tokens {
                        light: 0xB03327, lightHighContrast: 0x962C21)
         }
 
-        /// The informational steel-blue instrument — note banners and any
-        /// other "here is a fact about the system" mark. A graphical hue, not
-        /// an ink; never remapped by the accent dial.
+        /// The informational steel-blue instrument — `SystemAirPlayNoteBannerView`'s
+        /// note tier and any other "here is a fact about the system" mark. A
+        /// graphical hue, not an ink; never remapped by the accent dial.
         ///
         /// CONTRAST RATIONALE (measured; floor 3:1 on
         /// `canvas`/`panel`/`raised`): dark `#7FB4C4` = 8.69:1 / 7.89:1 /
@@ -1054,8 +1056,6 @@ public enum Tokens {
         public static var tertiaryLabel: NSColor { label3 }
         @available(*, deprecated, renamed: "label3")
         public static var inkTertiary: NSColor { label3 }
-        @available(*, deprecated, renamed: "canvas")
-        public static var canvasHi: NSColor { canvas }
         @available(*, deprecated, renamed: "raised")
         public static var iconSeatFill: NSColor { raised }
         @available(*, deprecated, renamed: "panel")
@@ -1068,8 +1068,14 @@ public enum Tokens {
         public static var goldCTA: NSColor { gold }
         @available(*, deprecated, renamed: "failure")
         public static var warning: NSColor { failure }
-        @available(*, deprecated, renamed: "ring")
-        public static var info: NSColor { ring }
+        @available(*, deprecated, renamed: "inkOnFill")
+        public static var inkOnGold: NSColor { inkOnFill }
+        @available(*, deprecated, renamed: "wireCore")
+        public static var syncSignal: NSColor { wireCore }
+        @available(*, deprecated, renamed: "party")
+        public static var partySignal: NSColor { party }
+        @available(*, deprecated, renamed: "partyRampDeep")
+        public static var partySignalDeep: NSColor { partyRampDeep }
     }
 
     // MARK: - Type
@@ -1094,8 +1100,8 @@ public enum Tokens {
         public static var bodyEmphasized: NSFont {
             .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
         }
-        /// Body text, bold — used for an active/selected row name
-        /// (`GroupRowView`). Alias of `NSFont.boldSystemFont(ofSize:)`.
+        /// Bold body text, currently without a consumer. Alias of
+        /// `NSFont.boldSystemFont(ofSize:)`.
         public static var bodyBold: NSFont { .boldSystemFont(ofSize: NSFont.systemFontSize) }
         /// A heading one step up from body (e.g. device-detail/group-editor
         /// name fields, +3pt semibold). Alias of
@@ -1258,10 +1264,6 @@ public enum Tokens {
         /// quit-in-progress HUD (`AppDelegate.QuittingIndicatorPanel`) both
         /// draw at this radius — previously two independent `12` literals.
         public static let panelCornerRadius: CGFloat = 12
-        /// The inset warning/note banner corner radius shared by
-        /// `SilenceFallbackBannerView` and `SystemAirPlayNoteBannerView` —
-        /// previously two independent `11` literals.
-        public static let bannerCornerRadius: CGFloat = 11
         /// The System Settings "grouped inset-list" card corner radius,
         /// shared by onboarding's `RoundedContainerView` (the permission
         /// card) and the Groups window's `GroupedSectionView` — both

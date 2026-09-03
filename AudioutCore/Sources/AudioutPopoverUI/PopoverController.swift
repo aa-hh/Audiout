@@ -1708,6 +1708,8 @@ public final class PopoverController: NSObject {
         }
         applicationsFooter.isRemoveEnabled = selectedAppBundleID != nil
         panel.addRow(applicationsFooter)
+        // Every card exists now, so the titles can take their liveness tint.
+        refreshCardHeaderLiveness()
 
         // Groups card removed (2026-07-16): the popover no longer renders a Groups
         // SECTION. Group ROUTING lives in the Main Out selector (refreshMainOutRow)
@@ -2283,6 +2285,42 @@ public final class PopoverController: NSObject {
                          // keeps full emphasis, the dropdown title carrying the
                          // group identity.
                          busOriginDimmed: devicesCardDivergence() != nil)
+        refreshCardHeaderLiveness()
+    }
+
+    /// Push each card title's "is this section sounding" state into the panel
+    /// (iOS Section Header rule: a sounding section's title reads `goldText`).
+    /// The three predicates are computed HERE, from this controller's own
+    /// model — the same inputs the rows render from — never read back off a
+    /// row, so the title and the rows below it can never disagree.
+    ///
+    /// With no `groupController` the main-mix terms are all false and only a
+    /// live app feed can arm a device row, which is exactly what the
+    /// no-controller branch of `applySelectionState` renders.
+    private func refreshCardHeaderLiveness() {
+        let controller = groupController
+        let mainOutSounding: Bool = {
+            guard let controller else { return false }
+            if case .connected = mainOutConnectionState(controller), !controller.isMainOutMuted {
+                return true
+            }
+            return mainOutIsLocalOnlyArmed(controller)
+        }()
+        let anyDeviceSounding = deviceRowsByID.keys.contains { id in
+            guard let device = devicesByID[id] else { return false }
+            if !(liveRoutedAppNames[id] ?? []).isEmpty { return true }
+            guard let controller, controller.isMainOutMember(id) else { return false }
+            guard case .connected = device.connectionState else { return false }
+            return !(device.isMuted || controller.isMuted(id)) && !controller.isMainOutMuted
+        }
+        let anyRouteSounding = appRouting.appRoutes.contains { route in
+            !isAppExcluded(route.bundleID)
+                && route.destination != .noRedirect
+                && !offlineBundleIDs.contains(route.bundleID)
+        }
+        panel.setCardHeaderLive(title: Self.mainAudioCardTitle, live: mainOutSounding)
+        panel.setCardHeaderLive(title: Self.outputDevicesCardTitle, live: anyDeviceSounding)
+        panel.setCardHeaderLive(title: Self.applicationsCardTitle, live: anyRouteSounding)
     }
 
     // MARK: Energize (Warm Signal v4.1 item 9)
@@ -3010,6 +3048,7 @@ public final class PopoverController: NSObject {
         // The rail's dormancy and its far end both track state a mid-open toggle
         // can change (v4 §Call-1), so re-point it on every in-place repaint too.
         updateRailRows()
+        refreshCardHeaderLiveness()
     }
 
     /// Re-point the membership rail at the mounted device rows (Warm Signal v4
@@ -3933,6 +3972,11 @@ public final class PopoverController: NSObject {
     /// dormancy annotation's assertion surface.
     public func test_cardNoteTexts(title: String) -> [String] {
         panel.test_cardNotes(title: title).map(\.stringValue)
+    }
+    /// The ink `title`'s card header currently carries — gold while the
+    /// section is sounding, `label2` while it is silent.
+    public func test_cardHeaderTitleColor(title: String) -> NSColor? {
+        panel.test_headerTitleColor(title: title)
     }
     /// The tooltips on `title`'s column legends, in creation order.
     public func test_columnTitleToolTips(title: String) -> [String?] {

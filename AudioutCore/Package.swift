@@ -211,7 +211,7 @@ let package = Package(
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit popover dropdown (SPEC §9 revised — NSMenu → NSPopover):
-        // `PopoverController` + `GroupRowView`, a Control-Center-style panel
+        // `PopoverController`, a Control-Center-style panel
         // hosted in an `NSPopover`. A *library* (not folded into the executable)
         // so both the app AND the headless `popover-harness` / tests can link it
         // and assert the built panel structure. Reuses the shared `DeviceRowView`.

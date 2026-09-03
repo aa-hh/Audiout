@@ -690,7 +690,7 @@ import AudioutCore
         #expect(row.test_meterLevel() == 0.42)
     }
 
-    /// `showsMeter: false` (the mixer window/`GroupRowView` default) makes
+    /// `showsMeter: false` (the mixer window default) makes
     /// `setLevel` a no-op — `test_meterLevel` stays 0.
     @Test func setLevelOnNonMeterRowIsANoOp() {
         let row = DeviceRowView(device: makeDevice(), showsMeter: false)

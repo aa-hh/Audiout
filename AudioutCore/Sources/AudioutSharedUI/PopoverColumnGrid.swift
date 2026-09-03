@@ -5,7 +5,7 @@ import AppKit
 /// The **shared column grid** every popover row type lays out against so the
 /// volume-slider column and the trailing-control column line up vertically across
 /// all three sections — System (`MainOutRowView`), Selected Devices
-/// (`DeviceRowView`) and Groups (`GroupRowView`). This vertical consistency is
+/// (`DeviceRowView`) and Applications (`AppRowView`). This vertical consistency is
 /// the core of the popover layout overhaul (task B).
 ///
 /// The trick that makes columns line up despite different *leading* controls
@@ -510,8 +510,7 @@ public enum PopoverColumnGrid {
     /// DeviceRowView and AppRowView to establish consistent hover interaction.
     public static let rowHoverWashAlpha: CGFloat = 0.10
     /// Alpha for the selection wash, drawn in ``Tokens/Color/engagedChrome``.
-    /// Shared by AppRowView's single-selection highlight and GroupRowView's
-    /// selection pill.
+    /// Used by AppRowView's single-selection highlight.
     public static let rowSelectionWashAlpha: CGFloat = 0.18
     /// Alpha of the gold wash behind a SOUNDING row (`DeviceRowView.isRouteArmed`,
     /// `AppRowView`'s routed ∧ running) — the iPhone's 12 % (`gold.opacity(0.12)`);
@@ -537,7 +536,7 @@ public enum PopoverColumnGrid {
     // The Applications card's single-selection model (± footer controls,
     // context-menu remove, Delete/Backspace) needs a selected-row highlight
     // distinct from `DeviceRowView`'s membership/hover pill. Named here per
-    // house rule (no magic numbers) — `DeviceRowView` and `GroupRowView`'s own
+    // house rule (no magic numbers) — `DeviceRowView`'s own
     // hover/selection pills (V10) now also draw from these same constants
     // instead of retyping the same numbers.
 
@@ -546,8 +545,8 @@ public enum PopoverColumnGrid {
     public static let selectionHighlightInsetX: CGFloat = 5
     public static let selectionHighlightInsetY: CGFloat = 2
     /// Corner radius of the selection-highlight rounded rect — the control
-    /// radius, shared by the device/app rows' live+hover pills, GroupRowView
-    /// and the panel header's hover pill.
+    /// radius, shared by the device/app rows' live+hover pills and the panel
+    /// header's hover pill.
     public static let selectionHighlightCornerRadius: CGFloat = Tokens.Layout.Radius.control
 
     // MARK: Applications card ± footer (T3, 2026-07-17)
@@ -768,10 +767,8 @@ public enum PopoverColumnGrid {
     public static let nameToSlider: CGFloat = 12
     /// Gap between the slider's trailing edge and the `%` readout's leading edge
     /// — kept small so the number reads tight against the slider on every slider
-    /// row (change 4). Slider rows anchor the readout off `slider.trailingAnchor`
-    /// with this constant; the derived `readoutTrailing` below is only for rows
-    /// that still trailing-anchor the readout (`GroupRowView`), and is defined so
-    /// the two placements coincide.
+    /// row (change 4). Rows anchor the readout off `slider.trailingAnchor`
+    /// with this constant.
     public static let sliderToReadout: CGFloat = 6
     /// Gap between the `%` readout's trailing edge and the trailing control
     /// (ENABLED switch) it sits left of — the flexible slack column. The
@@ -810,15 +807,6 @@ public enum PopoverColumnGrid {
         trailingControlTrailing + trailingControlWidth + readoutToTrailingControl
             + readoutWidth + sliderToReadout
     }
-    /// Distance from the row trailing edge to the **readout's trailing edge**.
-    /// Only used by rows that still trailing-anchor the readout (`GroupRowView`);
-    /// slider rows instead anchor it off `slider.trailingAnchor + sliderToReadout`.
-    /// Defined as exactly that same x so both placements coincide and the readout
-    /// column stays aligned across row types.
-    public static var readoutTrailing: CGFloat {
-        sliderTrailing - readoutWidth - sliderToReadout
-    }
-
     // MARK: Column-center helpers (for the combined section/column header row)
     //
     // Distances (positive, measured inward from the row trailing edge) to the

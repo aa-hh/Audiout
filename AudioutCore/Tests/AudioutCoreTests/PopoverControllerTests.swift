@@ -1068,7 +1068,7 @@ import AudioutProtocol
     }
 
     /// Toggling a card flips its disclosure chevron symbol (`chevron.down`
-    /// expanded ⇄ `chevron.right` collapsed — GroupRowView precedent).
+    /// expanded ⇄ `chevron.right` collapsed).
     @Test func toggleFlipsChevronSymbol() async throws {
         let (popover, _, _) = try await makePopover()
         let title = "System Audio"
@@ -3310,5 +3310,77 @@ import AudioutProtocol
         #expect(popover.test_columnTitleToolTips(title: "Output Devices")
                     == [PopoverController.sourceColumnHelp, PopoverController.offsetColumnHelp],
                 "both column legends explain themselves on hover")
+    }
+
+    // MARK: Card titles follow their rows' liveness
+
+    private func assertSameRGBA(_ a: NSColor?, _ b: NSColor, _ message: String) {
+        guard let a = a?.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else {
+            Issue.record("nil or non-convertible color: \(message)")
+            return
+        }
+        #expect(abs(a.redComponent - b.redComponent) <= 0.004, "red: \(message)")
+        #expect(abs(a.greenComponent - b.greenComponent) <= 0.004, "green: \(message)")
+        #expect(abs(a.blueComponent - b.blueComponent) <= 0.004, "blue: \(message)")
+        #expect(abs(a.alphaComponent - b.alphaComponent) <= 0.004, "alpha: \(message)")
+    }
+
+    /// The controller computes each card's liveness from its OWN model, so the
+    /// titles and the rows below them can never disagree — pinned here against
+    /// the rows' rendered armed state.
+    @Test func cardTitlesTintGoldWhileTheirRowsSound() async throws {
+        let (popover, _, backend) = try await makePopover()
+        // The fixture opens with only the Mac selected, so Main Out is
+        // local-only armed — sounding, even though no remote ring is lit and
+        // the row's armed dot stays dark.
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
+                       Tokens.Color.goldText, "the Mac alone is still the mix")
+        #expect(popover.test_mainOutRow.test_routeArmed == false)
+        for title in ["Output Devices", "App Routing"] {
+            assertSameRGBA(popover.test_cardHeaderTitleColor(title: title),
+                           Tokens.Color.label2, "\(title) starts silent")
+        }
+
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        popover.update(devices: backend.devices)
+
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
+                       Tokens.Color.goldText, "System Audio sounds")
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "Output Devices"),
+                       Tokens.Color.goldText, "Output Devices sounds")
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "App Routing"),
+                       Tokens.Color.label2, "no route, no gold")
+        #expect(popover.test_deviceRow(for: "office")?.test_routeArmed == true)
+        #expect(popover.test_mainOutRow.test_routeArmed == true)
+
+        popover.mainOutRow(popover.test_mainOutRow, didSetMuted: true)
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
+                       Tokens.Color.label2, "master mute silences System Audio")
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "Output Devices"),
+                       Tokens.Color.label2, "…and every device with it")
+        #expect(popover.test_deviceRow(for: "office")?.test_routeArmed == false)
+        #expect(popover.test_mainOutRow.test_routeArmed == false)
+    }
+
+    /// A redirect that is routed AND running is what makes the App Routing
+    /// title gold. The route is seeded BEFORE the popover exists: an
+    /// externally-added route triggers no rebuild.
+    @Test func appRoutingTitleTintsGoldForARunningRedirect() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        let (popover, _, _) = try await makePopover(
+            appRouting: appRouting,
+            runningAppsProvider: { [RunningAppInfo(bundleID: "com.example.music",
+                                                   displayName: "Music", icon: nil)] })
+
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "App Routing"),
+                       Tokens.Color.goldText, "a running redirect sounds")
+        #expect(popover.test_appRow(for: "com.example.music")?.test_isFaderEngaged == true)
+
+        popover.applyRoutedAppRunning(bundleID: "com.example.music", isRunning: false)
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "App Routing"),
+                       Tokens.Color.label2, "the app quit, the route stops sounding")
     }
 }

@@ -302,8 +302,8 @@ public final class DeviceRowView: NSView {
     private static let accessoryGlyphPointSize: CGFloat = 13
 
     /// The under-name VU meter (Warm Signal v4 §Call-1), mounted inside the
-    /// identity stack only when `showsMeter` — the mixer window and
-    /// `GroupRowView` leave it out. Shown (un-hidden) only on armed rows. See
+    /// identity stack only when `showsMeter` — the mixer window leaves it
+    /// out. Shown (un-hidden) only on armed rows. See
     /// ``LevelMeterView``.
     private let meterView = LevelMeterView()
 
@@ -1293,7 +1293,7 @@ public final class DeviceRowView: NSView {
     }
 
     /// Push a live RMS reading into the leading VU meter (task T3). No-op when
-    /// `showsMeter` is false — the mixer window/`GroupRowView` never call this.
+    /// `showsMeter` is false — the mixer window never calls this.
     /// While the row is muted (row OR master — S3), an incoming push is coerced
     /// to 0 so a straggling RMS event can never refill a drained meter: a muted
     /// row's meter stays down until unmute (the decay ballistics still ease any
@@ -1473,7 +1473,7 @@ public final class DeviceRowView: NSView {
         eqButton.toolTip = "Equalizer"
 
         // Leading VU meter (task T3): mounted only when `showsMeter` — the
-        // mixer window/GroupRowView never pass `true`, so their layout is
+        // mixer window never passes `true`, so its layout is
         // unaffected. Non-interactive (`LevelMeterView.hitTest` returns nil).
         meterView.translatesAutoresizingMaskIntoConstraints = false
 

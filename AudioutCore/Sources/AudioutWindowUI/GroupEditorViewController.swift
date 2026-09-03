@@ -777,7 +777,7 @@ public final class GroupEditorViewController: NSViewController {
         let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Group icon")
         image?.isTemplate = true
         iconWell.iconImageView.image = image
-        iconWell.iconImageView.contentTintColor = Tokens.Color.secondaryLabel
+        iconWell.iconImageView.contentTintColor = Tokens.Color.label
     }
 
     /// Recompute `candidateDevices` from `allDevices` — available devices,

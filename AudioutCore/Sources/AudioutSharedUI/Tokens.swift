@@ -293,6 +293,23 @@ public enum Tokens {
         public static var well: NSColor {
             warmDynamic(name: "well", dark: 0x100D0A, light: 0xE2DFD3)
         }
+        /// The seat a device glyph sits in: the 24 pt member chips on the
+        /// Groups overview's cards and the 64 pt editable icon well on the
+        /// detail and editor panes. Its own token because light and dark
+        /// need opposite moves that no existing pair makes: light climbs
+        /// ABOVE the `raised` card it sits in (a lighter interior for a black
+        /// glyph, Alec's ask), dark keeps a recess (`well`'s dark hex —
+        /// nothing in dark's ladder is lighter than `raised` without leaving
+        /// the fill family). Edge it with ``containerEdge``, tint the glyph
+        /// ``label``. CONTRAST RATIONALE (measured, WCAG relative luminance):
+        /// `label` composited on it (system black/white at 0.85 alpha)
+        /// 14.68:1 light / 13.96:1 dark; ``inkTertiary`` (the `+N` overflow
+        /// chip) 6.13 / 6.10; vs `raised` 1.10 / 1.19; vs `panel` 1.00 /
+        /// 1.11; ``containerEdge`` on it 1.76 / 1.56. Backgrounds carry no
+        /// IC variant (same precedent as `canvas`/`panel`/`raised`/`well`).
+        public static var iconSeatFill: NSColor {
+            warmDynamic(name: "iconSeatFill", dark: 0x100D0A, light: 0xFBFBF9)
+        }
         /// 1px section-divider hairline (§5.1 — the ONLY visual separation
         /// between de-nested cards now that they no longer draw their own
         /// material/shadow/rim). CONTRAST RATIONALE: dark carries a
@@ -922,7 +939,7 @@ public enum Tokens {
 
         // MARK: Permission-row instruments (colour-return pass, decisions Q1-Q6/NEW-1)
         //
-        // Onboarding's four permission rows (`PermissionRowView`: System Audio,
+        // Onboarding's four permission rows (`SetupCardView`: System Audio,
         // Local Network, Remote Control, Speaker Sync) went to a single neutral
         // grey glyph in the warm pass (`85c2052`, which retired the old
         // `.systemBlue`/`.systemIndigo`/`.systemPurple`/`.systemTeal` tile
@@ -988,7 +1005,7 @@ public enum Tokens {
         // (~2.8:1) before being hand-raised back above it — exactly the
         // silent under-floor failure this rule exists to catch.
         //
-        // First consumer: `PermissionRowView`'s `IconTileView` per-row resting
+        // First consumer: `SetupCardView`'s `IconTileView` per-row resting
         // glyph tint, one call site per row (T2 of this wave, landing
         // immediately after this case addition).
 

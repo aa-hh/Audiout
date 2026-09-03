@@ -318,9 +318,10 @@ cp -R \"\$BIN/$RESOURCE_BUNDLE_NAME\" .remote-products/"
       echo "==> Could not fetch products back — building locally instead" >&2
     fi
   elif [ "$RRC" -eq 2 ]; then
-    # Compiled and FAILED there. Never report that as this build's verdict: the
-    # toolchains differ (local Swift 6.4 / macOS 27 SDK vs remote 6.3.1 /
-    # macOS 26), so a remote-only error is as likely to be skew as a real break.
+    # Compiled and FAILED there. Never report that as this build's verdict: both
+    # Macs run Swift 6.4 but against different SDKs (macOS 27 here, macOS 26
+    # there), and the remote has been out of disk and starved before,
+    # so a remote-only error is as likely to be skew as a real break.
     # Same asymmetry run-tests.sh uses — accept a remote pass, re-confirm a
     # remote failure here.
     echo "==> Remote compile reported ERRORS — rebuilding locally to confirm" >&2

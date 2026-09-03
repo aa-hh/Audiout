@@ -18,12 +18,11 @@ import Testing
                 "running inside XCTest — HeadlessRuntime must report active")
     }
 
-    /// The migration-proofing case. While XCTest is still linked from the
-    /// not-yet-converted suites, `isXCTestLoaded` carries `isActive` on its
-    /// own — so a broken swift-testing check would hide behind it and only
-    /// surface once the last `import XCTest` is deleted, at which point real
-    /// windows would start flashing on screen during every `swift test` run.
-    /// Asserting the swift-testing limb DIRECTLY is what makes that impossible.
+    /// The suites are Swift-Testing-only, so `isSwiftTestingLoaded` is the
+    /// limb `isActive` must be able to stand on without XCTest. Asserting it
+    /// DIRECTLY means a broken swift-testing check fails here, rather than
+    /// surfacing as real windows flashing on screen during every `swift test`
+    /// run.
     ///
     /// Mechanism: `Testing` is a pure-Swift module with no Objective-C classes,
     /// so it is detected by `dlsym`-ing its type-descriptor symbols rather than
@@ -32,7 +31,7 @@ import Testing
     /// in a plain `swift run` executable correctly reported false.
     @Test func swiftTestingIsDetectedIndependentlyOfXCTest() {
         #expect(HeadlessRuntime.isSwiftTestingLoaded,
-                "the Testing module IS linked into this process — detection must not depend on XCTest also being present, since the migration removes it")
+                "the Testing module IS linked into this process — detection must not depend on XCTest also being present, since nothing in the test target imports it")
     }
 
     @Test func environmentOverrideIsHonored() {

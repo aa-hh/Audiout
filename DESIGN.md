@@ -14,6 +14,7 @@ colors:
   inkSecondary: "#B4ADA0"
   inkTertiary: "#969083"
   railDormant: "#7D7466"
+  nodeUnavailableFill: "#7D7466"
   gold: "#E8B84B"
   ember: "#8A6A2F"
   glow: "#FFD97A"
@@ -250,7 +251,8 @@ The scaffolding — the half of the system that themes.
 - **Container Edge** (`#3A332B` dark / `#C4C0B4` light): the heavier of the two hairline weights — a container's own outer stroke, where Hairline rules that container's interior. In light it clears the divider by 1.143:1, enough to rank the two without reading as a second material. In dark it resolves to Hairline's own values, because dark still has a fill ladder and light does not.
 - **Sidebar Warm Tint** (`#1F1A15` dark / `#F5F4ED` light): the source-list ground in the Groups and Settings screens.
 - **Warm Ink** (`#B4ADA0` dark / `#5C574C` light) and **Faded Ink** (`#969083` dark / `#665F4C` light): secondary and tertiary text where the system's own label colours sit under the text floor on the warm ground.
-- **Dormant Rail** (`#7D7466` dark / `#8A8272` light): the membership rail before anything is armed. Also an unavailable member's disc fill — see the Membership Bus component.
+- **Dormant Rail** (`#7D7466` dark / `#8A8272` light): the membership rail before anything is armed, and a failed segment's tone. In light it is the *palest* ink on the rail, which is what makes a dormant wire read quieter than an armed gold one.
+- **Unavailable Node Fill** (`#7D7466` dark / `#46423A` light): an unavailable member's disc, inside a rim still in the rail's tone. Clears gold by 2.50:1 in dark and 2.41:1 in light. A small mark is read on brightness before hue, so the grey has to be a different *weight* than the gold beside it, not just a different colour — which is why light goes near-charcoal rather than staying a mid grey. Dark shares Dormant Rail's values; light does not, because a value dark enough to separate a 13 pt disc would make the dormant wire the heaviest line on a light surface and invert the rail's own hierarchy.
 - **Icon Seat Fill** (`#100D0A` dark / `#FBFBF9` light): the fill behind a device glyph — the group card's member chip and the 64 pt editable icon well. Dark reuses `well`'s recess; light goes the opposite direction, a step *lighter* than the `raised` card it sits in, because the seat needed to read as a hole for the glyph rather than one more slab in the ladder. `label` on it clears 14.68:1 light / 13.96:1 dark.
 
 Everything else in the app draws in stock semantic colours — `labelColor`,
@@ -518,10 +520,13 @@ segment passing a non-member drew ember while the rest of the same wire drew
 gold. See The One Wire Rule and The Rim Belongs To The Rail Rule.
 
 A node's fill is the one part that answers a different question: an unavailable
-member fills `railDormant` while keeping its rim in the rail's tone. Dark
-separates that grey from gold by brightness (2.50:1); light currently separates
-it by chroma alone (1.09:1), which is an open weakness rather than a settled
-choice.
+member fills `nodeUnavailableFill` while keeping its rim in the rail's tone.
+Both appearances separate that fill from gold by brightness — 2.50:1 dark,
+2.41:1 light — because a 13 pt disc is read on weight before hue. The one cell
+the arithmetic will not give is an idle *dark* rail, where the fill sits 1.09:1
+from its own ember rim: the ≥3:1 instrument floor leaves a band beneath dark
+ember only 1.08:1 wide, so nothing fits, and going above ember would make an
+unavailable disc brighter than a live one.
 
 ### Alignment Stage
 

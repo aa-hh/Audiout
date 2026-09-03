@@ -204,6 +204,46 @@ import AppKit
                 "a button with no edge of its own is invisible against a flat drawer")
     }
 
+    /// The recess is bounded by an edge, not by its fill alone: on the flat
+    /// light ground the `well` is only 1.154:1 from the card it opens under,
+    /// so the lip is what says "this belongs to the row above".
+    @Test func theRecessIsBoundedByAContainerEdge() throws {
+        let (drawer, _) = makeDrawer()
+        drawer.appearance = NSAppearance(named: .aqua)
+        drawer.widthAnchor.constraint(equalToConstant: SurfaceLayout.width).isActive = true
+        drawer.layoutSubtreeIfNeeded()
+        drawer.setFrameSize(drawer.fittingSize)
+        let rep = try #require(drawer.bitmapImageRepForCachingDisplay(in: drawer.bounds))
+        drawer.cacheDisplay(in: drawer.bounds, to: rep)
+
+        let scale = CGFloat(rep.pixelsWide) / drawer.bounds.width
+        let midY = rep.pixelsHigh / 2
+        let edge = try #require(rep.colorAt(x: 0, y: midY)?.usingColorSpace(.sRGB))
+        let fill = try #require(rep.colorAt(x: Int(3 * scale), y: midY)?.usingColorSpace(.sRGB))
+
+        expectMatches(edge, resolved(Tokens.Color.containerEdge, appearanceName: .aqua),
+                      tolerance: 0.03, what: "the drawer's left rim")
+        expectMatches(fill, resolved(Tokens.Color.well, appearanceName: .aqua),
+                      tolerance: 0.03, what: "the fill 3 pt inside the rim")
+    }
+
+    private func expectMatches(_ drawn: NSColor, _ expected: NSColor,
+                               tolerance: CGFloat, what: String) {
+        guard let want = expected.usingColorSpace(.sRGB) else { return }
+        #expect(abs(drawn.redComponent - want.redComponent) < tolerance
+                    && abs(drawn.greenComponent - want.greenComponent) < tolerance
+                    && abs(drawn.blueComponent - want.blueComponent) < tolerance,
+                "\(what): drawn \(drawn) is not \(want)")
+    }
+
+    private func resolved(_ color: NSColor, appearanceName: NSAppearance.Name) -> NSColor {
+        var result = color
+        NSAppearance(named: appearanceName)?.performAsCurrentDrawingAppearance {
+            result = color.usingColorSpace(.sRGB) ?? color
+        }
+        return result
+    }
+
     /// The unit sits INSIDE the box at rest, and cannot be deleted — not
     /// because keystrokes are policed, but because editing swaps the whole
     /// string for a bare signed number and the suffix is re-rendered on commit.

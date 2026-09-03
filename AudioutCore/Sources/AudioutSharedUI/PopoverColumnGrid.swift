@@ -594,8 +594,9 @@ public enum PopoverColumnGrid {
     // Geometry for `AlignmentPlateButton`/`AlignmentPlateCell` (AudioutPopoverUI),
     // named here per house rule alongside the fader skin's own drawing-only cell.
 
-    /// Corner radius of the alignment-wizard plate button (spec §3).
-    public static let alignPlateCornerRadius: CGFloat = 12
+    /// Corner radius of the alignment-wizard plate button — the control radius
+    /// (iOS Shapes: a plate is a button).
+    public static let alignPlateCornerRadius: CGFloat = Tokens.Layout.Radius.control
 
     // MARK: Inline rename field (Groups window header)
     //

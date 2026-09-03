@@ -482,14 +482,12 @@ final class SetupRibbonView: NSView {
         var spacing: CGFloat = 0
 
         if let primary = content.primary {
-            // Both kinds wear the DEEP gold authored for white ink (`goldCTA`,
-            // measured rationale on the token) — the everyday step button and
-            // the finale's CTA alike, because there is only ever one of them on
-            // screen and it is always the thing to press. Ink is measured off
-            // the resolved fill (see `ProminentButton.picksInkFromFill`).
+            // The everyday step button and the finale's CTA are the same
+            // gold button, because there is only ever one of them on screen and
+            // it is always the thing to press. Fill and ink both belong to
+            // `ProminentButton`; only the weight is this call's to choose.
             let button = ProminentButton(title: primary.title, target: self,
                                          action: #selector(primaryTapped),
-                                         fill: Tokens.Color.goldCTA, picksInkFromFill: true,
                                          titleFont: Tokens.Font.bodyEmphasized)
             // Constrained directly (no stack view to do it for us): left on,
             // AutoLayout synthesises size from the zero frame and the button

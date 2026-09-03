@@ -621,8 +621,8 @@ public enum Tokens {
         /// Increase Contrast. That flip is forced, not stylistic: light-IC
         /// `gold` `#8A6614` gives `#171104` only 3.57:1 and even pure black
         /// 3.99:1 — no dark ink clears 4.5:1 on it — while white gives 5.26:1
-        /// (6.32:1 on Subtle light-IC `#6F5E33`). It is the same measured flip
-        /// `ProminentButton` already performs live.
+        /// (6.32:1 on Subtle light-IC `#6F5E33`). The flip is authored into
+        /// the token, so `ProminentButton` measures nothing at runtime.
         ///
         /// CONTRAST RATIONALE (measured, on `gold`): Full dark 10.18:1, dark
         /// Increase Contrast 11.72:1, light 4.94:1, light Increase Contrast
@@ -936,20 +936,23 @@ public enum Tokens {
 
         // MARK: Alignment-wizard stage instruments (wizard-stage v2 spec §2.1)
         //
-        // Eight tokens for the BT-alignment wizard's stage plate — a FIXED
+        // Tokens for the BT-alignment wizard's stage plate — a FIXED
         // dark instrument ground that never themes with the window (owner
-        // ruling 2026-08-23 #1). The six "instrument" tokens below
+        // ruling 2026-08-23 #1). The "instrument" tokens below
         // (`stagePlate` through `fuseWhite`) pass the SAME hex for dark and
         // light on purpose: the plate is a physical gauge face, not themed
         // chrome, so it reads identically in both appearances (spec's "dark
-        // screen set into a light chassis" framing). `syncSignalDeep`/
-        // `partyRampDeep` are the opposite case — themed chrome companions
-        // that DO vary by appearance, used only where the identity hue must
-        // sit on the THEMED window ground (plate rim/keycap tint in light
-        // mode) rather than the fixed plate itself. None of these eight are
-        // accent-dial remapped (spec §2.2): the stage no longer borrows
-        // `gold`/`glow`, so the dial's remap cannot collide with "which
-        // speaker" identity.
+        // screen set into a light chassis" framing). `syncSignalDeep` is the
+        // opposite case — a themed chrome companion that DOES vary by
+        // appearance, used only where the target's identity hue must sit on
+        // the THEMED window ground (plate rim/keycap tint in light mode)
+        // rather than the fixed plate itself. The wizard's REFERENCE light
+        // and rim are `ring` — pinned to its dark hex on the stage, themed on
+        // the plates — so `ring` needs no Deep companion of its own.
+        // `party`/`partyRampDeep` are group identity (C1) and are not drawn
+        // on this sheet. None of these are accent-dial remapped (spec §2.2):
+        // the stage no longer borrows `gold`/`glow`, so the dial's remap
+        // cannot collide with "which speaker" identity.
 
         /// The stage's instrument ground — the plate itself (spec §2.1).
         /// Background token, no contrast floor (canvas precedent: an
@@ -1004,18 +1007,16 @@ public enum Tokens {
                        light: 0x0B7A45, lightHighContrast: 0x086237)
         }
 
-        /// Reference light — the speaker being compared against (spec
-        /// §2.1/§0 ruling 1: the website's Party Magenta). Instrument
-        /// (fixed): names WHICH speaker, never state. CONTRAST RATIONALE:
-        /// measured 9.71:1 vs `stagePlate` (spec's "~9:1"). Fixed both
-        /// appearances.
+        /// The website's Party Magenta — group identity, consumed by the
+        /// popover and Groups. Fixed in both appearances. CONTRAST
+        /// RATIONALE: measured 9.71:1 vs `stagePlate`.
         public static var party: NSColor {
             warmDynamic(name: "party", dark: 0xFF90E9, darkHighContrast: 0xFF90E9,
                        light: 0xFF90E9, lightHighContrast: 0xFF90E9)
         }
 
         /// `party`'s themed chrome companion — "the magenta ramp's own
-        /// dark end" (spec §2.1), used the same way as `syncSignalDeep`.
+        /// dark end" (spec §2.1), for the popover/Groups grounds that theme.
         /// Dark keeps the electric value at FULL strength (owner ruling
         /// 2026-08-23), the same way `syncSignalDeep` does.
         /// CONTRAST RATIONALE: light `#752C68` measures 8.69:1 vs the flat
@@ -1059,8 +1060,6 @@ public enum Tokens {
         public static var iconSeatFill: NSColor { raised }
         @available(*, deprecated, renamed: "panel")
         public static var sidebarWarmTint: NSColor { panel }
-        @available(*, deprecated, renamed: "rim")
-        public static var plateRim: NSColor { rim }
         @available(*, deprecated, renamed: "gold")
         public static var success: NSColor { gold }
         @available(*, deprecated, renamed: "gold")
@@ -1164,14 +1163,25 @@ public enum Tokens {
         /// "−410" to "−41"; a 15 pt one still overhung the small buttons it now
         /// shares a band with). One point over ``caption``, medium weight, is
         /// enough for the editable number to read as the focal control.
+        /// Semibold is the system face's cut nearest the iOS Readout's 700
+        /// (``readout``'s precedent); the size stays 12 pt for the two live
+        /// findings above.
         public static var syncReadout: NSFont {
-            .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize + 1, weight: .medium)
+            .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize + 1, weight: .semibold)
         }
-        /// The alignment-wizard plate keycap glyph voice (wizard-stage v2
-        /// spec §3: "←"/"→"/"SPACE"/"⏎" chips on `AlignmentPlateButton`).
+        /// The alignment-wizard plate keycap glyph voice ("←"/"→"/"SPACE"/"⏎"
+        /// chips on `AlignmentPlateButton`): the plain system face at the
+        /// micro-label weight. Not monospaced — the chip draws the WORD
+        /// "SPACE" and iOS's One Case rule has no monospaced design; measured
+        /// 36.58 pt in the 44 pt wide chip.
         public static var keycap: NSFont {
-            .monospacedSystemFont(ofSize: 11, weight: .medium)
+            .systemFont(ofSize: 11, weight: .semibold)
         }
+        /// The wizard's two ANSWER plates' title (owner ruling 2026-08-23:
+        /// 236×88 hero plates with a 15 pt semibold title). Neither
+        /// ``bodyEmphasized`` (13) nor ``heading`` (16) is that size; only
+        /// `BTAlignmentWizardView` consumes it.
+        public static var plateTitle: NSFont { .systemFont(ofSize: 15, weight: .semibold) }
         /// The compact explanatory voice (design-token audit P1-4): the
         /// alignment prompt copy and the card note line — an 11 pt regular size
         /// two call sites already used independently.

@@ -72,8 +72,8 @@ public final class AlignmentPlateButton: NSButton {
 
     /// Convenience config API — sets the title, the drawn keycap chip (and
     /// its accessibility mirror), whether this is the screen's ONE primary
-    /// (`goldCTA`) plate, the per-side identity tint (`nil` = the neutral
-    /// `plateRim`, spec §2.1), and where the chip sits relative to the
+    /// (`gold`-filled) plate, the per-side identity tint (`nil` = the neutral
+    /// `rim`, spec §2.1), and where the chip sits relative to the
     /// title (`trailing` for every plate but the together bar, which passes
     /// `.inline` — spec §3).
     public func configure(title: String, keycap: String? = nil,

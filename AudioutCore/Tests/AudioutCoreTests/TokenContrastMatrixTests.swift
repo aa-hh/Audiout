@@ -171,6 +171,11 @@ extension SerializedSharedState {
                          groundsFor: sameGrounds(textGrounds)),
             ContrastEntry(name: "emberText", token: Tokens.Color.emberText, floor: 4.5,
                          groundsFor: sameGrounds(textGrounds)),
+            // The prominent button's key-window ink, over the only fill it is
+            // ever drawn on. Nothing measures this at runtime any more, so the
+            // floor is held here.
+            ContrastEntry(name: "inkOnFill", token: Tokens.Color.inkOnFill, floor: 4.5,
+                         groundsFor: sameGrounds([("gold", Tokens.Color.gold)])),
             // NON-TEXT, floor 3.0:1
             ContrastEntry(name: "failure", token: Tokens.Color.failure, floor: 3.0,
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised)])),

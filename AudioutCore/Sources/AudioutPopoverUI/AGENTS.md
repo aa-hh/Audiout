@@ -21,7 +21,7 @@ folder renders; routing arithmetic lives in Core.
 - Hidden means idle: ingest skips behind `isEffectivelyShown`, and every open rebuilds.
 - At most one sync drawer is open; `expandedSyncDeviceID` is the single owner.
 - A live scrub applies to audio but must not persist until committed.
-- The alignment wizard is a sheet the popover cannot close under.
+- The alignment wizard is a sheet the popover cannot close under; its lights are green and steel blue (`wireCore`/`ring`), never magenta (C1).
 - A selected Bluetooth device that loses availability is deselected here, on the edge.
 - The Mixer carries an equalizer DOOR (the row button beside mute, and the row menu) and one mark (magenta border when the curve is not flat). No editor, no curve, no tone control on the Mixer (2026-08-22, amended 2026-09-03).
 - A never-aligned Bluetooth row's chip IS the wizard's door; a measured one opens the drawer.

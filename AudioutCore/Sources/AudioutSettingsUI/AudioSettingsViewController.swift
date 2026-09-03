@@ -636,13 +636,15 @@ public final class AudioSettingsViewController: NSViewController {
             let note = SettingsForm.label(
                 "Your buffer is locked to \(Self.msLabel(envMs)) by a launch option for this session.")
             note.font = Tokens.Font.caption
-            note.textColor = Tokens.Color.warningText
+            note.textColor = Tokens.Color.label2
             note.lineBreakMode = .byWordWrapping
             note.maximumNumberOfLines = 0
-            // Not `hintLabel` (wrong color: this one's `.warningText`, not
-            // `.secondaryLabel`) but it needs the SAME `preferredMaxLayoutWidth`
-            // fix — see hintLabel's doc comment for why an unset one drags the
-            // whole pane wider than the fixed content column.
+            // Not `hintLabel` — that helper is for a live hint a pane rewrites
+            // on every control change, and this line is fixed for the session.
+            // It is styled to match (`label2`, caption) and needs the SAME
+            // `preferredMaxLayoutWidth` fix — see hintLabel's doc comment for
+            // why an unset one drags the whole pane wider than the fixed
+            // content column.
             note.preferredMaxLayoutWidth = SettingsForm.contentWidth - 40
             views.append(note)
             return views

@@ -51,7 +51,9 @@ import AudioutCore
         // the device is not currently in the mix (matrix §3.6 "Unavailable").
         row.apply(makeDevice(isAvailable: false), selected: true)
         #expect(row.test_busNode == .nonMember, "an unavailable device's node is hollow")
-        #expect(row.test_busNodeDimmed == true, "…and tinted (the unavailable signature)")
+        // The dim flag rides along; it reaches only a FILL, and a hollow node
+        // has none — the rim is the rail's and stays ember.
+        #expect(row.test_busNodeDimmed == true, "…and carries the unavailable dim")
         // Unavailable is a tinted `.nonMember` + the "Unavailable" FEED
         // override (v4.1 item 3 moved this word off the sublabel and onto the
         // FEED column, since this row is a bus row).

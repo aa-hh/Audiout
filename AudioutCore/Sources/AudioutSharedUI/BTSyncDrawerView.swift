@@ -73,13 +73,18 @@ public extension BTSyncDrawerViewDelegate {
 ///
 /// **Colour:** the background is ``Tokens/Color/well`` — the recessed/inset
 /// fill already used behind slider troughs, darker than the row card in BOTH
-/// themes, which is what "opens downward" needs to read. The recess is
-/// bounded by a 1 pt ``Tokens/Color/containerEdge`` rim on all four sides
-/// (2026-09-03): the drawer is a full-width row clip, so its sides are flush
-/// with the card and its top meets the device row, and on the flat light
-/// ground the well is only 1.154:1 from the card — iOS separates by edge
-/// weight there (containerEdge 1.75:1 on `well` light, 2.01:1 dark). A card's
-/// own edge is `containerEdge`, never `hairline`. The align-by-ear button
+/// themes, which is what "opens downward" needs to read. It is also EDGED,
+/// in two weights (2026-09-03), because the fill alone stopped carrying it:
+/// on the flat light ground the well is only 1.154:1 from the card, under the
+/// 1.25:1 edge floor, so the boundary has to be drawn. The sides and bottom
+/// bound the recess and take the container's own edge
+/// (``Tokens/Color/containerEdge``, 1.75:1 on `well` light, 2.01:1 dark); the
+/// TOP is not a card edge at all but the divider between this drawer and the
+/// device row above it — the drawer is a full-width row clip inside the card
+/// stack — so it takes ``Tokens/Color/hairline``, the rank below (1.31:1 on
+/// `well` light, 1.49:1 dark, both over the edge floor). This overrides an
+/// earlier live finding that the well needed no edge; it is on the owed
+/// eye-check list. The align-by-ear button
 /// keeps the exact `engagedChrome`/`label2` treatment it has on the row today
 /// (`DeviceRowView.alignTapped`). The background is drawn in `draw(_:)`, not
 /// stamped into a `CALayer`, so it re-resolves live on every pass with no
@@ -421,16 +426,31 @@ public final class BTSyncDrawerView: NSView {
         alignLeadingToEdge?.isActive = !canAlignAgain
     }
 
-    // MARK: Drawing — well fill + containerEdge rim
+    // MARK: Drawing — well fill, containerEdge recess, hairline divider
 
     public override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         Tokens.Color.well.setFill()
         bounds.fill()
-        let rim = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
-        rim.lineWidth = 1
+
+        // Two edge weights, because the four sides are not the same thing.
+        // The sides and the bottom BOUND the recess, so they carry the
+        // container's own edge; the top is the divider between this drawer and
+        // the device row it opened under — rows inside one container — which
+        // is `hairline`, a rank lighter. This view is not flipped, so the
+        // visual top is `maxY`.
+        let inset = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let recess = NSBezierPath()
+        recess.move(to: NSPoint(x: inset.minX, y: inset.maxY))
+        recess.line(to: NSPoint(x: inset.minX, y: inset.minY))
+        recess.line(to: NSPoint(x: inset.maxX, y: inset.minY))
+        recess.line(to: NSPoint(x: inset.maxX, y: inset.maxY))
+        recess.lineWidth = 1
         Tokens.Color.containerEdge.setStroke()
-        rim.stroke()
+        recess.stroke()
+
+        Tokens.Color.hairline.setFill()
+        NSRect(x: bounds.minX, y: bounds.maxY - 1, width: bounds.width, height: 1).fill()
     }
 
 

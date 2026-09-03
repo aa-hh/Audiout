@@ -367,6 +367,9 @@ final class AlignmentStageView: NSView {
     /// Shapes: a strip-sized card, not the Main Out deck's panel radius) under
     /// it all.
     private static let plateCornerRadius: CGFloat = Tokens.Layout.Radius.row
+    /// The detent's peak span-shadow opacity — double the 0.35 the span
+    /// rests at, which is the whole visible event (see `fireDetent`).
+    private static let detentPeakShadowOpacity: Float = 0.7
     /// The window never zooms tighter than this, whatever the rung asks for.
     private static let minWindowSpanMs: Double = 40
     /// The sticky centre's dead-band: the interval plus this much of the
@@ -1078,8 +1081,11 @@ final class AlignmentStageView: NSView {
                     ringRadius: fused ? look.ringRadius + 6 : look.ringRadius,
                     // ×0.85, not the table's ×0.55: measured against the
                     // magenta-era ring over the green halo (dusty mauve at
-                    // 0.55); not re-measured for `ring` — owed eye check
-                    // (PR 8).
+                    // 0.55). Not re-measured for `ring`, and the risk changed
+                    // with the hue: composited over the GREEN halo, blue moves
+                    // toward the target's own colour, so what to look for is
+                    // the reference ring reading teal and losing whose light
+                    // it is — not mud. Owed eye check.
                     ringOpacity: locked ? 0 : (fused ? look.ringOpacity * 0.85
                                                      : look.ringOpacity),
                     ringLineWidth: ringLineWidth,
@@ -1276,14 +1282,25 @@ final class AlignmentStageView: NSView {
     // MARK: - Flourishes
 
     /// The promotion's DETENT: the notch the push-in lands in. The span's
-    /// bloom swells and brightens to `stageInk` for a moment, and the
-    /// target ring overshoots its new weight by a hair. Span shadow only — the
-    /// identity hues never move.
+    /// bloom swells WIDER and, above all, BRIGHTER, and the target ring
+    /// overshoots its new weight by a hair. Span shadow only — the identity
+    /// hues never move.
+    ///
+    /// The brightness has to come from the OPACITY, because the colour move
+    /// carries almost none of it: the shadow rests at `fuseWhite` and the
+    /// detent stamps `stageInk` over it, which is 1.11:1 and ΔE76 5.4 — and
+    /// very slightly DARKER, not lighter (the retired gold peak was ΔE76
+    /// 42.2). On a blurred shadow that reads as no event at all. Doubling the
+    /// opacity is what the eye actually sees, and it keeps the stage's only
+    /// gold on the CTA plate.
     private func fireDetent(at begin: TimeInterval, look: Look) {
         guard window != nil else { return }
         pulse(layer: spanLayer, keyPath: "shadowRadius", peak: CGFloat(7),
               settled: look.spanShadowRadius, at: begin, duration: 0.2,
               key: "detent.shadowRadius")
+        pulse(layer: spanLayer, keyPath: "shadowOpacity",
+              peak: Self.detentPeakShadowOpacity, settled: spanLayer.shadowOpacity,
+              at: begin, duration: 0.2, key: "detent.shadowOpacity")
         pulse(layer: spanLayer, keyPath: "shadowColor", peak: resolvedDetentAccent,
               settled: resolvedSpanGlow, at: begin, duration: 0.1,
               key: "detent.shadowColor")
@@ -1772,6 +1789,11 @@ final class AlignmentStageView: NSView {
     }
     /// The colour the promotion detent pulses the span's shadow to.
     var test_detentAccent: NSColor? { NSColor(cgColor: resolvedDetentAccent) }
+    /// The detent's brightness swing: what the span's shadow opacity rests at,
+    /// and what the detent takes it to.
+    var test_detentShadowOpacity: (settled: Float, peak: Float) {
+        (spanLayer.shadowOpacity, Self.detentPeakShadowOpacity)
+    }
     var test_isBreathing: Bool {
         targetHalo.animation(forKey: Self.breatheKey) != nil
     }

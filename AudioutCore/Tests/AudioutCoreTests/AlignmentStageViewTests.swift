@@ -118,6 +118,13 @@ import AudioutSharedUI
                 "the detent is stamped stageInk, got \(accent)")
         #expect(accent.redComponent - accent.blueComponent < 0.1,
                 "gold would lead red by ~0.52; the detent is near-neutral")
+
+        // The colour alone is 1.11:1 and ΔE76 5.4 from the fuseWhite the
+        // shadow rests at, and slightly darker — so the detent is only an
+        // event if the BRIGHTNESS moves. It has to at least half again.
+        let (settled, peak) = stage.test_detentShadowOpacity
+        #expect(peak >= settled * 1.5,
+                "the detent must brighten the bloom, not just retint it (rests at \(settled), peaks at \(peak))")
     }
 
     /// Force-resolves a dynamic `Tokens.Color` under a fixed appearance — the

@@ -491,8 +491,11 @@ public final class AlignmentPlateCell: NSButtonCell {
     private static let chipNarrowSide: CGFloat = 22
     private static let chipWideWidth: CGFloat = 44
     private static let chipWideHeight: CGFloat = 20
-    /// The keycap chip's corner radius — the control radius; iOS puts chips
-    /// at the control radius, not a capsule.
+    /// The keycap chip's corner radius — the control radius, where iOS puts
+    /// chips. On the 22×22 glyph chips that is a rounded square; on the 44×20
+    /// "SPACE" chip 10 is exactly half the height, so that one lands on a
+    /// capsule. Left alone: it is the same radius, and the wide chip reading
+    /// as a key is the point.
     private static let chipCornerRadius: CGFloat = Tokens.Layout.Radius.control
     /// Trailing placement: the chip's inset from the plate's trailing edge.
     private static let chipTrailingMargin: CGFloat = 14

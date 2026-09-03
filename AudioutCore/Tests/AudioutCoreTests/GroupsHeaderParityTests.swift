@@ -252,6 +252,51 @@ import AppKit
                 "container it drifts one margin to the left of the whole form"))
     }
 
+    // MARK: The editor's top action band
+
+    /// The two controls that LEAVE the editor share one band above the form
+    /// (Alec, 2026-09-03): "‹ Groups" on the left, the Done/Save primary on
+    /// the right, the same height so they read as a matched secondary/primary
+    /// pair rather than a caption beside a button.
+    @Test func theWayBackAndThePrimaryShareOneBandAtTheTopOfTheForm() throws {
+        let (window, _, _, group) = try makeWindow()
+        window.test_select(.group(id: group.id))
+        settle(window)
+        let editor = window.test_editor
+        let back = editor.test_backControlFrame
+        let primary = editor.test_doneButtonFrame
+        let header = editor.test_headerSectionFrame
+
+        #expect(abs(back.height - primary.height) <= 0.01,
+                "the way back is sized to the primary, not to a caption")
+        #expect(abs(back.minY - primary.minY) <= 0.01, "…and sits on its band")
+        #expect(abs(primary.maxX - header.maxX) <= 0.01,
+                "the primary closes the form's trailing edge — the TOP RIGHT of the pane")
+        #expect(abs(back.minX - header.minX) <= 0.01,
+                "…and the way back opens its leading edge")
+        #expect(back.maxX < primary.minX, "the two never overlap")
+    }
+
+    /// The band rides inside the header section's own (bare, undrawn) top
+    /// padding rather than pushing the form down — which is what keeps the
+    /// parity assertions above honest with the device pane, whose column has
+    /// no band above it at all.
+    @Test func theTopBandClearsTheIdentityCardWithoutMovingIt() throws {
+        let (window, _, _, group) = try makeWindow()
+        window.test_select(.group(id: group.id))
+        settle(window)
+        let editor = window.test_editor
+
+        // The pane's own coordinates are NOT flipped (the scroll DOCUMENT is),
+        // so "above" is a larger y.
+        #expect(editor.test_backControlFrame.minY > editor.test_headerIconFrame.maxY,
+                "the band clears the identity card's icon")
+        #expect(abs(editor.test_headerSectionFrame.maxY
+                    - (editor.view.frame.height - GroupsPaneLayout.columnTopInset)) <= 0.5,
+                Comment(rawValue: "the form still starts at the inset both detail panes use — a band " +
+                "that pushed it down would make every sidebar swap twitch"))
+    }
+
     // MARK: The detail pane is one housing: one card, three titled slots
 
     @Test func detailPageHasOneCardThreeTitlesAndNoOrphanedRule() throws {

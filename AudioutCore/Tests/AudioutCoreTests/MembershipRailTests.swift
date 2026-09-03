@@ -468,7 +468,7 @@ import AppKit
                 == "Changes are saved as you go. They don\u{2019}t change what\u{2019}s playing now.")
     }
 
-    @Test func doneLeavesTheEditorTheWayTheBackBandDoes() throws {
+    @Test func thePrimaryLeavesTheEditorTheWayGroupsDoes() throws {
         let (editor, _, _) = try makeEditor()
         var backs = 0
         editor.onBack = { backs += 1 }
@@ -477,6 +477,15 @@ import AppKit
         editor.test_done()
 
         #expect(backs == 1)
+    }
+
+    @Test func theWayBackKeepsItsShortcutAndItsVoiceOverName() throws {
+        let (editor, _, _) = try makeEditor()
+        #expect(editor.test_backControlAccessibilityLabel == "Back to Groups",
+                "the button says \"Groups\"; VoiceOver says where it goes")
+        #expect(editor.test_backControlToolTip == "Back to Groups (\u{2318}[)",
+                "the one place the shortcut is printed — this screen has no menu bar")
+        #expect(editor.test_backControlAcceptsFocus, "Tab must reach the way out")
     }
 
     @Test func theActiveMarkersNeverMoveTheHeaderBand() throws {

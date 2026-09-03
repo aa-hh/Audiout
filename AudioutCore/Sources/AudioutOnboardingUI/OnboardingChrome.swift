@@ -78,10 +78,13 @@ func bluetoothRuneImage(height: CGFloat) -> NSImage? {
 // MARK: - Appearance-adaptive rounded views
 
 /// A small rounded tile holding an SF Symbol. Every onboarding tile rests on
-/// the same neutral `Tokens.Color.raised` well with a hairline rim (Q3 of the
-/// colour-return pass — the FILL/RIM are never coloured, only the glyph); the
-/// Groups window's device seats (`MemberChipView`, `DeviceIconWellView`) use
-/// `iconSeatFill` + `containerEdge` instead, tuned for a `label` glyph;
+/// the same neutral `Tokens.Color.raised` well with a `containerEdge` rim (Q3
+/// of the colour-return pass — the FILL/RIM are never coloured, only the
+/// glyph). A tile's own edge is always `containerEdge`; `hairline` is never
+/// drawn on `raised`, where it measures 1.154:1 and disappears. The Groups
+/// window's device seats (`MemberChipView`,
+/// `DeviceIconWellView`) draw that same edge on the same well, tuned for a
+/// `label` glyph rather than a permission hue;
 /// the SYMBOL's tint is caller-supplied (`color`, one of the four
 /// `Tokens.Color.permission*` hues for the onboarding rows) and PERMANENT —
 /// granting never recolours it (Alec, 2026-08-11: the retired
@@ -104,13 +107,17 @@ final class IconTileView: NSView {
     /// `customImage` overrides the symbol lookup for glyphs SF Symbols doesn't
     /// ship (Bluetooth's rune). Must be a template image — the tile tints it
     /// with `color` exactly like a symbol.
+    ///
+    /// `cornerRadius` defaults to the control rung, which is what the iPhone
+    /// companion rounds its own glyph tile at (`AppGlyph.swift:51` in
+    /// audiout-remote), so the two apps' tiles are the same shape.
     init(symbolName: String,
          customImage: NSImage? = nil,
          accessibility: String,
          color: NSColor = Tokens.Color.secondaryLabel,
          side: CGFloat = IconTileView.side,
          pointSize: CGFloat = 15,
-         cornerRadius: CGFloat = 7) {
+         cornerRadius: CGFloat = Tokens.Layout.Radius.control) {
         self.radius = cornerRadius
         super.init(frame: .zero)
         wantsLayer = true
@@ -142,7 +149,7 @@ final class IconTileView: NSView {
 
     override func updateLayer() {
         layer?.backgroundColor = Tokens.Color.raised.cgColor
-        layer?.borderColor = Tokens.Color.hairline.cgColor
+        layer?.borderColor = Tokens.Color.containerEdge.cgColor
         layer?.borderWidth = 1
         layer?.cornerRadius = radius
         layer?.cornerCurve = .continuous

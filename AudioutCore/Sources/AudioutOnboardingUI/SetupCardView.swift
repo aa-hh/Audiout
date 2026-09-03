@@ -184,8 +184,10 @@ final class SetupSpineRowView: NSView {
     /// (`OnboardingViewController.makeSpine()`), and of the keyboard focus
     /// ring a single row draws over itself — the two are visually the same
     /// radius on purpose, since a focused first/last row's ring should read as
-    /// part of the one rounded group, not a corner of its own.
-    static let cornerRadius: CGFloat = 9
+    /// part of the one rounded group, not a corner of its own. It is the ROW
+    /// rung rather than the panel one for that same reason: the group's corner
+    /// IS the first and last row's corner, so it rounds like a row.
+    static let cornerRadius: CGFloat = Tokens.Layout.Radius.row
     /// The trailing marker slot: one position that says locked, then earned.
     /// Also the checkmark's grown width (the 0 → 16 slide-in).
     static let markerSlot: CGFloat = 16
@@ -308,7 +310,7 @@ final class SetupSpineRowView: NSView {
         checkmark.image = NSImage(systemSymbolName: "checkmark.circle.fill",
                                   accessibilityDescription: "Allowed")
         checkmark.symbolConfiguration = .init(pointSize: 13, weight: .semibold)
-        checkmark.contentTintColor = Tokens.Color.success
+        checkmark.contentTintColor = Tokens.Color.gold
         checkmark.translatesAutoresizingMaskIntoConstraints = false
         checkmark.alphaValue = 0
 
@@ -320,7 +322,7 @@ final class SetupSpineRowView: NSView {
         // drawing path for one state. Upgrade path: if a dashed rim is ever
         // wanted, give that view an optional shape-layer border.
         configureMarker(skipGlyph, symbolName: "slash.circle", accessibility: "Skipped",
-                        tint: Tokens.Color.warningText)
+                        tint: Tokens.Color.label2)
         configureMarker(brokenGlyph, symbolName: "exclamationmark.triangle.fill",
                         accessibility: "Turned off", tint: Tokens.Color.failure)
 
@@ -485,17 +487,22 @@ final class SetupSpineRowView: NSView {
     /// generic wizard, not the macOS grouped-inset list `DemoPaneView`'s own
     /// Login Items mock already draws correctly).
     ///
-    /// The live row is the one lifted off the group's own `panel` fill — one
-    /// rung up the warm surface ladder (`raised`) plus an EMBER edge bar, so
-    /// current-vs-locked can't be mistaken. Ember, not gold (owner decision
-    /// 2026-08-12): gold is spent entirely on the ONE button the step wants
-    /// pressed, and a gold bar on the spine competed with it from across the
-    /// window. Ember is gold's dimmer companion in the same hue family, so the
-    /// live row still reads warm without claiming the accent. A BROKEN row
-    /// overrides that with the failure hue, because it is the only row asking
-    /// to be looked at. The browse selection is its own neutral tinted fill —
-    /// browsing is a reading position, not a change of state, so it never
-    /// stacks with the live/broken tint, only with hover.
+    /// The live row is the one lifted off the group's own `panel` fill, and it
+    /// is lifted with a GOLD WASH at ``PopoverColumnGrid/rowLiveWashAlpha`` —
+    /// 12 %, the same alpha every sounding device row in the popover paints,
+    /// measured 1.256:1 on dark `panel` and 1.140:1 on the light ground. The
+    /// 2026-08-12 ruling that made this row ember rather than gold (gold was
+    /// spent entirely on the ONE button the step wants pressed, and a gold bar
+    /// on the spine competed with it across the window) is superseded by
+    /// decisions F4 and R4 of the design migration,
+    /// `dev/notes/design-migration-scoping/01-decisions.md`: live is one gold
+    /// wash everywhere in the app, so this row says what a sounding device row
+    /// says. The ember EDGE BAR the old reading also carried does not come
+    /// back with it. A BROKEN row overrides the wash with the failure hue,
+    /// because it is the only row asking to be looked at. The browse selection
+    /// is its own neutral tinted fill — browsing is a reading position, not a
+    /// change of state, so it never stacks with the live/broken tint, only
+    /// with hover.
     ///
     /// Every blend goes through ``dynamicBlend(_:fraction:of:)``: blending a
     /// dynamic token in place would flatten it to whichever appearance happened
@@ -507,7 +514,9 @@ final class SetupSpineRowView: NSView {
         if isBroken {
             fill = dynamicBlend(Tokens.Color.panel, fraction: 0.08, of: Tokens.Color.failure)
         } else if isLive {
-            fill = Tokens.Color.raised
+            fill = dynamicBlend(Tokens.Color.panel,
+                                fraction: PopoverColumnGrid.rowLiveWashAlpha,
+                                of: Tokens.Color.gold)
         } else if isBrowseSelected {
             fill = dynamicBlend(Tokens.Color.panel, fraction: 0.16,
                                 of: NSColor.selectedContentBackgroundColor)

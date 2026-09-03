@@ -159,7 +159,10 @@ final class SetupPreviewFrameView: NSView {
     static let labelBandHeight: CGFloat = 24
     /// Air around the surface playing inside the frame.
     static let bodyPadding: CGFloat = 8
-    private static let cornerRadius: CGFloat = 10
+    /// The control rung, not the row one: the well clips `DemoPaneView`'s mock
+    /// macOS windows, which draw their own ~10 pt corners, and a wider frame
+    /// around them reads as two mismatched roundings.
+    private static let cornerRadius: CGFloat = Tokens.Layout.Radius.control
     private static let labelInset: CGFloat = 12
 
     /// Where the caller installs whatever plays in here (the demo pane). Its
@@ -328,6 +331,10 @@ final class SetupRibbonView: NSView {
     private static let statusGap: CGFloat = 6
     /// Gap between the buttons in the bar.
     private static let buttonGap: CGFloat = 8
+    /// The symbol a status line uses when something is wrong. Held here rather
+    /// than read off the controller: this view takes its content as a plain
+    /// tuple and knows nothing else about who filled it in.
+    private static let alertSymbol = "exclamationmark.triangle.fill"
 
     private let stack = NSStackView()
     private let statusRow = NSStackView()
@@ -440,7 +447,12 @@ final class SetupRibbonView: NSView {
             if let symbolName = status.symbolName, !status.spins {
                 statusGlyph.image = NSImage(systemSymbolName: symbolName,
                                             accessibilityDescription: nil)
-                statusGlyph.contentTintColor = status.color
+                // The triangle is the problem mark and always carries the
+                // problem hue, whatever ink the line's own words take. On this
+                // ribbon's `panel` ground `failure` measures 4.60:1 dark and
+                // 6.01:1 light, so the red mark carries on its own.
+                statusGlyph.contentTintColor =
+                    symbolName == Self.alertSymbol ? Tokens.Color.failure : status.color
             }
             statusSpinner.isHidden = !status.spins
             if status.spins { statusSpinner.startAnimation(nil) } else { statusSpinner.stopAnimation(nil) }
@@ -572,6 +584,9 @@ final class SetupRibbonView: NSView {
     // MARK: Test-support hooks
 
     var test_statusText: String? { statusRow.isHidden ? nil : statusLabel.stringValue }
+    /// The status glyph's tint — `failure` on the alert triangle, the line's
+    /// own colour on any other symbol.
+    var test_statusGlyphTint: NSColor? { statusGlyph.isHidden ? nil : statusGlyph.contentTintColor }
     var test_bodyText: String? { bodyLabel.isHidden ? nil : bodyLabel.stringValue }
     /// Whether a wait is on screen (the spinner beat).
     var test_isWaiting: Bool { !statusRow.isHidden && !statusSpinner.isHidden }

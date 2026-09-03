@@ -63,7 +63,7 @@ final class SetupCheckRowView: NSView {
         checkmark.image = NSImage(systemSymbolName: "checkmark.circle.fill",
                                   accessibilityDescription: "Ready")
         checkmark.symbolConfiguration = .init(pointSize: 13, weight: .semibold)
-        checkmark.contentTintColor = Tokens.Color.success
+        checkmark.contentTintColor = Tokens.Color.gold
         checkmark.translatesAutoresizingMaskIntoConstraints = false
 
         spinner.style = .spinning

@@ -1050,8 +1050,6 @@ public enum Tokens {
         public static var secondaryLabel: NSColor { label2 }
         @available(*, deprecated, renamed: "label2")
         public static var inkSecondary: NSColor { label2 }
-        @available(*, deprecated, renamed: "label2")
-        public static var warningText: NSColor { label2 }
         @available(*, deprecated, renamed: "label3")
         public static var tertiaryLabel: NSColor { label3 }
         @available(*, deprecated, renamed: "label3")
@@ -1061,11 +1059,7 @@ public enum Tokens {
         @available(*, deprecated, renamed: "panel")
         public static var sidebarWarmTint: NSColor { panel }
         @available(*, deprecated, renamed: "gold")
-        public static var success: NSColor { gold }
-        @available(*, deprecated, renamed: "gold")
         public static var accent: NSColor { gold }
-        @available(*, deprecated, renamed: "gold")
-        public static var goldCTA: NSColor { gold }
         @available(*, deprecated, renamed: "failure")
         public static var warning: NSColor { failure }
         @available(*, deprecated, renamed: "inkOnFill")

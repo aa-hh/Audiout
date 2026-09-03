@@ -258,6 +258,25 @@ import AudioutProtocol
                 "the welcome should carry the token the wiring answered at send time")
     }
 
+    @Test func aTokenArrivingAfterTheWelcomeIsPushedToConnectedClients() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = makeAutoApprovingServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let (client, log) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try sendHello(over: client)
+        try #require(waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
+                     "welcome never arrived")
+
+        server.sendCompanionToken("eyJ2IjoxfQ.c2ln")
+
+        #expect(waitUntil { log.contains(.companionToken("eyJ2IjoxfQ.c2ln")) },
+                "a phone connected before the licence should be handed the token without reconnecting")
+    }
+
     @Test func newerProtoHelloIsRefusedWithGoodbye() throws {
         let hub = try makeHub()
         defer { hub.cancel() }

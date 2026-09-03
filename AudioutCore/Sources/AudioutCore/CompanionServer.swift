@@ -446,6 +446,19 @@ public final class CompanionServer: @unchecked Sendable {
         }
     }
 
+    /// The Mac's licence came through after these phones connected: hand
+    /// every welcomed client the token its `welcome` would have carried, so
+    /// a phone locked on a token-less welcome unlocks without reconnecting.
+    /// Later connections get it from ``companionToken`` in their `welcome`.
+    public func sendCompanionToken(_ token: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            for client in self.clients.values where client.isWelcomed {
+                self.send(.companionToken(token), to: client)
+            }
+        }
+    }
+
     /// Tell the phone that staged a sync-calibration run that its sweeps have
     /// entered the feed — its cue to start recording. Addressed to exactly one
     /// client, like the icon pages and for the same reason: nobody else asked
@@ -854,7 +867,7 @@ public final class CompanionServer: @unchecked Sendable {
             }
 
         case .welcome, .awaitingApproval, .state, .commandResult, .goodbye, .appIcons,
-             .alignmentProbeStarted, .alignmentProbeFinished, .unknown:
+             .alignmentProbeStarted, .alignmentProbeFinished, .companionToken, .unknown:
             // Server-to-client message types arriving FROM a client, or a
             // frame type from a future protocol: not actionable, not worth a
             // disconnect. Ignore (forward-compat, `CompanionMessage.unknown`).

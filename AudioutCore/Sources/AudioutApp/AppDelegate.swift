@@ -1475,6 +1475,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.licenseGateWindowController = nil
                 self.applyLicenseState()
+                // Same as `general.onLicenseChanged` below: a key entered at
+                // the gate registers the device now, not at the next launch.
+                LicenseCheckIn(settings: self.settings).checkInIfNeeded()
                 self.runFirstRunGateAndStartBackend()
             },
             onAbort: { [weak self] in

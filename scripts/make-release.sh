@@ -44,6 +44,10 @@ if [ -z "${AUDIOUT_LICENSE_URL:-}" ]; then
   exit 1
 fi
 
+# Same reasoning: the first-open gate's only route for someone without a key
+# is its "Buy Audiout" button, and that button hides itself without this.
+export AUDIOUT_BUY_URL="${AUDIOUT_BUY_URL:-https://audiout.app/buy}"
+
 # The address below is the one thing about this artifact that can never be
 # fixed later: make-app.sh writes it into Info.plist, and every copy on every
 # buyer's Mac polls it forever. Get it wrong and they lose key validation AND

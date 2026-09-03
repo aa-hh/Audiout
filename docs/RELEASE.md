@@ -36,7 +36,7 @@ scripts/make-release.sh
 | Variable | Info.plist key | What it turns on |
 |---|---|---|
 | `AUDIOUT_LICENSE_URL` | `AudioutLicenseServerURL` | The soft license check: key validation (`POST /v1/validate`), check-ins, and the unregistered note. Also supplies `SPARKLE_FEED_URL` when that isn't set. |
-| `AUDIOUT_BUY_URL` | `AudioutBuyURL` | The "Buy Audiout…" button in Settings and the Mixer note's "Buy…" action. Absent ⇒ both hidden. |
+| `AUDIOUT_BUY_URL` | `AudioutBuyURL` | The "Buy Audiout" button on the first-open gate, in Settings and in the Mixer note. Absent ⇒ all hidden. `make-staging.sh` and `make-release.sh` default it to `https://audiout.app/buy`. |
 | `SPARKLE_FEED_URL` | `SUFeedURL` | Where the updater checks. Defaults to `$AUDIOUT_LICENSE_URL/appcast.xml`. |
 | `SPARKLE_ED_PUBLIC_KEY` | `SUPublicEDKey` | The EdDSA public key update archives are verified against. |
 

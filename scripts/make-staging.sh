@@ -32,6 +32,11 @@ set -euo pipefail
 
 # The staging worker, not production — and overridable for a local `wrangler dev`.
 export AUDIOUT_LICENSE_URL="${AUDIOUT_LICENSE_URL:-https://license-staging.audiout.app}"
+# The buy page is the same in staging and production. Without it the
+# first-open gate hides its "Buy Audiout" button — the only way through for
+# someone who arrives without a key — which is exactly the state a rehearsal
+# must not ship.
+export AUDIOUT_BUY_URL="${AUDIOUT_BUY_URL:-https://audiout.app/buy}"
 R2_BUCKET="${R2_BUCKET:-audiout-releases-staging}"
 # Both release buckets live in the EU jurisdiction. Without -J the uploads
 # land in a different (default-jurisdiction) bucket the Worker cannot read.

@@ -72,48 +72,49 @@ import AppKit
         for appearance in [NSAppearance.Name.darkAqua, .aqua] {
             let plate = resolved(Tokens.Color.stagePlate, appearanceName: appearance)
 
-            let sync = contrastRatio(resolved(Tokens.Color.syncSignal, appearanceName: appearance), plate)
-            #expect(sync >= floor, "syncSignal vs stagePlate (\(appearance.rawValue)): \(sync):1 below \(floor):1")
+            let sync = contrastRatio(resolved(Tokens.Color.wireCore, appearanceName: appearance), plate)
+            #expect(sync >= floor, "wireCore vs stagePlate (\(appearance.rawValue)): \(sync):1 below \(floor):1")
 
-            let party = contrastRatio(resolved(Tokens.Color.partySignal, appearanceName: appearance), plate)
-            #expect(party >= floor, "partySignal vs stagePlate (\(appearance.rawValue)): \(party):1 below \(floor):1")
+            let party = contrastRatio(resolved(Tokens.Color.party, appearanceName: appearance), plate)
+            #expect(party >= floor, "party vs stagePlate (\(appearance.rawValue)): \(party):1 below \(floor):1")
 
             let fuse = contrastRatio(resolved(Tokens.Color.fuseWhite, appearanceName: appearance), plate)
             #expect(fuse >= floor, "fuseWhite vs stagePlate (\(appearance.rawValue)): \(fuse):1 below \(floor):1")
         }
     }
 
-    // MARK: plateRim — required >=3:1 vs BOTH raised and canvas, both appearances (decision 12)
+    // MARK: rim — required >=3:1 vs BOTH raised and canvas, both appearances (decision 12)
 
     @Test func plateRimClearsTheRimFloorVsRaisedAndCanvasBothAppearances() {
         let floor: CGFloat = 3.0
 
-        let darkRim = resolved(Tokens.Color.plateRim, appearanceName: .darkAqua)
+        let darkRim = resolved(Tokens.Color.rim, appearanceName: .darkAqua)
         let darkVsRaised = contrastRatio(darkRim, resolved(Tokens.Color.raised, appearanceName: .darkAqua))
-        #expect(darkVsRaised >= floor, "plateRim vs raised (dark): \(darkVsRaised):1 below the \(floor):1 floor")
+        #expect(darkVsRaised >= floor, "rim vs raised (dark): \(darkVsRaised):1 below the \(floor):1 floor")
         let darkVsCanvas = contrastRatio(darkRim, resolved(Tokens.Color.canvas, appearanceName: .darkAqua))
-        #expect(darkVsCanvas >= floor, "plateRim vs canvas (dark): \(darkVsCanvas):1 below the \(floor):1 floor")
+        #expect(darkVsCanvas >= floor, "rim vs canvas (dark): \(darkVsCanvas):1 below the \(floor):1 floor")
 
-        let lightRim = resolved(Tokens.Color.plateRim, appearanceName: .aqua)
+        let lightRim = resolved(Tokens.Color.rim, appearanceName: .aqua)
         let lightVsRaised = contrastRatio(lightRim, resolved(Tokens.Color.raised, appearanceName: .aqua))
-        #expect(lightVsRaised >= floor, "plateRim vs raised (light): \(lightVsRaised):1 below the \(floor):1 floor")
+        #expect(lightVsRaised >= floor, "rim vs raised (light): \(lightVsRaised):1 below the \(floor):1 floor")
         let lightVsCanvas = contrastRatio(lightRim, resolved(Tokens.Color.canvas, appearanceName: .aqua))
-        #expect(lightVsCanvas >= floor, "plateRim vs canvas (light): \(lightVsCanvas):1 below the \(floor):1 floor")
+        #expect(lightVsCanvas >= floor, "rim vs canvas (light): \(lightVsCanvas):1 below the \(floor):1 floor")
     }
 
     // MARK: The primary plate — bright gold + black ink, ONE value everywhere
 
     /// The wizard's primary plates (Start / Sounds right / Try again / Done)
     /// fill with ``Tokens/Color/gold``'s DARK-appearance value in BOTH
-    /// appearances and set their title in ``Tokens/Color/inkOnGold`` (owner
+    /// appearances and set their title in ``Tokens/Color/inkOnFill`` (owner
     /// ruling 2026-08-24), which is why this measures the pair ONCE rather
-    /// than per appearance: the plate has only one.
-    @Test func inkOnGoldClearsTheBodyFloorOnThePinnedPrimaryPlateGold() {
+    /// than per appearance: the plate has only one. Measured 10.18:1.
+    @Test func inkOnFillClearsTheBodyFloorOnThePinnedPrimaryPlateGold() {
         let floor: CGFloat = 4.5
         let fill = resolved(Tokens.Color.gold, appearanceName: .darkAqua)
-        let ratio = contrastRatio(Tokens.Color.inkOnGold, fill)
+        let ink = resolved(Tokens.Color.inkOnFill, appearanceName: .darkAqua)
+        let ratio = contrastRatio(ink, fill)
         #expect(ratio >= floor,
-                "inkOnGold vs the pinned primary-plate gold: \(ratio):1 below the \(floor):1 floor")
+                "inkOnFill vs the pinned primary-plate gold: \(ratio):1 below the \(floor):1 floor")
     }
 
     // MARK: The Deep companions — themed chrome, light grounds only (spec §2.1)
@@ -131,12 +132,12 @@ import AppKit
 
     @Test func lightPartySignalDeepClearsTheFloorOnLightCanvasAndRaised() {
         let floor: CGFloat = 3.0
-        let deep = resolved(Tokens.Color.partySignalDeep, appearanceName: .aqua)
+        let deep = resolved(Tokens.Color.partyRampDeep, appearanceName: .aqua)
 
         let vsCanvas = contrastRatio(deep, resolved(Tokens.Color.canvas, appearanceName: .aqua))
-        #expect(vsCanvas >= floor, "partySignalDeep vs light canvas: \(vsCanvas):1 below the \(floor):1 floor")
+        #expect(vsCanvas >= floor, "partyRampDeep vs light canvas: \(vsCanvas):1 below the \(floor):1 floor")
 
         let vsRaised = contrastRatio(deep, resolved(Tokens.Color.raised, appearanceName: .aqua))
-        #expect(vsRaised >= floor, "partySignalDeep vs light raised: \(vsRaised):1 below the \(floor):1 floor")
+        #expect(vsRaised >= floor, "partyRampDeep vs light raised: \(vsRaised):1 below the \(floor):1 floor")
     }
 }

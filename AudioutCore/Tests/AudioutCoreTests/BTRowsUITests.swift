@@ -62,7 +62,7 @@ import AppKit
                          selected: Bool = false,
                          isEQShaped: Bool = false) -> DeviceRowView {
         let row = DeviceRowView(device: device, showsToggle: true,
-                                paintsSelectionBackground: false, showsMeter: true,
+                                showsMeter: true,
                                 showsBus: true, showsSyncControls: true)
         row.delegate = delegate
         row.apply(device, selected: selected, controllable: selected,
@@ -253,8 +253,8 @@ import AppKit
         let row = makeRow(castDevice(), delegate: SpyDelegate(), syncTrimMs: 0, syncTrimIsSet: false)
         #expect(row.test_syncChipTitle == "Not set")
         #expect(row.test_syncChipIsDashed, "the dashed border IS the invitation")
-        #expect(row.test_syncChipTitleColor == Tokens.Color.inkTertiary)
-        #expect(row.test_syncChipBorderColor == Tokens.Color.inkTertiary,
+        #expect(row.test_syncChipTitleColor == Tokens.Color.label3)
+        #expect(row.test_syncChipBorderColor == Tokens.Color.label3,
                 "one de-emphasis tone, spoken by both the text and its outline")
     }
 
@@ -351,7 +351,7 @@ import AppKit
         // lets ONE "Source" legend name both.
         let ap = Device(id: "office", name: "Office", kind: .homePod)
         let airPlay = DeviceRowView(device: ap, showsToggle: true,
-                                    paintsSelectionBackground: false, showsMeter: true,
+                                    showsMeter: true,
                                     showsBus: true)
         airPlay.apply(ap, selected: true, controllable: true)
         airPlay.layoutSubtreeIfNeeded()
@@ -419,7 +419,7 @@ import AppKit
         let bt = makeRow(btDevice(), delegate: SpyDelegate(), selected: true)
         let airPlayDevice = Device(id: "office", name: "Office", kind: .homePod)
         let airPlay = DeviceRowView(device: airPlayDevice, showsToggle: true,
-                                    paintsSelectionBackground: false, showsMeter: true,
+                                    showsMeter: true,
                                     showsBus: true)
         airPlay.apply(airPlayDevice, selected: true, controllable: true)
         let mac = makeRow(macDevice(), delegate: SpyDelegate(), selected: true)
@@ -445,7 +445,7 @@ import AppKit
     /// line weight) at 13 pt. The door stays image-only either way.
     @Test func aShapedSpeakerWearsTheGoldGlyphAndAFlatOneDoesNot() {
         let flat = makeRow(btDevice(), delegate: SpyDelegate(), selected: true)
-        #expect(flat.test_eqTintColor == Tokens.Color.secondaryLabel,
+        #expect(flat.test_eqTintColor == Tokens.Color.label2,
                 "a flat curve leaves the door at rest")
         #expect(flat.test_eqSymbolIsHeavy == false)
         #expect(flat.test_eqButtonHasTitle == false, "the door is image-only")
@@ -483,7 +483,7 @@ import AppKit
     @Test func airPlayRowMountsNoSyncChip() {
         let device = Device(id: "office", name: "Office", kind: .homePod)
         let row = DeviceRowView(device: device, showsToggle: true,
-                                paintsSelectionBackground: false, showsMeter: true,
+                                showsMeter: true,
                                 showsBus: true)
         row.apply(device, selected: false)
         #expect(row.test_showsSyncControls == false)
@@ -559,7 +559,7 @@ import AppKit
         #expect(spy.wizardRequests.map(\.door) == [.menu])
 
         let plain = DeviceRowView(device: btDevice(), showsToggle: true,
-                                  paintsSelectionBackground: false, showsMeter: true,
+                                  showsMeter: true,
                                   showsBus: true, showsSyncControls: false)
         #expect(plain.test_contextMenu()?.items.map(\.title) == ["Equalizer…"],
                 "non-sync rows keep the Equalizer door but carry no alignment item")

@@ -127,9 +127,8 @@ The `≥ 0` clamp is what creates D11's usable floor.
     (~lines 1432, 1531–1560) build the trailing→leading cluster.
   - Delegate methods at lines ~69–76.
 - `AudioutCore/Sources/AudioutSharedUI/PopoverColumnGrid.swift` §"SYNC
-  column" (~lines 578–620) holds every SYNC metric as a named constant. The
-  Figma design system mirrors this file 1:1 — **all new metrics go here, none
-  inline.**
+  column" (~lines 578–620) holds every SYNC metric as a named constant —
+  **all new metrics go here, none inline.**
 - `AudioutCore/Sources/AudioutPopoverUI/PopoverController.swift`
   - `btTrimProvider` (line ~259), `btTrimsByID` cache (~269), row construction
     passing `showsSyncControls: device.isBluetooth` (~1445), trim resolution
@@ -604,11 +603,6 @@ run them and do not modify their expectations.
 2. Update the nearest `AGENTS.md` files (`AudioutSharedUI/`, `AudioutCore/`)
    with two rules worth having: **a trim change must never rebuild a sink**, and
    **only one sync drawer may be open at a time**.
-3. Figma: follow `docs/FIGMA-DESIGN-SYSTEM.md` exactly, including the light-mode
-   rubric step. File `aGvr1qZ3tbqGD2e3jmA1Ru`. Add the chip variants
-   (set / unset / expanded), the drawer component, and the ruler; retire the
-   stepper-cluster variants. Every new `PopoverColumnGrid` constant needs its
-   Figma variable with Swift code syntax, both modes.
 
 ---
 

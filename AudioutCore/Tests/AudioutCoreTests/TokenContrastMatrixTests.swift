@@ -24,24 +24,17 @@ import AppKit
 /// DELIBERATE EXCLUSIONS — tokens/pairs this matrix does NOT re-check because
 /// another suite already owns them, or because the pairing has no floor to
 /// begin with:
-///  - The four `permission*` identity hues, `bluetoothBrand`, `goldCTA`, and
+///  - The five `permission*` identity hues, `bluetoothBrand`, and
 ///    gold-on-raised across BOTH dial columns — all swept by
-///    `OnboardingPermissionColorTests` (which also covers `.systemAccent`,
-///    a dial column this file does not touch at all).
+///    `OnboardingPermissionColorTests`.
 ///  - Surface-separation floors (`well`/`panel`/`raised`/`hairline` ratios
 ///    against EACH OTHER) — `MembershipWellContrastTests`' job; this file
 ///    only uses those tokens as fixed GROUNDS for a foreground instrument.
-///  - `glow`, `dotSocket`, `meterTrack`, `sidebarWarmTint`, and the surface
-///    ladder itself (`canvas`/`canvasHi`/`panel`/`raised`/`well`) — each
-///    documented as a floor-exempt quiet backdrop in its own Tokens.swift
-///    rationale. `dotSocket` is exempt from a GROUND floor only: it is always
-///    ringed, and Test D below pins it against the ring.
-///  - The bare `warning`/`destructive`/`info` system-alias tokens — OS-owned
-///    values, not this module's hexes to pin. KNOWN failure carried forward:
-///    bare `warning` measures ~2.1:1 as a light glyph; its one TEXT consumer
-///    moved to `warningText` in this pass (P1's `AudioSettingsViewController`
-///    fix), and the remaining glyph consumers belong to other tracks'
-///    findings — pinning an OS-owned hex here would be brittle.
+///  - The floor-exempt backdrops `canvas`, `panel`, `raised`, `well`,
+///    `liveRow`, `liveRaised`, `glow`, `socket` and `meter` — each documented
+///    as a quiet surface in its own Tokens.swift rationale. `socket` is exempt
+///    from a GROUND floor only: it is always ringed, and Test D below pins it
+///    against the ring.
 @MainActor
 extension SerializedSharedState {
 
@@ -124,8 +117,8 @@ extension SerializedSharedState {
         let token: NSColor
         let floor: CGFloat
         /// Most entries guarantee the SAME grounds in both appearances
-        /// (`sameGrounds`); `ringConnected`'s own rationale only guarantees
-        /// `raised` in dark (P2-4), so it needs a per-appearance list.
+        /// (`sameGrounds`); the closure shape stays so a token whose rationale
+        /// guarantees different grounds per appearance can still be listed.
         let groundsFor: (NSAppearance.Name) -> [(String, NSColor)]
     }
 
@@ -145,13 +138,11 @@ extension SerializedSharedState {
         let icOn: Bool
     }
 
-    /// Exactly one: `faderRim` on light `well` at base (non-IC) contrast —
-    /// deliberately just under 3:1 so a 1 px ring "reads as a rim, not a
-    /// stripe" on paper (`Tokens.swift`'s own rationale); the IC variant
-    /// clears 3.32:1, which is why it is not listed here too.
-    private let exceptions: [Exception] = [
-        Exception(token: "faderRim", ground: "well", appearance: .aqua, icOn: false),
-    ]
+    /// None today: every entry below clears its own floor in all four
+    /// appearance x Increase-Contrast cells. The mechanism stays because a
+    /// future authored under-floor case needs it, and Test A's self-cleaning
+    /// assertion keeps a listed pair from going stale.
+    private let exceptions: [Exception] = []
 
     @Test func everyInstrumentClearsItsFloorAcrossAppearanceAndIncreaseContrast() {
         Tokens.accentStyle = .fullGold
@@ -161,45 +152,36 @@ extension SerializedSharedState {
         let panel = Tokens.Color.panel
         let raised = Tokens.Color.raised
         let well = Tokens.Color.well
-        let iconSeatFill = Tokens.Color.iconSeatFill
-        let feedPillFill = Tokens.Color.feedPillFill
         let scopeGround = Tokens.Color.scopeGround
+
+        let textGrounds: [(String, NSColor)] = [("canvas", canvas), ("panel", panel),
+                                                ("raised", raised), ("well", well)]
 
         let entries: [ContrastEntry] = [
             // TEXT, floor 4.5:1
-            ContrastEntry(name: "secondaryLabel", token: Tokens.Color.secondaryLabel, floor: 4.5,
-                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel),
-                                                  ("raised", raised), ("well", well)])),
-            ContrastEntry(name: "inkSecondary", token: Tokens.Color.inkSecondary, floor: 4.5,
-                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
-            ContrastEntry(name: "inkTertiary", token: Tokens.Color.inkTertiary, floor: 4.5,
-                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("well", well),
-                                                  ("iconSeatFill", iconSeatFill)])),
-            ContrastEntry(name: "warningText", token: Tokens.Color.warningText, floor: 4.5,
-                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel)])),
-            ContrastEntry(name: "feedPillText", token: Tokens.Color.feedPillText, floor: 4.5,
-                         groundsFor: sameGrounds([("feedPillFill", feedPillFill)])),
+            ContrastEntry(name: "label2", token: Tokens.Color.label2, floor: 4.5,
+                         groundsFor: sameGrounds(textGrounds)),
+            ContrastEntry(name: "label3", token: Tokens.Color.label3, floor: 4.5,
+                         groundsFor: sameGrounds(textGrounds)),
+            ContrastEntry(name: "labelCool", token: Tokens.Color.labelCool, floor: 4.5,
+                         groundsFor: sameGrounds(textGrounds)),
+            ContrastEntry(name: "labelCool2", token: Tokens.Color.labelCool2, floor: 4.5,
+                         groundsFor: sameGrounds(textGrounds)),
+            ContrastEntry(name: "goldText", token: Tokens.Color.goldText, floor: 4.5,
+                         groundsFor: sameGrounds(textGrounds)),
+            ContrastEntry(name: "emberText", token: Tokens.Color.emberText, floor: 4.5,
+                         groundsFor: sameGrounds(textGrounds)),
             // NON-TEXT, floor 3.0:1
-            ContrastEntry(name: "success", token: Tokens.Color.success, floor: 3.0,
-                         groundsFor: sameGrounds([("panel", panel), ("raised", raised)])),
             ContrastEntry(name: "failure", token: Tokens.Color.failure, floor: 3.0,
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised)])),
-            ContrastEntry(name: "caution", token: Tokens.Color.caution, floor: 3.0,
-                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel)])),
             ContrastEntry(name: "gold", token: Tokens.Color.gold, floor: 3.0,
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
             ContrastEntry(name: "ember", token: Tokens.Color.ember, floor: 3.0,
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
-            ContrastEntry(name: "ringConnected", token: Tokens.Color.ringConnected, floor: 3.0,
-                         groundsFor: { appearance in
-                             appearance == .darkAqua
-                                 ? [("panel", panel), ("raised", raised)]
-                                 : [("panel", panel)]
-                         }),
-            ContrastEntry(name: "faderThumb", token: Tokens.Color.faderThumb, floor: 3.0,
-                         groundsFor: sameGrounds([("canvas", canvas), ("well", well)])),
-            ContrastEntry(name: "faderRim", token: Tokens.Color.faderRim, floor: 3.0,
-                         groundsFor: sameGrounds([("well", well)])),
+            ContrastEntry(name: "ring", token: Tokens.Color.ring, floor: 3.0,
+                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
+            ContrastEntry(name: "rim", token: Tokens.Color.rim, floor: 3.0,
+                         groundsFor: sameGrounds([("canvas", canvas), ("raised", raised), ("well", well)])),
             ContrastEntry(name: "railDormant", token: Tokens.Color.railDormant, floor: 3.0,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
             ContrastEntry(name: "scopeFlatLine", token: Tokens.Color.scopeFlatLine, floor: 3.0,
@@ -238,21 +220,32 @@ extension SerializedSharedState {
     /// column" — placed here rather than there because dial mutation
     /// requires the serialized suite
     /// (`OnboardingPermissionColorTests.swift:32-36`'s documented reason).
-    /// Expected (own measurement, recorded for the record): light `ember`
-    /// ~3.29:1 well / ~4.24:1 panel; light `gold` ~3.08:1 well / ~3.97:1
-    /// panel.
+    /// Expected (own measurement, recorded for the record): light `gold`
+    /// 3.42:1 well / 3.95:1 panel; light `ember` 5.02:1 well / 5.79:1 panel.
+    /// The text companions carry the 4.5:1 floor on the same two grounds:
+    /// `goldText` 4.51:1 / 5.21:1, `emberText` 5.02:1 / 5.79:1.
     @Test func subtleColumnEmberAndGoldClearTheNonTextFloorOnWellAndPanel() {
         Tokens.accentStyle = .subtle
         defer { Tokens.accentStyle = .fullGold }
-        let floor: CGFloat = 3.0
         let well = Tokens.Color.well
         let panel = Tokens.Color.panel
+        let grounds: [(String, NSColor)] = [("well", well), ("panel", panel)]
 
+        let nonTextFloor: CGFloat = 3.0
         for (name, token) in [("ember", Tokens.Color.ember), ("gold", Tokens.Color.gold)] {
-            for (groundName, ground) in [("well", well), ("panel", panel)] {
+            for (groundName, ground) in grounds {
                 let ratio = measuredRatio(token, over: ground, appearanceName: .aqua)
-                #expect(ratio >= floor,
-                    "\(name)/subtle vs \(groundName) light: \(String(format: "%.2f", ratio)):1 under \(floor):1")
+                #expect(ratio >= nonTextFloor,
+                    "\(name)/subtle vs \(groundName) light: \(String(format: "%.2f", ratio)):1 under \(nonTextFloor):1")
+            }
+        }
+
+        let textFloor: CGFloat = 4.5
+        for (name, token) in [("goldText", Tokens.Color.goldText), ("emberText", Tokens.Color.emberText)] {
+            for (groundName, ground) in grounds {
+                let ratio = measuredRatio(token, over: ground, appearanceName: .aqua)
+                #expect(ratio >= textFloor,
+                    "\(name)/subtle vs \(groundName) light: \(String(format: "%.2f", ratio)):1 under \(textFloor):1")
             }
         }
     }
@@ -283,7 +276,7 @@ extension SerializedSharedState {
 
     // MARK: - Test D: the unlit seat vs the ring around it
 
-    /// `dotSocket` fills two instruments that are always RINGED — the
+    /// `socket` fills two instruments that are always RINGED — the
     /// route-armed dot on its icon corner, and a dimmed membership node inside
     /// the rail's own rim — so the pairing that decides whether it reads is
     /// seat-vs-ring, not seat-vs-ground. It carries no ground floor by design
@@ -297,7 +290,7 @@ extension SerializedSharedState {
     /// behind it in each appearance. Swept over appearance x Increase Contrast
     /// x dial column because both rim tones are accent-remapped and every
     /// variant moves independently; the tightest cell is Subtle dark `ember`,
-    /// 1.47:1.
+    /// 2.08:1.
     @Test func dimmedNodeSeatSeparatesFromBothRimTones() {
         defer {
             Tokens.accentStyle = .fullGold
@@ -310,11 +303,11 @@ extension SerializedSharedState {
             for increaseContrast in [false, true] {
                 Tokens.test_increaseContrastOverride = increaseContrast
                 for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
-                    let seat = resolved(Tokens.Color.dotSocket, appearanceName: appearanceName)
+                    let seat = resolved(Tokens.Color.socket, appearanceName: appearanceName)
                     for (rimName, rim) in [("ember", Tokens.Color.ember), ("gold", Tokens.Color.gold)] {
                         let ratio = contrastRatio(seat, resolved(rim, appearanceName: appearanceName))
                         #expect(ratio >= floor, Comment(rawValue:
-                            "dotSocket vs \(rimName) (\(style), " +
+                            "socket vs \(rimName) (\(style), " +
                             "IC \(increaseContrast), \(appearanceName.rawValue)): " +
                             "\(String(format: "%.2f", ratio)):1 under \(floor):1"))
                     }

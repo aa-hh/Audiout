@@ -2578,7 +2578,7 @@ public final class PopoverController: NSObject {
         // lives on underneath (§4.8). The mixer window / group members keep the
         // default `false` (plain switch), so their rendering is unchanged.
         let view = DeviceRowView(device: device, indented: indented, showsToggle: showsToggle,
-                                 paintsSelectionBackground: false, showsMeter: true, showsBus: true,
+                                 showsMeter: true, showsBus: true,
                                  // Roadmap 056 Part 1: the Mac's own output is
                                  // a trimmable device too, and gets the identical
                                  // chip/drawer/wizard surface. CAST-SYNC adds
@@ -2701,7 +2701,6 @@ public final class PopoverController: NSObject {
                       selectionDimmed: dimmed,
                       routedAppNames: appRouting.routedAppNames(for: device.id),
                       liveAppNames: liveRoutedAppNames[device.id] ?? [],
-                      appTintColors: appTintColorsByName(),
                       mainOutTargetsGroupName: activeMainOutGroupName,
                       energizePending: energizePendingIDs.contains(device.id),
                       iconSymbolName: deviceIconController?.symbolName(for: device),
@@ -2755,7 +2754,6 @@ public final class PopoverController: NSObject {
                   selectionDimmed: dimmed,
                   routedAppNames: appRouting.routedAppNames(for: device.id),
                   liveAppNames: liveRoutedAppNames[device.id] ?? [],
-                  appTintColors: appTintColorsByName(),
                   masterMuted: controller.isMainOutMuted,
                   inActiveTarget: inActiveTarget,
                   mainOutTargetsGroupName: activeMainOutGroupName,
@@ -3437,15 +3435,6 @@ public final class PopoverController: NSObject {
     private func makeAppRow(_ route: AppRoute, devices: [Device]) -> AppRowView {
         let row = AppRowView(showsMeter: true)
         row.delegate = self
-        // Tether chip (Warm Signal v4.1 CORRECTIONS, extending item 7): only
-        // an actual AirPlay-device redirect has a matching device-row FEED
-        // segment to tether to — "No Redirect"/"Current Device" get no chip.
-        let tetherColor: NSColor?
-        if case .device = route.destination {
-            tetherColor = appTintColor(for: route.bundleID)
-        } else {
-            tetherColor = nil
-        }
         row.apply(AppRowView.Configuration(
             appID: route.bundleID,
             name: route.displayName,
@@ -3454,8 +3443,7 @@ public final class PopoverController: NSObject {
             selectedDestinationID: destinationID(for: route.destination),
             destinations: appDestinations(devices: devices, keeping: route.destination,
                                          bundleID: route.bundleID),
-            isRunning: !offlineBundleIDs.contains(route.bundleID),
-            tetherColor: tetherColor),
+            isRunning: !offlineBundleIDs.contains(route.bundleID)),
                   isSelected: route.bundleID == selectedAppBundleID)
         appRowsByBundleID[route.bundleID] = row
         return row
@@ -3637,9 +3625,6 @@ public final class PopoverController: NSObject {
     /// app's real icon from disk/`NSWorkspace` instead of falling straight to the
     /// placeholder below. Only an app `AppIconCache` truly can't find (never
     /// installed, or an invalid bundle id) reaches the generic placeholder. This
-    /// also means `appTintColor(for:)` below, which derives its tint from this
-    /// icon, now resolves a quit app's real brand hue instead of the neutral
-    /// placeholder tint.
     private func appIcon(for bundleID: String) -> NSImage? {
         if let running = runningAppsProvider().first(where: { $0.bundleID == bundleID }),
            let icon = running.icon {
@@ -3651,33 +3636,6 @@ public final class PopoverController: NSObject {
         let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .regular)
         return NSImage(systemSymbolName: Self.missingAppIconSymbolName, accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
-    }
-
-    /// This app's `AppTetherColor` tint (Warm Signal v4.1 CORRECTIONS,
-    /// extending T7/item 7) — derived from the same icon `appIcon(for:)`
-    /// resolves for the App Routing row, so a routed-but-quit app (icon
-    /// falls back to the generic placeholder) and a running one resolve
-    /// identically to whichever a redirect target's device row shows.
-    /// `AppTetherColor.color(forBundleID:icon:)` caches per bundle id itself
-    /// (Warm Signal v4 §Call 2), so repeated calls here are cheap.
-    private func appTintColor(for bundleID: String) -> NSColor {
-        AppTetherColor.color(forBundleID: bundleID, icon: appIcon(for: bundleID))
-    }
-
-    /// Every currently-routed app's tether tint, keyed by DISPLAY NAME —
-    /// `DeviceRowView`'s FEED column only carries app display names (never
-    /// bundle ids), so this is the map its `apply(appTintColors:)` parameter
-    /// needs. Built from `appRouting.appRoutes` regardless of each route's
-    /// destination (a device row only ever looks up names that are actually
-    /// in ITS OWN `feedAppNames`, i.e. routed to that specific device, so an
-    /// unrelated "Current Device"/"No Redirect" entry in this map is simply
-    /// never read).
-    private func appTintColorsByName() -> [String: NSColor] {
-        var result: [String: NSColor] = [:]
-        for route in appRouting.appRoutes {
-            result[route.displayName] = appTintColor(for: route.bundleID)
-        }
-        return result
     }
 
     // MARK: Actions

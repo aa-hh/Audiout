@@ -51,6 +51,14 @@ extension SerializedSharedState {
         #expect(settings.accentStyle == .fullGold)
     }
 
+    /// The dial used to have a third position, Follow System Accent. A Mac
+    /// that had it selected still has `"systemAccent"` in its defaults, and it
+    /// must land on the flagship default rather than on nothing.
+    @Test func accentStyleStoredFollowSystemFallsBackToFullGold() {
+        isolatedDefaults.set("systemAccent", forKey: "appearance.accentStyle")
+        #expect(settings.accentStyle == .fullGold)
+    }
+
     // MARK: Appearance pane — Accent dial
 
     private func makeAppearancePane() -> AppearanceSettingsViewController {
@@ -62,8 +70,8 @@ extension SerializedSharedState {
     }
 
     @Test func accentDialInitialisesFromPersistedStyle() {
-        settings.accentStyle = .systemAccent
-        #expect(makeAppearancePane().test_selectedAccentStyle == .systemAccent)
+        settings.accentStyle = .subtle
+        #expect(makeAppearancePane().test_selectedAccentStyle == .subtle)
     }
 
     @Test func selectingAccentPersistsRemapsAndNotifies() {
@@ -84,10 +92,10 @@ extension SerializedSharedState {
         let fullGoldHint = pane.test_accentHint
         #expect(!fullGoldHint.isEmpty)
 
-        pane.test_selectAccentStyle(.systemAccent)
-        let systemHint = pane.test_accentHint
-        #expect(!systemHint.isEmpty)
-        #expect(systemHint != fullGoldHint, "the hint is LIVE — it must re-write per dial position")
+        pane.test_selectAccentStyle(.subtle)
+        let subtleHint = pane.test_accentHint
+        #expect(!subtleHint.isEmpty)
+        #expect(subtleHint != fullGoldHint, "the hint is LIVE — it must re-write per dial position")
     }
 
     // MARK: Token remap (spec §1.3 table)
@@ -113,30 +121,15 @@ extension SerializedSharedState {
         #expect(resolved(Tokens.Color.glow, appearanceName: .darkAqua).alphaComponent == 0)
     }
 
-    @Test func systemAccentPullsControlAccentIntoGold() {
-        Tokens.accentStyle = .systemAccent
-        let gold = resolved(Tokens.Color.gold, appearanceName: .darkAqua)
-        let accent = resolved(NSColor.controlAccentColor, appearanceName: .darkAqua)
-        #expect(abs(gold.redComponent - accent.redComponent) <= 0.001)
-        #expect(abs(gold.greenComponent - accent.greenComponent) <= 0.001)
-        #expect(abs(gold.blueComponent - accent.blueComponent) <= 0.001)
-
-        // Ember = accent × 0.55 luminance (component-scaled), strictly dimmer.
-        let ember = resolved(Tokens.Color.ember, appearanceName: .darkAqua)
-        #expect(abs(ember.redComponent - accent.redComponent * 0.55) <= 0.005)
-        #expect(abs(ember.greenComponent - accent.greenComponent * 0.55) <= 0.005)
-        #expect(abs(ember.blueComponent - accent.blueComponent * 0.55) <= 0.005)
-    }
-
-    @Test func accentDialNeverRemapsFailureCautionOrRing() {
+    @Test func accentDialNeverRemapsFailureRimOrRing() {
         let failure = resolved(Tokens.Color.failure, appearanceName: .darkAqua)
-        let caution = resolved(Tokens.Color.caution, appearanceName: .darkAqua)
-        let ring = resolved(Tokens.Color.ringConnected, appearanceName: .darkAqua)
+        let rim = resolved(Tokens.Color.rim, appearanceName: .darkAqua)
+        let ring = resolved(Tokens.Color.ring, appearanceName: .darkAqua)
         for style in AccentStyle.allCases {
             Tokens.accentStyle = style
             #expect(resolved(Tokens.Color.failure, appearanceName: .darkAqua) == failure)
-            #expect(resolved(Tokens.Color.caution, appearanceName: .darkAqua) == caution)
-            #expect(resolved(Tokens.Color.ringConnected, appearanceName: .darkAqua) == ring)
+            #expect(resolved(Tokens.Color.rim, appearanceName: .darkAqua) == rim)
+            #expect(resolved(Tokens.Color.ring, appearanceName: .darkAqua) == ring)
         }
     }
 

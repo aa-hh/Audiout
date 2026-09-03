@@ -53,7 +53,7 @@ import AudioutCore
         let (row, _) = makeHostedRow(connectionState: .connecting)
         row.apply(makeDevice(connectionState: .connecting), selected: true, controllable: true)
         #expect(row.test_controlsMuted, "a connecting row sits in the muted-unconnected treatment")
-        assertSameHue(row.test_feedNeutralColor, Tokens.Color.tertiaryLabel,
+        assertSameHue(row.test_feedNeutralColor, Tokens.Color.label3,
                       "the FEED's neutral segment dims while connecting (item 8 'muted feed text')")
     }
 
@@ -61,8 +61,8 @@ import AudioutCore
         let (row, _) = makeHostedRow(connectionState: .connected)
         row.apply(makeDevice(connectionState: .connected), selected: true, controllable: true)
         #expect(!row.test_controlsMuted)
-        assertSameHue(row.test_feedNeutralColor, Tokens.Color.feedPillText,
-                      "a connected row's FEED reads at normal (full) tint")
+        assertSameHue(row.test_feedNeutralColor, Tokens.Color.goldText,
+                      "a connected, armed row's main-mix pill is goldText")
     }
 
     // MARK: The connect edge fires the brighten, gated by Reduce Motion
@@ -94,7 +94,7 @@ import AudioutCore
         row.apply(makeDevice(connectionState: .connected), selected: true, controllable: true)
         #expect(!row.test_isBrightening, "Reduce Motion removes the transition entirely")
         #expect(!row.test_controlsMuted, "the row still lands on the resolved bright state — just instantly")
-        assertSameHue(row.test_feedNeutralColor, Tokens.Color.feedPillText,
+        assertSameHue(row.test_feedNeutralColor, Tokens.Color.goldText,
                       "the settled FEED tint is unaffected by Reduce Motion — only the transition is")
     }
 

@@ -7,13 +7,11 @@ import AppKit
 
 /// V12 (raw-color elimination pass): `SilenceFallbackBannerView` and
 /// `SystemAirPlayNoteBannerView` used to stamp `NSColor.systemOrange`/
-/// `.systemBlue` directly instead of going through `Tokens.Color`. Both are
-/// now `Tokens.Color.warning`/`.info` — semantic aliases of the same system
-/// colors (declared like `Tokens.Color.warning`/`.destructive` immediately
-/// above them in `Tokens.swift`, not the custom warm-palette hex literals),
-/// so the RESOLVED pixel is unchanged by construction; these tests guard the
-/// wiring (the right token, the right alpha, per severity tier) rather than
-/// a colour delta that can't exist between an alias and the value it aliases.
+/// `.systemBlue` directly instead of going through `Tokens.Color`. Both now
+/// read `Tokens.Color.warning`/`.info`, which are deprecated aliases of
+/// `failure` and `ring` — so the banners tint red and steel blue until the
+/// surface PR re-points them. These tests guard the WIRING (the right token,
+/// the right alpha, per severity tier), not a particular hue.
 @MainActor
 @Suite struct NoteBannerColorTests {
 

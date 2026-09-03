@@ -329,10 +329,6 @@ bash scripts/run-tests.sh --filter MembershipRailTests
   removed 2026-09-03; only the wizard's own hold remains.
 - `AudioutCore/Sources/AudioutSharedUI/AGENTS.md` — add the EQ button and
   the fork chip to the row's element list if it has one.
-- `docs/FIGMA-DESIGN-SYSTEM.md` — the `PopoverColumnGrid` contract mirrors
-  the Figma file 1:1: add the three new constants
-  (`syncDrawerAlignAgainButtonWidth`, `eqButtonWidth`, `eqToMuteGap`),
-  remove `syncDrawerRevertButtonWidth`, note the width change.
 - `ROADMAP.jsonl` — mark `065` dropped through the foreman script (never
   hand-edit): `echo '{"id":"065","status":"dropped","notes":"Superseded 2026-09-03: the untuned chip opens the wizard directly; the first-join note replaces the alert state; no guided-vs-manual choice (Alec)."}' | node /Users/alechenderson/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js update-status`
 

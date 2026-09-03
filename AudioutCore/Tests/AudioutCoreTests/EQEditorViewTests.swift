@@ -188,12 +188,13 @@ import AppKit
         #expect(editor.test_advancedHintText == "10 bands")
     }
 
-    /// The hairline sits between the loudness row and the Advanced row, and
-    /// spans the same content lane the caption/readout columns anchor to.
-    /// Editor coordinates are NOT flipped, so "above" means a larger Y.
-    @Test func hairlineSitsBetweenLoudnessAndAdvanced() {
+    /// The `containerEdge` divider sits between the loudness row and the
+    /// Advanced row, and spans the same content lane the caption/readout
+    /// columns anchor to. Editor coordinates are NOT flipped, so "above"
+    /// means a larger Y.
+    @Test func dividerSitsBetweenLoudnessAndAdvanced() {
         let editor = makeHostedEditor(width: 357)
-        let hairline = editor.test_advancedHairlineFrame
+        let hairline = editor.test_advancedDividerFrame
         let checkbox = editor.test_loudnessCheckboxFrame
         let row = editor.test_advancedRowFrame
         #expect(hairline.minY >= row.maxY - 0.5)

@@ -89,32 +89,38 @@ import AppKit
         #expect(row.test_masterReadoutColor == Tokens.Color.emberText)
     }
 
-    /// A saved-group target is the one thing that puts magenta on this row: the
-    /// picker's arrow and the identity light behind the icon.
-    @Test func groupTargetLightsTheChevronAndGlow() {
+    /// A saved-group target lights the identity glow behind the icon; going
+    /// back to Selected Devices puts it out.
+    @Test func groupTargetLightsTheGlow() {
         let row = MainOutRowView()
         let options: [MainOutRowView.Option] = [
             .init(title: "Selected Devices", target: .selectedDevices),
             .init(title: "Kitchen", target: .group(id: "g1"), buttonTitle: "→ Kitchen"),
         ]
         row.apply(options: options, current: .group(id: "g1"), master: 50)
-        #expect(row.test_destinationChevronTint == Tokens.Color.partyRampDeep)
         #expect(row.test_groupGlowVisible)
 
         row.apply(options: options, current: .selectedDevices, master: 50)
-        #expect(row.test_destinationChevronTint == Tokens.Color.label2)
         #expect(!row.test_groupGlowVisible)
     }
 
-    /// The magenta stays off the words: the display-only cell item still
-    /// surfaces the group's short button title.
-    @Test func pickerTitleStaysLabelInkOnAGroupTarget() {
+    /// The display-only cell item surfaces the group's short button title, and
+    /// its attributed string carries the tail-truncating paragraph style — an
+    /// `attributedTitle` makes the cell ignore its own `lineBreakMode`, so a
+    /// long group name would otherwise clip mid-word with no ellipsis.
+    @Test func pickerTitleIsTheButtonTitleAndTruncatesByTail() {
         let row = MainOutRowView()
+        let longName = "The Extremely Long Upstairs Bedroom Speaker Group"
         row.apply(options: [
             .init(title: "Selected Devices", target: .selectedDevices),
-            .init(title: "Kitchen", target: .group(id: "g1"), buttonTitle: "→ Kitchen"),
+            .init(title: longName, target: .group(id: "g1"), buttonTitle: "→ \(longName)"),
         ], current: .group(id: "g1"), master: 50)
-        #expect(row.test_buttonTitle == "→ Kitchen")
+        #expect(row.test_buttonTitle == "→ \(longName)")
+
+        let attributed = try? #require(row.test_buttonAttributedTitle)
+        let style = attributed?.attribute(.paragraphStyle, at: 0, effectiveRange: nil)
+            as? NSParagraphStyle
+        #expect(style?.lineBreakMode == .byTruncatingTail)
     }
 
     @Test func connectedRingIsUnaffectedByRestingArmed() {

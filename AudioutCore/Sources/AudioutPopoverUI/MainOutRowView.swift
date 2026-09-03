@@ -23,9 +23,9 @@ import AudioutSharedUI
 /// The current target is checkmarked AND its title is the button's visible label,
 /// its accessibility value, and the `test_selectedTitle` hook.
 ///
-/// While the target is a saved GROUP the picker's arrow reads `partyRampDeep`
-/// and a `GroupIdentityGlowView` lights behind the icon (R2, the iOS "party
-/// edge") — the row still paints no fill of its own.
+/// While the target is a saved GROUP a `GroupIdentityGlowView` lights behind
+/// the icon (R2, the iOS "party edge") and the picker names the group — the
+/// row still paints no fill of its own.
 ///
 /// Pure UI: every control routes back through ``Delegate`` so the host
 /// (`PopoverController`) can drive `GroupController`. The view never talks to a
@@ -259,8 +259,6 @@ public final class MainOutRowView: NSView {
         busOriginView.apply(node: .origin, dimmed: busOriginDimmed ?? isGroupTarget,
                             originGold: armed)
         groupGlowView.isHidden = !isGroupTarget
-        destinationPopUp.contentTintColor = isGroupTarget
-            ? Tokens.Color.partyRampDeep : Tokens.Color.label2
 
         let menu = destinationPopUp.menu ?? NSMenu()
         menu.removeAllItems()
@@ -298,18 +296,24 @@ public final class MainOutRowView: NSView {
         if let currentItem { destinationPopUp.select(currentItem) }
         // The collapsed button always draws a display-only cell item, never the
         // selected menu item: the item's attributed title pins the words to
-        // `label`, so the borderless button's `contentTintColor` reaches only
-        // the arrow. It also carries a distinct `buttonTitle` when an option
+        // `label` ink. It also carries a distinct `buttonTitle` when an option
         // sets one, while the open menu keeps the full `title`. Re-set every
         // `apply` so a later selection without an override reverts.
+        //
+        // The paragraph style is load-bearing: an `attributedTitle` makes the
+        // cell ignore its own `lineBreakMode`, so without it a long group name
+        // clips mid-word instead of taking the tail ellipsis.
         if let cell = destinationPopUp.cell as? NSPopUpButtonCell {
             let shownTitle = currentButtonTitle ?? selectedTitle ?? ""
             cell.usesItemFromMenu = false
             let displayItem = NSMenuItem(title: shownTitle, action: nil, keyEquivalent: "")
+            let truncating = NSMutableParagraphStyle()
+            truncating.lineBreakMode = .byTruncatingTail
             displayItem.attributedTitle = NSAttributedString(
                 string: shownTitle,
                 attributes: [.font: Tokens.Font.caption,
-                             .foregroundColor: Tokens.Color.label])
+                             .foregroundColor: Tokens.Color.label,
+                             .paragraphStyle: truncating])
             cell.menuItem = displayItem
         }
 
@@ -423,12 +427,13 @@ public final class MainOutRowView: NSView {
         // truncated. It carries the same two-section menu populated in `apply`.
         destinationPopUp.translatesAutoresizingMaskIntoConstraints = false
         destinationPopUp.pullsDown = false
-        // Borderless permanently: `contentTintColor` cannot reach a bordered
-        // pop-up's arrow (the bezel draws it), and a bezel that came and went
-        // with the target would jump. Borderless, the tint reaches title AND
-        // arrow — which is why the display item below carries its own
-        // `label` attributed title, keeping the magenta off the words.
-        destinationPopUp.isBordered = false
+        // Bordered, always: a borderless `NSButton` silently discards
+        // `drawFocusRingMask`, so keyboard focus on this control would become
+        // invisible (the same trap `AlignmentPlateButton` documents). Going
+        // borderless was also the only way to tint the arrow — the bezel draws
+        // it — so the arrow stays neutral and the group's magenta is carried
+        // by the identity glow and the "→ <group>" title instead.
+        destinationPopUp.isBordered = true
         destinationPopUp.controlSize = .small
         destinationPopUp.font = Tokens.Font.caption
         // Truncate a long target title with a tail ellipsis inside the fixed
@@ -680,8 +685,11 @@ public final class MainOutRowView: NSView {
     public var test_masterReadoutColor: NSColor? { readoutLabel.textColor }
     /// The readout's current face.
     public var test_masterReadoutFont: NSFont? { readoutLabel.font }
-    /// The destination picker's arrow tint — magenta on a group target.
-    public var test_destinationChevronTint: NSColor? { destinationPopUp.contentTintColor }
+    /// The attributed string the collapsed pop-up actually renders — pins the
+    /// ink and the truncation the plain title cannot show.
+    public var test_buttonAttributedTitle: NSAttributedString? {
+        (destinationPopUp.cell as? NSPopUpButtonCell)?.menuItem?.attributedTitle
+    }
     /// Whether the group identity glow is lit behind the icon.
     public var test_groupGlowVisible: Bool { !groupGlowView.isHidden }
     /// Force the live-drag guard, so tests can pin what `apply(...)` may touch

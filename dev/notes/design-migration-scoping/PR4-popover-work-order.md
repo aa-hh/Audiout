@@ -72,7 +72,13 @@ every geometry constant stay as they are.
     `appDestinations` re-appending an offline `.device` target as an entry (:3557-3563), so a
     routed row's selected id is always in its list and `isNoRedirect`'s `?? true` never fires.
   A test pins each predicate to the rows' rendered state (`test_routeArmed`,
-  `test_isFaderEngaged`) so the two cannot drift silently.
+  `test_isFaderEngaged`).
+  **Known exception (accepted, cosmetic):** the App Routing predicate reads the
+  stored `route.destination`, while the row reads its own popup entry. If a
+  routed speaker leaves discovery entirely, the row can fall back to the
+  standalone entry (unarmed fader) while the stored destination is still a
+  `.device`, so the title stays gold over a silent row. Title tint only —
+  nothing audible, nothing else in the card moves.
 - **D2 The title is retinted by re-setting its attributed string.** `makeLegendLabel` builds the
   label with `labelWithAttributedString` and a `.foregroundColor` attribute
   (PopoverPanelViewController.swift:1184-1187); an attribute wins over `textColor`, so the setter
@@ -92,7 +98,18 @@ every geometry constant stay as they are.
 - **D5 `ConnectionDiagnosisView.backgroundCornerRadius` 7 → `Tokens.Layout.Radius.control`** so
   the three inset cards share one corner. Its 12 % `failure` blend over `panel` is already the
   recipe (ConnectionDiagnosisView.swift:221-240) and is untouched.
-- **D6 The destination pop-up goes borderless; the chevron carries the tint.** Probe (this
+- **D6 REVERTED during review (2026-09-04) — the pop-up stays bordered and the arrow keeps its
+  neutral tint.** A borderless `NSButton` silently discards `drawFocusRingMask` (openradar
+  29465363), so keyboard focus on this control would be invisible — the trap this repo already
+  documents at `AlignmentPlateButton.swift:38`, on a popover that does take key focus
+  (`ControlPanelWindowController.swift:187`). The regenerated snapshot also showed ~75 pt of bare
+  ground between title and arrow, so the borderless button stopped reading as one control. The
+  group's magenta is carried on this row by `GroupIdentityGlowView` and the "→ <group>" title
+  instead. What survives from the original D6: the display-only cell item with an attributed
+  title in `Tokens.Color.label`, now also carrying a tail-truncating paragraph style (an
+  attributed title makes the cell ignore its own `lineBreakMode`). The original reasoning follows,
+  kept because it is the record of why the borderless route looked right first.
+- **D6 (original, superseded) The destination pop-up goes borderless; the chevron carries the tint.** Probe (this
   session, `scratchpad/popup_probe*.swift`, rendered under `.darkAqua`): on a bordered
   `NSPopUpButton` `contentTintColor` changes nothing — the arrow is bezel-drawn; on a borderless
   one it tints title AND arrow; with the display-only cell item carrying an attributed title in

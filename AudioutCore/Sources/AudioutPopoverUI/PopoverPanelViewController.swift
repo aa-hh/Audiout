@@ -74,6 +74,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// Card/subsection TITLE labels keyed by their title — the labels carrying
     /// the AX `.heading` role, kept for the `test_headerTitleAXRole` hook.
     private var headerTitleLabelsByHeader: [String: NSTextField] = [:]
+    /// The liveness last pushed per card title, so a repeated push costs
+    /// nothing — the host re-derives it on every volume-key repeat.
+    private var headerLivenessByHeader: [String: Bool] = [:]
     /// Whole-header-row click recognizers keyed by section title (C4 — the
     /// entire `headerWrap` row is a collapse click target, not just the
     /// chevron + title; kept for the `test_fireHeaderClick` hook).
@@ -487,6 +490,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         cardsByHeader.removeAll()
         chevronsByHeader.removeAll()
         headerTitleLabelsByHeader.removeAll()
+        headerLivenessByHeader.removeAll()
         chevronSymbolByHeader.removeAll()
         pendingCollapsed.removeAll()
         headerClickRecognizersByHeader.removeAll()
@@ -827,7 +831,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// lookup dictionary but are never named by a caller, and a title with no
     /// header built yet is a no-op.
     func setCardHeaderLive(title: String, live: Bool) {
-        guard let label = headerTitleLabelsByHeader[title] else { return }
+        guard let label = headerTitleLabelsByHeader[title],
+              headerLivenessByHeader[title] != live else { return }
+        headerLivenessByHeader[title] = live
         label.attributedStringValue = NSAttributedString(
             string: label.attributedStringValue.string,
             attributes: [.font: Tokens.Font.captionEmphasized,

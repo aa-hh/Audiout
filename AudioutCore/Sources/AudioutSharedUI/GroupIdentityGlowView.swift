@@ -38,8 +38,20 @@ public final class GroupIdentityGlowView: NSView {
             gradient.locations = [0, 1]
         }
         setAccessibilityElement(false)
+        // Increase Contrast is NOT part of the effective appearance, so the
+        // appearance callback alone would miss it and the glow would keep its
+        // standard-contrast magenta — the same second observer every other
+        // instrument here registers. Selector-based observation needs no
+        // matching removal (post-10.11 AppKit auto-unregisters).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
         stamp()
     }
+
+    @objc private func accessibilityDisplayOptionsDidChange() { stamp() }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -73,10 +85,14 @@ public final class GroupIdentityGlowView: NSView {
 
     // MARK: Test-support hooks
 
-    /// The alpha of the stamped core colour — the appearance split, read back.
-    public var test_coreAlpha: CGFloat? {
+    /// The stamped core colour, read back — the appearance and
+    /// Increase-Contrast splits both land here.
+    public var test_coreColor: NSColor? {
         guard let gradient = layer as? CAGradientLayer,
-              let colors = gradient.colors as? [CGColor] else { return nil }
-        return colors.first?.alpha
+              let colors = gradient.colors as? [CGColor],
+              let core = colors.first else { return nil }
+        return NSColor(cgColor: core)
     }
+    /// The alpha of the stamped core colour — the appearance split, read back.
+    public var test_coreAlpha: CGFloat? { test_coreColor?.alphaComponent }
 }

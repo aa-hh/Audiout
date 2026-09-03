@@ -5,9 +5,15 @@ import AppKit
 @testable import AudioutSharedUI
 
 /// The magenta identity light behind a group's seat: its core is heavier in
-/// dark than on the light ground, it is invisible to the pointer and to
-/// VoiceOver, and its falloff is unit-based so one recipe serves every mounted
-/// size (the Main Out row at 60, the Groups editor well at 80).
+/// dark than on the light ground, it follows Increase Contrast live, it is
+/// invisible to the pointer and to VoiceOver, and its falloff is unit-based so
+/// one recipe serves every mounted size (the Main Out row at 60, the Groups
+/// editor well at 80).
+///
+/// Nested under `SerializedSharedState` for one reason: the Increase-Contrast
+/// test drives `Tokens.test_increaseContrastOverride`, which is process-wide.
+extension SerializedSharedState {
+
 @MainActor
 @Suite struct GroupIdentityGlowViewTests {
 
@@ -19,6 +25,42 @@ import AppKit
 
         view.appearance = NSAppearance(named: .aqua)
         #expect(abs((view.test_coreAlpha ?? -1) - 0.10) <= 0.004)
+    }
+
+    /// Increase Contrast is not part of the effective appearance, so only the
+    /// workspace observer can catch it — without that, the glow would keep the
+    /// standard-contrast magenta after the setting is turned on.
+    @Test func coreFollowsIncreaseContrastLive() {
+        defer { Tokens.test_increaseContrastOverride = nil }
+        let view = GroupIdentityGlowView()
+        view.appearance = NSAppearance(named: .aqua)
+
+        Tokens.test_increaseContrastOverride = false
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        let base = view.test_coreColor?.usingColorSpace(.sRGB)
+
+        Tokens.test_increaseContrastOverride = true
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        let increased = view.test_coreColor?.usingColorSpace(.sRGB)
+
+        guard let base, let increased else {
+            Issue.record("no stamped core colour")
+            return
+        }
+        #expect(increased.redComponent != base.redComponent
+                    || increased.blueComponent != base.blueComponent,
+                "the core must re-resolve when Increase Contrast turns on")
+
+        var expected: NSColor?
+        NSAppearance(named: .aqua)?.performAsCurrentDrawingAppearance {
+            expected = Tokens.Color.partyRampDeep.usingColorSpace(.sRGB)
+        }
+        let want = try? #require(expected)
+        #expect(abs(increased.redComponent - (want?.redComponent ?? -1)) <= 0.004)
+        #expect(abs(increased.greenComponent - (want?.greenComponent ?? -1)) <= 0.004)
+        #expect(abs(increased.blueComponent - (want?.blueComponent ?? -1)) <= 0.004)
     }
 
     @Test func glowIsNeitherHittableNorSpoken() {
@@ -46,4 +88,6 @@ import AppKit
         #expect(view.layer is CAGradientLayer)
         #expect(view.layer?.bounds.size == CGSize(width: 80, height: 80))
     }
+}
+
 }

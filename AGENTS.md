@@ -280,12 +280,17 @@ This app must feel like a native macOS citizen, not a cross-platform port.
 - **"Match Control Center / System Settings" is retired as guidance.** For the
   sanctioned custom-drawn Warm Signal pieces (canvas, connection ring, signal
   dot, meter, bus control, fader skin, shell bubble fill) the design authority
-  is the Warm Signal spec, `dev/notes/warm-signal-v3.md` — not Control Center.
-  Stock AppKit behavior, controls, and accessibility remain mandatory
-  regardless: the spec governs paint, not interaction model.
-- **The Figma design system mirrors the UI code.** Any change to `Tokens`,
-  `PopoverColumnGrid`, a custom-drawn view, or a screen must be mirrored in the
-  Figma file per [docs/FIGMA-DESIGN-SYSTEM.md](docs/FIGMA-DESIGN-SYSTEM.md).
+  is `DESIGN.md` at the repo root once the 2026-09-03 migration lands it, and
+  until then the iPhone companion's `DESIGN.md` (`aa-hh/audiout-remote`) plus
+  `dev/notes/design-migration-scoping/01-decisions.md`. `dev/notes/warm-signal-v3.md`
+  is the historical spec, not the authority. Stock AppKit behavior, controls,
+  and accessibility remain mandatory regardless: the design record governs
+  paint, not interaction model.
+- **`DESIGN.md` records the shipped design; nothing mirrors it elsewhere.**
+  The Figma design system was abandoned on 2026-09-03. When a change to
+  `Tokens`, `PopoverColumnGrid`, a custom-drawn view, or a screen lands, the
+  record is regenerated from the code by the `impeccable-documenter` agent
+  (`.claude/agents/impeccable-documenter.md`), never hand-mirrored.
 - Deviating is fine when the system has no equivalent — but note *why* in the
   nearest AGENTS.md, so the next agent doesn't "fix" it back to a system control
   that doesn't fit.

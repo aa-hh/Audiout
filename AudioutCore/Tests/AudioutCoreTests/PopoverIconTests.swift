@@ -10,15 +10,14 @@ import AppKit
 /// Icon-surfacing coverage for the popover (Groups window phase 2, T17):
 /// a device row renders a `DeviceIconController` override when one is
 /// injected and set, falls back to the `Device.Kind` default with no
-/// controller (unchanged behavior), `GroupRowView` resolves a group's own
-/// `iconSymbolName` the same way, and an `onChange`-driven refresh (the
+/// controller (unchanged behavior), and an `onChange`-driven refresh (the
 /// icon-picker edit path) reaches a mounted row without a manual reopen.
 /// Mirrors `PopoverControllerTests`'s harness pattern (`MockBackend` +
 /// `GroupController` + temp-directory stores); the popover isn't visible to
 /// CI, so this asserts the rendered `NSImage` via the same subview-traversal
 /// technique `PopoverControllerTests.testExactFitSizeMatchesContentNoScroll`
-/// uses for `NSScrollView`, since neither `DeviceRowView` nor `GroupRowView`
-/// exposes a `test_iconSymbolName` hook.
+/// uses for `NSScrollView`, since `DeviceRowView` does not expose a
+/// `test_iconSymbolName` hook.
 @MainActor
 @Suite struct PopoverIconTests {
 
@@ -78,9 +77,9 @@ import AppKit
         return dir
     }
 
-    /// The sole `NSImageView` in a row's subtree (both `DeviceRowView` and
-    /// `GroupRowView` mount exactly one — every other glyph-bearing control is
-    /// an `NSButton`), found by traversal since neither exposes its icon view.
+    /// The sole `NSImageView` in a row's subtree (a device row mounts exactly
+    /// one — every other glyph-bearing control is an `NSButton`), found by
+    /// traversal since the row does not expose its icon view.
     private func findImageView(in view: NSView) -> NSImageView? {
         if let imageView = view as? NSImageView { return imageView }
         for subview in view.subviews {
@@ -103,13 +102,6 @@ import AppKit
         NSImage(systemSymbolName: symbolName, accessibilityDescription: deviceName)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
                                                                   weight: .regular))
-    }
-
-    /// Reconstructs the exact `NSImage` `GroupRowView.apply` renders for
-    /// `symbolName`.
-    private func expectedGroupIcon(symbolName: String) -> NSImage? {
-        NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .regular))
     }
 
     // MARK: Device row — override injected
@@ -166,45 +158,6 @@ import AppKit
         #expect(imagesEqual(imageView.image,
                             expectedDeviceIcon(symbolName: device.kind.symbolName, deviceName: device.name)),
                 "a controller with no override for this device still shows its kind default")
-    }
-
-    // MARK: Group row
-
-    /// `GroupRowView` (mounted for the mixer window, built here directly per
-    /// `AudioutPopoverUI/AGENTS.md`'s map) shows the group's own
-    /// `iconSymbolName` when one is set.
-    @Test func groupRowRendersGroupIconSymbolNameWhenSet() {
-        let group = Group(name: "Whole House", memberIDs: ["office", "homepod-bed"],
-                          memberVolumes: ["office": 40, "homepod-bed": 60],
-                          iconSymbolName: "house.fill")
-        let row = GroupRowView(group: group, isActive: false, isExpanded: false, masterVolume: 50)
-
-        let imageView = findImageView(in: row)
-        #expect(imageView != nil, "the group row mounts an icon image view")
-        #expect(imagesEqual(imageView?.image, expectedGroupIcon(symbolName: "house.fill")),
-                "the group row renders its own iconSymbolName")
-    }
-
-    /// A group with no `iconSymbolName` (or an unrecognized/stale one) falls
-    /// back to `Group.defaultIconSymbolName` — the same render-time staleness
-    /// handling every other icon surface uses.
-    @Test func groupRowRendersDefaultIconWhenUnset() {
-        let group = Group(name: "Whole House", memberIDs: ["office"], memberVolumes: ["office": 40])
-        let row = GroupRowView(group: group, isActive: false, isExpanded: false, masterVolume: 50)
-
-        let imageView = findImageView(in: row)
-        #expect(imagesEqual(imageView?.image, expectedGroupIcon(symbolName: Group.defaultIconSymbolName)),
-                "no iconSymbolName ⇒ the group row falls back to the documented default")
-    }
-
-    @Test func groupRowRendersDefaultIconWhenStale() {
-        let group = Group(name: "Whole House", memberIDs: ["office"], memberVolumes: ["office": 40],
-                          iconSymbolName: "definitely.not.a.real.symbol.zzz")
-        let row = GroupRowView(group: group, isActive: false, isExpanded: false, masterVolume: 50)
-
-        let imageView = findImageView(in: row)
-        #expect(imagesEqual(imageView?.image, expectedGroupIcon(symbolName: Group.defaultIconSymbolName)),
-                "an unresolvable saved name falls back to the default, same as a nil override")
     }
 
     // MARK: onChange-driven refresh

@@ -27,7 +27,9 @@ import AudioutSharedUI
 /// what they think of the ornament.
 ///
 /// Composed of stock pieces (`WarmPanelView` ground, `NSImageView`,
-/// `NSTextField`) — nothing here draws its own chrome.
+/// `NSTextField`) — nothing here draws its own chrome, and the name is set in
+/// the wordmark face (`Tokens.Font.wordmark`), which falls back to system bold
+/// outside an assembled `.app`.
 @MainActor
 final class SurfaceSplashView: NSView {
 
@@ -43,6 +45,10 @@ final class SurfaceSplashView: NSView {
     static let fadeDuration: TimeInterval = 0.25
     /// Side of the mark's square image box.
     static let markSide: CGFloat = 96
+    /// Size of the name beside the mark: the iPhone companion sets its wordmark
+    /// at 32 pt against a 100 pt mark, so 96 × 0.32 = 30.72, rounded to a whole
+    /// point.
+    static let wordmarkSize: CGFloat = 31
 
     /// Once per PROCESS, never once per open: the second time a user summons
     /// the surface in a session they came for the mixer, not for the name.
@@ -122,7 +128,7 @@ final class SurfaceSplashView: NSView {
         mark.translatesAutoresizingMaskIntoConstraints = false
 
         let wordmark = NSTextField(labelWithString: "Audiout")
-        wordmark.font = Tokens.Font.bodyEmphasized
+        wordmark.font = Tokens.Font.wordmark(size: Self.wordmarkSize)
         wordmark.textColor = Tokens.Color.label
         wordmark.alignment = .center
 

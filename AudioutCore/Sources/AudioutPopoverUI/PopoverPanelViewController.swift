@@ -14,8 +14,8 @@ import AudioutSharedUI
 /// history). The spec's "de-nest" replaces both halves of that: `background`
 /// is now a single continuous **warm canvas** (`WarmCanvasView`, always
 /// opaque — no vibrancy) and `CardView` no longer draws a tile of its own —
-/// every section's rows sit directly on the canvas, separated only by a 1px
-/// hairline divider this controller inserts between cards (`beginCard`).
+/// every section's rows sit directly on the canvas, separated only by a 1 px
+/// `containerEdge` divider this controller inserts between cards (`beginCard`).
 ///
 /// It is a dumb container: `PopoverController` composes the sections and hands in
 /// the rows; this controller lays them out and sizes the popover. The outer
@@ -256,7 +256,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         stackView.distribution = .fill
         // Vertical gap BETWEEN sections (V2: cards no longer float as separate
         // tiles with their own margin-created gap — narrowed from 12 to 8pt now
-        // that the 1px hairline divider (`beginCard`) carries the separation
+        // that the 1 px `containerEdge` divider (`beginCard`) carries the separation
         // instead of whitespace-around-a-rounded-tile; a designer's pick, tune
         // live).
         stackView.spacing = 8
@@ -264,7 +264,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
 
         container.addSubview(stackView)
         // The rail overlay is added LAST so it composites ON TOP of the cards +
-        // hairline dividers — the continuous spine reads unbroken where it would
+        // dividers — the continuous spine reads unbroken where it would
         // otherwise be crossed. Non-interactive (`hitTest` returns nil).
         railOverlay.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(railOverlay)
@@ -506,7 +506,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     ///
     /// Title and column titles share ONE `makeLegendLabel` voice — the whole row
     /// is a single quiet legend line naming the content below it, never a banner
-    /// competing with it. The hairline divider `beginCard` inserts before each
+    /// competing with it. The `containerEdge` divider `beginCard` inserts before each
     /// card (plus the chevron) is what separates sections now; the type doesn't
     /// have to shout to do it.
     ///
@@ -525,8 +525,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// **Collapsible cards (T-4, PLAN-POPOVER-ROUTING.md decision 5 + §E risk 1;
     /// whole-header click target — C4 LOCKED DECISION, 2026-07-18).** When
     /// `collapsible` is true the header row gains a leading disclosure chevron
-    /// (`chevron.down` expanded / `chevron.right` collapsed, per `GroupRowView`'s
-    /// precedent) placed LEFT of the section title, and the ENTIRE `headerWrap`
+    /// (`chevron.down` expanded / `chevron.right` collapsed) placed LEFT of
+    /// the section title, and the ENTIRE `headerWrap`
     /// row — chevron, title, AND the column-header labels — is a click target
     /// that calls `onToggle`: an `NSClickGestureRecognizer` on `headerWrap` itself
     /// forwards to the same closure the chevron's target/action uses. The
@@ -586,7 +586,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // The section title displays exactly as authored ("System Audio" —
         // One Case rule); the `header` argument is also the lookup/collapse KEY.
         let label = Self.makeLegendLabel(header, weight: .semibold,
-                                         color: Tokens.Color.secondaryLabel)
+                                         color: Tokens.Color.label2)
         // VoiceOver section-jumping (VO-⌘-H) needs real heading roles; the
         // composed row labels are untouched — only this title label's role.
         Self.markAsAccessibilityHeading(label)
@@ -756,22 +756,22 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // V2 de-nest (spec §5.1): a card no longer floats as its own tile with
         // a side margin — it fills the FULL panel width, edge-to-edge with the
         // stack, so every section sits flush on the continuous warm canvas.
-        // The ONLY visual separation from the section before it is a 1px
-        // hairline divider, inserted here (not by `CardView` itself — cards
-        // draw zero chrome of their own now) BEFORE this card, skipped for the
-        // very first section.
+        // The ONLY visual separation from the section before it is a 1 px
+        // `containerEdge` divider, inserted here (not by `CardView` itself —
+        // cards draw zero chrome of their own now) BEFORE this card, skipped
+        // for the very first section.
         if stackView.arrangedSubviews.contains(where: { $0 is CardView }) {
-            let hairline = HairlineView()
-            hairline.translatesAutoresizingMaskIntoConstraints = false
-            stackView.addArrangedSubview(hairline)
+            let divider = CardDividerView()
+            divider.translatesAutoresizingMaskIntoConstraints = false
+            stackView.addArrangedSubview(divider)
             NSLayoutConstraint.activate([
-                hairline.heightAnchor.constraint(equalToConstant: 1),
+                divider.heightAnchor.constraint(equalToConstant: 1),
                 // Start the divider at the icon column (Warm Signal v4 §Call-1) so
                 // the left rail gutter stays clear for the continuous spine.
-                hairline.leadingAnchor.constraint(
+                divider.leadingAnchor.constraint(
                     equalTo: stackView.leadingAnchor,
                     constant: PopoverColumnGrid.firstElementLeading(indented: false)),
-                hairline.trailingAnchor.constraint(equalTo: stackView.trailingAnchor),
+                divider.trailingAnchor.constraint(equalTo: stackView.trailingAnchor),
             ])
         }
 
@@ -815,6 +815,24 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// card, not to the last subsection above it — collapsing Bluetooth must not
     /// take the strip away with it.
     func endSubsection() { currentSubsectionStack = nil }
+
+    /// Tint a CARD title for whether its section is currently sounding — the
+    /// iOS Section Header rule: `goldText` while audio is coming out of the
+    /// rows below it, `label2` otherwise. The host decides "sounding" and
+    /// pushes it here; the panel never derives it from a row.
+    ///
+    /// `makeLegendLabel` builds the title with an attributed string, and a
+    /// `.foregroundColor` attribute beats `textColor`, so the retint rebuilds
+    /// the string with the same text and font. Subsection titles share the
+    /// lookup dictionary but are never named by a caller, and a title with no
+    /// header built yet is a no-op.
+    func setCardHeaderLive(title: String, live: Bool) {
+        guard let label = headerTitleLabelsByHeader[title] else { return }
+        label.attributedStringValue = NSAttributedString(
+            string: label.attributedStringValue.string,
+            attributes: [.font: Tokens.Font.captionEmphasized,
+                         .foregroundColor: live ? Tokens.Color.goldText : Tokens.Color.label2])
+    }
 
     /// Apply a card's deferred initial collapse (recorded in `beginCard`) once its
     /// body exists. Synchronous end state, no animation (PLAN §E risk 1 — initial
@@ -993,8 +1011,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         }
     }
 
-    /// Assign the disclosure chevron image for a collapse state (GroupRowView
-    /// precedent: `chevron.down` expanded / `chevron.right` collapsed),
+    /// Assign the disclosure chevron image for a collapse state
+    /// (`chevron.down` expanded / `chevron.right` collapsed),
     /// template-tinted, and record the symbol name for the flip test hook.
     private func assignChevron(_ chevron: NSButton, collapsed: Bool, for header: String) {
         let name = collapsed ? "chevron.right" : "chevron.down"
@@ -1540,6 +1558,15 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     func test_headerTitleAXRole(title: String) -> NSAccessibility.Role? {
         headerTitleLabelsByHeader[title]?.accessibilityRole()
     }
+    /// The ink the card/subsection TITLE label for `title` currently carries —
+    /// the `.foregroundColor` attribute the liveness tint writes. `nil` if no
+    /// header with that title was built.
+    func test_headerTitleColor(title: String) -> NSColor? {
+        guard let label = headerTitleLabelsByHeader[title],
+              label.attributedStringValue.length > 0 else { return nil }
+        return label.attributedStringValue
+            .attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+    }
     /// The chevron's current AX label for `title` (Collapse/Expand flip).
     func test_chevronAXLabel(title: String) -> String? {
         chevronsByHeader[title]?.accessibilityLabel()
@@ -1642,16 +1669,20 @@ private final class ClosureActionTarget: NSObject {
     @objc func fire() { action() }
 }
 
-/// A 1px section-divider hairline (spec §5.1: "separated by 1px hairline
-/// dividers") — the ONLY visual separation between de-nested cards now that
-/// they no longer draw their own material/shadow/rim (`CardView`). Purely
+/// The 1 px divider between de-nested cards — the ONLY visual separation
+/// between them now that they draw no material/shadow/rim of their own
+/// (`CardView`). It crosses bare canvas rather than sitting inside a
+/// container, and it is the section's own boundary, so it stamps
+/// `containerEdge` (Rule 5: a divider on bare canvas never wears the
+/// in-container token) — measured 1.95:1 on the dark canvas, 2.02:1 on the
+/// light one. Purely
 /// decorative and non-interactive; `beginCard` inserts one into `stackView`
 /// before every card after the first.
-private final class HairlineView: NSView {
+private final class CardDividerView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = Tokens.Color.hairline.cgColor
+        layer?.backgroundColor = Tokens.Color.containerEdge.cgColor
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -1660,7 +1691,7 @@ private final class HairlineView: NSView {
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        layer?.backgroundColor = Tokens.Color.hairline.cgColor
+        layer?.backgroundColor = Tokens.Color.containerEdge.cgColor
     }
 }
 

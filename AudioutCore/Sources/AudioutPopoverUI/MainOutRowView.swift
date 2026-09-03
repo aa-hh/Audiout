@@ -23,6 +23,10 @@ import AudioutSharedUI
 /// The current target is checkmarked AND its title is the button's visible label,
 /// its accessibility value, and the `test_selectedTitle` hook.
 ///
+/// While the target is a saved GROUP the picker's arrow reads `partyRampDeep`
+/// and a `GroupIdentityGlowView` lights behind the icon (R2, the iOS "party
+/// edge") — the row still paints no fill of its own.
+///
 /// Pure UI: every control routes back through ``Delegate`` so the host
 /// (`PopoverController`) can drive `GroupController`. The view never talks to a
 /// backend directly.
@@ -78,6 +82,8 @@ public final class MainOutRowView: NSView {
     /// Leading speaker icon (restored — ahh reverted the slider to the original
     /// slim-track design, which does not draw an in-track glyph).
     private let iconView = MenuTriggerImageView()
+    /// The magenta identity light a GROUP target gives off, behind the icon.
+    private let groupGlowView = GroupIdentityGlowView()
     /// The connection **halo ring** around the Main Out icon (Warm Signal v3
     /// §3.2 Main Out note): reflects the AGGREGATE connection lifecycle of the
     /// active Audio Out target's members — **pending** (dashed breathing) during
@@ -226,6 +232,9 @@ public final class MainOutRowView: NSView {
         // The master fader's engaged (gold) fill reuses the EXACT same armed
         // predicate the dot renders — one armed truth, two instruments.
         faderCell.isRouteArmed = armed
+        // The readout agrees with the fill beside it: gold while the master is
+        // actually sounding, ember while it only holds a stored level.
+        readoutLabel.textColor = armed ? Tokens.Color.goldText : Tokens.Color.emberText
         // Under-name meter shown only on armed (connected + unmuted) rows (v4
         // §Call-1); hidden it collapses in the identity stack, leaving the name.
         meterView.isHidden = !armed
@@ -249,6 +258,9 @@ public final class MainOutRowView: NSView {
         if case .group = current { isGroupTarget = true } else { isGroupTarget = false }
         busOriginView.apply(node: .origin, dimmed: busOriginDimmed ?? isGroupTarget,
                             originGold: armed)
+        groupGlowView.isHidden = !isGroupTarget
+        destinationPopUp.contentTintColor = isGroupTarget
+            ? Tokens.Color.partyRampDeep : Tokens.Color.label2
 
         let menu = destinationPopUp.menu ?? NSMenu()
         menu.removeAllItems()
@@ -284,18 +296,21 @@ public final class MainOutRowView: NSView {
         // (SoundSource-style named dropdown, task B). The pop-up truncates a long
         // title with a tail ellipsis via its fixed max width + cell line break.
         if let currentItem { destinationPopUp.select(currentItem) }
-        // A distinct `buttonTitle` (when an option carries one) is shown on the
-        // COLLAPSED button while the open menu keeps the full `title`.
-        // `usesItemFromMenu = false` + a display-only cell item is the documented way
-        // to make the button label differ from the selected menu item; re-set every
-        // `apply` (both branches) so a later selection without an override reverts.
+        // The collapsed button always draws a display-only cell item, never the
+        // selected menu item: the item's attributed title pins the words to
+        // `label`, so the borderless button's `contentTintColor` reaches only
+        // the arrow. It also carries a distinct `buttonTitle` when an option
+        // sets one, while the open menu keeps the full `title`. Re-set every
+        // `apply` so a later selection without an override reverts.
         if let cell = destinationPopUp.cell as? NSPopUpButtonCell {
-            if let currentButtonTitle {
-                cell.usesItemFromMenu = false
-                cell.menuItem = NSMenuItem(title: currentButtonTitle, action: nil, keyEquivalent: "")
-            } else {
-                cell.usesItemFromMenu = true
-            }
+            let shownTitle = currentButtonTitle ?? selectedTitle ?? ""
+            cell.usesItemFromMenu = false
+            let displayItem = NSMenuItem(title: shownTitle, action: nil, keyEquivalent: "")
+            displayItem.attributedTitle = NSAttributedString(
+                string: shownTitle,
+                attributes: [.font: Tokens.Font.caption,
+                             .foregroundColor: Tokens.Color.label])
+            cell.menuItem = displayItem
         }
 
         // The readout is guarded WITH the thumb, not separately: the two show the
@@ -397,8 +412,8 @@ public final class MainOutRowView: NSView {
         muteButton.setContentHuggingPriority(.required, for: .horizontal)
 
         readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = Tokens.Font.caption
-        readoutLabel.textColor = Tokens.Color.secondaryLabel
+        readoutLabel.font = Tokens.Font.readout
+        readoutLabel.textColor = Tokens.Color.emberText
         readoutLabel.alignment = .right
         readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -408,6 +423,12 @@ public final class MainOutRowView: NSView {
         // truncated. It carries the same two-section menu populated in `apply`.
         destinationPopUp.translatesAutoresizingMaskIntoConstraints = false
         destinationPopUp.pullsDown = false
+        // Borderless permanently: `contentTintColor` cannot reach a bordered
+        // pop-up's arrow (the bezel draws it), and a bezel that came and went
+        // with the target would jump. Borderless, the tint reaches title AND
+        // arrow — which is why the display item below carries its own
+        // `label` attributed title, keeping the magenta off the words.
+        destinationPopUp.isBordered = false
         destinationPopUp.controlSize = .small
         destinationPopUp.font = Tokens.Font.caption
         // Truncate a long target title with a tail ellipsis inside the fixed
@@ -435,6 +456,9 @@ public final class MainOutRowView: NSView {
         identityStack.addArrangedSubview(nameLabel)
         identityStack.addArrangedSubview(meterView)
 
+        groupGlowView.translatesAutoresizingMaskIntoConstraints = false
+        groupGlowView.isHidden = true
+        addSubview(groupGlowView)
         addSubview(busOriginView)
         addSubview(iconView)
         addSubview(haloRingView)
@@ -461,6 +485,12 @@ public final class MainOutRowView: NSView {
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
             iconView.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.iconWidth),
+            // The glow is bigger than the 44 pt row, so the row's layer clips
+            // 8 pt off its top and bottom — accepted: the leak reads sideways.
+            groupGlowView.widthAnchor.constraint(equalToConstant: GroupIdentityGlowView.side),
+            groupGlowView.heightAnchor.constraint(equalToConstant: GroupIdentityGlowView.side),
+            groupGlowView.centerXAnchor.constraint(equalTo: iconView.centerXAnchor),
+            groupGlowView.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
 
             // Connection halo ring: a box GROWN past the icon box (Warm Signal
             // nitpicks — `mainAudioRingHostBoxDiameter`, the BESPOKE terminus
@@ -646,6 +676,14 @@ public final class MainOutRowView: NSView {
     /// The master percentage the READOUT prints — a separate surface from the
     /// thumb, and the one an off-Mac master move used to overwrite mid-drag.
     public var test_masterReadout: String { readoutLabel.stringValue }
+    /// The readout's current ink — gold while the master sounds, ember at rest.
+    public var test_masterReadoutColor: NSColor? { readoutLabel.textColor }
+    /// The readout's current face.
+    public var test_masterReadoutFont: NSFont? { readoutLabel.font }
+    /// The destination picker's arrow tint — magenta on a group target.
+    public var test_destinationChevronTint: NSColor? { destinationPopUp.contentTintColor }
+    /// Whether the group identity glow is lit behind the icon.
+    public var test_groupGlowVisible: Bool { !groupGlowView.isHidden }
     /// Force the live-drag guard, so tests can pin what `apply(...)` may touch
     /// while the user's finger is down. There is no other way in: the flag is set
     /// from `NSApp.currentEvent`, which is always nil under `swift test`.

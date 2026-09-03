@@ -73,6 +73,50 @@ import AppKit
                 "omitting restingArmed must not change the .off rendering")
     }
 
+    // MARK: Readout ink, group chevron and identity glow
+
+    /// The readout agrees with the fader beside it: gold while the master is
+    /// sounding, ember while it only holds a stored level.
+    @Test func readoutIsGoldWhileArmedElseEmber() {
+        let row = MainOutRowView()
+        row.apply(options: [.init(title: "Selected Devices")], current: .selectedDevices,
+                  master: 50, connectionState: .connected)
+        #expect(row.test_masterReadoutColor == Tokens.Color.goldText)
+        #expect(row.test_masterReadoutFont == Tokens.Font.readout)
+
+        row.apply(options: [.init(title: "Selected Devices")], current: .selectedDevices,
+                  master: 50, isMuted: true, connectionState: .connected)
+        #expect(row.test_masterReadoutColor == Tokens.Color.emberText)
+    }
+
+    /// A saved-group target is the one thing that puts magenta on this row: the
+    /// picker's arrow and the identity light behind the icon.
+    @Test func groupTargetLightsTheChevronAndGlow() {
+        let row = MainOutRowView()
+        let options: [MainOutRowView.Option] = [
+            .init(title: "Selected Devices", target: .selectedDevices),
+            .init(title: "Kitchen", target: .group(id: "g1"), buttonTitle: "→ Kitchen"),
+        ]
+        row.apply(options: options, current: .group(id: "g1"), master: 50)
+        #expect(row.test_destinationChevronTint == Tokens.Color.partyRampDeep)
+        #expect(row.test_groupGlowVisible)
+
+        row.apply(options: options, current: .selectedDevices, master: 50)
+        #expect(row.test_destinationChevronTint == Tokens.Color.label2)
+        #expect(!row.test_groupGlowVisible)
+    }
+
+    /// The magenta stays off the words: the display-only cell item still
+    /// surfaces the group's short button title.
+    @Test func pickerTitleStaysLabelInkOnAGroupTarget() {
+        let row = MainOutRowView()
+        row.apply(options: [
+            .init(title: "Selected Devices", target: .selectedDevices),
+            .init(title: "Kitchen", target: .group(id: "g1"), buttonTitle: "→ Kitchen"),
+        ], current: .group(id: "g1"), master: 50)
+        #expect(row.test_buttonTitle == "→ Kitchen")
+    }
+
     @Test func connectedRingIsUnaffectedByRestingArmed() {
         // A genuine remote `.connected` state must render identically whether or
         // not `restingArmed` happens to be true — `.resting` only ever fires for

@@ -36,8 +36,10 @@ public final class ConnectionDiagnosisView: NSView {
     private static let verticalInset: CGFloat = 4
     /// Padding between the tinted background's edge and its content.
     private static let contentPadding: CGFloat = 10
-    /// Corner radius of the failure-tinted background (spec §5.6's warm inset card).
-    private static let backgroundCornerRadius: CGFloat = 7
+    /// Corner radius of the failure-tinted background (spec §5.6's warm inset
+    /// card): the control radius the two note banners share, so the three
+    /// inset cards in the popover wear one corner.
+    private static let backgroundCornerRadius: CGFloat = Tokens.Layout.Radius.control
     /// Gap between the headline and the wrapping suggestion body.
     private static let headlineToSuggestion: CGFloat = 3
     /// Gap between the suggestion body and the buttons row.
@@ -303,6 +305,8 @@ public final class ConnectionDiagnosisView: NSView {
     public var test_copyDetailsHidden: Bool { copyDetailsButton.isHidden }
     /// The tinted background's current layer color (appearance-adaptivity asserts).
     public var test_backgroundTint: CGColor? { background.layer?.backgroundColor }
+    /// The tinted background's corner radius — the inset card's own corner.
+    public var test_backgroundCornerRadius: CGFloat? { background.layer?.cornerRadius }
 
     /// Whether the dismiss button is present and has a resolved image (never blank).
     public var test_hasDismissButton: Bool { dismissButton.image != nil }

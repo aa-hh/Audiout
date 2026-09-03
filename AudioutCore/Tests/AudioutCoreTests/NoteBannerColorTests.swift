@@ -5,13 +5,11 @@ import AppKit
 @testable import AudioutPopoverUI
 @testable import AudioutSharedUI
 
-/// V12 (raw-color elimination pass): `SilenceFallbackBannerView` and
-/// `SystemAirPlayNoteBannerView` used to stamp `NSColor.systemOrange`/
-/// `.systemBlue` directly instead of going through `Tokens.Color`. Both now
-/// read `Tokens.Color.warning`/`.info`, which are deprecated aliases of
-/// `failure` and `ring` — so the banners tint red and steel blue until the
-/// surface PR re-points them. These tests guard the WIRING (the right token,
-/// the right alpha, per severity tier), not a particular hue.
+/// Both banners wear the one Status Banner recipe: the tier's token at 12 %
+/// on the control radius with no border — `Tokens.Color.failure` for a real
+/// problem (the silence banner and the note banner's `.warning` tier),
+/// `.ring` for a note (`.info`). These tests guard the WIRING (the right
+/// token, the right alpha, per severity tier), not a particular hue.
 @MainActor
 @Suite struct NoteBannerColorTests {
 
@@ -28,30 +26,26 @@ import AppKit
 
     // MARK: SilenceFallbackBannerView (V12a)
 
-    @Test func silenceBannerUsesWarningTokenAtTheDocumentedAlphas() {
+    @Test func silenceBannerIsFailureAtTwelvePercent() {
         let banner = SilenceFallbackBannerView(text: "Playing on this Mac", maxTextWidth: 200)
-        assertSameRGBA(banner.test_backgroundColor, Tokens.Color.warning.withAlphaComponent(0.14), "background")
-        assertSameRGBA(banner.test_borderColor, Tokens.Color.warning.withAlphaComponent(0.40), "border")
+        assertSameRGBA(banner.test_backgroundColor, Tokens.Color.failure.withAlphaComponent(0.12), "background")
     }
 
     // MARK: SystemAirPlayNoteBannerView (V12b)
 
-    @Test func infoTierUsesTheNewInfoTokenAtTheDocumentedAlphas() {
+    @Test func noteTierIsRingAtTwelvePercent() {
         let banner = SystemAirPlayNoteBannerView(text: "Also playing over AirPlay", maxTextWidth: 200, severity: .info)
-        assertSameRGBA(banner.test_backgroundColor, Tokens.Color.info.withAlphaComponent(0.12), "background")
-        assertSameRGBA(banner.test_borderColor, Tokens.Color.info.withAlphaComponent(0.35), "border")
+        assertSameRGBA(banner.test_backgroundColor, Tokens.Color.ring.withAlphaComponent(0.12), "background")
     }
 
-    @Test func warningTierUsesTheWarningTokenAtTheDocumentedAlphas() {
+    @Test func warningTierIsFailureAtTwelvePercent() {
         let banner = SystemAirPlayNoteBannerView(text: "Routing is blocked", maxTextWidth: 200, severity: .warning)
-        assertSameRGBA(banner.test_backgroundColor, Tokens.Color.warning.withAlphaComponent(0.14), "background")
-        assertSameRGBA(banner.test_borderColor, Tokens.Color.warning.withAlphaComponent(0.40), "border")
+        assertSameRGBA(banner.test_backgroundColor, Tokens.Color.failure.withAlphaComponent(0.12), "background")
     }
 
-    /// A real, non-vacuous guard the alias approach still needs: `.info` and
-    /// `.warning` must stay two genuinely distinct tints (this WOULD fail if
-    /// `Tokens.Color.info` were ever accidentally declared to forward to
-    /// `.warning`, or the two severities collapsed onto the same alpha pair).
+    /// A real, non-vacuous guard: the note tier (`ring`) and the problem tier
+    /// (`failure`) must stay two genuinely distinct tints — this WOULD fail if
+    /// the two severities ever collapsed onto one token.
     @Test func infoAndWarningTiersRenderDifferentBackgrounds() {
         let info = SystemAirPlayNoteBannerView(text: "Note", maxTextWidth: 200, severity: .info)
         let warning = SystemAirPlayNoteBannerView(text: "Note", maxTextWidth: 200, severity: .warning)
@@ -72,8 +66,8 @@ import AppKit
     @Test func updateLayerReStampsFromTheSameToken() {
         let banner = SilenceFallbackBannerView(text: "Playing on this Mac", maxTextWidth: 200)
         banner.updateLayer()
-        assertSameRGBA(banner.test_backgroundColor, Tokens.Color.warning.withAlphaComponent(0.14), "background after updateLayer")
-        assertSameRGBA(banner.test_borderColor, Tokens.Color.warning.withAlphaComponent(0.40), "border after updateLayer")
+        assertSameRGBA(banner.test_backgroundColor, Tokens.Color.failure.withAlphaComponent(0.12),
+                       "background after updateLayer")
     }
 
     /// `wantsUpdateLayer` is what makes the re-stamp above run at all on a live
@@ -84,6 +78,17 @@ import AppKit
         #expect(SilenceFallbackBannerView(text: "Playing on this Mac", maxTextWidth: 200)
             .wantsUpdateLayer)
         #expect(SystemAirPlayNoteBannerView(text: "Note", maxTextWidth: 200).wantsUpdateLayer)
+    }
+
+    /// A banner is an inset CONTROL-sized rect, not a row or a panel, and it
+    /// carries no border — the fill alone separates it from the canvas.
+    @Test func bannersWearTheControlRadiusWithNoBorder() {
+        let silence = SilenceFallbackBannerView(text: "Playing on this Mac", maxTextWidth: 200)
+        let note = SystemAirPlayNoteBannerView(text: "Note", maxTextWidth: 200)
+        #expect(silence.layer?.cornerRadius == Tokens.Layout.Radius.control)
+        #expect(silence.layer?.borderWidth == 0)
+        #expect(note.layer?.cornerRadius == Tokens.Layout.Radius.control)
+        #expect(note.layer?.borderWidth == 0)
     }
 
     /// The silence banner is no longer a dead end: given an action it renders a

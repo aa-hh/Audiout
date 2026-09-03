@@ -481,6 +481,17 @@ public final class CompanionServer: @unchecked Sendable {
         }
     }
 
+    /// What the Mac made of the phone's measurement, sent only to the client
+    /// that staged the run — it is the verdict that client is waiting to show.
+    public func sendAlignmentApplied(deviceID: String, measuredMs: Double,
+                                     correctedMs: Double, to clientID: UUID) {
+        queue.async { [weak self] in
+            guard let self, let client = self.clients[clientID], client.isWelcomed else { return }
+            self.send(.alignmentApplied(deviceID: deviceID, measuredMs: measuredMs,
+                                        correctedMs: correctedMs), to: client)
+        }
+    }
+
     // MARK: - Connection handling
 
     /// `internal` (not `private`) so `CompanionServerTests` can hand it a
@@ -867,7 +878,8 @@ public final class CompanionServer: @unchecked Sendable {
             }
 
         case .welcome, .awaitingApproval, .state, .commandResult, .goodbye, .appIcons,
-             .alignmentProbeStarted, .alignmentProbeFinished, .companionToken, .unknown:
+             .alignmentProbeStarted, .alignmentProbeFinished, .alignmentApplied,
+             .companionToken, .unknown:
             // Server-to-client message types arriving FROM a client, or a
             // frame type from a future protocol: not actionable, not worth a
             // disconnect. Ignore (forward-compat, `CompanionMessage.unknown`).

@@ -186,6 +186,20 @@ struct CompanionAlignmentRun {
     var liveTrimMs: Double
 }
 
+/// What the Mac did with a phone's reported measurement, which is more than the
+/// phone can work out for itself: the phone knows the raw offset it heard, not
+/// the stagger that was baked into the staging nor where clamping and flooring
+/// left the stored latency.
+public enum CompanionAlignmentApplyResult: Equatable {
+    /// `measuredMs` is the phone's raw report with the staging's stagger taken
+    /// back out — signed, positive meaning the target sounded late.
+    /// `correctedMs` is how far the stored latency actually moved, which is `0`
+    /// when the clamp or the floor left it where it was.
+    case applied(measuredMs: Double, correctedMs: Double)
+    /// Why the Mac declined, in words the phone can show.
+    case refused(String)
+}
+
 /// One device's alignment freshness, as ``CompanionSnapshotBuilder`` maps it
 /// onto the wire. The reference half of the wire struct is NOT here: it is a
 /// function of the whole live device list, so the builder computes it.

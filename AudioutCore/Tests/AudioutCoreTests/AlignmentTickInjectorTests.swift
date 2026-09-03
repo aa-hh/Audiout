@@ -444,6 +444,22 @@ import AudioToolbox
                 "the row's metronome is the nudge-while-listening case")
     }
 
+    /// The phone's by-ear session sits between the two: long enough that nobody
+    /// tuning by ear is cut off, still bounded, and otherwise the row's
+    /// metronome — the phone sends no timer of its own.
+    @Test func companionConfigShape() {
+        let injector = AlignmentTickInjector(config: .companion)
+        #expect(injector.test_maxTicks == AlignmentTickInjector.companionMaxTicks)
+        #expect(AlignmentTickInjector.companionMaxTicks > AlignmentTickInjector.defaultMaxTicks,
+                "~30 s is not long enough to tune a speaker by ear")
+        #expect(AlignmentTickInjector.companionMaxTicks != AlignmentTickInjector.unlimitedTicks,
+                "a phone that walked away still runs out")
+        #expect(AlignmentTickInjector.Config.companion.armedAtStart,
+                "the ticks start the moment the phone switches them on")
+        #expect(AlignmentTickInjector.Config.companion.replacesProgram == false,
+                "by-ear tuning is the nudge-while-listening case")
+    }
+
     /// The wizard's tick has no wall-clock ceiling (live report, 2026-08-22):
     /// the old 360-beat budget ≈ 303 s expired mid-questionnaire and the whole
     /// system went silent with the panel still asking. The session's exit paths
@@ -861,6 +877,45 @@ import AudioToolbox
         #expect(!injector.takeProbeCompletion(), "…and only once")
         #expect(!injector.test_isArmed,
                 "the probe never arms the tick grid on its own")
+    }
+
+    /// A phone-driven run asks for `engineLaneScale: 1` and gets both sweeps at
+    /// the same amplitude: the −6 dB pays for a Mac speaker inches from the
+    /// Mac's own microphone, and the phone is across the room instead.
+    @Test func aFullScaleEngineLaneMatchesTheBluetoothOne() {
+        let rate = 8_000.0
+        let injector = AlignmentTickInjector(
+            sampleRate: rate, channels: 2,
+            config: .init(bpm: AlignmentTickInjector.wizardSearchBPM,
+                          maxTicks: AlignmentTickInjector.unlimitedTicks,
+                          armedAtStart: false, bedEnabled: false,
+                          replacesProgram: true))
+        let amplitude = 0.35
+        injector.stageProbe(amplitude: amplitude, shape: .simultaneous, engineLaneScale: 1)
+        injector.armProbe()
+
+        var engine: [Int16] = []
+        var bluetooth: [Int16] = []
+        for _ in 0..<9 {
+            var pcm = zeroBuffer(frames: 1_600)
+            var bedded = Data()
+            injector.mixWizardVariants(into: &pcm, bedded: &bedded)
+            engine.append(contentsOf: channel0(pcm))
+            bluetooth.append(contentsOf: channel0(bedded))
+        }
+
+        let epoch = Int(0.5 * rate)
+        let down = SyncProbe.samples(.downSweep(sampleRate: rate, duration: 1.0))
+        let up = SyncProbe.samples(.upSweep(sampleRate: rate, duration: 1.0))
+        func expected(_ sweep: [Float], _ i: Int, _ laneAmplitude: Double) -> Int16 {
+            Int16(clamping: Int32((Double(sweep[i]) * laneAmplitude * 32_767.0).rounded()))
+        }
+        #expect((0..<down.count).allSatisfy {
+                    engine[epoch + $0] == expected(down, $0, amplitude) },
+                "the engine lane carries the DOWN sweep at full amplitude")
+        #expect((0..<up.count).allSatisfy {
+                    bluetooth[epoch + $0] == expected(up, $0, amplitude) },
+                "the Bluetooth lane is untouched by the scale")
     }
 
     /// The staggered shape a phone-driven run needs when two Bluetooth

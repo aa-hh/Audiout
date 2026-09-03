@@ -10,13 +10,15 @@ import AppKit
 /// The Groups screen's surface separation, measured.
 ///
 /// The screen is ONE housing: bare lists on `panel`, and exactly one lifted
-/// card per page (`GroupedSectionView` `.card` — `raised` + a `hairline`
-/// edge). Before any of it the checklist painted no surface at all — measured
-/// on the real tones, `panel` vs `canvas` is ~1.06:1 dark / ~1.08:1 light,
-/// effectively invisible as a boundary.
+/// card per page (`GroupedSectionView` `.card` — `raised`, bounded by a
+/// `containerEdge` and ruled inside by `hairline`). Before any of it the
+/// checklist painted no surface at all — measured on the real tones, `panel`
+/// vs `canvas` is 1.060:1 dark and 1.000:1 light (light resolves both to the
+/// same hex), effectively invisible as a boundary.
 ///
 /// Locked constraint (Alec): text colors stay frozen everywhere — separation
-/// must come entirely from surfaces (`Tokens.Color.raised`/`.hairline`), never
+/// must come entirely from surfaces
+/// (`Tokens.Color.raised`/`.containerEdge`/`.hairline`), never
 /// a text-color change. These tests assert the measured floors against
 /// `Tokens.Color.panel` the task specifies, in BOTH appearances, using the
 /// SAME real WCAG relative-luminance math `AppTetherColorTests` already
@@ -93,20 +95,50 @@ import AppKit
     /// page is `raised` on `panel`, and on dark that pair measures 1.07:1 —
     /// UNDER the 1.10:1 surface floor above. The fill is deliberately that
     /// quiet: the card is a lift, not a slab. So the separation rides on the
-    /// 1 pt `hairline` edge instead, and THAT is what this floor pins
-    /// (measured 1.31:1 dark / 1.40:1 light).
+    /// 1 pt edge instead, and THAT is what this floor pins.
+    ///
+    /// The edge is `containerEdge`, the heavier of the two hairline weights,
+    /// and it may never rank below the `hairline` divider it bounds — a
+    /// container's edge reading lighter than the rules inside it inverts the
+    /// structure. Dark resolves the two tokens to one value by decision (dark
+    /// still has a fill ladder; light's `panel` and `canvas` are the same
+    /// hex), so the rank holds at `>=` rather than `>`.
     ///
     /// There is deliberately NO fill-floor assertion for raised-on-panel — it
     /// would fail by design, and adding one would mean either loosening the
     /// floor or brightening the card.
-    @Test func hairlineVsRaisedClearsTheCardEdgeFloorBothAppearances() {
+    @Test func containerEdgeClearsTheCardEdgeFloorAndOutranksTheDivider() {
+        let floor: CGFloat = 1.25
+
+        for appearanceName in [NSAppearance.Name.darkAqua, .aqua] {
+            let raised = resolved(Tokens.Color.raised, appearanceName: appearanceName)
+            let edgeRatio = contrastRatio(resolved(Tokens.Color.containerEdge,
+                                                  appearanceName: appearanceName), raised)
+            #expect(edgeRatio >= floor,
+                    Comment(rawValue: "containerEdge vs raised (\(appearanceName.rawValue)): " +
+                    "\(edgeRatio):1 below the \(floor):1 floor — the card's fill alone is " +
+                    "1.07:1 dark / 1.10:1 light on panel, so a weak edge leaves no card at all"))
+
+            let dividerRatio = contrastRatio(resolved(Tokens.Color.hairline,
+                                                      appearanceName: appearanceName), raised)
+            #expect(edgeRatio >= dividerRatio,
+                    Comment(rawValue: "containerEdge (\(edgeRatio):1) ranks BELOW the hairline " +
+                    "divider (\(dividerRatio):1) in \(appearanceName.rawValue) — a container's " +
+                    "edge must never read lighter than the rules inside it"))
+        }
+    }
+
+    /// The dividers INSIDE that card are drawn in `hairline` on the same
+    /// `raised` fill, so the lighter weight carries the same separator floor
+    /// on the same ground. This is the interior half of the pair above; both
+    /// have to hold, or a card loses either its boundary or its rows.
+    @Test func hairlineVsRaisedClearsTheDividerFloorInsideACard() {
         let floor: CGFloat = 1.25
 
         let darkRatio = contrastRatio(resolved(Tokens.Color.hairline, appearanceName: .darkAqua),
                                       resolved(Tokens.Color.raised, appearanceName: .darkAqua))
         #expect(darkRatio >= floor,
-                Comment(rawValue: "hairline vs raised (dark): \(darkRatio):1 below the \(floor):1 floor — " +
-                "the card's fill alone is 1.07:1 on panel, so a weak edge leaves no card at all"))
+                Comment(rawValue: "hairline vs raised (dark): \(darkRatio):1 below the \(floor):1 floor"))
 
         let lightRatio = contrastRatio(resolved(Tokens.Color.hairline, appearanceName: .aqua),
                                        resolved(Tokens.Color.raised, appearanceName: .aqua))

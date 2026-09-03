@@ -322,6 +322,44 @@ public enum Tokens {
                        light: 0xD0CDC3, lightHighContrast: 0x76716B)
         }
 
+        /// A container's OWN outer edge — the stroke around a grouped section
+        /// or an inset seat. ``hairline`` above is its sibling one rank down:
+        /// the dividers BETWEEN rows INSIDE such a container. Two weights of
+        /// one mechanism, and the mechanism is free, because nothing in this
+        /// app is ever drawn ON a hairline — each is only ever a stroke or a
+        /// divider fill — so ranking them spends no text and no instrument
+        /// contrast.
+        ///
+        /// WHY LIGHT NEEDS A SECOND WEIGHT AND DARK DOES NOT. In light,
+        /// `canvas`/`canvasHi`/`panel` are all one value (`#FBFBF9`), so a
+        /// `panel`-filled container on the canvas measures **1.000:1** — its
+        /// edge is the only boundary pixel that exists. (Light does have a
+        /// ladder above that: `raised` `#F2F0EA` is 1.100:1 on `panel` and
+        /// `well` `#E2DFD3` is 1.289:1. Neither rescues the `panel` case, and
+        /// neither is what a container edge is measured against.) Dark keeps a
+        /// real ladder throughout — `panel` vs `canvas` 1.060:1, `raised` vs
+        /// `panel` 1.070:1, `well` vs `panel` 1.109:1 — AND a `hairline`
+        /// already measuring 1.404:1 vs `panel`, 1.489:1 vs `canvas`, 1.558:1
+        /// vs `well`, at or above where light's edge lands. So **dark resolves
+        /// to `hairline`'s own two values**. A third dark value would buy
+        /// separation dark already has, and start drawing frames around things.
+        ///
+        /// CONTRAST RATIONALE (WCAG relative luminance; each ratio is against
+        /// the surface that edge actually borders). LIGHT `#C4C0B4` — 1.755:1 vs `canvas`/`panel`, 1.596:1 vs
+        /// `raised`, 1.362:1 vs `well`, all over the 1.25:1 separator floor
+        /// (`MembershipWellContrastTests`). It clears the `hairline` divider by
+        /// 1.143:1 — enough to rank the two, short of reading as two different
+        /// materials. LIGHT Increase Contrast `#6C6761` — 5.404:1 vs
+        /// `canvas`/`panel`, 4.914:1 vs `raised`, 4.194:1 vs `well`, and
+        /// 1.158:1 over the IC divider `#76716B`, so the container-vs-divider
+        /// rank survives the mode whose users most depend on structure. Same
+        /// neutral-greige hue line as that divider (R−B = 11): a warm-tan edge
+        /// reads off-family on the neutral Circuit ground.
+        public static var containerEdge: NSColor {
+            warmDynamic(name: "containerEdge", dark: 0x3A332B, darkHighContrast: 0x786B5A,
+                       light: 0xC4C0B4, lightHighContrast: 0x6C6761)
+        }
+
         /// The under-name level meter's EMPTY-track fill (`LevelMeterView`'s
         /// `trackLayer`). Added in the UX spacing/contrast pass (2026-07-23,
         /// owner live-build feedback): the track was `NSColor.tertiarySystemFill`,

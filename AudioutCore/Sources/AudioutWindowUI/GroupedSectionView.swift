@@ -7,12 +7,15 @@ import AudioutSharedUI
 /// idiom), in two modes.
 ///
 /// - ``Style/card`` — the page's ONE INSTRUMENT: a rounded
-///   `Tokens.Color.raised` fill with a 1 pt `Tokens.Color.hairline` edge. On
-///   dark, `raised` against the pane's `panel` measures 1.07:1 — below the
+///   `Tokens.Color.raised` fill with a 1 pt `Tokens.Color.containerEdge` edge.
+///   On dark, `raised` against the pane's `panel` measures 1.07:1 — below the
 ///   surface floor — so the EDGE, not the fill, is what carries the
-///   separation (`hairline` vs `raised`: 1.31:1 dark / 1.40:1 light,
-///   `MembershipWellContrastTests`). Exactly one card per page: the Equalizer
-///   on the two detail pages, the Speakers checklist in the group editor.
+///   separation (`containerEdge` vs `raised`: 1.31:1 dark / 1.60:1 light,
+///   `MembershipWellContrastTests`). The edge and the row dividers below are
+///   the same mechanism at two weights: the heavier one bounds the container,
+///   the lighter `hairline` rules its interior. Exactly one card per page: the
+///   Equalizer on the two detail pages, the Speakers checklist in the group
+///   editor.
 /// - ``Style/bare`` — a DIVIDER-ONLY list: no fill, no border, just the inset
 ///   hairlines between rows. The Settings-rows idiom, and what every other
 ///   list on these pages wears (Groups, About, and the header bands).
@@ -88,7 +91,11 @@ final class GroupedSectionView: NSView {
                                      xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
             Tokens.Color.raised.setFill()
             shape.fill()
-            Tokens.Color.hairline.setStroke()
+            // The container's own edge takes the heavier of the two hairline
+            // weights; the row dividers below stay at the lighter one. That
+            // rank is what tells a bounded section from the rules inside it on
+            // a ground where `panel` and `canvas` are the same pixel.
+            Tokens.Color.containerEdge.setStroke()
             shape.lineWidth = Self.borderWidth
             shape.stroke()
         }

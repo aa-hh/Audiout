@@ -90,6 +90,7 @@ import AppKit
             ("raised", Tokens.Color.raised),
             ("well", Tokens.Color.well),
             ("hairline", Tokens.Color.hairline),
+            ("containerEdge", Tokens.Color.containerEdge),
             ("meterTrack", Tokens.Color.meterTrack),
             ("sidebarWarmTint", Tokens.Color.sidebarWarmTint),
             ("ringConnected", Tokens.Color.ringConnected),

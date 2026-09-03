@@ -457,6 +457,14 @@ public final class ControlPanelWindowController: NSWindowController {
         set { (window as? ControlPanelPanel)?.keyEquivalentHandler = newValue }
     }
 
+    /// The panel's Escape hook (see `ControlPanelPanel`): consulted before
+    /// Escape closes the panel, so a screen showing content one level deep
+    /// can step back instead. Return `true` to keep the panel open.
+    public var cancelHandler: (() -> Bool)? {
+        get { (window as? ControlPanelPanel)?.cancelHandler }
+        set { (window as? ControlPanelPanel)?.cancelHandler = newValue }
+    }
+
     /// Whether the panel is currently on screen, as opposed to tucked away by
     /// `hidesOnDeactivate` after an app-switch. The status-item click handler
     /// reads this to decide between toggling a live panel CLOSED and restoring
@@ -833,7 +841,10 @@ extension ControlPanelWindowController: NSWindowDelegate {
 ///    `.titled`/`.closable` (it does — see
 ///    `ControlPanelWindowController.makePanel`), so this closes cleanly with no
 ///    system beep. A field editor still gets first crack at Escape (to cancel
-///    in-progress text editing) before it reaches here.
+///    in-progress text editing) before it reaches here, and the injected
+///    `cancelHandler` gets the next: content one level deep (the Groups
+///    screen's group editor) steps back instead, and only the next Escape
+///    closes the panel.
 /// 2. To offer callers a key-equivalent seam. The surface's screen shortcuts
 ///    (⌘1/⌘2/⌘3) used to ride `NSButton.keyEquivalent` on in-content header
 ///    buttons; a window-attached `NSToolbarItemGroup` carries no per-segment
@@ -859,7 +870,12 @@ final class ControlPanelPanel: NSPanel {
         resizeAnimationDuration ?? super.animationResizeTime(newFrame)
     }
 
+    /// Consulted before Escape closes the panel; return `true` to consume the
+    /// press. Set through `ControlPanelWindowController.cancelHandler`.
+    var cancelHandler: (() -> Bool)?
+
     override func cancelOperation(_ sender: Any?) {
+        if cancelHandler?() == true { return }
         performClose(sender)
     }
 

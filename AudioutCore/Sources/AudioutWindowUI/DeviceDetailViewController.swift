@@ -831,7 +831,7 @@ public final class DeviceDetailViewController: NSViewController {
         let image = NSImage(systemSymbolName: name, accessibilityDescription: device.name)
         image?.isTemplate = true
         iconWell.iconImageView.image = image
-        iconWell.iconImageView.contentTintColor = Tokens.Color.secondaryLabel
+        iconWell.iconImageView.contentTintColor = Tokens.Color.label
     }
 
     // MARK: Icon picker

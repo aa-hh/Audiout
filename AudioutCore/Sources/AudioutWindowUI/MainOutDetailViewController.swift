@@ -88,7 +88,7 @@ public final class MainOutDetailViewController: NSViewController {
                             accessibilityDescription: Self.title)
         image?.isTemplate = true
         iconWell.iconImageView.image = image
-        iconWell.iconImageView.contentTintColor = Tokens.Color.secondaryLabel
+        iconWell.iconImageView.contentTintColor = Tokens.Color.label
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.font = Tokens.Font.heading

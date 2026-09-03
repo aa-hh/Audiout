@@ -115,6 +115,12 @@ public final class AppSurfaceController {
 
     public private(set) var selectedScreen: SurfaceScreen = .mixer
 
+    /// Asked when Escape reaches the surface while the Groups screen is
+    /// showing. Return `true` when the screen stepped back a level (the app
+    /// wires `MixerWindowController.dismissEditor()`); `false` lets the press
+    /// close the surface.
+    public var groupsCancelHandler: (() -> Bool)?
+
     /// The one frame's content size for THIS open session — measured on every
     /// fresh show, never touched between shows.
     private var sessionContentSize = AppSurfaceController.minimumContentSize
@@ -297,6 +303,13 @@ public final class AppSurfaceController {
             else { return false }
             self?.select(screen)
             return true
+        }
+        // Escape on the Groups screen steps back one level first (a group
+        // editor pops to the overview); anything else, and the next Escape,
+        // closes the surface.
+        shell.cancelHandler = { [weak self] in
+            guard let self, selectedScreen == .groups else { return false }
+            return groupsCancelHandler?() ?? false
         }
     }
 

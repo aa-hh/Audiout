@@ -255,7 +255,7 @@ public final class MixerWindowController {
         // Groups row was already the selected one, so nothing in the sidebar
         // moves.
         editorViewController.onBack = { [weak self] in
-            self?.showOverview()
+            self?.dismissEditor()
         }
         // The editor's "Delete Group…" falls back to the default content (the
         // overview, now one card lighter).
@@ -369,6 +369,17 @@ public final class MixerWindowController {
     private func showDefaultContent() {
         sidebarViewController.select(.groupsOverview, notify: false)
         showOverview()
+    }
+
+    /// Step back from a group's editor to the card overview: the "‹ Groups"
+    /// band, ⌘[, the Done button and the surface's Escape all land here.
+    /// Returns `false` when no editor is showing, so a host's Escape can fall
+    /// through to closing the window.
+    @discardableResult
+    public func dismissEditor() -> Bool {
+        guard currentContent === editorViewController else { return false }
+        showOverview()
+        return true
     }
 
     /// Show the saved-group card overview, re-read from the current model +

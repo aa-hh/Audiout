@@ -39,10 +39,10 @@ import AudioutSharedUI
 /// step-up of the corner badge's alpha through the same `setOverlayVisible(_:)`
 /// path — so a sighted keyboard user gets the same "this is interactive" cue a
 /// mouse user gets on hover, not just the ring.
-/// WARM SIGNAL (spec §1 / §5.3): the well now draws itself as a real *raised
-/// well* — a rounded rect filled with `Tokens.Color.raised` (§1's stated role
-/// for that token: "raised well (icon well…)") edged with the `hairline`
-/// token — so the 64 pt box reads as one clickable control whose LEFT EDGE
+/// WARM SIGNAL (spec §1 / §5.3): the well draws itself as a real seat — a
+/// rounded rect filled with `Tokens.Color.iconSeatFill` (a step lighter than
+/// the `raised` section in light, a recess in dark) edged with
+/// `containerEdge` — so the 64 pt box reads as one clickable control whose LEFT EDGE
 /// aligns with the column (the previous bare glyph floated centered in an
 /// invisible box, which read as a left-alignment drift against the labels
 /// below it). Hovering (or keyboard focus) adds a neutral wash at
@@ -230,7 +230,7 @@ final class DeviceIconWellView: NSView {
 
     // MARK: Warm-well drawing (Warm Signal §1/§5.3)
 
-    /// Paints the raised well: `raised` fill, `hairline` edge (or the thin
+    /// Paints the seat: `iconSeatFill` fill, `containerEdge` edge (or the thin
     /// gold ring while `isActiveGroup`), plus the neutral hover/focus wash.
     /// A `draw(_:)` override — not frozen layer colors — so every token
     /// re-resolves per appearance and Increase Contrast on every paint
@@ -249,7 +249,7 @@ final class DeviceIconWellView: NSView {
                                 xRadius: Self.wellCornerRadius,
                                 yRadius: Self.wellCornerRadius)
 
-        Tokens.Color.raised.setFill()
+        Tokens.Color.iconSeatFill.setFill()
         path.fill()
 
         if isHighlighted {
@@ -262,14 +262,14 @@ final class DeviceIconWellView: NSView {
         // Gold when the group is the live target; the quiet `ember` when it's
         // an idle rail origin — the exact tone the rail itself draws in, so the
         // spine and the ring it lands on never disagree. Everything else keeps
-        // the neutral resting hairline.
+        // the neutral resting edge.
         let edge: NSColor
         if isActiveGroup {
             edge = Tokens.Color.gold
         } else if isRailOrigin {
             edge = Tokens.Color.ember
         } else {
-            edge = Tokens.Color.hairline
+            edge = Tokens.Color.containerEdge
         }
         edge.setStroke()
         path.lineWidth = strokeWidth

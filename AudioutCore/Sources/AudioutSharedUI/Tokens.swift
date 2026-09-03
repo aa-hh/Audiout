@@ -293,6 +293,23 @@ public enum Tokens {
         public static var well: NSColor {
             warmDynamic(name: "well", dark: 0x100D0A, light: 0xE2DFD3)
         }
+        /// The seat a device glyph sits in: the 24 pt member chips on the
+        /// Groups overview's cards and the 64 pt editable icon well on the
+        /// detail and editor panes. Its own token because light and dark
+        /// need opposite moves that no existing pair makes: light climbs
+        /// ABOVE the `raised` card it sits in (a lighter interior for a black
+        /// glyph, Alec's ask), dark keeps a recess (`well`'s dark hex —
+        /// nothing in dark's ladder is lighter than `raised` without leaving
+        /// the fill family). Edge it with ``containerEdge``, tint the glyph
+        /// ``label``. CONTRAST RATIONALE (measured, WCAG relative luminance):
+        /// `label` composited on it (system black/white at 0.85 alpha)
+        /// 14.68:1 light / 13.96:1 dark; ``inkTertiary`` (the `+N` overflow
+        /// chip) 6.13 / 6.10; vs `raised` 1.10 / 1.19; vs `panel` 1.00 /
+        /// 1.11; ``containerEdge`` on it 1.76 / 1.56. Backgrounds carry no
+        /// IC variant (same precedent as `canvas`/`panel`/`raised`/`well`).
+        public static var iconSeatFill: NSColor {
+            warmDynamic(name: "iconSeatFill", dark: 0x100D0A, light: 0xFBFBF9)
+        }
         /// 1px section-divider hairline (§5.1 — the ONLY visual separation
         /// between de-nested cards now that they no longer draw their own
         /// material/shadow/rim). CONTRAST RATIONALE: dark carries a
@@ -654,22 +671,30 @@ public enum Tokens {
                           // has to buy a comparable gap, and depth is the only
                           // axis available once both are floor-bound.
                           //
-                          // Full light `#6F5629`: 1.67:1 from gold, 6.06:1 on
-                          // raised, 5.18:1 on well, 6.67:1 on panel. Hue 38.6°
+                          // The gap has a floor AND a ceiling: under ~1.40:1
+                          // the two inks merge on a 2 pt line; much past 1.55:1
+                          // ember stops reading as a dimmer brass and turns
+                          // into a brown that muddies the whole rail. Depth is
+                          // bought with value, never with chroma — dropping
+                          // saturation on the way down is what makes a brown.
+                          //
+                          // Full light `#7A5E2A`: 1.46:1 from gold, 5.32:1 on
+                          // raised, 4.54:1 on well, 5.85:1 on panel. Hue 39.0°
                           // against gold's 41.4° (same family, inside the
-                          // reserved gold band), saturation 0.63 against gold's
-                          // 0.82 — a 0.186 gap, so ember stays the duller ink
-                          // by chroma AND is now the darker one by luminance,
-                          // which is exactly the relationship dark already has.
-                          // Subtle light `#6E6039` separates by luminance
-                          // rather than chroma (1.50:1 from Subtle gold): the
-                          // muted column is meant to be muted, and darkening it
-                          // is the only axis left that does not re-saturate it.
-                          // IC variants stay strictly darker than their bases.
+                          // reserved gold band), saturation 0.66 against gold's
+                          // 0.82 — a 0.161 gap, so ember stays the duller ink
+                          // by chroma AND the darker one by luminance, which is
+                          // exactly the relationship dark has.
+                          // Subtle light `#71613B` separates by luminance
+                          // rather than chroma (1.47:1 from Subtle gold, 4.53:1
+                          // on well): the muted column is meant to be muted,
+                          // and value is the only axis that does not
+                          // re-saturate it. IC variants stay strictly darker
+                          // than their bases.
                           full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
-                                             light: 0x6F5629, lightHighContrast: 0x5E4922),
+                                             light: 0x7A5E2A, lightHighContrast: 0x5E4922),
                           subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
-                                               light: 0x6E6039, lightHighContrast: 0x5C5030),
+                                               light: 0x71613B, lightHighContrast: 0x5C5030),
                           systemAccentScale: 0.55)
         }
 
@@ -914,7 +939,7 @@ public enum Tokens {
 
         // MARK: Permission-row instruments (colour-return pass, decisions Q1-Q6/NEW-1)
         //
-        // Onboarding's four permission rows (`PermissionRowView`: System Audio,
+        // Onboarding's four permission rows (`SetupCardView`: System Audio,
         // Local Network, Remote Control, Speaker Sync) went to a single neutral
         // grey glyph in the warm pass (`85c2052`, which retired the old
         // `.systemBlue`/`.systemIndigo`/`.systemPurple`/`.systemTeal` tile
@@ -980,7 +1005,7 @@ public enum Tokens {
         // (~2.8:1) before being hand-raised back above it — exactly the
         // silent under-floor failure this rule exists to catch.
         //
-        // First consumer: `PermissionRowView`'s `IconTileView` per-row resting
+        // First consumer: `SetupCardView`'s `IconTileView` per-row resting
         // glyph tint, one call site per row (T2 of this wave, landing
         // immediately after this case addition).
 

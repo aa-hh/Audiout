@@ -356,6 +356,12 @@ public final class GroupsOverviewViewController: NSViewController {
         plans.first { $0.groupID == id }?.overflowText
     }
 
+    /// A member chip's glyph tint. Built here rather than read off a card
+    /// because the grid's cells are never realized headlessly.
+    public static var test_memberChipGlyphTint: NSColor? {
+        MemberChipView(symbolName: "hifispeaker").test_glyphTint
+    }
+
     /// The titles the card's right-click menu would show.
     public func test_contextMenuItems(forCard id: String) -> [String] {
         guard let index = index(ofGroup: id) else { return [] }
@@ -741,9 +747,12 @@ private final class MemberChipView: NSView {
         isOverflow = false
         super.init(frame: .zero)
         glyphView.translatesAutoresizingMaskIntoConstraints = false
-        glyphView.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
+        // Medium weight so the stroke has body at 13 pt; `label` so the glyph
+        // is black on the light seat (14.7:1) and near-white on the dark one.
+        glyphView.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .medium))
         glyphView.image?.isTemplate = true
-        glyphView.contentTintColor = Tokens.Color.secondaryLabel
+        glyphView.contentTintColor = Tokens.Color.label
         addSubview(glyphView)
         NSLayoutConstraint.activate([
             glyphView.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -794,11 +803,14 @@ private final class MemberChipView: NSView {
             path.stroke()
             return
         }
-        Tokens.Color.well.setFill()
+        Tokens.Color.iconSeatFill.setFill()
         path.fill()
-        Tokens.Color.hairline.setStroke()
+        Tokens.Color.containerEdge.setStroke()
         path.stroke()
     }
+
+    /// The member glyph's tint (nil on the overflow chip).
+    var test_glyphTint: NSColor? { isOverflow ? nil : glyphView.contentTintColor }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()

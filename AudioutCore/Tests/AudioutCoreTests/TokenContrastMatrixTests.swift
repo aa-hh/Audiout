@@ -160,6 +160,7 @@ extension SerializedSharedState {
         let panel = Tokens.Color.panel
         let raised = Tokens.Color.raised
         let well = Tokens.Color.well
+        let iconSeatFill = Tokens.Color.iconSeatFill
         let feedPillFill = Tokens.Color.feedPillFill
         let scopeGround = Tokens.Color.scopeGround
 
@@ -171,7 +172,8 @@ extension SerializedSharedState {
             ContrastEntry(name: "inkSecondary", token: Tokens.Color.inkSecondary, floor: 4.5,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
             ContrastEntry(name: "inkTertiary", token: Tokens.Color.inkTertiary, floor: 4.5,
-                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("well", well)])),
+                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("well", well),
+                                                  ("iconSeatFill", iconSeatFill)])),
             ContrastEntry(name: "warningText", token: Tokens.Color.warningText, floor: 4.5,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel)])),
             ContrastEntry(name: "feedPillText", token: Tokens.Color.feedPillText, floor: 4.5,
@@ -250,6 +252,30 @@ extension SerializedSharedState {
                 let ratio = measuredRatio(token, over: ground, appearanceName: .aqua)
                 #expect(ratio >= floor,
                     "\(name)/subtle vs \(groundName) light: \(String(format: "%.2f", ratio)):1 under \(floor):1")
+            }
+        }
+    }
+
+    // MARK: - Test B2: Increase Contrast pushes ember away from its ground
+
+    /// Ember's Increase-Contrast variant must sit strictly further from
+    /// `panel` than its base in both appearances — darker in light, lighter
+    /// in dark — never drifting back toward the ground (or toward `gold`).
+    /// Lives here, not in `MembershipWellContrastTests`, because it drives
+    /// the process-global `test_increaseContrastOverride` seam (this file's
+    /// serialization reason, above).
+    @Test func emberIncreaseContrastIsStrictlyFurtherFromPanelThanBase() {
+        defer { Tokens.test_increaseContrastOverride = nil }
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            Tokens.test_increaseContrastOverride = false
+            let base = measuredRatio(Tokens.Color.ember, over: Tokens.Color.panel, appearanceName: appearanceName)
+            let baseLuminance = relativeLuminance(resolved(Tokens.Color.ember, appearanceName: appearanceName))
+            Tokens.test_increaseContrastOverride = true
+            let increased = measuredRatio(Tokens.Color.ember, over: Tokens.Color.panel, appearanceName: appearanceName)
+            let increasedLuminance = relativeLuminance(resolved(Tokens.Color.ember, appearanceName: appearanceName))
+            #expect(increased > base, Comment(rawValue: "\(appearanceName.rawValue): IC ember \(increased):1 on panel is not past base \(base):1"))
+            if appearanceName == .aqua {
+                #expect(increasedLuminance < baseLuminance, Comment(rawValue: "light IC ember \(increasedLuminance) is not darker than base \(baseLuminance)"))
             }
         }
     }

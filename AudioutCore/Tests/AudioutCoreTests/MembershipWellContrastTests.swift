@@ -128,6 +128,26 @@ import AppKit
         }
     }
 
+    /// The device seats (`MemberChipView` on the overview cards,
+    /// `DeviceIconWellView` on the detail/editor panes) fill with
+    /// `iconSeatFill` and edge with `containerEdge`. The edge carries the
+    /// separation: light `iconSeatFill` on `raised` is exactly 1.100:1, the
+    /// same raised-on-panel pair this file deliberately leaves unpinned
+    /// above, so there is NO fill floor here either — only the edge's. The
+    /// edge's other side (`containerEdge` vs `raised`) is pinned by
+    /// `containerEdgeClearsTheCardEdgeFloorAndOutranksTheDivider`.
+    @Test func containerEdgeClearsTheSeparatorFloorOnTheIconSeat() {
+        let floor: CGFloat = 1.25
+
+        for appearanceName in [NSAppearance.Name.darkAqua, .aqua] {
+            let ratio = contrastRatio(resolved(Tokens.Color.containerEdge, appearanceName: appearanceName),
+                                      resolved(Tokens.Color.iconSeatFill, appearanceName: appearanceName))
+            #expect(ratio >= floor,
+                    Comment(rawValue: "containerEdge vs iconSeatFill (\(appearanceName.rawValue)): " +
+                    "\(ratio):1 below the \(floor):1 separator floor"))
+        }
+    }
+
     /// The two authored inks the Groups screen carries for de-emphasised and
     /// unavailable text clear the 4.5:1 BODY floor on every ground this screen
     /// can put them on. They exist because their stock aliases could not:
@@ -255,6 +275,21 @@ import AppKit
                 "read as the live one"))
         #expect(abs(gold.hueComponent - ember.hueComponent) <= 0.03,
                 "…while staying in the same warm family, not becoming a second hue")
+    }
+
+    /// The light idle/armed gap has a floor AND a ceiling. `spineTone(armed:)`
+    /// resolves to `gold` or `ember`; under ~1.40:1 the two are one visible
+    /// colour on a 2 pt line and the rail cannot report armed vs idle — the
+    /// only reason ember has a light depth of its own. Past 1.60:1 ember has
+    /// dropped far enough to read as a brown that muddies the whole rail, so
+    /// a future "make it clearer" cannot buy the gap with depth alone.
+    @Test func lightEmberStaysTellableFromGold() {
+        let gold = resolved(Tokens.Color.gold, appearanceName: .aqua)
+        let ember = resolved(Tokens.Color.ember, appearanceName: .aqua)
+        let gap = contrastRatio(gold, ember)
+
+        #expect(gap >= 1.40, Comment(rawValue: "gold vs ember \(gap):1 — the idle rail merges into the armed one"))
+        #expect(gap <= 1.60, Comment(rawValue: "gold vs ember \(gap):1 — ember has sunk into a muddy brown"))
     }
 
     // MARK: Structural — the editor's checklist actually wears the new surface

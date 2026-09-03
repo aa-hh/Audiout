@@ -41,6 +41,11 @@ public final class GeneralSettingsViewController: NSViewController {
     private let enterLicenseButton = NSButton()
     private let loginApprovalButton = NSButton()
     private var loginApprovalRow: NSView?
+    // The pane's column stack: the approval row is mounted into and unmounted
+    // from it (never hidden in place — `NSStackView` keeps a hidden child's
+    // last height, AGENTS.md).
+    private weak var paneStack: NSStackView?
+    private var licenseStatusRow: NSView?
     private var licenseRow: NSView?
     /// Guards against a second in-flight `LicenseValidator` round trip while
     /// one is already out — the button is disabled too, but appearing re-entry
@@ -159,7 +164,7 @@ public final class GeneralSettingsViewController: NSViewController {
         // `SMAppService.register()` can succeed into `.requiresApproval` —
         // registered, but inert until the user allows it in System Settings.
         // The switch springs back on its own; this row is the explanation and
-        // the shortcut. Hidden until `syncFromLoginItem()` finds that state.
+        // the shortcut. Unmounted until `syncFromLoginItem()` finds that state.
         loginApprovalButton.title = "Open Login Items…"
         loginApprovalButton.bezelStyle = .rounded
         loginApprovalButton.controlSize = .small
@@ -181,7 +186,6 @@ public final class GeneralSettingsViewController: NSViewController {
         approvalRow.alignment = .firstBaseline
         approvalRow.spacing = 8
         approvalRow.translatesAutoresizingMaskIntoConstraints = false
-        approvalRow.isHidden = true
         loginApprovalRow = approvalRow
 
         // Reconnect-at-launch (roadmap 050): the opt-in that lets
@@ -282,6 +286,7 @@ public final class GeneralSettingsViewController: NSViewController {
         licenseStatusRow.alignment = .firstBaseline
         licenseStatusRow.spacing = 8
         licenseStatusRow.translatesAutoresizingMaskIntoConstraints = false
+        self.licenseStatusRow = licenseStatusRow
 
         // Footer strip (roadmap 050): Setup and About are rare-use, so they
         // share one quiet button strip instead of two full title+subtitle rows.
@@ -326,7 +331,6 @@ public final class GeneralSettingsViewController: NSViewController {
         // array merges cleanly.
         var rows: [NSView] = [
             launchRow,
-            approvalRow,
             reconnectRow,
             remoteControlRow,
         ]
@@ -356,6 +360,7 @@ public final class GeneralSettingsViewController: NSViewController {
         ])
 
         view = SettingsForm.paneView(rows: rows)
+        paneStack = launchRow.superview as? NSStackView
         rebuildPhoneList()
         // Claimed here (single-assignment, like the app layer's claims on
         // this pane's own callbacks): a prompt answered or a phone revoked
@@ -398,6 +403,11 @@ public final class GeneralSettingsViewController: NSViewController {
         let serverConfigured = settings.licenseServerURL != nil
         licenseRow?.isHidden = !serverConfigured
         licenseStatusHint.isHidden = !serverConfigured
+        // The row itself, not just its children: an empty row still costs the
+        // stack its spacing. `serverConfigured` is fixed for the pane's life
+        // and this first runs before the first layout, so plain `isHidden` is
+        // safe here (the row is never shown-then-hidden).
+        licenseStatusRow?.isHidden = !serverConfigured
 
         let key = settings.licenseKey ?? ""
         let status = settings.licenseStatus
@@ -523,8 +533,6 @@ public final class GeneralSettingsViewController: NSViewController {
         }
         // (The container itself is width-pinned by `SettingsForm.paneView`,
         // like every other row.)
-        view.layoutSubtreeIfNeeded()
-        preferredContentSize = NSSize(width: SettingsForm.contentWidth, height: view.fittingSize.height)
     }
 
     /// One remembered phone: name · Allowed/Denied · ✕. The identity shown is
@@ -598,12 +606,6 @@ public final class GeneralSettingsViewController: NSViewController {
         settings.touchBarControlsEnabled = touchBarSwitch.state == .on
     }
 
-    public override func viewDidLoad() {
-        super.viewDidLoad()
-        view.layoutSubtreeIfNeeded()
-        preferredContentSize = NSSize(width: SettingsForm.contentWidth, height: view.fittingSize.height)
-    }
-
     public override func viewWillAppear() {
         super.viewWillAppear()
         syncFromLoginItem()
@@ -641,7 +643,18 @@ public final class GeneralSettingsViewController: NSViewController {
     /// is holding the registration for the user to allow.
     private func syncFromLoginItem() {
         launchSwitch.state = loginItem.isEnabled ? .on : .off
-        loginApprovalRow?.isHidden = !loginItem.needsApproval
+        // Mount/unmount rather than `isHidden`: the stack keeps a hidden
+        // child's last height, so the row is only ever in the stack while it
+        // has something to say.
+        guard let row = loginApprovalRow, let stack = paneStack else { return }
+        if loginItem.needsApproval, row.superview == nil {
+            stack.insertArrangedSubview(row, at: 1) // right under Launch at login
+            // `removeFromSuperview` dropped the width pin `paneView` gave it.
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        } else if !loginItem.needsApproval, row.superview != nil {
+            stack.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
     }
 
     @objc private func remoteControlToggled() {
@@ -806,7 +819,7 @@ public final class GeneralSettingsViewController: NSViewController {
     /// Whether the "allow Audiout in Login Items" explanation is on screen.
     public var test_loginApprovalHintIsVisible: Bool {
         _ = view
-        return !(loginApprovalRow?.isHidden ?? true)
+        return loginApprovalRow?.superview != nil
     }
 
     /// Invoke "Open Login Items…" as a click would.

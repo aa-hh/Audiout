@@ -8,6 +8,7 @@ colors:
   raised: "#241F1A"
   well: "#100D0A"
   hairline: "#3A332B"
+  containerEdge: "#3A332B"
   sidebarWarmTint: "#1F1A15"
   inkSecondary: "#B4ADA0"
   inkTertiary: "#969083"
@@ -241,6 +242,7 @@ The scaffolding — the half of the system that themes.
 - **Raised** (`#241F1A` dark / `#F2F0EA` light): icon wells, name fields, active fills. Light's value exists so light has a real raised rung at all — it used to be identical to panel, which left the light appearance with no ladder.
 - **Deep Well** (`#100D0A` dark / `#E2DFD3` light): the recess. Darker than canvas in dark, so a fader trough reads as a genuine trough rather than a raised strip.
 - **Hairline** (`#3A332B` dark / `#D0CDC3` light): the divider between de-nested sections, and in light the main thing doing the separating.
+- **Container Edge** (`#3A332B` dark / `#C4C0B4` light): the heavier of the two hairline weights — a container's own outer stroke, where Hairline rules that container's interior. In light it clears the divider by 1.143:1, enough to rank the two without reading as a second material. In dark it resolves to Hairline's own values, because dark still has a fill ladder and light does not.
 - **Sidebar Warm Tint** (`#1F1A15` dark / `#F5F4ED` light): the source-list ground in the Groups and Settings screens.
 - **Warm Ink** (`#B4ADA0` dark / `#5C574C` light) and **Faded Ink** (`#969083` dark / `#665F4C` light): secondary and tertiary text where the system's own label colours sit under the text floor on the warm ground.
 - **Dormant Rail** (`#7D7466` dark / `#8A8272` light): the membership rail before anything is armed.
@@ -262,6 +264,15 @@ not a shortcut.
 success, rings, meters, fader hardware, and the permission identity hues keep
 their authored values in every appearance and are never remapped by a theme. If
 a token carries meaning, the meaning owns its colour.
+
+**The Two Weights Rule.** A container's outer edge draws in `containerEdge`;
+the rules inside it draw in `hairline`. They are one mechanism at two ranks,
+and the rank is free because nothing in this app is ever drawn *on* a hairline
+— each is only ever a stroke or a divider fill, so separating them costs no
+text and no instrument contrast. In light, `canvas`, `canvasHi` and `panel` are
+the same `#FBFBF9`, so a container's edge is the only boundary pixel it has;
+that is what the heavier weight exists for. Dark needs no second value and
+does not get one.
 
 **The Measured Floor Rule.** Every custom colour ships light, dark,
 light-Increase-Contrast, and dark-Increase-Contrast values, each with a written
@@ -359,8 +370,9 @@ read `SurfaceLayout`.
 
 Depth here is **tonal, not cast**. Surfaces are flat: the ladder from `well`
 through `canvas`, `panel`, and `raised` does the layering in dark, and in light —
-where those steps are much smaller — hairlines carry most of the separation
-instead. Cards were explicitly de-nested: they no longer draw their own
+where those steps are much smaller, and where `panel` on `canvas` is no step at
+all — drawn edges carry most of the separation instead, at the two ranks the
+Two Weights Rule sets out. Cards were explicitly de-nested: they no longer draw their own
 material, shadow, or rim, and a hairline is the only thing between one section
 and the next.
 
@@ -397,7 +409,7 @@ is:
 
 - **12 px** — the rounded panel: the control-panel shell's bubble body and the quit HUD.
 - **11 px** — inset warning and note banners.
-- **10 px** — the grouped inset-list card, modelled directly on the System Settings idiom (onboarding's permission card, the Groups window's sections).
+- **10 px** — the grouped inset-list card, modelled directly on the System Settings idiom (onboarding's permission card, the Groups window's sections). Its 1 pt outer stroke is `containerEdge`; the dividers between its rows are `hairline`.
 - **7 px** — pills and the row selection highlight: the mute pill, the selection wash inset 5 pt horizontally and 2 pt vertically.
 - **5 px** — the FEED pill, at 4 pt horizontal and 2 pt vertical padding.
 - **4 px / 2.5 px** — the fader thumb (10 × 17 pt) and its 5 pt track.
@@ -492,6 +504,7 @@ popover header carries icon-only tabs between the three screens.
 - **Do** read row geometry from `PopoverColumnGrid` and surface geometry from `SurfaceLayout`.
 - **Do** use `Tokens.Motion.collapseRevealDuration` (0.15 s, `.easeInEaseOut`) for anything that folds. One value means an expand is the exact mirror of its collapse; a second constant kept in step by hand silently drifts.
 - **Do** re-resolve colour on `viewDidChangeEffectiveAppearance`, on `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification`, and — if the view stamps `gold`, `ember`, or `glow` into a `CALayer` — on `Tokens.accentStyleDidChangeNotification`.
+- **Do** stroke a container's outer edge with `containerEdge` and rule its interior with `hairline`. On the light ground a card's edge is the only thing separating it from the page.
 - **Do** give a state-branching view an `else` branch. A resting halo with no else branch was an invisible bare fill at 1.000:1 on the flat light ground.
 
 ### Don't:
@@ -504,5 +517,6 @@ popover header carries icon-only tabs between the three screens.
 - **Don't** use `controlAccentColor` for engaged mixer chrome — it follows the user's macOS accent and paints `#007AFF` into a warm vocabulary. Use `engagedChrome`.
 - **Don't** cache a resolved `.cgColor` outside a live draw or an appearance refresh. A frozen colour sits outside Increase Contrast forever.
 - **Don't** apply a case transform to authored copy, and don't change the height of a line to make room for a state word.
+- **Don't** give `containerEdge` a third value in dark. Dark already has both a fill ladder and a hairline sitting where light's edge lands; a separate dark value buys nothing and starts drawing frames around things.
 - **Don't** treat the light appearance as the dark one lightened. Light is Circuit: neutral, near-white, with hairlines doing the separating.
 - **Don't** promote the depth behaviour described above into doctrine without asking. That decision is open.

@@ -9,6 +9,7 @@ backend.
 ## Rules
 
 - Configuration-only: selection is not activation, and nothing here calls `activateGroup`.
+- Every way out of the editor lands in `MixerWindowController.dismissEditor()`: the band, ⌘[, Done, the Groups plate re-click, and the surface's Escape (which closes the window only when there is no editor to pop).
 - Hosts drive visibility through `setHostVisible(_:)`; a hidden host still stores snapshots.
 - The sidebar split must never collapse: nothing in the UI brings it back.
 - The `mixer-4-device-detail` goldens are unreproducible on macOS 27; never regenerate them.
@@ -28,8 +29,8 @@ backend.
 - `MixerWindowController` → screen-content controller: split view, sheets, auto-select rule.
 - `ContentPaneHostViewController` → swapped overview, editor and detail pane, plus footer.
 - `GroupsOverviewViewController` → the group list: card grid, absorbed empty state.
-- `SidebarViewController` → source list: Groups plate, System Audio, Speakers.
-- `GroupEditorViewController` → edit-only pane: back band, rename, membership, delete.
+- `SidebarViewController` → source list: Groups plate, System Audio, Speakers. A click on the already-selected Groups plate re-reports `.groupsOverview` (the click action, not the selection delegate).
+- `GroupEditorViewController` → edit-only pane: back band, rename, membership, delete, Done. Edits autosave; the line beside Delete says so for every group.
 - `GroupCreationSheetController` → standard sheet for new groups; never activates.
 - `DeviceDetailViewController` → device pane: identity, Equalizer, Groups, About.
 - `MainOutDetailViewController` → Main Audio page, non-editable icon well.

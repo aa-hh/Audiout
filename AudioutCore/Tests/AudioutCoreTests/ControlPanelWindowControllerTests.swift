@@ -238,6 +238,26 @@ struct ControlPanelWindowControllerTests {
         #expect(fired, "Escape/cancelOperation should close the panel and fire onClose")
     }
 
+    /// A screen one level deep gets Escape first: a handler that consumes it
+    /// keeps the panel open, and one that declines lets the same press close.
+    @Test func escapeConsultsTheCancelHandlerBeforeClosing() {
+        let controller = makeController()
+        controller.show(anchorRect: nil)
+        var fired = false
+        controller.onClose = { fired = true }
+        var asked = 0
+
+        controller.cancelHandler = { asked += 1; return true }
+        controller.test_panel?.cancelOperation(nil)
+        #expect(asked == 1)
+        #expect(!fired, "a consumed Escape leaves the panel open")
+
+        controller.cancelHandler = { asked += 1; return false }
+        controller.test_panel?.cancelOperation(nil)
+        #expect(asked == 2)
+        #expect(fired, "a declined Escape closes the panel")
+    }
+
     /// The status-item toggle-close calls this shell method when the panel is
     /// already open; it must route through the real close so the app lands home
     /// on the popover (i.e. `onClose` fires), not silently order the panel out.

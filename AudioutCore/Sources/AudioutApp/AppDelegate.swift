@@ -1134,6 +1134,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The Groups content skips its rebuild while hidden (B8) and has no
         // window of its own to ask about visibility any more, so the surface
         // tells it which screen the user is looking at.
+        // Escape in a group's editor steps back to the overview; the next
+        // Escape closes the surface.
+        surface.groupsCancelHandler = { [weak self] in
+            self?.mixerWindowController?.dismissEditor() ?? false
+        }
         surface.onVisibleScreenChange = { [weak self] screen in
             self?.mixerWindowController?.setHostVisible(screen == .groups)
             // Settings' panes are built once and cached for the process's

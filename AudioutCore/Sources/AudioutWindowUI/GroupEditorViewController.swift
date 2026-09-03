@@ -117,6 +117,10 @@ public final class GroupEditorViewController: NSViewController {
     /// `test_headerSectionFrame` / the badge anchors measure its frame.
     private let headerWell = GroupedSectionView()
     private let deleteButton = NSButton()
+    /// "Done", at the trailing end of the delete row: the same way out as the
+    /// "‹ Groups" band, in a control a first-time user reaches for. No Return
+    /// key equivalent — Return belongs to the rename field.
+    private let doneButton = NSButton()
 
     /// The pane's scroll view (roadmap 039) — see the note in ``loadView()``.
     /// Held so the `test_*` seams can measure the document without walking the
@@ -142,23 +146,21 @@ public final class GroupEditorViewController: NSViewController {
         return stack
     }()
 
-    /// The reassurance line for the one editor that raises the fear — an ACTIVE
+    /// The line that says edits are saved as they are made — there is no Save
+    /// button, and Done only leaves. Every group's editor shows it; an ACTIVE
     /// group's, where "Playing now" is on screen while membership is being
-    /// edited. An inactive group's editor states nothing, because nothing there
-    /// is playing to change.
+    /// edited, adds that nothing playing changes (``show(groupID:devices:)``).
     ///
-    /// HEIGHT BUDGET: it sits BESIDE "Delete Group…" and is centred on it, with
-    /// no bottom pin, so it rides inside the button's existing bottom margin and
-    /// costs the pane ZERO fitting height. The pane has no scroll view and (at a
-    /// seven-device fleet) no spare points at all — a new band above the button
-    /// would overflow it (`MembershipRailTests`).
+    /// HEIGHT BUDGET: it sits BETWEEN "Delete Group…" and "Done", centred on
+    /// them, with no bottom pin, so it rides inside the buttons' existing
+    /// bottom margin and costs the pane ZERO fitting height. At a seven-device
+    /// fleet the pane has no spare points at all — a new band above the
+    /// buttons would overflow it (`MembershipRailTests`).
     ///
-    /// Configured (and hidden) at declaration for the same `loadView`-after-
-    /// `show` ordering reason as ``playingBadge``.
+    /// Configured at declaration for the same `loadView`-after-`show`
+    /// ordering reason as ``playingBadge``.
     private let reassuranceLabel: NSTextField = {
-        let label = NSTextField(wrappingLabelWithString:
-            "Changes here are saved for next time \u{2014} they don\u{2019}t change "
-            + "what\u{2019}s playing now.")
+        let label = NSTextField(wrappingLabelWithString: GroupEditorViewController.savedAsYouGo)
         label.font = Tokens.Font.caption
         // Stock `.secondaryLabel`: text colours are frozen in this pane
         // (`AGENTS.md`) — the gold in this pair tints the badge's GLYPH only.
@@ -168,7 +170,6 @@ public final class GroupEditorViewController: NSViewController {
         // It WRAPS into whatever the button leaves rather than pushing the
         // button's own required geometry around.
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        label.isHidden = true
         return label
     }()
 
@@ -187,6 +188,10 @@ public final class GroupEditorViewController: NSViewController {
     /// IS GEOMETRIC (`GroupsHeaderParityTests` asserts the two panes' real
     /// laid-out title frames), so a band that PUSHED the header down would
     /// make every sidebar swap between a group and a speaker twitch.
+    private static let savedAsYouGo = "Changes are saved as you go."
+    private static let savedAsYouGoActive =
+        "Changes are saved as you go. They don\u{2019}t change what\u{2019}s playing now."
+
     private static let backBandTopInset: CGFloat = 4
     private static let backBandHeight: CGFloat = 16
     private static let backBandToColumnGap: CGFloat = 0
@@ -311,6 +316,12 @@ public final class GroupEditorViewController: NSViewController {
         deleteButton.action = #selector(deleteTapped(_:))
         deleteButton.hasDestructiveAction = true
 
+        doneButton.translatesAutoresizingMaskIntoConstraints = false
+        doneButton.title = "Done"
+        doneButton.bezelStyle = .rounded
+        doneButton.target = self
+        doneButton.action = #selector(doneTapped(_:))
+
         // A host that re-invalidates the rail on every layout pass, so the spine
         // always reflects the CURRENT row frames (rebuild, resize, pane swap)
         // with no cached geometry.
@@ -375,7 +386,7 @@ public final class GroupEditorViewController: NSViewController {
         // — they just read document space rather than container space.
         let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
-        for v in [backBand, column, deleteButton, reassuranceLabel] {
+        for v in [backBand, column, deleteButton, doneButton, reassuranceLabel] {
             document.addSubview(v)
         }
         // Added LAST so the spine composites ON TOP of the header and the rows
@@ -427,11 +438,11 @@ public final class GroupEditorViewController: NSViewController {
             constant: -GroupsPaneLayout.contentTrailingInset)
         titleCap.priority = NSLayoutConstraint.Priority(999)
 
-        // The reassurance line takes whatever the delete button leaves, wrapping
+        // The reassurance line takes whatever the two buttons leave, wrapping
         // into it. 999 rather than required so a pathologically narrow pane
-        // breaks THIS rather than the button's own required geometry.
+        // breaks THIS rather than a button's own required geometry.
         let reassuranceTrailing = reassuranceLabel.trailingAnchor.constraint(
-            equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset)
+            equalTo: doneButton.leadingAnchor, constant: -16)
         reassuranceTrailing.priority = NSLayoutConstraint.Priority(999)
 
         NSLayoutConstraint.activate([
@@ -574,9 +585,15 @@ public final class GroupEditorViewController: NSViewController {
             deleteButton.bottomAnchor.constraint(equalTo: document.bottomAnchor,
                                                  constant: -GroupsPaneLayout.paneBottomInset),
 
-            // Beside the button, centred on it, with NO bottom pin: the line's
-            // overhang rides inside the `paneBottomInset` margin above, so the
-            // pane's fitting height is unchanged (see ``reassuranceLabel``).
+            // Done closes the row at the content's trailing margin, level with
+            // Delete; the same bezel, so the row's height is Delete's.
+            doneButton.trailingAnchor.constraint(
+                equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset),
+            doneButton.centerYAnchor.constraint(equalTo: deleteButton.centerYAnchor),
+
+            // Between the buttons, centred on them, with NO bottom pin: the
+            // line's overhang rides inside the `paneBottomInset` margin above,
+            // so the pane's fitting height is unchanged (see ``reassuranceLabel``).
             reassuranceLabel.leadingAnchor.constraint(
                 greaterThanOrEqualTo: deleteButton.trailingAnchor, constant: 16),
             reassuranceLabel.centerYAnchor.constraint(equalTo: deleteButton.centerYAnchor),
@@ -689,10 +706,10 @@ public final class GroupEditorViewController: NSViewController {
         iconWell.setAccessibilityValue(isActive ? "Active group" : "")
         // The ring is colour alone; these two say it in words — the marker
         // states that this group IS playing, and the line answers the question
-        // that raises while its membership is being edited. Both are hidden for
-        // an inactive group, whose editor moves nothing either way.
+        // that raises while its membership is being edited. An inactive group
+        // moves nothing either way, so its line only says edits are saved.
         playingBadge.isHidden = !isActive
-        reassuranceLabel.isHidden = !isActive
+        reassuranceLabel.stringValue = isActive ? Self.savedAsYouGoActive : Self.savedAsYouGo
         // The origin hook's tone follows the same active-group truth the well's
         // gold ring does (`railHookAnchor`), so repaint the rail with it.
         railOverlay.needsDisplay = true
@@ -1115,6 +1132,10 @@ public final class GroupEditorViewController: NSViewController {
         deleteTapped(deleteButton)
     }
 
+    @objc private func doneTapped(_ sender: NSButton) {
+        onBack?()
+    }
+
     @objc private func deleteTapped(_ sender: NSButton) {
         guard let group = editingGroup else { return }
         guard let window = view.window else {
@@ -1264,8 +1285,7 @@ public final class GroupEditorViewController: NSViewController {
     /// the active Main Out group's editor only.
     public var test_playingBadgeVisible: Bool { !playingBadge.isHidden }
 
-    /// Whether the reassurance line under the membership section is on screen —
-    /// the active group's editor only (nothing else raises the question).
+    /// Whether the reassurance line beside the delete row is on screen.
     public var test_reassuranceVisible: Bool { !reassuranceLabel.isHidden }
 
     /// The reassurance line's exact wording.
@@ -1292,6 +1312,12 @@ public final class GroupEditorViewController: NSViewController {
     /// True when "Delete Group…" is currently visible (always true — the
     /// editor is edit-only).
     public var test_deleteButtonVisible: Bool { !deleteButton.isHidden }
+
+    /// The Done button's title, as VoiceOver reads it.
+    public var test_doneButtonTitle: String { doneButton.title }
+
+    /// Click "Done" — the real button action.
+    public func test_done() { doneButton.performClick(nil) }
 
     /// The delete button's laid-out frame in the pane's own coordinates — it
     /// must line up with the content above it (anchoring trap: it used to hang
@@ -1528,8 +1554,9 @@ private final class RailRepaintingView: NSView {
     ///
     /// razor: view-local, like Cmd-N. The Groups screen is hosted in the
     /// menu-bar surface and has no menu bar of its own, so this works while
-    /// the editor is in the key window and nowhere else, and no UI can print
-    /// the shortcut. Upgrade path: a real "Back" item in the app's main menu.
+    /// the editor is in the key window and nowhere else; only the back band's
+    /// tooltip prints the shortcut. Upgrade path: a real "Back" item in the
+    /// app's main menu.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
            event.charactersIgnoringModifiers == "[",
@@ -1553,8 +1580,8 @@ private final class RailRepaintingView: NSView {
 // MARK: - Back band
 
 /// The "‹ Groups" band above the identity card: the whole band is the target,
-/// not just the word, and it reads in the same quiet caption tone the rest of
-/// the pane's secondary text uses. Bare `NSView` rather than an `NSButton` so
+/// not just the word, and it reads in the pane's primary text tone so the way
+/// back is visible at rest. Bare `NSView` rather than an `NSButton` so
 /// its geometry is the band's, so it hand-rolls what a control gets for free:
 /// `acceptsFirstResponder` + the focus ring, Space/Return, and
 /// `accessibilityPerformPress()` (`DeviceIconWellView`'s precedent).
@@ -1564,8 +1591,6 @@ private final class BackBandView: NSView {
 
     private let glyphView = NSImageView()
     private let label = NSTextField(labelWithString: "Groups")
-    private var trackingArea: NSTrackingArea?
-    private var isHovered = false { didSet { updateTone() } }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1585,6 +1610,9 @@ private final class BackBandView: NSView {
 
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = Tokens.Font.caption
+        // Stock `.label`: text colours are frozen in this pane (`AGENTS.md`).
+        label.textColor = Tokens.Color.label
+        glyphView.contentTintColor = Tokens.Color.label
 
         addSubview(glyphView)
         addSubview(label)
@@ -1599,33 +1627,13 @@ private final class BackBandView: NSView {
             label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
         ])
 
-        updateTone()
         setAccessibilityRole(.button)
         setAccessibilityLabel("Back to Groups")
-        toolTip = "Back to Groups"
+        // The one place the shortcut is printed: the screen has no menu bar
+        // to list it (see `performKeyEquivalent`).
+        toolTip = "Back to Groups (\u{2318}[)"
     }
 
-    /// Hover is a tone step from secondary to primary — text colours are
-    /// frozen to stock semantics in this pane (`AGENTS.md`), so the affordance
-    /// has to come from WHICH stock grey, never from a hue.
-    private func updateTone() {
-        let color = isHovered ? Tokens.Color.label : Tokens.Color.secondaryLabel
-        label.textColor = color
-        glyphView.contentTintColor = color
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea { removeTrackingArea(trackingArea) }
-        let area = NSTrackingArea(rect: bounds,
-                                  options: [.mouseEnteredAndExited, .activeInActiveApp],
-                                  owner: self, userInfo: nil)
-        addTrackingArea(area)
-        trackingArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
     override func mouseDown(with event: NSEvent) { onActivate?() }
 
     override var acceptsFirstResponder: Bool { true }

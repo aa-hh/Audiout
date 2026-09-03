@@ -193,6 +193,11 @@ public final class SidebarViewController: NSViewController {
         outlineView.allowsMultipleSelection = true
         outlineView.dataSource = self
         outlineView.delegate = self
+        // A click on the ALREADY-selected Groups row is the way back from a
+        // group's editor; the selection delegate never hears it, the click
+        // action does.
+        outlineView.target = self
+        outlineView.action = #selector(outlineViewClicked(_:))
         // Right-click menu: one menu whose items are rebuilt per click, because
         // they depend on the CLICKED row (`menuNeedsUpdate`).
         let contextMenu = NSMenu()
@@ -447,6 +452,10 @@ public final class SidebarViewController: NSViewController {
 
     private var suppressSelectionCallback = false
 
+    /// Whether the click now in progress already fired `onSelect` through
+    /// `outlineViewSelectionDidChange`. Read and cleared by the click action.
+    private var clickChangedSelection = false
+
     private func findNode(matching target: SidebarSelection) -> Node? {
         func search(_ nodes: [Node]) -> Node? {
             for node in nodes {
@@ -516,6 +525,15 @@ public final class SidebarViewController: NSViewController {
     /// Simulate the user clicking a sidebar row (fires `onSelect`).
     public func test_select(_ target: SidebarSelection) {
         select(target, notify: true)
+    }
+
+    /// Simulate a click on the Groups row — the click ACTION, which is what
+    /// fires when the row is already selected and the selection delegate
+    /// stays silent. `clickedRow` cannot be set headlessly, so the row is
+    /// looked up here and handed to the action's own handler.
+    public func test_clickGroupsRow() {
+        guard let node = findNode(matching: .groupsOverview) else { return }
+        reselectGroupsRow(ifClicked: outlineView.row(forItem: node))
     }
 
     /// Simulate a multi-selection of device rows (cmd/shift-click), for the
@@ -895,7 +913,27 @@ extension SidebarViewController: NSOutlineViewDelegate {
         // suppression or not — a programmatic restore must retitle it too.
         updateAddButtonTitle()
         guard !suppressSelectionCallback else { return }
+        // A click that moved the selection has just been reported here; the
+        // click action that follows it must not report it a second time
+        // (`currentEvent` is the mouse-down for the whole of the click).
+        clickChangedSelection = NSApp?.currentEvent?.type == .leftMouseDown
         onSelect?(currentSelection)
+    }
+
+    @objc private func outlineViewClicked(_ sender: Any?) {
+        reselectGroupsRow(ifClicked: outlineView.clickedRow)
+    }
+
+    /// The click action's one job: a click on the Groups row while it is
+    /// ALREADY selected re-reports `.groupsOverview`, so the host can pop a
+    /// group's editor back to the overview. Every other click was either
+    /// reported by the selection delegate or selects nothing new.
+    private func reselectGroupsRow(ifClicked row: Int) {
+        let alreadyReported = clickChangedSelection
+        clickChangedSelection = false
+        guard !alreadyReported, row >= 0, row == outlineView.selectedRow,
+              currentSelection == .groupsOverview else { return }
+        onSelect?(.groupsOverview)
     }
 
     // MARK: Cell builders

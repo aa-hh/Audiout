@@ -307,6 +307,45 @@ import AppKit
         #expect(meteringStates == [true, false, true], "reshow is a fresh Mixer show")
     }
 
+    /// Escape on the Groups screen steps back a level when the screen can;
+    /// with nothing left to pop, the same press closes the surface. Headless,
+    /// a panel closes once per show, so each test closes exactly once.
+    @Test func escapeStepsBackOnTheGroupsScreenBeforeItClosesTheSurface() {
+        let (surface, _, _, _) = makeSurface()
+        var closes = 0
+        surface.onClose = { closes += 1 }
+        var canStepBack = true
+        var asked = 0
+        surface.groupsCancelHandler = { asked += 1; return canStepBack }
+
+        surface.show(anchorRect: nil)
+        surface.shell.test_isPanelVisibleOverride = true
+        surface.select(.groups)
+        surface.shell.test_panel?.cancelOperation(nil)
+        #expect(asked == 1)
+        #expect(closes == 0, "the editor popped; the surface stays open")
+
+        canStepBack = false
+        surface.shell.test_panel?.cancelOperation(nil)
+        #expect(asked == 2)
+        #expect(closes == 1, "with nothing to pop, Escape closes the surface")
+    }
+
+    @Test func escapeOnTheMixerScreenClosesWithoutAskingTheGroupsScreen() {
+        let (surface, _, _, _) = makeSurface()
+        var closes = 0
+        surface.onClose = { closes += 1 }
+        var asked = 0
+        surface.groupsCancelHandler = { asked += 1; return true }
+
+        surface.show(anchorRect: nil)
+        surface.shell.test_isPanelVisibleOverride = true
+        surface.shell.test_panel?.cancelOperation(nil)
+
+        #expect(asked == 0, "the Mixer screen has no level to step back from")
+        #expect(closes == 1)
+    }
+
     // MARK: Pin — persistence round-trip + chrome inset
 
     @Test func pinPersistsAndRestores() {

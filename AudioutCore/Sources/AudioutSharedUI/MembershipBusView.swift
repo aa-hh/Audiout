@@ -106,6 +106,15 @@ public final class MembershipBusView: NSView {
     /// (`Tokens.Color.spineTone`). Defaults to true: the popover's rows ARE the
     /// live signal path and keep their gold unchanged.
     private var armed = true
+    /// Whether a dimmed `.member`'s rim draws at `busNodeDimmedRimWidth`
+    /// instead of the standard `busNodeRimWidth`. Off by default — the
+    /// popover's dimmed member is a CONFIGURATION divergence (a checked
+    /// device outside the active Main Out target, still fully reachable), and
+    /// doesn't need the extra weight. `MembershipRowView` (the Groups editor)
+    /// turns this on: there, `dimmed` means the checked device is physically
+    /// unavailable, and the thicker rim is what the row's own `Unavailable`
+    /// label already says in text.
+    public var emphasizesDimmedMemberRim = false
     /// Whether the pointer is over the row's bus-gutter region — the node
     /// RESIZES to ``postClickRadius(for:)``, the size it would rest at once the
     /// click lands, so the pointer previews the toggle instead of just admitting
@@ -277,9 +286,14 @@ public final class MembershipBusView: NSView {
 
     /// Stroke a node's rim (hollow node border, or the filled node's edge).
     private func strokeNodeRim(in rect: NSRect, color: NSColor, dashed: Bool) {
-        let width: CGFloat = node == .failed
-            ? PopoverColumnGrid.haloRingFailedStroke
-            : PopoverColumnGrid.busNodeRimWidth
+        let width: CGFloat
+        if node == .failed {
+            width = PopoverColumnGrid.haloRingFailedStroke
+        } else if node == .member, dimmed, emphasizesDimmedMemberRim {
+            width = PopoverColumnGrid.busNodeDimmedRimWidth
+        } else {
+            width = PopoverColumnGrid.busNodeRimWidth
+        }
         let rim = NSBezierPath(ovalIn: rect.insetBy(dx: width / 2, dy: width / 2))
         rim.lineWidth = width
         if dashed {

@@ -463,6 +463,12 @@ public enum PopoverColumnGrid {
     public static let busLineWidth: CGFloat = 2
     /// Stroke width of the rim ringing a filled node / edging a hollow one.
     public static let busNodeRimWidth: CGFloat = 1.5
+    /// Rim width for a SELECTED-but-unavailable member (`MembershipBusView`'s
+    /// `emphasizesDimmedMemberRim`, set true only by the Groups editor's own
+    /// row) — 2x `busNodeRimWidth`, so the seat that already carries the
+    /// visual weight (`dotSocket`) reads as emphasized rather than merely
+    /// dim.
+    public static let busNodeDimmedRimWidth: CGFloat = busNodeRimWidth * 2
     /// The unstroked VERTICAL gap between a node's edge and where the rail line
     /// stops/resumes above and below it (Alec's clearance refinement) — the rail
     /// "meets" a node with breathing room instead of jamming into it, so

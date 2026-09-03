@@ -183,7 +183,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         lostKeyButton.action = #selector(lostKeyTapped)
         setQuietLinkTitle("I lost my key", on: lostKeyButton)
 
-        buyButton.title = "Don’t have a key? Buy Audiout — €30"
+        buyButton.title = "Buy Audiout"
         buyButton.bezelStyle = .rounded
         buyButton.controlSize = .regular
         buyButton.target = self

@@ -395,6 +395,14 @@ public final class GroupCreationSheetController: NSViewController {
     /// `memberVolumes` entry is that device's current backend volume.
     private func commit() {
         guard isCreateEnabled else { return }
+        // ONCE. Return in the name field and the default button's own Return
+        // both land here, and a second landing arrives AFTER the first has
+        // already saved the group — so the sheet refused the name it had just
+        // created, on a first-ever group ("that name is already taken",
+        // live-caught 2026-09-03). Everything below is re-runnable after a
+        // REFUSAL (the flag is only set once a group actually exists), so a
+        // corrected name still commits.
+        guard !hasCreatedGroup else { return }
         let trimmed = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = trimmed.isEmpty ? "New Group" : trimmed
         // TAKEN NAME first: refusing the name wins over resolving the member
@@ -428,6 +436,7 @@ public final class GroupCreationSheetController: NSViewController {
                 informativeText: "The group couldn\u{2019}t be saved. Try again.")
             return
         }
+        hasCreatedGroup = !result.alreadyExisted
         Analytics.capture("scene:created", [
             "source": "sheet",
             "member_count": String(memberIDs.count),
@@ -442,6 +451,13 @@ public final class GroupCreationSheetController: NSViewController {
         }
         finish((group: result.group, alreadyExisted: result.alreadyExisted))
     }
+
+    /// Set once ``commit()`` has actually saved a NEW group, so a second
+    /// Return or click cannot run the form again against the group it just
+    /// made. Not set when the member set resolved onto an existing group —
+    /// nothing was written, and the user may still go back and change the
+    /// selection.
+    private var hasCreatedGroup = false
 
     /// Whether any saved group already carries `name` (case-insensitively).
     private func isNameTaken(_ name: String) -> Bool {

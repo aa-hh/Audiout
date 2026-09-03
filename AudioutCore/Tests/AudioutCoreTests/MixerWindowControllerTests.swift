@@ -883,6 +883,27 @@ import AppKit
         #expect(sheet.test_checkedDeviceIDs == ["homepod-bed"], "the selection survives the refusal")
     }
 
+    /// Return in the name field and the default button both reach `commit()`,
+    /// so a single keypress could run it twice — the second run then found the
+    /// group the first had just saved and refused its own name. Live-caught
+    /// 2026-09-03 on a first-ever group.
+    @Test func committingTheCreateSheetTwiceCreatesOneGroupAndNoRefusal() async throws {
+        let (window, controller, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+
+        sheet.test_setName("Kitchen")
+        sheet.test_setMembership(deviceID: "homepod-bed", isChecked: true)
+        sheet.test_commit()
+        sheet.test_commit()
+        await drain()
+
+        #expect(controller.groups.map(\.name) == ["Kitchen"], "one group, created once")
+        #expect(!sheet.test_duplicateNameRefused,
+                "the sheet never refuses the name of the group it just created")
+    }
+
     // MARK: The creation sheet reports a failed save (P1-4)
 
     @Test func createSheetReportsAFailedSaveAndKeepsTheForm() async throws {

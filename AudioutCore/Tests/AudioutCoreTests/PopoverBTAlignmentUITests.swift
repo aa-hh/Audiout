@@ -421,6 +421,27 @@ import AppKit
         #expect(wizard?.test_clickCountText == BTAlignmentWizardView.clickCountCopy(1))
     }
 
+    /// Identity colour names WHICH speaker: green for the target, steel blue
+    /// for the reference. Magenta is group identity now, and never appears on
+    /// this sheet.
+    @Test func theAnswerPlatesWearGreenAndSteelBlueNeverMagenta() throws {
+        let (popover, _) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+
+        let target = try #require(wizard?.test_plateIdentityTint("Move 2")?
+            .usingColorSpace(.sRGB))
+        #expect(target.greenComponent > target.blueComponent
+                    && target.blueComponent > target.redComponent,
+                "the target plate is green-led, got \(target)")
+
+        let reference = try #require(wizard?.test_plateIdentityTint("This Mac")?
+            .usingColorSpace(.sRGB))
+        #expect(reference.blueComponent > reference.redComponent + 0.15
+                    && reference.greenComponent > reference.redComponent,
+                "the reference plate is blue-led, got \(reference)")
+    }
+
     @Test func backUndoesTheLastAnswerAndReAsksThatTrial() {
         let (popover, recorder) = makePopover()
         let wizard = openWizard(popover)

@@ -334,7 +334,19 @@ public final class GroupCreationSheetController: NSViewController {
         updateCreateEnabled()
     }
 
-    private var isCreateEnabled: Bool { !checkedIDs.isEmpty }
+    /// The saved group whose members are exactly what is ticked right now, if
+    /// any. `createGroup` resolves an identical set onto that group rather than
+    /// making a copy, so this is the state Create CANNOT be pressed into.
+    private var groupMatchingChecked: Group? {
+        groupController.group(matchingMemberSet: checkedIDs)
+    }
+
+    /// Create needs at least one speaker, and a set that isn't already a saved
+    /// group. Saying so on the checklist — Create dimmed, the count line naming
+    /// the group — is what keeps the user OUT of the refusal that used to be
+    /// the only way to learn it (Alec, 2026-09-03: "I just don't want to get to
+    /// that strange error state").
+    private var isCreateEnabled: Bool { !checkedIDs.isEmpty && groupMatchingChecked == nil }
 
     private func updateCreateEnabled() {
         createButton.isEnabled = isCreateEnabled
@@ -342,7 +354,13 @@ public final class GroupCreationSheetController: NSViewController {
 
     private func updateCountLabel() {
         let count = checkedIDs.count
-        countLabel.stringValue = count == 1 ? "1 speaker selected" : "\(count) speakers selected"
+        let selected = count == 1 ? "1 speaker selected" : "\(count) speakers selected"
+        guard let existing = groupMatchingChecked else {
+            countLabel.stringValue = selected
+            return
+        }
+        countLabel.stringValue =
+            selected + " \u{2014} already saved as \u{201C}\(existing.name)\u{201D}"
     }
 
     // MARK: Actions

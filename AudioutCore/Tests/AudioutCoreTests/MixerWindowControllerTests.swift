@@ -502,18 +502,25 @@ import AppKit
         #expect(completedResult?.alreadyExisted == false)
         let firstID = controller.groups[0].id
 
-        // Same member set again (order swapped) must resolve to the existing group.
+        // Same member set again (order swapped). The sheet REFUSES TO ARM
+        // rather than letting the user press Create into a refusal (Alec,
+        // 2026-09-03) — the count line names the group that already holds them.
         window.test_presentCreateSheet(preselected: ["appletv-lr", "office"])
         await drain()
         sheet = try #require(window.test_createSheet)
         completedResult = nil
         sheet.onComplete = { completedResult = $0 }
+
+        #expect(!sheet.test_isCreateEnabled, "Create cannot be pressed into a set that is already a group")
+        #expect(sheet.test_countText.contains(controller.groups[0].name),
+                Comment(rawValue: "and the count line says which group holds them: " + sheet.test_countText))
+
         sheet.test_commit()
         await drain()
 
         #expect(controller.groups.count == 1, "no duplicate group for an identical member set")
-        #expect(completedResult?.group.id == firstID)
-        #expect(completedResult?.alreadyExisted == true)
+        #expect(controller.groups[0].id == firstID)
+        #expect(completedResult == nil, "a disarmed Create reports nothing at all")
     }
 
     /// Reversed 2026-08-28 (Alec): an offline speaker MAY join a brand-new
@@ -966,9 +973,10 @@ import AppKit
         #expect(sheet.test_isCreateEnabled, "…and Create stays live, so the user can try again")
     }
 
-    /// The dedup announcement is a WINDOW-path sheet; headless keeps today's
-    /// silent resolve, which every existing flow depends on.
-    @Test func aHeadlessDedupStillCompletesWithAlreadyExisted() async throws {
+    /// The dedup outcome is now unreachable from the sheet at all — Create is
+    /// disarmed for a set that is already a group, window or not, so nobody
+    /// arrives at the announcement by pressing a live button (Alec, 2026-09-03).
+    @Test func aSetThatIsAlreadyAGroupNeverArmsCreate() async throws {
         let (window, controller, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: ["office", "homepod-bed"])
         await drain()
@@ -981,11 +989,13 @@ import AppKit
         let second = try #require(window.test_createSheet)
         var result: (group: Group, alreadyExisted: Bool)?
         second.onComplete = { result = $0 }
+
+        #expect(!second.test_isCreateEnabled, "Create is disarmed for a set that is already a group")
         second.test_commit()
         await drain()
 
-        #expect(controller.groups.count == 1, "the identical member set resolved to the existing group")
-        #expect(result?.alreadyExisted == true, "and headless still reports it, rather than waiting on a sheet")
+        #expect(controller.groups.count == 1, "nothing was written")
+        #expect(result == nil, "and nothing was reported — there is no outcome to announce")
     }
 
     // MARK: The creation sheet's empty checklist (P1-5)

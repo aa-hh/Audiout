@@ -14,11 +14,8 @@ import AppKit
 /// DISTINCT in both accent-dial columns (Q1), each clears the same >=3:1
 /// own-theme contrast floor every other `Tokens.Color` instrument is held to
 /// (T1's written arithmetic, exercised here), the accent dial genuinely MUTES
-/// all five in `.subtle` (Q5) while `.systemAccent` leaves them at their
-/// authored Full-gold hues and STILL mutually distinct (NEW-1 — the explicit
-/// guard against a later regression routing them through `accentDynamic`,
-/// which would collapse all five onto the same live-accent-derived value),
-/// and the glyph-only decision (Q3) holds end to end: the tile's own FILL
+/// all five in `.subtle` (Q5), and the glyph-only decision (Q3) holds end to
+/// end: the tile's own FILL
 /// never recolours, and each card's glyph keeps its identity hue in every
 /// `SetupCardState`.
 ///
@@ -181,43 +178,13 @@ extension SerializedSharedState {
         }
     }
 
-    // MARK: 4 — .systemAccent stays at the Full-gold hues AND stays distinct (NEW-1)
-
-    /// The executable guard against a later regression routing these five
-    /// through `accentDynamic`'s `.systemAccent` branch (which resolves
-    /// `controlAccentColor` scaled by a constant — a value that depends on
-    /// the LIVE SYSTEM ACCENT, not on which token asked for it, so they
-    /// would silently collapse onto the same hue the moment a user picks
-    /// Follow System).
-    @Test func systemAccentStaysAtFullGoldValuesAndStaysDistinct() {
-        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
-            Tokens.accentStyle = .fullGold
-            let full = permissionTokens.map { (name: $0.name, color: resolved($0.color, appearanceName: appearance)) }
-
-            Tokens.accentStyle = .systemAccent
-            let systemAccent = permissionTokens.map { (name: $0.name, color: resolved($0.color, appearanceName: appearance)) }
-
-            for (fullEntry, systemEntry) in zip(full, systemAccent) {
-                #expect(fullEntry.color == systemEntry.color,
-                    "\(fullEntry.name)/\(appearance.rawValue): .systemAccent must resolve the authored Full column unchanged (NEW-1) — it must NOT remap to the live system accent")
-            }
-        }
-
-        // Still mutually distinct under .systemAccent (currently the active
-        // style from the loop above, both appearances re-checked explicitly).
-        Tokens.accentStyle = .systemAccent
-        assertMutuallyDistinct(appearance: .darkAqua)
-        assertMutuallyDistinct(appearance: .aqua)
-    }
-
     // MARK: The check row's gold glyph — measured, not assumed
 
     /// The final-check row's `checklist` glyph is `gold` on the tile's
     /// `raised` well (a deliberate non-permission hue — the first note of the
     /// finale's colour story). Same ≥3:1 glyph floor the five permission
     /// tokens are held to, measured in both authored dial columns and both
-    /// appearances. `.systemAccent` is excluded on the token's own terms: it
-    /// resolves `gold` to the live user accent, whose contrast the OS owns.
+    /// appearances (light 3.64:1, Subtle light 3.95:1).
     @Test func goldOnRaisedClearsTheGlyphFloorInBothDialColumnsAndAppearances() {
         let floor: CGFloat = 3.0
         for style: AccentStyle in [.fullGold, .subtle] {
@@ -232,31 +199,25 @@ extension SerializedSharedState {
         }
     }
 
-    // MARK: goldCTA — the finale CTA's double floor (ink AND canvas)
+    // MARK: The gold CTA fill — its double floor (ink AND canvas)
 
-    /// The Setup CTA's fill is contrast-governed on BOTH sides: white ink must
-    /// clear the 4.5:1 body floor on it, and the fill itself must clear 3:1
-    /// against `canvas` — the Setup window's true background. Re-measured here
-    /// rather than trusted from the token's written rationale, in both
-    /// appearances, plus the ink PICK itself: the measured-ink machinery must
-    /// resolve white on this fill everywhere.
-    @Test func goldCTAClearsTheInkAndCanvasFloorsInBothAppearances() {
+    /// A `gold`-filled call to action is contrast-governed on BOTH sides:
+    /// `inkOnFill` must clear the 4.5:1 body floor on it (dark 10.18:1, light
+    /// 4.94:1), and the fill itself must clear 3:1 against `canvas`, the Setup
+    /// window's true background (10.73:1 / 3.64:1). Re-measured here rather
+    /// than trusted from the tokens' written rationales.
+    @Test func goldFillTakesInkOnFillAndClearsTheCanvasFloorInBothAppearances() {
         Tokens.accentStyle = .fullGold
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
-            let fill = resolved(Tokens.Color.goldCTA, appearanceName: appearance)
+            let fill = resolved(Tokens.Color.gold, appearanceName: appearance)
+            let ink = resolved(Tokens.Color.inkOnFill, appearanceName: appearance)
             let canvas = resolved(Tokens.Color.canvas, appearanceName: appearance)
-            let inkRatio = contrastRatio(fill, .white)
+            let inkRatio = contrastRatio(fill, ink)
             let canvasRatio = contrastRatio(fill, canvas)
             #expect(inkRatio >= 4.5,
-                    "goldCTA/\(appearance.rawValue): white ink \(inkRatio):1 under the 4.5:1 body floor")
+                    "gold/\(appearance.rawValue): inkOnFill \(inkRatio):1 under the 4.5:1 body floor")
             #expect(canvasRatio >= 3.0,
-                    "goldCTA/\(appearance.rawValue): fill vs canvas \(canvasRatio):1 under the 3:1 floor")
-
-            let cta = ProminentButton(title: "Start listening", target: nil, action: nil,
-                                      fill: Tokens.Color.goldCTA, picksInkFromFill: true)
-            cta.appearance = NSAppearance(named: appearance)
-            #expect(cta.test_measuredKeyInk == .white,
-                    "goldCTA/\(appearance.rawValue): the measured ink must be white — the fill is authored deep enough that black never wins")
+                    "gold/\(appearance.rawValue): fill vs canvas \(canvasRatio):1 under the 3:1 floor")
         }
     }
 
@@ -321,73 +282,37 @@ extension SerializedSharedState {
         }
     }
 
-    // MARK: 7 — Direction 04's extended ladder (warningText/inkSecondary/success/raised)
+    // MARK: 7 — the authored ink ladder, and light's one flat ground
 
-    /// `warningText` is the onboarding header's warning message and the
-    /// rehearsal-led Setup ribbon's status line — a TEXT consumer, so it is
-    /// held to the 4.5:1 body floor, unlike `warning` itself (untouched,
-    /// still the bare `.systemOrange` alias other non-text consumers keep).
-    @Test func warningTextClearsTheBodyFloorInBothAppearances() {
+    /// `label2` is the spine/ribbon's secondary text — held to the 4.5:1 body
+    /// floor on every surface it might sit on (dark 8.81 canvas / 7.99 panel /
+    /// 7.02 raised; light 5.97 on the flat ground).
+    @Test func label2ClearsTheBodyFloorInBothAppearances() {
         let floor: CGFloat = 4.5
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
-            let warningText = resolved(Tokens.Color.warningText, appearanceName: appearance)
-            let canvas = resolved(Tokens.Color.canvas, appearanceName: appearance)
-            let panel = resolved(Tokens.Color.panel, appearanceName: appearance)
-            let canvasRatio = contrastRatio(warningText, canvas)
-            let panelRatio = contrastRatio(warningText, panel)
-            #expect(canvasRatio >= floor,
-                    "warningText/\(appearance.rawValue) vs canvas: \(canvasRatio):1 under the \(floor):1 floor")
-            #expect(panelRatio >= floor,
-                    "warningText/\(appearance.rawValue) vs panel: \(panelRatio):1 under the \(floor):1 floor")
-        }
-    }
-
-    /// `inkSecondary` is the rehearsal-led spine/ribbon's secondary text —
-    /// held to the same 4.5:1 body floor on every warm surface it might sit
-    /// on, unlike the system `secondaryLabel` alias it replaces there (which
-    /// measures under floor in light).
-    @Test func inkSecondaryClearsTheBodyFloorInBothAppearances() {
-        let floor: CGFloat = 4.5
-        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
-            let ink = resolved(Tokens.Color.inkSecondary, appearanceName: appearance)
+            let ink = resolved(Tokens.Color.label2, appearanceName: appearance)
             let canvas = resolved(Tokens.Color.canvas, appearanceName: appearance)
             let panel = resolved(Tokens.Color.panel, appearanceName: appearance)
             let raised = resolved(Tokens.Color.raised, appearanceName: appearance)
             for (name, surface) in [("canvas", canvas), ("panel", panel), ("raised", raised)] {
                 let ratio = contrastRatio(ink, surface)
                 #expect(ratio >= floor,
-                        "inkSecondary/\(appearance.rawValue) vs \(name): \(ratio):1 under the \(floor):1 floor")
+                        "label2/\(appearance.rawValue) vs \(name): \(ratio):1 under the \(floor):1 floor")
             }
         }
     }
 
-    /// `success` is the rehearsal-led spine/ribbon's earned-checkmark green —
-    /// held to the 3:1 UI floor against `panel`/`raised`, unlike the bare
-    /// `.systemGreen` it replaces there (which measures under floor in
-    /// light).
-    @Test func successClearsTheUIFloorInBothAppearances() {
-        let floor: CGFloat = 3.0
-        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
-            let success = resolved(Tokens.Color.success, appearanceName: appearance)
-            let panel = resolved(Tokens.Color.panel, appearanceName: appearance)
-            let raised = resolved(Tokens.Color.raised, appearanceName: appearance)
-            let panelRatio = contrastRatio(success, panel)
-            let raisedRatio = contrastRatio(success, raised)
-            #expect(panelRatio >= floor,
-                    "success/\(appearance.rawValue) vs panel: \(panelRatio):1 under the \(floor):1 floor")
-            #expect(raisedRatio >= floor,
-                    "success/\(appearance.rawValue) vs raised: \(raisedRatio):1 under the \(floor):1 floor")
-        }
-    }
-
-    /// `raised` now carries a real one-rung surface ladder in light mode too
-    /// (Direction 04) — assert it genuinely resolves to a DIFFERENT colour
-    /// from `panel` in light, not merely documented as one. Dark already had
-    /// this separation and is untouched.
-    @Test func raisedIsDistinctFromPanelInLight() {
+    /// Light is ONE flat ground: `canvas`, `panel` and `raised` all resolve to
+    /// the same value on paper, and separation is carried by edge weight
+    /// instead of by fill steps. Asserted rather than documented, because a
+    /// well-meaning "give light a ladder too" re-tune would silently change
+    /// what every light edge is measured against.
+    @Test func lightGroundIsOneFlatValue() {
+        let canvas = resolved(Tokens.Color.canvas, appearanceName: .aqua)
         let panel = resolved(Tokens.Color.panel, appearanceName: .aqua)
         let raised = resolved(Tokens.Color.raised, appearanceName: .aqua)
-        #expect(panel != raised, "light mode needs a real raised step above panel, not an identical fill")
+        #expect(canvas == panel, "light canvas and panel are one ground")
+        #expect(panel == raised, "light panel and raised are one ground")
     }
 
     // MARK: 8 — Bluetooth's row wears the OFFICIAL mark

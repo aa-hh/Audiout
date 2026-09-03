@@ -629,7 +629,7 @@ import AppKit
         let row = makeThreeStateRow(selected: "device-1", isRunning: false)
         #expect(row.test_nameDisplayText == "Example App (idle)")
         #expect(row.test_nameTextColor == Tokens.Color.secondaryLabel)
-        #expect(row.test_idleSuffixColor == .tertiaryLabelColor, "the (idle) suffix must render in the tertiary idle voice")
+        #expect(row.test_idleSuffixColor == Tokens.Color.label3, "the (idle) suffix must render in the tertiary idle voice")
         #expect(!(row.test_isOfflineBadgeVisible), "the routed-idle treatment replaces the warning badge")
     }
 
@@ -678,7 +678,7 @@ import AppKit
         let row = makeThreeStateRow(selected: "device-1", isRunning: false, tetherColor: .systemGreen)
         #expect(row.test_hasTetherChip)
         #expect(row.test_nameDisplayText == "Example App (idle)")
-        #expect(row.test_idleSuffixColor == .tertiaryLabelColor)
+        #expect(row.test_idleSuffixColor == Tokens.Color.label3)
     }
 
     /// S6 item 6: the composed VoiceOver label reads "…, follows main output"

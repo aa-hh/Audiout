@@ -183,12 +183,8 @@ final class ProminentButton: NSButton {
                          .font: titleFont])
     }
 
-    /// White or black over the RESOLVED fill, by WCAG contrast — except under
-    /// the `.systemAccent` dial, where `gold` resolves to the live accent (an
-    /// arbitrary hue the user picked) and forced white is the platform's own
-    /// filled-accent convention, matching every other prominent button here.
+    /// White or black over the RESOLVED fill, by WCAG contrast.
     private func measuredKeyInk() -> NSColor {
-        guard Tokens.accentStyle != .systemAccent else { return .white }
         var resolved = fill
         effectiveAppearance.performAsCurrentDrawingAppearance {
             resolved = fill.usingColorSpace(.sRGB) ?? resolved

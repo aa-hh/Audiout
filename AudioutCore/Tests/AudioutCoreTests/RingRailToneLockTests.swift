@@ -177,7 +177,7 @@ extension SerializedSharedState {
                 expectSameInk(firstInk, row.test_ringStrokeColor,
                               "baseline: the pair starts coupled (\(appearanceName.rawValue)/armed=\(armed))")
 
-                for style: AccentStyle in [.systemAccent, .subtle, .fullGold] {
+                for style: AccentStyle in [.subtle, .fullGold] {
                     Tokens.accentStyle = style      // the ONLY thing that happens
                     overlay.needsDisplay = true     // the rail's own repaint path
 

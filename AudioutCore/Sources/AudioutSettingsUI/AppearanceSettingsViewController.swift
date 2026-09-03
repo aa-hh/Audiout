@@ -45,7 +45,7 @@ public final class AppearanceSettingsViewController: NSViewController {
     private var selectedIndex = 0
 
     /// Radio order == this array — same single-source-of-truth idiom as `order`.
-    private let accentOrder: [AccentStyle] = [.fullGold, .subtle, .systemAccent]
+    private let accentOrder: [AccentStyle] = [.fullGold, .subtle]
     private var accentRadios: [NSButton] = []
     private let accentHint = SettingsForm.hintLabel()
 
@@ -81,7 +81,7 @@ public final class AppearanceSettingsViewController: NSViewController {
         view = SettingsForm.paneView(rows: [column, makeAccentSection()])
     }
 
-    /// The **Accent** dial (Warm Signal spec §1.3 / §5.2 — decision i): three
+    /// The **Accent** dial (Warm Signal spec §1.3 / §5.2 — decision i): two
     /// stock radios under a hairline. The pane persists the choice AND applies
     /// the live token remap itself (`Tokens.accentStyle` — the token module is
     /// process-local state, not an `NSApp` side effect, so unlike the theme
@@ -107,7 +107,7 @@ public final class AppearanceSettingsViewController: NSViewController {
             radio.setAccessibilityLabel(style.displayName)
             return radio
         }
-        // Horizontal on purpose: the three dial names fit comfortably in the
+        // Horizontal on purpose: the two dial names fit comfortably in the
         // fixed 460 pt form width and keep the pane short (see
         // `eachTabHasNonDegenerateFittedSize`).
         let radioColumn = NSStackView(views: accentRadios)
@@ -316,34 +316,31 @@ final class ThemeTileButton: NSButton {
         let gold: NSColor      // §1.1/§1.2 `gold` (route-armed dot, meter hot end)
         let ember: NSColor     // §1.1/§1.2 `ember` (meter low end)
 
-        /// Dark flagship (spec §1.1). `well` is `0x100D0A` — the fader-
-        /// legibility retune's darkened value (`Tokens.Color.well`'s dark
-        /// case, Tokens.swift), NOT the original spec hex `0x2B2620`: this
-        /// tile depicts the live product, so a token re-tune must carry over
-        /// here too. `PreviewPaletteTokenPinTests` pins every literal below
-        /// that has a `Tokens.Color` counterpart against the live token, so a
-        /// future re-tune fails loudly here instead of drifting silently
-        /// (this exact case — `well` sat stale through one retune already).
+        /// Dark: the cool ladder the product actually paints. This tile
+        /// depicts the live product, so a token re-tune must carry over here
+        /// too — `PreviewPaletteTokenPinTests` pins `canvas`, `well`, `gold`
+        /// and `ember` against the live tokens, so a future re-tune fails
+        /// loudly here instead of drifting silently (that has happened once
+        /// already, when `well` sat stale through a retune).
         static let dark = WarmPreviewPalette(
             chrome: Mock.darkChrome, stroke: Mock.darkStroke,
-            canvas: NSColor(srgbRed: 0x16 / 255, green: 0x13 / 255, blue: 0x0F / 255, alpha: 1),
-            well: NSColor(srgbRed: 0x10 / 255, green: 0x0D / 255, blue: 0x0A / 255, alpha: 1),
+            canvas: NSColor(srgbRed: 0x0A / 255, green: 0x0A / 255, blue: 0x0C / 255, alpha: 1),
+            well: NSColor(srgbRed: 0x05 / 255, green: 0x05 / 255, blue: 0x07 / 255, alpha: 1),
             name: NSColor(srgbRed: 0xEF / 255, green: 0xE9 / 255, blue: 0xDD / 255, alpha: 1),
             nameDim: NSColor(srgbRed: 0x7A / 255, green: 0x70 / 255, blue: 0x62 / 255, alpha: 1),
             gold: NSColor(srgbRed: 0xE8 / 255, green: 0xB8 / 255, blue: 0x4B / 255, alpha: 1),
             ember: NSColor(srgbRed: 0x8A / 255, green: 0x6A / 255, blue: 0x2F / 255, alpha: 1))
 
-        /// Circuit light (the 2026-08-07 light-theme decision — `canvas` is
-        /// Circuit `bg/normal`, `well` the deepened Circuit `bg/highlight`,
-        /// `ember` and `gold` the light instruments darkened until each clears
-        /// 3:1 on the `well` they are drawn over, 2026-08-12).
+        /// Light: one flat near-white ground with a recessed `well`, and the
+        /// two gold instruments deepened until each clears 3:1 on the `well`
+        /// they are drawn over. Pinned the same way as `dark` above.
         static let light = WarmPreviewPalette(
             chrome: Mock.lightChrome, stroke: Mock.lightStroke,
-            canvas: NSColor(srgbRed: 0xFB / 255, green: 0xFB / 255, blue: 0xF9 / 255, alpha: 1),
-            well: NSColor(srgbRed: 0xE2 / 255, green: 0xDF / 255, blue: 0xD3 / 255, alpha: 1),
+            canvas: NSColor(srgbRed: 0xFA / 255, green: 0xFA / 255, blue: 0xFB / 255, alpha: 1),
+            well: NSColor(srgbRed: 0xE9 / 255, green: 0xEA / 255, blue: 0xEC / 255, alpha: 1),
             name: NSColor(srgbRed: 0x2B / 255, green: 0x25 / 255, blue: 0x19 / 255, alpha: 1),
             nameDim: NSColor(srgbRed: 0x9A / 255, green: 0x8F / 255, blue: 0x7D / 255, alpha: 1),
-            gold: NSColor(srgbRed: 0x9E / 255, green: 0x76 / 255, blue: 0x1D / 255, alpha: 1),
+            gold: NSColor(srgbRed: 0xA6 / 255, green: 0x7C / 255, blue: 0x1E / 255, alpha: 1),
             ember: NSColor(srgbRed: 0x7A / 255, green: 0x5E / 255, blue: 0x2A / 255, alpha: 1))
     }
 
@@ -546,12 +543,11 @@ private extension AppearanceTheme {
 }
 
 private extension AccentStyle {
-    /// Radio title (spec §1.3's three dial names).
+    /// Radio title (spec §1.3's two dial names).
     var displayName: String {
         switch self {
-        case .fullGold:     return "Full Gold"
-        case .subtle:       return "Subtle"
-        case .systemAccent: return "Follow System Accent"
+        case .fullGold: return "Full Gold"
+        case .subtle:   return "Subtle"
         }
     }
 
@@ -559,9 +555,8 @@ private extension AccentStyle {
     /// actually does to the instruments, per §1.3's remap table.
     var hintLine: String {
         switch self {
-        case .fullGold:     return "Meters, dots, and rings glow in the full brand gold."
-        case .subtle:       return "A quieter gold — softer meters, and no glow around the routing dot."
-        case .systemAccent: return "Gold instruments take on this Mac's accent color instead."
+        case .fullGold: return "Meters, dots, and rings glow in the full brand gold."
+        case .subtle:   return "A quieter gold — softer meters, and no glow around the routing dot."
         }
     }
 }

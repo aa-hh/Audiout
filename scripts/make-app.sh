@@ -406,6 +406,17 @@ chmod +x "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 mkdir -p "$RESOURCES_DIR"
 cp -R "$BUILT_RESOURCE_BUNDLE" "$RESOURCES_DIR/$RESOURCE_BUNDLE_NAME"
 
+# --- Wordmark font (ClashDisplay-Semibold) ---------------------------------
+# NOT in git and NOT in the SwiftPM resource bundle: the ITF Free Font License
+# forbids redistributing the file through a public repository, so
+# scripts/fetch-wordmark-font.sh pulls it from Fontshare at assembly (cached
+# under build/, sha256-pinned; AUDIOUT_WORDMARK_FONT=<path> for offline) and
+# Tokens.Font.wordmark finds it in Contents/Resources through Bundle.main.
+# A missing or mismatched font FAILS the build: a shipped app must never
+# fall back to the system face silently.
+"$SCRIPT_DIR/fetch-wordmark-font.sh" "$RESOURCES_DIR" "$OUTPUT_DIR/font-cache"
+test -f "$RESOURCES_DIR/ClashDisplay-Semibold.otf" || { echo "ERROR: ClashDisplay-Semibold.otf missing from $RESOURCES_DIR after fetch" >&2; exit 1; }
+
 # --- SMAppService launchd daemon plist -------------------------------------
 # Ships from scripts/ptp-helper.plist with __BUNDLE_ID__ substituted for the
 # real BUNDLE_ID (see that file for the SMAppService shape rationale —

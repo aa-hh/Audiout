@@ -86,8 +86,8 @@ public final class BTSyncDrawerView: NSView {
 
     // MARK: Auto-repeat timing
     //
-    // Timing, not geometry: `PopoverColumnGrid` is the Figma contract's mirror
-    // and holds METRICS, so these live with the control they time. Matched to
+    // Timing, not geometry: `PopoverColumnGrid` holds METRICS, so these live
+    // with the control they time. Matched to
     // the platform's own key-repeat feel — long enough that a deliberate
     // single click never repeats, fast enough that holding covers the ±500 ms
     // range (with ⇧, ~7 s end to end) without becoming a drag race.

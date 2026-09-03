@@ -541,7 +541,7 @@ import AudioutCore
         row.apply(device, selected: false, controllable: false)
 
         #expect(!row.test_isSliderEnabled)
-        #expect(row.test_readoutColor == .tertiaryLabelColor, "readout dims alongside a disabled slider")
+        #expect(row.test_readoutColor == Tokens.Color.label3, "readout dims alongside a disabled slider")
     }
 
     @Test func readoutIsSecondaryWhenSliderEnabled() {

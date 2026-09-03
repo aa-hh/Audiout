@@ -472,12 +472,10 @@ public enum AppTetherColor {
     private static let saturationFloorOut: CGFloat = 0.38
     private static let lightSaturationBoost: CGFloat = 0.07
     private static let lightSaturationCap: CGFloat = 0.70
-    /// RAISED 0.28 → 0.40 with the Circuit light theme (roadmap 035): the FEED
-    /// pill's fill went from a near-invisible quaternary wash to the stronger
-    /// Circuit `feedPillFill` `#D0CDC3`, so a light tint must carry against
-    /// that fill, not just the canvas — the deeper drop (mostly landing on
-    /// ``minimumLegibleBrightness``'s 0.50 cap) measures 3.94–4.87:1 across
-    /// the brand-hue sample on Circuit `bg/normal`.
+    /// The drop is this deep so that a light tint carries against the FEED
+    /// pill's fill (now ``Tokens/Color/well``) as well as against the canvas —
+    /// the pill's fill is the tighter of the two grounds, and a tint tuned only
+    /// for the canvas washed out on it.
     private static let lightBrightnessDrop: CGFloat = 0.40
     private static let goldSteeredBrightnessScale: CGFloat = 0.88
 

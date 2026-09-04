@@ -1659,6 +1659,26 @@ final class AlignmentStageView: NSView {
         return resolved
     }
 
+    /// The plate's bezel, pinned to ``Tokens/Color/rim``'s dark hex in BOTH
+    /// appearances for the same reason `referenceLight` is: the edge sits on
+    /// the FIXED dark plate, so a light-appearance `rim` is being measured
+    /// against a ground that is not there. The bezel's ALPHA still follows the
+    /// window (below) — a heavier edge is what keeps a black plate off white
+    /// paper — but its colour does not.
+    ///
+    /// Resolving live hands the light window `rim`'s light hexes, which are
+    /// darkened FOR a light ground, and Increase Contrast then makes the bezel
+    /// worse rather than better: 3.47:1 off, 2.89:1 on, under the 3:1 non-text
+    /// floor. Pinned it measures 3.70:1 and 5.02:1.
+    /// `AlignmentTokenContrastTests` reads this, which is why it is not private.
+    static var plateEdge: NSColor {
+        var resolved = Tokens.Color.rim
+        NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
+            resolved = Tokens.Color.rim.usingColorSpace(.sRGB) ?? resolved
+        }
+        return resolved
+    }
+
     private func stampColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             let dormant = rung == .dormant
@@ -1677,8 +1697,9 @@ final class AlignmentStageView: NSView {
             plateLayer.backgroundColor = Tokens.Color.stagePlate.cgColor
             // A recessed screen's bezel: faint in the dark chassis, a real
             // warm rim in light, where the plate is a black rectangle on
-            // white without it.
-            plateLayer.borderColor = Tokens.Color.rim
+            // white without it. Only the ALPHA reads the window — the colour
+            // is pinned to the plate's own appearance (see `plateEdge`).
+            plateLayer.borderColor = Self.plateEdge
                 .withAlphaComponent(isDark ? 0.35 : 0.9).cgColor
             // Fused/locked, the two halves of the wire carry their own voice
             // up to the ring; otherwise one rule.

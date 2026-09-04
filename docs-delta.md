@@ -231,3 +231,28 @@ This retires the Bluetooth-UI rule that "Connected elsewhere" and "Not paired"
 must read distinctly ON THE ROW. They still read apart — on the tooltip and in
 the spoken value. The "Unavailable" rung is a separate one and keeps its word.
 ```
+
+---
+
+## The Instrument Ground Rule covers the edge too (2026-09-04)
+
+`DESIGN.md` states the Instrument Ground Rule for the tokens the wizard stage
+owns (`stagePlate`, `stageRule`, `stageInk`, `wireCore`, `fuseWhite`). It says
+nothing about the tokens the stage BORROWS from the themed palette to draw on
+that fixed plate, and the plate's own bezel is one: it draws in `rim`, which is
+authored per appearance. Resolved with the window, the light hexes measured
+3.47:1 on the plate with Increase Contrast off and 2.89:1 with it on — the
+setting a user turns on to read better made the bezel worse and pushed it under
+the 3:1 non-text floor. `AlignmentStageView.plateEdge` now pins it to `rim`'s
+dark hex the way `referenceLight` already pins `ring`: 3.70:1 and 5.02:1.
+
+Append to the "Instrument Ground Rule" paragraph:
+
+```markdown
+The rule binds anything DRAWN on the plate, not only the five tokens above. A
+themed token borrowed for the stage — the plate's own bezel takes `rim` — is
+resolved under `.darkAqua` before it is drawn, because the ground it will be
+measured against is the fixed dark plate, not the window. Only geometry may
+read the window: the bezel's alpha still steps from 0.35 to 0.9 in light mode,
+where a heavier edge is what keeps a black plate off white paper.
+```

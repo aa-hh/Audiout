@@ -282,7 +282,7 @@ import AppKit
         #expect(row.test_syncChipIsEngaged)
         #expect(row.test_syncChipFill
                 == Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha),
-                "exactly the mute pill's engaged fill")
+                "the engaged-chrome fill at the pill alpha")
         #expect(row.test_syncChipFill != Tokens.Color.gold, "…and never the gold accent")
         #expect(row.test_syncChipTitleColor == Tokens.Color.engagedChrome)
         #expect(row.test_syncChipBorderColor == Tokens.Color.engagedChrome)

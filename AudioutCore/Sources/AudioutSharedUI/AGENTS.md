@@ -22,6 +22,7 @@ or `GroupController`.
 - The identity stack yields the Equalizer slot on EVERY row, so names truncate alike.
 - Instruments reconcile accessibility-display changes live; the accent dial is a third trigger.
 - Warm ink and gold wash mean `isRouteArmed`; cool means silent. Instruments are flat, no `CALayer` blooms.
+- `Tokens.Color.muted` is fenced to the device row's engaged mute button; a second consumer fails a test.
 - `setContent`'s `defaultSize:` seeds only the first mount of a content controller.
 - `ControlPanelBackingView` is an approved custom-drawn exception; NSPanel has no arrow.
 - `Tokens.Color.shadow`'s three real consumers, each the same flat, clipped

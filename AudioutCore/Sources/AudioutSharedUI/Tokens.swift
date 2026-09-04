@@ -371,6 +371,53 @@ public enum Tokens {
                        light: 0x2C6E86, lightHighContrast: 0x265E73)
         }
 
+        /// **Muted** — the one hue in the app that means "this output is
+        /// deliberately silent". Its single consumer is the device row's
+        /// engaged mute button (`DeviceRowView.updateMuteTint()`), which fills
+        /// the pill OPAQUELY in this tone and knocks the `speaker.slash.fill`
+        /// glyph out of it in ``panel``.
+        ///
+        /// WHERE IT MAY NOT APPEAR: anywhere else. It is not a second cool
+        /// accent, not a disabled/dimmed tone, and not available to a control
+        /// that merely happens to be off. A row that is silent for some OTHER
+        /// reason — unavailable, failed, not a member — keeps its existing
+        /// treatment, because this hue answers "someone muted this", not "no
+        /// sound is coming out".
+        ///
+        /// WHY A NEW HUE RATHER THAN ONE ALREADY HERE. `gold`/`ember` mean the
+        /// row is carrying audio, so mute can never borrow them; `failure` red
+        /// means something went wrong and a mute is deliberate; `party`/
+        /// `partyRampDeep` is the alignment wizard's group identity, `ring` its
+        /// reference light, the five `permission*` hues are fenced to
+        /// onboarding, and `bluetoothBrand` is a vendor mark. Cool is the
+        /// semantically right direction (warm means sound is flowing there,
+        /// cool means silent), and this sits 40-43° of hue off `ring`'s
+        /// desaturated steel and 29° off `permissionSystemAudio`'s blue —
+        /// measured ΔE (CIE76) 35.1-66.1 from `ring` and never below 14.0 from
+        /// any permission hue in any cell.
+        ///
+        /// WHY OPAQUE, not the translucent pill it replaces. A tint of this
+        /// hue tops out at 2.3:1 against the row ground even at 45% — under
+        /// the 3:1 non-text floor in every appearance, which is exactly why
+        /// the old 22% neutral pill did not read as anything. Opaque, the pill
+        /// clears the floor with room to spare and the glyph reads as a
+        /// knock-out.
+        ///
+        /// CONTRAST RATIONALE (measured; floor 3:1 for the pill against every
+        /// ground it sits on — the row at rest on `panel`, the gold-washed
+        /// live row, the hover wash — and 4.5:1 for the ``panel`` glyph
+        /// knocked out of the pill). Dark `#8E93F0` = 6.48:1 vs `panel` /
+        /// 7.14:1 vs `canvas` / 5.69:1 vs `raised` / 5.14:1 vs the live wash /
+        /// 5.15:1 vs the hover wash, glyph 6.48:1; dark Increase Contrast
+        /// `#ADB1F7` = 8.90 / 9.80 / 7.81 / 6.90 / 7.07, glyph 8.90. Light
+        /// `#4A50C7` = 6.17 / 6.17 / 6.17 / 5.41 / 5.10, glyph 6.17; light
+        /// Increase Contrast `#393FA8` = 8.22 / 8.22 / 8.22 / 7.03 / 6.80,
+        /// glyph 8.22.
+        public static var muted: NSColor {
+            warmDynamic(name: "muted", dark: 0x8E93F0, darkHighContrast: 0xADB1F7,
+                       light: 0x4A50C7, lightHighContrast: 0x393FA8)
+        }
+
         /// The COOL body ink — the same second-rung job as ``label2`` on a
         /// surface that carries no warmth of its own. Barred from `liveRow`
         /// and `liveRaised`: it measures 7.07:1 there and would pass, but a

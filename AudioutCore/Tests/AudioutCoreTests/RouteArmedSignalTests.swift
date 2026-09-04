@@ -176,13 +176,13 @@ import AudioutCore
         #expect(row.test_routeArmed)
     }
 
-    // MARK: S3 — engaged mute pill (glyph never slashes; drawing only)
+    // MARK: S3 — engaged mute pill (drawing only)
 
     @Test func mutePillEngagesViaApply() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true, controllable: true)
-        #expect(row.test_isMutePillEngaged, "muted: filled pill behind the (unchanged) glyph")
-        #expect(row.test_muteTintColor == Tokens.Color.engagedChrome)
+        #expect(row.test_isMutePillEngaged, "muted: a filled pill behind the slashed glyph")
+        assertSameHue(row.test_muteTintColor, Tokens.Color.panel, "muted knocks the glyph out in `panel`")
     }
 
     @Test func mutePillDisengagesOnUnmute() {

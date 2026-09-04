@@ -233,3 +233,111 @@ This retires the Bluetooth-UI rule that "Connected elsewhere" and "Not paired"
 must read distinctly ON THE ROW. They still read apart — on the tooltip and in
 the spoken value. The "Unavailable" rung is a separate one and keeps its word.
 ```
+
+---
+
+# DESIGN.md delta — the muted state gets a glyph and a hue of its own
+
+Alec, 2026-09-04: "the active mute state does not look like any other mute state
+I have seen in my life. Use `speaker.slash` when muted and use colour to clearly
+bring attention to the muted state."
+
+## 1. Replace the MUTE bullet under "Don't"
+
+DESIGN.md currently reads:
+
+> - **Don't** draw MUTE, or any hover/selection wash, in gold — gold means the
+>   row is carrying audio, and `engagedChrome` (an alias of `label`) is the
+>   deliberately neutral tone for "this control is engaged" precisely so a
+>   mute state and a live state never share a hue.
+
+Replace with:
+
+```markdown
+- **Don't** draw MUTE, or any hover/selection wash, in gold — gold means the
+  row is carrying audio, so a mute state and a live state may never share a
+  hue. The washes stay on `engagedChrome` (an alias of `label`), the
+  deliberately neutral "this control is engaged" tone. The device row's mute
+  button no longer does: it has its own reserved hue, `Tokens.Color.muted`
+  (see the Muted-Hue Fence below).
+```
+
+## 2. Add a named rule, beside the Permission-Hue Fence
+
+```markdown
+**The Muted-Hue Fence.** One token, `Tokens.Color.muted` (`#8E93F0` dark /
+`#4A50C7` light, Increase Contrast `#ADB1F7` / `#393FA8`), means one thing:
+**this output is deliberately silent.** Its only consumer is the device row's
+engaged mute button (`DeviceRowView.updateMuteTint()`), which fills the pill
+OPAQUELY in this hue and knocks a `speaker.slash.fill` glyph out of it in
+`panel`.
+
+It may not appear anywhere else. It is not a second cool accent, not a
+disabled or dimmed tone, and not available to a control that merely happens
+to be off. A row silent for some OTHER reason — unavailable, failed, not a
+member — keeps its existing treatment, because this hue answers "someone
+muted this", not "no sound is coming out". `DeviceRowMutedStateTests` fails
+if a second call site appears in `Sources/`.
+
+Why a new hue and not one already here. `gold`/`ember` mean the row is
+carrying audio, so mute can never borrow them — that rule is the reason this
+token has to exist. `failure` red means something went wrong and a mute is
+deliberate. `party`/`partyRampDeep` is the alignment wizard's group identity,
+`ring` its reference light, the five `permission*` hues are fenced to
+onboarding, and `bluetoothBrand` is a real-world mark. Cool is the
+semantically right direction under the temperature rule — warm means sound is
+flowing there, cool means silent — and this sits 40–43° of hue off `ring`'s
+desaturated steel and 29° off `permissionSystemAudio`'s blue. Measured ΔE
+(CIE76) 35.1–66.1 from `ring`, and never below 14.0 from any permission hue
+in any of the four cells. Two rejected candidates for the record: an azure at
+213° came within ΔE 6.4 of `permissionSystemAudio`, and a violet at 257°
+within ΔE 6.5 of `permissionLocalNetwork`.
+
+It follows the Variant Rule in full: four authored hexes resolved live by
+`warmDynamic` against appearance and the live Increase-Contrast flag, never a
+frozen snapshot. It is NOT dial-aware — like `failure`, `rim` and `ring`, it
+is fixed in every accent-dial position.
+```
+
+## 3. Add to the mixer row's description (grep `muteWidth` / the 24pt mute control)
+
+```markdown
+### Mute Button (Mixer row)
+At rest: `speaker.wave.2.fill` at the shared 13pt accessory size, tinted
+`label2`, no fill. Muted: `speaker.slash.fill` at that same size and weight,
+knocked out in `panel`, on an OPAQUE `Tokens.Color.muted` capsule at the
+control radius with no border.
+
+The fill is opaque because a translucent one measurably cannot do this job. It
+had been `engagedChrome` at 22% behind an UNSLASHED speaker — a faint grey
+pill with an ordinary speaker in it, which is exactly what it read as. A tint
+of the new hue tops out at 2.31:1 against the row ground even at 45% alpha,
+under the 3:1 non-text floor in every appearance. Opaque, the pill clears that
+floor on every ground the row can put behind it: 6.48:1 on `panel`, 7.14 on
+`canvas`, 5.69 on `raised`, 5.14 on the gold live wash and 5.15 on the hover
+wash in dark; 6.17 / 6.17 / 6.17 / 5.41 / 5.10 in light; 8.90 / 9.80 / 7.81 /
+6.90 / 7.07 dark Increase Contrast; 8.22 / 8.22 / 8.22 / 7.03 / 6.80 light
+Increase Contrast.
+
+The glyph's ink is `panel`, the row's own ground, so the mark reads as punched
+THROUGH the pill — and because `panel` is dark in dark and light in light it
+flips polarity with the fill for free, at 6.17:1 in the worst cell.
+`inkOnFill` cannot do this: it is authored as dark ink on the gold family and
+turns white under light + Increase Contrast. This is the one place `panel` is
+a foreground rather than a ground, and `TokenContrastMatrixTests` holds it to
+the 4.5:1 glyph floor there.
+
+The slash retires the older "the icon never changes on toggle" decision.
+`.fill` rather than plain `speaker.slash` so it keeps the weight of the
+at-rest glyph it replaces; it landed in macOS 10.15, well under the package's
+macOS 14.2 floor. It collides with nothing — `Device.Kind.symbolName` already
+avoids the `speaker.*` family for the Bluetooth row icon for this reason.
+
+The Equalizer door 6pt leading stays legibly different by all three of shape,
+hue and border: the door is an opaque GOLD rounded square with a 1pt dark
+border and an oversized glyph; mute is a borderless cool capsule at the
+at-rest glyph size.
+
+NOT YET APPLIED to `MainOutRowView`, which still draws the old
+`engagedChrome`-at-22% pill behind an unslashed speaker.
+```

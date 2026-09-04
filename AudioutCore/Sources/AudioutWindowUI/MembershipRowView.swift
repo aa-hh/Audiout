@@ -100,6 +100,7 @@ public final class MembershipRowView: NSView {
         busView.emphasizesDimmedMemberRim = true
         buildSubviews()
         apply(device: device, checked: checked, iconSymbolName: iconSymbolName)
+        redrawOnAccessibilityDisplayChange()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

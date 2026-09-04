@@ -551,6 +551,14 @@ private final class AppearanceObservingView: NSView {
 /// surface. Drawn in `draw(_:)` so both tokens re-resolve live per appearance +
 /// Increase Contrast (the `WarmCanvasView` pattern); flat fill, no grain.
 private final class WarmPreviewTileView: NSView {
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        redrawOnAccessibilityDisplayChange()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
     override func draw(_ dirtyRect: NSRect) {
         let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
         let radius = Tokens.Layout.Radius.control

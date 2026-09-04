@@ -212,9 +212,17 @@ enum SettingsForm {
 
 /// The value-readout backing: the panel's inset `well` fill in a rounded rect,
 /// drawn in `draw(_:)` (not a stamped layer color) so it re-resolves under the
-/// current appearance with no manual bookkeeping — same reasoning as
-/// `BorderedListView`.
+/// current appearance on its own, and subscribes for the Increase-Contrast
+/// repaint it cannot get for free — same reasoning as `BorderedListView`.
 private final class ReadoutWellView: NSView {
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        redrawOnAccessibilityDisplayChange()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         Tokens.Color.well.setFill()

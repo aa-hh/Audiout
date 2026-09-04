@@ -233,3 +233,52 @@ This retires the Bluetooth-UI rule that "Connected elsewhere" and "Not paired"
 must read distinctly ON THE ROW. They still read apart — on the tooltip and in
 the spoken value. The "Unavailable" rung is a separate one and keeps its word.
 ```
+
+---
+
+## 3. "Resolved live" needs a view that asks for the paint
+
+DESIGN.md's **The Variant Rule** (line 185) says the Increase-Contrast hexes are
+"resolved live by `warmDynamic`/`accentDynamic`/`permissionDynamic` against both
+the window's appearance and the live
+`NSWorkspace.accessibilityDisplayShouldIncreaseContrast` flag on every draw —
+never a frozen snapshot."
+
+Every word of that is true of the tokens and false of the screen, because
+nothing schedules the draw. Reading the flag outside the appearance is exactly
+why flipping Increase Contrast changes no view's effective appearance and fires
+no `viewDidChangeEffectiveAppearance` — and the app pins its own appearance for
+the theme setting, so it would not fire anyway. A view that overrides only that
+method keeps its standard-contrast colours until some unrelated repaint arrives.
+Thirteen drawn views across the Groups window and Settings were in that state
+(2026-09-04).
+
+Suggested replacement for the sentence ending "never a frozen snapshot":
+
+```markdown
+appearance and the live `NSWorkspace.accessibilityDisplayShouldIncreaseContrast`
+flag on every draw — never a frozen snapshot. Resolving live is only half of it:
+because the flag is read OUTSIDE the appearance, toggling Increase Contrast
+fires no `viewDidChangeEffectiveAppearance`, so a view that draws a token must
+also subscribe to
+`NSWorkspace.accessibilityDisplayOptionsDidChangeNotification` and repaint —
+`NSView.redrawOnAccessibilityDisplayChange()` (`AudioutSharedUI`) is the one
+place that wiring lives. A view whose colours are stamped `CGColor`s on a
+`CALayer` needs more than a repaint and re-stamps in its own handler instead.
+```
+
+### Proposed AGENTS.md rule lines
+
+Left out of the source tree deliberately: several tracks are editing these files
+in parallel and a one-line rule is the cheapest thing to conflict on. Each is one
+bullet under **Rules**.
+
+- `AudioutCore/Sources/AudioutSharedUI/AGENTS.md` — *A view that draws a token
+  calls `redrawOnAccessibilityDisplayChange()` in its init.
+  `viewDidChangeEffectiveAppearance` covers light/dark only; Increase Contrast
+  arrives on the workspace notification or not at all.*
+- `AudioutCore/Sources/AudioutWindowUI/AGENTS.md` and
+  `AudioutCore/Sources/AudioutSettingsUI/AGENTS.md` — *Every custom-drawn view
+  here subscribes to the accessibility display options;
+  `IncreaseContrastLiveReconcileTests` walks the real view tree and fails on a
+  new one that does not.*

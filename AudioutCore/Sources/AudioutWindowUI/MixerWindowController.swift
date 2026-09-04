@@ -749,6 +749,13 @@ public final class MixerWindowController {
 /// pure chrome and must never swallow a click meant for what it borders.
 final class HairlineView: NSView {
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        redrawOnAccessibilityDisplayChange()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {

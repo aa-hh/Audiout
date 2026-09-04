@@ -68,7 +68,12 @@ public struct Device: Identifiable, Equatable, Sendable {
             // speaker glyph separates BT rows from the AirPlay kinds above.
             // NOT "speaker.wave.2.fill" — that's the rows' mute-accessory
             // glyph (DeviceRowView/MainOutRowView) and would collide.
-            case .bluetooth:      return "hifispeaker.2.fill"
+            // This is the FALLBACK for a Bluetooth row whose device class is
+            // unknown or names a speaker; a pairing that says it is headphones
+            // or car audio draws its own glyph — see ``Device/symbolName``.
+            // Not "hifispeaker.2.fill": that is a stereo PAIR, which drew two
+            // cabinets for a set of earbuds (Alec, 2026-09-04).
+            case .bluetooth:      return "radio.fill"
             // SF Symbols has no Cast rune (trademark); the TV-plus-speaker
             // glyph reads as "receiver attached to a screen", which is what a
             // Chromecast/Nest/Android TV target is, and collides with nothing.
@@ -163,6 +168,39 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// devices, and stopped sessions.
     public var castVolumeLagSeconds: Int?
 
+    /// The Audio/Video MINOR device class this pairing reports in its Class of
+    /// Device (`IOBluetoothDevice.deviceClassMinor`, carried here by
+    /// ``BTDeviceSnapshot/deviceClassMinor``). `nil` for every non-Bluetooth
+    /// kind, and for a Bluetooth row the paired list could not be read for.
+    /// Its only job is picking the row glyph — see ``symbolName``.
+    public var bluetoothDeviceClassMinor: UInt32?
+
+    /// The SF Symbol for this device's row icon. Everything but Bluetooth is
+    /// decided by ``Kind/symbolName`` alone; a Bluetooth pairing also states
+    /// what it IS, and headphones drawn as a speaker cabinet was the defect
+    /// this exists to fix (Alec, 2026-09-04).
+    ///
+    /// The values are the Audio/Video minor device classes from the Bluetooth
+    /// assigned numbers (`BluetoothAssignedNumbers.h`): headset `0x01`,
+    /// hands-free `0x02`, loudspeaker `0x05`, headphones `0x06`, portable
+    /// `0x07`, car audio `0x08`, HiFi `0x0a`. Spelled as literals rather than
+    /// the `kBluetoothDeviceClassMinorAudio*` constants because this target
+    /// must not import IOBluetooth — an ungated IOBluetooth touch kills the
+    /// process, so the framework stays behind `BTDeviceEnumerator`'s gate.
+    ///
+    /// Everything not named here — the speaker classes, an unclassified
+    /// pairing, an unreadable paired list — keeps the kind's own neutral
+    /// speaker glyph. Both branch glyphs predate macOS 11, so neither needs an
+    /// availability check against the 14.2 floor.
+    public var symbolName: String {
+        guard kind == .bluetooth, let minor = bluetoothDeviceClassMinor else { return kind.symbolName }
+        switch minor {
+        case 0x01, 0x02, 0x06: return "headphones"
+        case 0x08:             return "car.fill"
+        default:               return kind.symbolName
+        }
+    }
+
     public init(
         id: String,
         name: String,
@@ -176,7 +214,8 @@ public struct Device: Identifiable, Equatable, Sendable {
         connectionState: ConnectionState = .off,
         eq: DeviceEQ = .flat,
         eqBypassReason: EQBypassReason? = nil,
-        castVolumeLagSeconds: Int? = nil
+        castVolumeLagSeconds: Int? = nil,
+        bluetoothDeviceClassMinor: UInt32? = nil
     ) {
         self.id = id
         self.name = name
@@ -191,6 +230,7 @@ public struct Device: Identifiable, Equatable, Sendable {
         self.eq = eq
         self.eqBypassReason = eqBypassReason
         self.castVolumeLagSeconds = castVolumeLagSeconds
+        self.bluetoothDeviceClassMinor = bluetoothDeviceClassMinor
     }
 }
 

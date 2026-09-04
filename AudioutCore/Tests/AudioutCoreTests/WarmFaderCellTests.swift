@@ -186,6 +186,31 @@ import AppKit
         #expect(config.type == .linear)
     }
 
+    // MARK: Fill geometry reaches the track's real ends
+
+    @Test func fillReachesTrackEndsAtExtremes() {
+        // Stock NSSliderCell insets the knob's travel by half the knob width
+        // at each end, so anchoring the fill to the knob's center left it
+        // short of the trough at 100% (and painted a phantom fill at 0%).
+        // The fill must derive from the VALUE instead, reaching the track's
+        // actual ends.
+        let cell = WarmFaderCell()
+        cell.minValue = 0
+        cell.maxValue = 100
+        let track = NSRect(x: 0, y: 0, width: 150, height: 5)
+
+        cell.doubleValue = 0
+        #expect(cell.test_fillRect(track: track).width == 0,
+                "at the minimum value the fill has zero width")
+
+        cell.doubleValue = 100
+        let fullFill = cell.test_fillRect(track: track)
+        #expect(fullFill.width == track.width,
+                "at the maximum value the fill spans the whole track")
+        #expect(fullFill.maxX == track.maxX,
+                "at the maximum value the fill reaches the track's real end, not the knob's inset center")
+    }
+
     // MARK: Deterministic drawing (cacheDisplay double-render, both looks)
 
     @Test func faderRenderIsByteDeterministic() throws {

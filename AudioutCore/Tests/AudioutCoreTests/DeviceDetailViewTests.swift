@@ -591,7 +591,7 @@ import AppKit
         #expect(detail.test_eqSectionShown)
         #expect(detail.test_slotTitles == ["Equalizer", "Groups", "About"])
         #expect(detail.test_cardFrames.count == 1,
-                "the Equalizer is the page's one instrument, so its one card")
+                "the Equalizer is the page's one instrument, so its one box (a `.well`, not `.card`)")
     }
 
     // MARK: The Equalizer section's title
@@ -617,9 +617,10 @@ import AppKit
                 "the Equalizer card's own content sits below its title")
     }
 
-    /// One card per page, and identity/Groups/About are bare: a box is earned
-    /// by holding a different instrument, never by length. The titles are bare
-    /// pane text, the same idiom as the group editor's "Speakers" label.
+    /// One box per page (the Equalizer, a `.well`), and identity/Groups/About
+    /// are bare: a box is earned by holding a different instrument, never by
+    /// length. The titles are bare pane text, the same idiom as the group
+    /// editor's "Speakers" label.
     @Test func onlyTheEqualizerIsACard() {
         let detail = makeLoadedPane(device: makeDevice())
         #expect(detail.test_cardFrames.count == 1)

@@ -94,16 +94,15 @@ public final class WarmFaderCell: NSSliderCell {
                width: track.width, height: Self.hairlineWidth).fill()
         NSGraphicsContext.current?.restoreGraphicsState()
 
-        // …then the filled portion, min-value side up to the thumb's center.
-        let knobMidX = knobRect(flipped: flipped).midX
-        let fillRect: NSRect
-        if controlView?.userInterfaceLayoutDirection == .rightToLeft {
-            fillRect = NSRect(x: knobMidX, y: track.minY,
-                              width: max(0, track.maxX - knobMidX), height: track.height)
-        } else {
-            fillRect = NSRect(x: track.minX, y: track.minY,
-                              width: max(0, knobMidX - track.minX), height: track.height)
-        }
+        // …then the filled portion, min-value side up to a point DERIVED FROM
+        // THE VALUE — not the knob's center. Stock `NSSliderCell` insets the
+        // knob's travel by half the stock knob width at each end (measured on
+        // a 150 pt regular slider, min 0 / max 100: knob center at 10.0 at
+        // value 0, 140.0 at value 100), so anchoring the fill to `knobRect`
+        // left it 10 pt short of the trough at 100% — and painted a phantom
+        // 10 pt fill at 0%. Nothing on record defends that; it was inherited
+        // AppKit geometry, not a decision.
+        let fillRect = self.fillRect(track: track)
         if fillRect.width > 0 {
             NSGraphicsContext.current?.saveGraphicsState()
             trough.addClip()
@@ -215,6 +214,29 @@ public final class WarmFaderCell: NSSliderCell {
 
     // MARK: Geometry / constants
 
+    /// The filled portion's rect for the CURRENT slider value, from the
+    /// min-value end of `track` to a point at `fraction` of the track's
+    /// width — factored out so `drawBar` and `test_fillRect` below compute
+    /// IDENTICAL geometry. Mirrored for right-to-left: the min-value end
+    /// sits at `track.maxX` and the fill grows leftward.
+    private func fillRect(track: NSRect) -> NSRect {
+        let fraction: CGFloat
+        if maxValue > minValue {
+            fraction = CGFloat((doubleValue - minValue) / (maxValue - minValue))
+        } else {
+            fraction = 0
+        }
+        if controlView?.userInterfaceLayoutDirection == .rightToLeft {
+            let fillStartX = track.maxX - track.width * fraction
+            return NSRect(x: fillStartX, y: track.minY,
+                          width: max(0, track.maxX - fillStartX), height: track.height)
+        } else {
+            let fillEndX = track.minX + track.width * fraction
+            return NSRect(x: track.minX, y: track.minY,
+                          width: max(0, fillEndX - track.minX), height: track.height)
+        }
+    }
+
     /// The recessed trough: `faderTrackHeight` tall, vertically centered in
     /// the cell's bar rect, full width.
     private func trackRect(inside rect: NSRect) -> NSRect {
@@ -253,4 +275,10 @@ public final class WarmFaderCell: NSSliderCell {
     /// from the pixels.
     public var test_isEngagedFill: Bool { isRouteArmed && isEnabled }
     public var test_isPendingFill: Bool { isPendingApply && isRouteArmed && isEnabled }
+
+    /// The fill rect `drawBar` would paint for `track`, at the cell's current
+    /// `doubleValue`/`minValue`/`maxValue` — same geometry, so a test can
+    /// assert the fill reaches the track's real ends without going through
+    /// the drawing chain.
+    public func test_fillRect(track: NSRect) -> NSRect { fillRect(track: track) }
 }

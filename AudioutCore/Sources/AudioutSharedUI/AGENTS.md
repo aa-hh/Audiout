@@ -24,6 +24,10 @@ or `GroupController`.
 - Warm ink and gold wash mean `isRouteArmed`; cool means silent. Instruments are flat, no `CALayer` blooms.
 - `setContent`'s `defaultSize:` seeds only the first mount of a content controller.
 - `ControlPanelBackingView` is an approved custom-drawn exception; NSPanel has no arrow.
+- `Tokens.Color.shadow`'s three real consumers, each the same flat, clipped
+  inset-shade band and never an `NSShadow`: `WarmFaderCell` (here), `AlignmentPlateCell`
+  (`AudioutPopoverUI`), and `GroupedSectionView`'s `.well` style (`AudioutWindowUI`,
+  the device detail page's Equalizer recess, 2026-09-04).
 - Stability findings carry `STABILITY(id)` markers; sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 - Long-form traps and changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md); grep before debugging.
 

@@ -519,7 +519,7 @@ public enum PopoverColumnGrid {
 
     // MARK: Engaged mute pill (Warm Signal v3 §3.4/§3.5, S3)
     //
-    // A muted row's mute button gains a filled PILL behind its (never-slashed
+    // A muted row's mute button gains a filled PILL behind its (slashed
     // — locked decision) speaker glyph: drawing only, on the real `NSButton`'s
     // backing layer; behavior/keyboard/VoiceOver untouched.
 

@@ -38,7 +38,7 @@ import AudioutSharedUI
 /// - an `NSToolbarItemGroup` segmented control drew a hairline between
 ///   adjacent segments and suppressed the one beside the SELECTED segment, so
 ///   the divider moved with the selection and no API draws them consistently;
-/// - custom-view tabs beside bordered Pin/Quit left bare glyphs next to
+/// - custom-view tabs beside the bordered Pin item left bare glyphs next to
 ///   bordered circles — two styles in one header, which is why the conversion
 ///   is now all of the strip or none of it;
 /// - an authored fill put every cue inside `if #available(macOS 26.0, *)`

@@ -400,9 +400,11 @@ public final class MainOutRowView: NSView {
         // Speaker mute button, LEFT of the master slider (same visual pattern as
         // `DeviceRowView`'s per-device mute): `pushOnPushOff` so the mute STATE
         // still toggles and the delegate still fires, but the glyph itself stays
-        // fixed on `speaker.wave.2.fill` in both states (no alternate/slash image
-        // — ahh wants the icon to never change on toggle). Muted state is shown by
-        // tint color only.
+        // swapping to `speaker.slash.fill` when engaged. The glyph used to stay
+        // fixed in both states (Alec, an earlier call); he reversed that on
+        // 2026-09-04 — a mute that changes nothing but its tint reads as no mute
+        // at all. The row wears the same two glyphs and the same `muted` pill as
+        // every device row below it.
         muteButton.translatesAutoresizingMaskIntoConstraints = false
         muteButton.setButtonType(.pushOnPushOff)
         muteButton.isBordered = false
@@ -594,13 +596,15 @@ public final class MainOutRowView: NSView {
     /// (locked decision). Mirrors `DeviceRowView.updateMuteTint()`.
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
-        muteButton.contentTintColor = engaged ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
+        muteButton.image = NSImage(
+            systemSymbolName: engaged ? "speaker.slash.fill" : "speaker.wave.2.fill",
+            accessibilityDescription: "Mute Main Audio")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .regular))
+        muteButton.contentTintColor = engaged ? Tokens.Color.panel : Tokens.Color.secondaryLabel
         muteButton.wantsLayer = true
         muteButton.layer?.cornerRadius = PopoverColumnGrid.mutePillCornerRadius
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            muteButton.layer?.backgroundColor = engaged
-                ? Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha).cgColor
-                : nil
+            muteButton.layer?.backgroundColor = engaged ? Tokens.Color.muted.cgColor : nil
         }
         configureAccessibility()
     }

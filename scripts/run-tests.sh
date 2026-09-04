@@ -52,23 +52,18 @@ hk="$repo_root/scripts/housekeeping.sh"
 [ -x "$hk" ] || hk="$(cd "$(dirname "$0")" && pwd)/housekeeping.sh"
 if [ -x "$hk" ]; then "$hk" --current "$repo_root" || true; fi
 
-# Which build engine the suite compiles with. PINNED rather than defaulted, for
-# the reason scripts/build.sh gives: Swift 6.4 defaults to `swiftbuild`, which
-# does not forward a C target's cSettings unsafeFlags (AirPlayEngine/
-# Package.swift's Homebrew -I paths) into the clang module dependency scan, so
-# `import CAirPlayEngine` fails to resolve.
+# The suite compiles with the SwiftPM default engine (swiftbuild). This used to
+# pin the old `native` engine because swiftbuild did not forward a C target's
+# cSettings unsafeFlags (AirPlayEngine/Package.swift's Homebrew -I paths) into
+# the clang module dependency scan, so `import CAirPlayEngine` failed. Fixed as
+# of Swift 6.4 — verified 2026-09-04.
 #
-# The second reason is disk. The two engines keep SEPARATE .build trees (`out`
-# AND `arm64-apple-macosx`) at ~1.3 GB apiece, so an unpinned test run beside
-# the pinned scripts/build.sh and scripts/make-app.sh doubles every worktree's
-# cache. That duplication is what filled this disk: 10 of 33 worktrees were
-# holding both.
-#
-# razor: `native` is deprecated in Swift 6.4 and will be removed eventually.
-# The ceiling is swiftbuild's unsafeFlags forwarding, not either machine --
-# both Macs run Swift 6.4. Upgrade path: once swiftbuild can build
-# AirPlayEngine, move run-tests.sh, build.sh and make-app.sh to it together.
-engine="--build-system native"
+# Do NOT add an engine flag back here alone. The two engines keep SEPARATE
+# .build trees (`out` AND `arm64-apple-macosx`) at ~1.3 GB apiece, so one script
+# disagreeing with scripts/build.sh and scripts/make-app.sh doubles every
+# worktree's cache. That duplication is what filled this disk once already:
+# 10 of 33 worktrees were holding both. housekeeping.sh's stale-cache sweep
+# reads this file to decide which tree is live.
 
 # Command Line Tools cannot run `swift test` for ANY package, XCTest or not —
 # measured: SwiftPM calls `xcrun --sdk macosx --show-sdk-platform-path` before
@@ -154,8 +149,8 @@ run_remote() {
     # a local path), and the private iOS repo is reached over ssh by a
     # different script.
     case "${AUDIOUT_TEST_MODE:-parallel}" in
-        serial) rargs="$engine --disable-keychain --no-parallel" ;;
-        *)      rargs="$engine --disable-keychain --parallel" ;;
+        serial) rargs="--disable-keychain --no-parallel" ;;
+        *)      rargs="--disable-keychain --parallel" ;;
     esac
 
     # The remote command is a STRING the far shell re-parses, so caller flags
@@ -391,7 +386,7 @@ set +e
 # (`--parallel` or `--no-parallel`) rather than as one quoted word. "$@" stays
 # quoted so caller arguments with spaces survive.
 # shellcheck disable=SC2086
-( cd "$core" && swift test $engine $test_args "$@" ) >&2
+( cd "$core" && swift test $test_args "$@" ) >&2
 status=$?
 set -e
 

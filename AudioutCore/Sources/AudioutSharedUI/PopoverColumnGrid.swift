@@ -688,19 +688,17 @@ public enum PopoverColumnGrid {
     /// row's trailing control, with the feed pills to its left.
     public static var syncTrailing: CGFloat { trailingInset }
     /// Distance from the row trailing edge to the "Offset" column title's
-    /// TRAILING edge on the card header line — the chip column's own trailing
-    /// edge, so the title hangs over the chip it names and moves with it
-    /// (sibling of `feedColumnLeadingFromTrailing`, the "Source" title's
-    /// anchor on the same line). The pair reads in the order of the controls
-    /// beneath it and clears itself by a wide margin: at
-    /// `Tokens.Font.captionMedium` "Source" measures 37.7 pt and starts 154 in,
-    /// so it ends 116.3 in; "Offset" measures 33.6 pt and ends 14 in, so it
-    /// starts 47.6 in — **68.7 pt of clear air** between them. Re-anchoring
-    /// the chip re-anchors this title, which is the point: with the chip on
-    /// the slot's other side these same two anchors printed each legend over
-    /// the OTHER column's control. This legend prints exactly once, on the
-    /// card header, never on a subsection line.
-    public static var offsetTitleTrailingFromTrailing: CGFloat { syncTrailing }
+    /// LEADING edge — the SYNC chip's own leading edge (`syncTrailing +
+    /// syncChipWidth`), so the title LEFT-ALIGNS over its column exactly as
+    /// "Source" left-aligns on `feedColumnLeadingFromTrailing` (sibling
+    /// anchor, same card header line). At `Tokens.Font.captionMedium`
+    /// "Source" measures 37.7 pt and starts at 154, ending at 116.3;
+    /// "Offset" measures 33.6 pt and starts here at 98, ending at 64.4 —
+    /// **18.3 pt of clear air** between them. Re-anchoring the chip
+    /// re-anchors this title, which is the point: the title always sits
+    /// over the chip it names. This legend prints exactly once, on the card
+    /// header, never on a subsection line.
+    public static var offsetTitleLeadingFromTrailing: CGFloat { syncTrailing + syncChipWidth }
 
     // MARK: SYNC drawer (PLAN-BT-SYNC-DRAWER T5 — `BTSyncDrawerView`)
     //

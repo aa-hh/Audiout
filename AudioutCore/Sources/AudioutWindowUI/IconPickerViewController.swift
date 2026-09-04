@@ -261,8 +261,10 @@ public final class IconPickerViewController: NSViewController {
             selectedButton = button
         }
         button.wantsLayer = true
+        // No `masksToBounds`: the radius already clips the background fill,
+        // and masking would also clip a keyboard focus ring drawn outside the
+        // cell's bounds.
         button.layer?.cornerRadius = Tokens.Layout.Radius.control
-        button.layer?.masksToBounds = true
         let image = NSImage(systemSymbolName: name, accessibilityDescription: plainLabel)
         image?.isTemplate = true
         button.image = image

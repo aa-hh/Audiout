@@ -235,14 +235,6 @@ public final class MembershipRowView: NSView {
         ])
     }
 
-    /// Re-derive the drawn node from the current membership state. The node
-    /// vocabulary here is deliberately BINARY — filled gold `.member` when
-    /// checked, hollow `.nonMember` when not — because this checklist edits
-    /// *membership*, which has no connection/energize states to report (the
-    /// popover's `DeviceRowView` owns those). In particular the pinned sole
-    /// member (`setCheckboxEnabled(false)`) still renders `.member`: it IS a
-    /// member, and `.blocked`'s greyed hollow node would wrongly read as "not
-    /// in this group". No-op on `.systemSheet`, which mounts no node at all.
     /// The row's three inks — name, glyph and the "Unavailable" word — set
     /// together from one decision, because every path that can change them
     /// (a host refresh, an arming flip, a toggle) can change all three.
@@ -284,6 +276,14 @@ public final class MembershipRowView: NSView {
         }
     }
 
+    /// Re-derive the drawn node from the current membership state. The node
+    /// vocabulary here is deliberately BINARY — filled gold `.member` when
+    /// checked, hollow `.nonMember` when not — because this checklist edits
+    /// *membership*, which has no connection/energize states to report (the
+    /// popover's `DeviceRowView` owns those). In particular the pinned sole
+    /// member (`setCheckboxEnabled(false)`) still renders `.member`: it IS a
+    /// member, and `.blocked`'s greyed hollow node would wrongly read as "not
+    /// in this group". No-op on `.systemSheet`, which mounts no node at all.
     private func updateBus() {
         guard surface == .warmPane else { return }
         // The node dims with the rest of the row — fill only: an unavailable

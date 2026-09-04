@@ -155,21 +155,32 @@ import AppKit
         #expect(row.test_meterLevel() == 0.4, "levels now land on a meter the user can see")
     }
 
-    // MARK: Failure headline (never instructional sublabels)
+    // MARK: Failure mark (glyph on the row, headline on the tooltip)
 
-    @Test func failedRowRendersTheFailureHeadlineInTheFeedPill() {
+    /// The row draws ONE failure glyph whatever the cause (Alec, 2026-09-04).
+    /// This retires the BT-UI decision that "Connected elsewhere" and "Not
+    /// paired" must read distinctly ON THE ROW — every headline overflowed the
+    /// 52 pt Bluetooth feed slot and clipped mid-word, and Alec chose one
+    /// consistent glyph over words-when-they-fit. The distinction survives, on
+    /// the tooltip and in the spoken value. Still no instructional sublabels.
+    @Test func failedRowRendersAGlyphAndKeepsTheHeadlineOnTheTooltip() {
         let spy = SpyDelegate()
         let elsewhere = makeRow(
             btDevice(available: false, state: .failed(.init(cause: .connectedElsewhere))),
             delegate: spy, selected: true)
-        #expect(elsewhere.test_feedText == "Connected elsewhere")
-        #expect(elsewhere.test_feedIsErrorColored)
+        #expect(elsewhere.test_feedText == nil, "no words in the pill at Bluetooth row width")
+        #expect(elsewhere.test_feedErrorPillHasGlyph)
+        #expect(elsewhere.test_feedErrorGlyphIsFailureColored)
+        #expect(elsewhere.test_feedTooltip == "Connected elsewhere")
+        #expect(elsewhere.test_accessibilityValue?.contains("Connected elsewhere") == true)
         #expect(elsewhere.test_ringForm == .failed)
 
         let notPaired = makeRow(
             btDevice(available: false, state: .failed(.init(cause: .notPaired))),
             delegate: spy, selected: true)
-        #expect(notPaired.test_feedText == "Not paired")
+        #expect(notPaired.test_feedTooltip == "Not paired",
+                "the two causes still read apart — on the tooltip, not on the row")
+        #expect(notPaired.test_accessibilityValue?.contains("Not paired") == true)
         #expect(notPaired.test_statusText == nil, "no instructional sublabels — ever")
     }
 
@@ -440,33 +451,62 @@ import AppKit
                 "one name column across every row shape — got \(trailings)")
     }
 
-    /// The door's ONE mark: the glyph goes gold and a step heavier when the
-    /// curve is not flat — the response scope's own two variables (hue and
-    /// line weight) at 13 pt. The door stays image-only either way.
-    @Test func aShapedSpeakerWearsTheGoldGlyphAndAFlatOneDoesNot() {
+    /// The door's active mark (Alec, 2026-09-04): a GOLD SEAT with a dark
+    /// border, its glyph bigger, heavier and in that same dark ink. It was a
+    /// bare gold glyph, which measured 3.64:1 on `canvas` in light against the
+    /// at-rest grey's 5.97:1 — the "on" state read dimmer than the "off" one —
+    /// so the state moved from a hue to a fill. The door stays image-only
+    /// either way.
+    @Test func aShapedSpeakerWearsTheGoldSeatAndAFlatOneDoesNot() {
         let flat = makeRow(btDevice(), delegate: SpyDelegate(), selected: true)
         #expect(flat.test_eqTintColor == Tokens.Color.label2,
                 "a flat curve leaves the door at rest")
+        #expect(!flat.test_eqSeatIsGoldFilled, "…with no seat behind the glyph")
+        #expect(flat.test_eqSeatBorderWidth == 0, "…and no border")
         #expect(flat.test_eqSymbolIsHeavy == false)
         #expect(flat.test_eqButtonHasTitle == false, "the door is image-only")
 
         let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
                              isEQShaped: true)
-        #expect(shaped.test_eqTintColor == Tokens.Color.gold)
+        #expect(shaped.test_eqSeatIsGoldFilled, "the state is a FILL now, not a glyph hue")
+        #expect(shaped.test_eqSeatBorderIsInkOnFill, "…inside the dark border")
+        #expect(shaped.test_eqTintColor == Tokens.Color.inkOnFill,
+                "the glyph reads dark ON the gold, never gold on gold")
         #expect(shaped.test_eqSymbolIsHeavy,
-                "the weight is the non-colour half of the mark")
+                "the size and weight step is the non-colour half of the mark")
         #expect(shaped.test_eqButtonHasTitle == false)
     }
 
     /// The mark must not be colour ALONE — the same rule the scope follows.
-    /// Weight is the second cue for a viewer who cannot separate gold from
-    /// grey, and the spoken value is the third.
+    /// The glyph's size/weight step is the second cue for a viewer who cannot
+    /// separate gold from grey, and the spoken value is the third.
     @Test func theShapedMarkCarriesMoreThanItsHue() {
         let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
                              isEQShaped: true)
         let flat = makeRow(btDevice(), delegate: SpyDelegate(), selected: true)
         #expect(shaped.test_eqSymbolIsHeavy != flat.test_eqSymbolIsHeavy,
                 "shape survives a viewer who cannot read the hue")
+    }
+
+    /// Mute sits 6 pt trailing and is itself a filled pill, so the door's new
+    /// seat must not read as the same object. Mute is a capsule — its radius
+    /// clamps to half its own height; the door's seat is a rounded SQUARE,
+    /// short of that. The gap between them is unchanged: the seat grew inside
+    /// the slot the door already occupied, never the slot itself.
+    @Test func theShapedDoorSeatIsNotTheMuteCapsule() {
+        let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
+                             isEQShaped: true)
+        shaped.layoutSubtreeIfNeeded()
+        #expect(shaped.test_eqSeatCornerRadius < shaped.test_eqSeatFrame.height / 2,
+                "a rounded rectangle beside mute's capsule, not a second capsule")
+        #expect(shaped.test_eqSeatFrame.height < shaped.test_eqButtonFrame.height,
+                "the seat is sized to the door's slot, not to the button's larger frame")
+        #expect(abs(shaped.test_eqSeatFrame.midY - shaped.test_muteButtonFrame.midY) <= 1,
+                "the two engaged marks sit on one centre line")
+        // The seat grew inside the slot, so the gap to mute is untouched. No
+        // absolute width assert here — AppKit's rounding grid varies per run.
+        #expect(abs((shaped.test_muteButtonFrame.minX - shaped.test_eqButtonFrame.maxX)
+                    - PopoverColumnGrid.eqToMuteGap) <= 1, "the 6 pt gap to mute is unmoved")
     }
 
     @Test func clickingTheEQButtonOpensTheEqualizer() {

@@ -15,7 +15,9 @@ import AppKit
 /// floating in empty space. The edge is load-bearing here (`rim` measures
 /// 4.38:1 on `well` dark, 4.15:1 light) because the fill sits barely off the
 /// row ground. What the TEXT colour says is whether the value is sounding
-/// (D7), and an error pill signals in failure red plus its own glyph.
+/// (D7), and an error pill signals in failure red plus its own glyph — a
+/// `.failed` row's pill is that glyph ALONE, its words having moved to the
+/// row's tooltip and spoken value (2026-09-04).
 ///
 /// Drawing/layout-only, non-interactive (`hitTest` returns `nil`, mirroring
 /// `LevelMeterView`/`RouteArmedDotView`'s "small self-contained view" house
@@ -33,8 +35,9 @@ final class FeedPillView: NSView {
     private let label = NSTextField(labelWithString: "")
     /// A small leading triangle glyph, mounted only on an ERROR pill (P2-6) —
     /// decorative (no accessibility description: the row's spoken state
-    /// clause already says "couldn't connect"), so the pill carries a SHAPE
-    /// as well as a colour.
+    /// clause says "couldn't connect" and, since 2026-09-04, its spoken VALUE
+    /// carries the failure's own headline), so the pill carries a SHAPE as
+    /// well as a colour. On a `.failed` pill it is the only content.
     private let errorGlyph = NSImageView()
     /// The label's leading constraint — pinned to the pill's own leading edge
     /// by default, re-pointed at the glyph's trailing edge the one time
@@ -106,13 +109,19 @@ final class FeedPillView: NSView {
     /// where there is one) — this view only draws the capsule around it. An
     /// error pill ALSO gets a leading triangle glyph (P2-6), so it reads by
     /// shape, not colour alone; the fill and edge are one pair for every pill.
+    ///
+    /// A `.failed` row passes an EMPTY string here (2026-09-04): its pill is
+    /// the glyph alone, and the headline moved to the row's tooltip and
+    /// spoken value. The glyph-to-label gap collapses to zero in that case so
+    /// the lone triangle sits centred in its own padding instead of 3 pt off.
     func configure(attributedText: NSAttributedString, isError: Bool) {
         label.attributedStringValue = attributedText
         if isError {
             errorGlyph.isHidden = false
             labelLeadingConstraint?.isActive = false
             let leading = label.leadingAnchor.constraint(
-                equalTo: errorGlyph.trailingAnchor, constant: 3)
+                equalTo: errorGlyph.trailingAnchor,
+                constant: attributedText.length == 0 ? 0 : 3)
             leading.isActive = true
             labelLeadingConstraint = leading
         }
@@ -157,9 +166,18 @@ final class FeedPillView: NSView {
     /// `isError` flag `configure` was called with) so a test can't drift from
     /// the real drawn state, mirroring the retired `feedLabel`'s own
     /// `test_feedIsErrorColored`.
-    var test_isErrorColored: Bool {
-        guard let color = firstRunColor(),
-              let resolved = color.usingColorSpace(.sRGB),
+    var test_isErrorColored: Bool { isFailureColored(firstRunColor()) }
+
+    /// Whether the leading triangle is mounted AND currently painted in the
+    /// failure tone. A `.failed` pill carries no words at all now, so this is
+    /// where its colour lives — ``test_isErrorColored`` reads an empty run
+    /// and returns false for one.
+    var test_errorGlyphIsFailureColored: Bool {
+        !errorGlyph.isHidden && isFailureColored(errorGlyph.contentTintColor)
+    }
+
+    private func isFailureColored(_ color: NSColor?) -> Bool {
+        guard let resolved = color?.usingColorSpace(.sRGB),
               let failure = Tokens.Color.failure.usingColorSpace(.sRGB) else { return false }
         return abs(resolved.redComponent - failure.redComponent) < 0.01
             && abs(resolved.greenComponent - failure.greenComponent) < 0.01

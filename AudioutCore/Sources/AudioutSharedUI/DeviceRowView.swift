@@ -294,12 +294,45 @@ public final class DeviceRowView: NSView {
     /// Mounted only when ``supportsEqualizer``; the layout reserves its slot on
     /// every row either way, so the name truncates identically across rows.
     private let eqButton = NSButton()
+    /// The shaped door's gold seat, mounted behind ``eqButton`` and hidden
+    /// while the curve is flat.
+    ///
+    /// It is its OWN view rather than a fill on the button's backing layer —
+    /// the idiom ``updateMuteTint()`` uses one control away — because an
+    /// `.accessoryBar` `NSButton` frames LARGER than the alignment rect its
+    /// constraints size: the door's 24×24 constraint pair produces a measured
+    /// 24.5 × 30.5 frame (alignment insets top 4, bottom 2.5, right 0.5), so
+    /// painting that layer would put a 30 pt gold slab in a 24 pt slot, sat
+    /// 1.5 pt high of centre. Mute can paint its own layer because it carries
+    /// no size constraint at all, so its frame IS its pill.
+    private let eqSeatView = NSView()
     /// The door's glyph — three band faders, the equalizer's own picture.
-    /// Named because ``updateEQButton`` re-makes the image to change its
-    /// WEIGHT and must ask for the same symbol the builder mounted.
+    /// Named because ``updateEQButton`` re-makes the image to change its SIZE
+    /// and WEIGHT and must ask for the same symbol the builder mounted.
     private static let eqSymbolName = "slider.horizontal.3"
     /// The point size every accessory glyph on this row is drawn at.
     private static let accessoryGlyphPointSize: CGFloat = 13
+    /// The SHAPED door's glyph — "just a bit bigger" (Alec, 2026-09-04). It
+    /// grows inside the unchanged 24 pt slot, so the gold seat still keeps
+    /// about 4 pt of padding around the mark and ``PopoverColumnGrid/eqToMuteGap``
+    /// never moves.
+    private static let eqShapedGlyphPointSize: CGFloat = 15
+    /// The shaped door's gold seat, centred on ``eqButton``. Width is the
+    /// door's own column; height is picked against the control 6 pt trailing:
+    /// the engaged MUTE pill measures 24.5 × 14, so a full 24 × 24 seat would
+    /// stand 71% taller than the pill beside it and dominate a 44 pt row. 18
+    /// keeps the door the bigger of the two marks — which is what "a bit
+    /// bigger" asked for — without turning it into a block.
+    private static let eqSeatSize = NSSize(width: PopoverColumnGrid.eqButtonWidth, height: 18)
+    /// Corner of that seat. Deliberately NOT ``Tokens/Layout/Radius/control``
+    /// (10): on an 18 pt-high seat that exceeds half the height, so Core
+    /// Animation would clamp it to a capsule — the exact shape the mute pill
+    /// 6 pt trailing already owns (its own 10 clamps to 7 on a 14 pt pill).
+    /// 6 stays visibly short of the 9 pt capsule point, so the two engaged
+    /// marks never read as one vocabulary.
+    private static let eqSeatCornerRadius: CGFloat = 6
+    /// Stroke width of the shaped door's dark border.
+    private static let eqSeatBorderWidth: CGFloat = 1
 
     /// The under-name VU meter (Warm Signal v4 §Call-1), mounted inside the
     /// identity stack only when `showsMeter` — the mixer window leaves it
@@ -893,35 +926,71 @@ public final class DeviceRowView: NSView {
         }
     }
 
-    /// The Equalizer door's one MARK: the glyph itself goes GOLD and a step
-    /// heavier when this speaker's curve is not flat.
+    /// The Equalizer door's active MARK: when this speaker's curve is not
+    /// flat the door draws a GOLD SEAT with a dark border, and its glyph
+    /// grows a size and a weight step and flips to the dark ink that sits on
+    /// gold everywhere else in the app. At rest there is no seat at all — a
+    /// `label2` glyph at the accessory size, unchanged.
     ///
-    /// It is the response scope's own language, scaled down to 13 pt. That
-    /// scope draws a shaped curve in `gold` at `shapedLineWidth`, and a flat
-    /// one as a neutral `scopeFlatLine` hairline — "gold means signal, and
-    /// flat is the absence of shaping" (`EQResponseCurveView`). The door onto
-    /// that scope now says the same thing in the same two variables, hue and
-    /// weight, so the mark carries a non-colour cue as well as a colour one.
+    /// It was a bare gold GLYPH until 2026-09-04, and that failed on
+    /// measurement: gold measures 3.64:1 on `canvas` in light where the
+    /// at-rest `label2` measures 5.97:1, so the "on" state read 39% DIMMER
+    /// than the "off" state; dark separated the two by 1.22:1; and under the
+    /// Subtle accent setting the relationship inverted in every appearance. A
+    /// hue swap cannot carry this state, so a fill carries it instead.
     ///
-    /// Two things this mark deliberately is NOT. It is not `partySignal`:
-    /// that magenta is the alignment wizard's REFERENCE-LIGHT colour, meaning
+    /// The seat is a DELIBERATE reversal of the rule this comment used to
+    /// state. It said: no border, because the mute button immediately
+    /// trailing already says "engaged" with a filled pill, so a second shape
+    /// for the same idea would give one row three vocabularies. Alec
+    /// overruled that on 2026-09-04, knowing mute sits 6 pt away — "when
+    /// clicked could we give it a black border with a gold fill? make it just
+    /// a bit bigger". The two engaged marks are drawn to stay legibly
+    /// different: MUTE is a translucent NEUTRAL capsule (`engagedChrome` at
+    /// ``PopoverColumnGrid/mutePillFillAlpha``, no border, its glyph the same
+    /// size as at rest); the DOOR is an opaque GOLD rounded square at
+    /// ``eqSeatCornerRadius`` with a 1 pt `inkOnFill` border and a larger,
+    /// heavier glyph in that same dark ink.
+    ///
+    /// One thing the mark still deliberately is NOT: `partySignal`. That
+    /// magenta is the alignment wizard's REFERENCE-LIGHT colour, meaning
     /// "this is the other speaker in the run", and spending it here would make
-    /// one hue carry two unrelated meanings. And it is not a border: the mute
-    /// button immediately trailing already says "engaged" with a filled pill,
-    /// so a second shape for the same idea would give one row three
-    /// vocabularies. One mark per control.
+    /// one hue carry two unrelated meanings.
+    ///
+    /// The seat's fill and border are static `CGColor`s on ``eqSeatView``'s
+    /// layer — the same discipline ``updateMuteTint()`` uses one method up,
+    /// re-stamped from the same callers (``apply`` and
+    /// ``viewDidChangeEffectiveAppearance``). See ``eqSeatView`` for why the
+    /// seat is not painted on the button's own layer.
     private func updateEQButton() {
         guard supportsEqualizer else { return }
         eqButton.setAccessibilityLabel("Equalizer for \(device.name)")
         eqButton.setAccessibilityValue(isEQShaped ? "Shaped" : "Flat")
-        eqButton.contentTintColor = isEQShaped ? Tokens.Color.gold : Tokens.Color.label2
-        // The symbol image is re-made rather than re-tinted: weight lives in
-        // the `SymbolConfiguration`, not in the tint.
+        eqButton.contentTintColor = isEQShaped ? Tokens.Color.inkOnFill : Tokens.Color.label2
+        eqSeatView.isHidden = !isEQShaped
+        eqSeatView.wantsLayer = true
+        eqSeatView.layer?.cornerRadius = Self.eqSeatCornerRadius
+        eqSeatView.layer?.borderWidth = Self.eqSeatBorderWidth
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            eqSeatView.layer?.backgroundColor = Tokens.Color.gold.cgColor
+            eqSeatView.layer?.borderColor = Tokens.Color.inkOnFill.cgColor
+        }
+        // The symbol image is re-made rather than re-tinted: size and weight
+        // live in the `SymbolConfiguration`, not in the tint.
         eqButton.image = NSImage(systemSymbolName: Self.eqSymbolName,
                                  accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: Self.accessoryGlyphPointSize,
-                                           weight: isEQShaped ? .semibold : .regular))
+            .withSymbolConfiguration(isEQShaped ? Self.eqShapedGlyphConfig
+                                                : Self.eqFlatGlyphConfig)
     }
+
+    /// The shaped door's glyph configuration — one source shared by
+    /// ``updateEQButton()`` and ``test_eqSymbolIsHeavy``, so the hook cannot
+    /// drift from what is drawn.
+    private static let eqShapedGlyphConfig = NSImage.SymbolConfiguration(
+        pointSize: eqShapedGlyphPointSize, weight: .semibold)
+    /// The at-rest door's glyph configuration.
+    private static let eqFlatGlyphConfig = NSImage.SymbolConfiguration(
+        pointSize: accessoryGlyphPointSize, weight: .regular)
 
     /// The pill's engaged fill is a static `CGColor` — re-stamp on a live
     /// light/dark or Increase-Contrast switch (the dot/ring/bus subviews all
@@ -1098,13 +1167,21 @@ public final class DeviceRowView: NSView {
             return
         }
         if case .failed(let failure) = device.connectionState {
-            // The failure HEADLINE, not a hardcoded generic (BT-UI locked spec:
-            // "failure headline sublabel" — "Connected elsewhere"/"Not paired"
-            // must read distinctly; `.unknown` still renders "Couldn't
-            // connect", so AirPlay's common case is unchanged). Copy lives on
-            // `ConnectionFailure` — single source shared with the panel.
-            feedStack.toolTip = nil
-            setFeedText(failure.headline, color: Tokens.Color.failure)
+            // GLYPH ONLY, with the words on the tooltip and in the row's
+            // spoken value (Alec, 2026-09-04). Every one of the twelve
+            // headlines overflowed the Bluetooth feed slot — "Couldn't
+            // connect" needs 113.2 pt of a 52 pt slot and the triangle eats
+            // 19 pt before the first character, so the pill clipped mid-word.
+            // Alec chose the consistent version over "words when they fit",
+            // so an AirPlay row's wider slot draws the same bare glyph. The
+            // headline is not lost: `feedStack.toolTip` carries it on hover
+            // and `configureAccessibility` speaks it. This DOES retire the
+            // BT-UI spec's "'Connected elsewhere' and 'Not paired' read
+            // distinctly on the row" — knowingly traded for one shape.
+            setFeedFailureGlyph()
+            // AFTER the render: `renderFeedPills` → `clearFeedPills()` wipes
+            // `feedStack.toolTip` as it tears the old pills down.
+            feedStack.toolTip = failure.headline
             return
         }
         if !device.isAvailable {
@@ -1182,8 +1259,15 @@ public final class DeviceRowView: NSView {
         feedStack.toolTip = nil
     }
 
-    /// Render a SINGLE failure-red pill — the "Couldn't
-    /// connect" / "Unavailable" rungs.
+    /// Render the SINGLE failure pill: the triangle glyph alone, in
+    /// `failure`, with no words at all. The headline rides `feedStack`'s
+    /// tooltip and the row's spoken value instead (2026-09-04).
+    private func setFeedFailureGlyph() {
+        renderFeedPills([(attributedText: NSAttributedString(), isError: true)])
+    }
+
+    /// Render a SINGLE failure-red pill of WORDS — the "Unavailable" rung.
+    /// The `.failed` rung above draws ``setFeedFailureGlyph()`` instead.
     private func setFeedText(_ text: String, color: NSColor) {
         let attr = NSAttributedString(
             string: text, attributes: [.font: Tokens.Font.caption, .foregroundColor: color])
@@ -1510,7 +1594,14 @@ public final class DeviceRowView: NSView {
         addSubview(slider)
         addSubview(readoutLabel)
         addSubview(muteButton)
-        if supportsEqualizer { addSubview(eqButton) }
+        if supportsEqualizer {
+            // Seat first: subview order is z-order, and the seat draws BEHIND
+            // the door's glyph.
+            eqSeatView.translatesAutoresizingMaskIntoConstraints = false
+            eqSeatView.isHidden = true
+            addSubview(eqSeatView)
+            addSubview(eqButton)
+        }
         // FEED column (v4.1 item 3): only a bus row has the free trailing slot.
         if busActive {
             addSubview(feedStack)
@@ -1697,6 +1788,12 @@ public final class DeviceRowView: NSView {
                 eqButton.centerYAnchor.constraint(equalTo: centerYAnchor),
                 eqButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.eqButtonWidth),
                 eqButton.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.eqButtonWidth),
+                // The gold seat is centred on the door's own alignment rect,
+                // at its own size — never on the button's larger frame.
+                eqSeatView.centerXAnchor.constraint(equalTo: eqButton.centerXAnchor),
+                eqSeatView.centerYAnchor.constraint(equalTo: eqButton.centerYAnchor),
+                eqSeatView.widthAnchor.constraint(equalToConstant: Self.eqSeatSize.width),
+                eqSeatView.heightAnchor.constraint(equalToConstant: Self.eqSeatSize.height),
             ])
         }
 
@@ -2328,6 +2425,14 @@ public final class DeviceRowView: NSView {
         feedPills.first?.test_hasErrorGlyph ?? false
     }
 
+    /// Whether that glyph is CURRENTLY painted in the failure tone. The
+    /// failure pill lost its words on 2026-09-04, so the colour half of the
+    /// signal now lives on the glyph rather than on a text run — this is what
+    /// ``test_feedIsErrorColored`` used to read for a `.failed` row.
+    public var test_feedErrorGlyphIsFailureColored: Bool {
+        feedPills.first?.test_errorGlyphIsFailureColored ?? false
+    }
+
     /// The FEED column's leading pill's CURRENTLY-painted foreground color
     /// (the main-mix pill when not an error override): `label3` while
     /// ``controlsMuted``, `goldText` while the main mix is sounding here,
@@ -2403,9 +2508,45 @@ public final class DeviceRowView: NSView {
     /// The Equalizer door's not-flat mark: its glyph tint (`gold` when shaped,
     /// `label2` at rest) and the symbol weight that rides with it.
     public var test_eqTintColor: NSColor? { eqButton.contentTintColor }
+    /// Whether the door's glyph currently wears the SHAPED configuration —
+    /// bigger and heavier than at rest (2026-09-04: the size step joined the
+    /// weight step, so this reads the whole configuration, not just weight).
     public var test_eqSymbolIsHeavy: Bool {
-        eqButton.image?.symbolConfiguration == NSImage.SymbolConfiguration(
-            pointSize: Self.accessoryGlyphPointSize, weight: .semibold)
+        eqButton.image?.symbolConfiguration == Self.eqShapedGlyphConfig
+    }
+    /// Whether the door CURRENTLY draws its gold seat — compares what is
+    /// stamped on the layer against `gold` resolved in this view's own
+    /// appearance, so a test reads the drawn state rather than the intent.
+    public var test_eqSeatIsGoldFilled: Bool {
+        !eqSeatView.isHidden
+            && eqSeatColor(eqSeatView.layer?.backgroundColor, matches: Tokens.Color.gold)
+    }
+    /// Whether the seat's border is CURRENTLY the app's dark-on-gold ink.
+    public var test_eqSeatBorderIsInkOnFill: Bool {
+        !eqSeatView.isHidden && eqSeatView.layer?.borderWidth ?? 0 > 0
+            && eqSeatColor(eqSeatView.layer?.borderColor, matches: Tokens.Color.inkOnFill)
+    }
+    /// The seat's stroke as DRAWN — zero while the seat is hidden, so a flat
+    /// row reports no border rather than one nobody can see.
+    public var test_eqSeatBorderWidth: CGFloat {
+        eqSeatView.isHidden ? 0 : (eqSeatView.layer?.borderWidth ?? 0)
+    }
+    public var test_eqSeatCornerRadius: CGFloat { eqSeatView.layer?.cornerRadius ?? 0 }
+    /// The seat's frame in the row's own coordinates, after a layout pass —
+    /// what the shape comparison against the mute pill reads.
+    public var test_eqSeatFrame: NSRect { eqSeatView.frame }
+
+    private func eqSeatColor(_ stamped: CGColor?, matches token: NSColor) -> Bool {
+        guard let stamped,
+              let drawn = NSColor(cgColor: stamped)?.usingColorSpace(.sRGB) else { return false }
+        var expected: NSColor?
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            expected = token.usingColorSpace(.sRGB)
+        }
+        guard let expected else { return false }
+        return abs(drawn.redComponent - expected.redComponent) < 0.01
+            && abs(drawn.greenComponent - expected.greenComponent) < 0.01
+            && abs(drawn.blueComponent - expected.blueComponent) < 0.01
     }
     public func test_clickEQButton() { eqButton.performClick(nil) }
     public var test_muteButtonFrame: NSRect { muteButton.frame }
@@ -3006,6 +3147,15 @@ public final class DeviceRowView: NSView {
         // dot's wording — "playing here" when a confirmed live feed lights it,
         // "armed" for the held main-mix route.
         var valueParts: [String] = []
+        // The FEED column stopped printing the failure HEADLINE on 2026-09-04
+        // (it draws a bare triangle now), so the words arrive here rather than
+        // becoming unreachable. Bus rows only: a non-bus row still carries the
+        // headline in its sublabel, and saying it twice would be worse than
+        // the clipping this replaced. The label's own ", couldn't connect"
+        // clause stays — it is the ring's state, not the cause.
+        if busActive, case .failed(let failure) = device.connectionState {
+            valueParts.append(failure.headline)
+        }
         if device.isMuted || isMasterMuted { valueParts.append("muted") }
         if isRouteArmed { valueParts.append(hasLiveFeeds ? "playing here" : "armed") }
         if volumePendingApply { valueParts.append("applying volume") }

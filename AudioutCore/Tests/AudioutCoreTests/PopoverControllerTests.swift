@@ -985,7 +985,8 @@ import AudioutProtocol
 
         #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "R12: a failure keeps intent, so the checked set never diverged and there is no dormancy note to show")
         #expect(popover.test_deviceRow(for: "office")?.test_busNodeDimmed == false, "the FAILED member never tints — failure outranks configuration (R2)")
-        #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Took too long", "the failure FEED override renders the failure's own headline at full emphasis")
+        #expect(popover.test_deviceRow(for: "office")?.test_feedErrorPillHasGlyph == true, "the failure FEED override takes the column")
+        #expect(popover.test_deviceRow(for: "office")?.test_feedTooltip == "Took too long", "…and the failure's own headline reaches the tooltip (2026-09-04: the pill lost its words)")
         #expect(popover.test_diagnosisPanel(for: "office") != nil, "the diagnosis panel attaches normally")
         #expect(controller.selectedDeviceIDs.contains("office"), "R12: the failed device stays SELECTED — the failure must not rewrite what the user chose")
 

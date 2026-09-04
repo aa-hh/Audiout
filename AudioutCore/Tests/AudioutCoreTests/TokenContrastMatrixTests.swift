@@ -179,8 +179,12 @@ extension SerializedSharedState {
             // NON-TEXT, floor 3.0:1
             ContrastEntry(name: "failure", token: Tokens.Color.failure, floor: 3.0,
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised)])),
+            // `canvas` joined gold's grounds on 2026-09-04. The omission is why
+            // the Equalizer door's gold-on-canvas glyph (3.64:1 light, and
+            // inverted against its own at-rest grey) was never caught here.
             ContrastEntry(name: "gold", token: Tokens.Color.gold, floor: 3.0,
-                         groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
+                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel),
+                                                  ("raised", raised), ("well", well)])),
             ContrastEntry(name: "ember", token: Tokens.Color.ember, floor: 3.0,
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
             ContrastEntry(name: "ring", token: Tokens.Color.ring, floor: 3.0,

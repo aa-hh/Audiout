@@ -109,6 +109,10 @@ if [ "${SKIP_NOTARIZE:-0}" = "1" ]; then
   step "Build + sign (make-app.sh, NOTARIZATION SKIPPED)"
   AUDIOUT_BUNDLE_DYLIBS=1 "$SCRIPT_DIR/make-app.sh" "$OUTPUT_DIR"
   test -d "$APP_BUNDLE" || { echo "ERROR: expected app bundle not found at $APP_BUNDLE" >&2; exit 1; }
+  # The fast path exists to skip waiting, so it gets the plist assertion only —
+  # no second build. The real path below inherits the full check through
+  # make-release.sh.
+  "$SCRIPT_DIR/check-license-invariants.sh" artifact "$APP_BUNDLE" "$AUDIOUT_LICENSE_URL"
   rm -f "$DIST_ZIP"
   ditto -c -k --keepParent "$APP_BUNDLE" "$DIST_ZIP"
 else

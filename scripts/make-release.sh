@@ -109,6 +109,19 @@ echo "==> Building and signing the release app (make-app.sh)"
 AUDIOUT_BUNDLE_DYLIBS=1 CODESIGN_REQUIRE_IDENTITY=1 "$SCRIPT_DIR/make-app.sh" "$OUTPUT_DIR"
 test -d "$APP_BUNDLE" || { echo "ERROR: expected app bundle not found at $APP_BUNDLE" >&2; exit 1; }
 
+# --- Licence invariants -------------------------------------------------------
+# Before the expensive Apple round-trips, prove the two things that must be
+# true of the licence wiring: this build carries exactly the URL it was built
+# with, and a build made without one carries no key at all. The second needs
+# its own (unlicensed) build; make-app.sh sends the compile to the other Mac
+# when it is up and does it here when it is not.
+#
+# This ran as the macos `build-invariants` CI job until it became the biggest
+# line on the GitHub Actions bill (macOS bills at 10x). It belongs here anyway:
+# it now gates the artifact that actually ships rather than a pull request.
+echo "==> Checking licence invariants"
+"$SCRIPT_DIR/check-license-invariants.sh" full "$APP_BUNDLE" "$AUDIOUT_LICENSE_URL"
+
 # --- Zip for notarization -----------------------------------------------------
 # ditto -c -k --keepParent, not `zip`: it's what Apple's own notarization docs
 # use, and it preserves the bundle's resource forks/extended attributes and

@@ -59,6 +59,14 @@ import AudioutSharedUI
 /// affected; the dead area beside a narrower row simply swallows a click with
 /// no target, same as clicking blank pane background anywhere else.
 final class GroupedSectionView: NSView {
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        redrawOnAccessibilityDisplayChange()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
     /// How this container draws itself — see the type's doc comment.
     enum Style {
         /// The page's one instrument: `raised` fill + a `containerEdge` edge.

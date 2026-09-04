@@ -235,6 +235,10 @@ final class DeviceIconWellView: NSView {
 
     @objc private func accessibilityDisplayOptionsDidChange() {
         restampBadgeLayerColors()
+        // The badge is stamped above; the WELL is drawn in `draw(_:)` off the
+        // same live tokens, so it needs the repaint or it keeps its
+        // standard-contrast fill and edge until something else dirties it.
+        needsDisplay = true
     }
 
     // MARK: Warm-well drawing (Warm Signal §1/§5.3)

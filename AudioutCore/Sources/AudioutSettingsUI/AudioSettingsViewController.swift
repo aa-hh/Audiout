@@ -1106,10 +1106,19 @@ extension AudioSettingsViewController: FoldFollowing {
 }
 
 /// A rounded hairline border around the excluded-apps list. Drawn with
-/// `NSColor.separatorColor` in `draw(_:)` (resolved under the current appearance),
-/// so it adapts to light/dark and the app's theme override with no manual
-/// appearance-change bookkeeping.
+/// `NSColor.separatorColor` in `draw(_:)` (resolved under the current
+/// appearance), so it adapts to light/dark and the app's theme override on its
+/// own. Increase Contrast is the exception it cannot get for free — see
+/// `redrawOnAccessibilityDisplayChange()`.
 final class BorderedListView: NSView {
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        redrawOnAccessibilityDisplayChange()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         let rect = bounds.insetBy(dx: 0.5, dy: 0.5)

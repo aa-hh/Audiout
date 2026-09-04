@@ -147,9 +147,9 @@ public final class MixerWindowController {
         // those still reserve. The source-list LOOK is unaffected because it
         // never came from here: `SidebarViewController` sets
         // `outlineView.style = .sourceList` itself. What the constructor did
-        // supply is the system sidebar material, and the sidebar's own
-        // `SidebarWarmSurfaceView` draws its opaque backing instead (the
-        // branch that already shipped to everyone below macOS 26).
+        // supply is the system sidebar material; the sidebar sits on the
+        // surface's own `panel` backing instead (C6, 2026-09-03: no wash on
+        // either screen).
         let sidebarItem = NSSplitViewItem(viewController: sidebarViewController)
         // PINNED at `SurfaceLayout.sidebarWidth` — minimum AND maximum,
         // deliberately (2026-08-12). The sidebar's own fitting width is
@@ -791,7 +791,7 @@ final class ContentPaneHostViewController: NSViewController {
     override func loadView() {
         footerLabel.translatesAutoresizingMaskIntoConstraints = false
         footerLabel.font = Tokens.Font.caption
-        footerLabel.textColor = Tokens.Color.secondaryLabel
+        footerLabel.textColor = Tokens.Color.label2
         footerLabel.alignment = .center
         footerLabel.lineBreakMode = .byTruncatingTail
 

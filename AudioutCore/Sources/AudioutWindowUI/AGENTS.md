@@ -18,9 +18,10 @@ backend.
 - The rail overlay and the delete button anchor to the column, not the container.
 - `viewDidAppear` Tab seeding never runs headless; do not delete it as dead code.
 - Gold means LIVE, per row; it is never decoration here.
+- Magenta is identity, never state: `GroupIdentityGlowView` sits behind every group seat, active or not.
 - Persistence failures go through `saveOrReport(_:)`, reported in plain words, never swallowed.
 - An unavailable speaker may join a group; `orderedDevices()` is the one ordering rule (2026-08-28).
-- Text colors are frozen: contrast lifts from surfaces, never hue.
+- Ink carries temperature (C5, 2026-09-03): `labelCool` on idle names and glyphs, `label` on the live one; chrome and the sidebar stay stock. `GroupsInkTemperatureTests` pins it.
 - `DeviceIcon` is the single resolution point for a device or group symbol.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 
@@ -28,7 +29,7 @@ backend.
 
 - `MixerWindowController` → screen-content controller: split view, sheets, auto-select rule.
 - `ContentPaneHostViewController` → swapped overview, editor and detail pane, plus footer.
-- `GroupsOverviewViewController` → the group list: card grid, absorbed empty state.
+- `GroupsOverviewViewController` → the group list: card grid with seats, absorbed empty state.
 - `SidebarViewController` → source list: Groups plate, System Audio, Speakers. A click on the already-selected Groups plate re-reports `.groupsOverview` (the click action, not the selection delegate).
 - `GroupEditorViewController` → edit-only pane: a top band carrying “‹ Groups” and the primary, then rename, membership, delete. Edits autosave, so the primary reads “Done”; it reads “Save” only while the name field holds text that has not been committed, and pressing it then commits before leaving.
 - `GroupCreationSheetController` → standard sheet for new groups; never activates.

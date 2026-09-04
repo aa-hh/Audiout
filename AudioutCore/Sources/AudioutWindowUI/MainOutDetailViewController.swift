@@ -88,7 +88,6 @@ public final class MainOutDetailViewController: NSViewController {
                             accessibilityDescription: Self.title)
         image?.isTemplate = true
         iconWell.iconImageView.image = image
-        iconWell.iconImageView.contentTintColor = Tokens.Color.label
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.font = Tokens.Font.heading
@@ -101,7 +100,7 @@ public final class MainOutDetailViewController: NSViewController {
 
         noteLabel.translatesAutoresizingMaskIntoConstraints = false
         noteLabel.font = Tokens.Font.caption
-        noteLabel.textColor = Tokens.Color.secondaryLabel
+        noteLabel.textColor = Tokens.Color.label2
         noteLabel.isSelectable = false
         // Wraps inside the CONTENT lane it now sits in, not across the whole
         // column — the caption is the card's, so it starts where the card's
@@ -126,7 +125,7 @@ public final class MainOutDetailViewController: NSViewController {
 
         eqTitleLabel.translatesAutoresizingMaskIntoConstraints = false
         eqTitleLabel.font = Tokens.Font.body
-        eqTitleLabel.textColor = Tokens.Color.secondaryLabel
+        eqTitleLabel.textColor = Tokens.Color.label2
 
         eqResetButton.translatesAutoresizingMaskIntoConstraints = false
         eqResetButton.bezelStyle = .rounded

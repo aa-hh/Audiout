@@ -4,21 +4,23 @@ import AppKit
 import AudioutSharedUI
 
 /// The Groups screen's ONE container shape (the macOS System Settings grouped
-/// idiom), in two modes.
+/// idiom), in three modes.
 ///
 /// - ``Style/card`` — the page's ONE INSTRUMENT: a rounded
-///   `Tokens.Color.raised` fill with a 1 pt `Tokens.Color.containerEdge` edge.
-///   On dark, `raised` against the pane's `panel` measures 1.07:1 — below the
-///   surface floor — so the EDGE, not the fill, is what carries the
-///   separation (`containerEdge` vs `raised`: 1.31:1 dark / 1.60:1 light,
-///   `MembershipWellContrastTests`). The edge and the row dividers below are
-///   the same mechanism at two weights: the heavier one bounds the container,
-///   the lighter `hairline` rules its interior. Exactly one card per page: the
+///   `Tokens.Color.raised` fill with a 1 pt `Tokens.Color.containerEdge` edge,
+///   at the panel radius. On dark, `raised` against the pane's `panel`
+///   measures 1.07:1 — below the surface floor — so the EDGE, not the fill, is
+///   what carries the separation (`containerEdge` vs `raised`: 1.553:1 dark /
+///   2.020:1 light). Its interior rules are `containerEdge` too: `hairline` on
+///   `raised` is 1.154:1 dark, under any floor. Exactly one card per page: the
 ///   Equalizer on the two detail pages, the Speakers checklist in the group
 ///   editor.
+/// - ``Style/panel`` — a stroked-panel row list (the iPhone companion's
+///   PanelRow): `panel` fill, 1 pt `containerEdge` edge at the row radius,
+///   `hairline` dividers. The pane ground is `panel` too, so the stroke is the
+///   card. The fact lists on the detail pages wear it.
 /// - ``Style/bare`` — a DIVIDER-ONLY list: no fill, no border, just the inset
-///   hairlines between rows. The Settings-rows idiom, and what every other
-///   list on these pages wears (Groups, About, and the header bands).
+///   hairlines between rows. What the header bands wear.
 ///
 /// A box is earned by holding a different instrument, never by length.
 ///
@@ -48,8 +50,12 @@ import AudioutSharedUI
 final class GroupedSectionView: NSView {
     /// How this container draws itself — see the type's doc comment.
     enum Style {
-        /// The page's one instrument: `raised` fill + a `hairline` edge.
+        /// The page's one instrument: `raised` fill + a `containerEdge` edge.
         case card
+        /// A stroked-panel row list (iOS PanelRow): `panel` fill, 1 pt
+        /// `containerEdge` edge at the row radius, `hairline` dividers. The
+        /// pane ground is `panel` too, so the stroke is the card.
+        case panel
         /// A divider-only list: no fill, no border.
         case bare
     }
@@ -58,11 +64,16 @@ final class GroupedSectionView: NSView {
     /// otherwise — there is at most one per page, and it is the loud one.
     var style: Style = .card { didSet { needsDisplay = true } }
 
-    /// Large enough to read as a rounded shape at this container's size — the
-    /// 6 pt first draft rendered visually square. Same value as onboarding's
-    /// `RoundedContainerView` (both model the System Settings grouped
-    /// inset-list look), so it's sourced from `Tokens.Layout.groupedSectionCornerRadius`.
-    static let cornerRadius: CGFloat = Tokens.Layout.groupedSectionCornerRadius
+    /// The card is a grouped stack, so it takes the panel rung; a `.panel`
+    /// list is a row, so it takes the row rung. `.bare` draws no shape, so its
+    /// value is never read.
+    private var cornerRadius: CGFloat {
+        switch style {
+        case .card: return Tokens.Layout.Radius.panel
+        case .panel: return Tokens.Layout.Radius.row
+        case .bare: return 0
+        }
+    }
     /// Breathing room above the first row and below the last, so rows never
     /// touch the container's edges.
     static let verticalPadding: CGFloat = 6
@@ -83,25 +94,29 @@ final class GroupedSectionView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
-        if case .card = style {
+        switch style {
+        case .card, .panel:
             // Stroke sits ON the boundary, so inset by half its width to keep
             // the 1pt line crisp instead of straddling the pixel edge.
             let borderRect = bounds.insetBy(dx: Self.borderWidth / 2, dy: Self.borderWidth / 2)
+            let radius = cornerRadius
             let shape = NSBezierPath(roundedRect: borderRect,
-                                     xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
-            Tokens.Color.raised.setFill()
+                                     xRadius: radius, yRadius: radius)
+            (style == .card ? Tokens.Color.raised : Tokens.Color.panel).setFill()
             shape.fill()
-            // The container's own edge takes the heavier of the two hairline
-            // weights; the row dividers below stay at the lighter one. That
-            // rank is what tells a bounded section from the rules inside it on
-            // a ground where `panel` and `canvas` are the same pixel.
             Tokens.Color.containerEdge.setStroke()
             shape.lineWidth = Self.borderWidth
             shape.stroke()
+        case .bare:
+            break
         }
 
         guard rows.count > 1 else { return }
-        Tokens.Color.hairline.setFill()
+        // `hairline` on `raised` measures 1.154:1 dark — invisible — so the
+        // card rules its interior with `containerEdge` too. On `panel` and on
+        // the bare ground `hairline` is 1.314:1 dark / 1.512:1 light and
+        // stands, so the lighter weight stays where it reads.
+        (style == .card ? Tokens.Color.containerEdge : Tokens.Color.hairline).setFill()
         for (a, b) in zip(rows, rows.dropFirst()) {
             guard let aSuper = a.superview, let bSuper = b.superview else { continue }
             let aFrame = convert(a.frame, from: aSuper)

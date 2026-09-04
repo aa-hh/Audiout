@@ -23,7 +23,9 @@ import AudioutSharedUI
 /// - a HEADER SECTION holding the large (``DeviceIconWellView/size``pt) group
 ///   icon and the group's name SIDE BY SIDE (design review 2026-07-25 — they
 ///   used to stack, which cost 30 pt of a pane that was overflowing its own
-///   window); clicking the icon opens the icon picker;
+///   window); clicking the icon opens the icon picker. The well carries
+///   ``GroupIdentityGlowView`` behind it, the same magenta light this group's
+///   overview card shows;
 /// - the name itself is an inline rename field: a real `NSTextField` wearing
 ///   the ``WarmNameFieldCell`` skin (filled, bordered, trailing pencil), which
 ///   commits on Return/focus loss, reverts on Escape, and restores the previous
@@ -114,14 +116,17 @@ public final class GroupEditorViewController: NSViewController {
     /// Space, the pressed state and `accessibilityPerformPress()` are AppKit's.
     private let backButton = BackButton()
     private let iconWell = DeviceIconWellView()
+    /// The group's identity light, mounted behind the well.
+    private let iconGlow = GroupIdentityGlowView()
     private let nameField = NSTextField(string: "")
     private let membershipStack = RailRepaintingStackView()
     /// THIS PAGE'S ONE INSTRUMENT, so it is the one `.card` here — a `raised`
-    /// fill with a `hairline` edge behind the Speakers checklist, plus the
-    /// inter-row hairlines. Sits BEHIND `membershipStack` in z-order.
-    /// NAME IS LOAD-BEARING: `GroupsWindowTextColorLockTests` reaches this
-    /// stored property by reflection (the type is internal, the property is
-    /// private) to sample the real drawn fill/divider colours.
+    /// fill with a `containerEdge` edge behind the Speakers checklist, plus
+    /// the inter-row rules in the same tone. Sits BEHIND `membershipStack` in
+    /// z-order.
+    /// NAME IS LOAD-BEARING: `GroupsInkTemperatureTests` reaches this stored
+    /// property by reflection (the type is internal, the property is private)
+    /// to sample the real drawn fill/divider colours.
     private let membershipWell = GroupedSectionView()
     /// The header BAND — `.bare`, so it draws nothing at all (identity is not
     /// an instrument). Kept as a section purely for its GEOMETRY: the rail
@@ -182,7 +187,7 @@ public final class GroupEditorViewController: NSViewController {
         label.font = Tokens.Font.caption
         // Stock `.secondaryLabel`: text colours are frozen in this pane
         // (`AGENTS.md`) — the gold in this pair tints the badge's GLYPH only.
-        label.textColor = Tokens.Color.secondaryLabel
+        label.textColor = Tokens.Color.label2
         label.isSelectable = false
         label.maximumNumberOfLines = 0
         // It WRAPS into whatever the button leaves rather than pushing the
@@ -197,6 +202,11 @@ public final class GroupEditorViewController: NSViewController {
     /// invisible once already (snapshot-caught 2026-07-18). REQUIRED priority,
     /// deliberately: the field may overflow its section by a hair on a
     /// pathologically narrow pane rather than vanish.
+    /// The identity glow's mounted side. A 60 pt glow would sit wholly under
+    /// the 64 pt opaque well and never be seen, so it is the well plus 16: 40
+    /// pt of radius, 8 pt of magenta leaking past the well's edge.
+    static let iconGlowSide: CGFloat = DeviceIconWellView.size + 16
+
     private static let titleFieldMinWidth: CGFloat = 140
 
     private static let savedAsYouGo = "Changes are saved as you go."
@@ -338,7 +348,7 @@ public final class GroupEditorViewController: NSViewController {
 
         let speakersLabel = NSTextField(labelWithString: "Speakers")
         speakersLabel.translatesAutoresizingMaskIntoConstraints = false
-        speakersLabel.textColor = Tokens.Color.secondaryLabel
+        speakersLabel.textColor = Tokens.Color.label2
 
         membershipStack.translatesAutoresizingMaskIntoConstraints = false
         membershipStack.orientation = .vertical
@@ -422,7 +432,8 @@ public final class GroupEditorViewController: NSViewController {
         }
         // Identity is bare; the checklist is the page's one card.
         headerWell.style = .bare
-        for v in [iconWell, nameField, playingBadge, speakersLabel, membershipStack] {
+        for v in [iconGlow, iconWell, nameField, playingBadge, speakersLabel, membershipStack] {
+            v.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(v)
         }
         // The pane SCROLLS (roadmap 039, `../AGENTS.md`): the surface frame is
@@ -558,6 +569,11 @@ public final class GroupEditorViewController: NSViewController {
             iconWell.leadingAnchor.constraint(equalTo: column.leadingAnchor,
                                               constant: GroupsPaneLayout.contentLeadingInset),
 
+            iconGlow.centerXAnchor.constraint(equalTo: iconWell.centerXAnchor),
+            iconGlow.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
+            iconGlow.widthAnchor.constraint(equalToConstant: Self.iconGlowSide),
+            iconGlow.heightAnchor.constraint(equalToConstant: Self.iconGlowSide),
+
             nameField.leadingAnchor.constraint(equalTo: iconWell.trailingAnchor,
                                                constant: GroupsPaneLayout.iconToTitleGap),
             nameField.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
@@ -691,7 +707,7 @@ public final class GroupEditorViewController: NSViewController {
         let caption = NSTextField(labelWithString: "Playing now")
         caption.translatesAutoresizingMaskIntoConstraints = false
         caption.font = Tokens.Font.caption
-        caption.textColor = Tokens.Color.secondaryLabel
+        caption.textColor = Tokens.Color.label2
 
         playingBadge.translatesAutoresizingMaskIntoConstraints = false
         playingBadge.orientation = .horizontal
@@ -852,7 +868,6 @@ public final class GroupEditorViewController: NSViewController {
         let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Group icon")
         image?.isTemplate = true
         iconWell.iconImageView.image = image
-        iconWell.iconImageView.contentTintColor = Tokens.Color.label
     }
 
     /// Recompute `candidateDevices` from `allDevices` — available devices,
@@ -1379,6 +1394,24 @@ public final class GroupEditorViewController: NSViewController {
     /// The SF Symbol name currently resolved for the icon well's image, or
     /// `nil` if it has none loaded yet (before `show`).
     public var test_iconWellSymbolName: String? { iconWellSymbolName }
+
+    /// True when the identity glow shares the well's parent AND sits below it
+    /// in z-order — in front of the opaque well it would be invisible, and the
+    /// magenta has to read as light behind the seat.
+    public var test_hasIdentityGlow: Bool {
+        guard let parent = iconWell.superview,
+              iconGlow.superview === parent,
+              let glowIndex = parent.subviews.firstIndex(of: iconGlow),
+              let wellIndex = parent.subviews.firstIndex(of: iconWell) else { return false }
+        return glowIndex < wellIndex
+    }
+
+    /// The size the glow is actually laid out at — the gradient scales to its
+    /// own bounds, so this is what the magenta's radius follows.
+    public var test_identityGlowSide: CGFloat {
+        view.layoutSubtreeIfNeeded()
+        return iconGlow.frame.width
+    }
 
     /// Simulate picking `name` from the icon picker (`nil` = "use default"),
     /// bypassing the anchored popover — drives the exact same

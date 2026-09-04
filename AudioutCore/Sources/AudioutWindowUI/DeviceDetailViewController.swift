@@ -223,7 +223,7 @@ public final class DeviceDetailViewController: NSViewController {
         for title in [eqTitleLabel, groupsTitleLabel, aboutTitleLabel] {
             title.translatesAutoresizingMaskIntoConstraints = false
             title.font = Tokens.Font.body
-            title.textColor = Tokens.Color.secondaryLabel
+            title.textColor = Tokens.Color.label2
         }
 
         // Enablement/visibility are set by `refreshUI()`/`applyEQSectionVisibility()`,
@@ -256,11 +256,14 @@ public final class DeviceDetailViewController: NSViewController {
         eqWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
         groupsWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
         aboutWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
-        // ONE card per page, and it is the instrument: everything else is a
-        // bare list, separated by its own dividers rather than by a box.
+        // The header band is bare — a box around an identity band is not a
+        // container anyone asked for. The two fact lists are stroked `panel`
+        // rows (the iPhone companion's PanelRow): the pane ground is `panel`
+        // too, so their edge is the only pixel separating them from it. The
+        // Equalizer stays the one `raised` card, because it is the instrument.
         headerWell.style = .bare
-        groupsWell.style = .bare
-        aboutWell.style = .bare
+        groupsWell.style = .panel
+        aboutWell.style = .panel
         eqEditor.translatesAutoresizingMaskIntoConstraints = false
         eqEditor.delegate = self
 
@@ -475,7 +478,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// stack's, so "trailing" means the section's own inset edge.
     private func makeMetadataRow(caption: String, valueLabel: NSTextField) -> NSView {
         let captionLabel = NSTextField(labelWithString: caption)
-        captionLabel.textColor = Tokens.Color.secondaryLabel
+        captionLabel.textColor = Tokens.Color.label2
         captionLabel.translatesAutoresizingMaskIntoConstraints = false
         captionLabel.setContentHuggingPriority(.required, for: .horizontal)
         captionLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -775,7 +778,7 @@ public final class DeviceDetailViewController: NSViewController {
         chevron.translatesAutoresizingMaskIntoConstraints = false
         let chevronImage = DeviceIcon.image("chevron.right")
         chevron.image = chevronImage
-        chevron.contentTintColor = Tokens.Color.secondaryLabel
+        chevron.contentTintColor = Tokens.Color.label2
         cell.chevronReserve = (chevronImage?.size.width ?? 0) + Self.groupRowChevronGap
         button.addSubview(chevron)
         NSLayoutConstraint.activate([
@@ -790,7 +793,7 @@ public final class DeviceDetailViewController: NSViewController {
     private func makeNoGroupsRow() -> NSView {
         let label = NSTextField(labelWithString: Self.noGroupsRowText)
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.textColor = Tokens.Color.secondaryLabel
+        label.textColor = Tokens.Color.label2
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -831,7 +834,6 @@ public final class DeviceDetailViewController: NSViewController {
         let image = NSImage(systemSymbolName: name, accessibilityDescription: device.name)
         image?.isTemplate = true
         iconWell.iconImageView.image = image
-        iconWell.iconImageView.contentTintColor = Tokens.Color.label
     }
 
     // MARK: Icon picker

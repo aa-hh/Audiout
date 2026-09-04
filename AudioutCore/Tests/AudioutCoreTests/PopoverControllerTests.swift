@@ -1012,21 +1012,26 @@ import AudioutProtocol
     // covered by `testAddingLocalIntoAMixedSetIsAllowed` and
     // `testClickingTheLocalRowCheckboxThroughRealDispatchJoinsAMixedSet` above.
 
-    /// T-3 — exact-fit sizing: the popover is exactly its visible content height,
-    /// with no `NSScrollView` and no clipping. The resize primitive publishes the
-    /// panel's settled `fittingSize` through `preferredContentSize` (the documented
-    /// `NSPopover` size channel), so after a rebuild the two must be equal and the
-    /// height must cover the full stack (header + both cards). No scroller can
-    /// appear because the panel contains no scroll view at all.
+    /// T-3 — exact-fit sizing: the popover is exactly its visible content height.
+    /// The resize primitive publishes the panel's settled `fittingSize` through
+    /// `preferredContentSize` (the documented `NSPopover` size channel), so after a
+    /// rebuild the two must be equal and the height must cover the full stack
+    /// (header + both cards).
+    ///
+    /// Roadmap 039 put ONE scroll view in the panel — the Output Devices card's
+    /// body — so the "no `NSScrollView` anywhere" assertion this test used to
+    /// carry became "no OTHER card scrolls": the chrome around the device list is
+    /// still exact-fit, with nothing that can grow a scroller.
     @Test func exactFitSizeMatchesContentNoScroll() async throws {
         let (popover, _, _) = try await makePopover()
 
-        // No NSScrollView anywhere in the panel view tree ⇒ no scroller chrome ever.
-        func containsScrollView(_ v: NSView) -> Bool {
-            if v is NSScrollView { return true }
-            return v.subviews.contains(where: containsScrollView)
+        func scrollViews(_ v: NSView) -> [NSScrollView] {
+            (v as? NSScrollView).map { [$0] } ?? v.subviews.flatMap(scrollViews)
         }
-        #expect(!(containsScrollView(popover.test_panelView)), "the popover panel contains no NSScrollView (exact-fit, no scrollbar ever)")
+        let scrollers = scrollViews(popover.test_panelView)
+        #expect(scrollers.count == 1, "only the device list scrolls")
+        #expect(scrollers.first === popover.test_deviceListScrollView,
+                "and it is the device list's own")
 
         // Publish the exact-fit size, then the tracked content size must equal the
         // panel's settled fitting size — no clipping, nothing cut off.

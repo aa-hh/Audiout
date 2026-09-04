@@ -64,8 +64,12 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
 ///
 /// **ONE FRAME.** The surface is `SurfaceLayout.width` wide and, for a whole
 /// open session, exactly one height: measured on each fresh show from the
-/// Mixer's exact fit, floored at `minimumContentSize` and capped to the
-/// screen. Every screen wears it, folds and drawers move rows INSIDE it, and
+/// Mixer's exact fit, floored at `minimumContentSize`, and capped by the
+/// Mixer's own device-list ceiling — `applyContentHeightLimit`, applied just
+/// before the measure, so a fleet past the ceiling scrolls inside the list and
+/// the frame never has to grow past it (roadmap 039). The screen's own limit
+/// (`screenContentHeightLimit`) is the upper bound on both. Every screen wears
+/// the result, folds and drawers move rows INSIDE it, and
 /// nothing resizes the window again until the surface closes — a width change
 /// on a screen switch slid the toolbar out from under the cursor and "reads
 /// as the surface twitching" (owner, 2026-08-12). The frame is applied
@@ -555,17 +559,29 @@ public final class AppSurfaceController {
         let panel = claimedMixerPanel()
         applyChromeTopInset()
         popoverController.rebuildForOpen()
+        // The device list's ceiling, and with it the panel's own maximum height:
+        // the LOWER of the list's twelve-row maximum and what this screen leaves.
+        // Applied before the measure, so a fleet past the ceiling scrolls inside
+        // the list instead of running the frame off the bottom of the screen.
+        panel.applyContentHeightLimit(screenContentHeightLimit())
         var size = panel.fittingSizeSettled()
         size.width = Self.minimumContentSize.width
         size.height = max(size.height, Self.minimumContentSize.height)
-        if let window = shell.window, let screen = window.screen ?? NSScreen.main {
-            let maxFrame = NSRect(x: 0, y: 0,
-                                  width: size.width,
-                                  height: screen.visibleFrame.height - 16)
-            size.height = min(size.height,
-                              window.contentRect(forFrameRect: maxFrame).height)
-        }
+        size.height = min(size.height, screenContentHeightLimit())
         return size
+    }
+
+    /// The tallest window CONTENT this screen can hold, with the shell's own
+    /// margin left over. `.greatestFiniteMagnitude` before there is a window to
+    /// measure a frame against (headless).
+    private func screenContentHeightLimit() -> CGFloat {
+        guard let window = shell.window, let screen = window.screen ?? NSScreen.main else {
+            return .greatestFiniteMagnitude
+        }
+        let maxFrame = NSRect(x: 0, y: 0,
+                              width: Self.minimumContentSize.width,
+                              height: screen.visibleFrame.height - 16)
+        return window.contentRect(forFrameRect: maxFrame).height
     }
 
     // MARK: Screen switching
@@ -689,8 +705,10 @@ public final class AppSurfaceController {
     /// The Mixer panel, claimed from its controller on first use. Claiming
     /// also installs the surface's size LISTENER: the surface never resizes to
     /// the panel — the frame is fixed — it only notices content the frame
-    /// cannot show and says so once per open. What to do about it (scroll the
-    /// Mixer) is roadmap 039's call; clipping silently is not.
+    /// cannot show and says so once per open. Roadmap 039 answered what to DO
+    /// about it — the device list scrolls — so the log line is now a backstop for
+    /// chrome (banners, App Routing) that outgrows the frame on its own, not the
+    /// everyday large-fleet case.
     private func claimedMixerPanel() -> PopoverPanelViewController {
         if let mixerPanel { return mixerPanel }
         let panel = popoverController.claimPanelForSurfaceHosting()

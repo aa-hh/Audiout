@@ -239,6 +239,16 @@ public final class BusRailOverlayView: NSView {
         }
         stops.sort { $0.y > $1.y }   // non-flipped: top = higher y
 
+        let deviceBand = clipBand(of: deviceSection)
+        // A row scrolled off the TOP of a device list that scrolls (roadmap 039)
+        // is behind the clip's own edge, so its node disc is already hidden —
+        // drop its stop too, or the detour arc the overlay would draw around it
+        // lands on the fixed card header above the list. Nothing is dropped when
+        // the list does not scroll: every row sits at or below the clip's top.
+        if let top = deviceBand?.upperBound {
+            stops.removeAll { $0.y > top }
+        }
+
         let input = RailPlan.Input(
             gold: anchor.gold,
             ringCenterY: anchor.centerY,
@@ -249,7 +259,7 @@ public final class BusRailOverlayView: NSView {
             originClipBand: clipBand(of: originSection),
             originHeaderY: headerTerminusY(of: originSection),
             deviceSectionCollapsed: deviceSection?.railSectionCollapsed ?? false,
-            deviceFloorY: clipBand(of: deviceSection)?.lowerBound,
+            deviceFloorY: deviceBand?.lowerBound,
             dropsHiddenRows: deviceSectionRowsDropped,
             dormant: dormant,
             stops: stops)

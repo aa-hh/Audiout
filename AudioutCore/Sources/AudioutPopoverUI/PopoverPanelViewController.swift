@@ -22,13 +22,19 @@ import AudioutSharedUI
 /// vertical `stackView` holds the cards.
 ///
 /// **Exact-fit sizing (T-3, PLAN-POPOVER-ROUTING.md §A/§E risk 1, 2026-07-16):**
-/// there is **no `NSScrollView`** — the stack is pinned directly inside the
-/// container (header bottom → container bottom), so no scroller chrome can ever
-/// appear. The popover is exactly the height of its visible content and
+/// the stack is pinned directly inside the container (header bottom → container
+/// bottom). The popover is exactly the height of its visible content and
 /// grows/shrinks as sections expand or collapse. The size flows out through
 /// `preferredContentSize` (the DOCUMENTED `NSPopover` channel — it tracks
 /// `contentViewController.preferredContentSize` and animates on its own when
 /// `popover.animates` is true; see `panelContentDidChangeHeight`).
+///
+/// **The one ceiling (roadmap 039, 2026-09-04).** Exact fit alone had no
+/// maximum: a large fleet grew the panel until the screen clamp cut the last
+/// row in half. The Output Devices card's BODY now scrolls inside a ceiling
+/// (`deviceListMaxHeight`, or what a short screen leaves — see
+/// `applyContentHeightLimit`); everything around it, that card's own header row
+/// included, is still exact-fit chrome that never scrolls.
 @MainActor
 final class PopoverPanelViewController: NSViewController, FoldFollowing {
 
@@ -165,6 +171,32 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// The content's resting inset from the container top (breathing room the
     /// original layout always had; the surface's chrome inset adds to it).
     private static let contentRestingTopInset: CGFloat = 4
+
+    // MARK: The device list's ceiling (roadmap 039)
+
+    /// The tallest the DEVICE LIST may draw before it starts scrolling: twelve
+    /// rows. Picked off the content rather than off the screen — twelve speakers
+    /// is a list you read down, and the row after it is visibly cut, which is
+    /// what tells you to scroll. Below that the list is short enough to look
+    /// arbitrary next to a fleet of twenty-four; above it the surface stops
+    /// being a panel and becomes a column of the screen.
+    ///
+    /// It is a MAXIMUM, not a size: a shorter list still hugs its rows exactly,
+    /// and a short screen lowers it further (`applyContentHeightLimit`).
+    static let deviceListMaxHeight: CGFloat = PopoverColumnGrid.bodyRowHeight * 12
+
+    /// The floor the screen clamp may not push the list below — three rows.
+    /// A surface whose chrome alone fills a tiny screen still shows a list.
+    static let deviceListMinHeight: CGFloat = PopoverColumnGrid.bodyRowHeight * 3
+
+    /// The card whose body scrolls — the Output Devices card, re-registered by
+    /// every `beginCard(scrollsBody: true)` since a rebuild replaces the card.
+    private weak var scrollingCard: CardView?
+
+    /// The ceiling currently applied to the scrolling card's body. Held across
+    /// rebuilds (which throw the card away) so the list's height is a property of
+    /// the SESSION, not of whichever rebuild happened last.
+    private var deviceListCeiling: CGFloat = PopoverPanelViewController.deviceListMaxHeight
 
     /// Popover width — SoundSource-style proportions so the columns
     /// (name · Volume · Device) line up. Narrowed 2026-07-16 (change 5): the
@@ -365,6 +397,13 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             bottomShield,
         ])
         view = wrapper
+
+        // Keyboard focus inside the scrolling device list (see `revealFocusedRow`).
+        // Selector-based observation needs no matching removal (post-10.11 AppKit
+        // auto-unregisters), the same as the overlay's.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(hostWindowDidUpdate),
+            name: NSWindow.didUpdateNotification, object: nil)
     }
 
     /// Point the continuous rail overlay at the current Main Audio row + device
@@ -421,9 +460,78 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     func fittingSizeSettled() -> NSSize {
         _ = view   // ensure `loadView` ran
         view.layoutSubtreeIfNeeded()
+        // The scrolling device list has no natural height of its own, so its
+        // height constraint is brought back in line with its ROWS here — inside
+        // the one funnel every size publish already goes through — and the
+        // layout settled again over the new value. Without this the measure
+        // would read whatever height the list last happened to hold.
+        if let scrollingCard {
+            scrollingCard.reconcileBodyHeight()
+            view.layoutSubtreeIfNeeded()
+        }
         // The RIGID content column, not `view`: the wrapper's own `fittingSize`
         // keeps stale frame heights (see the surplus-shield note in `loadView`).
         return contentContainer.fittingSize
+    }
+
+    /// Cap the device list so the whole panel fits inside `maxContentHeight`, and
+    /// never lets it past ``deviceListMaxHeight`` whatever the screen allows.
+    ///
+    /// The surface calls this once per open, right after the measuring rebuild.
+    /// The arithmetic runs on the real tree rather than an estimate: measure the
+    /// panel with the list UNCAPPED, subtract the list's own height, and what is
+    /// left is the fixed chrome — banners, the System Audio card, both card
+    /// headers, the App Routing card. The list gets whatever of the ceiling that
+    /// chrome leaves, floored at ``deviceListMinHeight``.
+    func applyContentHeightLimit(_ maxContentHeight: CGFloat) {
+        guard let card = scrollingCard else { return }
+        card.bodyMaxHeight = .greatestFiniteMagnitude
+        let uncapped = fittingSizeSettled().height
+        let chrome = uncapped - card.bodyFittingHeight
+        deviceListCeiling = max(Self.deviceListMinHeight,
+                                min(Self.deviceListMaxHeight, maxContentHeight - chrome))
+        card.bodyMaxHeight = deviceListCeiling
+    }
+
+    /// The list's current ceiling — what `applyContentHeightLimit` settled on.
+    var test_deviceListCeiling: CGFloat { deviceListCeiling }
+    /// The scrolling device list's scroll view, `nil` before the card is built.
+    var test_deviceListScrollView: NSScrollView? { scrollingCard?.bodyScrollView }
+
+    /// Scroll a row that has just taken keyboard focus back into the visible part
+    /// of the device list. A row off the bottom of a capped list is still in the
+    /// key-view loop and still in the accessibility tree; tabbing to it has to
+    /// bring it up rather than move focus somewhere the user cannot see.
+    @discardableResult
+    func revealFocusedRow(_ responder: NSResponder?) -> Bool {
+        var focused = responder as? NSView
+        // A text field hands first-responder status to the window's shared field
+        // editor, which is not in the row's view tree — its delegate is.
+        if let editor = focused as? NSTextView, editor.isFieldEditor {
+            focused = editor.delegate as? NSView
+        }
+        guard let focused, let scrollingCard else { return false }
+        return scrollingCard.revealBodyRow(focused)
+    }
+
+    /// AppKit posts this after every event the window processes, which is the
+    /// only notice there is that the first responder may have moved.
+    @objc private func hostWindowDidUpdate(_ note: Notification) {
+        guard let window = viewIfLoaded?.window, note.object as? NSWindow === window,
+              window.firstResponder !== lastRevealedResponder else { return }
+        lastRevealedResponder = window.firstResponder
+        revealFocusedRow(window.firstResponder)
+    }
+
+    /// The responder the reveal above last acted on, so a window that keeps
+    /// posting updates for the same focus costs one identity comparison.
+    private weak var lastRevealedResponder: NSResponder?
+
+    /// Scrolling the device list moves the rows the rail is anchored to without
+    /// laying the card stack out, so `RailStackView`'s own invalidation never
+    /// fires — repaint the spine here instead.
+    @objc private func deviceListDidScroll() {
+        railOverlay.needsDisplay = true
     }
 
     /// The single resize primitive (T-3 → consumed by the collapsible-sections task
@@ -484,6 +592,11 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             stackView.removeArrangedSubview(v)
             v.removeFromSuperview()
         }
+        if let clip = scrollingCard?.bodyScrollView?.contentView {
+            NotificationCenter.default.removeObserver(
+                self, name: NSView.boundsDidChangeNotification, object: clip)
+        }
+        scrollingCard = nil
         currentCard = nil
         currentSubsectionStack = nil
         subsectionBodies.removeAll()
@@ -574,9 +687,19 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
                    trailingAccessory accessory: HeaderAccessory? = nil,
                    collapsible: Bool = false,
                    collapsed: Bool = false,
+                   scrollsBody: Bool = false,
                    onToggle: (() -> Void)? = nil) {
-        let card = CardView()
+        let card = CardView(scrollingBody: scrollsBody)
         card.translatesAutoresizingMaskIntoConstraints = false
+        if scrollsBody {
+            scrollingCard = card
+            card.bodyMaxHeight = deviceListCeiling
+            if let clip = card.bodyScrollView?.contentView {
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(deviceListDidScroll),
+                    name: NSView.boundsDidChangeNotification, object: clip)
+            }
+        }
         // The card's fold is driven by `FoldAnimator`, which re-fits THIS panel
         // (and the window with it) on every tick of it.
         card.foldFollower = self
@@ -1653,6 +1776,12 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// card — the assertion surface for a row's POSITION within its card.
     func test_cardRows(title: String) -> [NSView] {
         cardsByHeader[title]?.test_bodyRows ?? []
+    }
+
+    /// The card's always-visible header row — the chrome that must hold still
+    /// while a scrolling body moves under it.
+    func test_cardHeaderRow(title: String) -> NSView? {
+        cardsByHeader[title]?.railHeaderRow
     }
 }
 

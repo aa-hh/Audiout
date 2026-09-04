@@ -8384,6 +8384,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 var updated = existing
                 updated.name = snapshot.name
                 updated.isAvailable = snapshot.isConnected
+                // The row glyph follows the pairing's device class, so a class
+                // that only becomes readable later (the Bluetooth grant arrives
+                // mid-session and the paired list finally loads) still reaches
+                // the row.
+                updated.bluetoothDeviceClassMinor = snapshot.deviceClassMinor
                 if updated != existing {
                     let availabilityMoved = updated.isAvailable != existing.isAvailable
                     if availabilityMoved, expectedSelected.contains(id) {
@@ -8442,7 +8447,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // shows from the moment the row appears. A BT device's sink
                     // gets the value re-pushed on every arm, so the snapshot and
                     // what is audible agree.
-                    eq: eqByDeviceID[id] ?? .flat)
+                    eq: eqByDeviceID[id] ?? .flat,
+                    bluetoothDeviceClassMinor: snapshot.deviceClassMinor)
                 // The first time this process lists a connected Bluetooth
                 // device is the only link-up it will ever see for it: a first
                 // pairing, or a speaker already up when the app launched. Both

@@ -5,8 +5,8 @@ import AudioutCore
 
 /// The single resolution point for "what SF Symbol represents this device."
 ///
-/// A device's icon is either the default derived from its `Device.Kind`
-/// (`Device.Kind.symbolName`) or a user-chosen override persisted by
+/// A device's icon is either the device's own default (`Device.symbolName`,
+/// derived from its `Device.Kind`) or a user-chosen override persisted by
 /// ``DeviceIconController``. Overrides are stored as bare SF Symbol name
 /// strings (never colors, never custom assets — see the house rule in
 /// `../../AGENTS.md`), so an override can go stale: a name saved on one
@@ -156,9 +156,11 @@ public final class DeviceIconController {
     // MARK: Queries
 
     /// The symbol to render for `device`: its override if one is set and
-    /// still valid on this OS, else the default derived from `device.kind`.
+    /// still valid on this OS, else the device's own default (`Device`'s
+    /// `symbolName`, which is the kind's glyph everywhere except a Bluetooth
+    /// pairing that reports itself as headphones or car audio).
     public func symbolName(for device: Device) -> String {
-        DeviceIcon.resolve(overrides[device.id], default: device.kind.symbolName)
+        DeviceIcon.resolve(overrides[device.id], default: device.symbolName)
     }
 
     // MARK: Mutations

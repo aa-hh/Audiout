@@ -197,10 +197,10 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
         echo "  (no scripts/run-tests.sh found — running unserialised)" >&2
         run_suite=""
     fi
-    # --build-system native matches scripts/run-tests.sh and scripts/make-app.sh
-    # — see the long note at run-tests.sh's `swift test` call. The engines keep
-    # separate cache trees, so a guard that disagreed with the runner would make
-    # every commit pay a cold rebuild.
+    # No engine flag: the SwiftPM default matches scripts/run-tests.sh and
+    # scripts/make-app.sh — see the note above run-tests.sh's `swift test` call.
+    # The engines keep separate cache trees, so a guard that disagreed with the
+    # runner would make every commit pay a cold rebuild.
     # SwiftPM shells out to git, so it must NOT inherit the hook's git
     # environment. Git exports GIT_DIR (and GIT_INDEX_FILE) when it runs a
     # hook; SwiftPM's dependency checkout then reads objects from THIS repo
@@ -212,7 +212,7 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     # keep reading the commit's real index.
     nogit='env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE'
     if ! { if [ -n "$run_suite" ]; then $nogit "$run_suite"; \
-           else ( cd "$repo_root/AudioutCore" && $nogit swift test --build-system native --parallel >&2 ); fi; }; then
+           else ( cd "$repo_root/AudioutCore" && $nogit swift test --parallel >&2 ); fi; }; then
         echo "" >&2
         echo "  REFUSED: full test suite failed. Fix the failures" >&2
         echo "  (or 'git commit --no-verify' for a real emergency)." >&2
@@ -285,7 +285,7 @@ if [ -n "$staged_airplayengine" ] && command -v swift >/dev/null 2>&1; then
     echo "  before commit. ~2s; --no-verify to skip." >&2
     if ! ( cd "$repo_root/AirPlayEngine" \
              && env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE \
-                swift test --build-system native >&2 ); then
+                swift test >&2 ); then
         echo "" >&2
         echo "  REFUSED: AirPlayEngine test suite failed. Fix the failures" >&2
         echo "  (or 'git commit --no-verify' for a real emergency)." >&2

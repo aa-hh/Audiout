@@ -271,12 +271,12 @@ if [ "${AUDIOUT_BUILD_LOCAL:-0}" != "1" ] &&
   # \$ escapes keep PWD/BIN/HBIN for the remote shell; $EXECUTABLE and friends
   # expand here.
   REMOTE_CMD="R=\$PWD; \
-swift build --build-system native --package-path AudioutCore -c release --product $EXECUTABLE && \
-swift build --build-system native --package-path AudioutCore -c release --product $TCC_PROBE_EXECUTABLE && \
-BIN=\$(swift build --build-system native --package-path AudioutCore -c release --show-bin-path) && \
-swift build --build-system native --package-path AirPlayEngine -c release --product $HELPER_EXECUTABLE \
+swift build --package-path AudioutCore -c release --product $EXECUTABLE && \
+swift build --package-path AudioutCore -c release --product $TCC_PROBE_EXECUTABLE && \
+BIN=\$(swift build --package-path AudioutCore -c release --show-bin-path) && \
+swift build --package-path AirPlayEngine -c release --product $HELPER_EXECUTABLE \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker \"\$R/scripts/ptp-helper-info.plist\" && \
-HBIN=\$(swift build --build-system native --package-path AirPlayEngine -c release --show-bin-path) && \
+HBIN=\$(swift build --package-path AirPlayEngine -c release --show-bin-path) && \
 rm -rf .remote-products && mkdir -p .remote-products && \
 cp \"\$BIN/$EXECUTABLE\" \"\$BIN/$TCC_PROBE_EXECUTABLE\" \"\$HBIN/$HELPER_EXECUTABLE\" .remote-products/ && \
 cp -R \"\$BIN/$RESOURCE_BUNDLE_NAME\" .remote-products/"
@@ -332,17 +332,16 @@ fi
 
 if [ "$REMOTE_BUILT" -eq 0 ]; then
 echo "==> Building $EXECUTABLE (release)"
-# --build-system native: Xcode 26+/27 made the new "swiftbuild" engine the
-# default for `swift build`, but it doesn't forward a C target's cSettings
+# Build engine: the SwiftPM default (swiftbuild). These commands used to pin the
+# old `native` engine, because swiftbuild did not forward a C target's cSettings
 # unsafeFlags (AirPlayEngine/Package.swift's Homebrew -I paths for libevent/
 # libsodium/libgcrypt/libplist) into the clang module dependency scan used by
-# Swift targets that `import CAirPlayEngine` — so <event2/thread.h> fails to
-# resolve and the build errors out with "could not build module
-# 'CAirPlayEngine'". The deprecated native engine still merges those flags
-# correctly. Pin it explicitly until Package.swift's header search paths are
-# restructured to survive the new engine (or SwiftPM fixes the propagation).
-swift build --build-system native --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
-BIN_DIR="$(swift build --build-system native --package-path "$PACKAGE_DIR" -c release --show-bin-path)"
+# Swift targets that `import CAirPlayEngine` — <event2/thread.h> failed to
+# resolve and the build died with "could not build module 'CAirPlayEngine'".
+# Fixed as of Swift 6.4 — verified 2026-09-04. Keep this script, build.sh and
+# run-tests.sh on the same engine: they keep SEPARATE ~1.3 GB caches.
+swift build --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
+BIN_DIR="$(swift build --package-path "$PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_BINARY="$BIN_DIR/$EXECUTABLE"
 BUILT_RESOURCE_BUNDLE="$BIN_DIR/$RESOURCE_BUNDLE_NAME"
 test -x "$BUILT_BINARY" || { echo "error: built binary not found at $BUILT_BINARY" >&2; exit 1; }
@@ -350,7 +349,7 @@ test -x "$BUILT_BINARY" || { echo "error: built binary not found at $BUILT_BINAR
 # Same package as $EXECUTABLE, same release config — this lands in $BIN_DIR
 # alongside it, no second package build needed (contrast with ptp-helper below).
 echo "==> Building $TCC_PROBE_EXECUTABLE (release)"
-swift build --build-system native --package-path "$PACKAGE_DIR" -c release --product "$TCC_PROBE_EXECUTABLE"
+swift build --package-path "$PACKAGE_DIR" -c release --product "$TCC_PROBE_EXECUTABLE"
 BUILT_TCC_PROBE="$BIN_DIR/$TCC_PROBE_EXECUTABLE"
 test -x "$BUILT_TCC_PROBE" || { echo "error: built binary not found at $BUILT_TCC_PROBE" >&2; exit 1; }
 
@@ -365,9 +364,9 @@ echo "==> Building $HELPER_EXECUTABLE (release)"
 # carries the section; plain `swift build --product ptp-helper` (dev/tests) omits
 # it, which is fine — the section only matters to SMAppService registration.
 test -f "$HELPER_INFO_PLIST" || { echo "error: helper Info.plist not found at $HELPER_INFO_PLIST" >&2; exit 1; }
-swift build --build-system native --package-path "$ENGINE_PACKAGE_DIR" -c release --product "$HELPER_EXECUTABLE" \
+swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --product "$HELPER_EXECUTABLE" \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$HELPER_INFO_PLIST"
-HELPER_BIN_DIR="$(swift build --build-system native --package-path "$ENGINE_PACKAGE_DIR" -c release --show-bin-path)"
+HELPER_BIN_DIR="$(swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_HELPER="$HELPER_BIN_DIR/$HELPER_EXECUTABLE"
 test -x "$BUILT_HELPER" || { echo "error: built helper not found at $BUILT_HELPER" >&2; exit 1; }
 fi  # REMOTE_BUILT

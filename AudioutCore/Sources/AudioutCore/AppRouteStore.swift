@@ -13,13 +13,16 @@ import Foundation
 ///    never a snapshot: editing the group's membership changes what the app
 ///    plays on immediately, exactly as it does when the group is Main Out.
 ///
-/// `.noRedirect` and `.currentDevice` are ENGINE/CAPTURE-EQUIVALENT: both mean
-/// "this app plays locally, is not captured for remote streaming, and stays in
-/// the whole-system mix." They differ only in the popover UI (default/unset vs.
-/// a deliberate pick) — every engine/capture call site should pattern-match
-/// positively on `.device`/`.group` (as they already do) rather than negatively
-/// on `.currentDevice`, so both local states are treated identically without
-/// needing a shared case.
+/// `.noRedirect` and `.currentDevice` both mean "this app plays locally and is
+/// not streamed to a remote device", and they are ENGINE/CAPTURE-EQUIVALENT
+/// ONLY AT VOLUME 100: there `.noRedirect` is genuinely untouched — no tap, no
+/// exclusion — and stays in the whole-system mix. BELOW 100 a `.noRedirect`
+/// route engages the leveled intercept (``LeveledAppInjector``): the app is
+/// tapped, taken out of the whole-system mix, and summed back into it at that
+/// volume. Every engine/capture call site should still pattern-match positively
+/// on `.device`/`.group` (as they already do) rather than negatively on
+/// `.currentDevice`; the leveled set is a separate question (`.noRedirect` AND
+/// volume < 100).
 public enum AppRouteDestination: Equatable, Sendable {
     case noRedirect
     case currentDevice
@@ -108,8 +111,8 @@ public struct AppRouteStore: Sendable {
     /// always did (`.currentDevice` is preserved as `.currentDevice`, NOT
     /// reinterpreted as `.noRedirect`, even though it used to double as the
     /// unset/default state — a persisted route the user never touched still
-    /// round-trips to the same value, and behaves identically at the engine/
-    /// capture level either way since both are `isDeviceRoute == false`). No
+    /// round-trips to the same value, and an untouched route is at volume 100,
+    /// where the two behave identically at the engine/capture level). No
     /// old reader ever needs to understand `"noRedirect"` (this app doesn't
     /// ship an older binary that reads a newer file), so `currentSchemaVersion`
     /// stays at 1. `"group"` lands the same way, carrying its id in its OWN key

@@ -226,18 +226,10 @@ public enum BackendEvent: Sendable, Equatable {
     /// never do.
     case routingBlockedNeedsDefault(Bool)
 
-    /// The first-mix alignment intercept (W3, PLAN-UNIVERSAL-SYNC "ALIGNMENT
-    /// WIZARD UX LOCKED"): the selection that FIRST puts a never-aligned
-    /// Bluetooth speaker (no saved SYNC trim, no recorded "Not now") into a
-    /// mix with any other device connected it and started its stream but is
-    /// HOLDING IT SILENT; the UI answers with an anchored card offering
-    /// align-with-music / align-with-ticks / Not now, each resolving through
-    /// ``BTOutputControlling/resolveBTAlignmentPrompt(forDevice:dismissed:)``
-    /// (which releases the hold). The backend re-emits at most once per device
-    /// per launch and never again once a trim or dismissal is recorded; a
-    /// backend-side watchdog releases an unanswered hold so a surfacing
-    /// failure can never strand a speaker silent. Only ``NativeBackend``
-    /// emits it — it's the only backend with Bluetooth sinks.
+    /// A never-aligned Bluetooth speaker just joined its first mix and is
+    /// playing as-is; the UI offers alignment under its row. At most once per
+    /// device per session. Only ``NativeBackend`` emits it — it's the only
+    /// backend with Bluetooth sinks.
     case btFirstMixAlignmentPrompt(deviceID: String)
 
     /// The takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md): a
@@ -576,15 +568,14 @@ public protocol AppRouteConfiguring: AnyObject {
     /// `OwnToneBackend`) compile without change — they have no per-app capture.
     func handleAppLaunched(bundleID: String)
 
-    /// Set the LOCAL playback volume of a `.currentDevice`-routed app (Bug T2):
-    /// an app pinned to "Current Device" is captured and replayed on the Mac's
-    /// built-in speakers as an independent stream, and this levels that stream.
+    /// Set the volume of an app that is rendered from its own capture rather than
+    /// streamed to a device: a `.currentDevice` app replayed on the Mac's built-in
+    /// speakers (Bug T2), or an un-redirected app being LEVELED into the mix.
     /// The popover slider calls it directly for a low-latency response; the same
     /// value also flows through `updateAppRoutes` from the persisted route edit.
-    /// `volume` is the UI's 0–100 int. A no-op for a bundle ID with no live local
-    /// stream (non-`.currentDevice`, or not yet capturing). Default empty body so
-    /// non-`NativeBackend` conformers compile without change — they have no local
-    /// per-app playback.
+    /// `volume` is the UI's 0–100 int. A no-op for a bundle ID neither consumer
+    /// knows. Default empty body so non-`NativeBackend` conformers compile without
+    /// change — they have no per-app rendering.
     func setLocalPlaybackVolume(volume: Int, bundleID: String)
 }
 
@@ -593,8 +584,8 @@ extension AppRouteConfiguring {
     /// this. Only `NativeBackend` overrides it with real restart logic.
     public func handleAppLaunched(bundleID: String) {}
 
-    /// Default no-op so backends without local per-app playback don't need to
+    /// Default no-op so backends without per-app rendering don't need to
     /// implement this. Only `NativeBackend` overrides it (drives
-    /// ``LocalPlaybackControlling``).
+    /// ``LocalPlaybackControlling`` and ``LeveledAppInjector``).
     public func setLocalPlaybackVolume(volume: Int, bundleID: String) {}
 }

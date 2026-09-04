@@ -590,6 +590,10 @@ final class BTDeviceSink: @unchecked Sendable {
     /// connect: a rebuild restarts the same physical connection, not a new
     /// one, so this must not reset in ``clearSessionStateLocked(carryDelay:)``.
     private var hasLoggedReportedLatency = false
+    /// The device clock's 1 Hz stability watcher, run while the engine runs.
+    /// `nil` when nobody asked to observe it (tests). Its timer never touches
+    /// the render thread; see ``BTClockWatcher``.
+    private let clockWatcher: BTClockWatcher?
 
     init(
         deviceID: AudioObjectID,
@@ -602,7 +606,8 @@ final class BTDeviceSink: @unchecked Sendable {
         // up to the same 2^19 frames, so this costs nothing.
         maxBufferedSeconds: Double = 11,
         maxRenderFrames: Int = 8192,
-        delayNanosProvider: @escaping @Sendable () -> Int64
+        delayNanosProvider: @escaping @Sendable () -> Int64,
+        clockObserver: (@Sendable (String, BTClockStability.Outcome) -> Void)? = nil
     ) {
         let channels = max(1, channelCount)
         self.deviceID = deviceID
@@ -614,6 +619,9 @@ final class BTDeviceSink: @unchecked Sendable {
         self.nominalRate = renderSampleRate
         self.graphQueue = DispatchQueue(label: "com.audiout.btsink.graph.\(deviceUID)")
         self.listenerQueue = DispatchQueue(label: "com.audiout.btsink.listener.\(deviceUID)")
+        self.clockWatcher = clockObserver.map { observe in
+            BTClockWatcher(deviceID: deviceID, deviceUID: deviceUID) { observe(deviceUID, $0) }
+        }
 
         // The delay line must hold the full delay's worth of pre-roll (the
         // BT-only buffer or the ~2 s AirPlay presentation delay) AND, behind
@@ -761,9 +769,11 @@ final class BTDeviceSink: @unchecked Sendable {
         running = engine.isRunning
         guard running else { throw BTDeviceSinkError.engineNotRunning }
         installEventListenersLocked()
+        clockWatcher?.start(nominalRate: nominalRate)
     }
 
     private func stopLocked(carryDelay: Bool = false) {
+        clockWatcher?.cancel()
         removeEventListenersLocked()
         if running || engine.isRunning {
             sourceNode?.reset()
@@ -1303,6 +1313,9 @@ final class BTSyncedSink: @unchecked Sendable {
     /// production — plan risk R4 forbids a hardcoded copy). Sampled per session
     /// anchor via each sink's delay provider.
     private let presentationDelayMs: @Sendable () -> Int
+    /// Handed every sink's clock-stability verdicts, keyed by device UID.
+    /// `nil` (tests) means no sink watches its clock.
+    private let clockObserver: (@Sendable (String, BTClockStability.Outcome) -> Void)?
 
     private let tableLock = NSLock()
     private var sinksByUID: [String: BTDeviceSink] = [:]
@@ -1317,12 +1330,14 @@ final class BTSyncedSink: @unchecked Sendable {
         renderSampleRate: Double = 44_100,
         channelCount: Int = 2,
         btOnlyBufferMs: Int = BTSyncedSink.defaultBTOnlyBufferMs,
-        presentationDelayMs: @escaping @Sendable () -> Int
+        presentationDelayMs: @escaping @Sendable () -> Int,
+        clockObserver: (@Sendable (String, BTClockStability.Outcome) -> Void)? = nil
     ) {
         self.renderSampleRate = renderSampleRate
         self.channelCount = max(1, channelCount)
         self.btOnlyBufferMs = btOnlyBufferMs
         self.presentationDelayMs = presentationDelayMs
+        self.clockObserver = clockObserver
     }
 
     deinit {
@@ -1584,6 +1599,29 @@ final class BTSyncedSink: @unchecked Sendable {
         }
     }
 
+    /// Fan one block with a per-device split: `ownerUID`'s delay line takes
+    /// the sweep-carrying block, every other takes the sweep-free one. This is
+    /// the write-side half of a phone-driven sync run's staggered sweep
+    /// windows (`NativeCaptureCoordinator.stageCompanionMicProbe`).
+    ///
+    /// Feed-time, deliberately: the block a sink is HANDED is decided here,
+    /// before its delay line, so the sequencing is sample-accurate whatever
+    /// each speaker's delay turns out to be. Gating at the output with gain
+    /// instead would be gated by that same unknown delay — the thing the run
+    /// exists to measure.
+    ///
+    /// `ownerUID` of `nil` (a window whose reference is the Mac's own output,
+    /// so no Bluetooth sink is to hear it) hands every device the sweep-free
+    /// block.
+    func enqueue(sweepFrames: UnsafePointer<Float>, sweepFreeFrames: UnsafePointer<Float>,
+                 frameCount: Int, pts: timespec, ownerUID: String?) {
+        let sinks = tableLock.withLock { Array(sinksByUID.values) }
+        for sink in sinks {
+            let frames = sink.deviceUID == ownerUID ? sweepFrames : sweepFreeFrames
+            sink.enqueue(interleavedFrames: frames, frameCount: frameCount, pts: pts)
+        }
+    }
+
     // MARK: Internals
 
     private func makeSink(_ spec: DeviceSpec) -> BTDeviceSink {
@@ -1593,7 +1631,8 @@ final class BTSyncedSink: @unchecked Sendable {
             deviceUID: uid,
             renderSampleRate: renderSampleRate,
             channelCount: channelCount,
-            delayNanosProvider: { [weak self] in self?.delayNanos(forUID: uid) ?? 0 })
+            delayNanosProvider: { [weak self] in self?.delayNanos(forUID: uid) ?? 0 },
+            clockObserver: clockObserver)
     }
 
     private func delayNanos(forUID uid: String) -> Int64 {

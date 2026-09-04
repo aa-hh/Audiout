@@ -34,7 +34,12 @@ enum GroupsPaneLayout {
     /// Gap from the top of the content pane's SAFE AREA (the window is
     /// `.fullSizeContentView`, so the pane runs under the title bar) to the
     /// header section's top border.
-    static let columnTopInset: CGFloat = 20
+    ///
+    /// This also has to clear the group editor's top action band
+    /// (`GroupEditorViewController.topBandTopInset`), which overlaps the icon
+    /// well horizontally — it cannot be lowered without revisiting that
+    /// constant too.
+    static let columnTopInset: CGFloat = 28
 
     /// Caps the form column's width so the sections don't stretch
     /// edge-to-edge in a very wide window. It is a CAP, not a width: the
@@ -50,7 +55,7 @@ enum GroupsPaneLayout {
     /// sum can never exceed the one fixed surface frame:
     /// `SurfaceLayout.contentPaneWidth` (`SurfaceLayout.width` minus
     /// `MixerWindowController`'s pinned sidebar) minus both column margins,
-    /// which evaluates to 385. Raise it and the whole screen would ask to
+    /// which evaluates to 415. Raise it and the whole screen would ask to
     /// grow past the fixed frame; the sections already fill the pane exactly
     /// here, so there is nothing to gain by doing so.
     static let contentMaxWidth: CGFloat = SurfaceLayout.contentPaneWidth - columnInset - columnTrailingInset

@@ -53,7 +53,7 @@ import AppKit
         let primary = try render(makeButton(isPrimary: true))
         let secondary = try render(makeButton(isPrimary: false))
         #expect(primary != secondary,
-                "the goldCTA-filled primary plate must render different bytes than a secondary plate")
+                "the gold-filled primary plate must render different bytes than a secondary plate")
     }
 
     // MARK: (c) Pressed render ≠ rest render
@@ -198,8 +198,8 @@ import AppKit
     // MARK: (i) The identity tint's own alpha survives the rim
 
     @Test func rimKeepsTheHandedTintAlpha() throws {
-        // The caller hands the rim's alpha inside the tint (0.45 electric on
-        // dark); `withAlphaComponent(1)` on the way to the stroke used to
+        // The caller hands the rim's alpha inside the tint (0.9 Deep / `ring`
+        // on light); `withAlphaComponent(1)` on the way to the stroke used to
         // reset it to neon. A half-alpha probe must render a rim that is NOT
         // the full-strength probe colour.
         let button = makeButton(keycap: nil, identityTint: Self.probeTint.withAlphaComponent(0.45))
@@ -212,6 +212,23 @@ import AppKit
         #expect(pixel.redComponent < 0.8,
                 "the rim is the tint at 0.45 over the fill, not full-strength (red \(pixel.redComponent))")
         #expect(pixel.redComponent > 0.3, "…but the rim is still there")
+    }
+
+    // MARK: (j) The reference plate's rim is steel blue, never magenta
+
+    @Test func referenceRimInRingIsBlueNotMagenta() throws {
+        let button = makeButton(keycap: nil, identityTint: Tokens.Color.ring)
+        button.appearance = NSAppearance(named: .darkAqua)
+        button.layoutSubtreeIfNeeded()
+        let rep = try #require(button.bitmapImageRepForCachingDisplay(in: button.bounds))
+        button.cacheDisplay(in: button.bounds, to: rep)
+        // The same left-rim, mid-height read `rimKeepsTheHandedTintAlpha` uses.
+        let pixel = try #require(rep.colorAt(x: 0, y: rep.pixelsHigh / 2)?.usingColorSpace(.sRGB))
+        // `ring` dark `#7FB4C4` is r 0.50, g 0.71, b 0.77; magenta led on red.
+        #expect(pixel.blueComponent > pixel.redComponent + 0.15,
+                "the reference rim is blue-led (r \(pixel.redComponent), b \(pixel.blueComponent))")
+        #expect(pixel.greenComponent > pixel.redComponent,
+                "…and green sits above red too (g \(pixel.greenComponent))")
     }
 
     /// A hue no token in the plate's paint comes near, so every strongly

@@ -90,11 +90,12 @@ New method (Alec's design, 2026-08-12):
   alias with the ±500 range), so it works with music paused. This absorbs
   roadmap 040.
 - Applies to the Mac row's trim identically.
-- Carry-overs that stay as built: first-mix intercept card (once-ever
-  auto-prompt), 30 s auto-stop, Sonos amp-park mitigation (~−47 dBFS
+- Carry-overs that stay as built: 30 s auto-stop, Sonos amp-park mitigation (~−47 dBFS
   keep-alive bed + ~3 s wake preamble), and the hard rule to never schedule
   audio at absolute times against a BT device clock (continuous loop +
-  in-place rewrite only).
+  in-place rewrite only). The first-mix intercept card is GONE — see the
+  2026-09-03 amendment under "ALIGNMENT WIZARD UX LOCKED" in
+  `docs/plans/PLAN-UNIVERSAL-SYNC.md`.
 
 ## Part 3 — making a saved trim trustworthy (prerequisites)
 

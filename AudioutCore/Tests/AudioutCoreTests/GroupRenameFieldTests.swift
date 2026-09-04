@@ -413,6 +413,142 @@ import AppKit
         #expect(!title.isBordered)
         #expect(!title.drawsBackground)
     }
+
+    // MARK: A repaint must not discard what is being typed
+
+    /// `show(groupID:devices:)` is a REFRESH as well as a first show:
+    /// `MixerWindowController.refreshAll()` calls it on every repaint of a
+    /// visible editor. A membership toggle in this same pane saves the group,
+    /// and any phone-driven group edit repaints too — so writing the model's
+    /// name into the field unconditionally threw away whatever the user was
+    /// halfway through typing, with nothing said.
+    ///
+    /// CONVERSION NOTE: same early-return compromise as the other field-editor
+    /// tests in this file — a headless run can refuse first responder.
+    @MainActor
+    @Test func aRepaintDoesNotDiscardAHalfTypedName() throws {
+        let (window, _, group) = try makeWindow()
+        let editor = window.test_editor
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                            styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        host.contentView = editor.view
+        host.contentView?.layoutSubtreeIfNeeded()
+        guard host.makeFirstResponder(editor.test_titleField),
+              let fieldEditor = editor.test_titleField.currentEditor() else {
+            return
+        }
+
+        fieldEditor.string = "Half typed"
+        // Exactly what `refreshAll()` does for a visible editor.
+        editor.show(groupID: group.id, devices: [])
+
+        #expect(editor.test_nameFieldValue == "Half typed",
+                "a background repaint must leave the in-progress rename alone")
+    }
+
+    /// The guard is scoped to the group being renamed: switching the pane to a
+    /// DIFFERENT group must re-fill the field, or the new group would show the
+    /// previous one's half-typed name.
+    @MainActor
+    // MARK: The primary button tracks the ONE uncommitted state
+
+    // Everything else on this pane autosaves — a membership toggle, an icon
+    // pick and a committed rename each write straight through, and the line
+    // beside "Delete Group…" says so. Text typed into this field and not yet
+    // committed is the only thing the editor can be holding, so it is the only
+    // thing that may turn the primary into "Save" (Alec, 2026-09-03).
+
+    @Test func primaryReadsDoneUntilTheFieldHoldsAnUncommittedName() throws {
+        let (window, _, _) = try makeWindow()
+        let editor = window.test_editor
+        #expect(editor.test_doneButtonTitle == "Done",
+                "at rest there is nothing outstanding to save")
+
+        editor.test_typeIntoNameField("Kitchen")
+        #expect(editor.test_doneButtonTitle == "Save")
+        #expect(editor.test_doneButtonAccessibilityLabel == "Save",
+                "VoiceOver announces the title on screen, never the other one")
+
+        editor.test_commitRenameViaReturn("Kitchen")
+        #expect(editor.test_doneButtonTitle == "Done",
+                "Return commits the rename and stays put — nothing is pending after it")
+        #expect(editor.test_doneButtonAccessibilityLabel == "Done")
+    }
+
+    @Test func escapeRevertsTheNameAndTheTitleWithIt() throws {
+        let (window, controller, group) = try makeWindow()
+        let editor = window.test_editor
+        editor.test_typeIntoNameField("Half typed")
+        #expect(editor.test_doneButtonTitle == "Save")
+
+        editor.test_cancelRename(after: "Half typed")
+
+        #expect(editor.test_nameFieldValue == "Downstairs")
+        #expect(editor.test_doneButtonTitle == "Done")
+        #expect(controller.groups.first(where: { $0.id == group.id })?.name == "Downstairs")
+    }
+
+    @Test func paddingTheNameWithSpacesIsNotAnUncommittedChange() throws {
+        let (window, _, _) = try makeWindow()
+        window.test_editor.test_typeIntoNameField("  Downstairs  ")
+        #expect(window.test_editor.test_doneButtonTitle == "Done",
+                "the commit trims, so a padded name is the same name")
+    }
+
+    @Test func pressingSaveCommitsTheTypedNameAndThenLeaves() throws {
+        let (window, controller, group) = try makeWindow()
+        let editor = window.test_editor
+        var backs = 0
+        editor.onBack = { backs += 1 }
+
+        editor.test_typeIntoNameField("Kitchen")
+        #expect(editor.test_doneButtonTitle == "Save")
+        editor.test_done()
+
+        #expect(controller.groups.first(where: { $0.id == group.id })?.name == "Kitchen",
+                "a typed name is never abandoned on the way out")
+        #expect(editor.test_nameFieldValue == "Kitchen")
+        #expect(backs == 1, "…and it leaves by the same door Done uses")
+    }
+
+    @Test func saveOnANameAnotherGroupHoldsKeepsTheEditorOpen() throws {
+        let (window, controller, group) = try makeWindow()
+        _ = try controller.createGroup(name: "Upstairs", memberIDs: ["d1"], memberVolumes: [:])
+        window.test_select(.group(id: group.id))
+        settle(window)
+        let editor = window.test_editor
+        var backs = 0
+        editor.onBack = { backs += 1 }
+
+        editor.test_typeIntoNameField("Upstairs")
+        editor.test_done()
+
+        #expect(backs == 0, "a refused rename keeps the editor on its explanation")
+        #expect(editor.test_duplicateNameRefused)
+        #expect(editor.test_nameFieldValue == "Downstairs", "and puts the field back")
+        #expect(editor.test_doneButtonTitle == "Done")
+    }
+
+    @Test func switchingToAnotherGroupWhileTypingStillRefillsTheField() throws {
+        let (window, controller, _) = try makeWindow()
+        let other = try controller.createGroup(name: "Upstairs", memberIDs: ["d1"],
+                                               memberVolumes: [:]).group
+        let editor = window.test_editor
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                            styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        host.contentView = editor.view
+        host.contentView?.layoutSubtreeIfNeeded()
+        guard host.makeFirstResponder(editor.test_titleField),
+              let fieldEditor = editor.test_titleField.currentEditor() else {
+            return
+        }
+
+        fieldEditor.string = "Half typed"
+        editor.show(groupID: other.id, devices: [])
+
+        #expect(editor.test_nameFieldValue == "Upstairs",
+                "a different group's editor must never inherit the last one's typing")
+    }
 }
 
 private extension NSView {

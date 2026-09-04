@@ -109,6 +109,24 @@ enum SettingsForm {
     /// centred on the title text. The returned view sizes its own height from its
     /// contents.
     static func row(title: String, subtitle: String? = nil, control: NSView) -> NSView {
+        var built: NSTextField?
+        if let subtitle {
+            let sub = label(subtitle)
+            sub.font = Tokens.Font.caption
+            sub.textColor = Tokens.Color.secondaryLabel
+            sub.lineBreakMode = .byWordWrapping
+            sub.maximumNumberOfLines = 0
+            built = sub
+        }
+        return row(title: title, subtitleLabel: built, control: control)
+    }
+
+    /// The same row, taking the caller's OWN subtitle label — so a pane can keep
+    /// a stored `hintLabel` it re-writes on every value change and still have it
+    /// sit as the row's subtitle, 2pt under the title.
+    /// It resets the label's `preferredMaxLayoutWidth` because the row container
+    /// owns that width and re-feeds it on every layout pass.
+    static func row(title: String, subtitleLabel: NSTextField?, control: NSView) -> NSView {
         let titleLabel = label(title)
         titleLabel.font = Tokens.Font.body
         // Titles WRAP within the text column instead of truncating: the control
@@ -127,16 +145,10 @@ enum SettingsForm {
         textStack.translatesAutoresizingMaskIntoConstraints = false
         textStack.addArrangedSubview(titleLabel)
 
-        var subtitleLabel: NSTextField?
-        if let subtitle {
-            let sub = label(subtitle)
-            sub.font = Tokens.Font.caption
-            sub.textColor = Tokens.Color.secondaryLabel
-            sub.lineBreakMode = .byWordWrapping
-            sub.maximumNumberOfLines = 0
-            sub.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            textStack.addArrangedSubview(sub)
-            subtitleLabel = sub
+        if let subtitleLabel {
+            subtitleLabel.preferredMaxLayoutWidth = 0
+            subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            textStack.addArrangedSubview(subtitleLabel)
         }
 
         control.translatesAutoresizingMaskIntoConstraints = false

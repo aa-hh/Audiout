@@ -223,6 +223,13 @@ again. SYNC stepper column placement (popover vs window-only) is deliberately
 left to reconcile with the touch-up track's scrubber design — don't move it
 until that lands.
 
+**AMENDED 2026-09-03 (Alec):** the first-mix card, the hold-silent join and the
+final "Not now" are removed. A never-aligned Bluetooth speaker joining a mix
+plays as-is; a one-sentence note under its row offers the wizard until the
+speaker is measured (✕ hides it for the session). The untuned chip reads Align
+with a tuning-fork glyph and opens the wizard; a measured chip opens the drawer,
+which carries Align again… beside Align by ear and no Revert.
+
 **BT-OFFSET-UI — per-device manual offset (numeric ms + nudge) + persistence**
 Files: Settings Audio tab (match the existing "Advanced buffer ms" precedent), `AppSettings.swift`, `BTSyncedSink.swift` (consume), per-brand seed table.
 What: per-device numeric ms offset (bare number/unit — house rule on numeric controls), an A/B "nudge until it blends" affordance, per-brand seed defaults, persisted per device UID.

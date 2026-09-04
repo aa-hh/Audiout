@@ -28,27 +28,31 @@ set -eu
 repo_root=$(git rev-parse --show-toplevel)
 package=${AUDIOUT_BUILD_PACKAGE:-AudioutCore}
 
-# --build-system native: Xcode 26+/27 made the new "swiftbuild" engine the
-# default, but it doesn't forward a C target's cSettings unsafeFlags
-# (AirPlayEngine/Package.swift's Homebrew -I paths) into the clang module
-# dependency scan, so `import CAirPlayEngine` fails to resolve. It is also the
-# engine every other script here pins — and the engines keep SEPARATE caches, so
-# one stray default-engine command costs a full cold rebuild. Same flag
-# everywhere, always.
-build_flags="--build-system native"
+# Build engine: the SwiftPM default (swiftbuild). This used to pin the old
+# `native` engine, because swiftbuild did not forward a C target's cSettings
+# unsafeFlags (AirPlayEngine/Package.swift's Homebrew -I paths) into the clang
+# module dependency scan, so `import CAirPlayEngine` failed to resolve. That is
+# fixed as of Swift 6.4 — verified 2026-09-04 by building both packages and
+# running the suite with no flag.
+#
+# Do NOT reintroduce a per-script engine flag. The engines keep SEPARATE caches
+# (~1.3 GB apiece), so one script disagreeing with the others costs every
+# worktree a full cold rebuild. build.sh, run-tests.sh and make-app.sh use the
+# same engine, and housekeeping.sh's stale-cache sweep assumes it.
 
 . "$(cd "$(dirname "$0")" && pwd)/lib/remote.sh"
 
 if [ "${AUDIOUT_BUILD_LOCAL:-0}" != "1" ] && remote_wins; then
     echo "  build: sending to remote $remote_host ..." >&2
     rrc=0
-    remote_run "$repo_root" "cd \"$package\" && swift build $build_flags $*" || rrc=$?
+    remote_run "$repo_root" "cd \"$package\" && swift build $*" || rrc=$?
     if [ "$rrc" -eq 0 ]; then
         echo "  build: compiled clean on remote $remote_host." >&2
         exit 0
     elif [ "$rrc" -eq 2 ]; then
-        # Ran and failed. Do NOT report it as the caller's error: the toolchains
-        # differ (local Swift 6.4 / macOS 27 SDK vs remote 6.3.1 / macOS 26), so
+        # Ran and failed. Do NOT report it as the caller's error: both Macs run
+        # Swift 6.4 but against different SDKs (macOS 27 here, macOS 26 there),
+        # and the remote has been out of disk and starved before, so
         # a remote-only failure is as likely to be skew as a real break. Same
         # asymmetry run-tests.sh uses — a remote PASS is accepted, a remote
         # FAILURE is re-confirmed here before anyone acts on it.
@@ -59,4 +63,4 @@ if [ "${AUDIOUT_BUILD_LOCAL:-0}" != "1" ] && remote_wins; then
 fi
 
 # shellcheck disable=SC2086
-( cd "$repo_root/$package" && swift build $build_flags "$@" )
+( cd "$repo_root/$package" && swift build "$@" )

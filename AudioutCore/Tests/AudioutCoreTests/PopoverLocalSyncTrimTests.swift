@@ -75,12 +75,10 @@ import AppKit
         return (popover, recorder, settings)
     }
 
-    private func waitFor(timeout: TimeInterval = 5, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     // MARK: The chip
@@ -107,13 +105,11 @@ import AppKit
                 "the deleted Settings help lives on the chip now: \(String(describing: row?.test_syncChipTooltip))")
     }
 
-    @Test func theSyncColumnTitleRendersOverTheThisMacSubsection() {
+    @Test func theOffsetColumnTitleRendersWhenTheMacRowCarriesItsChip() {
         let isolation = TestIsolation(owner: "PopoverLocalSyncTrimTests")
         let (popover, _, _) = makePopover(isolation)
-        #expect(popover.test_syncColumnTitleShown(in: "This Mac"),
-                "a subsection whose rows carry the chip gets the column title")
-        #expect(!popover.test_syncColumnTitleShown(in: "AirPlay Devices"),
-                "…and one whose rows do not, does not")
+        #expect(popover.test_offsetColumnTitleShown(),
+                "the Mac's pinned row carries the sync chip, so the card header prints the Offset legend (once, 2026-08-28)")
     }
 
     // MARK: The drawer
@@ -186,7 +182,7 @@ import AppKit
         _ = popover.test_toggleDeviceEnabled(deviceID: "mac", on: true)
         #expect(popover.test_isSpeakerSelected("mac"))
 
-        popover.startBTAlignmentWizard(deviceID: "mac")
+        popover.startBTAlignmentWizard(deviceID: "mac", door: .menu)
         let wizard = popover.test_btWizardView()
         #expect(wizard != nil, "the Mac's own row opens the same wizard")
         #expect(popover.test_btWizardReferenceID() == "office",

@@ -193,6 +193,15 @@ import AudioutSharedUI
         #expect(long.fittingSize.height > short.fittingSize.height)
     }
 
+    /// The diagnosis card, the silence banner and the note banner are all
+    /// inset control-sized rects, so they share one corner.
+    @Test func cardWearsTheControlRadius() {
+        let view = ConnectionDiagnosisView(
+            failure: ConnectionFailure(cause: .timedOut), deviceName: "Study")
+        view.apply(failure: ConnectionFailure(cause: .notResponding), deviceName: "Study")
+        #expect(view.test_backgroundCornerRadius == Tokens.Layout.Radius.control)
+    }
+
     @Test func narrowerWidthWrapsToTallerHeight() {
         let view = ConnectionDiagnosisView(
             failure: ConnectionFailure(cause: .notResponding), deviceName: "Study")

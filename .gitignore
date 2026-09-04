@@ -32,6 +32,7 @@ xcuserdata/
 *.xcworkspace/xcuserdata/
 DerivedData/
 .swiftpm/xcode/
+*.xcuserstate
 
 # Impeccable design-skill scratch state (local config + generated critique notes).
 .impeccable/
@@ -43,3 +44,9 @@ __pycache__/
 
 # PostHog credentials for local builds (scripts/make-app.sh reads this)
 .env
+
+# The wordmark face, ClashDisplay-Semibold: the ITF Free Font License forbids
+# redistributing it through a public repo, so scripts/make-app.sh fetches it
+# at assembly (scripts/fetch-wordmark-font.sh). Never commit a copy.
+*.otf
+ClashDisplay-*

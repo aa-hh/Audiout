@@ -28,7 +28,7 @@ import AppKit
 
     /// The `PopoverBTAlignmentUITests` harness: a STARTED `MockBackend` fleet
     /// behind a real `GroupController`, rows pushed by hand.
-    private func makePopover() -> (PopoverController, Recorder) {
+    private func makePopover(btIsTuned: Bool = false) -> (PopoverController, Recorder) {
         let fleet = [local(), airplay(), bt()]
         let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
@@ -43,16 +43,15 @@ import AppKit
         waitFor { backend.devices.count == fleet.count }
         let recorder = Recorder()
         popover.onOpenEqualizer = { recorder.opened.append($0) }
+        popover.btTrimIsSetProvider = { _ in btIsTuned }
         popover.update(devices: fleet)
         return (popover, recorder)
     }
 
-    private func waitFor(timeout: TimeInterval = 5, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     private func local() -> Device {
@@ -126,20 +125,36 @@ import AppKit
         #expect(row.test_iconAXLabel == "Main Audio options")
     }
 
-    // MARK: What the popover no longer carries
+    // MARK: The Mixer carries a DOOR, never an editor
 
-    @Test func noRowCarriesAnEQChip() {
+    /// The Mixer's equalizer control is a door: image-only (no "EQ" title, no
+    /// value), and no row hosts a curve editor. The tone lives on the Groups
+    /// screen; this is the way there.
+    @Test func theEQButtonIsADoorNotAnEditor() {
         let (popover, _) = makePopover()
-        func hasEQChip(_ view: NSView) -> Bool {
-            if let button = view as? NSButton, button.title == "EQ" { return true }
-            return view.subviews.contains(where: hasEQChip)
+        func hasTitledEQControl(_ view: NSView) -> Bool {
+            if let button = view as? NSButton, button.title.localizedCaseInsensitiveContains("eq") {
+                return true
+            }
+            return view.subviews.contains(where: hasTitledEQControl)
         }
-        #expect(popover.test_deviceRow(for: "office").map(hasEQChip) == false)
-        #expect(hasEQChip(popover.test_mainOutRow) == false)
+        func hostsAnEditor(_ view: NSView) -> Bool {
+            if view is EQEditorView { return true }
+            return view.subviews.contains(where: hostsAnEditor)
+        }
+        for row in [popover.test_deviceRow(for: "office"),
+                    popover.test_deviceRow(for: "bt-a:output")].compactMap({ $0 }) {
+            #expect(hasTitledEQControl(row) == false, "the door is image-only")
+            #expect(hostsAnEditor(row) == false, "no editor on the Mixer")
+        }
+        #expect(hasTitledEQControl(popover.test_mainOutRow) == false)
+        #expect(hostsAnEditor(popover.test_mainOutRow) == false)
     }
 
     @Test func syncDrawerStillOpensAfterTheEQDrawerLeft() {
-        let (popover, _) = makePopover()
+        // A MEASURED speaker, whose chip is the drawer's own control — driven
+        // through its real target/action, not a state poke.
+        let (popover, _) = makePopover(btIsTuned: true)
         popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
         FoldAnimator.shared.test_settleNow()
         #expect(popover.test_syncDrawerVisible)

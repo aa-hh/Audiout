@@ -25,7 +25,7 @@ import AudioutCore
 
     private func makeBusRow(device: Device? = nil) -> DeviceRowView {
         DeviceRowView(device: device ?? makeDevice(), showsToggle: true,
-                      paintsSelectionBackground: false, showsMeter: true, showsBus: true)
+                      showsMeter: true, showsBus: true)
     }
 
     // MARK: Multi-source composite — never collapses to one reason
@@ -83,23 +83,18 @@ import AudioutCore
     }
 
     @Test func manualMemberPlusTwoApps() {
-        // Pre-pill this fit at the same `feedColumnWidth` as one packed
-        // string; each value now carries its own bordered-pill chrome
-        // (padding + border + inter-pill gap), so three short values plus
-        // two chips no longer fit in the same reserved width and the
-        // STATIC "+N" overflow correctly kicks in one segment sooner. The
-        // "never collapses to one reason" behavior is unchanged — it just
-        // shows 2 pills + "+1" instead of 3 pills at this exact width; see
-        // `testManualMemberPlusOneApp`/`testGroupMemberPlusOneApp` for the
-        // still-uncapped two-pill case.
+        // Without the colour chips each pill carries text plus its own
+        // padding only, so all three values fit: three bare pills measure
+        // ~130 pt of the 136 pt `feedColumnWidth` budget. The chips were what
+        // used to tip this into the STATIC "+N" overflow.
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true,
                   routedAppNames: ["Music", "Safari"])
-        #expect(row.test_feedText == "System · Music · +1")
-        #expect(row.test_feedHasOverflow)
+        #expect(row.test_feedText == "System · Music · Safari")
+        #expect(!(row.test_feedHasOverflow))
         // The tooltip is uncapped (VoiceOver/hover have no viewport to
         // overflow) — every name, no "+N".
-        #expect(row.test_feedTooltip == "Feeding System, Music, Safari")
+        #expect(row.test_feedTooltip == "Playing System, Music, Safari")
     }
 
     @Test func neitherMainMixNorAppsShowsNothing() {
@@ -157,31 +152,46 @@ import AudioutCore
         #expect(row.test_statusText == "Muted", "…it lives on the sublabel/mute-pill instead")
     }
 
-    // MARK: AP1 micro-tag — the one true exception, AP2 never badged
+    // MARK: No protocol badge — the FEED column shows feeds, never attributes
 
-    @Test func aP1DeviceGetsTheMicroTagPrefix() {
-        let row = makeBusRow()
-        row.apply(makeDevice(supportsAirPlay2: false), selected: true, controllable: true)
-        #expect(row.test_feedHasAP1Tag)
-        #expect(row.test_feedText == "Older AirPlay System")
-        let tooltip = row.test_feedTooltip ?? ""
-        #expect(tooltip.contains("Feeding System"))
-        #expect(tooltip.contains("Older AirPlay — can't route single apps"))
+    /// The retired "Older AirPlay" micro-tag. It read `supportsAirPlay2`,
+    /// which is false for Bluetooth, Cast AND the Mac's own row as well as a
+    /// genuine AP1 receiver — so it labelled a Chromecast as AirPlay. Alec
+    /// dropped it outright rather than narrowing it to real AP1 receivers: the
+    /// column carries what a device is PLAYING, and a protocol attribute was
+    /// never that.
+    @Test func noDeviceGetsAProtocolTagWhateverItsAirPlay2Flag() {
+        for supportsAirPlay2 in [true, false] {
+            let row = makeBusRow()
+            row.apply(makeDevice(supportsAirPlay2: supportsAirPlay2), selected: true, controllable: true)
+            #expect(row.test_feedText == "System")
+            #expect(row.test_feedTooltip == "Playing System",
+                    "the tooltip keeps the feed line and loses the protocol consequence line")
+        }
     }
 
-    @Test func aP2DeviceNeverGetsATag() {
-        let row = makeBusRow()
-        row.apply(makeDevice(supportsAirPlay2: true), selected: true, controllable: true)
-        #expect(!(row.test_feedHasAP1Tag))
+    /// The kinds that shared the flag without being AirPlay at all — the Mac's
+    /// own row was the visible casualty, its narrow feed slot truncating
+    /// "Older AirPlay System" to a bare "Older".
+    @Test func nonAirPlayKindsShowTheirFeedAndNothingElse() {
+        let kinds: [(Device.Kind, Bool)] = [(.localMac, true), (.bluetooth, false), (.cast, false)]
+        for (kind, isLocal) in kinds {
+            let device = Device(id: "dev-\(kind)", name: "Test Speaker", kind: kind,
+                                isAvailable: true, supportsAirPlay2: false,
+                                isLocalDevice: isLocal, connectionState: .connected)
+            let row = makeBusRow(device: device)
+            row.apply(device, selected: true, controllable: true)
+            #expect(row.test_feedText == "System", "\(kind) shows its feed, unbadged")
+            #expect(!(row.test_feedTooltip ?? "").contains("Older AirPlay"))
+        }
     }
 
-    @Test func failedAP1DeviceShowsTheErrorWithNoTag() {
-        // The error override takes the WHOLE column — no tag mixed in.
+    @Test func failedDeviceShowsOnlyTheError() {
+        // The error override takes the WHOLE column.
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .vanished)), supportsAirPlay2: false),
                   selected: true, controllable: true)
         #expect(row.test_feedText == "Not on the network")
-        #expect(!(row.test_feedHasAP1Tag))
     }
 
     // MARK: STATIC "+N" overflow — locked, no interactive reveal
@@ -212,54 +222,32 @@ import AudioutCore
         #expect(row.test_feedText == nil, "a non-bus host has no free trailing slot to draw into")
     }
 
-    // MARK: Tether-tint + chip (T7, Warm Signal v4.1 CORRECTIONS)
+    // MARK: Pill tint (D7)
 
-    @Test func appSegmentColorUsesTheHostSuppliedTetherTintNotFlatSecondaryLabel() {
-        let row = makeBusRow()
-        let tint = NSColor(srgbRed: 0.42, green: 0.58, blue: 0.47, alpha: 1)
-        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"],
-                  appTintColors: ["Music": tint])
-        #expect(row.test_feedAppSegmentColor(for: "Music") == tint, "T7 rewired this seam to the host-supplied AppTetherColor tint")
-        #expect(row.test_feedAppSegmentColor(for: "Music") != Tokens.Color.secondaryLabel, "no longer the flat secondaryLabel it was before T7")
+    @Test func mainMixPillIsGoldTextWhileSoundingAndLabel2Otherwise() {
+        let live = makeBusRow()
+        let device = makeDevice(connectionState: .connected)
+        live.apply(device, selected: true, controllable: true)
+        assertSameHue(live.test_feedNeutralColor, Tokens.Color.goldText,
+                      "the main-mix pill is goldText while the main mix sounds here")
+
+        let idle = makeBusRow(device: makeDevice(connectionState: .off))
+        idle.apply(makeDevice(connectionState: .off), selected: true, controllable: true)
+        assertSameHue(idle.test_feedNeutralColor, Tokens.Color.label2,
+                      "a silent row's main-mix pill is the chrome label2")
     }
 
-    @Test func appSegmentColorFallsBackToNeutralTetherWhenUnmapped() {
-        let row = makeBusRow()
-        #expect(row.test_feedAppSegmentColor(for: "Music") == AppTetherColor.neutralFallback,
-                "an app the host never mapped still reads as a tether tone, not the neutral main-mix secondaryLabel")
-    }
-
-    @Test func appRedirectSegmentsWearAChipMainMixSegmentDoesNot() {
-        // Three pills' worth of bordered chrome (System + 2 app pills, 2 of
-        // them chipped) no longer fits `feedColumnWidth` at this exact width
-        // — see the note on `testManualMemberPlusTwoApps` — so Safari's pill
-        // overflows to the static "+1" here too. The chip-per-segment rule
-        // this test exists to pin is still exercised on the VISIBLE pills:
-        // "System" (no chip) and "Music" (chip); `testAppOnlyRedirectFeedStillWearsItsChip`
-        // separately covers a chip surviving as the SOLE visible app pill.
-        let row = makeBusRow()
-        row.apply(makeDevice(), selected: true, controllable: true,
-                  routedAppNames: ["Music", "Safari"],
-                  appTintColors: ["Music": .systemGreen, "Safari": .systemTeal])
-        #expect(row.test_feedText == "System · Music · +1")
-        #expect(row.test_feedChipCount == 1, "one chip per VISIBLE app segment; the neutral 'System' segment wears none")
-    }
-
-    @Test func appOnlyRedirectFeedStillWearsItsChip() {
-        let row = makeBusRow()
-        row.apply(makeDevice(), selected: false, controllable: true, routedAppNames: ["Safari"],
-                  appTintColors: ["Safari": .systemTeal])
-        #expect(row.test_feedText == "Safari")
-        #expect(row.test_feedChipCount == 1)
-    }
-
-    @Test func errorOverrideFeedNeverWearsAChip() {
-        let row = makeBusRow()
-        row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
-                  selected: true, controllable: true, routedAppNames: ["Music"],
-                  appTintColors: ["Music": .systemGreen])
-        #expect(row.test_feedText == "Didn't respond")
-        #expect(row.test_feedChipCount == 0)
+    /// Assert two colors resolve to the same sRGB components — `goldText` is a
+    /// computed `static var`, so `==` never holds on it.
+    private func assertSameHue(_ a: NSColor?, _ b: NSColor?, _ message: String,
+                               sourceLocation: SourceLocation = #_sourceLocation) {
+        guard let a = a?.usingColorSpace(.sRGB), let b = b?.usingColorSpace(.sRGB) else {
+            Issue.record("nil color: \(message)", sourceLocation: sourceLocation)
+            return
+        }
+        #expect(abs(a.redComponent - b.redComponent) < 0.01, "\(message)", sourceLocation: sourceLocation)
+        #expect(abs(a.greenComponent - b.greenComponent) < 0.01, "\(message)", sourceLocation: sourceLocation)
+        #expect(abs(a.blueComponent - b.blueComponent) < 0.01, "\(message)", sourceLocation: sourceLocation)
     }
 
     // MARK: VoiceOver — one composed announcement, no double-speaking
@@ -268,8 +256,8 @@ import AudioutCore
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
         let label = row.test_accessibilityLabel ?? ""
-        #expect(label.hasSuffix(", feeding System, Music"), "the feed clause trails the rest of the composed announcement")
-        #expect(label.components(separatedBy: "feeding").count - 1 == 1, "spoken exactly once")
+        #expect(label.hasSuffix(", playing System, Music"), "the feed clause trails the rest of the composed announcement")
+        #expect(label.components(separatedBy: "playing").count - 1 == 1, "spoken exactly once")
     }
 
     @Test func failedRowNeverSpeaksAFeedClauseSinceTheConnectionClauseAlreadyCoversIt() {
@@ -278,12 +266,12 @@ import AudioutCore
                   selected: true, controllable: true, routedAppNames: ["Music"])
         let label = row.test_accessibilityLabel ?? ""
         #expect(label.hasSuffix(", couldn't connect"), "no trailing feed clause — the connection clause already spoke the failure")
-        #expect(!(label.contains("feeding")))
+        #expect(!(label.contains("playing")))
     }
 
     @Test func nonBusRowNeverSpeaksAFeedClauseEither() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
-        #expect(!((row.test_accessibilityLabel ?? "").contains("feeding")), "a non-bus host has no FEED column, so nothing new to speak")
+        #expect(!((row.test_accessibilityLabel ?? "").contains("playing")), "a non-bus host has no FEED column, so nothing new to speak")
     }
 }

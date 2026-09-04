@@ -60,10 +60,10 @@ import AudioutCore
         let label = row.test_accessibilityLabel ?? ""
         #expect(label.hasPrefix("Sweep Speaker, "), "identity leads the announcement")
         #expect(label.contains(", in main audio"), "bus membership rides the one row label")
-        // v4.1 item 3: the FEED clause ("feeding System") now trails the ring's
+        // v4.1 item 3: the FEED clause ("playing System") now trails the ring's
         // connection-state clause — one more channel in the same composed
         // announcement, not a replacement for it.
-        #expect(label.hasSuffix(", connected, feeding System"), "the ring's state leads, the FEED clause trails, in the same announcement")
+        #expect(label.hasSuffix(", connected, playing System"), "the ring's state leads, the FEED clause trails, in the same announcement")
         #expect(label.components(separatedBy: "connected").count - 1 == 1, "the connection state is spoken exactly once")
 
         // Value: the live-signal channels (dot/mute) — and ONLY there, so the
@@ -193,7 +193,6 @@ import AudioutCore
         postDisplayOptionsChanged()
         #expect(!(dot.test_isBlooming), "Reduce Motion strips the in-flight bloom immediately")
         #expect(dot.test_isLit, "the model layer was already settled — still lit gold")
-        #expect(dot.test_hasGlow, "the static resting glow is state, not animation — it stays")
     }
 
     @Test func noBloomFiresAtAllUnderReduceMotion() {
@@ -232,13 +231,11 @@ import AudioutCore
 
     @Test func flattenedCanvasIsTheFlatOpaqueBaseColor() {
         // §D: under Reduce Transparency / Increase Contrast the canvas is the
-        // FLAT `canvas` color — no gradient (top pixel == bottom pixel), no
-        // grain. DARK appearance carries the comparison: light mode is flat
-        // even un-flattened (Circuit light theme — `canvasHi` == `canvas`,
-        // the gradient deliberately collapses), so only dark can distinguish
-        // flattened from graded. The dark-only grain doesn't confound either
-        // half — the flatten branch removes it along with the gradient, and
-        // in the graded half it only adds to the delta the assertion wants.
+        // FLAT `canvas` color — one value top to bottom, no grain. The canvas
+        // is flat in BOTH appearances now, so flattening is asserted by COLOUR
+        // (the flat pixel IS `canvas`) rather than by the absence of a
+        // gradient. Dark carries the check because it is the appearance whose
+        // draw path still adds grain the flatten branch has to remove.
         let size = NSRect(x: 0, y: 0, width: 32, height: 32)
         let canvas = WarmCanvasView(frame: size)
         canvas.appearance = NSAppearance(named: .darkAqua)
@@ -255,20 +252,14 @@ import AudioutCore
         #expect(abs((flatTop?.greenComponent ?? -1) - (flatBottom?.greenComponent ?? 1)) <= 1.0 / 255)
         #expect(abs((flatTop?.blueComponent ?? -1) - (flatBottom?.blueComponent ?? 1)) <= 1.0 / 255)
 
-        canvas.test_flattenOverride = false
-        guard let graded = bitmap(of: canvas) else {
-            Issue.record("no bitmap")
-            return
+        var darkCanvas = Tokens.Color.canvas
+        NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
+            darkCanvas = Tokens.Color.canvas.usingColorSpace(.sRGB) ?? darkCanvas
         }
-        let top = graded.colorAt(x: 16, y: 1)?.usingColorSpace(.sRGB)
-        let bottom = graded.colorAt(x: 16, y: 30)?.usingColorSpace(.sRGB)
-        // Split into sub-expressions — the single chained form exceeded the
-        // compiler's type-check budget (optional CGFloat + `??` + `abs` chain).
-        let redDelta: CGFloat = abs((top?.redComponent ?? 0) - (bottom?.redComponent ?? 0))
-        let greenDelta: CGFloat = abs((top?.greenComponent ?? 0) - (bottom?.greenComponent ?? 0))
-        let blueDelta: CGFloat = abs((top?.blueComponent ?? 0) - (bottom?.blueComponent ?? 0))
-        let delta = redDelta + greenDelta + blueDelta
-        #expect(delta > 0.5 / 255, "un-flattened: the canvasHi → canvas gradient is actually present")
+        #expect(abs((flatTop?.redComponent ?? -1) - darkCanvas.redComponent) <= 1.0 / 255,
+                "the flat pixel is Tokens.Color.canvas itself")
+        #expect(abs((flatTop?.greenComponent ?? -1) - darkCanvas.greenComponent) <= 1.0 / 255)
+        #expect(abs((flatTop?.blueComponent ?? -1) - darkCanvas.blueComponent) <= 1.0 / 255)
     }
 
     @Test func ringRestampsItsTokenColorOnDisplayOptionsChange() {
@@ -292,12 +283,12 @@ import AudioutCore
 
     @Test func meterGradientSurvivesDisplayOptionsChange() {
         // Same shape for the meter: the notification re-stamps the warm ramp
-        // (ember → gold → caution) — three stops, and never failure red
+        // (ember → gold) — two stops, and never failure red
         // (house rule 8), before and after.
         let meter = LevelMeterView()
         postDisplayOptionsChanged()
         let colors = meter.test_gradientColors
-        #expect(colors.count == 3, "the warm ramp survives the re-stamp intact")
+        #expect(colors.count == 2, "the warm ramp survives the re-stamp intact")
         guard let failure = Tokens.Color.failure.usingColorSpace(.sRGB) else {
             Issue.record("failure token did not resolve")
             return

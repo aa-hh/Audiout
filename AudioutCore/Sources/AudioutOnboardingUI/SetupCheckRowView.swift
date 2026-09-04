@@ -47,7 +47,12 @@ final class SetupCheckRowView: NSView {
     private func build() {
         translatesAutoresizingMaskIntoConstraints = false
 
-        surface = RoundedContainerView(radius: SetupSpineRowView.cornerRadius)
+        // No radius, no border: the sixth row is a full-bleed strip inside the
+        // spine's one shared grouped container, same as every permission row
+        // above it (`SetupSpineRowView`) — see that file's Direction 04
+        // grouped-inset note. The group's own rounding + hairline separators
+        // do the work a per-row card used to.
+        surface = RoundedContainerView(fill: Tokens.Color.panel, border: .clear, radius: 0)
         addSubview(surface)
 
         titleLabel.font = Tokens.Font.bodyEmphasized
@@ -58,7 +63,7 @@ final class SetupCheckRowView: NSView {
         checkmark.image = NSImage(systemSymbolName: "checkmark.circle.fill",
                                   accessibilityDescription: "Ready")
         checkmark.symbolConfiguration = .init(pointSize: 13, weight: .semibold)
-        checkmark.contentTintColor = Tokens.Color.success
+        checkmark.contentTintColor = Tokens.Color.gold
         checkmark.translatesAutoresizingMaskIntoConstraints = false
 
         spinner.style = .spinning

@@ -29,13 +29,11 @@ import Foundation
 ///   pure-Swift module with no Objective-C classes, so `NSClassFromString`
 ///   cannot see it. Instead we `dlsym` a symbol that only exists when the
 ///   `Testing` module is linked into the process (see `isSwiftTestingLoaded`).
-///   This matters because this repo's suites are migrating from XCTest to
-///   swift-testing: today `swift test` still drags `XCTest` in as long as ANY
-///   file in the target imports it, but once the last `import XCTest` is gone
-///   that is no longer guaranteed — and an un-detected test run means real,
-///   empty windows flashing on the developer's screen for the run's duration.
-///   Both checks are kept: mid-migration either one fires, end-state the
-///   swift-testing one does, and a legacy XCTest-only target still works.
+///   The test target is Swift-Testing-only, so nothing in it imports XCTest
+///   and `swift test` does not load that framework — without this `dlsym`
+///   check a test run would go undetected, and real, empty windows would
+///   flash on the developer's screen for the run's duration. The XCTest
+///   check stays too, so a legacy XCTest-only target still works.
 /// - `swift run <harness-or-snapshot-tool>`: these are neither, so each tool's
 ///   `main()` sets `AIRPLAY_HEADLESS=1` in its own environment (or the invoking
 ///   shell does) before touching AppKit. The REAL app (`AudioutApp`) never

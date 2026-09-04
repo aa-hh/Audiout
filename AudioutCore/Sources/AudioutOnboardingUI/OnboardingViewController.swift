@@ -265,48 +265,102 @@ public final class OnboardingViewController: NSViewController {
         view = background
     }
 
-    /// The spine: the hero header over six compact rows. No buttons, no copy —
-    /// everything a step SAYS lives in the ribbon now.
+    /// The spine: the hero header over six compact rows, GROUPED INSET —
+    /// macOS's native shape for a status list (`DemoPaneView`'s own Login Items
+    /// mock already draws it correctly): one rounded, bordered container, its
+    /// rows abutting with a hairline between them, rather than six separately
+    /// bordered cards with gaps — the "same-size icon + heading + text card"
+    /// shape that reads as a generic cross-platform wizard (owner critique,
+    /// Direction 04 grouped-inset pass). No buttons, no copy — everything a
+    /// step SAYS lives in the ribbon now.
     private func makeSpine() -> NSView {
         let pane = NSView()
         pane.translatesAutoresizingMaskIntoConstraints = false
 
         let header = makeHeader()
+
+        let group = RoundedContainerView(fill: Tokens.Color.panel,
+                                         border: Tokens.Color.hairline,
+                                         radius: SetupSpineRowView.cornerRadius)
+        // Clips every row's own fill/edge-bar to the group's rounded corners —
+        // the first and last rows have no radius of their own (see
+        // `SetupSpineRowView`), so this is what keeps them from squaring off
+        // past the group's rim.
+        group.wantsLayer = true
+        group.layer?.masksToBounds = true
+
         spineStack = NSStackView()
         spineStack.orientation = .vertical
         spineStack.alignment = .leading
-        spineStack.spacing = 6
+        // Zero: the hairline BETWEEN rows is drawn by a separator arranged
+        // subview, not by gap-plus-border the way six separate cards were —
+        // that gap is exactly what made the column read as six tiles.
+        spineStack.spacing = 0
         spineStack.distribution = .fill
         spineStack.translatesAutoresizingMaskIntoConstraints = false
         for step in flow.steps {
+            if !rows.isEmpty { addRowSeparator(to: spineStack) }
             let row = makeRow(for: step)
             rows[step] = row
             spineStack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: spineStack.widthAnchor).isActive = true
         }
+        addRowSeparator(to: spineStack)
         checkRow = SetupCheckRowView()
         spineStack.addArrangedSubview(checkRow)
         checkRow.widthAnchor.constraint(equalTo: spineStack.widthAnchor).isActive = true
 
+        group.addSubview(spineStack)
+        NSLayoutConstraint.activate([
+            spineStack.leadingAnchor.constraint(equalTo: group.leadingAnchor),
+            spineStack.trailingAnchor.constraint(equalTo: group.trailingAnchor),
+            spineStack.topAnchor.constraint(equalTo: group.topAnchor),
+            spineStack.bottomAnchor.constraint(equalTo: group.bottomAnchor),
+        ])
+
         pane.addSubview(header)
-        pane.addSubview(spineStack)
+        pane.addSubview(group)
 
         // Weakest constraint in the column: the spine hangs from the header and
         // the pane's lower slack falls below it.
-        let stackAboveBottom = spineStack.bottomAnchor.constraint(lessThanOrEqualTo: pane.bottomAnchor)
-        stackAboveBottom.priority = .defaultLow
+        let groupAboveBottom = group.bottomAnchor.constraint(lessThanOrEqualTo: pane.bottomAnchor)
+        groupAboveBottom.priority = .defaultLow
 
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
             header.topAnchor.constraint(equalTo: pane.topAnchor),
 
-            spineStack.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
-            spineStack.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
-            spineStack.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 18),
-            stackAboveBottom,
+            group.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
+            group.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
+            group.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 18),
+            groupAboveBottom,
         ])
         return pane
+    }
+
+    /// A hairline between two spine rows, inset to the row's text column and
+    /// full-bleed to the trailing edge — the same anatomy
+    /// `DemoPaneView`'s grouped-list mock already draws for its own rows,
+    /// which is what makes the group read as ONE list rather than six tiles
+    /// glued together.
+    private func addRowSeparator(to stack: NSStackView) {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        let box = NSBox()
+        box.boxType = .separator
+        box.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(box)
+        let textLeading = SetupSpineRowView.horizontalInset + SetupSpineRowView.iconSide
+            + SetupSpineRowView.iconGap
+        NSLayoutConstraint.activate([
+            box.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: textLeading),
+            box.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            box.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            container.heightAnchor.constraint(equalToConstant: 1),
+        ])
+        stack.addArrangedSubview(container)
+        container.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
     }
 
     /// The hero: one warm panel, read top to bottom (owner-approved 2026-08-12).
@@ -323,7 +377,7 @@ public final class OnboardingViewController: NSViewController {
     private func makeHeroPane() -> NSView {
         let pane = RoundedContainerView(fill: Tokens.Color.panel,
                                         border: Tokens.Color.hairline,
-                                        radius: 12)
+                                        radius: Tokens.Layout.Radius.row)
         heroHead = SetupHeroHeadView(width: SetupRibbonView.textWidth)
         previewFrame = SetupPreviewFrameView()
         demoPane = DemoPaneView()
@@ -1323,7 +1377,7 @@ public final class OnboardingViewController: NSViewController {
             // wait names the symptom and demotes a way round the frozen dialog.
             if isStuck(step) {
                 content.status = (Self.alertSymbol, Self.stuckPromptHint,
-                                  Tokens.Color.warningText, false)
+                                  Tokens.Color.label2, false)
                 content.body = Self.ribbonBody(copy.detail)
                 content.quietLink = "Open Settings…"
                 return content
@@ -1333,7 +1387,7 @@ public final class OnboardingViewController: NSViewController {
             // dialog, and only the words have something new to say.
             content.status = (nil,
                               closeRefusedDuringPrompt ? Self.closeRefusedStatus : Self.waitingStatus,
-                              Tokens.Color.warningText, true)
+                              Tokens.Color.label2, true)
             content.body = Self.ribbonBody(copy.detail)
             return content
         }
@@ -1357,7 +1411,7 @@ public final class OnboardingViewController: NSViewController {
         if step == .speakerSync, didTripLoginItems,
            model.ptpHelperStatus == .requiresApproval {
             content.status = (Self.alertSymbol, Self.speakerSyncRecoveryStatus,
-                              Tokens.Color.warningText, false)
+                              Tokens.Color.label2, false)
             content.body = Self.ribbonBody(Self.speakerSyncRecoveryBody)
             content.primary = ("Open Login Items…", .prominent)
             content.showsSkip = true
@@ -1381,7 +1435,7 @@ public final class OnboardingViewController: NSViewController {
         // so the pane is a demotion beside it, never a replacement.
         if localNetworkUnanswered(step) {
             content.status = (Self.alertSymbol, Self.localNetworkUnansweredStatus,
-                              Tokens.Color.warningText, false)
+                              Tokens.Color.label2, false)
             content.body = Self.ribbonBody(copy.detail)
             content.primary = ("Try Again", .prominent)
             content.quietLink = offersSettingsLink(step) ? "Open Settings…" : nil
@@ -1402,7 +1456,7 @@ public final class OnboardingViewController: NSViewController {
         content = firstAskRibbonContent(step)
         if reopenedSteps.contains(step) {
             content.status = ("slash.circle", "You skipped this earlier \u{2014} nothing's lost.",
-                              Tokens.Color.warningText, false)
+                              Tokens.Color.label2, false)
         }
         return content
     }
@@ -1658,7 +1712,7 @@ public final class OnboardingViewController: NSViewController {
                 headerMessage = .permissionLost
                 titleLabel.stringValue = "Let's get your sound back"
                 subtitleLabel.stringValue = Self.permissionLostText(for: stillMissing)
-                subtitleLabel.textColor = Tokens.Color.warningText
+                subtitleLabel.textColor = Tokens.Color.label2
                 return
             }
         }
@@ -2186,7 +2240,7 @@ public final class OnboardingViewController: NSViewController {
     }
 
     /// Whether the gate button is the gold prominent CTA — a `ProminentButton`
-    /// carrying the `goldCTA` fill, not a plain bezel. Compared by RESOLVED
+    /// carrying the gold fill, not a plain bezel. Compared by RESOLVED
     /// sRGB components: two accesses of a provider-backed token are distinct
     /// `NSColor` instances, and their `isEqual` is not documented to see
     /// through the provider.
@@ -2196,7 +2250,7 @@ public final class OnboardingViewController: NSViewController {
               let done = ribbon.primaryButton as? ProminentButton else { return false }
         var matches = false
         NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
-            matches = done.fill.usingColorSpace(.sRGB) == Tokens.Color.goldCTA.usingColorSpace(.sRGB)
+            matches = done.fill.usingColorSpace(.sRGB) == Tokens.Color.gold.usingColorSpace(.sRGB)
         }
         return matches
     }

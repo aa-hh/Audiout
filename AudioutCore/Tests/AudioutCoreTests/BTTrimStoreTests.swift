@@ -46,14 +46,12 @@ import Testing
     }
 
     /// The two maps are independent: the wizard writes the latency and must
-    /// never disturb the user's trim, or the dismissal record.
-    @Test func latenciesAndTrimsAndDismissalsSurviveEachOther() throws {
+    /// never disturb the user's trim.
+    @Test func latenciesAndTrimsSurviveEachOther() throws {
         let store = store()
         try store.save(["a": 40])
-        try store.saveDismissedUIDs(["b"])
         try store.saveLatencies(["a": 320])
         #expect(try store.load() == ["a": 40])
-        #expect(try store.loadDismissedUIDs() == ["b"])
         #expect(try store.loadLatencies() == ["a": 320])
 
         try store.save(["a": -10])
@@ -74,17 +72,14 @@ import Testing
         #expect(try store.loadLatencies()?["a"] == nil, "the measurement is gone, not 0")
     }
 
-    /// It clears ONE device and touches nothing else — neither another
-    /// speaker's alignment nor the dismissal record.
-    @Test func clearAlignmentLeavesOtherDevicesAndDismissalsAlone() throws {
+    /// It clears ONE device and touches no other speaker's alignment.
+    @Test func clearAlignmentLeavesOtherDevicesAlone() throws {
         let store = store()
         try store.save(["a": 40, "b": -10])
         try store.saveLatencies(["a": 320, "b": 640])
-        try store.saveDismissedUIDs(["a"])
         try store.clearAlignment(deviceUID: "a")
         #expect(try store.load() == ["b": -10])
         #expect(try store.loadLatencies() == ["b": 640])
-        #expect(try store.loadDismissedUIDs() == ["a"], "\"Not now\" is final and survives a reset")
     }
 
     /// Nothing stored yet (or nothing for this device) is not an error — the

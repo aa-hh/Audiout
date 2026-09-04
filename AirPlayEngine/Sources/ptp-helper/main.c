@@ -14,8 +14,12 @@
 //      CI/test path, §6.2's "interim dev launch" high-port mode) — applied
 //      via airptp_ports_override()/airptp_shm_name_override() BEFORE binding.
 //   2. Register airptp_callbacks (logmsg/hexdump/thread_name_set) so the
-//      library's own diagnostics reach stderr, which launchd redirects to
-//      its configured log files.
+//      library's own diagnostics reach stderr (visible directly when
+//      launched unprivileged for dev/test — the bundled plist sets no
+//      StandardErrorPath, so launchd does NOT capture it to a file on its
+//      own) and are teed to the unified log via os_log(), queryable with
+//      `log show --predicate 'process == "ptp-helper"'` no matter how the
+//      process was started.
 //   3. Check in on the launchd Mach service, if one was handed to us (see
 //      "On-demand lifecycle" below).
 //   4. Derive a real per-host clock-id seed from gethostuuid() (§6.1: "feed a
@@ -48,6 +52,15 @@
 //     later, so a single bind attempt would lose the race.
 //   - Idle exit: once no PTP peer has been active for a while, exit so
 //     launchd tears the ports back down and macOS AirPlay can have them.
+//   - Dead-man's watchdog: idle exit above only works if the service loop is
+//     still iterating to notice the empty peer table. Observed live: the PTP
+//     thread wedged (stopped servicing 319/320 entirely) while still holding
+//     the ports bound, for over an hour, and idle exit never fired because
+//     nothing was left running the code that watches for it. An independent
+//     dispatch timer checks a heartbeat the service loop updates every
+//     iteration; if it goes stale, the timer hard-exits non-zero so launchd
+//     starts a fresh copy instead of the wedged one squatting the ports
+//     forever.
 //   - Release verb: a peer connection may send a dictionary with
 //     {"release": true} to trigger the same clean exit immediately, so a
 //     seamless handoff can free 319/320 in ~1s instead of waiting out the
@@ -62,8 +75,9 @@
 //               for any of these — the next connect click demand-starts a
 //               fresh attempt through the Mach service.
 //   non-zero  = genuine internal failure only (daemon_start failed, the
-//               library stopped reporting a running daemon). Respawning is
-//               the right response to these.
+//               library stopped reporting a running daemon, the dead-man's
+//               watchdog caught a wedged service loop). Respawning is the
+//               right response to these.
 //
 // ENV OVERRIDES (all optional; the AUDIOUT_PTP_* family)
 //
@@ -78,6 +92,10 @@
 //   AUDIOUT_PTP_IDLE_SECS           idle-exit window, default 15.
 //   AUDIOUT_PTP_IDLE_GRACE_SECS     startup grace before idleness is
 //                                     measured at all, default 30.
+//   AUDIOUT_PTP_WATCHDOG_SECS       dead-man's watchdog staleness threshold -
+//                                     hard-exit(1) if the service loop stops
+//                                     proving progress for this long, default
+//                                     30.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,9 +107,11 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <time.h>
+#include <stdatomic.h>
 #include <uuid/uuid.h>
 #include <dispatch/dispatch.h>
 #include <xpc/xpc.h>
+#include <os/log.h>
 #ifdef __APPLE__
 #include <pthread.h>
 #endif
@@ -115,11 +135,56 @@ ptp_helper_signal_handler(int signum)
   ptp_helper_should_run = 0;
 }
 
+// MARK: - Unified log (os_log) tee
+//
+// Every stderr diagnostic below also reaches `log show --predicate 'process
+// == "ptp-helper"'` — stderr alone is not enough once launchd runs this
+// daemon (no StandardErrorPath is configured in the bundled plist, so
+// launchd does NOT redirect it to a file; stderr is only visible when the
+// binary is launched directly for dev/test). os_log() itself requires a
+// compile-time literal format string, so a dynamic fmt/va_list (as arrives
+// here from every fprintf(stderr, ...) call site in this file) is formatted
+// into a buffer first and handed to os_log() as one "%{public}s" argument —
+// %{public} because none of this diagnostic text is privacy-sensitive and it
+// must not be redacted in `log show`.
+
+static os_log_t
+ptp_helper_log_handle(void)
+{
+  static os_log_t logger;
+  static dispatch_once_t once;
+
+  dispatch_once(&once, ^{
+    logger = os_log_create("com.audiout.ptp-helper", "diagnostics");
+  });
+
+  return logger;
+}
+
+static void
+ptp_helper_os_log_v(const char *fmt, va_list ap)
+{
+  char buf[512];
+
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  os_log(ptp_helper_log_handle(), "%{public}s", buf);
+}
+
+static void
+ptp_helper_os_log(const char *fmt, ...)
+{
+  va_list ap;
+
+  va_start(ap, fmt);
+  ptp_helper_os_log_v(fmt, ap);
+  va_end(ap);
+}
+
 // MARK: - Callbacks (ptp-helper-design.md §1; shape mirrors
 // CAirPlayEngine/shims/ptpd.c's logmsg/hexdump, minus the OwnTone logger —
-// this daemon has no logger dependency, so it writes straight to stderr,
-// which launchd captures per the daemon's launchd plist (StandardErrorPath /
-// the default log redirection).
+// this daemon has no logger dependency, so it writes straight to stderr
+// (visible unprivileged in dev; see the unified-log note above for why that
+// alone is not enough) and tees the same text to the unified log.
 
 static void
 ptp_helper_logmsg(const char *fmt, ...)
@@ -130,20 +195,40 @@ ptp_helper_logmsg(const char *fmt, ...)
   vfprintf(stderr, fmt, ap);
   va_end(ap);
   fputc('\n', stderr);
+
+  va_start(ap, fmt);
+  ptp_helper_os_log_v(fmt, ap);
+  va_end(ap);
 }
 
 static void
 ptp_helper_hexdump(const char *msg, uint8_t *data, size_t data_len)
 {
   size_t i;
+  char line[3 * 16 + 1];
+  size_t line_len = 0;
 
   if (msg)
+  {
     fprintf(stderr, "%s\n", msg);
+    ptp_helper_os_log("%s", msg);
+  }
 
   for (i = 0; i < data_len; i++)
+  {
     fprintf(stderr, "%02x%s", data[i], ((i + 1) % 16 == 0) ? "\n" : " ");
+    line_len += (size_t)snprintf(line + line_len, sizeof(line) - line_len, "%02x ", data[i]);
+    if ((i + 1) % 16 == 0)
+    {
+      ptp_helper_os_log("%s", line);
+      line_len = 0;
+    }
+  }
   if (data_len % 16 != 0)
+  {
     fputc('\n', stderr);
+    ptp_helper_os_log("%s", line);
+  }
 }
 
 static void
@@ -186,6 +271,7 @@ ptp_helper_apply_port_override_if_set(void)
   if (!comma)
   {
     fprintf(stderr, "ptp-helper: AUDIOUT_PTP_PORTS must be \"EVENT,GENERAL\" (got \"%s\") - ignoring\n", env);
+    ptp_helper_os_log("ptp-helper: AUDIOUT_PTP_PORTS must be \"EVENT,GENERAL\" (got \"%s\") - ignoring", env);
     return;
   }
 
@@ -196,11 +282,14 @@ ptp_helper_apply_port_override_if_set(void)
   if (event_port <= 0 || event_port > 65535 || general_port <= 0 || general_port > 65535)
   {
     fprintf(stderr, "ptp-helper: AUDIOUT_PTP_PORTS out of range (\"%s\") - ignoring\n", env);
+    ptp_helper_os_log("ptp-helper: AUDIOUT_PTP_PORTS out of range (\"%s\") - ignoring", env);
     return;
   }
 
   fprintf(stderr, "ptp-helper: AUDIOUT_PTP_PORTS set - overriding to event=%ld general=%ld (unprivileged test path)\n",
           event_port, general_port);
+  ptp_helper_os_log("ptp-helper: AUDIOUT_PTP_PORTS set - overriding to event=%ld general=%ld (unprivileged test path)",
+                     event_port, general_port);
   airptp_ports_override((unsigned short)event_port, (unsigned short)general_port);
 }
 
@@ -221,6 +310,7 @@ ptp_helper_apply_shm_name_override_if_set(void)
     return;
 
   fprintf(stderr, "ptp-helper: AUDIOUT_PTP_SHM_NAME set - publishing clock state as \"%s\" (unprivileged test path)\n", env);
+  ptp_helper_os_log("ptp-helper: AUDIOUT_PTP_SHM_NAME set - publishing clock state as \"%s\" (unprivileged test path)", env);
   airptp_shm_name_override(env);
 }
 
@@ -246,10 +336,90 @@ ptp_helper_env_long(const char *name, long fallback)
   if (errno != 0 || end == env || *end != '\0' || value < 0)
   {
     fprintf(stderr, "ptp-helper: %s=\"%s\" is not a non-negative integer - using %ld\n", name, env, fallback);
+    ptp_helper_os_log("ptp-helper: %s=\"%s\" is not a non-negative integer - using %ld", name, env, fallback);
     return fallback;
   }
 
   return value;
+}
+
+// MARK: - Dead-man's watchdog
+//
+// Idle exit (see ptp_helper_wait_until_idle_or_signal() below) only frees the
+// ports if the service loop is still iterating to notice the empty peer
+// table. Observed live: the PTP master loop (its own thread, started inside
+// airptp_daemon_start()) stopped servicing UDP 319/320 entirely while still
+// holding them bound - ~38KB queued unread on port 319 after over an hour -
+// and idle exit never fired, because nothing was left running the code that
+// watches for it. This watchdog is the independent backstop: rather than
+// trusting the service loop to notice its own death, an unrelated dispatch
+// timer checks whether the loop keeps proving forward progress at all.
+//
+// ptp_helper_heartbeat() is called once per iteration, at the top of the
+// while loop in ptp_helper_wait_until_idle_or_signal() - so a fresh
+// timestamp means the PREVIOUS iteration ran to completion, including its
+// call into airptp_peer_active_count() (the one call in that loop touching
+// the same peer-table state the wedged PTP thread was manipulating, and so
+// the most likely place a lock inversion would hang it). A normal quiet
+// period - empty peer table, loop ticking on its ~1s poll - refreshes the
+// heartbeat every iteration and never trips the watchdog; only a loop that
+// stops reaching its own top does.
+//
+// A trip is a genuine internal failure (see the EXIT-CODE CONTRACT at the
+// top of this file): hard-exit non-zero, via _exit() rather than a normal
+// return through main(), so launchd's KeepAlive={SuccessfulExit:false}
+// demand-starts a fresh copy. Deliberately skips airptp_end(hdl)'s normal
+// teardown - if the service loop is wedged, whatever state daemon_start()
+// left behind cannot be trusted to unwind cleanly either, and a watchdog
+// that can itself hang defeats the point of having one.
+static _Atomic time_t ptp_helper_last_heartbeat;
+
+static void
+ptp_helper_heartbeat(void)
+{
+  atomic_store_explicit(&ptp_helper_last_heartbeat, time(NULL), memory_order_relaxed);
+}
+
+// Held for process lifetime and deliberately never released, same reasoning
+// as ptp_helper_mach_listener below: the timer must stay armed for as long
+// as we run.
+static dispatch_source_t ptp_helper_watchdog_timer;
+
+// Arms the watchdog. Must be called once, after the service loop it is
+// watching is about to start (so the seeded heartbeat below is not stale
+// before the loop gets a chance to run), and only once per process.
+static void
+ptp_helper_watchdog_start(void)
+{
+  long threshold_secs = ptp_helper_env_long("AUDIOUT_PTP_WATCHDOG_SECS", 30);
+  long check_secs = threshold_secs / 3;
+  dispatch_queue_t queue;
+
+  if (check_secs < 1)
+    check_secs = 1;
+  if (check_secs > 10)
+    check_secs = 10;
+
+  ptp_helper_heartbeat(); // Seed it now, before the service loop's first iteration.
+
+  queue = dispatch_queue_create("com.audiout.ptp-helper.watchdog", DISPATCH_QUEUE_SERIAL);
+  ptp_helper_watchdog_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+  dispatch_source_set_timer(ptp_helper_watchdog_timer, dispatch_time(DISPATCH_TIME_NOW, check_secs * NSEC_PER_SEC),
+                             (uint64_t)check_secs * NSEC_PER_SEC, NSEC_PER_SEC);
+  dispatch_source_set_event_handler(ptp_helper_watchdog_timer, ^{
+    time_t last = atomic_load_explicit(&ptp_helper_last_heartbeat, memory_order_relaxed);
+    time_t stale_for = time(NULL) - last;
+
+    if (stale_for < threshold_secs)
+      return;
+
+    ptp_helper_logmsg("ptp-helper: watchdog - service loop has not proven progress for %lds (threshold %lds) - "
+                       "it is wedged, hard-exiting so launchd starts a fresh copy",
+                       (long)stale_for, threshold_secs);
+    fflush(stderr);
+    _exit(1);
+  });
+  dispatch_resume(ptp_helper_watchdog_timer);
 }
 
 // MARK: - launchd Mach-service check-in
@@ -286,6 +456,7 @@ ptp_helper_mach_checkin(void)
   {
     // Not fatal: the clock is still worth running for whoever started us.
     fprintf(stderr, "ptp-helper: could not create a Mach service listener for \"%s\" - continuing without check-in\n", name);
+    ptp_helper_os_log("ptp-helper: could not create a Mach service listener for \"%s\" - continuing without check-in", name);
     return;
   }
 
@@ -334,6 +505,7 @@ ptp_helper_clock_id_seed_get(void)
     char hostname[256];
 
     fprintf(stderr, "ptp-helper: gethostuuid() failed (errno %d) - falling back to hostname\n", errno);
+    ptp_helper_os_log("ptp-helper: gethostuuid() failed (errno %d) - falling back to hostname", errno);
 
     if (gethostname(hostname, sizeof(hostname)) != 0)
       return 0x41756469756f7465ULL; // "Audiote"-ish - last-resort constant, never 0xdeadbeef.
@@ -403,7 +575,10 @@ ptp_helper_bind_with_retry(void)
     // Sparingly: a 500 ms cadence over 10 s would otherwise be 20 identical
     // lines in the launchd log for every failed takeover.
     if (attempt % 4 == 0)
+    {
       fprintf(stderr, "ptp-helper: PTP ports still busy (attempt %ld/%ld): %s\n", attempt + 1, attempts, airptp_errmsg_get());
+      ptp_helper_os_log("ptp-helper: PTP ports still busy (attempt %ld/%ld): %s", attempt + 1, attempts, airptp_errmsg_get());
+    }
 
     ptp_helper_sleep_ms(interval_ms);
   }
@@ -437,6 +612,8 @@ ptp_helper_wait_until_idle_or_signal(struct airptp_handle *hdl)
 
   while (ptp_helper_should_run)
   {
+    ptp_helper_heartbeat(); // Dead-man's watchdog: proves this iteration started.
+
     ptp_helper_sleep_ms(1000);
     if (!ptp_helper_should_run)
       break;
@@ -449,6 +626,7 @@ ptp_helper_wait_until_idle_or_signal(struct airptp_handle *hdl)
       // - a genuine internal failure, so exit non-zero and let launchd's
       // KeepAlive={SuccessfulExit:false} respawn.
       fprintf(stderr, "ptp-helper: airptp_peer_active_count() no longer reports a running daemon - aborting\n");
+      ptp_helper_os_log("ptp-helper: airptp_peer_active_count() no longer reports a running daemon - aborting");
       return 1;
     }
 
@@ -518,11 +696,16 @@ main(void)
   if (ret < 0)
   {
     fprintf(stderr, "ptp-helper: airptp_daemon_start() failed: %s\n", airptp_errmsg_get());
+    ptp_helper_os_log("ptp-helper: airptp_daemon_start() failed: %s", airptp_errmsg_get());
     airptp_end(hdl);
     return 1;
   }
 
   ptp_helper_logmsg("ptp-helper: running (shared daemon, clock state published)");
+
+  // Arm the dead-man's watchdog now: it watches ptp_helper_wait_until_idle_or_
+  // signal()'s loop below, so there is nothing to watch before this point.
+  ptp_helper_watchdog_start();
 
   // No daemonize() - launchd (or, in the interim dev path, the foreground
   // osascript-elevated caller) owns backgrounding (§2.2, §6.1). The PTP

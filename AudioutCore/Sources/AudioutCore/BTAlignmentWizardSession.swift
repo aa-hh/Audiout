@@ -6,6 +6,12 @@
 
 import Foundation
 
+/// Which affordance opened a wizard run — carried into
+/// `bt_sync:wizard_started` so the four doors can be told apart.
+public enum BTAlignmentWizardDoor: String {
+    case chip, note, drawer, menu
+}
+
 /// One run of the alignment wizard for one device (W2): owns the
 /// ``BTAlignmentPosterior`` loop end to end and drives the backend through
 /// three injected closures — candidate trims as LIVE PREVIEWS (relative to the

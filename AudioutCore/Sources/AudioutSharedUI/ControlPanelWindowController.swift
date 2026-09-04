@@ -240,18 +240,27 @@ public final class ControlPanelWindowController: NSWindowController {
             // NO separate visible title bar (owner decision 2026-08-07, live
             // build review): the window-attached toolbar the surface installs
             // IS the one header strip, and `titleVisibility` stays `.hidden`
-            // so the title-bar text never stacks a second strip above it (the
-            // toolbar carries a centered app-name item instead; `window.title`
-            // remains set for VoiceOver / Mission Control). The title bar
-            // area keeps its system material pinned (`titlebarAppearsTransparent
-            // = false`) — the system draws the unified-toolbar strip, Liquid
-            // Glass on macOS 26+, the older material below, Reduce
-            // Transparency handled for free. Appearance bits only: the style
-            // mask is NOT touched (see `makePanel`), so `.fullSizeContentView`
-            // stays on — the hosted content still spans the whole frame,
-            // including under the toolbar strip, and content that needs to
-            // clear it has to inset itself.
-            panel.titlebarAppearsTransparent = false
+            // so the title-bar text never stacks a second strip above it
+            // (`window.title` remains set for VoiceOver / Mission Control).
+            //
+            // The title bar is TRANSPARENT in both manners, so the strip shows
+            // the window's own `backgroundColor` — the same warm `panel` the
+            // body carries. Pinned used to leave it opaque and let the system
+            // paint the unified-strip material, which in dark mode is a
+            // NEUTRAL grey against a warm near-black body: a hard horizontal
+            // seam across the window, exactly under the header (live check,
+            // 2026-09-03). Warm Signal owns backgrounds, so the ground has to
+            // run edge to edge. Nothing is given up to get it: the window is
+            // opaque with an authored fill, so there is no translucency for
+            // Reduce Transparency to reduce, and the toolbar ITEMS still draw
+            // their own macOS 26+ glass capsules — those are the controls, not
+            // the ground.
+            //
+            // Appearance bits only: the style mask is NOT touched (see
+            // `makePanel`), so `.fullSizeContentView` stays on — the hosted
+            // content still spans the whole frame, including under the toolbar
+            // strip, and content that needs to clear it has to inset itself.
+            panel.titlebarAppearsTransparent = true
             panel.titleVisibility = .hidden
             // Pinned shows the standard close button (an ordinary window's
             // close affordance); unpinned hides it — the menu-bar click and
@@ -457,6 +466,14 @@ public final class ControlPanelWindowController: NSWindowController {
         set { (window as? ControlPanelPanel)?.keyEquivalentHandler = newValue }
     }
 
+    /// The panel's Escape hook (see `ControlPanelPanel`): consulted before
+    /// Escape closes the panel, so a screen showing content one level deep
+    /// can step back instead. Return `true` to keep the panel open.
+    public var cancelHandler: (() -> Bool)? {
+        get { (window as? ControlPanelPanel)?.cancelHandler }
+        set { (window as? ControlPanelPanel)?.cancelHandler = newValue }
+    }
+
     /// Whether the panel is currently on screen, as opposed to tucked away by
     /// `hidesOnDeactivate` after an app-switch. The status-item click handler
     /// reads this to decide between toggling a live panel CLOSED and restoring
@@ -499,6 +516,26 @@ public final class ControlPanelWindowController: NSWindowController {
         return CACurrentMediaTime() - stamp <= interval
     }
 
+    /// Bring the app forward so the panel can actually take key.
+    ///
+    /// `NSApp.activate()` — the macOS 14+ cooperative form — is DECLINED when
+    /// the app is not already frontmost, which is exactly the state a menu-bar
+    /// status-item click leaves us in. Measured in a Developer ID signed bundle
+    /// (2026-08-30): after `show(anchorRect:)` had called it plus
+    /// `makeKeyAndOrderFront`, the panel still reported
+    /// `key=false appActive=false`. The panel then renders its whole header in
+    /// the unfocused appearance forever — every control at ~1.2:1 instead of
+    /// ~3.3:1, and the brand mark's gold washed to grey. Alec reported it as
+    /// "the header is always in a dismissed state", in the notarised build too.
+    ///
+    /// `activate(ignoringOtherApps:)` is deprecated but is NOT refusable, and
+    /// is the only form that reliably fronts an `.accessory` app from its own
+    /// status item. We ask for it only in response to a user gesture that
+    /// opened the surface, which is what the API is for.
+    private static func activateForSurface() {
+        NSApp?.activate(ignoringOtherApps: true)
+    }
+
     /// Show the panel anchored just under `anchorRect` (the menu-bar status
     /// item's frame, in screen coordinates); `nil` centers it.
     ///
@@ -519,7 +556,7 @@ public final class ControlPanelWindowController: NSWindowController {
 
         if isPinned {
             if !HeadlessRuntime.isActive {
-                NSApp?.activate()
+                Self.activateForSurface()
                 panel.makeKeyAndOrderFront(nil)
             }
             return
@@ -579,7 +616,7 @@ public final class ControlPanelWindowController: NSWindowController {
         // for the run's duration. Everything else (frame math, model state)
         // still runs so headless assertions stay exactly as strong.
         if !HeadlessRuntime.isActive {
-            NSApp?.activate()
+            Self.activateForSurface()
             panel.makeKeyAndOrderFront(nil)
         }
 
@@ -813,7 +850,10 @@ extension ControlPanelWindowController: NSWindowDelegate {
 ///    `.titled`/`.closable` (it does — see
 ///    `ControlPanelWindowController.makePanel`), so this closes cleanly with no
 ///    system beep. A field editor still gets first crack at Escape (to cancel
-///    in-progress text editing) before it reaches here.
+///    in-progress text editing) before it reaches here, and the injected
+///    `cancelHandler` gets the next: content one level deep (the Groups
+///    screen's group editor) steps back instead, and only the next Escape
+///    closes the panel.
 /// 2. To offer callers a key-equivalent seam. The surface's screen shortcuts
 ///    (⌘1/⌘2/⌘3) used to ride `NSButton.keyEquivalent` on in-content header
 ///    buttons; a window-attached `NSToolbarItemGroup` carries no per-segment
@@ -839,7 +879,12 @@ final class ControlPanelPanel: NSPanel {
         resizeAnimationDuration ?? super.animationResizeTime(newFrame)
     }
 
+    /// Consulted before Escape closes the panel; return `true` to consume the
+    /// press. Set through `ControlPanelWindowController.cancelHandler`.
+    var cancelHandler: (() -> Bool)?
+
     override func cancelOperation(_ sender: Any?) {
+        if cancelHandler?() == true { return }
         performClose(sender)
     }
 

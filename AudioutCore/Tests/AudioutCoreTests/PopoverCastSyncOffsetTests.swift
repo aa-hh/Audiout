@@ -80,12 +80,10 @@ import AppKit
         init(_ values: [String: Double]) { self.values = values }
     }
 
-    private func waitFor(timeout: TimeInterval = 5, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     // MARK: The chip
@@ -113,11 +111,24 @@ import AppKit
                 "the chip is the only place that says what the dial is FOR")
     }
 
-    @Test func theSyncColumnTitleRendersOverTheCastSubsection() {
+    /// The legend for the chip lives on the CARD HEADER now, not on each
+    /// subsection's own header line — the 2026-08-28 owner ruling that moved
+    /// "Source" / "Offset" up there, which landed after Cast did. So a Cast row
+    /// is covered by the same legend a Bluetooth or This Mac row sits under
+    /// instead of carrying a "Sync" title of its own. This replaces
+    /// `theSyncColumnTitleRendersOverTheCastSubsection`, which pinned the
+    /// per-subsection mechanism that ruling removed; the behaviour it protected
+    /// — Cast rows are labelled, AirPlay rows are not — is what the two
+    /// expectations below still hold.
+    @Test func theCardHeaderOffsetLegendCoversTheCastRows() {
         let isolation = TestIsolation(owner: "PopoverCastSyncOffsetTests")
         let (popover, _, _) = makePopover(isolation)
-        #expect(popover.test_syncColumnTitleShown(in: "Cast Devices"))
-        #expect(!popover.test_syncColumnTitleShown(in: "AirPlay Devices"))
+        #expect(popover.test_offsetColumnTitleShown(),
+                "a chip-carrying Cast row puts the card header's Offset legend on screen")
+        #expect(popover.test_deviceRow(for: "cast-tv")?.test_syncChipTitle != nil,
+                "and the Cast row carries the chip that legend names")
+        #expect(popover.test_deviceRow(for: "office")?.test_syncChipTitle == nil,
+                "while an AirPlay row still carries no chip for it to name")
     }
 
     // MARK: The drawer
@@ -207,18 +218,15 @@ import AppKit
         #expect(titles.contains("Equalizer…"), "…but tone is unaffected")
     }
 
-    @Test func theDrawersOptionClickWizardDoorIsRefusedForCast() {
+    @Test func theDrawerCarriesNoAlignAgainDoorForCast() {
         let isolation = TestIsolation(owner: "PopoverCastSyncOffsetTests")
         let (popover, _, _) = makePopover(isolation)
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         _ = popover.test_toggleDeviceEnabled(deviceID: "cast-tv", on: true)
 
         popover.test_deviceRow(for: "cast-tv")?.test_fireSyncChipClick()
-        let drawer = popover.test_syncDrawer
-        drawer?.test_optionModifierOverride = true
-        drawer?.test_fireAlignClick()
 
-        #expect(popover.test_btWizardView() == nil,
-                "the hidden ⌥ door is refused too, not just the visible menu item")
+        #expect(popover.test_syncDrawer?.test_alignAgainVisible == false,
+                "no wizard for this receiver, so no door to it — never a dead button")
     }
 }

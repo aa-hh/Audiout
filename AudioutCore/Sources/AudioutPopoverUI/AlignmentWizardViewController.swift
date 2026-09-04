@@ -28,8 +28,8 @@ public final class AlignmentWizardViewController: NSViewController {
     private let canvas: WarmCanvasView
     private let wizardView: BTAlignmentWizardView
     /// Two soft radial washes on the sheet ground behind the plate — green
-    /// (sync/target) behind the left third, magenta (party/reference) behind
-    /// the right third (spec §2.2). A sibling `NSView`, not a sublayer of
+    /// (sync/target) behind the left third, steel blue (`ring`, the reference)
+    /// behind the right third (spec §2.2). A sibling `NSView`, not a sublayer of
     /// `canvas`'s own backing layer — see `RoomSpillView`'s doc comment.
     private let roomSpill = RoomSpillView(frame: .zero)
 
@@ -110,8 +110,9 @@ public final class AlignmentWizardViewController: NSViewController {
     }
 
     /// Places the two spill layers: green behind the left third of the
-    /// STAGE, magenta behind the right third (spec §2.2 — "behind the
-    /// plate"), at `spillRadius`, centred on the stage's own midline.
+    /// STAGE, steel blue (`ring`, the reference) behind the right third
+    /// (spec §2.2 — "behind the plate"), at `spillRadius`, centred on the
+    /// stage's own midline.
     private func reframeSpillLayers() {
         let radius = Self.spillRadius
         let side = radius * 2
@@ -246,16 +247,16 @@ private final class RoomSpillView: NSView {
 
     /// Peak spill alpha: 0.10 dark (spec §2.2). OFF in light: measured at
     /// both 0.07 and 0.12 the wash was <1% neutral darkening with no chroma —
-    /// invisible as a tint, visible only as banding on the Circuit ground.
+    /// invisible as a tint, visible only as banding on the flat light ground.
     private var peakOpacity: CGFloat { isDarkAppearance ? 0.10 : 0 }
 
     private var leftTint: NSColor {
-        isDarkAppearance ? Tokens.Color.syncSignal : Tokens.Color.syncSignalDeep
+        isDarkAppearance ? Tokens.Color.wireCore : Tokens.Color.syncSignalDeep
     }
 
-    private var rightTint: NSColor {
-        isDarkAppearance ? Tokens.Color.partySignal : Tokens.Color.partySignalDeep
-    }
+    /// `ring`'s dark hex is the only one ever seen — light spill is off
+    /// (`peakOpacity`).
+    private var rightTint: NSColor { Tokens.Color.ring }
 
     private func gradientColors(_ tint: NSColor) -> [CGColor] {
         [tint.cgColor, tint.withAlphaComponent(0).cgColor]

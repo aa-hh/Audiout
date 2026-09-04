@@ -99,15 +99,10 @@ public struct BTTrimStore: Sendable {
     struct Envelope: Codable {
         var schemaVersion: Int
         var trims: [String: Double]
-        /// Device UIDs whose first-mix alignment intercept the user dismissed
-        /// with "Not now" (W3) — FINAL, never auto-prompted again. Optional so
-        /// a pre-existing file (and an old reader on a new file) decodes
-        /// cleanly; no schema bump needed.
-        var alignmentPromptDismissed: [String]?
         /// Roadmap 056 Part A: each Bluetooth device's MEASURED output latency
         /// in ms — what the alignment wizard now writes, distinct from the
-        /// user's `trims` nudge on top of it. Optional for the same reason as
-        /// the dismissal list: a file holding only trims still decodes.
+        /// user's `trims` nudge on top of it. Optional so a file holding only
+        /// trims still decodes; no schema bump needed.
         var latencyMs: [String: Double]?
     }
 
@@ -178,25 +173,13 @@ public struct BTTrimStore: Sendable {
         try write(envelope)
     }
 
-    /// Device UIDs whose first-mix intercept was dismissed ("Not now" — final).
-    public func loadDismissedUIDs() throws -> Set<String> {
-        Set((try loadEnvelope())?.alignmentPromptDismissed ?? [])
-    }
-
-    /// Overwrite the dismissal set, preserving trims (read-modify-write).
-    public func saveDismissedUIDs(_ uids: Set<String>) throws {
-        var envelope = existingEnvelope()
-        envelope.alignmentPromptDismissed = uids.sorted()
-        try write(envelope)
-    }
-
     /// The file as it stands (or a fresh envelope), stamped with the current
     /// schema version — the read half of every writer's read-modify-write, so
     /// saving one map can never drop another.
     private func existingEnvelope() -> Envelope {
         var envelope = ((try? loadEnvelope()) ?? nil)
             ?? Envelope(schemaVersion: Self.currentSchemaVersion, trims: [:],
-                        alignmentPromptDismissed: nil, latencyMs: nil)
+                        latencyMs: nil)
         envelope.schemaVersion = Self.currentSchemaVersion
         return envelope
     }

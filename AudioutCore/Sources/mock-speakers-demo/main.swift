@@ -83,9 +83,9 @@ func describe(_ event: BackendEvent) -> String? {
         // switch stays exhaustive.
         return "⚠ capture failed: \(message ?? "cleared") retrying:\(retrying)"
     case .btFirstMixAlignmentPrompt(let deviceID):
-        // Native-only (W3 first-mix alignment intercept); never under mock.
+        // Native-only (W3 first-mix alignment offer); never under mock.
         // Handled so the switch stays exhaustive.
-        return "♪ first-mix alignment prompt \(deviceID)"
+        return "♪ never-aligned speaker joined a mix \(deviceID)"
     }
 }
 

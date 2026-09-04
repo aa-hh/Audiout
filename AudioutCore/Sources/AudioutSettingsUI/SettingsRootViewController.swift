@@ -84,6 +84,17 @@ public final class SettingsRootViewController: NSSplitViewController {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Re-read whatever a remote client can also have changed since these
+    /// panes were built — today only Audio's connect volume and buffer (see
+    /// `AudioSettingsViewController.reloadFromSettings`). Addressed to the
+    /// panes that have something to reconcile rather than broadcast to all of
+    /// them, so a pane without remote-writable state needs no empty override.
+    public func reloadFromSettings() {
+        for case let audio as AudioSettingsViewController in sections.map(\.viewController) {
+            audio.reloadFromSettings()
+        }
+    }
+
     /// Select a section through the sidebar's REAL outline selection, exactly
     /// as a click on the row does — the pane swap then arrives back through
     /// `onSelect`. Tests drive this rather than a direct swap on purpose: a

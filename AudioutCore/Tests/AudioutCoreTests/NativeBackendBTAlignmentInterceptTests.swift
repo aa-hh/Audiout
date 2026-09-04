@@ -13,6 +13,13 @@ import CoreAudio
 /// held-silent join (sink gain 0 before audio, 1 on resolve), dismissal
 /// finality across backend instances, the give-up watchdog, and the W2 wizard
 /// trim preview/restore/persist plumbing.
+///
+/// Nested under ``SerializedSharedState`` because these tests install the
+/// process-global `Telemetry._installTestSink(_:)`. Outside that parent they
+/// race every other suite that installs it — one suite's `nil` teardown tears
+/// another's sink out mid-test, and the loser reads back nothing.
+extension SerializedSharedState {
+
 @Suite final class NativeBackendBTAlignmentInterceptTests: IsolatedSuite {
 
     // MARK: Doubles (per-suite copies, house style)
@@ -180,8 +187,7 @@ import CoreAudio
     private let btFlip = BTDeviceSnapshot(id: "70-99-1C-51-8F-A8:output", name: "Flip 5", isConnected: true)
 
     private func makeBackend(
-        storeDirectory: URL? = nil,
-        holdTimeout: TimeInterval = 120
+        storeDirectory: URL? = nil
     ) -> (NativeBackend, FakeBTEnumerator, SpyBTSink, EventCollector) {
         let bt = FakeBTEnumerator()
         let backend = NativeBackend(
@@ -199,19 +205,16 @@ import CoreAudio
             })
         let sink = SpyBTSink()
         backend.btSyncedSinkFactory = { sink }
-        backend.btAlignmentHoldTimeout = holdTimeout
         backend.btDeviceIDForUID = { uid in AudioObjectID(1000 + UInt32(abs(uid.hashValue % 1000))) }
         let collector = EventCollector()
         collector.attach(to: backend)
         return (backend, bt, sink, collector)
     }
 
-    private func waitFor(timeout: TimeInterval = 3, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     private func device(_ backend: NativeBackend, _ id: String) -> Device? {
@@ -227,21 +230,24 @@ import CoreAudio
 
     // MARK: - Trigger matrix
 
-    /// Never-aligned + first mix (two BT devices) → both prompt and both join
-    /// held silent (gain 0 lands at the sink).
-    @Test func neverAlignedFirstMixFiresAndHoldsSilent() {
+    /// Never-aligned + first mix (two BT devices) → both offer alignment and
+    /// both PLAY: the offer never silences a speaker, it only asks the UI to
+    /// put a note under the row.
+    @Test func neverAlignedFirstMixFiresAndStaysAudible() {
         let (backend, bt, sink, events) = makeBackend()
         defer { backend.stop() }
         backend.start()
         bt.fire([btMove, btFlip])
         waitFor { self.device(backend, self.btMove.id) != nil && self.device(backend, self.btFlip.id) != nil }
+        setFullVolume(backend, btMove.id, btFlip.id)
 
         backend.setOutputSet([btMove.id, btFlip.id])
         waitFor { events.promptedDeviceIDs().count == 2 && sink.gains.count >= 2 }
+        waitFor { sink.lastGain(for: self.btMove.id) == 1 && sink.lastGain(for: self.btFlip.id) == 1 }
 
         #expect(Set(events.promptedDeviceIDs()) == [btMove.id, btFlip.id])
-        #expect(sink.lastGain(for: btMove.id) == 0, "held silent while the card is up")
-        #expect(sink.lastGain(for: btFlip.id) == 0)
+        #expect(sink.lastGain(for: btMove.id) == 1, "the offer plays the speaker as-is")
+        #expect(sink.lastGain(for: btFlip.id) == 1)
     }
 
     /// Solo BT never fires — a lone speaker has nothing to align with.
@@ -270,7 +276,7 @@ import CoreAudio
         waitFor { self.device(backend, self.btFlip.id) != nil }
 
         backend.setOutputSet([btMove.id])
-        waitFor(timeout: 0.5) { false }   // settle; nothing should fire
+        SuiteWait.settle(0.5)   // settle; nothing should fire
         #expect(events.promptedDeviceIDs().isEmpty)
 
         backend.setOutputSet([btMove.id, btFlip.id])
@@ -301,39 +307,6 @@ import CoreAudio
         #expect(sink.lastGain(for: btMove.id) == 1)
     }
 
-    /// "Not now" is FINAL: the dismissal persists, and a FRESH backend over
-    /// the same store never re-fires.
-    @Test func dismissalIsFinalAcrossBackendInstances() {
-        let dir = scratchDir
-        do {
-            let (backend, bt, sink, events) = makeBackend(storeDirectory: dir)
-            backend.start()
-            bt.fire([btMove, btFlip])
-            waitFor { self.device(backend, self.btFlip.id) != nil }
-            setFullVolume(backend, btMove.id, btFlip.id)
-            backend.setOutputSet([btMove.id, btFlip.id])
-            waitFor { events.promptedDeviceIDs().count == 2 }
-
-            backend.resolveBTAlignmentPrompt(forDevice: btMove.id, dismissed: true)
-            backend.resolveBTAlignmentPrompt(forDevice: btFlip.id, dismissed: true)
-            waitFor { sink.lastGain(for: self.btMove.id) == 1 && sink.lastGain(for: self.btFlip.id) == 1 }
-            #expect(sink.lastGain(for: btMove.id) == 1, "resolving releases the hold")
-            backend.stop()
-        }
-
-        let (backend, bt, sink, events) = makeBackend(storeDirectory: dir)
-        defer { backend.stop() }
-        backend.start()
-        bt.fire([btMove, btFlip])
-        waitFor { self.device(backend, self.btFlip.id) != nil }
-        setFullVolume(backend, btMove.id, btFlip.id)
-        backend.setOutputSet([btMove.id, btFlip.id])
-        waitFor { !sink.gains.isEmpty }
-
-        #expect(events.promptedDeviceIDs().isEmpty, "dismissed devices are never auto-prompted again")
-        #expect(sink.lastGain(for: btMove.id) == 1)
-    }
-
     /// Un-resolved (abandoned) prompts don't re-fire within the session —
     /// once ever per device on its own.
     @Test func promptFiresOncePerSession() {
@@ -347,93 +320,15 @@ import CoreAudio
         waitFor { events.promptedDeviceIDs().count == 2 }
         backend.setOutputSet([btMove.id])
         backend.setOutputSet([btMove.id, btFlip.id])
-        waitFor(timeout: 0.5) { false }   // settle
+        SuiteWait.settle(0.5)   // settle
 
         #expect(events.promptedDeviceIDs().count == 2, "no re-prompt on re-forming the mix")
     }
 
-    /// Deselecting a held device releases its hold (gain back to 1) so the
-    /// next select — never re-intercepted — plays audibly.
-    @Test func deselectReleasesTheHold() {
-        let (backend, bt, sink, events) = makeBackend()
-        defer { backend.stop() }
-        backend.start()
-        bt.fire([btMove, btFlip])
-        waitFor { self.device(backend, self.btFlip.id) != nil }
-        setFullVolume(backend, btMove.id, btFlip.id)
-
-        backend.setOutputSet([btMove.id, btFlip.id])
-        waitFor { events.promptedDeviceIDs().count == 2 }
-        backend.setOutputSet([btFlip.id])
-        waitFor { sink.lastGain(for: self.btMove.id) == 1 }
-        #expect(sink.lastGain(for: btMove.id) == 1)
-    }
-
-    /// The give-up watchdog: an unanswered hold un-mutes on its own — a
-    /// silent speaker with no visible cause must be impossible.
-    @Test func watchdogReleasesAnUnansweredHold() {
-        let (backend, bt, sink, events) = makeBackend(holdTimeout: 0.2)
-        defer { backend.stop() }
-        backend.start()
-        bt.fire([btMove, btFlip])
-        waitFor { self.device(backend, self.btFlip.id) != nil }
-        setFullVolume(backend, btMove.id, btFlip.id)
-
-        backend.setOutputSet([btMove.id, btFlip.id])
-        waitFor { events.promptedDeviceIDs().count == 2 }
-        waitFor { sink.lastGain(for: self.btMove.id) == 1 && sink.lastGain(for: self.btFlip.id) == 1 }
-        #expect(sink.lastGain(for: btMove.id) == 1)
-        #expect(sink.lastGain(for: btFlip.id) == 1)
-    }
-
-    // MARK: - Hold × user volume (one composed product)
-
-    /// A slider write DURING the hold cannot un-mute: the composed gain is 0
-    /// for a held uid regardless of the level — and the resolve then pushes
-    /// the level the user chose mid-hold, never a hardcoded 1.
-    @Test func volumeDuringHoldStaysSilentAndResolvePushesComposed() {
-        let (backend, bt, sink, events) = makeBackend()
-        defer { backend.stop() }
-        backend.start()
-        bt.fire([btMove, btFlip])
-        waitFor { self.device(backend, self.btFlip.id) != nil }
-
-        backend.setOutputSet([btMove.id, btFlip.id])
-        waitFor { events.promptedDeviceIDs().count == 2 }
-        waitFor { sink.lastGain(for: self.btMove.id) == 0 }
-
-        backend.setVolume(40, for: btMove.id)
-        waitFor { self.device(backend, self.btMove.id)?.volume == 40 }
-        #expect(sink.lastGain(for: btMove.id) == 0, "held stays silent through a slider write")
-
-        backend.resolveBTAlignmentPrompt(forDevice: btMove.id, dismissed: false)
-        waitFor { sink.lastGain(for: self.btMove.id).map { abs($0 - 0.4) < 0.001 } == true }
-        #expect(sink.lastGain(for: btMove.id).map { abs($0 - 0.4) < 0.001 } == true,
-                "the release pushes the composed user gain, not 1")
-    }
-
-    /// The watchdog release is composed too — giving up on the card must not
-    /// blow away the user's level.
-    @Test func watchdogReleasePushesComposedNotUnity() {
-        let (backend, bt, sink, events) = makeBackend(holdTimeout: 0.2)
-        defer { backend.stop() }
-        backend.start()
-        bt.fire([btMove, btFlip])
-        waitFor { self.device(backend, self.btFlip.id) != nil }
-        backend.setVolume(40, for: btMove.id)
-        setFullVolume(backend, btFlip.id)
-
-        backend.setOutputSet([btMove.id, btFlip.id])
-        waitFor { events.promptedDeviceIDs().count == 2 }
-        waitFor { sink.lastGain(for: self.btMove.id).map { abs($0 - 0.4) < 0.001 } == true }
-        #expect(sink.lastGain(for: btMove.id).map { abs($0 - 0.4) < 0.001 } == true)
-        #expect(sink.lastGain(for: btFlip.id) == 1)
-    }
-
-    /// The wizard's entry release, end to end: the popover answers the prompt
-    /// with `dismissed: false` before the run starts, and the target must come
-    /// out of the hold AUDIBLE. A guided run against a gain-0 sink asks the
-    /// user which speaker ticked first while one of them is muted.
+    /// The wizard's own hold, end to end: nothing holds the target on the way
+    /// IN (there is no first-mix hold any more), and the run's hold on the
+    /// other speakers clears when the run ends. A guided run against a gain-0
+    /// sink asks the user which speaker ticked first while one of them is muted.
     @Test func theWizardsReleaseLeavesTheTargetAudible() {
         let (backend, bt, sink, events) = makeBackend()
         defer { backend.stop() }
@@ -444,13 +339,17 @@ import CoreAudio
 
         backend.setOutputSet([btMove.id, btFlip.id])
         waitFor { events.promptedDeviceIDs().count == 2 }
-        waitFor { sink.lastGain(for: self.btMove.id) == 0 }
-
-        // What `PopoverController.startBTAlignmentWizard` sends on every door
-        // into the wizard.
-        backend.resolveBTAlignmentPrompt(forDevice: btMove.id, dismissed: false)
         waitFor { sink.lastGain(for: self.btMove.id) == 1 }
+        #expect(sink.lastGain(for: btMove.id) == 1, "the offer never held the target")
+
+        backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id,
+                                      btReferenceDeviceID: "mac")
+        waitFor { sink.lastGain(for: self.btFlip.id) == 0 }
         #expect(sink.lastGain(for: btMove.id) == 1, "the wizard's target ticks audibly")
+
+        backend.endBTWizardRun()
+        waitFor { sink.lastGain(for: self.btFlip.id) == 1 }
+        #expect(sink.lastGain(for: btFlip.id) == 1, "the wizard's own hold clears on end-run")
     }
 
     // MARK: - Wizard preview plumbing (W2)
@@ -542,6 +441,99 @@ import CoreAudio
                 "Keep logs its own line: \(keepLine ?? "none")")
         #expect(keepLine?.contains("\"latencyMs\":\"280\"") == true)
         #expect(keepLine?.contains("\"trimMs\":\"0\"") == true)
+        #expect(keepLine?.contains("\"settleRemainingS\":\"nil\"") == true,
+                "the Mac publishes a clock verdict, never a number of seconds")
+    }
+
+    /// A first pairing, and any speaker already connected when the app
+    /// launched, are the only link-up this process will ever see for that
+    /// device — so the first listing of a CONNECTED speaker opens a settle
+    /// window too (Alec, 2026-09-04). It stales nothing: with no alignment
+    /// instant recorded there is nothing for the connect to be after. A
+    /// speaker listed disconnected gets no window; its link-up comes later.
+    @Test func theFirstListingOfAConnectedSpeakerOpensASettleWindow() throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).save([btMove.id: 40])
+        let (backend, bt, _, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove, BTDeviceSnapshot(id: btFlip.id, name: btFlip.name, isConnected: false)])
+        waitFor { self.device(backend, self.btFlip.id) != nil }
+
+        let move = backend.btAlignmentReport(forDevice: btMove.id)
+        #expect(move?.clockState == .unknown, "the launch-time link-up opens the window")
+        #expect(move?.status == .tuned, "…and stales nothing: no alignment instant to be after")
+        #expect(backend.btAlignmentReport(forDevice: btFlip.id)?.clockState == .steady,
+                "a speaker that is not connected has had no link-up to settle from")
+    }
+
+    /// The Mac's own alignment paths go through the freshness store like the
+    /// phone's do: Keep, Reset and a persisted trim each move the row, a
+    /// reconnect stales a Keep made before it, and a Keep made while the clock
+    /// is still settling is marked early without any extra code at the site.
+    @Test func theMacsOwnAlignmentPathsMoveTheRowsFreshness() throws {
+        let (backend, bt, _, _) = makeBackend(storeDirectory: scratchDir)
+        defer { backend.stop() }
+        final class ChangeCount: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _value = 0
+            var value: Int { lock.withLock { _value } }
+            func bump() { lock.withLock { _value += 1 } }
+        }
+        let changes = ChangeCount()
+        backend.onBTAlignmentChanged = { changes.bump() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        let uid = btMove.id
+        func report() -> BTAlignmentReport? { backend.btAlignmentReport(forDevice: uid) }
+        /// Eleven advancing samples a second apart: ten stable seconds, and
+        /// the store's one publish on arriving there.
+        func settleTheClock() {
+            let from = Date()
+            for s in 0...10 {
+                backend.btAlignmentFreshness.noteClockOutcome(
+                    uid: uid, outcome: .advanced, at: from.addingTimeInterval(Double(s)))
+            }
+        }
+
+        settleTheClock()
+        let base = changes.value
+        backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 280)
+        #expect(report()?.status == .tuned, "a Keep while stable is an ordinary alignment")
+        #expect(changes.value == base + 1)
+
+        // The link drops and comes back. Nobody in this process asked, so
+        // only the enumerator's availability edge can report it.
+        bt.fire([BTDeviceSnapshot(id: uid, name: btMove.name, isConnected: false)])
+        waitFor { self.device(backend, uid)?.isAvailable == false }
+        bt.fire([btMove])
+        waitFor { report()?.status == .stale }
+        #expect(report()?.staleReason == BTAlignmentFreshness.staleReasonReconnected)
+        #expect(report()?.clockState == .unknown, "a new link, and no verdict on its clock yet")
+        #expect(report()?.settleRemainingSeconds == nil)
+        #expect(changes.value == base + 2)
+
+        backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 300)
+        #expect(report()?.status == .stale, "a Keep before the clock settles again is early")
+        #expect(report()?.staleReason == BTAlignmentFreshness.staleReasonMeasuredWhileSettling)
+        #expect(changes.value == base + 3)
+
+        settleTheClock()
+        backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 310)
+        #expect(report()?.status == .tuned, "…and one after it settles clears the mark")
+        #expect(report()?.staleReason == nil)
+        #expect(changes.value == base + 5, "the arrival at stable, then the Keep")
+
+        backend.resetBTAlignment(forDevice: uid)
+        #expect(report()?.status == .notSet)
+        #expect(changes.value == base + 6)
+
+        backend.setBTSyncTrim(12, forDevice: uid, persist: true)
+        #expect(report()?.status == .tuned, "a persisted nudge is an alignment")
+        #expect(changes.value == base + 7)
+        backend.setBTSyncTrim(13, forDevice: uid, persist: false)
+        #expect(changes.value == base + 7, "a scrub is not")
     }
 
     /// The candidate range a run may present ignores the device's trim, because
@@ -614,7 +606,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
 
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
         waitFor { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
@@ -653,7 +650,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
 
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
         waitFor { sink.buffers.last == 2_000 }
@@ -679,7 +681,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
         let baseline = sink.reanchors.count
 
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
@@ -714,7 +721,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
 
         Telemetry._installTestSink { capture.append($0) }
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
@@ -747,7 +759,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
 
         Telemetry._installTestSink { capture.append($0) }
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
@@ -785,10 +802,6 @@ import CoreAudio
         setFullVolume(backend, btMove.id, btFlip.id)
         backend.setOutputSet([btMove.id, btFlip.id])
         waitFor { sink.gains.count >= 2 }
-        // Clear the first-mix holds so the only silence left to explain is the
-        // wizard's own.
-        backend.resolveBTAlignmentPrompt(forDevice: btMove.id, dismissed: false)
-        backend.resolveBTAlignmentPrompt(forDevice: btFlip.id, dismissed: false)
         waitFor { sink.lastGain(for: self.btMove.id) == 1
             && sink.lastGain(for: self.btFlip.id) == 1 }
 
@@ -819,9 +832,6 @@ import CoreAudio
         setFullVolume(backend, btMove.id, btFlip.id, btThird.id)
         backend.setOutputSet([btMove.id, btFlip.id, btThird.id])
         waitFor { sink.gains.count >= 3 }
-        for id in [btMove.id, btFlip.id, btThird.id] {
-            backend.resolveBTAlignmentPrompt(forDevice: id, dismissed: false)
-        }
         waitFor { sink.lastGain(for: btThird.id) == 1 }
 
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id,
@@ -849,7 +859,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
 
         backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
         waitFor { sink.buffers.last == NativeBackend.btWizardReferenceBufferMs }
@@ -875,7 +890,12 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
-        waitFor { !sink.trims.isEmpty }
+        waitFor { !sink.buffers.isEmpty }   // applyBTSinkTransition has begun: it pushes the buffer
+                                    // right after creating the sink and setting composition.
+                                    // NOT a claim that the sink is fully engaged — gains, EQ,
+                                    // setDevices and start() all follow. The old
+                                    // `!sink.trims.isEmpty` barrier could never fire here: that
+                                    // loop only runs for PERSISTED trims, and this test stores none.
 
         Telemetry._installTestSink { capture.append($0) }
         backend.setBTWizardTickTempo(bpm: BTAlignmentWizardSession.searchTickBPM)
@@ -908,3 +928,5 @@ import CoreAudio
                 "got \(sink.offsets)")
     }
 }
+
+} // extension SerializedSharedState

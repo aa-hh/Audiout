@@ -25,7 +25,7 @@ public enum SidebarSelection: Equatable, Sendable {
 /// `dev/notes/groups-speakers-split-direction-c-brief-2026-08-27.md`).
 ///
 /// Top to bottom: the pinned **Groups** row (the only non-device row — drawn
-/// as a raised PLATE with a hairline edge, taller and bolder than the fleet
+/// as a raised PLATE with a `containerEdge` edge, taller and bolder than the fleet
 /// rows, because it is a doorway to the card overview and not one more list
 /// item; a trailing chevron says it leads somewhere, and it carries the gold
 /// "playing" marker whenever any group is live), then two flat sections,
@@ -89,7 +89,6 @@ public final class SidebarViewController: NSViewController {
     private let outlineView = NSOutlineView()
     private let scrollView = NSScrollView()
     private let addButton = NSButton()
-    private let warmSurfaceView: SidebarWarmSurfaceView
 
     /// Top-level nodes (the pinned Groups row, the hairline, then the two
     /// section headers). Rebuilt on `reload`.
@@ -103,16 +102,7 @@ public final class SidebarViewController: NSViewController {
     /// one. Pure model state, never audio-driven.
     private var hasLiveGroup = false
 
-    /// Whether a system sidebar material sits behind the warm wash for it to
-    /// tint (T7, spec Q4-b). FALSE on every OS since the surface's split
-    /// items became plain ones (`MixerWindowController` explains why): with
-    /// no `.sidebar` behavior there is no automatic material — not even
-    /// macOS 26+'s Liquid Glass — so the wash draws the opaque warm backing
-    /// itself, the branch that always shipped below macOS 26. The parameter
-    /// stays injectable because both drawing modes are still real and a test
-    /// must be able to exercise either one directly.
-    public init(rendersOnSystemSidebarMaterial: Bool = false) {
-        self.warmSurfaceView = SidebarWarmSurfaceView(rendersOnGlass: rendersOnSystemSidebarMaterial)
+    public init() {
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -193,6 +183,11 @@ public final class SidebarViewController: NSViewController {
         outlineView.allowsMultipleSelection = true
         outlineView.dataSource = self
         outlineView.delegate = self
+        // A click on the ALREADY-selected Groups row is the way back from a
+        // group's editor; the selection delegate never hears it, the click
+        // action does.
+        outlineView.target = self
+        outlineView.action = #selector(outlineViewClicked(_:))
         // Right-click menu: one menu whose items are rebuilt per click, because
         // they depend on the CLICKED row (`menuNeedsUpdate`).
         let contextMenu = NSMenu()
@@ -232,24 +227,10 @@ public final class SidebarViewController: NSViewController {
 
         let container = SidebarContainerView()
         container.onCommandN = { [weak self] in self?.performAdd() }
-        // The warm surface sits BEHIND everything else (glass tint on
-        // macOS 26+, opaque warm fallback below) and BENEATH the outline
-        // view (T7, spec Q4-b) — added first so it's the bottommost
-        // subview, pinned to the container's full bounds so both the row
-        // list and the add bar read as one warm surface. Non-interactive
-        // (`hitTest` returns nil): it must never swallow a click meant for
-        // a sidebar row or the add button.
-        warmSurfaceView.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(warmSurfaceView)
         container.addSubview(scrollView)
         container.addSubview(addBar)
 
         NSLayoutConstraint.activate([
-            warmSurfaceView.topAnchor.constraint(equalTo: container.topAnchor),
-            warmSurfaceView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            warmSurfaceView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            warmSurfaceView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-
             scrollView.topAnchor.constraint(equalTo: container.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -447,6 +428,10 @@ public final class SidebarViewController: NSViewController {
 
     private var suppressSelectionCallback = false
 
+    /// Whether the click now in progress already fired `onSelect` through
+    /// `outlineViewSelectionDidChange`. Read and cleared by the click action.
+    private var clickChangedSelection = false
+
     private func findNode(matching target: SidebarSelection) -> Node? {
         func search(_ nodes: [Node]) -> Node? {
             for node in nodes {
@@ -516,6 +501,15 @@ public final class SidebarViewController: NSViewController {
     /// Simulate the user clicking a sidebar row (fires `onSelect`).
     public func test_select(_ target: SidebarSelection) {
         select(target, notify: true)
+    }
+
+    /// Simulate a click on the Groups row — the click ACTION, which is what
+    /// fires when the row is already selected and the selection delegate
+    /// stays silent. `clickedRow` cannot be set headlessly, so the row is
+    /// looked up here and handed to the action's own handler.
+    public func test_clickGroupsRow() {
+        guard let node = findNode(matching: .groupsOverview) else { return }
+        reselectGroupsRow(ifClicked: outlineView.row(forItem: node))
     }
 
     /// Simulate a multi-selection of device rows (cmd/shift-click), for the
@@ -598,31 +592,6 @@ public final class SidebarViewController: NSViewController {
         view.window?.firstResponder === outlineView
     }
 
-    // MARK: Test-support hooks (T7 — warm sidebar surface, Q4-b)
-
-    /// True on macOS 26+ (per the injected seam): the sidebar's automatic
-    /// Liquid Glass is left in place and this is the LOW-ALPHA warm wash
-    /// drawn on top of it. Mutually exclusive with
-    /// ``test_hasFallbackBacking``.
-    public var test_hasTintOverlay: Bool { warmSurfaceView.rendersOnGlass }
-
-    /// True below macOS 26 (per the injected seam): there is no automatic
-    /// glass to tint, so this is the OPAQUE warm backing standing in for it.
-    /// Mutually exclusive with ``test_hasTintOverlay``.
-    public var test_hasFallbackBacking: Bool { !warmSurfaceView.rendersOnGlass }
-
-    /// The alpha the wash actually draws at: the 26+ tint overlay's low
-    /// alpha, or 1 on the pre-26 opaque fallback — AND on the glass branch
-    /// while Reduce Transparency is on (A1: the wash promotes itself to the
-    /// opaque backing).
-    public var test_warmSurfaceAlpha: CGFloat { warmSurfaceView.effectiveAlpha }
-
-    /// `nil` = read the live Reduce Transparency setting; tests pin both
-    /// sides of the wash's opaque promotion with this.
-    public var test_reduceTransparencyOverride: Bool? {
-        get { warmSurfaceView.test_reduceTransparencyOverride }
-        set { warmSurfaceView.test_reduceTransparencyOverride = newValue }
-    }
 }
 
 /// A sidebar row cell with two trailing slots: a small gold
@@ -662,7 +631,7 @@ final class IconLabelCellView: NSTableCellView {
         v.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold))
         v.image?.isTemplate = true
-        v.contentTintColor = Tokens.Color.tertiaryLabel
+        v.contentTintColor = Tokens.Color.label3
         v.isHidden = true
         v.setAccessibilityElement(false)
         v.setContentHuggingPriority(.required, for: .horizontal)
@@ -690,7 +659,8 @@ final class IconLabelCellView: NSTableCellView {
     }
 }
 
-/// The pinned Groups row's row view: a raised plate with a hairline edge —
+/// The pinned Groups row's row view: a `raised` plate with a `containerEdge`
+/// edge (rule 5: `hairline` never sits on `raised`) —
 /// `GroupedSectionView`'s `.card` surface vocabulary at row scale, promising
 /// the pane of cards the row opens. Drawn (not a layer colour) so the `Tokens`
 /// fills re-resolve live per appearance flip and Increase Contrast on every
@@ -718,7 +688,7 @@ final class PlateRowView: NSTableRowView {
     /// Half-point inset so the 1 pt stroke lands on whole pixels.
     private var platePath: NSBezierPath {
         let rect = bounds.insetBy(dx: Self.selectionInsetX + 0.5, dy: 0.5)
-        let radius = Tokens.Layout.groupedSectionCornerRadius - 2
+        let radius = Tokens.Layout.Radius.control
         return NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
     }
 
@@ -730,7 +700,7 @@ final class PlateRowView: NSTableRowView {
         let path = platePath
         Tokens.Color.raised.setFill()
         path.fill()
-        Tokens.Color.hairline.setStroke()
+        Tokens.Color.containerEdge.setStroke()
         path.lineWidth = 1
         path.stroke()
     }
@@ -895,7 +865,27 @@ extension SidebarViewController: NSOutlineViewDelegate {
         // suppression or not — a programmatic restore must retitle it too.
         updateAddButtonTitle()
         guard !suppressSelectionCallback else { return }
+        // A click that moved the selection has just been reported here; the
+        // click action that follows it must not report it a second time
+        // (`currentEvent` is the mouse-down for the whole of the click).
+        clickChangedSelection = NSApp?.currentEvent?.type == .leftMouseDown
         onSelect?(currentSelection)
+    }
+
+    @objc private func outlineViewClicked(_ sender: Any?) {
+        reselectGroupsRow(ifClicked: outlineView.clickedRow)
+    }
+
+    /// The click action's one job: a click on the Groups row while it is
+    /// ALREADY selected re-reports `.groupsOverview`, so the host can pop a
+    /// group's editor back to the overview. Every other click was either
+    /// reported by the selection delegate or selects nothing new.
+    private func reselectGroupsRow(ifClicked row: Int) {
+        let alreadyReported = clickChangedSelection
+        clickChangedSelection = false
+        guard !alreadyReported, row >= 0, row == outlineView.selectedRow,
+              currentSelection == .groupsOverview else { return }
+        onSelect?(.groupsOverview)
     }
 
     // MARK: Cell builders
@@ -925,7 +915,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
         // Matches Finder's own sidebar section-header weight — a plain
         // `NSTextField(labelWithString:)` label reads noticeably thinner.
         textField.font = Tokens.Font.captionEmphasized
-        textField.textColor = Tokens.Color.secondaryLabel
+        textField.textColor = Tokens.Color.label2
         textField.lineBreakMode = .byTruncatingTail
         cell.addSubview(textField)
         cell.textField = textField
@@ -965,9 +955,9 @@ extension SidebarViewController: NSOutlineViewDelegate {
         // fill instead, via `.isTemplate` (which `DeviceIcon.image` sets) plus
         // an explicit `contentTintColor`.
         cell.imageView?.image = DeviceIcon.image(symbol)
-        cell.imageView?.contentTintColor = dimmed ? .disabledControlTextColor : Tokens.Color.label
+        cell.imageView?.contentTintColor = dimmed ? Tokens.Color.label3 : Tokens.Color.label
         cell.textField?.stringValue = text
-        cell.textField?.textColor = dimmed ? .disabledControlTextColor : Tokens.Color.label
+        cell.textField?.textColor = dimmed ? Tokens.Color.label3 : Tokens.Color.label
         cell.setActiveMarkerVisible(showsActiveMarker)
         cell.setDisclosureVisible(showsDisclosure)
         // Both states were COLOUR/GLYPH ONLY: a dimmed row and a gold marker

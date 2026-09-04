@@ -174,9 +174,9 @@ import AppKit
         #expect(delegate.removedAppID == "com.example.app")
     }
 
-    // MARK: Slider dimming (Bug T2 — only "No Redirect" dims)
+    // MARK: Slider enablement (no destination dims it any more)
 
-    /// Bug T2: "Current Device" is now its OWN independent local stream (played on
+    /// Bug T2: "Current Device" is its OWN independent local stream (played on
     /// the Mac's built-in speakers), so its slider is LIVE, not dimmed.
     @Test func sliderNotDimmedWhenDestinationIsCurrentDevice() {
         let (row, _) = makeRow(selected: "local")
@@ -189,16 +189,17 @@ import AppKit
         #expect(!row.test_isSliderDimmed, "slider must be enabled once redirected to an AirPlay device")
     }
 
-    /// Only the standalone "No Redirect" state dims the slider — that's the one
-    /// state with no independent stream to level (the app just plays in the
-    /// whole-system mix).
-    @Test func sliderDimmedWhenDestinationIsNoRedirect() {
+    /// "No Redirect" is live too: below 100 the app is intercepted and summed
+    /// back into the whole-system mix at that volume, so the slider does something
+    /// in every destination state.
+    @Test func sliderLiveWhenDestinationIsNoRedirect() {
         let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
-        #expect(row.test_isSliderDimmed, "slider must dim while destination is No Redirect")
+        #expect(!row.test_isSliderDimmed,
+                "slider must stay live on No Redirect — below 100 the app is levelled in the mix")
     }
 
     /// Bug T2: with all three states present, "Current Device" keeps a LIVE slider
-    /// (its own local stream); only "No Redirect" dims.
+    /// (its own local stream).
     @Test func sliderNotDimmedWhenDestinationIsExplicitCurrentDeviceAmongThreeStates() {
         let (row, _) = makeRowWithThreeStates(selected: "local")
         #expect(!row.test_isSliderDimmed,
@@ -211,9 +212,9 @@ import AppKit
     }
 
     @Test func sliderAlwaysVisibleRegardlessOfDestination() {
-        // LOCKED DECISION 3: the slider is ALWAYS visible, only dimmed — never
-        // hidden. `AppRowView` has no isHidden toggle on the slider at all; this
-        // asserts both states still report a live volume via the hook.
+        // LOCKED DECISION 3: the slider is ALWAYS visible — never hidden.
+        // `AppRowView` has no isHidden toggle on the slider at all; this asserts
+        // both states still report a live volume via the hook.
         let (localRow, _) = makeRow(selected: "local")
         #expect(localRow.test_volume == 42)
         let (redirectedRow, _) = makeRow(selected: "device-1")
@@ -367,7 +368,8 @@ import AppKit
     // MARK: Unified hover/selection wash tokens (V3/V8)
 
     @Test func noHighlightWhenNeitherSelectedNorHovered() {
-        let (row, _) = makeRow()
+        // An unrouted app is not sounding, so it paints no wash of any kind.
+        let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
         #expect(row.test_highlightAlpha == nil)
     }
 
@@ -378,7 +380,9 @@ import AppKit
     }
 
     @Test func hoverWashUsesUnifiedHoverAlpha() {
-        let (row, _) = makeRow()
+        // Hover is the faintest of the three, so it needs a row that is not
+        // sounding to be the wash that shows.
+        let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
         row.test_setHovered(true)
         #expect(row.test_highlightAlpha == PopoverColumnGrid.rowHoverWashAlpha)
     }
@@ -391,22 +395,55 @@ import AppKit
                        "selection must win when both selected and hovered")
     }
 
-    // MARK: Readout tertiary/secondary colour (V7)
-
-    @Test func readoutIsTertiaryWhenDestinationIsNoRedirect() {
-        let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
-        #expect(row.test_readoutTextColor == .tertiaryLabelColor,
-                       "the % readout must dim to tertiary while No Redirect is selected")
-    }
-
-    @Test func readoutIsSecondaryWhenDestinationIsCurrentDevice() {
-        let (row, _) = makeRow(selected: "local")
-        #expect(row.test_readoutTextColor == Tokens.Color.secondaryLabel)
-    }
-
-    @Test func readoutIsSecondaryWhenRedirected() {
+    @Test func liveWashUsesTheLiveAlphaWhenNeitherSelectedNorHovered() {
         let (row, _) = makeRow(selected: "device-1")
-        #expect(row.test_readoutTextColor == Tokens.Color.secondaryLabel)
+        #expect(row.test_highlightAlpha == PopoverColumnGrid.rowLiveWashAlpha,
+                       "a sounding row paints the gold live wash")
+    }
+
+    @Test func selectionWashOutranksLiveWash() {
+        let (row, _) = makeRow(selected: "device-1")
+        row.test_setSelected(true)
+        #expect(row.test_highlightAlpha == PopoverColumnGrid.rowSelectionWashAlpha,
+                       "keyboard selection must stay visible over a live row (D3)")
+    }
+
+    // MARK: Readout colour (V7)
+
+    /// Every destination has a live volume, so the readout never hides — what
+    /// changes is whether the route is actually sounding.
+    @Test func readoutIsEmberTextWhenDestinationIsNoRedirect() {
+        let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
+        assertSameHue(row.test_readoutTextColor, Tokens.Color.emberText,
+                      "an unrouted app's readout holds a stored level")
+    }
+
+    /// An explicit "Current Device" pick IS an exception route with its own
+    /// stream (Bug T2), so it counts as sounding under D1's routed ∧ running
+    /// predicate — the same one the fader's gold fill already uses.
+    @Test func readoutIsGoldTextWhenDestinationIsCurrentDevice() {
+        let (row, _) = makeRow(selected: "local")
+        assertSameHue(row.test_readoutTextColor, Tokens.Color.goldText,
+                      "Current Device is a live exception route")
+    }
+
+    @Test func readoutIsGoldTextWhenRedirectedAndRunning() {
+        let (row, _) = makeRow(selected: "device-1")
+        assertSameHue(row.test_readoutTextColor, Tokens.Color.goldText,
+                      "a live redirect's readout is goldText")
+    }
+
+    /// Assert two colors resolve to the same sRGB components — `goldText` and
+    /// `emberText` are computed `static var`s, so `==` never holds on them.
+    private func assertSameHue(_ a: NSColor?, _ b: NSColor?, _ message: String,
+                               sourceLocation: SourceLocation = #_sourceLocation) {
+        guard let a = a?.usingColorSpace(.sRGB), let b = b?.usingColorSpace(.sRGB) else {
+            Issue.record("nil color: \(message)", sourceLocation: sourceLocation)
+            return
+        }
+        #expect(abs(a.redComponent - b.redComponent) < 0.01, "\(message)", sourceLocation: sourceLocation)
+        #expect(abs(a.greenComponent - b.greenComponent) < 0.01, "\(message)", sourceLocation: sourceLocation)
+        #expect(abs(a.blueComponent - b.blueComponent) < 0.01, "\(message)", sourceLocation: sourceLocation)
     }
 
     // MARK: Destination subtitle microcopy (A3)
@@ -692,23 +729,23 @@ import AppKit
     }
 
     /// An unrouted (follows-main-output) app is not a live exception — its
-    /// name sits at secondary, with no idle suffix.
+    /// name sits in the cool idle voice, with no idle suffix.
     @Test func unroutedAppNameIsSecondary() {
         let row = makeThreeStateRow(selected: "no-redirect", isRunning: true)
-        #expect(row.test_nameTextColor == Tokens.Color.secondaryLabel)
+        #expect(row.test_nameTextColor == Tokens.Color.labelCool)
         #expect(row.test_idleSuffixColor == nil)
         #expect(row.test_nameDisplayText == "Example App")
     }
 
     /// A routed-but-idle app (route saved, process not running) shows the
-    /// spec's " (idle)" tertiary suffix (§3.5 `AppName (idle)` pattern), the
-    /// name itself at secondary, and NO warning badge — idle is a calm state,
-    /// not an alert.
+    /// spec's " (idle)" suffix (§3.5 `AppName (idle)` pattern) in the cool idle
+    /// voice, the name itself cool too, and NO warning badge — idle is a calm
+    /// state, not an alert.
     @Test func routedIdleAppShowsTertiaryIdleSuffixAndNoBadge() {
         let row = makeThreeStateRow(selected: "device-1", isRunning: false)
         #expect(row.test_nameDisplayText == "Example App (idle)")
-        #expect(row.test_nameTextColor == Tokens.Color.secondaryLabel)
-        #expect(row.test_idleSuffixColor == .tertiaryLabelColor, "the (idle) suffix must render in the tertiary idle voice")
+        #expect(row.test_nameTextColor == Tokens.Color.labelCool)
+        #expect(row.test_idleSuffixColor == Tokens.Color.labelCool2, "the (idle) suffix must render in the cool idle voice")
         #expect(!(row.test_isOfflineBadgeVisible), "the routed-idle treatment replaces the warning badge")
     }
 
@@ -720,44 +757,6 @@ import AppKit
         #expect(row.test_isOfflineBadgeVisible)
         #expect(row.test_nameDisplayText == "Example App")
         #expect(row.test_idleSuffixColor == nil)
-    }
-
-    // MARK: Tether chip (Warm Signal v4.1 CORRECTIONS, extending item 7)
-
-    private func makeThreeStateRow(selected: String, isRunning: Bool, tetherColor: NSColor?) -> AppRowView {
-        let row = AppRowView()
-        row.apply(AppRowView.Configuration(
-            appID: "com.example.app", name: "Example App", icon: nil, volume: 42,
-            selectedDestinationID: selected, destinations: makeThreeStateDestinations(),
-            isRunning: isRunning, tetherColor: tetherColor))
-        return row
-    }
-
-    @Test func deviceRedirectWithATetherColorWearsTheChip() {
-        let row = makeThreeStateRow(selected: "device-1", isRunning: true, tetherColor: .systemGreen)
-        #expect(row.test_hasTetherChip)
-        #expect(row.test_nameDisplayText == "Example App", "the chip is a prefixed glyph, not a change to the spoken/plain name text")
-        #expect(row.test_nameTextColor == .labelColor, "the chip is additive — the existing liveness-driven name colour is unchanged")
-    }
-
-    @Test func noTetherColorMeansNoChip() {
-        let row = makeThreeStateRow(selected: "device-1", isRunning: true, tetherColor: nil)
-        #expect(!(row.test_hasTetherChip))
-    }
-
-    @Test func unroutedAppNeverWearsAChipEvenIfHostPassedOne() {
-        // Defensive: a real host only ever passes a tetherColor for an actual
-        // device redirect, but the view itself must not depend on that — it
-        // renders whatever it's given.
-        let row = makeThreeStateRow(selected: "no-redirect", isRunning: true, tetherColor: .systemGreen)
-        #expect(row.test_hasTetherChip, "the view renders whatever the host supplies")
-    }
-
-    @Test func idleSuffixWithATetherColorStillWearsTheChipAndTheIdleSuffix() {
-        let row = makeThreeStateRow(selected: "device-1", isRunning: false, tetherColor: .systemGreen)
-        #expect(row.test_hasTetherChip)
-        #expect(row.test_nameDisplayText == "Example App (idle)")
-        #expect(row.test_idleSuffixColor == .tertiaryLabelColor)
     }
 
     /// S6 item 6: the composed VoiceOver label reads "…, follows main output"

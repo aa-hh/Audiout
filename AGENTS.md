@@ -33,6 +33,8 @@ diagrams that restate imports.
 **Every symbol you name is a rot point** — Guard 2 verifies each one exists, so
 name only what earns it. Over budget means you are describing code.
 
+**Over-budget history goes in a sibling file, never here.** The dated decisions, incident write-ups and long-form trap explanations a folder accumulates live in that folder's `AGENTS-HISTORY.md` (archived verbatim, not maintained, never scanned by Guard 2) and `AGENTS.md` links it in one line. A one-line trap may keep its date. This root file carries repo-wide policy and is exempt from the three-section cap.
+
 Corollary for readers: **docs orient, code decides.** If an AGENTS.md names a
 symbol you cannot find in source, believe the source and fix the doc.
 
@@ -41,21 +43,58 @@ symbol you cannot find in source, believe the source and fix the doc.
 - [AudioutCore/](AudioutCore/AGENTS.md) — the Swift package:
   the `Device` model, the `OutputBackend` seam and its implementations, per-app
   routing, the AppKit UI targets, and the shipping app target. This is the app.
+Not a folder here, but linked into the app: **`AudioutProtocol`**, the wire
+contract for the Mac↔iPhone companion app (messages, commands, snapshot
+schema), lives in https://github.com/aa-hh/audiout-shared. MIT, not GPL,
+because the closed-source iPhone app links the same code, and a repository of
+its own because SwiftPM cannot depend on a package inside a subdirectory of
+another repo. `AudioutCore` pins it by version.
+
+### Shared-code changes (AudioutProtocol / ProbeKit)
+
+The pin above makes `audiout-shared` read-only from inside this repo, which
+is exactly why a local copy of one of its types is the path of least
+resistance — and exactly what `.githooks/guard-shared-leak.sh` blocks. The
+sanctioned path for a wire-format field, a protocol case, or a ProbeKit
+tweak:
+
+1. Edit it in `~/Projects/audiout-shared` directly — never here.
+2. Test there: `swift test` (no wrapper scripts in that repo).
+3. Tag and push: `git tag X.Y.Z && git push origin main --tags`. Whether
+   that also needs a `CompanionProto.version` bump is audiout-shared's own
+   rule — see its AGENTS.md, don't re-derive it here.
+4. Bump the pin in **both** consumers in the same session — this repo
+   (`AudioutCore/Package.swift` + `Package.resolved`) and audiout-remote's
+   Xcode package pin. A protocol change ships to both apps together or not
+   at all.
 - [AirPlayEngine/](AirPlayEngine/AGENTS.md) — standalone package: a vendored
   AirPlay 2 sender wrapped in a Swift `actor`. No OwnTone runtime dependency.
+Not a folder here, but linked into the app: **`ProbeKit`**, the sync-probe DSP
+(sweep synthesis + matched filter), lives in https://github.com/aa-hh/audiout-shared
+together with the companion wire protocol. MIT, not GPL, because the
+closed-source iPhone app links the same code, and a repository of its own
+because SwiftPM cannot depend on a package inside a subdirectory of another
+repo. `AudioutCore` pins it by version.
 - [dev/](dev/AGENTS.md) — offline dev tooling, plus `dev/notes/`, the home for
   research briefs and phase write-ups.
 - [scripts/make-app.sh](scripts/make-app.sh) — wraps the executable into a real
   `.app` with a stable bundle id, signed with a Developer ID identity when one
   is present in the keychain (auto-detected, override with `CODESIGN_IDENTITY`),
   else ad-hoc. Required for the `native` backend's TCC-gated process tap; a
-  bare `swift run` loses the grant.
+  bare `swift run` loses the grant. **Needs `POSTHOG_PROJECT_TOKEN` and
+  `POSTHOG_HOST`, unconditionally — not gated for dev builds like the
+  license/buy/Sparkle keys are.** They come from `.env` at the repo root;
+  `.env` is gitignored, so a fresh `git worktree` never has its own copy, and
+  the script falls back to the primary checkout's automatically (finds it via
+  `--git-common-dir`, no action needed). Missing it entirely makes the script
+  exit before the codesign step, leaving a half-built `.app` that ran through
+  none of the entitlements/hardened-runtime signing below — it will look
+  present (and even launch) but hold none of the TCC entitlements, so treat a
+  `make-app.sh` run
+  as failed unless you check its actual exit code, never a file-freshness
+  heuristic.
 - [docs/SPEC.md](docs/SPEC.md) — the product spec. Code cites its sections ("SPEC.md §9").
 - `docs/plans/PLAN-*.md` — the phased execution plans and their resolved decisions.
-- `ios/` — the iPhone companion app. Not present in `main` or this worktree;
-  staged on `claude/ios-staging` until the whole app is ready to merge. See
-  [CLAUDE.md](CLAUDE.md#ios-companion-app) — start any iOS task from that
-  branch, never from `main`.
 
 ## Rules (all targets)
 
@@ -242,12 +281,17 @@ This app must feel like a native macOS citizen, not a cross-platform port.
 - **"Match Control Center / System Settings" is retired as guidance.** For the
   sanctioned custom-drawn Warm Signal pieces (canvas, connection ring, signal
   dot, meter, bus control, fader skin, shell bubble fill) the design authority
-  is the Warm Signal spec, `dev/notes/warm-signal-v3.md` — not Control Center.
-  Stock AppKit behavior, controls, and accessibility remain mandatory
-  regardless: the spec governs paint, not interaction model.
-- **The Figma design system mirrors the UI code.** Any change to `Tokens`,
-  `PopoverColumnGrid`, a custom-drawn view, or a screen must be mirrored in the
-  Figma file per [docs/FIGMA-DESIGN-SYSTEM.md](docs/FIGMA-DESIGN-SYSTEM.md).
+  is `DESIGN.md` at the repo root once the 2026-09-03 migration lands it, and
+  until then the iPhone companion's `DESIGN.md` (`aa-hh/audiout-remote`) plus
+  `dev/notes/design-migration-scoping/01-decisions.md`. `dev/notes/warm-signal-v3.md`
+  is the historical spec, not the authority. Stock AppKit behavior, controls,
+  and accessibility remain mandatory regardless: the design record governs
+  paint, not interaction model.
+- **`DESIGN.md` records the shipped design; nothing mirrors it elsewhere.**
+  The Figma design system was abandoned on 2026-09-03. When a change to
+  `Tokens`, `PopoverColumnGrid`, a custom-drawn view, or a screen lands, the
+  record is regenerated from the code by the `impeccable-documenter` agent
+  (`.claude/agents/impeccable-documenter.md`), never hand-mirrored.
 - Deviating is fine when the system has no equivalent — but note *why* in the
   nearest AGENTS.md, so the next agent doesn't "fix" it back to a system control
   that doesn't fit.

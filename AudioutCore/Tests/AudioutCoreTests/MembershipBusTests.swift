@@ -27,7 +27,7 @@ import AudioutCore
 
     private func makeBusRow(device: Device? = nil) -> DeviceRowView {
         DeviceRowView(device: device ?? makeDevice(), showsToggle: true,
-                      paintsSelectionBackground: false, showsMeter: true, showsBus: true)
+                      showsMeter: true, showsBus: true)
     }
 
     // MARK: Node ↦ state mapping (§4.3/§4.4/§4.6, matrix §3.6)
@@ -51,7 +51,9 @@ import AudioutCore
         // the device is not currently in the mix (matrix §3.6 "Unavailable").
         row.apply(makeDevice(isAvailable: false), selected: true)
         #expect(row.test_busNode == .nonMember, "an unavailable device's node is hollow")
-        #expect(row.test_busNodeDimmed == true, "…and tinted (the unavailable signature)")
+        // The dim flag rides along; it reaches only a FILL, and a hollow node
+        // has none — the rim is the rail's and stays ember.
+        #expect(row.test_busNodeDimmed == true, "…and carries the unavailable dim")
         // Unavailable is a tinted `.nonMember` + the "Unavailable" FEED
         // override (v4.1 item 3 moved this word off the sublabel and onto the
         // FEED column, since this row is a bus row).
@@ -81,7 +83,7 @@ import AudioutCore
         // §4.6 group members: showsToggle == false rows carry no membership
         // control, so they keep NO bus node even under a bus host.
         let row = DeviceRowView(device: makeDevice(), indented: true, showsToggle: false,
-                                paintsSelectionBackground: false, showsMeter: true,
+                                showsMeter: true,
                                 showsBus: true)
         #expect(row.test_busNode == nil, "a showsToggle=false (group-member) row keeps no bus node")
     }
@@ -193,32 +195,165 @@ import AudioutCore
             Issue.record("a bus row must expose both rects"); return
         }
         #expect(hit.contains(node),
-                "the invisible checkbox's target covers the node and its hover ring, not just the disc")
+                "the invisible checkbox's target covers the node at the widest it ever draws, not just the resting disc")
         #expect(hit.height == row.bounds.height, "…over the full row height")
         #expect(hit.maxX <= PopoverColumnGrid.firstElementLeading(indented: false),
                 "…and stops at the icon column, so it steals nothing from the row's other controls")
     }
 
-    @Test func gutterHoverRingsTheNode() {
+    @Test func gutterHoverGrowsANonMemberIntoItsMemberSize() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false, controllable: true)
-        #expect(!row.test_drawsHoverRing, "at rest the gutter carries no affordance ink")
+        let resting = row.test_nodeTargetRadius
+        #expect(resting == PopoverColumnGrid.busNodeDiameterUnselected / 2,
+                "at rest the node draws at its own size — the gutter adds no ink")
         row.test_setGutterHovered(true)
-        #expect(row.test_drawsHoverRing,
-                "hovering the gutter rings the node, so it admits it is the click target")
+        #expect(row.test_nodeTargetRadius == PopoverColumnGrid.busNodeDiameterSelected / 2,
+                "hovering previews the click: this node's click ADDS it, so it grows to the member size — never past it")
+        #expect(row.test_nodePreviewsClick)
         row.test_setGutterHovered(false)
-        #expect(!row.test_drawsHoverRing, "and it settles back on exit")
+        #expect(row.test_nodeTargetRadius == resting, "and it settles back on exit")
+        #expect(!row.test_nodePreviewsClick)
+    }
+
+    @Test func gutterHoverShrinksAMemberIntoItsNonMemberSize() {
+        // Alec's correction: the hover previews the POST-CLICK state, so a
+        // member — whose click REMOVES it from the mix — travels DOWN. The
+        // direction of travel is what says which way the click goes.
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: true, controllable: true)
+        let resting = row.test_nodeTargetRadius
+        #expect(resting == PopoverColumnGrid.busNodeDiameterSelected / 2)
+        row.test_setGutterHovered(true)
+        #expect(row.test_nodeTargetRadius == PopoverColumnGrid.busNodeDiameterUnselected / 2,
+                "a member's click removes it, so the hover shrinks the node to the size it would land on")
+        #expect(row.test_nodePreviewsClick)
+        row.test_setGutterHovered(false)
+        #expect(row.test_nodeTargetRadius == resting, "and it settles back on exit")
+    }
+
+    @Test func rowHoverGrowsAnUnselectedNode() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: false)
+        row.test_setHovered(true)
+        #expect(row.test_nodeTargetRadius == PopoverColumnGrid.busNodeDiameterSelected / 2,
+                "hovering anywhere on an unselected row grows its node — the invisible checkbox's one resting invitation")
+        row.test_setHovered(false)
+        #expect(!row.test_nodePreviewsClick)
+    }
+
+    @Test func rowHoverDoesNotResizeASelectedNode() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: true, controllable: true)
+        row.test_setHovered(true)
+        #expect(row.test_nodeTargetRadius == PopoverColumnGrid.busNodeDiameterSelected / 2,
+                "a selected row resizes only from the gutter — its filled node already reads as the control")
+        #expect(!row.test_nodePreviewsClick)
+    }
+
+    @Test func rowHoverNeverResizesADisabledCheckbox() {
+        let row = makeBusRow()
+        row.apply(makeDevice(isAvailable: false), selected: false)
+        row.test_setHovered(true)
+        #expect(!row.test_nodePreviewsClick, "never preview a click the checkbox would refuse")
+    }
+
+    // MARK: The hover growth itself (the tween, and Reduce Motion's way out)
+
+    /// A node in a live window TRAVELS to its hover size; the same node under
+    /// Reduce Motion is simply AT it. Both halves are read before any clock
+    /// tick, so neither depends on the run loop getting time.
+    @Test func reduceMotionTakesTheHoverSizeWithoutTravelling() {
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 60, height: 40),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        let resting = PopoverColumnGrid.busNodeDiameterUnselected / 2
+
+        let postClick = PopoverColumnGrid.busNodeDiameterSelected / 2
+
+        let travelling = makeBusView()
+        travelling.test_reduceMotionOverride = false
+        window.contentView!.addSubview(travelling)
+        travelling.setHovered(true)
+        #expect(travelling.test_nodeTargetRadius == postClick,
+                "the hover moves the node's TARGET to its post-click radius")
+        #expect(travelling.test_nodeRadius == resting,
+                "…and the node starts the travel from its resting size, not at the target")
+        travelling.removeFromSuperview()  // settles the tween; nothing ticks off screen
+
+        let instant = makeBusView()
+        instant.test_reduceMotionOverride = true
+        window.contentView!.addSubview(instant)
+        instant.setHovered(true)
+        #expect(instant.test_nodeRadius == postClick,
+                "Reduce Motion removes the tween, not the affordance — the node is at the post-click size already")
+        instant.setHovered(false)
+        #expect(instant.test_nodeRadius == resting, "…and back, in the same turn")
+        instant.removeFromSuperview()
+    }
+
+    /// Structural hooks say the target moved; this says the PIXELS did — and in
+    /// BOTH directions, which is the whole correction: a hovered non-member
+    /// spans more of the gutter, a hovered member spans less. Off-window, so the
+    /// size is taken instantly and the bitmaps are deterministic.
+    @Test func theHoveredNodeReallyDrawsItsPostClickWidth() {
+        let joining = makeBusView()
+        let restingNonMember = drawnNodeExtent(joining)
+        joining.setHovered(true)
+        let hoveredNonMember = drawnNodeExtent(joining)
+        #expect(hoveredNonMember > restingNonMember,
+                Comment(rawValue: "the hovered non-member spans \(hoveredNonMember) px against \(restingNonMember) at rest"))
+
+        let leaving = makeBusView(node: .member)
+        let restingMember = drawnNodeExtent(leaving)
+        leaving.setHovered(true)
+        let hoveredMember = drawnNodeExtent(leaving)
+        #expect(hoveredMember < restingMember,
+                Comment(rawValue: "the hovered member spans \(hoveredMember) px against \(restingMember) at rest"))
+        #expect(restingMember > restingNonMember,
+                "sanity: the resting sizes the two hovers trade between are the real ones")
+    }
+
+    private func makeBusView(node: MembershipBusView.Node = .nonMember) -> MembershipBusView {
+        let bus = MembershipBusView()
+        bus.frame = NSRect(x: 0, y: 0, width: PopoverColumnGrid.busColumnWidth, height: 40)
+        bus.apply(node: node)
+        return bus
+    }
+
+    /// The drawn node's horizontal span, in pixels, read off a real bitmap of
+    /// the node view: the inked extent along its centre scan line.
+    private func drawnNodeExtent(_ bus: MembershipBusView) -> Int {
+        guard let rep = bus.bitmapImageRepForCachingDisplay(in: bus.bounds) else { return 0 }
+        bus.cacheDisplay(in: bus.bounds, to: rep)
+        let y = rep.pixelsHigh / 2
+        let inked = (0..<rep.pixelsWide).filter { x in
+            (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05
+        }
+        guard let first = inked.first, let last = inked.last else { return 0 }
+        return last - first + 1
+    }
+
+    @Test func nameTooltipInvitesOnlyUnselectedAvailableRows() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: false)
+        #expect(row.test_nameTooltip == "Add Test Speaker to the mix")
+        row.apply(makeDevice(), selected: true, controllable: true)
+        #expect(row.test_nameTooltip == nil,
+                "the node's own tooltip already names the removal")
+        row.apply(makeDevice(isAvailable: false), selected: false)
+        #expect(row.test_nameTooltip == nil,
+                "a greyed Bluetooth row's name click CONNECTS — a mix tooltip there would lie")
     }
 
     @Test func modelRefreshClearsTheGutterHover() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true)
         row.test_setGutterHovered(true)
-        #expect(row.test_drawsHoverRing)
+        #expect(row.test_nodePreviewsClick)
         // Row reuse (any `apply`) drops the transient hover, exactly like the
         // row's own hover wash.
         row.apply(makeDevice(id: "dev-2"), selected: false)
-        #expect(!row.test_drawsHoverRing)
+        #expect(!row.test_nodePreviewsClick)
     }
 
     @Test func nonBusCheckboxKeepsItsLegacyVoiceOverLabel() {

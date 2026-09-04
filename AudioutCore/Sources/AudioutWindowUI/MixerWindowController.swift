@@ -149,9 +149,13 @@ public final class MixerWindowController {
         // those still reserve. The source-list LOOK is unaffected because it
         // never came from here: `SidebarViewController` sets
         // `outlineView.style = .sourceList` itself. What the constructor did
-        // supply is the system sidebar material, and the sidebar's own
-        // `SidebarWarmSurfaceView` draws its opaque backing instead (the
-        // branch that already shipped to everyone below macOS 26).
+        // supply is the system sidebar material. Nothing stands in for it
+        // (C6, 2026-09-03: no wash on either screen): a `.sourceList` outline
+        // view paints its OWN opaque background whatever sits behind it, so
+        // the sidebar rows read as the system source-list colour, not as this
+        // surface's `panel`. Measured dark, that colour is roughly twice as
+        // light as `panel`. Unchanged by the deletion — the wash it replaced
+        // was opaque too, and behind the same outline view.
         let sidebarItem = NSSplitViewItem(viewController: sidebarViewController)
         // PINNED at `SurfaceLayout.sidebarWidth` — minimum AND maximum,
         // deliberately (2026-08-12). The sidebar's own fitting width is
@@ -257,7 +261,7 @@ public final class MixerWindowController {
         // Groups row was already the selected one, so nothing in the sidebar
         // moves.
         editorViewController.onBack = { [weak self] in
-            self?.showOverview()
+            self?.dismissEditor()
         }
         // The editor's "Delete Group…" falls back to the default content (the
         // overview, now one card lighter).
@@ -371,6 +375,17 @@ public final class MixerWindowController {
     private func showDefaultContent() {
         sidebarViewController.select(.groupsOverview, notify: false)
         showOverview()
+    }
+
+    /// Step back from a group's editor to the card overview: the "‹ Groups"
+    /// band, ⌘[, the Done button and the surface's Escape all land here.
+    /// Returns `false` when no editor is showing, so a host's Escape can fall
+    /// through to closing the window.
+    @discardableResult
+    public func dismissEditor() -> Bool {
+        guard currentContent === editorViewController else { return false }
+        showOverview()
+        return true
     }
 
     /// Show the saved-group card overview, re-read from the current model +
@@ -782,7 +797,7 @@ final class ContentPaneHostViewController: NSViewController {
     override func loadView() {
         footerLabel.translatesAutoresizingMaskIntoConstraints = false
         footerLabel.font = Tokens.Font.caption
-        footerLabel.textColor = Tokens.Color.secondaryLabel
+        footerLabel.textColor = Tokens.Color.label2
         footerLabel.alignment = .center
         footerLabel.lineBreakMode = .byTruncatingTail
 

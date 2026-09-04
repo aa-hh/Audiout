@@ -156,6 +156,25 @@ for wt in "$worktrees_dir"/*/; do
     fi
 done
 
+# --- C. PTP-helper daemon check (best-effort) -----------------------------------
+#
+# Stale *.ptphelper launchd daemons pile up from old/side-by-side dev builds and
+# can block live testing by holding UDP 319/320. purge-stale-ptp-helpers.sh's dry
+# run enumerates them, but includes override-only GHOSTS (no loaded job, harmless,
+# unremovable by bootout). We count only LOADED jobs: when > 1, a stale helper
+# is squatting on the ports. Threshold is >1 because one loaded helper is legit
+# (the current dev build). When exceeded, nag with the fix. Best-effort: any
+# error is silent, never blocks the build.
+stale_helpers_output=$(bash scripts/purge-stale-ptp-helpers.sh 2>/dev/null || true)
+stale_helpers_total=$(printf '%s\n' "$stale_helpers_output" | grep -oE 'Found [0-9]+' | grep -oE '[0-9]+')
+[ -z "$stale_helpers_total" ] && stale_helpers_total=0
+stale_helpers_ghosts=$(printf '%s\n' "$stale_helpers_output" | grep -c "unknown (override-only entry, no loaded job)")
+stale_helpers_loaded=$((stale_helpers_total - stale_helpers_ghosts))
+if [ "$stale_helpers_loaded" -gt 1 ]; then
+    say "WARNING: $stale_helpers_loaded stale PTP-helper(s) with loaded jobs — run to clean up:"
+    say "    bash scripts/purge-stale-ptp-helpers.sh --apply"
+fi
+
 # --- B. build caches: staleness sweep + disk-pressure floor ------------------
 # NOT a fixed count. Caches on a roomy disk cost nothing, and a count cap
 # forces cold rebuilds (minutes of heavy compile per Guard-4 commit) exactly
@@ -246,11 +265,16 @@ units=$(
     done | sort -n
 )
 
-# Rule 0: dead-engine subtrees. This repo builds exclusively with
-# `--build-system native` (see scripts/run-tests.sh), whose cache is
-# .build/arm64-apple-macosx. The DEFAULT engine's cache — .build/out — is
-# therefore unreachable: no command this repo runs can ever hit it again. It is
-# ~800 MB per worktree and was 8.4 GB machine-wide at the switchover.
+# Rule 0: dead-engine subtrees. This repo builds with the SwiftPM DEFAULT engine
+# (see scripts/run-tests.sh), whose cache is .build/out. The old `native`
+# engine's cache — .build/arm64-apple-macosx — is therefore unreachable: no
+# command this repo runs can ever hit it again. It is ~1.3 GB per worktree.
+#
+# NOTE the direction flipped on 2026-09-04, when the scripts dropped
+# `--build-system native`. Before that this rule deleted .build/out and kept
+# arm64-apple-macosx. If you flip the engine again, flip BOTH `dead_engine_dir`
+# and the `migrated` test below — they must always name opposite trees, or this
+# deletes the cache every build is using.
 #
 # This runs BEFORE the two rules below on purpose, because it is the only
 # reclaim that is free: rules 1 and 2 delete WARM caches and make that
@@ -261,24 +285,23 @@ units=$(
 # old engine still has a live process pointing at it, so `skippable` protects it
 # and it simply ages out via rule 1 instead.
 #
-# AND it only fires on a worktree whose OWN checkout has the native pin. A
-# branch cut before that change still builds with swiftbuild, so its .build/out
-# is its LIVE cache, not a dead one — deleting it would force a cold rebuild
-# that the branch then immediately redoes, thrashing it once per housekeeping
-# run until it merges main. Checking each worktree's own run-tests.sh keeps the
-# reclaim to caches that are genuinely unreachable.
-dead_engine_dir=out
+# AND it only fires on a worktree whose OWN checkout is off the native pin. A
+# branch cut before the flip still builds with `native`, so its
+# .build/arm64-apple-macosx is its LIVE cache, not a dead one — deleting it
+# would force a cold rebuild that the branch then immediately redoes, thrashing
+# it once per housekeeping run until it merges main. Checking each worktree's
+# own run-tests.sh keeps the reclaim to caches that are genuinely unreachable.
+dead_engine_dir=arm64-apple-macosx
 migrated() {
-    grep -q -- '--build-system native' "$1/scripts/run-tests.sh" 2>/dev/null && return 0
-    # A worktree predating the pin is still BUILT by the primary checkout's
-    # wrapper — Guard 4 resolves scripts/ there whenever the worktree is older
-    # than they are — so the native cache it grew is the live one and .build/out
-    # is dead after all. Presence of BOTH is the evidence: nothing produces an
-    # arm64-apple-macosx tree except the pinned wrapper. Without this the
-    # commonest case on this machine (33 worktrees, 10 carrying both engines)
-    # was skipped forever and cost ~1.3 GB each.
+    grep -q -- '--build-system native' "$1/scripts/run-tests.sh" 2>/dev/null || return 0
+    # A worktree still carrying the old pin in its own checkout is nonetheless
+    # BUILT by the primary checkout's wrapper — Guard 4 resolves scripts/ there
+    # whenever the worktree is older than they are — so the swiftbuild cache it
+    # grew is the live one and arm64-apple-macosx is dead after all. Presence of
+    # BOTH is the evidence: nothing produces an `out` tree except the current
+    # wrapper.
     both=$(caches_of "$1" | while IFS= read -r d; do
-        [ -d "$d/arm64-apple-macosx" ] && printf 'x'
+        [ -d "$d/out" ] && printf 'x'
     done)
     [ -n "$both" ]
 }
@@ -293,10 +316,10 @@ printf '%s\n' "$units" | while IFS='	' read -r mt u; do
     sz=$(printf '%s\n' "$found" | while IFS= read -r d; do du -sk "$d" 2>/dev/null | cut -f1; done |
          awk '{t+=$1} END {printf "%d", t/1024}')
     if [ "$dry_run" -eq 1 ]; then
-        say "would delete dead swiftbuild cache in $(basename "$u") (~${sz} MB) — repo builds with --build-system native."
+        say "would delete dead native-engine cache in $(basename "$u") (~${sz} MB) — repo builds with the default engine."
     else
         printf '%s\n' "$found" | while IFS= read -r d; do rm -rf "$d"; done
-        say "deleted dead swiftbuild cache in $(basename "$u") (~${sz} MB) — unreachable, repo builds with --build-system native."
+        say "deleted dead native-engine cache in $(basename "$u") (~${sz} MB) — unreachable, repo builds with the default engine."
     fi
 done
 

@@ -15,17 +15,17 @@ public enum AppearanceTheme: String, CaseIterable, Sendable {
 }
 
 /// The accent dial (Settings › Appearance › Accent — Warm Signal spec §1.3,
-/// decision i): how strongly the gold instrument tokens (`gold`/`ember`/`glow`)
-/// render. `.fullGold` is the flagship default; `.subtle` desaturates the gold
-/// channel and removes the glow; `.systemAccent` pulls the Mac's accent color
-/// into every gold slot. The dial remaps ONLY the gold channel — `failure`,
-/// `caution`, `ring-connected`, and all text tokens are never remapped. Core
-/// owns only the persisted choice; the token remap itself lives with the token
-/// module (`AudioutSharedUI.Tokens`), since Core imports no AppKit.
+/// decision i): how strongly the gold instrument tokens render. TWO positions
+/// — `.fullGold` is the flagship default; `.subtle` desaturates the gold
+/// channel and removes the glow. The dial remaps ONLY the gold channel;
+/// `failure`, the edge tokens and every text token are never remapped. A value
+/// persisted by a build that had a third position no longer decodes, and the
+/// getter's existing `?? .fullGold` fallback catches it. Core owns only the
+/// persisted choice; the token remap itself lives with the token module
+/// (`AudioutSharedUI.Tokens`), since Core imports no AppKit.
 public enum AccentStyle: String, CaseIterable, Sendable {
     case fullGold
     case subtle
-    case systemAccent
 }
 
 /// What the license server last said about the stored key (`POST /v1/validate`).
@@ -84,11 +84,13 @@ public struct AppSettings {
         static let startBufferMs = "audio.startBufferMs"
         static let hasCompletedSetup = "setup.hasCompleted"
         static let speakerSyncWasEnabled = "speakerSync.wasEnabled"
+        static let localNetworkWasGranted = "localNetwork.wasGranted"
         static let reconnectAtLaunch = "general.reconnectAtLaunch"
         static let wakeRestoreMinutes = "audio.wakeRestoreMinutes"
         static let connectVolume = "audio.connectVolume"
         static let mainOutVolume = "audio.mainOutVolume"
         static let syncOffsetMs = "audio.syncOffsetMs"
+        static let allowRemoteControl = "companion.allowRemoteControl"
         static let surfacePinned = "surface.pinned"
         static let eqAdvancedExpanded = "eq.advancedExpanded"
         static let licenseKey = "license.key"
@@ -96,9 +98,11 @@ public struct AppSettings {
         static let licenseCheckInURL = "license.checkInURL"
         static let licenseStatus = "license.status"
         static let licenseMaxMajor = "license.maxMajor"
+        static let companionToken = "license.companionToken"
         static let telemetryOptIn = "telemetry.optIn"
         static let telemetryAsked = "telemetry.asked"
         static let touchBarControls = "general.touchBarControls"
+        static let mixerMembershipHintDismissed = "mixer.membershipHintDismissed"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -161,6 +165,23 @@ public struct AppSettings {
     public var speakerSyncWasEnabled: Bool {
         get { defaults.bool(forKey: Keys.speakerSyncWasEnabled) }
         nonmutating set { defaults.set(newValue, forKey: Keys.speakerSyncWasEnabled) }
+    }
+
+    /// Whether a Local Network browse has EVER reached the network — written by
+    /// ``SetupModel``'s one prime funnel the first time it proves the grant, and
+    /// cleared only by a real refusal (the mDNS policy error).
+    ///
+    /// It exists because Local Network is the one permission with no silent
+    /// read: browsing is what raises the system prompt, so a status of
+    /// `.unknown` — which every freshly built ``SetupModel`` starts at — cannot
+    /// be resolved by just looking. Without this bit, re-opening Setup showed a
+    /// long-granted permission as un-asked and invited the user to grant it
+    /// again (live report, 2026-08-29). With it, a fresh model starts from the
+    /// proven grant and re-verifies by browsing, which raises no prompt on a
+    /// permission already held.
+    public var localNetworkWasGranted: Bool {
+        get { defaults.bool(forKey: Keys.localNetworkWasGranted) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.localNetworkWasGranted) }
     }
 
     /// Settings › General "Reconnect last speakers when Audiout starts"
@@ -302,6 +323,102 @@ public struct AppSettings {
         }
     }
 
+    /// Whether the iPhone companion app may connect to and control this Mac
+    /// (Settings › General "Allow control from iPhone on this network").
+    /// Defaults to **`true`** when unset (T22 flip, Alec's call 2026-08-06):
+    /// the phone app ships alongside the Mac app now, and the per-phone
+    /// approval gate (T24) means an enabled listener still admits nobody the
+    /// user hasn't explicitly approved. Unchecking the Settings › General
+    /// checkbox stores `false` and wins. See ``resolvedAllowRemoteControl(explicit:environment:)``
+    /// for the env-var override AppDelegate actually reads at launch.
+    public var allowRemoteControl: Bool {
+        get {
+            guard defaults.object(forKey: Keys.allowRemoteControl) != nil else { return true }
+            return defaults.bool(forKey: Keys.allowRemoteControl)
+        }
+        nonmutating set { defaults.set(newValue, forKey: Keys.allowRemoteControl) }
+    }
+
+    /// The env var that force-overrides ``allowRemoteControl`` for one launch,
+    /// mirroring `BackendKind.environmentVariableName`'s dev-convenience idiom.
+    public static let allowRemoteControlEnvironmentVariableName = "AUDIOUT_COMPANION"
+
+    /// What decided a ``resolvedAllowRemoteControlWithSource(explicit:environment:settings:)``
+    /// call — carried alongside the resolved value so a caller that needs to
+    /// EXPLAIN itself (the Settings › General checkbox, FIX-C) can tell "this is
+    /// the user's own setting" apart from "an override forced this value for the
+    /// launch, the setting can't take effect until it's gone." Without this, the
+    /// General pane rendered the raw persisted bool while the server actually
+    /// ran on the resolved one — a checkbox that could show OFF while a LAN
+    /// server was running, and silently do nothing when unchecked.
+    public enum RemoteControlResolution: Equatable, Sendable {
+        /// The persisted ``allowRemoteControl`` setting decided — nothing
+        /// overrode it, so writing the setting takes effect immediately.
+        case setting(Bool)
+        /// An explicit argument or the `AUDIOUT_COMPANION` env var forced
+        /// this value for the current process launch. The persisted setting
+        /// still exists underneath but cannot change what's running.
+        case forced(Bool)
+
+        /// The resolved value, regardless of what decided it.
+        public var value: Bool {
+            switch self {
+            case .setting(let value), .forced(let value): return value
+            }
+        }
+
+        /// Whether an override is in force — the setting can't be changed
+        /// through the normal write path while this is `true`.
+        public var isForced: Bool {
+            if case .forced = self { return true }
+            return false
+        }
+    }
+
+    /// Resolve whether the companion server should run, in priority order: an
+    /// explicit argument → the `AUDIOUT_COMPANION` env var (`1`/`0` or
+    /// `on`/`off`, case-insensitive) → the persisted ``allowRemoteControl``
+    /// setting — same priority ``resolvedAllowRemoteControl(explicit:environment:settings:)``
+    /// uses, but returned alongside ``RemoteControlResolution`` so a UI can
+    /// render the override honestly instead of just reading the raw setting.
+    ///
+    /// This is an explicit knob, never a silent fallback (mirrors
+    /// `BackendKind.resolved`'s policy, OwnToneBackend.swift): an unrecognized
+    /// env value is treated as absent — it falls back to the setting and
+    /// prints one warning to stderr rather than silently guessing which way
+    /// to go.
+    public static func resolvedAllowRemoteControlWithSource(
+        explicit: Bool? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        settings: AppSettings
+    ) -> RemoteControlResolution {
+        if let explicit { return .forced(explicit) }
+
+        guard let raw = environment[allowRemoteControlEnvironmentVariableName] else {
+            return .setting(settings.allowRemoteControl)
+        }
+        switch raw.lowercased() {
+        case "1", "on":  return .forced(true)
+        case "0", "off": return .forced(false)
+        default:
+            FileHandle.standardError.write(
+                Data("warning: unrecognized \(allowRemoteControlEnvironmentVariableName) value \"\(raw)\" — falling back to the setting\n".utf8)
+            )
+            return .setting(settings.allowRemoteControl)
+        }
+    }
+
+    /// Convenience over ``resolvedAllowRemoteControlWithSource(explicit:environment:settings:)``
+    /// for callers that only need the resolved value (`AppDelegate`, which
+    /// only starts/stops the server and never has to explain the source).
+    public static func resolvedAllowRemoteControl(
+        explicit: Bool? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        settings: AppSettings
+    ) -> Bool {
+        resolvedAllowRemoteControlWithSource(explicit: explicit, environment: environment, settings: settings).value
+    }
+
     /// Whether this Mac's sync trim has an ENTRY at all — the honest answer to
     /// "tuned or never tuned?", which the value alone cannot give: a Mac
     /// deliberately trimmed to exactly 0 ms IS tuned and must not read "Not
@@ -338,6 +455,14 @@ public struct AppSettings {
         nonmutating set { defaults.set(newValue, forKey: Keys.eqAdvancedExpanded) }
     }
 
+    /// Whether the Mixer's first-run membership hint has been dismissed. Set
+    /// the first time the user toggles a speaker's membership in the Mixer;
+    /// the hint shows on every Mixer open while this is `false`.
+    public var mixerMembershipHintDismissed: Bool {
+        get { defaults.bool(forKey: Keys.mixerMembershipHintDismissed) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.mixerMembershipHintDismissed) }
+    }
+
     /// The purchase licence key, entered once from the receipt (Settings ›
     /// General, roadmap 054). `nil` when unset — Audiout is fully functional
     /// without one (the Ardour model: the binary is what's sold, never a
@@ -348,7 +473,10 @@ public struct AppSettings {
         get { defaults.string(forKey: Keys.licenseKey) }
         nonmutating set {
             defaults.set(newValue, forKey: Keys.licenseKey)
-            if newValue == nil { licenseStatus = nil }
+            if newValue == nil {
+                licenseStatus = nil
+                companionToken = nil
+            }
         }
     }
 
@@ -386,6 +514,15 @@ public struct AppSettings {
             return stored == 0 ? nil : stored
         }
         nonmutating set { defaults.set(newValue, forKey: Keys.licenseMaxMajor) }
+    }
+
+    /// The opaque licence-server token for the companion server to forward
+    /// to approved iPhones in `welcome`, so the iOS app can unlock offline.
+    /// Written only by ``LicenseValidator``. `nil` when never issued, or
+    /// cleared alongside ``licenseKey``/``licenseStatus``.
+    public var companionToken: String? {
+        get { defaults.string(forKey: Keys.companionToken) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.companionToken) }
     }
 
     /// The license server this build talks to, from the bundle's

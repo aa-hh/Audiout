@@ -57,25 +57,29 @@ final class UsageStatsConsentCard: NSView {
     /// freezes at whatever appearance was ambient when it was taken, and taking
     /// it in `init` — before the view has a window — froze this card WHITE in
     /// dark mode, with white text on it. SharedUI's layer-colour rule.
+    ///
+    /// The rim is `containerEdge`, the card's own edge: this is a card sitting
+    /// on a panel, and without an edge of its own the two grounds run together.
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
         layer?.backgroundColor = Tokens.Color.panel.cgColor
-        layer?.cornerRadius = 12
+        layer?.borderColor = Tokens.Color.containerEdge.cgColor
+        layer?.borderWidth = 1
+        layer?.cornerRadius = Tokens.Layout.Radius.row
         layer?.cornerCurve = .continuous
     }
 
     private func build() {
-        // The step's identity tile — the same glyph and hue its spine row
-        // wears, so the card is recognisably this step's the moment it lands.
-        let tile = RoundedContainerView(fill: Tokens.Color.permissionUsageStats,
-                                        border: .clear, radius: 13)
-        let glyph = NSImageView()
-        glyph.image = NSImage(systemSymbolName: "chart.bar.xaxis", accessibilityDescription: nil)
-        glyph.symbolConfiguration = .init(pointSize: 26, weight: .regular)
-        glyph.contentTintColor = .white
-        glyph.translatesAutoresizingMaskIntoConstraints = false
-        tile.addSubview(glyph)
+        // The step's identity tile, built exactly as its spine row builds one:
+        // the NEUTRAL well every other step wears, with only the glyph carrying
+        // the step's hue (Q3). A filled hue tile with white ink is retired
+        // everywhere in this flow — no tile colours its own fill.
+        let tile = IconTileView(symbolName: "chart.bar.xaxis",
+                                accessibility: "Usage statistics",
+                                color: Tokens.Color.permissionUsageStats,
+                                side: Self.tileSide,
+                                pointSize: 26)
 
         let headline = NSTextField(wrappingLabelWithString: Self.headlineText)
         headline.font = .systemFont(ofSize: 15, weight: .semibold)
@@ -116,10 +120,6 @@ final class UsageStatsConsentCard: NSView {
 
             tile.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.padding),
             tile.topAnchor.constraint(equalTo: topAnchor, constant: Self.padding),
-            tile.widthAnchor.constraint(equalToConstant: Self.tileSide),
-            tile.heightAnchor.constraint(equalToConstant: Self.tileSide),
-            glyph.centerXAnchor.constraint(equalTo: tile.centerXAnchor),
-            glyph.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
 
             headline.leadingAnchor.constraint(equalTo: tile.leadingAnchor),
             headline.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.padding),

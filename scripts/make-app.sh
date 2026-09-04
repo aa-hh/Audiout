@@ -271,12 +271,12 @@ if [ "${AUDIOUT_BUILD_LOCAL:-0}" != "1" ] &&
   # \$ escapes keep PWD/BIN/HBIN for the remote shell; $EXECUTABLE and friends
   # expand here.
   REMOTE_CMD="R=\$PWD; \
-swift build --build-system native --package-path AudioutCore -c release --product $EXECUTABLE && \
-swift build --build-system native --package-path AudioutCore -c release --product $TCC_PROBE_EXECUTABLE && \
-BIN=\$(swift build --build-system native --package-path AudioutCore -c release --show-bin-path) && \
-swift build --build-system native --package-path AirPlayEngine -c release --product $HELPER_EXECUTABLE \
+swift build --package-path AudioutCore -c release --product $EXECUTABLE && \
+swift build --package-path AudioutCore -c release --product $TCC_PROBE_EXECUTABLE && \
+BIN=\$(swift build --package-path AudioutCore -c release --show-bin-path) && \
+swift build --package-path AirPlayEngine -c release --product $HELPER_EXECUTABLE \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker \"\$R/scripts/ptp-helper-info.plist\" && \
-HBIN=\$(swift build --build-system native --package-path AirPlayEngine -c release --show-bin-path) && \
+HBIN=\$(swift build --package-path AirPlayEngine -c release --show-bin-path) && \
 rm -rf .remote-products && mkdir -p .remote-products && \
 cp \"\$BIN/$EXECUTABLE\" \"\$BIN/$TCC_PROBE_EXECUTABLE\" \"\$HBIN/$HELPER_EXECUTABLE\" .remote-products/ && \
 cp -R \"\$BIN/$RESOURCE_BUNDLE_NAME\" .remote-products/"
@@ -318,9 +318,10 @@ cp -R \"\$BIN/$RESOURCE_BUNDLE_NAME\" .remote-products/"
       echo "==> Could not fetch products back — building locally instead" >&2
     fi
   elif [ "$RRC" -eq 2 ]; then
-    # Compiled and FAILED there. Never report that as this build's verdict: the
-    # toolchains differ (local Swift 6.4 / macOS 27 SDK vs remote 6.3.1 /
-    # macOS 26), so a remote-only error is as likely to be skew as a real break.
+    # Compiled and FAILED there. Never report that as this build's verdict: both
+    # Macs run Swift 6.4 but against different SDKs (macOS 27 here, macOS 26
+    # there), and the remote has been out of disk and starved before,
+    # so a remote-only error is as likely to be skew as a real break.
     # Same asymmetry run-tests.sh uses — accept a remote pass, re-confirm a
     # remote failure here.
     echo "==> Remote compile reported ERRORS — rebuilding locally to confirm" >&2
@@ -331,17 +332,16 @@ fi
 
 if [ "$REMOTE_BUILT" -eq 0 ]; then
 echo "==> Building $EXECUTABLE (release)"
-# --build-system native: Xcode 26+/27 made the new "swiftbuild" engine the
-# default for `swift build`, but it doesn't forward a C target's cSettings
+# Build engine: the SwiftPM default (swiftbuild). These commands used to pin the
+# old `native` engine, because swiftbuild did not forward a C target's cSettings
 # unsafeFlags (AirPlayEngine/Package.swift's Homebrew -I paths for libevent/
 # libsodium/libgcrypt/libplist) into the clang module dependency scan used by
-# Swift targets that `import CAirPlayEngine` — so <event2/thread.h> fails to
-# resolve and the build errors out with "could not build module
-# 'CAirPlayEngine'". The deprecated native engine still merges those flags
-# correctly. Pin it explicitly until Package.swift's header search paths are
-# restructured to survive the new engine (or SwiftPM fixes the propagation).
-swift build --build-system native --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
-BIN_DIR="$(swift build --build-system native --package-path "$PACKAGE_DIR" -c release --show-bin-path)"
+# Swift targets that `import CAirPlayEngine` — <event2/thread.h> failed to
+# resolve and the build died with "could not build module 'CAirPlayEngine'".
+# Fixed as of Swift 6.4 — verified 2026-09-04. Keep this script, build.sh and
+# run-tests.sh on the same engine: they keep SEPARATE ~1.3 GB caches.
+swift build --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
+BIN_DIR="$(swift build --package-path "$PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_BINARY="$BIN_DIR/$EXECUTABLE"
 BUILT_RESOURCE_BUNDLE="$BIN_DIR/$RESOURCE_BUNDLE_NAME"
 test -x "$BUILT_BINARY" || { echo "error: built binary not found at $BUILT_BINARY" >&2; exit 1; }
@@ -349,7 +349,7 @@ test -x "$BUILT_BINARY" || { echo "error: built binary not found at $BUILT_BINAR
 # Same package as $EXECUTABLE, same release config — this lands in $BIN_DIR
 # alongside it, no second package build needed (contrast with ptp-helper below).
 echo "==> Building $TCC_PROBE_EXECUTABLE (release)"
-swift build --build-system native --package-path "$PACKAGE_DIR" -c release --product "$TCC_PROBE_EXECUTABLE"
+swift build --package-path "$PACKAGE_DIR" -c release --product "$TCC_PROBE_EXECUTABLE"
 BUILT_TCC_PROBE="$BIN_DIR/$TCC_PROBE_EXECUTABLE"
 test -x "$BUILT_TCC_PROBE" || { echo "error: built binary not found at $BUILT_TCC_PROBE" >&2; exit 1; }
 
@@ -364,9 +364,9 @@ echo "==> Building $HELPER_EXECUTABLE (release)"
 # carries the section; plain `swift build --product ptp-helper` (dev/tests) omits
 # it, which is fine — the section only matters to SMAppService registration.
 test -f "$HELPER_INFO_PLIST" || { echo "error: helper Info.plist not found at $HELPER_INFO_PLIST" >&2; exit 1; }
-swift build --build-system native --package-path "$ENGINE_PACKAGE_DIR" -c release --product "$HELPER_EXECUTABLE" \
+swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --product "$HELPER_EXECUTABLE" \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$HELPER_INFO_PLIST"
-HELPER_BIN_DIR="$(swift build --build-system native --package-path "$ENGINE_PACKAGE_DIR" -c release --show-bin-path)"
+HELPER_BIN_DIR="$(swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_HELPER="$HELPER_BIN_DIR/$HELPER_EXECUTABLE"
 test -x "$BUILT_HELPER" || { echo "error: built helper not found at $BUILT_HELPER" >&2; exit 1; }
 fi  # REMOTE_BUILT
@@ -404,6 +404,17 @@ chmod +x "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 # `Bundle.module`: see BrandMark.swift.
 mkdir -p "$RESOURCES_DIR"
 cp -R "$BUILT_RESOURCE_BUNDLE" "$RESOURCES_DIR/$RESOURCE_BUNDLE_NAME"
+
+# --- Wordmark font (ClashDisplay-Semibold) ---------------------------------
+# NOT in git and NOT in the SwiftPM resource bundle: the ITF Free Font License
+# forbids redistributing the file through a public repository, so
+# scripts/fetch-wordmark-font.sh pulls it from Fontshare at assembly (cached
+# under build/, sha256-pinned; AUDIOUT_WORDMARK_FONT=<path> for offline) and
+# Tokens.Font.wordmark finds it in Contents/Resources through Bundle.main.
+# A missing or mismatched font FAILS the build: a shipped app must never
+# fall back to the system face silently.
+"$SCRIPT_DIR/fetch-wordmark-font.sh" "$RESOURCES_DIR" "$OUTPUT_DIR/font-cache"
+test -f "$RESOURCES_DIR/ClashDisplay-Semibold.otf" || { echo "ERROR: ClashDisplay-Semibold.otf missing from $RESOURCES_DIR after fetch" >&2; exit 1; }
 
 # --- SMAppService launchd daemon plist -------------------------------------
 # Ships from scripts/ptp-helper.plist with __BUNDLE_ID__ substituted for the
@@ -727,29 +738,47 @@ plutil -extract NSHumanReadableCopyright raw -o - "$PLIST" >/dev/null || { echo 
 # keys are needed and BOTH must be present or discovery silently finds nothing:
 #   NSLocalNetworkUsageDescription — the prompt's rationale (same plutil-not-
 #     PlistBuddy reasoning as above: the prose has apostrophes).
-#   NSBonjourServices — the service types we're allowed to browse; without it the
-#     browse is blocked even with the usage string. These MUST match every type
-#     the app browses: _airplay._tcp for AirPlay 2 and _raop._tcp for AP1
-#     (NativeDiscovery), _googlecast._tcp for Cast receivers
-#     (CastDeviceEnumerator), plus _audiout-pf._tcp — the service setup
-#     publishes and then browses for on this same Mac to PROVE the permission
-#     was granted (LocalNetworkPrimer's self-discovery). Leave that last one out
-#     and the self-browse is silently blocked, so setup can never confirm a
-#     grant on a network with no speaker switched on. That name is SHORT on
-#     purpose: Bonjour caps a service name at 15 characters, and the longer
+#   NSBonjourServices — the service types we're allowed to use; without it the
+#     operation is blocked even with the usage string. These MUST match every
+#     type the app touches: _airplay._tcp for AirPlay 2 and _raop._tcp for AP1
+#     (NativeDiscovery browses), _googlecast._tcp for Cast receivers
+#     (CastDeviceEnumerator), the type CompanionServer ADVERTISES
+#     (_audiout._tcp), and _audiout-pf._tcp — the service setup publishes
+#     and then browses for on this same Mac to PROVE the permission was granted
+#     (LocalNetworkPrimer's self-discovery). Leave that last one out and the
+#     self-browse is silently blocked, so setup can never confirm a grant on a
+#     network with no speaker switched on. That name is SHORT on purpose:
+#     Bonjour caps a service name at 15 characters, and the longer
 #     _audiout-preflight._tcp was rejected outright (BadParam), which is
 #     exactly as invisible as leaving it out. Keep it in step with
 #     LocalNetworkPrimer.selfServiceType.
+#
+#     _audiout._tcp is here because ADVERTISING is gated too, not just
+#     browsing. An earlier research note claimed NSBonjourServices covered
+#     browsing only, so a service the Mac merely advertises needed no entry.
+#     That is WRONG on macOS 15+: proven live 2026-07-27, where NWListener
+#     came up, logged success, and then failed asynchronously with
+#     `-65555: NoAuth` (kDNSServiceErr_NoAuth) — no socket, no advertisement,
+#     and nothing surfaced in the UI. Adding the type here fixes it.
 plutil -insert NSLocalNetworkUsageDescription -string "$LOCAL_NETWORK_USAGE" "$PLIST"
 plutil -insert NSBonjourServices -array "$PLIST"
 plutil -insert NSBonjourServices.0 -string "_airplay._tcp" "$PLIST"
 plutil -insert NSBonjourServices.1 -string "_raop._tcp" "$PLIST"
-plutil -insert NSBonjourServices.2 -string "_audiout-pf._tcp" "$PLIST"
-plutil -insert NSBonjourServices.3 -string "_googlecast._tcp" "$PLIST"
+plutil -insert NSBonjourServices.2 -string "_audiout._tcp" "$PLIST"
+#     _dacp._tcp is DACPServer's advertisement — the channel a speaker uses to
+#     report ITS OWN volume change back to us (turn the knob on a Sonos). Found
+#     failing `-65555: NoAuth` on every launch during the 2026-07-27 companion
+#     live gate: a PRE-EXISTING bug in the shipping app, same root cause, not
+#     introduced by the companion work. Without this entry speaker-initiated
+#     volume never reaches the Mac and nothing reports why.
+plutil -insert NSBonjourServices.3 -string "_dacp._tcp" "$PLIST"
+plutil -insert NSBonjourServices.4 -string "_audiout-pf._tcp" "$PLIST"
+plutil -insert NSBonjourServices.5 -string "_googlecast._tcp" "$PLIST"
 plutil -extract NSLocalNetworkUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSLocalNetworkUsageDescription missing from Info.plist" >&2; exit 1; }
 plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices missing from Info.plist" >&2; exit 1; }
-plutil -extract NSBonjourServices.2 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing the setup self-discovery type — setup could not prove a Local Network grant" >&2; exit 1; }
-plutil -extract NSBonjourServices.3 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing _googlecast._tcp — Cast discovery would be silently blocked" >&2; exit 1; }
+plutil -extract NSBonjourServices.2 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing _audiout._tcp — the companion server cannot advertise without it (fails -65555 NoAuth)" >&2; exit 1; }
+plutil -extract NSBonjourServices.4 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing the setup self-discovery type — setup could not prove a Local Network grant" >&2; exit 1; }
+plutil -extract NSBonjourServices.5 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing _googlecast._tcp — Cast discovery would be silently blocked" >&2; exit 1; }
 
 # Bluetooth (BT-CONNECT): reconnecting an already-paired speaker touches
 # IOBluetooth, which macOS gates behind the Bluetooth TCC prompt — and a
@@ -857,9 +886,26 @@ fi
 # PostHog must be present in a bundled release because double-clicked apps do not
 # inherit the build shell's environment. CI supplies these values directly; local
 # release builds may use the wizard-managed root .env.
-if [ -f "$REPO_ROOT/.env" ]; then
+#
+# .env is gitignored, so a fresh `git worktree` never has one — only the
+# primary checkout does. Every worktree shares that one repository, so the
+# primary checkout is always findable from `--git-common-dir` (a worktree's is
+# `<primary>/.git`; the primary's own is `.git` itself, whose parent is
+# already $REPO_ROOT, so this is a no-op there). Missing this made the script
+# exit here, before the codesign step, leaving a half-built `.app` that looked
+# present and even launched but carried none of the entitlements below — see
+# dev/notes/make-app-worktree-env-gap.md.
+ENV_FILE="$REPO_ROOT/.env"
+if [ ! -f "$ENV_FILE" ]; then
+  PRIMARY_ROOT="$(cd "$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir)/.." && pwd)"
+  if [ -f "$PRIMARY_ROOT/.env" ] && [ "$PRIMARY_ROOT" != "$REPO_ROOT" ]; then
+    echo "==> No .env in this worktree — using the primary checkout's ($PRIMARY_ROOT/.env)"
+    ENV_FILE="$PRIMARY_ROOT/.env"
+  fi
+fi
+if [ -f "$ENV_FILE" ]; then
   set -a
-  . "$REPO_ROOT/.env"
+  . "$ENV_FILE"
   set +a
 fi
 [ -n "${POSTHOG_PROJECT_TOKEN:-}" ] || { echo "ERROR: POSTHOG_PROJECT_TOKEN is required for a release bundle" >&2; exit 1; }

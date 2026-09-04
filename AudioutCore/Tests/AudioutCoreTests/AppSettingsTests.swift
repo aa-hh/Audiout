@@ -252,6 +252,145 @@ import Testing
         #expect((AppSettings.minSyncOffsetMs...AppSettings.maxSyncOffsetMs).contains(AppSettings.defaultSyncOffsetMs))
     }
 
+    // MARK: Store directory — side-by-side isolation
+
+    @Test func storeDirectoryKeepsTheHistoricalFolderForNonAudioutHosts() {
+        // The swift-test host (com.apple.dt.xctest.tool) is not an
+        // Audiout-family bundle id, so it must resolve to the historical
+        // "Audiout" folder — the no-migration pin. Only a BUNDLE_ID
+        // override like com.audiout.Audiout.dev diverges (not
+        // constructible from this host; the predicate is exercised by the
+        // side-by-side dev-build flow).
+        #expect(GroupStore.defaultDirectory.lastPathComponent == "Audiout")
+    }
+
+    // MARK: Companion — allow remote control (T6)
+
+    @Test func allowRemoteControlDefaultsTrueWhenUnset() {
+        // T22 flip: enabled out of the box — the per-phone approval gate is
+        // what protects the listener, not the checkbox. Unchecking still
+        // stores false and wins (see allowRemoteControlRoundTrips).
+        #expect(AppSettings(defaults: defaults).allowRemoteControl)
+    }
+
+    @Test func allowRemoteControlRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = true
+        #expect(settings.allowRemoteControl)
+        #expect(AppSettings(defaults: defaults).allowRemoteControl)
+
+        settings.allowRemoteControl = false
+        #expect(!AppSettings(defaults: defaults).allowRemoteControl)
+    }
+
+    @Test func resolvedAllowRemoteControlExplicitWins() {
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = false
+        #expect(AppSettings.resolvedAllowRemoteControl(explicit: true, environment: [:], settings: settings))
+        #expect(!AppSettings.resolvedAllowRemoteControl(explicit: false, environment: ["AUDIOUT_COMPANION": "1"], settings: settings))
+    }
+
+    @Test func resolvedAllowRemoteControlFallsBackToSettingWhenEnvUnset() {
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = true
+        #expect(AppSettings.resolvedAllowRemoteControl(environment: [:], settings: settings))
+
+        settings.allowRemoteControl = false
+        #expect(!AppSettings.resolvedAllowRemoteControl(environment: [:], settings: settings))
+    }
+
+    @Test(arguments: [
+        ("1", true), ("0", false),
+        ("on", true), ("off", false),
+        ("ON", true), ("OFF", false),
+        ("On", true), ("Off", false),
+    ])
+    func resolvedAllowRemoteControlEnvMatrix(raw: String, expected: Bool) {
+        let settings = AppSettings(defaults: defaults)
+        // The setting disagrees with every expected outcome, so a pass proves
+        // the env var actually won rather than merely matching the default.
+        settings.allowRemoteControl = !expected
+        #expect(AppSettings.resolvedAllowRemoteControl(
+            environment: ["AUDIOUT_COMPANION": raw], settings: settings) == expected)
+    }
+
+    @Test func resolvedAllowRemoteControlUnrecognizedEnvFallsBackToSetting() {
+        // An explicit but garbage value is treated as absent (falls back to
+        // the setting), never silently guessed — mirrors BackendKind.resolved.
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = true
+        #expect(AppSettings.resolvedAllowRemoteControl(environment: ["AUDIOUT_COMPANION": "banana"], settings: settings))
+
+        settings.allowRemoteControl = false
+        #expect(!AppSettings.resolvedAllowRemoteControl(environment: ["AUDIOUT_COMPANION": "banana"], settings: settings))
+    }
+
+    // MARK: Companion — resolution source (FIX-C)
+    //
+    // The Settings › General checkbox must render the EFFECTIVE state and
+    // disable itself while an override is in force, rather than showing the
+    // raw persisted setting while a different value actually runs — these
+    // assert the source-carrying resolver `resolvedAllowRemoteControl` is
+    // built on gets every case right.
+
+    @Test func resolutionSourceIsSettingWhenEnvUnset() {
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = true
+        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(environment: [:], settings: settings)
+        #expect(resolution == .setting(true))
+        #expect(resolution.value)
+        #expect(!resolution.isForced)
+    }
+
+    @Test(arguments: [
+        ("1", true), ("0", false),
+        ("on", true), ("off", false),
+        ("ON", true), ("OFF", false),
+    ])
+    func resolutionSourceIsForcedForEveryRecognizedEnvValue(raw: String, expected: Bool) {
+        let settings = AppSettings(defaults: defaults)
+        // The setting disagrees with every expected outcome, so a pass proves
+        // the env var actually won rather than merely matching the default.
+        settings.allowRemoteControl = !expected
+        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(
+            environment: ["AUDIOUT_COMPANION": raw], settings: settings)
+        #expect(resolution == .forced(expected))
+        #expect(resolution.value == expected)
+        #expect(resolution.isForced)
+    }
+
+    @Test func resolutionSourceIsSettingWhenEnvGarbage() {
+        // Garbage still falls back to the setting AND reports the source as
+        // `.setting` — the checkbox must stay editable, not lock up over a typo.
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = true
+        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(
+            environment: ["AUDIOUT_COMPANION": "banana"], settings: settings)
+        #expect(resolution == .setting(true))
+        #expect(!resolution.isForced)
+    }
+
+    @Test func resolutionSourceIsForcedForExplicit() {
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = false
+        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(
+            explicit: true, environment: [:], settings: settings)
+        #expect(resolution == .forced(true))
+        #expect(resolution.isForced)
+    }
+
+    @Test func resolvedAllowRemoteControlAgreesWithSourceVariant() {
+        // The plain-Bool convenience must always equal `.value` on the
+        // source-carrying resolver — it's implemented in terms of it.
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = true
+        for environment in [[:], ["AUDIOUT_COMPANION": "off"], ["AUDIOUT_COMPANION": "garbage"]] as [[String: String]] {
+            let plain = AppSettings.resolvedAllowRemoteControl(environment: environment, settings: settings)
+            let withSource = AppSettings.resolvedAllowRemoteControlWithSource(environment: environment, settings: settings)
+            #expect(plain == withSource.value)
+        }
+    }
+
     // MARK: One-surface pin (U3)
 
     @Test func surfacePinnedDefaultsFalseAndRoundTrips() {
@@ -262,6 +401,16 @@ import Testing
         #expect(AppSettings(defaults: defaults).surfacePinned, "persisted across instances")
         settings.surfacePinned = false
         #expect(!AppSettings(defaults: defaults).surfacePinned)
+    }
+
+    @Test func mixerMembershipHintDismissedDefaultsFalseAndRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        #expect(!settings.mixerMembershipHintDismissed, "fresh install: the hint is still owed")
+        settings.mixerMembershipHintDismissed = true
+        #expect(settings.mixerMembershipHintDismissed)
+        #expect(AppSettings(defaults: defaults).mixerMembershipHintDismissed, "persisted across instances")
+        settings.mixerMembershipHintDismissed = false
+        #expect(!AppSettings(defaults: defaults).mixerMembershipHintDismissed)
     }
 
     // MARK: License check-in (roadmap 054)

@@ -35,10 +35,35 @@ remote_bias=${AUDIOUT_TEST_REMOTE_BIAS:-$(git config --get audiout.testRemoteBia
 # so `cd '~/foo'` fails) nor safe quoting of paths containing spaces. ssh starts
 # in $HOME, so a relative path is both simpler and correct.
 remote_root=${AUDIOUT_TEST_REMOTE_ROOT:-audiout-remote-tests}
+# The binary whose presence proves the remote can do this KIND of work. SwiftPM
+# callers want `swift`; the iOS target is built by `xcodebuild`, which can sit on
+# a machine with no Swift on PATH and vice versa. A caller sets this before
+# remote_run; a wrong answer takes the sentinel-97 path below and becomes "stay
+# local" rather than a failed build.
+remote_toolchain=${remote_toolchain:-swift}
 # Short ON PURPOSE. The known failure mode of this particular machine is
 # sleeping: it answers ping (sleep proxy) but refuses TCP, so a generous timeout
 # would stall every run behind a host that is never going to answer.
 remote_probe_timeout=${AUDIOUT_TEST_REMOTE_TIMEOUT:-5}
+
+# How many jobs may run ON THE REMOTE at once. The local machine has had a slot
+# cap for a long time; the remote had NONE, and that asymmetry is what actually
+# overloaded it: with `testPrefer = remote` every agent shipped its suite there
+# unconditionally, and the remote attempt happens BEFORE the local semaphore is
+# taken, so a remote run touched no cap at all. Observed: three suites at once
+# on a 8-core mule.
+#
+# A COUNT, deliberately, not a load-average check. Load average is a lie for
+# this workload -- the suite is wait-bound, so it parks threads on timers and
+# reports a load of 20+ while the CPU sits near 25%. Anything that gates on
+# load either throttles an idle machine or waves through a busy one. A permit
+# count measures the thing we actually care about: how many jobs are resident.
+remote_slots=${AUDIOUT_TEST_REMOTE_SLOTS:-$(git config --get audiout.remoteSlots 2>/dev/null || echo 2)}
+
+# Free-space floor on the remote, in MB. Under this, remote_prune_stale starts
+# evicting least-recently-used trees. 20 GB covers the concurrent slots' build
+# caches (~1.6 GB per tree) with room for whatever else that Mac is doing.
+remote_free_floor=${AUDIOUT_TEST_REMOTE_FREE_MB:-$(git config --get audiout.remoteFreeMB 2>/dev/null || echo 20000)}
 
 remote_configured() { [ -n "$remote_host" ]; }
 
@@ -125,18 +150,43 @@ remote_sweep_orphans() {
         2>/dev/null || true
 }
 
-# Delete remote trees not used for 7+ days. Each tree carries a ~1.3 GB
-# .build cache and nothing re-syncs it once its local worktree is gone: 79
-# dead trees (93 GB) filled the remote disk to 118 MB free (Aug 2026), swift
-# died with ENOSPC on every remote run, and everything silently fell back
-# local. Recency = the .last-used stamp remote_run touches (top-dir mtime for
-# trees that predate the stamp). Best-effort: a live tree costs one re-sync
-# (~seconds) plus one cold build if ever pruned wrongly.
+# Delete remote trees to keep the disk usable. Two rules, applied in order:
+#   1. AGE  — a tree unused for 24h+ goes, unconditionally.
+#   2. SPACE — while free space is under the floor, evict the least recently
+#      used tree, until it clears or nothing is left to take.
+#
+# Rule 1 was 7 days and bounded nothing -- twice that took the remote down.
+# `.last-used` is re-stamped every run, so with a fleet of agents cycling
+# branches no tree ever reached 7 days and the rule never fired once. 24h is
+# short enough to actually bite. NOTE the BSD find quirk: `-mtime +1` means
+# older than TWO days (the fraction is truncated), so "older than 24h" is
+# `-mtime +0` -- the same predicate rule 2 uses to protect a live run.
+# Cost of cutting it this fine: returning to a worktree after a day pays one
+# re-sync plus one cold build, a few minutes.
+# Each tree carries a ~1.6 GB .build cache, and `.last-used` is re-stamped on
+# every run -- so a fleet of agents cycling through branches keeps 60+ trees
+# permanently "fresh". First 79 dead trees / 93 GB (Aug 2026), then 62 LIVE
+# trees / 101 GB (Aug 29) took the disk to 113 MB free: swift failed with
+# `error: other(28)` (ENOSPC), rsync with an I/O error, and every suite fell
+# back to local -- the exact silent-fallback failure this file exists to
+# prevent. Age says nothing about how much room is left; the floor does.
+#
+# Recency = the .last-used stamp remote_run touches (top-dir mtime for trees
+# predating the stamp). Best-effort throughout: a tree pruned wrongly costs one
+# re-sync (~seconds) plus one cold build.
 remote_prune_stale() {
     ssh -o BatchMode=yes "$remote_host" \
         "cd \"$remote_root\" 2>/dev/null || exit 0; \
          for d in */; do d=\${d%/}; s=\"\$d/.last-used\"; [ -f \"\$s\" ] || s=\"\$d\"; \
-             [ -n \"\$(find \"\$s\" -maxdepth 0 -mtime +7 2>/dev/null)\" ] && rm -rf \"\$d\"; \
+             [ -n \"\$(find \"\$s\" -maxdepth 0 -mtime +0 2>/dev/null)\" ] && rm -rf \"\$d\"; \
+         done; \
+         while [ \"\$(df -m . | awk 'NR==2{print \$4}')\" -lt $remote_free_floor ]; do \
+             _v=\$(for d in */; do d=\${d%/}; s=\"\$d/.last-used\"; [ -f \"\$s\" ] || s=\"\$d\"; \
+                     [ -n \"\$(find \"\$s\" -maxdepth 0 -mtime +0 2>/dev/null)\" ] && \
+                         echo \"\$(date -r \"\$s\" +%s) \$d\"; \
+                   done | sort -n | head -1 | cut -d' ' -f2-); \
+             [ -n \"\$_v\" ] || break; \
+             rm -rf \"\$_v\"; \
          done; true" \
         2>/dev/null || true
 }
@@ -152,8 +202,9 @@ remote_prune_stale() {
 #   2  ran remotely and FAILED
 #
 # A remote that cannot be reached, synced or set up must NEVER surface as "your
-# code is broken". The toolchains differ (local Swift 6.4 / macOS 27 SDK vs
-# remote 6.3.1 / macOS 26), so callers accept a remote PASS but re-confirm a
+# code is broken". Both Macs run Swift 6.4 but against different SDKs (macOS 27
+# here, macOS 26 there), and the remote has been out of disk and starved
+# before, so callers accept a remote PASS but re-confirm a
 # remote FAILURE locally before letting it block anything. The asymmetry is
 # deliberate: the expensive error is a false refusal, not a false pass.
 remote_run() {
@@ -164,19 +215,28 @@ remote_run() {
         echo "  remote: unreachable (asleep or offline) — staying local." >&2
         return 1
     fi
+    # Housekeeping runs BEFORE the sync, not after. A full disk is precisely
+    # what makes rsync fail, so a pruner reachable only via a SUCCESSFUL sync
+    # can never clear the condition blocking it -- the self-healing step sits
+    # on the wrong side of the failure it is meant to heal.
+    remote_prune_stale
     if ! remote_sync "$_root"; then
-        echo "  remote: rsync failed — staying local." >&2
+        echo "  remote: rsync failed (disk full?) — staying local." >&2
         return 1
     fi
     remote_sweep_orphans
-    remote_prune_stale
     # PATH is set explicitly: a non-interactive ssh shell often lacks
     # /opt/homebrew/bin, and Package.swift shells out to `brew --prefix` to find
     # the keg-only C dependencies.
     # Exit 97 is a private sentinel for "the remote ENVIRONMENT is wrong"
-    # (directory missing, no swift) as opposed to "the work failed". Without it,
+    # (directory missing, no toolchain) as opposed to "the work failed". Without it,
     # a broken remote reports as a failure of the caller's code — exactly the
     # confusion this function exists to prevent.
+    # Two probes guard it, because one is not enough: /usr/bin/swift exists
+    # under Command Line Tools, so `command -v` cannot see a CLT-selected
+    # remote. `xcrun --show-sdk-platform-path` is what SwiftPM calls before
+    # running any test bundle, and it fails under CLT — the remote twin of
+    # run-tests.sh's exit-78 check.
     # -tt ties the remote command's life to this connection: with a tty, sshd
     # HUPs the remote process group the moment the local side dies — even
     # SIGKILL, since the kernel still closes the socket. Without it an
@@ -189,7 +249,17 @@ remote_run() {
         "export PATH=/opt/homebrew/bin:\$PATH; \
          cd \"$_rdir\" || exit 97; \
          touch .last-used; \
-         command -v swift >/dev/null 2>&1 || exit 97; \
+         command -v $remote_toolchain >/dev/null 2>&1 || exit 97; \
+         xcrun --show-sdk-platform-path >/dev/null 2>&1 || exit 97; \
+         _s=''; _n=1; \
+         while [ \$_n -le $remote_slots ]; do \
+             if /usr/bin/shlock -f /tmp/audiout-remote-work.lock.\$_n -p \$\$; then \
+                 _s=/tmp/audiout-remote-work.lock.\$_n; break; \
+             fi; \
+             _n=\$((_n + 1)); \
+         done; \
+         [ -n \"\$_s\" ] || exit 98; \
+         trap 'rm -f \"\$_s\"' EXIT HUP INT TERM; \
          $* ; echo \"REMOTE_EXIT:\$?\"" 2>&1)
     _rc=$?
     _out=$(printf '%s' "$_out" | tr -d '\r')
@@ -201,7 +271,16 @@ remote_run() {
     _marker=$(printf '%s\n' "$_out" | grep '^REMOTE_EXIT:' | tail -1 | cut -d: -f2 || true)
 
     if [ "$_rc" -eq 97 ]; then
-        echo "  remote: environment not usable (missing dir or toolchain) — staying local." >&2
+        echo "  remote: environment not usable (missing dir, no toolchain, or Command Line Tools selected instead of Xcode) — staying local." >&2
+        return 1
+    fi
+    # 98: the remote is at its job cap. Not an error and not a failure of the
+    # caller's code -- just "no capacity there", which is the same answer as an
+    # unreachable host, so it takes the same path back into the local queue.
+    # Falling back is strictly better than waiting: the local slots are usually
+    # free precisely when everyone has piled onto the remote.
+    if [ "$_rc" -eq 98 ]; then
+        echo "  remote: all $remote_slots remote slots busy — staying local." >&2
         return 1
     fi
     # 255 is ssh's own error code, and a missing marker means the command never
@@ -212,6 +291,38 @@ remote_run() {
     fi
     remote_status="$_marker"
     [ "$remote_status" -eq 0 ] && return 0
+    # Say WHAT kind of failure it was. The case this exists for: a remote suite
+    # whose test process died with a signal after 3294 passes, where the caller
+    # saw one anonymous "FAILURES" and no way to tell that from a compile error
+    # or from real failing tests. Matched on plain words only — the per-test
+    # lines arrive with SF Symbols glyphs and ANSI colour codes around them.
+    # Only for the swift toolchain: xcodebuild (ios.sh) prints neither of these
+    # words, so classifying its output would call every iOS failure a build failure.
+    if [ "$remote_toolchain" = swift ]; then
+        _failed=$(printf '%s\n' "$_out" | grep ' Test ' | grep ' failed after ' \
+            | sed -e 's/.* Test //' -e 's/ failed after .*//' \
+            | grep -v '^run with ' || true)
+        _nfailed=$(printf '%s' "$_failed" | grep -c . || true)
+        if [ "$_nfailed" -gt 0 ]; then
+            _names=$(printf '%s' "$_failed" | tr '\n' ' ' | sed 's/ *$//')
+            echo "  remote: ran and FAILED there — $_nfailed test(s) failed: $_names" >&2
+        else
+            # Pattern match, not `grep -q`: under pipefail grep -q exits at the first
+            # match, printf takes SIGPIPE, and `!` inverts the resulting 141 — which
+            # read a transcript with an early "Build complete!" as a build that never
+            # finished.
+            case "$_out" in
+                *"Build complete!"*)
+                    _npassed=$(printf '%s\n' "$_out" | grep -v ' Test run with ' \
+                        | grep -c ' Test .* passed after ' || true)
+                    echo "  remote: ran and FAILED there — exit $remote_status, no test verdict in the output ($_npassed tests passed, no failure lines, no summary line)" >&2
+                    ;;
+                *)
+                    echo "  remote: ran and FAILED there — the build did not finish (no \"Build complete!\" line); the compiler errors are in the output above" >&2
+                    ;;
+            esac
+        fi
+    fi
     return 2
 }
 

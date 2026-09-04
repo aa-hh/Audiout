@@ -5,8 +5,8 @@ import Foundation
 import AppKit
 @testable import AudioutSharedUI
 
-/// Wizard-stage v2 spec §2.1/§6: the alignment wizard's eight new
-/// `Tokens.Color` instruments, measured against the same floors the spec's
+/// Wizard-stage v2 spec §2.1/§6: the alignment wizard's stage instruments in
+/// `Tokens.Color`, measured against the same floors the spec's
 /// table states. `MembershipWellContrastTests` idiom (own private
 /// `relativeLuminance`/`contrastRatio`/`resolved` helpers, deliberately not
 /// shared across files).
@@ -66,54 +66,59 @@ import AppKit
         #expect(light >= floor, "stageInk vs stagePlate (light): \(light):1 below the \(floor):1 floor")
     }
 
-    @Test func syncPartyAndFuseSignalsClearTheNonTextFloorOnThePlateBothAppearances() {
+    @Test func wireCoreRingAndFuseWhiteClearTheNonTextFloorOnThePlateBothAppearances() {
         let floor: CGFloat = 3.0
 
         for appearance in [NSAppearance.Name.darkAqua, .aqua] {
             let plate = resolved(Tokens.Color.stagePlate, appearanceName: appearance)
 
-            let sync = contrastRatio(resolved(Tokens.Color.syncSignal, appearanceName: appearance), plate)
-            #expect(sync >= floor, "syncSignal vs stagePlate (\(appearance.rawValue)): \(sync):1 below \(floor):1")
-
-            let party = contrastRatio(resolved(Tokens.Color.partySignal, appearanceName: appearance), plate)
-            #expect(party >= floor, "partySignal vs stagePlate (\(appearance.rawValue)): \(party):1 below \(floor):1")
+            let sync = contrastRatio(resolved(Tokens.Color.wireCore, appearanceName: appearance), plate)
+            #expect(sync >= floor, "wireCore vs stagePlate (\(appearance.rawValue)): \(sync):1 below \(floor):1")
 
             let fuse = contrastRatio(resolved(Tokens.Color.fuseWhite, appearanceName: appearance), plate)
             #expect(fuse >= floor, "fuseWhite vs stagePlate (\(appearance.rawValue)): \(fuse):1 below \(floor):1")
         }
+
+        // The reference light is measured ONCE, outside the loop: the stage
+        // pins `ring` to its dark hex in both appearances.
+        let reference = contrastRatio(resolved(Tokens.Color.ring, appearanceName: .darkAqua),
+                                      resolved(Tokens.Color.stagePlate, appearanceName: .darkAqua))
+        #expect(reference >= floor, "the pinned ring vs stagePlate: \(reference):1 below \(floor):1")
     }
 
-    // MARK: plateRim — required >=3:1 vs BOTH raised and canvas, both appearances (decision 12)
+    // MARK: rim — required >=3:1 vs BOTH raised and canvas, both appearances (decision 12)
 
     @Test func plateRimClearsTheRimFloorVsRaisedAndCanvasBothAppearances() {
         let floor: CGFloat = 3.0
 
-        let darkRim = resolved(Tokens.Color.plateRim, appearanceName: .darkAqua)
+        let darkRim = resolved(Tokens.Color.rim, appearanceName: .darkAqua)
         let darkVsRaised = contrastRatio(darkRim, resolved(Tokens.Color.raised, appearanceName: .darkAqua))
-        #expect(darkVsRaised >= floor, "plateRim vs raised (dark): \(darkVsRaised):1 below the \(floor):1 floor")
+        #expect(darkVsRaised >= floor, "rim vs raised (dark): \(darkVsRaised):1 below the \(floor):1 floor")
         let darkVsCanvas = contrastRatio(darkRim, resolved(Tokens.Color.canvas, appearanceName: .darkAqua))
-        #expect(darkVsCanvas >= floor, "plateRim vs canvas (dark): \(darkVsCanvas):1 below the \(floor):1 floor")
+        #expect(darkVsCanvas >= floor, "rim vs canvas (dark): \(darkVsCanvas):1 below the \(floor):1 floor")
 
-        let lightRim = resolved(Tokens.Color.plateRim, appearanceName: .aqua)
+        let lightRim = resolved(Tokens.Color.rim, appearanceName: .aqua)
         let lightVsRaised = contrastRatio(lightRim, resolved(Tokens.Color.raised, appearanceName: .aqua))
-        #expect(lightVsRaised >= floor, "plateRim vs raised (light): \(lightVsRaised):1 below the \(floor):1 floor")
+        #expect(lightVsRaised >= floor, "rim vs raised (light): \(lightVsRaised):1 below the \(floor):1 floor")
         let lightVsCanvas = contrastRatio(lightRim, resolved(Tokens.Color.canvas, appearanceName: .aqua))
-        #expect(lightVsCanvas >= floor, "plateRim vs canvas (light): \(lightVsCanvas):1 below the \(floor):1 floor")
+        #expect(lightVsCanvas >= floor, "rim vs canvas (light): \(lightVsCanvas):1 below the \(floor):1 floor")
     }
 
     // MARK: The primary plate — bright gold + black ink, ONE value everywhere
 
     /// The wizard's primary plates (Start / Sounds right / Try again / Done)
     /// fill with ``Tokens/Color/gold``'s DARK-appearance value in BOTH
-    /// appearances and set their title in ``Tokens/Color/inkOnGold`` (owner
+    /// appearances and set their title in ``Tokens/Color/inkOnFill`` (owner
     /// ruling 2026-08-24), which is why this measures the pair ONCE rather
-    /// than per appearance: the plate has only one.
-    @Test func inkOnGoldClearsTheBodyFloorOnThePinnedPrimaryPlateGold() {
+    /// than per appearance: the plate has only one, and the cell pins the ink
+    /// with `primaryInkColor` for the same reason. Measured 10.18:1.
+    @Test func inkOnFillClearsTheBodyFloorOnThePinnedPrimaryPlateGold() {
         let floor: CGFloat = 4.5
         let fill = resolved(Tokens.Color.gold, appearanceName: .darkAqua)
-        let ratio = contrastRatio(Tokens.Color.inkOnGold, fill)
+        let ink = resolved(Tokens.Color.inkOnFill, appearanceName: .darkAqua)
+        let ratio = contrastRatio(ink, fill)
         #expect(ratio >= floor,
-                "inkOnGold vs the pinned primary-plate gold: \(ratio):1 below the \(floor):1 floor")
+                "inkOnFill vs the pinned primary-plate gold: \(ratio):1 below the \(floor):1 floor")
     }
 
     // MARK: The Deep companions — themed chrome, light grounds only (spec §2.1)
@@ -129,14 +134,20 @@ import AppKit
         #expect(vsRaised >= floor, "syncSignalDeep vs light raised: \(vsRaised):1 below the \(floor):1 floor")
     }
 
-    @Test func lightPartySignalDeepClearsTheFloorOnLightCanvasAndRaised() {
+    /// `ring` carries its own light hex, so the reference plate needs no Deep
+    /// companion — but its rim draws at `lightRimAlpha` 0.9, so what has to
+    /// clear the floor is the COMPOSITE over the light ground, not the token.
+    @Test func lightRingAtTheRimAlphaClearsTheFloorOnTheLightGround() throws {
         let floor: CGFloat = 3.0
-        let deep = resolved(Tokens.Color.partySignalDeep, appearanceName: .aqua)
+        let canvas = resolved(Tokens.Color.canvas, appearanceName: .aqua)
+        let well = resolved(Tokens.Color.well, appearanceName: .aqua)
+        let ring = resolved(Tokens.Color.ring, appearanceName: .aqua)
+        let composited = try #require(ring.blended(withFraction: 0.1, of: canvas))
 
-        let vsCanvas = contrastRatio(deep, resolved(Tokens.Color.canvas, appearanceName: .aqua))
-        #expect(vsCanvas >= floor, "partySignalDeep vs light canvas: \(vsCanvas):1 below the \(floor):1 floor")
+        let vsCanvas = contrastRatio(composited, canvas)
+        #expect(vsCanvas >= floor, "ring @0.9 vs light canvas: \(vsCanvas):1 below the \(floor):1 floor")
 
-        let vsRaised = contrastRatio(deep, resolved(Tokens.Color.raised, appearanceName: .aqua))
-        #expect(vsRaised >= floor, "partySignalDeep vs light raised: \(vsRaised):1 below the \(floor):1 floor")
+        let vsWell = contrastRatio(composited, well)
+        #expect(vsWell >= floor, "ring @0.9 vs light well: \(vsWell):1 below the \(floor):1 floor")
     }
 }

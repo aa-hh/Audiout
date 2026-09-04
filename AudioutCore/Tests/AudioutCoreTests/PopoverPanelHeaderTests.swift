@@ -45,6 +45,32 @@ import AppKit
         #expect(panel.test_isCardCollapsed(title: title) == false)
     }
 
+    // MARK: AX headings + chevron Collapse/Expand flip
+
+    @Test func cardAndSubsectionTitlesExposeHeadingRoles() {
+        let panel = makePanel()
+        panel.beginCard(header: "Output Devices", collapsible: true, onToggle: {})
+        panel.addSubsectionHeader("AirPlay Devices", collapsible: true,
+                                  collapsed: false, onToggle: {})
+        #expect(panel.test_headerTitleAXRole(title: "Output Devices")?.rawValue == "AXHeading",
+                "the card title is a VoiceOver heading, so section-jumping works")
+        #expect(panel.test_headerTitleAXRole(title: "AirPlay Devices")?.rawValue == "AXHeading",
+                "subsection titles are headings too, one rank below")
+    }
+
+    @Test func chevronAXLabelFlipsWithCollapse() {
+        let panel = makePanel()
+        let title = "Devices"
+        panel.beginCard(header: title, collapsible: true, collapsed: false, onToggle: {})
+        panel.addRow(NSView())
+        #expect(panel.test_chevronAXLabel(title: title) == "Collapse Devices")
+        panel.setCardCollapsed(title: title, collapsed: true, animated: false)
+        #expect(panel.test_chevronAXLabel(title: title) == "Expand Devices",
+                "the chevron's spoken action tracks the state it would produce")
+        panel.setCardCollapsed(title: title, collapsed: false, animated: false)
+        #expect(panel.test_chevronAXLabel(title: title) == "Collapse Devices")
+    }
+
     @Test func nonCollapsibleHeaderHasNoClickTarget() {
         let panel = makePanel()
         panel.beginCard(header: "System")   // collapsible defaults to false
@@ -104,6 +130,38 @@ import AppKit
         #expect(notes.count == 1)
         #expect(notes.first?.stringValue == text)
         #expect(notes.first?.textColor == Tokens.Color.secondaryLabel)
+    }
+
+    // MARK: Card-title liveness tint
+
+    /// A sounding section names itself in gold; a silent one stays on the
+    /// second-rung ink. A title nobody built is a no-op, not a crash.
+    @Test func cardTitleTintFollowsLiveness() {
+        let panel = makePanel()
+        let title = "Devices"
+        panel.beginCard(header: title, collapsible: true, collapsed: false)
+
+        assertSameRGBA(panel.test_headerTitleColor(title: title), Tokens.Color.label2, "idle")
+        panel.setCardHeaderLive(title: title, live: true)
+        assertSameRGBA(panel.test_headerTitleColor(title: title), Tokens.Color.goldText, "live")
+        panel.setCardHeaderLive(title: title, live: false)
+        assertSameRGBA(panel.test_headerTitleColor(title: title), Tokens.Color.label2, "back to idle")
+
+        panel.setCardHeaderLive(title: "nope", live: true)
+        assertSameRGBA(panel.test_headerTitleColor(title: title), Tokens.Color.label2,
+                       "an unknown title changes nothing")
+        #expect(panel.test_headerTitleColor(title: "nope") == nil)
+    }
+
+    private func assertSameRGBA(_ a: NSColor?, _ b: NSColor, _ message: String) {
+        guard let a = a?.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else {
+            Issue.record("nil or non-convertible color: \(message)")
+            return
+        }
+        #expect(abs(a.redComponent - b.redComponent) <= 0.004, "red: \(message)")
+        #expect(abs(a.greenComponent - b.greenComponent) <= 0.004, "green: \(message)")
+        #expect(abs(a.blueComponent - b.blueComponent) <= 0.004, "blue: \(message)")
+        #expect(abs(a.alphaComponent - b.alphaComponent) <= 0.004, "alpha: \(message)")
     }
 
     @Test func cardNoteSurvivesBodyCollapse() {

@@ -12,7 +12,7 @@ import AudioutCore
 /// test (R3: the dot is pure model state, never RMS), the dot's gold/socket
 /// hues and static glow, the arm bloom's gating, the Main Out row's dot, the
 /// **mute channel** (engaged pill, ballistic meter drain, MUTED sublabel
-/// token with no reflow), the warm meter gradient (ember → gold → caution,
+/// token with no reflow), the warm meter gradient (ember → gold,
 /// NEVER failure red — house rule 8), and the VoiceOver value equivalents
 /// shipped with each visual state.
 @MainActor
@@ -129,22 +129,20 @@ import AudioutCore
         #expect(!(dark.test_routeArmed), "RMS can never light a dot the model didn't arm")
     }
 
-    // MARK: Dot rendering — gold + static glow armed, dark socket at rest
+    // MARK: Dot rendering — flat gold armed, dark socket at rest
 
-    @Test func armedDotIsGoldWithStaticGlow() {
+    @Test func armedDotIsGoldWithNoHalo() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: true)
         assertSameHue(row.test_dotFillColor, Tokens.Color.gold, "the armed dot is THE gold accent")
-        #expect(row.test_dotHasGlow, "armed carries the subtle STATIC glow halo")
         #expect(!(row.test_dotIsBlooming), "no transient on a first render — steady states render settled (spec §6)")
     }
 
-    @Test func unarmedDotIsTheDarkSocketWithNoGlow() {
+    @Test func unarmedDotIsTheSocket() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: false)
-        assertSameHue(row.test_dotFillColor, Tokens.Color.dotSocket,
+        assertSameHue(row.test_dotFillColor, Tokens.Color.socket,
                       "not armed renders the dark/empty socket, not an absence")
-        #expect(!(row.test_dotHasGlow), "no glow at rest on an unarmed socket")
     }
 
     // MARK: Arm bloom — only on a transition INTO armed while visible
@@ -194,7 +192,7 @@ import AudioutCore
 
         row.apply(makeDevice(isMuted: false), selected: true, controllable: true)
         #expect(!(row.test_isMutePillEngaged), "unmuting removes the pill")
-        #expect(row.test_muteTintColor == Tokens.Color.secondaryLabel)
+        #expect(row.test_muteTintColor == Tokens.Color.label2)
     }
 
     @Test func mutePillEngagesInstantlyOnLiveClick() {
@@ -303,15 +301,14 @@ import AudioutCore
         #expect(row.test_statusText == "Couldn't connect", "sublabel precedence: failure > MUTED token > feeds (§3.1)")
     }
 
-    // MARK: S2 — warm meter gradient (ember → gold → caution; NEVER failure red)
+    // MARK: C3 — warm meter gradient (ember → gold; NEVER failure red)
 
-    @Test func meterGradientIsEmberGoldCaution() {
+    @Test func meterGradientIsEmberToGold() {
         let meter = LevelMeterView()
         let colors = meter.test_gradientColors
-        #expect(colors.count == 3)
+        #expect(colors.count == 2)
         assertSameHue(colors.first, Tokens.Color.ember, "bottom of the ramp is ember")
-        assertSameHue(colors.dropFirst().first, Tokens.Color.gold, "the body warms to gold")
-        assertSameHue(colors.last, Tokens.Color.caution, "the top zone is the caution CEILING")
+        assertSameHue(colors.last, Tokens.Color.gold, "gold is the CEILING")
     }
 
     @Test func failureRedNeverAppearsInAMeter() {

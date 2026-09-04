@@ -94,8 +94,8 @@ public final class BusRailOverlayView: NSView {
     private static let beadLength: CGFloat = 26
     /// How long the landed bubble takes to dissolve into the ring.
     private static let beadAbsorbDuration: CFTimeInterval = 0.12
-    /// The arrival bloom's disc radius (its light halo doubles the visual
-    /// footprint via the shadow).
+    /// The arrival bloom's disc radius; the swell carries it outward from
+    /// there.
     private static let arrivalBloomRadius: CGFloat = 5
     /// The transient header-dot bloom currently playing at a COLLAPSED origin,
     /// if any (mounted by the bead's completion; dies with any cancel). An
@@ -357,24 +357,28 @@ public final class BusRailOverlayView: NSView {
             }
             let onSpine = Self.onSpine(stop.node)
             let stopR = MembershipBusView.nodeRadius(for: stop.node)
-            // Segment tone (Warm Signal v4 §Call-1 + v4.1 items 3/4/9):
-            //   • member (connected)  → the SPINE TONE (`originColor`) — gold on
-            //     an armed spine, ember on an idle one. It reuses the HOOK's own
-            //     resolution rather than naming `gold` again, because the hook's
-            //     corner and the line leaving it are one continuous stroke: a
-            //     second call site here can pick a tone the corner didn't,
+            // Segment tone (Warm Signal v4 §Call-1 + v4.1 items 3/4/9). The
+            // wire is ONE line from the hook to the terminus, so every segment
+            // wears the SPINE TONE (`originColor` — gold on an armed spine,
+            // ember on an idle one) unless the segment itself means something:
             //   • connecting          → ember (the energize "coming online" sweep
             //     — the segment, not the node, carries the ember tone),
             //   • FAILED               → DIM (item 9 — the red node carries failure).
+            // A member segment FEEDS its node and a non-member segment PASSES
+            // BY its node (the detour arc); neither changes what the line is
+            // carrying, so both keep the spine's tone. Reusing the HOOK's own
+            // resolution rather than naming `gold` again matters because the
+            // hook's corner and the line leaving it are one continuous stroke:
+            // a second call site here can pick a tone the corner didn't.
             // A DORMANT rail skips the split entirely: `originColor` is already
             // the one quiet tone, so every segment inherits it.
             let segColor: NSColor
             if plan.dormant || stop.node == .failed {
                 segColor = Tokens.Color.railDormant
-            } else if stop.node == .member {
-                segColor = originColor
-            } else {
+            } else if stop.node == .connecting {
                 segColor = Tokens.Color.ember
+            } else {
+                segColor = originColor
             }
 
             if onSpine {
@@ -608,18 +612,13 @@ public final class BusRailOverlayView: NSView {
         bead.frame = hostLayer.bounds
         bead.path = path
         bead.fillColor = nil
-        // Wider than the wire + a soft zero-offset halo: light emission, the
-        // physics of a bright bead, not a depth shadow.
+        // Wider than the wire: a bright bead, drawn as a stroke — never a
+        // shadow.
         bead.lineWidth = PopoverColumnGrid.busLineWidth * 2
         bead.lineCap = .round
         bead.lineJoin = .round
-        bead.shadowOffset = .zero
-        bead.shadowRadius = 4
-        bead.shadowOpacity = 0.85
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            let glow = Tokens.Color.glow.cgColor
-            bead.strokeColor = glow
-            bead.shadowColor = glow
+            bead.strokeColor = Tokens.Color.glow.cgColor
         }
         bead.strokeStart = 0
         bead.strokeEnd = 0
@@ -700,9 +699,10 @@ public final class BusRailOverlayView: NSView {
         }
     }
 
-    /// The COLLAPSED-ORIGIN receiving end: a soft `glow` burst at the bare
-    /// gutter dot the wire starts from when the origin section is collapsed —
-    /// the desk acknowledging the room. The uncollapsed case has a real ring
+    /// The COLLAPSED-ORIGIN receiving end: a `glow` disc that swells and fades
+    /// at the bare gutter dot the wire starts from when the origin section is
+    /// collapsed — a fill, never a shadow — the desk acknowledging the room.
+    /// The uncollapsed case has a real ring
     /// and blooms THAT instead (`RailHookProviding.receiveRailPulse`); the dot
     /// survives here because it is only `railCollapsedTerminusDotDiameter`
     /// across — dissolving the bead onto something that small, with no stroke
@@ -725,13 +725,8 @@ public final class BusRailOverlayView: NSView {
             ellipseIn: CGRect(x: radius, y: radius,
                               width: radius * 2, height: radius * 2),
             transform: nil)
-        bloom.shadowOffset = .zero
-        bloom.shadowRadius = radius * 0.8
-        bloom.shadowOpacity = 0.7
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            let glow = Tokens.Color.glow.cgColor
-            bloom.fillColor = glow
-            bloom.shadowColor = glow
+            bloom.fillColor = Tokens.Color.glow.cgColor
         }
         bloom.opacity = 0
         hostLayer.addSublayer(bloom)

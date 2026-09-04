@@ -105,6 +105,12 @@ let package = Package(
         // Offscreen PNG renderer for the alignment-wizard window (v2 visual
         // verification). Run: `swift run wizard-snapshot [output-dir]`.
         .executable(name: "wizard-snapshot", targets: ["wizard-snapshot"]),
+        // Opens the real first-open licence gate and nothing else — no
+        // backend, no permissions, no network. The one surface a snapshot
+        // tool CANNOT stand in for: its ground is a live Metal shader, and
+        // Metal is off under `HeadlessRuntime`, so an offscreen render of this
+        // window is a flat colour. Run: `swift run license-gate-preview`.
+        .executable(name: "license-gate-preview", targets: ["license-gate-preview"]),
         // Silent read-only Core Audio diagnostic for enumerating process objects and
         // their PIDs/bundle IDs, useful for diagnosing per-app routing (T7).
         .executable(name: "core-audio-diagnostic", targets: ["core-audio-diagnostic"]),
@@ -139,6 +145,22 @@ let package = Package(
         // (T-NB-BACKEND-1) and NativeCaptureCoordinator (T-NB-CAPTURE-1) are
         // the consumers; the Mock/OwnTone backends do not import it.
         .package(path: "../AirPlayEngine"),
+        // Shared code with the iPhone companion, three products: ProbeKit (the
+        // sync-probe DSP — sweep synthesis and the matched filter behind
+        // mic-probe calibration), AudioutProtocol (the companion wire
+        // protocol — CompanionServer / CompanionSnapshotBuilder /
+        // CompanionCommandDispatcher are the consumers) and AudioutField (the
+        // emitter field's numbers, which the marketing site's shader reads
+        // from the same file — `EmitterFieldView` is its consumer here). MIT,
+        // so the closed-source iPhone companion can link the same code, and a
+        // repository of its own because SwiftPM cannot depend on a package
+        // that lives inside a subdirectory of another repo — and the phone
+        // now lives in `aa-hh/audiout-remote`. Pinned by range: this app
+        // chooses when to follow the shared package, and `Package.resolved`
+        // records which tag it is actually on. 0.6.0 is the floor because
+        // that is the tag `CompanionMessage.alignmentApplied` landed in, and
+        // the companion server sends it on every applied measurement.
+        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.7.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.
@@ -160,6 +182,8 @@ let package = Package(
             name: "AudioutCore",
             dependencies: [
                 .product(name: "AirPlayEngine", package: "AirPlayEngine"),
+                .product(name: "ProbeKit", package: "audiout-shared"),
+                .product(name: "AudioutProtocol", package: "audiout-shared"),
                 "CastSender",
                 "ObjCExceptionShim",
             ],
@@ -187,7 +211,7 @@ let package = Package(
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit popover dropdown (SPEC §9 revised — NSMenu → NSPopover):
-        // `PopoverController` + `GroupRowView`, a Control-Center-style panel
+        // `PopoverController`, a Control-Center-style panel
         // hosted in an `NSPopover`. A *library* (not folded into the executable)
         // so both the app AND the headless `popover-harness` / tests can link it
         // and assert the built panel structure. Reuses the shared `DeviceRowView`.
@@ -239,7 +263,13 @@ let package = Package(
             name: "AudioutOnboardingUI",
             // AudioutSharedUI: the Tokens design-token layer (Wave 2 of the
             // Warm Signal redesign) — onboarding styles through Tokens.* now.
-            dependencies: ["AudioutCore", "AudioutSharedUI"],
+            // AudioutField: the emitter field's shared numbers, which
+            // `EmitterFieldView` generates its Metal shader from rather than
+            // retyping them (the licence gate's ground).
+            dependencies: [
+                "AudioutCore", "AudioutSharedUI",
+                .product(name: "AudioutField", package: "audiout-shared"),
+            ],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Pure AppKit (SPEC §9). The app shell (status item, backend wiring,
@@ -302,6 +332,13 @@ let package = Package(
             dependencies: ["AudioutCore", "AudioutPopoverUI", "AudioutSharedUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
+        // On-screen preview of the licence gate — see the product comment
+        // above.
+        .executableTarget(
+            name: "license-gate-preview",
+            dependencies: ["AudioutCore", "AudioutOnboardingUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
+        ),
         // Offscreen PNG renderer for the mixer window (group-creation design
         // review) — see the product comment in window-snapshot/main.swift.
         .executableTarget(
@@ -322,7 +359,7 @@ let package = Package(
         // Mic-probe hardware spike — see the product comment above.
         .executableTarget(
             name: "mic-probe-spike",
-            dependencies: ["AudioutCore"],
+            dependencies: ["AudioutCore", .product(name: "ProbeKit", package: "audiout-shared")],
             // Info.plist is embedded into the Mach-O at link time (below), NOT
             // shipped as an SPM resource — exclude it so SPM stops warning.
             exclude: ["Info.plist"],
@@ -388,6 +425,11 @@ let package = Package(
                 "AudioutOnboardingUI",
                 "CastSender",
                 "CastFakeReceiver",
+                .product(name: "ProbeKit", package: "audiout-shared"),
+                // EmitterFieldTests reads the same defaults the shader is
+                // generated from, so a change to field.json fails a test here
+                // instead of silently forking the brand's one moving image.
+                .product(name: "AudioutField", package: "audiout-shared"),
             ],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),

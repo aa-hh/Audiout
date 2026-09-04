@@ -18,7 +18,8 @@ import AppKit
         var toggles: [(on: Bool, id: String)] = []
         var reconnects: [String] = []
         var drawerToggles: [String] = []
-        var wizardRequests: [String] = []
+        var wizardRequests: [(id: String, door: BTAlignmentWizardDoor)] = []
+        var equalizerRequests: [(id: String, fromButton: Bool)] = []
         func deviceRow(_ row: DeviceRowView, didSetVolume volume: Int, for id: String) {}
         func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {}
         func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {
@@ -30,8 +31,12 @@ import AppKit
         func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String) {
             drawerToggles.append(id)
         }
-        func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView) {
-            wizardRequests.append(row.device.id)
+        func deviceRow(_ row: DeviceRowView, didRequestAlignmentWizardFor id: String,
+                       door: BTAlignmentWizardDoor) {
+            wizardRequests.append((id, door))
+        }
+        func deviceRowDidRequestEqualizer(_ row: DeviceRowView, fromButton: Bool) {
+            equalizerRequests.append((row.device.id, fromButton))
         }
     }
 
@@ -41,20 +46,30 @@ import AppKit
                isAvailable: available, supportsAirPlay2: false, connectionState: state)
     }
 
+    private func macDevice() -> Device {
+        Device(id: "mac", name: "This Mac", kind: .localMac, isLocalDevice: true)
+    }
+
+    private func castDevice() -> Device {
+        Device(id: "cast-1", name: "Living Room TV", kind: .cast, supportsAirPlay2: false)
+    }
+
     /// The popover's real BT row shape: bus + meter + SYNC chip.
     private func makeRow(_ device: Device, delegate: SpyDelegate,
                          syncTrimMs: Double = 0, syncTrimIsSet: Bool = false,
                          syncMeasuredLatencyMs: Double? = nil,
                          syncDrawerExpanded: Bool = false,
-                         selected: Bool = false) -> DeviceRowView {
+                         selected: Bool = false,
+                         isEQShaped: Bool = false) -> DeviceRowView {
         let row = DeviceRowView(device: device, showsToggle: true,
-                                paintsSelectionBackground: false, showsMeter: true,
+                                showsMeter: true,
                                 showsBus: true, showsSyncControls: true)
         row.delegate = delegate
         row.apply(device, selected: selected, controllable: selected,
                   syncTrimMs: syncTrimMs, syncTrimIsSet: syncTrimIsSet,
                   syncMeasuredLatencyMs: syncMeasuredLatencyMs,
-                  syncDrawerExpanded: syncDrawerExpanded)
+                  syncDrawerExpanded: syncDrawerExpanded,
+                  isEQShaped: isEQShaped)
         return row
     }
 
@@ -229,15 +244,17 @@ import AppKit
         #expect(row.test_syncChipIsDashed == false)
     }
 
-    /// D10, the discoverability fix: an untuned speaker must not read "0.0 ms"
+    /// D10, the discoverability fix: an untuned row must not read "0.0 ms"
     /// (which looks finished) — it reads "Not set" inside a DASHED outline,
-    /// which reads as an invitation.
+    /// which reads as an invitation. A never-measured BLUETOOTH speaker is the
+    /// exception: its chip is the wizard's door instead (see
+    /// `anUntunedBluetoothChipReadsAlignAndOpensTheWizard`).
     @Test func untunedChipReadsNotSetInADashedTertiaryOutline() {
-        let row = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 0, syncTrimIsSet: false)
+        let row = makeRow(castDevice(), delegate: SpyDelegate(), syncTrimMs: 0, syncTrimIsSet: false)
         #expect(row.test_syncChipTitle == "Not set")
         #expect(row.test_syncChipIsDashed, "the dashed border IS the invitation")
-        #expect(row.test_syncChipTitleColor == Tokens.Color.inkTertiary)
-        #expect(row.test_syncChipBorderColor == Tokens.Color.inkTertiary,
+        #expect(row.test_syncChipTitleColor == Tokens.Color.label3)
+        #expect(row.test_syncChipBorderColor == Tokens.Color.label3,
                 "one de-emphasis tone, spoken by both the text and its outline")
     }
 
@@ -295,7 +312,7 @@ import AppKit
                 "never a bare signed number (D7)")
         #expect(tuned.test_syncChipAXExpanded == false)
 
-        let untuned = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimIsSet: false)
+        let untuned = makeRow(castDevice(), delegate: SpyDelegate(), syncTrimIsSet: false)
         #expect(untuned.test_syncChipAXValue == "not set")
 
         let open = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: -3,
@@ -304,12 +321,169 @@ import AppKit
         #expect(open.test_syncChipAXValue == "3 milliseconds earlier")
     }
 
+    /// The trailing slot's column order on a sync-capable row: FEED pills at
+    /// the slot's LEADING edge — the same anchor an AirPlay row's pills use,
+    /// under the card header's "Source" — and the chip closing the slot at the
+    /// trailing inset, under "Offset". Anchors and order only; no absolute
+    /// widths (the AppKit rounding grid varies per run).
+    @Test func syncRowPutsTheFeedPillsLeftAndTheChipRight() {
+        let device = btDevice(state: .connected)
+        let row = makeRow(device, delegate: SpyDelegate(), syncTrimMs: 24,
+                          syncTrimIsSet: true, selected: true)
+        row.layoutSubtreeIfNeeded()
+        let (feed, chip) = row.test_trailingSlotFrames
+        #expect(row.test_feedText?.isEmpty == false, "a member row feeds something to place")
+
+        // Measured INWARD from the row's own trailing edge — the frame the
+        // whole grid is anchored off. A row self-sizes to its content, so an
+        // absolute x would only pin this run's rounding grid.
+        let feedInset = row.bounds.maxX - feed.minX
+        let chipInset = row.bounds.maxX - chip.maxX
+        let placement = "feed \(feed), chip \(chip), row \(row.bounds)"
+        #expect(abs(feedInset - PopoverColumnGrid.feedColumnLeadingFromTrailing) <= 1,
+                "pills start at the slot's leading edge — \(placement)")
+        #expect(abs(chipInset - PopoverColumnGrid.trailingInset) <= 1,
+                "the chip closes the slot at the trailing inset — \(placement)")
+        #expect(feed.maxX <= chip.minX,
+                "feed left, chip right — never crossed. \(placement)")
+
+        // The AirPlay row's pills are on the very same anchor, which is what
+        // lets ONE "Source" legend name both.
+        let ap = Device(id: "office", name: "Office", kind: .homePod)
+        let airPlay = DeviceRowView(device: ap, showsToggle: true,
+                                    showsMeter: true,
+                                    showsBus: true)
+        airPlay.apply(ap, selected: true, controllable: true)
+        airPlay.layoutSubtreeIfNeeded()
+        let airPlayFeed = airPlay.test_trailingSlotFrames.feed
+        #expect(abs((airPlay.bounds.maxX - airPlayFeed.minX) - feedInset) <= 1,
+                "one Source column for both row shapes — airplay \(airPlayFeed) in \(airPlay.bounds)")
+    }
+
+    // MARK: The untuned Bluetooth chip is the wizard's door
+
+    /// A never-measured Bluetooth speaker's chip reads `Align` behind a tuning
+    /// fork and goes straight to the wizard — the phone's glyph, in the Mac's
+    /// chip. The dashed border stays: it is still the invitation.
+    @Test func anUntunedBluetoothChipReadsAlignAndOpensTheWizard() {
+        let spy = SpyDelegate()
+        let row = makeRow(btDevice(), delegate: spy, syncTrimIsSet: false)
+        #expect(row.test_syncChipTitle == "Align")
+        #expect(row.test_syncChipTitleColor == Tokens.Color.label)
+        #expect(row.test_syncChipIsDashed, "still the invitation")
+        #expect(row.test_syncChipAXLabel == "Align Sonos Move 2")
+
+        row.test_fireSyncChipClick()
+        #expect(spy.wizardRequests.map(\.id) == [btDevice().id])
+        #expect(spy.wizardRequests.map(\.door) == [.chip])
+        #expect(spy.drawerToggles.isEmpty, "the untuned chip never opens the drawer")
+    }
+
+    @Test func aTunedBluetoothChipStillOpensTheDrawer() {
+        let spy = SpyDelegate()
+        let row = makeRow(btDevice(), delegate: spy, syncTrimMs: 24, syncTrimIsSet: true)
+        #expect(row.test_syncChipTitle == "24 ms")
+        row.test_fireSyncChipClick()
+        #expect(spy.drawerToggles == [btDevice().id])
+        #expect(spy.wizardRequests.isEmpty)
+    }
+
+    /// The Mac's own trim is a SETTING, not a measurement, and no run can
+    /// bisect it — its chip keeps "Not set" and its drawer.
+    @Test func theMacsOwnUntunedChipStillOpensTheDrawer() {
+        let spy = SpyDelegate()
+        let row = makeRow(macDevice(), delegate: spy, syncTrimIsSet: false)
+        #expect(row.test_syncChipTitle == "Not set")
+        row.test_fireSyncChipClick()
+        #expect(spy.drawerToggles == ["mac"])
+        #expect(spy.wizardRequests.isEmpty)
+    }
+
+    /// A Cast receiver plays seconds behind live, so the guided run has
+    /// nothing to converge on — its chip is a readout, never a door.
+    @Test func aCastChipNeverOffersTheWizard() {
+        let spy = SpyDelegate()
+        let row = makeRow(castDevice(), delegate: spy, syncTrimIsSet: false)
+        #expect(row.test_syncChipTitle == "Not set")
+        row.test_fireSyncChipClick()
+        #expect(spy.drawerToggles == ["cast-1"])
+        #expect(spy.wizardRequests.isEmpty)
+    }
+
+    // MARK: The Equalizer door beside mute
+
+    /// Present on every row with an equalizer, absent on the Mac's — and the
+    /// identity stack yields the SAME width either way, so a name truncates
+    /// identically across the three row shapes.
+    @Test func theEQButtonSitsLeadingOfMuteOnRowsWithAnEqualizer() {
+        let bt = makeRow(btDevice(), delegate: SpyDelegate(), selected: true)
+        let airPlayDevice = Device(id: "office", name: "Office", kind: .homePod)
+        let airPlay = DeviceRowView(device: airPlayDevice, showsToggle: true,
+                                    showsMeter: true,
+                                    showsBus: true)
+        airPlay.apply(airPlayDevice, selected: true, controllable: true)
+        let mac = makeRow(macDevice(), delegate: SpyDelegate(), selected: true)
+        for row in [bt, airPlay, mac] { row.layoutSubtreeIfNeeded() }
+
+        #expect(bt.test_hasEQButton)
+        #expect(airPlay.test_hasEQButton)
+        #expect(mac.test_hasEQButton == false, "this Mac is not an equalizer target")
+
+        let placement = "eq \(bt.test_eqButtonFrame), mute \(bt.test_muteButtonFrame)"
+        #expect(bt.test_eqButtonFrame.maxX <= bt.test_muteButtonFrame.minX,
+                "the door leads mute, never crosses it — \(placement)")
+        #expect(abs((bt.test_muteButtonFrame.minX - bt.test_eqButtonFrame.maxX)
+                    - PopoverColumnGrid.eqToMuteGap) <= 1, "\(placement)")
+
+        let trailings = [bt, airPlay, mac].map { $0.test_identityStackFrame.maxX }
+        #expect(trailings.allSatisfy { abs($0 - trailings[0]) <= 1 },
+                "one name column across every row shape — got \(trailings)")
+    }
+
+    /// The door's ONE mark: the glyph goes gold and a step heavier when the
+    /// curve is not flat — the response scope's own two variables (hue and
+    /// line weight) at 13 pt. The door stays image-only either way.
+    @Test func aShapedSpeakerWearsTheGoldGlyphAndAFlatOneDoesNot() {
+        let flat = makeRow(btDevice(), delegate: SpyDelegate(), selected: true)
+        #expect(flat.test_eqTintColor == Tokens.Color.label2,
+                "a flat curve leaves the door at rest")
+        #expect(flat.test_eqSymbolIsHeavy == false)
+        #expect(flat.test_eqButtonHasTitle == false, "the door is image-only")
+
+        let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
+                             isEQShaped: true)
+        #expect(shaped.test_eqTintColor == Tokens.Color.gold)
+        #expect(shaped.test_eqSymbolIsHeavy,
+                "the weight is the non-colour half of the mark")
+        #expect(shaped.test_eqButtonHasTitle == false)
+    }
+
+    /// The mark must not be colour ALONE — the same rule the scope follows.
+    /// Weight is the second cue for a viewer who cannot separate gold from
+    /// grey, and the spoken value is the third.
+    @Test func theShapedMarkCarriesMoreThanItsHue() {
+        let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
+                             isEQShaped: true)
+        let flat = makeRow(btDevice(), delegate: SpyDelegate(), selected: true)
+        #expect(shaped.test_eqSymbolIsHeavy != flat.test_eqSymbolIsHeavy,
+                "shape survives a viewer who cannot read the hue")
+    }
+
+    @Test func clickingTheEQButtonOpensTheEqualizer() {
+        let spy = SpyDelegate()
+        let row = makeRow(btDevice(), delegate: spy, selected: true)
+        row.test_clickEQButton()
+        #expect(spy.equalizerRequests.map(\.id) == [btDevice().id])
+        #expect(spy.equalizerRequests.map(\.fromButton) == [true],
+                "the button and the menu are two doors, told apart")
+    }
+
     /// The T6 regression guard from the other side: a non-BT row mounts no
     /// chip at all, so nothing about the AirPlay row's trailing slot moved.
     @Test func airPlayRowMountsNoSyncChip() {
         let device = Device(id: "office", name: "Office", kind: .homePod)
         let row = DeviceRowView(device: device, showsToggle: true,
-                                paintsSelectionBackground: false, showsMeter: true,
+                                showsMeter: true,
                                 showsBus: true)
         row.apply(device, selected: false)
         #expect(row.test_showsSyncControls == false)
@@ -317,9 +491,10 @@ import AppKit
         #expect(row.test_syncChipEnabled == false)
     }
 
-    /// The metronome button lives in the sync drawer now (D9); ⌥-click on it
-    /// is the wizard relaunch that used to sit on the row's own button.
-    @Test func optionClickOnTheDrawerMetronomeRequestsTheWizardNotTheTick() {
+    /// The drawer carries BOTH alignment doors as visible buttons: the guided
+    /// wizard leads the band, the manual metronome sits beside it, and neither
+    /// hides behind a modifier. Revert is gone.
+    @Test func theDrawerOffersAlignAgainAndNoRevert() {
         final class DrawerSpy: BTSyncDrawerViewDelegate {
             var tickToggles: [Bool] = []
             var wizardRequests = 0
@@ -332,14 +507,42 @@ import AppKit
         }
         let spy = DrawerSpy()
         let drawer = BTSyncDrawerView()
+        drawer.configure(deviceName: "Move 2", trimMs: 24, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false,
+                         canAlignAgain: true)
         drawer.delegate = spy
-        drawer.test_optionModifierOverride = true
+        #expect(drawer.test_alignAgainVisible, "a speaker with a wizard gets the door")
+        #expect(drawer.test_alignAgainTitle == "Align again…")
+
+        drawer.test_fireAlignAgainClick()
+        #expect(spy.wizardRequests == 1, "the visible button asks for the guided wizard")
+        #expect(spy.tickToggles.isEmpty, "…and never the manual tick")
+
         drawer.test_fireAlignClick()
-        #expect(spy.wizardRequests == 1, "⌥-click asks for the guided wizard")
-        #expect(spy.tickToggles.isEmpty, "…never the manual tick")
-        #expect(!drawer.test_alignActive, "and the toggle never flips")
-        #expect(DeviceRowView.alignTooltip.contains("⌥ for the guided alignment"),
-                "the tooltip teaches the invisible modifier")
+        #expect(spy.tickToggles == [true], "the metronome only toggles ticks now")
+        #expect(spy.wizardRequests == 1)
+        #expect(!DeviceRowView.alignTooltip.contains("⌥"),
+                "no invisible modifier left to teach")
+    }
+
+    /// The band has to fit at the surface's real width: the ⇧ hint must not
+    /// run under the value cluster it describes.
+    @Test func theHintDoesNotOverlapTheValueCluster() {
+        let drawer = BTSyncDrawerView()
+        // The WIDEST band — every leading button mounted — is the one the hint
+        // has to survive.
+        drawer.configure(deviceName: "Move 2", trimMs: 24, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false,
+                         canReset: true, canAlignAgain: true)
+        drawer.frame = NSRect(x: 0, y: 0, width: SurfaceLayout.width,
+                              height: PopoverColumnGrid.syncDrawerHeight)
+        drawer.layoutSubtreeIfNeeded()
+        let band = drawer.test_bandFrames
+        let placement = "reset \(band.reset), hint \(band.hint), minus \(band.minus)"
+        #expect(band.reset.maxX <= band.hint.minX,
+                "the hint starts clear of the leading buttons — \(placement)")
+        #expect(band.hint.maxX <= band.minus.minX,
+                "…and ends clear of the value cluster — \(placement)")
     }
 
     @Test func contextMenuCarriesAlignSpeakerOnBTRowsThroughRealMenuDispatch() throws {
@@ -352,10 +555,11 @@ import AppKit
         let alignIndex = try #require(menu?.items.firstIndex { $0.title == "Align speaker…" })
         #expect(menu?.items[alignIndex].isEnabled == true)
         menu?.performActionForItem(at: alignIndex)   // real AppKit menu dispatch
-        #expect(spy.wizardRequests == [btDevice().id])
+        #expect(spy.wizardRequests.map(\.id) == [btDevice().id])
+        #expect(spy.wizardRequests.map(\.door) == [.menu])
 
         let plain = DeviceRowView(device: btDevice(), showsToggle: true,
-                                  paintsSelectionBackground: false, showsMeter: true,
+                                  showsMeter: true,
                                   showsBus: true, showsSyncControls: false)
         #expect(plain.test_contextMenu()?.items.map(\.title) == ["Equalizer…"],
                 "non-sync rows keep the Equalizer door but carry no alignment item")
@@ -403,12 +607,10 @@ import AppKit
         return (popover, controller, backend)
     }
 
-    private func waitFor(timeout: TimeInterval = 5, _ cond: @escaping () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+    private func waitFor(timeout: TimeInterval? = nil,
+                     sourceLocation: SourceLocation = #_sourceLocation,
+                     _ cond: @escaping () -> Bool) {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, cond)
     }
 
     private func local() -> Device {
@@ -430,26 +632,28 @@ import AppKit
     @Test func bluetoothSubsectionHeaderAlwaysRendersWithAConnectRowWhenEmpty() {
         let (popover, _, _) = makePopover()
         popover.update(devices: [local(), airplay()])
-        #expect(popover.test_subsectionTitles() == ["This Mac", "AirPlay Devices", "Bluetooth Devices"])
+        #expect(popover.test_subsectionTitles() == ["AirPlay Devices", "Bluetooth Devices"])
         #expect(popover.test_bluetoothRowOrder().isEmpty)
         #expect(popover.test_bluetoothConnectRowShown())
     }
 
-    /// The "SYNC" column title is printed only when BT rows carrying a sync chip
-    /// sit under it. The Bluetooth header renders even with nothing listed (its
-    /// empty body IS the Connect affordance), so without the gate the title names
-    /// a column that does not exist.
-    @Test func syncColumnTitleIsPrintedOnlyWhenBluetoothRowsExist() {
+    /// The "Offset" column title (the card header's, since 2026-08-28) is
+    /// printed only when a row carrying the sync chip actually renders. The
+    /// Bluetooth header renders even with nothing listed (its empty body IS
+    /// the Connect affordance), so without the gate the title names a column
+    /// that does not exist. A Mac-less, BT-less fleet is the empty case here —
+    /// the Mac's own row carries the chip too and would satisfy the gate.
+    @Test func offsetColumnTitleIsPrintedOnlyWhenSyncChipRowsExist() {
         let (popover, _, _) = makePopover()
-        popover.update(devices: [local(), airplay()])
+        popover.update(devices: [airplay()])
         #expect(popover.test_bluetoothConnectRowShown(),
                 "precondition: the subsection is in its empty state")
-        #expect(!popover.test_syncColumnTitleShown(in: "Bluetooth Devices"),
-                "no rows under it means no column to name")
+        #expect(!popover.test_offsetColumnTitleShown(),
+                "no chip rows under it means no column to name")
 
-        popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Attic Speaker")])
+        popover.update(devices: [airplay(), bt("bt-a:output", name: "Attic Speaker")])
         #expect(popover.test_bluetoothRowOrder() == ["bt-a:output"])
-        #expect(popover.test_syncColumnTitleShown(in: "Bluetooth Devices"),
+        #expect(popover.test_offsetColumnTitleShown(),
                 "one listed BT row brings its SYNC chip — and the title back")
     }
 
@@ -470,7 +674,7 @@ import AppKit
             bt("bt-old:output", name: "Attic Speaker"),
         ])
         #expect(popover.test_subsectionTitles()
-                == ["This Mac", "AirPlay Devices", "Bluetooth Devices"])
+                == ["AirPlay Devices", "Bluetooth Devices"])
         #expect(popover.test_bluetoothRowOrder()
                 == ["bt-new:output", "bt-old:output", "bt-ghost:output"],
                 "most recent first; a pairing with no recency sinks to the bottom")
@@ -526,10 +730,10 @@ import AppKit
         #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "130 ms")
     }
 
-    /// D10 at the popover level: a device with no persisted ENTRY reads "Not
-    /// set" on its chip, not "0.0 ms" — and a device deliberately tuned to
-    /// exactly 0.0 reads "0.0 ms", which the value alone could never tell
-    /// apart (T7 §6).
+    /// D10 at the popover level: a device with no persisted ENTRY must not
+    /// read "0.0 ms" (which looks finished). On a Bluetooth row it reads
+    /// "Align", the wizard's door; a device deliberately tuned to exactly 0.0
+    /// reads "0 ms", which the value alone could never tell apart (T7 §6).
     @Test func untunedChipTracksThePersistedENTRYNotTheValue() {
         let (popover, _, _) = makePopover()
         popover.btTrimProvider = { _ in 0 }
@@ -539,7 +743,7 @@ import AppKit
                                  bt("bt-b:output", name: "Speaker B")])
 
         let never = popover.test_deviceRow(for: "bt-a:output")
-        #expect(never?.test_syncChipTitle == "Not set")
+        #expect(never?.test_syncChipTitle == "Align")
         #expect(never?.test_syncChipIsDashed == true)
 
         let tunedToZero = popover.test_deviceRow(for: "bt-b:output")
@@ -749,6 +953,9 @@ import AppKit
     /// before, so this one goes through the chip's own target/action.
     @Test func chipClickOpensAndClosesTheDrawerThroughItsRealAction() {
         let (popover, _) = makePopover()
+        // A MEASURED speaker: its chip is the drawer's control. An untuned
+        // one's chip is the wizard's door instead.
+        popover.btTrimIsSetProvider = { _ in true }
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
 
         popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()

@@ -5,7 +5,7 @@ import AppKit
 /// The **shared column grid** every popover row type lays out against so the
 /// volume-slider column and the trailing-control column line up vertically across
 /// all three sections — System (`MainOutRowView`), Selected Devices
-/// (`DeviceRowView`) and Groups (`GroupRowView`). This vertical consistency is
+/// (`DeviceRowView`) and Applications (`AppRowView`). This vertical consistency is
 /// the core of the popover layout overhaul (task B).
 ///
 /// The trick that makes columns line up despite different *leading* controls
@@ -75,6 +75,17 @@ public enum PopoverColumnGrid {
     public static let headerChevronWidth: CGFloat = 16
     /// Gap between that chevron and the title following it.
     public static let headerChevronToTitle: CGFloat = 4
+    /// Leading edge of a SUBSECTION header's first element (its chevron) —
+    /// one clear indent step IN from the card header's own
+    /// `firstElementLeading`, so the two header ranks read as nested rather
+    /// than as four peers (both chevrons used to share the identical anchor,
+    /// which made "Output Devices" and "This Mac" look like siblings). The
+    /// step reuses the existing member-row indent
+    /// (`indentedLeadingInset − leadingInset`) rather than minting a new
+    /// magic number.
+    public static var subsectionHeaderLeading: CGFloat {
+        firstElementLeading(indented: true)
+    }
     /// Leading edge of a header's TITLE TEXT — the x a section title, a
     /// subsection label, and anything annotating them all start at. A card note
     /// is a subtitle to its section title, so it belongs on this column, not on
@@ -195,6 +206,11 @@ public enum PopoverColumnGrid {
     /// The speaker/mute glyph column, sitting **left of the slider** in every row
     /// (per-device mute on device rows, master mute on Main Out and group rows).
     public static let muteWidth: CGFloat = 24
+    /// Width (and height — it is square) of the row's Equalizer button, the
+    /// door beside mute on every row that has an equalizer.
+    public static let eqButtonWidth: CGFloat = 24
+    /// Gap between the Equalizer button and the mute glyph it leads.
+    public static let eqToMuteGap: CGFloat = 6
     /// The trailing control column, sized to the **widest** trailing control so
     /// the slider column clears it in every row: the Main Out row's named
     /// destination dropdown (task B). The device row's small mute button and the
@@ -214,41 +230,6 @@ public enum PopoverColumnGrid {
     /// STATIC "+N" overflow measurement.
     public static let feedColumnWidth: CGFloat = trailingControlWidth - 4
 
-    /// The FEED composite's derived-colour app CHIP (Warm Signal v4.1
-    /// CORRECTIONS "FEED needs the colour chip, not just tinted text") — a
-    /// small square swatch in `AppTetherColor`'s tone, prefixed onto a
-    /// redirected app's name segment. The SAME chip (same size/radius) marks
-    /// that app's name in the App Exceptions row so the tether reads at both
-    /// ends. Edge length only — never the state-carrying halo ring or meter
-    /// (house rule: tether colour lives on FEED/redirect app-name text only).
-    /// Raised 5 → 7pt (2026-07-22, the same pass as the tuning-constant
-    /// contrast raise above): the owner's live-build feedback was that even a
-    /// correctly-contrasted chip was too small to read as a colour swatch at
-    /// all rather than a fleck. `feedColumnWidth` itself is UNCHANGED — the
-    /// STATIC "+N" overflow measurement in `DeviceRowView.setFeedSegments`
-    /// reads `feedChipSize`/`feedChipGap` live via `FeedChip.attachmentString`
-    /// and `pillWidth(_:)`, so a wider chip correctly eats into the same
-    /// margin rather than needing a second constant updated in lockstep; see
-    /// `FeedColumnTests` for the still-passing (now slightly-earlier-tripping)
-    /// two-app overflow cases this shifts by construction, not regression.
-    public static let feedChipSize: CGFloat = 7
-    /// Visual gap between a chip and the app-name text that follows it, baked
-    /// into the chip's own attachment width (no separate space glyph) so
-    /// stripping the attachment character back out of `attributedStringValue`
-    /// never leaves a stray leading space in a test's plain-text read. Kept
-    /// tight — the FEED column's `feedColumnWidth` is unchanged by this
-    /// task, so a multi-segment composite's existing STATIC "+N" overflow
-    /// threshold must not shift just because a chip was added to it (a
-    /// two-chip composite like "System · Music · Safari" measured ~119pt of
-    /// ~136pt available before chips; each chip's `feedChipSize + feedChipGap`
-    /// eats straight into that ~17pt margin).
-    public static let feedChipGap: CGFloat = 2
-    /// Corner radius of the chip's rounded square — a soft chip, not a bare
-    /// square or a full pill (spec reference `v41-fixes.html` `.feed .chip`).
-    /// Proportionally small relative to `feedChipSize` (unlike the
-    /// reference's 9px/2px ratio) so the chip still reads as a SQUARE at the
-    /// compact size the FEED column's tight width budget forces it to.
-    public static let feedChipCornerRadius: CGFloat = 1
 
     // MARK: FEED pills (per-value bordered pills, replacing the packed
     // " · "-joined composite string)
@@ -266,10 +247,6 @@ public enum PopoverColumnGrid {
     /// Vertical padding inside a FEED pill, between its rounded-rect border
     /// and the text/chip it hosts.
     public static let feedPillVerticalPadding: CGFloat = 2
-    /// Corner radius of a FEED pill's rounded-rect border — soft, not a
-    /// capsule (deliberately distinct from the mute button's fuller-rounded
-    /// `mutePillCornerRadius`, which signals "engaged control," not "value").
-    public static let feedPillCornerRadius: CGFloat = 5
     /// Horizontal gap between adjacent FEED pills — the mock's "small gap
     /// between pills," replacing the retired `feedSegmentSeparator` middle
     /// dot as the thing that visually separates one feed value from the next.
@@ -397,19 +374,15 @@ public enum PopoverColumnGrid {
     // below the retired 10 pt connection beacon) reads as a deliberate
     // indicator while the parchment punch-out border keeps it separated from
     // the glyph. Paired with the `routeArmedDotBoxSize` bump so the larger disc
-    // plus its glow halo isn't clipped.
+    // isn't clipped.
     public static let routeArmedDotDiameter: CGFloat = 8
-    /// Blur radius of the lit dot's STATIC `glow` halo (spec §3.3 "subtle
-    /// glow" — a resting shadow, not an animation; energy rule intact).
-    public static let routeArmedGlowRadius: CGFloat = 3.5
-    /// Opacity of the lit dot's static `glow` halo shadow.
-    public static let routeArmedGlowOpacity: Float = 0.6
     /// Duration of the one-shot `ember → gold` bloom when a dot transitions
     /// INTO armed while visible (spec §6 first-light bloom, ≤450 ms ease-out;
     /// instant under Reduce Motion; never fires on initial render).
     public static let routeArmedBloomDuration: CFTimeInterval = 0.45
     /// Side length of the square overlay view hosting the dot — big enough to
-    /// contain the disc plus its glow halo without clipping.
+    /// contain the disc with a margin (unchanged from the halo era; geometry
+    /// is not re-tuned in this pass).
     public static let routeArmedDotBoxSize: CGFloat = 18
 
     // MARK: Membership bus — the LEFT SPINE (Warm Signal v4 §Call-1)
@@ -452,6 +425,12 @@ public enum PopoverColumnGrid {
     public static let busLineWidth: CGFloat = 2
     /// Stroke width of the rim ringing a filled node / edging a hollow one.
     public static let busNodeRimWidth: CGFloat = 1.5
+    /// Rim width for a SELECTED-but-unavailable member (`MembershipBusView`'s
+    /// `emphasizesDimmedMemberRim`, set true only by the Groups editor's own
+    /// row) — 2x `busNodeRimWidth`, so the seat that already carries the
+    /// visual weight (`socket`) reads as emphasized rather than merely
+    /// dim.
+    public static let busNodeDimmedRimWidth: CGFloat = busNodeRimWidth * 2
     /// The unstroked VERTICAL gap between a node's edge and where the rail line
     /// stops/resumes above and below it (Alec's clearance refinement) — the rail
     /// "meets" a node with breathing room instead of jamming into it, so
@@ -463,11 +442,11 @@ public enum PopoverColumnGrid {
     /// node's radius, so a large node and a small one are cleared by the same
     /// margin.
     public static let busDetourBulge: CGFloat = 6.5
-    /// Radius of the HOVER RING — the thin gold circle that appears around the
-    /// node while the pointer is in the gutter. CONSTANT for every node kind, so
-    /// the affordance lands in the same place whether the row is in the mix or
-    /// out of it, and so the gutter reserve can be sized against one number.
-    public static let busNodeHoverRingRadius: CGFloat = 10
+    /// How long the hover resize takes, each way. Pointer feedback, not storytelling:
+    /// an order of magnitude under the rail pulse's `railConnectPulseDuration`
+    /// and inside the "immediate feedback" band, so the node answers the pointer
+    /// rather than performing for it.
+    public static let busNodeHoverGrowDuration: CFTimeInterval = 0.12
     /// FULL-WIRE travel time of the rail's one-shot CONNECT PULSE (Warm Signal
     /// v4.1 item 9, reshaped per Alec 2026-08-12): the glowing bead's climb
     /// from the joining room's node into the Main Audio ring. A mid-wire
@@ -484,9 +463,9 @@ public enum PopoverColumnGrid {
     /// the house clock.
     public static let railConnectPulseArrivalDuration: CFTimeInterval = 0.4
     /// Width of the non-interactive bus-overlay column view a row hosts, centered
-    /// on `railGutterCenterX`. Wide enough to contain the largest node plus its
-    /// hover ring without clipping — the detour arcs are drawn by the panel-level
-    /// overlay, not here. Spans the full
+    /// on `railGutterCenterX`. Wide enough to contain the largest node a hover
+    /// can reach — `busNodeDiameterSelected` — without clipping; the detour arcs
+    /// are drawn by the panel-level overlay, not here. Spans the full
     /// row height so stacked rows' rail segments read as one continuous line.
     public static let busColumnWidth: CGFloat = 30
     /// Minimum hit height of the inline "Undo" link button in the transient
@@ -531,9 +510,12 @@ public enum PopoverColumnGrid {
     /// DeviceRowView and AppRowView to establish consistent hover interaction.
     public static let rowHoverWashAlpha: CGFloat = 0.10
     /// Alpha for the selection wash, drawn in ``Tokens/Color/engagedChrome``.
-    /// Shared by AppRowView's single-selection highlight and DeviceRowView's
-    /// mixer-window selection pill.
+    /// Used by AppRowView's single-selection highlight.
     public static let rowSelectionWashAlpha: CGFloat = 0.18
+    /// Alpha of the gold wash behind a SOUNDING row (`DeviceRowView.isRouteArmed`,
+    /// `AppRowView`'s routed ∧ running) — the iPhone's 12 % (`gold.opacity(0.12)`);
+    /// measured 1.256:1 on dark `panel`, 1.140:1 on the light ground.
+    public static let rowLiveWashAlpha: CGFloat = 0.12
 
     // MARK: Engaged mute pill (Warm Signal v3 §3.4/§3.5, S3)
     //
@@ -546,16 +528,15 @@ public enum PopoverColumnGrid {
     /// alpha in that token's ladder, since a pill is smaller than a row wash
     /// and needs the extra weight to read at glyph scale.
     public static let mutePillFillAlpha: CGFloat = 0.22
-    /// Corner radius of the engaged pill (capsule-ish over the `muteWidth`
-    /// column's glyph box). Tuned live.
-    public static let mutePillCornerRadius: CGFloat = 7
+    /// Corner radius of the engaged pill — the control radius (iOS Shapes).
+    public static let mutePillCornerRadius: CGFloat = Tokens.Layout.Radius.control
 
     // MARK: Single-selection highlight (AppRowView, 2026-07-17)
     //
     // The Applications card's single-selection model (± footer controls,
     // context-menu remove, Delete/Backspace) needs a selected-row highlight
     // distinct from `DeviceRowView`'s membership/hover pill. Named here per
-    // house rule (no magic numbers) — `DeviceRowView` and `GroupRowView`'s own
+    // house rule (no magic numbers) — `DeviceRowView`'s own
     // hover/selection pills (V10) now also draw from these same constants
     // instead of retyping the same numbers.
 
@@ -563,8 +544,10 @@ public enum PopoverColumnGrid {
     /// the row's bounds — matches `DeviceRowView`'s hover/selection pill inset.
     public static let selectionHighlightInsetX: CGFloat = 5
     public static let selectionHighlightInsetY: CGFloat = 2
-    /// Corner radius of the selection-highlight rounded rect.
-    public static let selectionHighlightCornerRadius: CGFloat = 7
+    /// Corner radius of the selection-highlight rounded rect — the control
+    /// radius, shared by the device/app rows' live+hover pills and the panel
+    /// header's hover pill.
+    public static let selectionHighlightCornerRadius: CGFloat = Tokens.Layout.Radius.control
 
     // MARK: Applications card ± footer (T3, 2026-07-17)
     //
@@ -592,17 +575,16 @@ public enum PopoverColumnGrid {
     /// gradient's dim end and the unarmed fill read at a glance — the 4 pt
     /// line was part of why the fader sank into the warm canvas.
     public static let faderTrackHeight: CGFloat = 5
-    /// Corner radius of the fader trough (fully rounds the 5 pt track ends).
-    public static let faderTrackCornerRadius: CGFloat = 2.5
+    /// Corner radius of the fader trough — a capsule at the track's height.
+    public static let faderTrackCornerRadius: CGFloat = faderTrackHeight / 2
     /// Width of the rounded-rect fader thumb (replaces the stock circle).
     /// Grown 9×15 → 10×17 in the fader-legibility pass so the handle reads
-    /// as a grabbable object at arm's length (alongside the `faderThumb`
-    /// token's ≥3:1 fill).
+    /// as a grabbable object at arm's length.
     public static let faderThumbWidth: CGFloat = 10
     /// Height of the rounded-rect fader thumb.
     public static let faderThumbHeight: CGFloat = 17
-    /// Corner radius of the fader thumb.
-    public static let faderThumbCornerRadius: CGFloat = 4
+    /// Corner radius of the fader thumb — a capsule cap, as on the iOS fader.
+    public static let faderThumbCornerRadius: CGFloat = faderThumbWidth / 2
     /// Alpha the fader's interior drawing (fill/rim/thumb) dims to while the
     /// slider is disabled — matches `selectionDimmedAlpha`'s dim-not-hide idiom.
     public static let faderDisabledAlpha: CGFloat = 0.4
@@ -612,8 +594,9 @@ public enum PopoverColumnGrid {
     // Geometry for `AlignmentPlateButton`/`AlignmentPlateCell` (AudioutPopoverUI),
     // named here per house rule alongside the fader skin's own drawing-only cell.
 
-    /// Corner radius of the alignment-wizard plate button (spec §3).
-    public static let alignPlateCornerRadius: CGFloat = 12
+    /// Corner radius of the alignment-wizard plate button — the control radius
+    /// (iOS Shapes: a plate is a button).
+    public static let alignPlateCornerRadius: CGFloat = Tokens.Layout.Radius.control
 
     // MARK: Inline rename field (Groups window header)
     //
@@ -627,11 +610,9 @@ public enum PopoverColumnGrid {
     /// (rather than a label with a box around it) while still fitting beside
     /// the 64 pt icon well in the side-by-side header band.
     public static let titleFieldHeight: CGFloat = 28
-    /// Corner radius of the inline rename field. Deliberately NOT a capsule:
-    /// the fully-rounded shape is already spoken for by the engaged mute pill
-    /// (`mutePillCornerRadius`), which means "control engaged" — a capsule here
-    /// would collide with that vocabulary. A soft rounded rect reads as "field."
-    public static let titleFieldCornerRadius: CGFloat = 6
+    /// Corner radius of the inline rename field — the control radius every
+    /// field and button in the app wears.
+    public static let titleFieldCornerRadius: CGFloat = Tokens.Layout.Radius.control
 
     // MARK: Edit-affordance alphas (Groups window header)
     //
@@ -648,15 +629,22 @@ public enum PopoverColumnGrid {
     /// the thing it marks.
     public static let editAffordanceHoverAlpha: CGFloat = 1.0
 
-    // MARK: SYNC column (Bluetooth rows — BT-OFFSET-UI, chip since T6)
+    // MARK: SYNC column (sync-capable rows — BT-OFFSET-UI, chip since T6)
     //
-    // Bluetooth rows carve a per-device SYNC control out of the LEFT portion
-    // of the reserved trailing-control slot: the slider/% columns keep their
-    // exact trailing anchors (cross-section alignment untouched), while the BT
-    // row's FEED pill right-aligns into `btFeedReserveWidth` at the far right
-    // (locked UI spec: "feed pill stays far right") instead of the AirPlay
-    // rows' left-aligned `feedColumnWidth`. Named constants only — the Figma
-    // design-system contract mirrors this file 1:1.
+    // A sync-capable row (every Bluetooth row, plus the Mac's own) splits the
+    // reserved trailing-control slot in two, in the SAME left-to-right order
+    // as the card header's legends: the FEED pills take the slot's LEADING
+    // portion (`btFeedSlotWidth`, under "Source") on the very anchor an
+    // AirPlay row's pills use, and the SYNC chip closes the slot at the
+    // trailing inset (under "Offset"). The slider/% columns keep their exact
+    // trailing anchors, so cross-section alignment is untouched. Named
+    // constants only.
+    //
+    // That order SUPERSEDES BT-OFFSET-UI's locked "chip left, feed pill far
+    // right" spec, which predates the column legends: with the controls the
+    // other way round, "Source" printed over the chip and "Offset" over the
+    // pill. The controls moved rather than the legends, since the legends
+    // already name these columns correctly on every AirPlay row.
     //
     // PLAN-BT-SYNC-DRAWER T6 replaced the old four-control cluster (− / value
     // field / + / metronome) with ONE read-only value chip that opens the
@@ -684,63 +672,72 @@ public enum PopoverColumnGrid {
     public static let syncChipDashLength: CGFloat = 3
     /// Dash OFF length of that same untuned border.
     public static let syncChipDashGap: CGFloat = 2
-    /// The BT row's FEED slot: the trailing-control column's far-right portion
-    /// the right-aligned feed pill keeps (an overlong pill clips at the slot's
-    /// edge via the feed stack's existing mask, exactly like overflow pills).
-    public static let btFeedReserveWidth: CGFloat = 48
-    /// Gap between the SYNC chip's trailing edge and the BT feed slot.
+    /// Gap between the FEED pill slot and the SYNC chip that follows it.
     public static let btFeedToSyncGap: CGFloat = 4
-    /// Distance from the row trailing edge to the SYNC chip's TRAILING edge
-    /// — the chip sits immediately left of the BT feed slot.
-    public static var syncTrailing: CGFloat {
-        trailingInset + btFeedReserveWidth + btFeedToSyncGap
+    /// The sync-capable row's FEED slot: the trailing-control column's LEADING
+    /// portion — everything the chip and their gap leave (140 − 84 − 4 = 52).
+    /// The pills left-align on `feedColumnLeadingFromTrailing`, and this width
+    /// is both their ceiling and the feed stack's clipping bound (the stack
+    /// masks to its own bounds), so an overlong pill is cut off at the chip's
+    /// side of the gap — the same honest-clipping fallback as overflow pills.
+    public static var btFeedSlotWidth: CGFloat {
+        trailingControlWidth - syncChipWidth - btFeedToSyncGap
     }
-    /// Distance from the row trailing edge to the SYNC chip's CENTER, so the
-    /// Bluetooth subsection header can center its "SYNC" column title over the
-    /// chip (the title lives in that subsection header ONLY — the card
-    /// header's VOLUME/FEED titles are untouched). Derived from the chip's own
-    /// width, so re-sizing the chip re-centres the title in lockstep.
-    public static var syncCenterFromTrailing: CGFloat {
-        syncTrailing + syncChipWidth / 2
-    }
+    /// Distance from the row trailing edge to the SYNC chip's TRAILING edge —
+    /// the chip CLOSES the trailing slot, landing on the same x as every other
+    /// row's trailing control, with the feed pills to its left.
+    public static var syncTrailing: CGFloat { trailingInset }
+    /// Distance from the row trailing edge to the "Offset" column title's
+    /// TRAILING edge on the card header line — the chip column's own trailing
+    /// edge, so the title hangs over the chip it names and moves with it
+    /// (sibling of `feedColumnLeadingFromTrailing`, the "Source" title's
+    /// anchor on the same line). The pair reads in the order of the controls
+    /// beneath it and clears itself by a wide margin: at
+    /// `Tokens.Font.captionMedium` "Source" measures 37.7 pt and starts 154 in,
+    /// so it ends 116.3 in; "Offset" measures 33.6 pt and ends 14 in, so it
+    /// starts 47.6 in — **68.7 pt of clear air** between them. Re-anchoring
+    /// the chip re-anchors this title, which is the point: with the chip on
+    /// the slot's other side these same two anchors printed each legend over
+    /// the OTHER column's control. This legend prints exactly once, on the
+    /// card header, never on a subsection line.
+    public static var offsetTitleTrailingFromTrailing: CGFloat { syncTrailing }
 
     // MARK: SYNC drawer (PLAN-BT-SYNC-DRAWER T5 — `BTSyncDrawerView`)
     //
     // The panel that opens underneath a Bluetooth row: ONE horizontal band,
     //
-    //     [♪ Align by ear] [Revert]     hold ⇧ for 10 ms   [ − | −414 ms | + ]
+    //     [⑂ Align again…] [♪ Align by ear] [Reset alignment]   hold ⇧ for 10 ms   [ − | −414 ms | + ]
     //
-    // The align/revert pair sits at the far LEADING edge, deliberately as far
-    // as the band allows from the steppers, so Revert cannot be mis-tapped
-    // mid-adjustment. The value cluster hugs the TRAILING edge so it lands
+    // The two alignment doors and Reset sit at the far LEADING edge,
+    // deliberately as far as the band allows from the steppers, so Reset
+    // cannot be mis-tapped mid-adjustment. The value cluster hugs the
+    // TRAILING edge so it lands
     // directly beneath the SYNC chip that opened the drawer. Everything in the
     // band shares ``syncDrawerControlHeight`` and is vertically centred, sized
     // to sit WITH the row's own controls — two earlier versions were redone for
-    // being oversized. Named constants only — the Figma design-system contract
-    // mirrors this file.
+    // being oversized. Named constants only.
 
     /// Horizontal inset of the drawer's content from its container edges. No
     /// accent edge or border (live feedback — see `BTSyncDrawerView`'s header).
     public static let syncDrawerHorizontalInset: CGFloat = 12
     /// Vertical inset of the drawer's content from its top/bottom edges.
     public static let syncDrawerVerticalInset: CGFloat = 12
-    /// The ONE height every element of the band shares — the align and revert
+    /// The ONE height every element of the band shares — the three leading
     /// buttons and the whole value cluster. Sized to a `.rounded`-bezel
     /// `.small` `NSButton`'s natural height, so the pair reads as stock chrome
     /// rather than a stretched bezel.
     public static let syncDrawerControlHeight: CGFloat = 22
+    /// Width of the "Align again…" push button that leads the band — fits the
+    /// title with its leading tuning-fork glyph at ``Tokens/Font/caption``.
+    public static let syncDrawerAlignAgainButtonWidth: CGFloat = 104
     /// Width of the align-by-ear toggle — fits "Align by ear" with its leading
     /// metronome glyph at ``Tokens/Font/caption``.
     public static let syncDrawerAlignButtonWidth: CGFloat = 104
-    /// Width of the Revert push button.
-    public static let syncDrawerRevertButtonWidth: CGFloat = 58
-    /// Width of the "Reset alignment" push button — wider than Revert because
-    /// it spells out what it clears: Revert restores the value this drawer
-    /// opened on, Reset deletes the stored alignment entirely, and a two-button
-    /// pair reading "Revert"/"Reset" would be one glance from a wrong click.
+    /// Width of the "Reset alignment" push button — it spells out what it
+    /// clears, which is longer than either alignment door beside it.
     public static let syncDrawerResetButtonWidth: CGFloat = 108
-    /// Gap between the align toggle and the Revert button beside it — they are
-    /// one pair, so this is tight.
+    /// Gap between the band's leading buttons — they are one group, so this is
+    /// tight.
     public static let syncDrawerButtonGap: CGFloat = 6
     /// Gap between the "hold ⇧" hint and the value cluster it describes.
     public static let syncDrawerHintToClusterGap: CGFloat = 12
@@ -770,10 +767,8 @@ public enum PopoverColumnGrid {
     public static let nameToSlider: CGFloat = 12
     /// Gap between the slider's trailing edge and the `%` readout's leading edge
     /// — kept small so the number reads tight against the slider on every slider
-    /// row (change 4). Slider rows anchor the readout off `slider.trailingAnchor`
-    /// with this constant; the derived `readoutTrailing` below is only for rows
-    /// that still trailing-anchor the readout (`GroupRowView`), and is defined so
-    /// the two placements coincide.
+    /// row (change 4). Rows anchor the readout off `slider.trailingAnchor`
+    /// with this constant.
     public static let sliderToReadout: CGFloat = 6
     /// Gap between the `%` readout's trailing edge and the trailing control
     /// (ENABLED switch) it sits left of — the flexible slack column. The
@@ -792,6 +787,18 @@ public enum PopoverColumnGrid {
     /// Distance from the row trailing edge to the **trailing control's trailing
     /// edge** (i.e. the trailing control's own trailing inset).
     public static var trailingControlTrailing: CGFloat { trailingInset }
+    /// Distance from the row trailing edge to the FEED slot's **leading edge**
+    /// — the x the LEFT-ALIGNED feed pills start at (`DeviceRowView`'s
+    /// `feedStack` pins its leading here). The card header's "Source" column
+    /// title (renamed from "Feed", 2026-08-28) left-aligns on this same anchor
+    /// rather than centering over the whole reserved column: with the pills
+    /// left-aligned, a centered title floated ~46 pt right of a single pill.
+    /// One derivation for all three, so title and pills cannot drift — a
+    /// sync-capable row's pills start here too, just capped at
+    /// `btFeedSlotWidth` to leave the chip its share of the slot.
+    public static var feedColumnLeadingFromTrailing: CGFloat {
+        trailingControlTrailing + trailingControlWidth
+    }
     /// Distance from the row trailing edge to the **slider's trailing edge** — the
     /// slider column is fixed-width and fixed here, so it lines up across every
     /// row type. Sized to clear the readout that hangs off it, the min flex
@@ -800,15 +807,6 @@ public enum PopoverColumnGrid {
         trailingControlTrailing + trailingControlWidth + readoutToTrailingControl
             + readoutWidth + sliderToReadout
     }
-    /// Distance from the row trailing edge to the **readout's trailing edge**.
-    /// Only used by rows that still trailing-anchor the readout (`GroupRowView`);
-    /// slider rows instead anchor it off `slider.trailingAnchor + sliderToReadout`.
-    /// Defined as exactly that same x so both placements coincide and the readout
-    /// column stays aligned across row types.
-    public static var readoutTrailing: CGFloat {
-        sliderTrailing - readoutWidth - sliderToReadout
-    }
-
     // MARK: Column-center helpers (for the combined section/column header row)
     //
     // Distances (positive, measured inward from the row trailing edge) to the

@@ -10,17 +10,18 @@ import AppKit
 /// — house rule R3). The ROW computes the armed predicate (spec §3.3) and
 /// pushes the boolean; this view only draws it:
 ///
-/// - **armed** → a `gold` disc with a subtle STATIC `glow` halo (a resting
-///   shadow, not an animation — the energy rule holds: nothing runs at rest).
-/// - **not armed** → the dark/empty `dotSocket` disc (spec §3.3's "dark/empty
+/// - **armed** → a flat `gold` disc, no halo: the gold fill against the unlit
+///   socket IS the signal.
+/// - **not armed** → the dark/empty `socket` disc (spec §3.3's "dark/empty
 ///   socket"), so the corner reads as an unlit lamp, not an absence.
 ///
 /// Both states keep the punch-out border (`underPageBackground`, the
 /// `statusDotBorderWidth` ring the retired corner dot pioneered) so the dot
 /// reads as a badge over the glyph, not part of it.
 ///
-/// **Bloom transition** (spec §6 first-light): on a model transition INTO
-/// armed while on screen, the fill blooms `ember → gold` over
+/// **Bloom transition** (spec §6 first-light) — a colour transition and
+/// nothing more: on a model transition INTO armed while on screen, the fill
+/// blooms `ember → gold` over
 /// `routeArmedBloomDuration` (≤450 ms, ease-out). Under Reduce Motion the swap
 /// is instant. The animation runs OVER a settled model layer (fill already
 /// stamped gold), following ``HaloRingView``'s model-layer-settled pattern, so
@@ -37,7 +38,6 @@ public final class RouteArmedDotView: NSView {
 
     private let dotLayer = CAShapeLayer()
     private static let bloomFillKey = "routeArmedDot.bloomFill"
-    private static let bloomGlowKey = "routeArmedDot.bloomGlow"
 
     /// The armed state currently rendered (model truth, stamped by `apply`).
     private var isArmed = false
@@ -62,7 +62,7 @@ public final class RouteArmedDotView: NSView {
             selector: #selector(accessibilityDisplayOptionsDidChange),
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
             object: nil)
-        // A layer-color instrument: `dotLayer.fillColor`/`shadowColor` are
+        // A layer-color instrument: `dotLayer.fillColor` is
         // stamped once and won't re-resolve on their own, so the accent dial
         // (AGENTS.md rule 36 / Tokens.swift's accentStyleDidChangeNotification
         // doc) needs its own observer alongside the a11y one above.
@@ -81,7 +81,6 @@ public final class RouteArmedDotView: NSView {
         updateLayerAppearance()
         if reduceMotion {
             dotLayer.removeAnimation(forKey: Self.bloomFillKey)
-            dotLayer.removeAnimation(forKey: Self.bloomGlowKey)
         }
     }
 
@@ -112,7 +111,6 @@ public final class RouteArmedDotView: NSView {
             // Leaving armed (or re-confirming unarmed): make sure no stale
             // bloom keeps playing over the socket (energy rule / idempotence).
             dotLayer.removeAnimation(forKey: Self.bloomFillKey)
-            dotLayer.removeAnimation(forKey: Self.bloomGlowKey)
         }
     }
 
@@ -125,21 +123,16 @@ public final class RouteArmedDotView: NSView {
         updateLayerAppearance()
     }
 
-    /// Stamp the MODEL layer fully settled for the current state — fill, punch-
-    /// out border, and static glow — against the current effective appearance.
+    /// Stamp the MODEL layer fully settled for the current state — fill and
+    /// punch-out border — against the current effective appearance.
     /// The bloom (if any) animates over these settled values, so a snapshot
     /// always captures the final state.
     private func updateLayerAppearance() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             if isArmed {
                 dotLayer.fillColor = Tokens.Color.gold.cgColor
-                dotLayer.shadowColor = Tokens.Color.glow.cgColor
-                dotLayer.shadowOpacity = PopoverColumnGrid.routeArmedGlowOpacity
-                dotLayer.shadowRadius = PopoverColumnGrid.routeArmedGlowRadius
-                dotLayer.shadowOffset = .zero
             } else {
-                dotLayer.fillColor = Tokens.Color.dotSocket.cgColor
-                dotLayer.shadowOpacity = 0
+                dotLayer.fillColor = Tokens.Color.socket.cgColor
             }
             // Punch-out border in the under-page hue so the badge separates
             // from the glyph beneath it, lit or dark.
@@ -161,7 +154,7 @@ public final class RouteArmedDotView: NSView {
         test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
-    /// One-shot `ember → gold` fill bloom + glow fade-in, ease-out, over the
+    /// One-shot `ember → gold` fill bloom, ease-out, over the
     /// already-settled model layer. Self-removing (`isRemovedOnCompletion`
     /// stays true), so nothing animates at rest.
     private func bloom() {
@@ -174,12 +167,6 @@ public final class RouteArmedDotView: NSView {
         fill.duration = PopoverColumnGrid.routeArmedBloomDuration
         fill.timingFunction = CAMediaTimingFunction(name: .easeOut)
         dotLayer.add(fill, forKey: Self.bloomFillKey)
-
-        let glow = CABasicAnimation(keyPath: "shadowOpacity")
-        glow.fromValue = 0
-        glow.duration = PopoverColumnGrid.routeArmedBloomDuration
-        glow.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        dotLayer.add(glow, forKey: Self.bloomGlowKey)
     }
 
     // MARK: Test-support hooks
@@ -209,7 +196,4 @@ public final class RouteArmedDotView: NSView {
         dotLayer.animation(forKey: Self.bloomFillKey) != nil
     }
 
-    /// Whether the static glow halo is currently on (armed state's resting
-    /// shadow) — `shadowOpacity` > 0.
-    public var test_hasGlow: Bool { dotLayer.shadowOpacity > 0 }
 }

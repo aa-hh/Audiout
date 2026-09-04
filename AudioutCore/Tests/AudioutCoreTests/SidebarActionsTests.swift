@@ -268,6 +268,33 @@ import AppKit
                 "the glyph never carries the row's own name")
     }
 
+    // MARK: The Groups row's click action
+
+    @Test func clickingTheAlreadySelectedGroupsRowReportsItAgain() {
+        let sidebar = makeSidebar()
+        var reported: [SidebarSelection?] = []
+        sidebar.onSelect = { reported.append($0) }
+        sidebar.test_select(.groupsOverview)
+        #expect(reported == [.groupsOverview])
+
+        sidebar.test_clickGroupsRow()
+
+        #expect(reported == [.groupsOverview, .groupsOverview],
+                "the selection delegate stays silent; the click action speaks")
+    }
+
+    @Test func theGroupsRowClickActionIgnoresAClickWhileAnotherRowIsSelected() {
+        let sidebar = makeSidebar()
+        var reported: [SidebarSelection?] = []
+        sidebar.onSelect = { reported.append($0) }
+        sidebar.test_select(.device(id: "kitchen"))
+
+        sidebar.test_clickGroupsRow()
+
+        #expect(reported == [.device(id: "kitchen")],
+                "a click that moves the selection is the delegate's to report")
+    }
+
     // Double-click-to-rename left this file with the group rows (direction C):
     // rename lives on the overview's cards now, covered by
     // `GroupsOverviewViewControllerTests`. A speaker row's first click already

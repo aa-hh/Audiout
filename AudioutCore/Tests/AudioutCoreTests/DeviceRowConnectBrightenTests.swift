@@ -148,8 +148,10 @@ import AudioutCore
         row.apply(failed, selected: true, controllable: true)
         #expect(!row.test_isBrightening, "a failure edge never brightens — it stays muted")
         #expect(row.test_controlsMuted, "failed rows stay in the muted-unconnected treatment")
-        #expect(row.test_feedIsErrorColored, "the FEED shows the red error, not a dimmed composite")
-        #expect(row.test_feedText == "Didn't respond")
+        // The failure pill lost its words on 2026-09-04 — the red now rides
+        // the glyph, and the headline the tooltip.
+        #expect(row.test_feedErrorGlyphIsFailureColored, "the FEED shows the red error, not a dimmed composite")
+        #expect(row.test_feedTooltip == "Didn't respond")
     }
 
     @Test func connectedToFailedNeverBrightens() {

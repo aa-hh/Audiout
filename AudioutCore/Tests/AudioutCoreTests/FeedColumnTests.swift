@@ -93,15 +93,22 @@ import AudioutCore
 
     // MARK: Error overrides the feed (failure-red words)
 
-    @Test func failedOverridesTheFeedWithCouldntConnect() {
+    /// The failure override is now a GLYPH, not words (Alec, 2026-09-04):
+    /// every headline overflowed the feed slot, so the words moved to the
+    /// tooltip and the spoken value. The rung itself is unchanged — a failure
+    /// still takes the whole column, in the failure tone, and still overrides
+    /// any composite the row would otherwise draw.
+    @Test func failedOverridesTheFeedWithAGlyphAndMovesTheHeadlineOffTheRow() {
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
                   selected: true, controllable: true, routedAppNames: ["Music"])
-        #expect(row.test_feedText == "Didn't respond", "failure overrides the composite entirely — never both — with the failure's own headline")
-        #expect(row.test_feedIsErrorColored)
+        #expect(row.test_feedText == nil, "failure overrides the composite entirely — and carries no words of its own")
+        #expect(row.test_feedErrorPillHasGlyph, "an error pill reads by shape (P2-6) — here by shape alone")
+        #expect(row.test_feedErrorGlyphIsFailureColored, "…in the failure tone")
         #expect(row.test_statusText == nil, "the sublabel carries no words for a failed bus row")
-        #expect(row.test_feedTooltip == nil, "a failed row's tooltip carries no feed names")
-        #expect(row.test_feedErrorPillHasGlyph, "an error pill reads by shape, not colour alone (P2-6)")
+        #expect(row.test_feedTooltip == "Didn't respond", "the headline reaches the pointer on the tooltip")
+        #expect(row.test_accessibilityValue?.contains("Didn't respond") == true,
+                "…and the screen reader through the row's spoken value")
     }
 
     @Test func unavailableOverridesTheFeed() {
@@ -168,11 +175,14 @@ import AudioutCore
     }
 
     @Test func failedDeviceShowsOnlyTheError() {
-        // The error override takes the WHOLE column.
+        // The error override takes the WHOLE column — as one glyph, with the
+        // cause on the tooltip.
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .vanished)), supportsAirPlay2: false),
                   selected: true, controllable: true)
-        #expect(row.test_feedText == "Not on the network")
+        #expect(row.test_feedText == nil)
+        #expect(row.test_feedErrorPillHasGlyph)
+        #expect(row.test_feedTooltip == "Not on the network")
     }
 
     // MARK: STATIC "+N" overflow — locked, no interactive reveal

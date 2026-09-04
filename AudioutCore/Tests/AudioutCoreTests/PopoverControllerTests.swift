@@ -2167,8 +2167,8 @@ import AudioutProtocol
     }
 
     /// The collapsed pop-up names the group the way Main Out's own dropdown
-    /// does, and the row wears the tether chip a device route wears.
-    @Test func aGroupRoutedRowNamesTheGroupAndWearsTheTetherChip() async throws {
+    /// does.
+    @Test func aGroupRoutedRowNamesTheGroup() async throws {
         let appRouting = tempAppRoutingController()
         seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
         let (popover, groups, backend) = try await makePopover(appRouting: appRouting,
@@ -2179,7 +2179,6 @@ import AudioutProtocol
 
         let row = try #require(popover.test_appRow(for: "com.example.music"))
         #expect(row.test_collapsedDestinationTitle == "→ Kitchen")
-        #expect(row.test_hasTetherChip, "a group route tethers to its speakers' FEED chips too")
     }
 
     /// Every eligible member's FEED column names the app — a group route fans

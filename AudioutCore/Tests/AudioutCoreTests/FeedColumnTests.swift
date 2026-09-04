@@ -72,13 +72,13 @@ import AudioutCore
                   routedAppNames: ["Music"], appRouteGroupNames: ["Music": "Downstairs"])
 
         #expect(row.test_feedText == "System · Music", "the pills are unchanged")
-        #expect(row.test_accessibilityLabel?.contains("feeding System, Music, through Downstairs") == true)
+        #expect(row.test_accessibilityLabel?.contains("playing System, Music, through Downstairs") == true)
     }
 
     @Test func aDirectlyRoutedAppNamesNoGroup() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
-        #expect(row.test_accessibilityLabel?.contains("feeding System, Music") == true)
+        #expect(row.test_accessibilityLabel?.contains("playing System, Music") == true)
         #expect(row.test_accessibilityLabel?.contains("through") != true)
     }
 

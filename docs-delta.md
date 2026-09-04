@@ -233,3 +233,47 @@ This retires the Bluetooth-UI rule that "Connected elsewhere" and "Not paired"
 must read distinctly ON THE ROW. They still read apart — on the tooltip and in
 the spoken value. The "Unavailable" rung is a separate one and keeps its word.
 ```
+
+---
+
+# DESIGN.md delta — roadmap 039 (the popover's maximum height)
+
+One replacement, the first paragraph under `## Layout` (DESIGN.md:333-336).
+
+## Current
+
+> The popover is the primary shell: `AppSurfaceController` swaps Mixer/Groups/
+> Settings through one hosted panel, sized entirely through
+> `preferredContentSize` with no `NSScrollView` — height flows from content,
+> pinned top and bottom.
+
+## Replacement
+
+> The popover is the primary shell: `AppSurfaceController` swaps Mixer/Groups/
+> Settings through one hosted panel, sized through `preferredContentSize` —
+> height flows from content, pinned top and bottom. It has one ceiling: the
+> Output Devices card's list of speakers stops at twelve rows (504pt) and
+> scrolls past that, so a large fleet cannot push the surface off the bottom
+> of the screen. The list alone scrolls — the header strip, the warning
+> banners, the System Audio block and that card's own "Source"/"Offset"
+> legends hold still above it, on overlay scrollers that take no width from
+> the columns. A short screen lowers the ceiling below twelve rows; a short
+> list ignores it and hugs its rows exactly, as before.
+
+## Why
+
+The panel had no maximum at all. The only limit was
+`AppSurfaceController.measureSessionContentSize()`, which clamped the measured
+content to the screen's visible height minus 16pt — so with 24 devices and two
+warning banners the window filled the screen and the last row was cut by the
+screen edge.
+
+Twelve rows is picked off the content, not off the screen: twelve speakers is a
+list you read down, and the thirteenth row is visibly cut, which is what tells
+you it scrolls. The screen clamp stays as the upper bound and
+`applyContentHeightLimit` takes the lower of the two, so a short screen still
+lowers the list rather than overflowing.
+
+The ONE-FRAME contract is untouched: the ceiling is applied before the session
+frame is measured, the frame is still measured once per open, still never
+animated, still never re-centred.

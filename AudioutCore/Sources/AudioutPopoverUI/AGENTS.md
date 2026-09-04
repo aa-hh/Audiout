@@ -13,7 +13,7 @@ folder renders; routing arithmetic lives in Core.
 - Every delegate callback mutates, then calls `rebuild()`; no in-place mutation afterwards.
 - The popover is the only host of `PopoverPanelViewController`, in dev and shipping.
 - The surface claims the panel through `claimPanelForSurfaceHosting()`, the one handover door.
-- No `NSScrollView`: height flows through `preferredContentSize`, pinned top and bottom.
+- Height flows through `preferredContentSize`, pinned top and bottom. Exactly ONE `NSScrollView` exists in the panel: the Output Devices card's body (roadmap 039), which stops at `deviceListMaxHeight` (12 rows) or at what the screen leaves, whichever is lower. Its height is a constraint `fittingSizeSettled()` reconciles from the ROWS — a scroll view has no natural height, so measuring the scroll view instead gives a zero-height or screen-height panel. Every other card still pins its rows straight into its clip; do not add a second one.
 - `insertRow`/`removeRow` own the re-fit; never add your own height republish.
 - Two rebuild flavors: `rebuildForOpen()` discards manual toggles, `rebuild()` preserves them.
 - A subsection collapses by animating its own clip height, never rebuilding (2026-08-10).

@@ -1612,6 +1612,10 @@ public final class PopoverController: NSObject {
                         secondTrailingTitleToolTip: showsOffsetTitle ? Self.offsetColumnHelp : nil,
                         collapsible: true,
                         collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
+                        // The one card whose list can outgrow the surface (roadmap
+                        // 039): past its ceiling the speakers scroll, while this
+                        // header — "Source", "Offset" — holds still above them.
+                        scrollsBody: true,
                         onToggle: { [weak self] in self?.toggleCard(Self.outputDevicesCardTitle) })
         // Dormancy note (spec §4.7 FINAL, S5): only a GENUINELY-DIVERGING group
         // target annotates the card ("Inactive — Audio Out is using 'X'", a
@@ -4075,6 +4079,26 @@ public final class PopoverController: NSObject {
     /// Drive the resize primitive directly (offscreen; no live popover) so tests can
     /// assert the published size equals the content's fitting height.
     public func test_applyExactFitSize() { panel.panelContentDidChangeHeight(animated: false) }
+
+    // MARK: Device-list ceiling hooks (roadmap 039)
+
+    /// Apply the session's content-height limit exactly as the surface does.
+    public func test_applyContentHeightLimit(_ maxContentHeight: CGFloat) {
+        panel.applyContentHeightLimit(maxContentHeight)
+    }
+    /// The ceiling the device list currently wears.
+    public var test_deviceListCeiling: CGFloat { panel.test_deviceListCeiling }
+    /// The device list's scroll view (`nil` before the card is built).
+    public var test_deviceListScrollView: NSScrollView? { panel.test_deviceListScrollView }
+    /// A card's always-visible header row (the chrome above a scrolling body).
+    public func test_cardHeaderRow(title: String) -> NSView? {
+        panel.test_cardHeaderRow(title: title)
+    }
+    /// Drive the keyboard-focus reveal without a window to hold the responder.
+    @discardableResult
+    public func test_revealFocusedRow(_ responder: NSResponder?) -> Bool {
+        panel.revealFocusedRow(responder)
+    }
 
     /// The collapse-reactive rail geometry the overlay resolves from the current
     /// laid-out frames (origin at ring vs collapsed header, the terminus dot, the

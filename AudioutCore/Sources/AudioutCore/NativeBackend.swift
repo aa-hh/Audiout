@@ -312,6 +312,51 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// sink is internally synchronized).
     private let btSinkRefLock = NSLock()
 
+    /// One per-app mixed stream's Bluetooth delivery: the speakers it feeds, the
+    /// S16LE→Float bridge's resampler (streaming filter state, hence one per
+    /// stream and never shared), and whether that same stream still has an
+    /// engine-bound device, i.e. whether the AirPlay write stays.
+    ///
+    /// The manager is resolved per buffer rather than captured: the map is built
+    /// on `stateQueue`, and the manager may not exist until the transition that
+    /// build enqueues has run on `captureControlQueue`.
+    ///
+    /// razor: one adapter per stream, existing only because the sink manager
+    /// takes Float frames; it goes away if ``BTSyncedSink`` ever accepts S16LE.
+    private final class BTPerAppStreamFeed: SyncedLocalPCMSink, @unchecked Sendable {
+        let uids: [String]
+        let feedsEngine: Bool
+        let renderSampleRate: Double
+        let resampler: SyncedLocalBaseResampler
+        private let manager: @Sendable () -> BTSyncedSinkControlling?
+
+        init(uids: [String], feedsEngine: Bool, renderSampleRate: Double,
+             manager: @escaping @Sendable () -> BTSyncedSinkControlling?) {
+            self.uids = uids
+            self.feedsEngine = feedsEngine
+            self.renderSampleRate = renderSampleRate
+            self.resampler = SyncedLocalBaseResampler(
+                inputRate: Double(PCMFormat.airplay.sampleRate),
+                outputRate: renderSampleRate,
+                channelCount: PCMFormat.airplay.channels)
+            self.manager = manager
+        }
+
+        func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {
+            manager()?.enqueue(interleavedFrames: interleavedFrames, frameCount: frameCount,
+                               pts: pts, forDeviceUIDs: uids)
+        }
+    }
+
+    /// Where each per-app mixed stream is delivered, keyed by `streamID`.
+    /// Rebuilt whole by ``rebuildBTPerAppFeedsLocked(_:)`` and read on the
+    /// mixer's delivery thread, so it takes its own leaf lock rather than
+    /// `stateQueue` (the same posture as ``btSinkRefLock`` above). A stream with
+    /// no Bluetooth destination has NO entry, which is what leaves the
+    /// AirPlay-only path exactly as it was.
+    private var btPerAppFeeds: [Int: BTPerAppStreamFeed] = [:]
+    private let btPerAppFeedsLock = NSLock()
+
     // MARK: Bluetooth connect lifecycle (BT-LIFECYCLE)
 
     /// Every BT id currently held at `.connecting`, with the instant its hold
@@ -461,6 +506,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// tap start/stop or a synced-local transition).
     private var btSinkEnabled = false
     private var btSelectedUIDs: [String] = []
+    /// The Bluetooth UIDs the current PER-APP topology feeds, sorted. Held apart
+    /// from `btSelectedUIDs` on purpose: it arms the sink manager
+    /// (``btArmingLocked()``) but is deliberately absent from
+    /// ``btOnlyReferenceMs(latencies:uids:)`` and ``roomDelayLocked()``, so a
+    /// per-app destination READS the room's timing and never writes it — one
+    /// app's speaker cannot re-anchor every other sink in the house.
+    ///
+    /// razor: a per-app-only speaker measured slower than the reference then
+    /// hits `SyncTiming.totalDelayNanos`'s ≥ 0 clamp and plays late; the upgrade
+    /// is to fold these UIDs into the reference, at the cost of re-anchoring
+    /// every other BT sink, the Mac's own sink and the AirPlay pre-delay.
+    private var btPerAppClaimedUIDs: [String] = []
     private var btComposition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
     /// The BT-only reference timeline currently in force (ms) — the buffer
     /// every BT sink AND the Mac's own sink schedule against when no AirPlay
@@ -1666,6 +1723,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self?.handleDestinationSetsChanged(sets)
         }
         routeMixer.onMixedBuffer = { [weak self] mixed in
+            guard let self else { return }
             // `engine.write` is nonisolated + fire-and-forget — safe from the
             // mixer's queue with no hop. streamID is ≥ 1 (0 is the legacy path).
             if AudioDiag.isEnabled {
@@ -1676,8 +1734,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 AudioDiag.tick("engineWrite:stream\(mixed.streamID)",
                                detail: "s16peak=\(Self.diagS16Peak(mixed.pcm)) frames=\(mixed.frameCount)")
             }
-            self?.engine.write(
-                pcm: mixed.pcm, streamId: UInt32(mixed.streamID), pts: mixed.pts)
+            // R-partition, per-app half: a stream can span an AirPlay receiver
+            // and a Bluetooth speaker, so the two deliveries are ADDITIVE. No
+            // entry at all means no Bluetooth on this stream — the engine write
+            // then stands alone, as it always has.
+            let feed = self.btPerAppFeedsLock.withLock { self.btPerAppFeeds[mixed.streamID] }
+            if feed?.feedsEngine ?? true {
+                self.engine.write(
+                    pcm: mixed.pcm, streamId: UInt32(mixed.streamID), pts: mixed.pts)
+            }
+            if let feed {
+                NativeCaptureCoordinator.fanOutToSyncedLocal(
+                    mixed.pcm, pts: mixed.pts, into: feed, resampler: feed.resampler)
+            }
             // BACKPRESSURE VISIBILITY (diagnostic): the engine's write guard can
             // silently DROP audio once a stream's un-drained backlog hits its cap
             // — audible as "dropped milliseconds" that the routing telemetry above
@@ -1687,7 +1756,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // `Telemetry` must never be called at buffer cadence. One cheap
             // counter increment per buffer; a snapshot read + possible log only
             // once every `backlogSampleInterval` buffers.
-            self?.sampleWriteBacklogIfDue()
+            self.sampleWriteBacklogIfDue()
             // CADENCE VISIBILITY (T-ENG-CADENCE-1, whole-system-dropout
             // investigation): same rationale and throttling as the backlog
             // sample above, for the engine's write-cadence deficit/overrun
@@ -1696,7 +1765,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // `NativeCaptureCoordinator.swift` mirrors this for stream 0
             // (`path: "wholeSystem"`), so this event now has full coverage
             // whether or not any per-app route is active.
-            self?.sampleWriteCadenceIfDue()
+            self.sampleWriteCadenceIfDue()
             // The per-device meter is driven by the apps' PRE-volume SOURCE levels
             // (see `emitAppLevel`), NOT this post-volume mixed buffer — so nothing
             // metering-related is read off the mix here.
@@ -2340,6 +2409,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // stop (same ordering argument as the coordinator stop).
             self.btSinkEnabled = false
             self.btSelectedUIDs = []
+            self.btPerAppClaimedUIDs = []
             self.btComposition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
             // CAST-OUT: same shape — reset the decisions here, enqueue the
             // teardown below so the FIFO's last Cast op is the disable.
@@ -3416,14 +3486,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.btSinkEnabled = wantBT
                 self.btSelectedUIDs = btUIDs
                 self.btComposition = composition
-                let gains = self.btSinkGains(forUIDs: btUIDs)
+                // The manager arms for BOTH domains, so the set it is handed is
+                // the union — while the reference below stays a function of the
+                // whole-system selection alone.
+                let (armed, armedUIDs) = self.btArmingLocked()
+                let gains = self.btSinkGains(forUIDs: armedUIDs)
                 // Derived AFTER the new selection is committed — the reference
                 // is a function of the selected devices' measured latencies.
                 let referenceMs = self.updateBTReferenceBufferLocked()
-                let eqs = self.btSinkEQs(forUIDs: btUIDs)
+                let eqs = self.btSinkEQs(forUIDs: armedUIDs)
                 self.captureControlQueue.async { [weak self] in
                     self?.applyBTSinkTransition(
-                        enable: wantBT, uids: btUIDs, composition: composition,
+                        enable: armed, uids: armedUIDs, composition: composition,
                         gains: gains, eqs: eqs, referenceBufferMs: referenceMs)
                 }
                 if localReferenceMoved, self.syncedLocalSinkApplied {
@@ -3937,6 +4011,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         return desired
     }
 
+    /// Whether the sink manager must be armed and for which UIDs: the two
+    /// domains that can claim a Bluetooth speaker — the whole-system selection
+    /// and the per-app topology — deduped and sorted. The single answer every
+    /// ``applyBTSinkTransition(enable:uids:composition:gains:eqs:referenceBufferMs:)``
+    /// call outside `stop()`'s explicit teardown asks.
+    ///
+    /// `btSinkEnabled` deliberately keeps its narrower whole-system-only
+    /// meaning: it is what ``roomDelayLocked()`` branches on, and widening it
+    /// would put a per-app destination in charge of the room's timing. On
+    /// `stateQueue`.
+    private func btArmingLocked() -> (enable: Bool, uids: [String]) {   // on stateQueue
+        (btSinkEnabled || !btPerAppClaimedUIDs.isEmpty,
+         Set(btSelectedUIDs).union(btPerAppClaimedUIDs).sorted())
+    }
+
     /// Wave-4 reconnect-reapply: re-run the CURRENT BT sink decision so a
     /// selected device that just (re)appeared resolves a live `AudioObjectID`
     /// and re-enters the per-device set (and one that vanished drops out). The
@@ -3944,8 +4033,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// which `applyBTSinkTransition` performs fresh on every apply. On
     /// `stateQueue`.
     private func reapplyBTSinkLocked() {
-        guard btSinkEnabled else { return }
-        let uids = btSelectedUIDs
+        let (armed, uids) = btArmingLocked()
+        guard armed else { return }
         let composition = btComposition
         let gains = btSinkGains(forUIDs: uids)
         let referenceMs = updateBTReferenceBufferLocked()
@@ -4310,8 +4399,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     /// Whether a `.device(id:)` route pointed at `id` can actually carry audio
     /// RIGHT NOW: the device is in our discovered snapshot, reports itself
-    /// reachable, and has an engine output handle to stream through. On
+    /// reachable, and has somewhere to stream through — an engine output handle,
+    /// or, for a Bluetooth speaker, its own delay-line sink, which the manager
+    /// feeds by UID and which therefore never holds an `outputIDs` entry. On
     /// `stateQueue`.
+    ///
+    /// The second arm tests the POSITIVE kind (`isBluetooth`), never `!isCast`
+    /// or `supportsAirPlay2`: Cast is the third R-partition arm with no per-app
+    /// delivery path at all, and AP1 receivers share `supportsAirPlay2: false`
+    /// with Bluetooth while being engine-driven.
     ///
     /// This is the whole basis of the effective route table below (R5). A route
     /// aimed at an unreachable receiver is intent, not a live redirect: honouring
@@ -4321,7 +4417,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// pushed in before discovery has found anything, and each one engages as its
     /// device shows up.
     private func isRouteTargetReachableLocked(_ id: String) -> Bool {   // on stateQueue
-        known[id]?.isAvailable == true && outputIDs[id] != nil
+        guard let device = known[id], device.isAvailable else { return false }
+        return outputIDs[id] != nil || device.isBluetooth
     }
 
     /// Whether whole-system routing (stream 0) CLAIMS `id` at the DECISION layer —
@@ -5981,7 +6078,65 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // drops (`reconcileAggregateDefault`'s tail call is unreached with an
             // empty `expectedSelected`).
             self.reconcileHandoffWatcherLocked()
+
+            // BT-BACKEND (R-partition): the per-app half of what the binding
+            // loop above structurally skipped. A Bluetooth speaker a route names
+            // is fed by UID through the sink manager, so the manager has to be
+            // armed for it even with nothing selected whole-system — and armed
+            // WITHOUT joining `btSelectedUIDs`, which is the only input the
+            // room's timing has.
+            //
+            // razor: a per-app GROUP route spanning an AirPlay receiver and a BT
+            // speaker will not agree — `airPlayPresent` is computed from the
+            // whole-system selection alone, so the BT sink schedules against the
+            // Mac's own clock while the receiver plays on its presentation
+            // timeline. The upgrade is folding per-app AirPlay destinations into
+            // `BTGroupComposition`; not taken because it re-anchors every BT
+            // sink and the Mac's own sink for the sake of one app's route.
+            let perAppBTUIDs = Set(sets.flatMap(\.deviceIDs))
+                .filter { self.known[$0]?.isBluetooth == true }
+                .sorted()
+            if perAppBTUIDs != self.btPerAppClaimedUIDs {
+                self.btPerAppClaimedUIDs = perAppBTUIDs
+                let (armed, armedUIDs) = self.btArmingLocked()
+                let composition = self.btComposition
+                let gains = self.btSinkGains(forUIDs: armedUIDs)
+                let eqs = self.btSinkEQs(forUIDs: armedUIDs)
+                // The reference ALREADY IN FORCE, never a fresh derivation: a
+                // per-app claim reads the room's timeline and must not move it.
+                let referenceMs = self.btReferenceBufferMs
+                let claimed = Set(perAppBTUIDs)
+                self.captureControlQueue.async { [weak self] in
+                    self?.applyBTSinkTransition(
+                        enable: armed, uids: armedUIDs, composition: composition,
+                        gains: gains, eqs: eqs, referenceBufferMs: referenceMs)
+                    // What the whole-system fan-out must now skip, so a speaker
+                    // this topology feeds never also hears the system mix.
+                    self?.btSink?.setPerAppClaimedUIDs(claimed)
+                }
+            }
+            self.rebuildBTPerAppFeedsLocked(sets)
         }
+    }
+
+    /// Rebuild the per-app Bluetooth delivery map from the current topology —
+    /// one entry per stream that has at least one Bluetooth device on it, none
+    /// for a stream that has none. The adapter and its resampler are built HERE,
+    /// once per stream, never per buffer. On `stateQueue`.
+    private func rebuildBTPerAppFeedsLocked(_ sets: [AppRouteMixer.DestinationSet]) {   // on stateQueue
+        let renderSampleRate = btSinkRefLock.withLock { btSink }?.renderSampleRate
+            ?? Double(PCMFormat.airplay.sampleRate)
+        var feeds: [Int: BTPerAppStreamFeed] = [:]
+        for set in sets {
+            let uids = set.deviceIDs.filter { known[$0]?.isBluetooth == true }.sorted()
+            guard !uids.isEmpty else { continue }
+            feeds[set.streamID] = BTPerAppStreamFeed(
+                uids: uids,
+                feedsEngine: set.deviceIDs.contains { outputIDs[$0] != nil },
+                renderSampleRate: renderSampleRate,
+                manager: { [weak self] in self?.btSinkRefLock.withLock { self?.btSink } })
+        }
+        btPerAppFeedsLock.withLock { btPerAppFeeds = feeds }
     }
 
     /// Chain `ops` onto the `bindTail` FIFO in the given order (on `stateQueue`).
@@ -11643,6 +11798,14 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// Per-device tone. A property swap on the running session — never a
     /// rebuild. Same default-no-op posture as `setTrimMs`.
     func setEQ(_ eq: DeviceEQ, forDeviceUID uid: String)
+    /// The UIDs per-app routing feeds directly, so the whole-system fan-out
+    /// skips them and no speaker hears both mixes. Same default-no-op posture as
+    /// `setTrimMs`.
+    func setPerAppClaimedUIDs(_ uids: Set<String>)
+    /// Feed one per-app mixed stream to exactly `uids`, ignoring the claim set
+    /// above. Same default-no-op posture as `setTrimMs`.
+    func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec,
+                 forDeviceUIDs uids: [String])
 }
 
 extension BTSyncedSinkControlling {
@@ -11656,6 +11819,9 @@ extension BTSyncedSinkControlling {
     }
     func setGain(_ gain: Float, forDeviceUID uid: String) {}
     func setEQ(_ eq: DeviceEQ, forDeviceUID uid: String) {}
+    func setPerAppClaimedUIDs(_ uids: Set<String>) {}
+    func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec,
+                 forDeviceUIDs uids: [String]) {}
 }
 
 extension BTSyncedSink: BTSyncedSinkControlling {}

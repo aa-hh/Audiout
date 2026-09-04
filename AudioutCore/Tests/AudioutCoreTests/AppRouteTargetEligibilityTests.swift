@@ -52,20 +52,26 @@ import Testing
         #expect(device.canBePerAppRouteTarget(allOutputs: true) == true)
     }
 
-    @Test func bluetoothAndCastStayExcludedEvenWithAllOutputs() {
-        // The ceiling `canBePerAppRouteTarget` enforces even with the flag
-        // on: Bluetooth and Cast are refused by their own
-        // `isBluetooth`/`isCast` branches. `supportsAirPlay2: true` here is
-        // deliberately unrealistic (BT/Cast rows always carry `false` in
-        // production) — it isolates that the refusal comes from the kind
-        // exclusion itself, not from an incidental AP2 check.
-        let bluetooth = Device(id: "bt-1", name: "Bluetooth Speaker", kind: .bluetooth,
-                                supportsAirPlay2: true)
+    @Test func bluetoothDeviceRequiresAllOutputsFlag() {
+        // Matches production (`NativeBackend.swift`): a Bluetooth row always
+        // carries `supportsAirPlay2: false`. With no dedicated Bluetooth
+        // branch left, it falls through to the same
+        // `allOutputs || supportsAirPlay2` tail every other non-excluded
+        // kind uses.
+        let device = Device(id: "bt-1", name: "Bluetooth Speaker", kind: .bluetooth,
+                             supportsAirPlay2: false)
+        #expect(device.canBePerAppRouteTarget(allOutputs: false) == false)
+        #expect(device.canBePerAppRouteTarget(allOutputs: true) == true)
+    }
+
+    @Test func castStaysExcludedEvenWithAllOutputs() {
+        // `supportsAirPlay2: true` here is deliberately unrealistic (Cast
+        // rows always carry `false` in production) — it isolates that the
+        // refusal comes from the `isCast` branch itself, not from an
+        // incidental AP2 check.
         let cast = Device(id: "cast-1", name: "Chromecast", kind: .cast,
                            supportsAirPlay2: true)
-        #expect(bluetooth.canBePerAppRouteTarget(allOutputs: true) == false)
         #expect(cast.canBePerAppRouteTarget(allOutputs: true) == false)
-        #expect(bluetooth.canBePerAppRouteTarget(allOutputs: false) == false)
         #expect(cast.canBePerAppRouteTarget(allOutputs: false) == false)
     }
 }

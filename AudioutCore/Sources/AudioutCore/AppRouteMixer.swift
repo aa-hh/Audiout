@@ -16,9 +16,15 @@ import AudioToolbox
 /// AppRoutingController.appRoutes ──updateRoutes──▶ ┌──────────────┐
 ///                                                  │              │──onDestinationSetsChanged──▶ T6
 /// PerAppCaptureCoordinator.onStateChange ─────────▶│ AppRouteMixer│
-/// PerAppCaptureCoordinator.onBuffer ──────────────▶│              │──onMixedBuffer──▶ T6 ──engine.write(pcm:streamId:pts:)
+/// PerAppCaptureCoordinator.onBuffer ──────────────▶│              │──onMixedBuffer──▶ T6
 ///                                                  └──────────────┘
 /// ```
+/// T6 delivers each mixed buffer to whichever destinations that stream actually
+/// has: the AirPlay engine (`engine.write(pcm:streamId:pts:)`) for its
+/// engine-bound devices, and the Bluetooth sink manager for the speakers on it
+/// that render through their own delay lines. One stream can have both, and gets
+/// both.
+///
 /// The mixer consumes only apps the backend resolved to at least one live
 /// speaker — a `.device(id:)` route, or a `.group(id:)` route's surviving
 /// members. Apps on `.noRedirect` OR

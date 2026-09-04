@@ -9695,8 +9695,9 @@ extension SerializedSharedState {
 /// Being over-inclusive here is not free: everything under the parent runs
 /// strictly one at a time.
 ///
-/// NOTE for the inner loop: `--filter NativeBackendTests` does NOT match this
-/// suite's runtime name. Use `--filter NativeBackend` to run both.
+/// NOTE for the inner loop: `--filter NativeBackendTests` reaches this suite
+/// too — it matches all three suites nested here: `NativeBackendGlobalStateTests`,
+/// `SerializedSharedState`, and `NativeBackendTests` itself, 227 tests total.
 @Suite struct NativeBackendGlobalStateTests {
 
     /// Selecting a device (the gate's false->true edge) must re-arm the poll —

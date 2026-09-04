@@ -269,9 +269,17 @@ public final class MixerWindowController {
             self?.refreshAll()
             self?.showDefaultContent()
         }
-        // Renames / membership edits refresh the sidebar labels in place.
+        // Renames / membership edits refresh the sidebar labels in place, AND
+        // re-read the card overview: it is a projection of the same model, and
+        // the pane it lives on is off screen while the editor is up, so a
+        // membership change left its chips and "N speakers" showing the
+        // membership from before the edit (live report). Not `refreshAll()` —
+        // that re-`show`s the editor mid-edit, which is what this callback is
+        // fired from.
         editorViewController.onDidEditGroup = { [weak self] in
-            self?.refreshSidebar()
+            guard let self else { return }
+            refreshSidebar()
+            overviewViewController.reload(devices: orderedDevices())
         }
         // Escape out of a rename hands keyboard focus to the sidebar's row
         // list — the one control present whatever pane is showing. Anywhere

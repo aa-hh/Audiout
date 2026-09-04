@@ -236,6 +236,28 @@ import AppKit
         #expect(controller.activeGroupID == nil, "opening a card never activates the group")
     }
 
+    /// A membership edit reaches the card overview at once, not only when the
+    /// user walks back to it (live report: removing a speaker left the card
+    /// showing its old chips and count, so a group looked like it only ever
+    /// grew). The overview is a projection of the same model and its pane is
+    /// off screen during the edit, so nothing else was re-reading it.
+    @Test func removingAMemberUpdatesTheOverviewCardImmediately() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_overview.test_clickCard(id: saved.id)
+        await drain()
+        #expect(window.test_overview.test_chipCount(forCard: saved.id) == 2)
+
+        window.test_editor.test_setMembership(false, for: "office")
+        await drain()
+
+        #expect(controller.groups.first { $0.id == saved.id }?.memberIDs == ["sonos-move"],
+                "the model drops the member")
+        #expect(window.test_overview.test_chipCount(forCard: saved.id) == 1,
+                "and the card behind the editor already reflects it")
+    }
+
     @Test func theEditorsBackBandReturnsToTheOverview() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)

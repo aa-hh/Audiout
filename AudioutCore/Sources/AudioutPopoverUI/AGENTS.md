@@ -26,6 +26,13 @@ folder renders; routing arithmetic lives in Core.
 - The Mixer carries an equalizer DOOR (the row button beside mute, and the row menu) and one mark (magenta border when the curve is not flat). No editor, no curve, no tone control on the Mixer (2026-08-22, amended 2026-09-03).
 - A never-aligned Bluetooth row's chip IS the wizard's door; a measured one opens the drawer.
 - A first-join alignment note is session state: ✕ hides it, nothing is written down.
+- The header strip draws its OWN chrome: every toolbar item — the three tabs AND Pin —
+  is a `SurfaceToolbarSeatButton` wearing `SurfaceToolbarSeatCell`, the folder's one
+  custom-drawn exception (drawing only; tracking, keyboard and VoiceOver stay stock).
+  One rounded rectangle at the control radius carries rest/hover/pressed/selected and
+  Pin's on/off, because AppKit draws a bordered item's hover as a CIRCLE and its
+  selection as a rounded SQUARE. Convert the strip whole or not at all, and never put
+  a cue behind `#available` — the package deploys to 14.2 (2026-09-04).
 - Known stability findings in this target carry `STABILITY(id)` inline markers — details and fix sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 
@@ -34,3 +41,4 @@ folder renders; routing arithmetic lives in Core.
 - `PopoverController` → the Mixer brain: card stack, device ingest, controller calls.
 - `PopoverPanelViewController` → the panel view controller every host mounts.
 - `AppSurfaceController` → owns the shell, swaps the three screens.
+- `SurfaceToolbar` → the window's header strip; `SurfaceToolbarSeatButton` is what it draws.

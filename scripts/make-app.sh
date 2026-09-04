@@ -23,6 +23,11 @@
 
 set -euo pipefail
 
+# A compiler orphaned by a killed wrapper holds the .build lock and makes
+# this script hang with no output at all. Clear it first -- see
+# scripts/reap-orphaned-swift.sh.
+bash "$(dirname "${BASH_SOURCE[0]}")/reap-orphaned-swift.sh" || true
+
 # --- Config ---------------------------------------------------------------
 # APP_NAME / BUNDLE_ID honor env overrides so a side-by-side dev build can carry
 # a distinct identity (its own menu-bar app + LaunchServices registration) and
@@ -406,6 +411,39 @@ chmod +x "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 mkdir -p "$RESOURCES_DIR"
 cp -R "$BUILT_RESOURCE_BUNDLE" "$RESOURCES_DIR/$RESOURCE_BUNDLE_NAME"
 
+
+# Symbols when NO icon tier compiled a catalogue (classic .icns mode writes a
+# .icns file, not an Assets.car) — and the final verification either way.
+if [ -d "$SYMBOL_CATALOGUE" ]; then
+  if [ ! -f "$RESOURCES_DIR/Assets.car" ]; then
+    echo "==> Compiling custom SF Symbols (icns icon mode: symbols-only catalogue)"
+    # ONLY the `platforms:` line — a naive `.macOS(` match reads the comment
+    # above it about AirPlayEngine's floor and yields the wrong number
+    # (caught 2026-09-04: 14.0 against the real 14.2).
+    symbol_min_macos="$(grep -m1 'platforms:' "$REPO_ROOT/AudioutCore/Package.swift" \
+      | sed -n 's/.*\.macOS("\([0-9.]*\)").*/\1/p;s/.*\.macOS(\.v\([0-9]*\)).*/\1.0/p')"
+    [ -n "$symbol_min_macos" ] || { echo "FATAL: no macOS floor in Package.swift" >&2; exit 1; }
+    xcrun actool "$SYMBOL_CATALOGUE" \
+      --compile "$RESOURCES_DIR" \
+      --platform macosx \
+      --minimum-deployment-target "$symbol_min_macos" \
+      --output-format human-readable-text >/dev/null
+  fi
+  [ -f "$RESOURCES_DIR/Assets.car" ] || {
+    echo "FATAL: no Assets.car produced, custom symbols cannot ship" >&2; exit 1; }
+  # Verify against the FINAL file — the bug this section exists to prevent was
+  # a check that passed against an intermediate Assets.car a later tier replaced.
+  for symbolset in "$SYMBOL_CATALOGUE"/*.symbolset; do
+    [ -e "$symbolset" ] || continue
+    name="$(basename "$symbolset" .symbolset)"
+    if ! xcrun assetutil --info "$RESOURCES_DIR/Assets.car" 2>/dev/null | grep -q "$name"; then
+      echo "FATAL: symbol '$name' missing from the final Assets.car" >&2
+      exit 1
+    fi
+  done
+  echo "    custom SF Symbols verified in the final Assets.car"
+fi
+
 # --- Wordmark font (ClashDisplay-Semibold) ---------------------------------
 # NOT in git and NOT in the SwiftPM resource bundle: the ITF Free Font License
 # forbids redistributing the file through a public repository, so
@@ -530,6 +568,20 @@ fi
 # is what Finder, Get Info, the About box, notifications, and any
 # Store/distribution listing use.
 mkdir -p "$RESOURCES_DIR"
+
+# --- Custom SF Symbols: one catalogue, compiled WITH the icon -----------------
+# Every actool run REPLACES Assets.car — it merges its input catalogues, not
+# its output file. The first version of this step compiled the symbols before
+# the icon tiers below and shipped an app whose mute and Equalizer buttons drew
+# nothing: the Liquid Glass tier rebuilt Assets.car from the icon alone, the
+# per-symbol check had already passed against the earlier file, and the only
+# symptom was two blank controls (2026-09-04). So the symbol catalogue rides as
+# an EXTRA INPUT on whichever icon tier wins, the icns tier (which writes no
+# Assets.car) gets a symbols-only compile afterwards, and the names are
+# verified against the FINAL Assets.car, never an intermediate one.
+SYMBOL_CATALOGUE="$REPO_ROOT/AudioutCore/Sources/AudioutSharedUI/Resources/Symbols.xcassets"
+SYMBOL_CATALOGUE_ARG=""
+[ -d "$SYMBOL_CATALOGUE" ] && SYMBOL_CATALOGUE_ARG="$SYMBOL_CATALOGUE"
 ICON_MODE="icns"
 ICON_BUNDLE_SRC="$SCRIPT_DIR/Audiout.icon"
 XCODE_MAJOR="$(xcodebuild -version 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1 || true)"
@@ -544,7 +596,7 @@ if [ -n "$XCODE_MAJOR" ] && [ "$XCODE_MAJOR" -ge 26 ] && [ -d "$ICON_BUNDLE_SRC"
       --output-partial-info-plist "$ACTOOL_TMP/partial-info.plist" \
       --output-format human-readable-text \
       --notices --warnings \
-      "$ICON_BUNDLE_SRC" >"$ACTOOL_TMP/actool.log" 2>&1 \
+      "$ICON_BUNDLE_SRC" $SYMBOL_CATALOGUE_ARG >"$ACTOOL_TMP/actool.log" 2>&1 \
     && [ -f "$RESOURCES_DIR/Assets.car" ]; then
     echo "    actool compiled Assets.car — using Liquid Glass icon"
     ICON_MODE="liquidglass"
@@ -624,7 +676,7 @@ PYEOF
       --output-partial-info-plist "$ACTOOL_LD_TMP/partial-info.plist" \
       --output-format human-readable-text \
       --notices --warnings \
-      "$XCASSETS_DIR" >"$ACTOOL_LD_TMP/actool.log" 2>&1 \
+      "$XCASSETS_DIR" $SYMBOL_CATALOGUE_ARG >"$ACTOOL_LD_TMP/actool.log" 2>&1 \
     && [ -f "$RESOURCES_DIR/Assets.car" ]; then
     echo "    actool compiled Assets.car — verifying light and dark actually render differently"
     VERIFY_SWIFT="$(mktemp -d)/verify_appearance.swift"

@@ -66,11 +66,79 @@ import Testing
         }
     }
 
-    /// A device class never moves a non-Bluetooth row's glyph — the branch is
-    /// gated on the kind, so a stray value cannot repaint an AirPlay speaker.
+    /// The name branch, on the string this layer exists for. Alec's own pair is
+    /// called "Alec's AirPods Pro #2": an exact-name table would miss it, and a
+    /// table that checked "AirPods" before "AirPods Pro" would draw the wrong
+    /// product. The class routing under it never gets a say — 0x06 would
+    /// otherwise draw plain headphones.
+    @Test func productNameBeatsTheDeviceClass() {
+        let device = Device(id: "x", name: "Alec's AirPods Pro #2", kind: .bluetooth,
+                            bluetoothDeviceClassMinor: 0x06)
+        #expect(device.symbolName == "airpodspro")
+    }
+
+    /// Every phrase that contains a shorter phrase has to beat it: the Pro, Max
+    /// and generation models over bare "AirPods", "Powerbeats Pro" over
+    /// "Powerbeats", the Studio Buds over Studio. The shorter phrase still gets
+    /// its own glyph when it stands alone.
+    @Test func moreSpecificProductPhrasesWin() {
+        func symbol(_ name: String) -> String? { Device.bluetoothProductSymbol(forName: name) }
+        #expect(symbol("AirPods Max") == "airpodsmax")
+        #expect(symbol("AirPods Pro") == "airpodspro")
+        #expect(symbol("AirPods (4th generation)") == "airpods.gen4")
+        #expect(symbol("AirPods (3rd generation)") == "airpods.gen3")
+        #expect(symbol("AirPods") == "airpods")
+        #expect(symbol("Powerbeats Pro") == "beats.powerbeatspro")
+        #expect(symbol("Powerbeats") == "beats.earphones")
+        #expect(symbol("Beats Studio Buds") == "beats.studiobud.right")
+        #expect(symbol("Beats Studio Pro") == "beats.headphones")
+    }
+
+    /// Case and punctuation carry no meaning — people type their speakers'
+    /// names by hand, and the words AROUND the product may be any language,
+    /// which is why only the product phrase itself is ever matched.
+    @Test func productMatchingIgnoresCaseAndPunctuation() {
+        #expect(Device.bluetoothProductSymbol(forName: "alec's airpods pro") == "airpodspro")
+        #expect(Device.bluetoothProductSymbol(forName: "AIRPODS-MAX") == "airpodsmax")
+        #expect(Device.bluetoothProductSymbol(forName: "Küchen AirPods") == "airpods")
+    }
+
+    /// The two fall-throughs, which is the whole safety story: a name that
+    /// states no product hands over to the device class, and a device class
+    /// that states nothing hands over to the kind's own glyph. There is no
+    /// third outcome — a wrong glyph is worse than a generic one.
+    @Test func anUnknownNameFallsThroughToTheClassRouting() {
+        func symbol(_ name: String, _ minor: UInt32?) -> String {
+            Device(id: "x", name: name, kind: .bluetooth, bluetoothDeviceClassMinor: minor).symbolName
+        }
+        #expect(symbol("Kitchen", 0x06) == "headphones")
+        #expect(symbol("Kitchen", nil) == Device.Kind.bluetooth.symbolName)
+        #expect(symbol("Sony WH-1000XM4", 0x06) == "headphones")
+        #expect(symbol("", nil) == Device.Kind.bluetooth.symbolName)
+    }
+
+    /// Every glyph the product table can return must resolve, or a typo ships
+    /// as a blank row icon. None of them may be an AirPlay kind's glyph either:
+    /// a product glyph is an exception to the Bluetooth/AirPlay distinctness
+    /// rule ONLY because it names one real device rather than a category.
+    @Test func everyProductGlyphResolvesInAppKit() {
+        let airPlayGlyphs = Set(Device.Kind.allCases
+            .filter { $0 != .bluetooth }
+            .map(\.symbolName))
+        for entry in Device.bluetoothProductGlyphs {
+            #expect(NSImage(systemSymbolName: entry.symbol, accessibilityDescription: nil) != nil,
+                    "'\(entry.symbol)' (\(entry.phrase)) must resolve on this AppKit")
+            #expect(!airPlayGlyphs.contains(entry.symbol),
+                    "'\(entry.symbol)' is an AirPlay kind's glyph — a BT row would read as one")
+        }
+    }
+
+    /// Neither the name nor the device class moves a non-Bluetooth row's glyph
+    /// — both branches are gated on the kind, so neither a stray class value
+    /// nor an AirPlay receiver someone named "AirPods" can repaint it.
     @Test func deviceClassOnlyAffectsBluetoothRows() {
         for kind in Device.Kind.allCases where kind != .bluetooth {
-            let device = Device(id: "x", name: "X", kind: kind, bluetoothDeviceClassMinor: 0x06)
+            let device = Device(id: "x", name: "AirPods", kind: kind, bluetoothDeviceClassMinor: 0x06)
             #expect(device.symbolName == kind.symbolName)
         }
     }

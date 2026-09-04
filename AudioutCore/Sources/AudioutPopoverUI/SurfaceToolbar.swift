@@ -9,15 +9,33 @@ import AudioutSharedUI
 /// machinery; the system toolbar provides Liquid Glass on macOS 26+, the older
 /// material below, and Reduce Transparency handling on its own):
 ///
-/// - the three screens as three tabs, ICON-ONLY, and deliberately so: names
-///   were tried on the items' `title` (#95, #97) and removed again (Alec,
-///   2026-09-03) because three translated labels would widen the strip until
-///   AppKit swept the tabs into the overflow menu, and primary navigation
-///   cannot live behind a chevron. Nothing is lost to a reader: the tooltips
-///   ("Mixer (⌘1)"), each tab's accessibility label (what VoiceOver speaks)
-///   and ⌘1/⌘2/⌘3 all still carry the names, and none of them costs strip
-///   width in any language;
+/// - the three screens as three tabs. The CURRENT one shows its name beside
+///   its glyph; the other two are icon-only. The tooltips ("Mixer (⌘1)"), the
+///   accessibility labels and ⌘1/⌘2/⌘3 still carry all three names as they
+///   always did;
 /// - Pin as a trailing item, standing OUTSIDE the tabs' capsule.
+///
+/// **One name at a time, and a capped one** (Alec, 2026-09-04, third pass:
+/// "if I were to click on groups or speakers, then it would expand out to show
+/// the name"). Names were on all three items' `title` once (#95, #97) and were
+/// removed on 2026-09-03 because three translated labels widened the strip
+/// until AppKit swept the tabs into the overflow menu, and primary navigation
+/// cannot live behind a chevron. Two things make that impossible here rather
+/// than merely unlikely: only the selected tab is ever expanded, so the strip
+/// carries ONE name however many languages it is read in; and that name is
+/// clamped to `SurfaceToolbarSeat.maxNameWidth` and truncates past it, so no
+/// word in any language can push the strip wider than
+/// `widestCapsuleWidth` + Pin = 256 pt of the fixed 653 pt surface.
+/// `SurfaceToolbarTests.theStripCannotOutgrowTheSurfaceInAnyLanguage` asserts
+/// it against a name no translator could produce.
+///
+/// The name is REVEALED, not faded: the seat itself grows to the right of the
+/// glyph and the name is clipped until there is room for it, which is the
+/// gesture the owner described. It travels on `FoldAnimator`, the app's one
+/// reveal clock — so it opens at the same `Tokens.Motion.collapseRevealDuration`
+/// every card body and inserted row does, and Reduce Motion is answered where
+/// that driver already answers it: the width settles synchronously, with no
+/// frame of travel.
 ///
 /// **The three tabs are ONE capsule** (Alec, 2026-09-04, second pass). A
 /// single `NSToolbarItem` carries a `SurfaceToolbarTabCapsule`: one
@@ -66,8 +84,9 @@ import AudioutSharedUI
 /// `SurfaceToolbarTabCapsule` is behind an availability check; the capsule is
 /// one drawn surface and the highlight is painted ON it, never instead of it,
 /// so a selected tab can only end up lighter than its ground in dark mode; the
-/// capsule's size is derived from three fixed tabs, so no selection can resize
-/// or reflow it; and the tests below sample real pixels.
+/// capsule's width is derived from the tabs themselves, so the ONE thing that
+/// can change it is a tab opening its name, and even that is bounded whatever
+/// the name says; and the tests below sample real pixels.
 ///
 /// One toolbar per process: unlike the retired per-screen header instances,
 /// the toolbar belongs to the shell WINDOW, so there is nothing to keep in
@@ -163,9 +182,17 @@ final class SurfaceToolbarController: NSObject {
     /// the radio-button role, the accessibility value and
     /// `isAccessibilitySelected` from the same flag that draws the seat, and
     /// `SurfaceToolbarTests` asserts exactly one tab reports selected.
-    private func applySelectionToTabs() {
+    /// `animated` is false only while the strip is being BUILT: the first tab
+    /// arrives already named, because the header names the current screen at
+    /// all times and there is nothing yet for a reveal to explain.
+    private func applySelectionToTabs(animated: Bool = true) {
         for screen in SurfaceScreen.allCases {
-            tabButton(screen)?.isEngaged = (screen == selectedScreen)
+            let isCurrent = (screen == selectedScreen)
+            tabButton(screen)?.isEngaged = isCurrent
+            // The name and the highlight are the same statement about the same
+            // tab, set from the same flag in the same pass, so the strip can
+            // never name one screen and mark another.
+            tabButton(screen)?.setNameRevealed(isCurrent, animated: animated)
         }
     }
 
@@ -226,11 +253,18 @@ final class SurfaceToolbarController: NSObject {
     var test_tabAccessibilityLabels: [String] {
         SurfaceScreen.allCases.compactMap { tabButton($0)?.accessibilityLabel() }
     }
-    /// What the tabs DRAW, in tab order — empty strings once they are
-    /// icon-only. The guard against a name creeping back onto the strip.
-    var test_tabTitles: [String] {
-        SurfaceScreen.allCases.compactMap { tabButton($0)?.title }
+    /// What the tabs DRAW, in tab order: the current screen's name and two
+    /// empty strings. Measured from the seat's own bounds, so a tab that
+    /// carries a name it is too narrow to show reads as empty here — which is
+    /// exactly what the two idle tabs are.
+    var test_tabDrawnNames: [String] {
+        SurfaceScreen.allCases.compactMap { screen -> String? in
+            guard let tab = tabButton(screen) else { return nil }
+            return tab.test_visibleNameWidth > 0 ? tab.test_name : ""
+        }
     }
+    /// How wide the tabs' capsule asks to be right now.
+    var test_capsuleFittingWidth: CGFloat? { test_tabCapsule?.fittingSize.width }
     /// The tabs' tooltips, in tab order — where the name and shortcut live.
     var test_tabToolTips: [String] {
         SurfaceScreen.allCases.compactMap { tabButton($0)?.toolTip }
@@ -330,12 +364,12 @@ extension SurfaceToolbarController: NSToolbarDelegate {
                                                             fallbacks: screen.fallbackSymbolNames,
                                                             accessibilityDescription: screen.label),
                                  label: screen.label,
-                                 // No drawn name: the tabs are icon-only, so
-                                 // the name reaches the reader through this
-                                 // tooltip (which also carries ⌘1/⌘2/⌘3,
-                                 // riding the shell panel's key-equivalent
-                                 // seam), the accessibility label, and the
-                                 // shortcut itself.
+                                 // The tooltip stays even though the current
+                                 // tab now draws its name: it is where the
+                                 // ⌘1/⌘2/⌘3 shortcut is written down (the
+                                 // shell panel's key-equivalent seam runs it),
+                                 // and it is the only place the two tabs you
+                                 // are NOT on can be named.
                                  toolTip: "\(screen.label) (⌘\(screen.keyEquivalent))",
                                  isTab: true)
                 tabButtons[screen] = button
@@ -345,7 +379,7 @@ extension SurfaceToolbarController: NSToolbarDelegate {
             // Navigation cannot live behind the overflow chevron.
             item.visibilityPriority = .high
             tabsItem = item
-            applySelectionToTabs()
+            applySelectionToTabs(animated: false)
             return item
 
         case Self.pinItemIdentifier:

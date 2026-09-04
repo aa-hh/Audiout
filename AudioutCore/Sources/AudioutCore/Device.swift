@@ -68,9 +68,10 @@ public struct Device: Identifiable, Equatable, Sendable {
             // speaker glyph separates BT rows from the AirPlay kinds above.
             // NOT "speaker.wave.2.fill" — that's the rows' mute-accessory
             // glyph (DeviceRowView/MainOutRowView) and would collide.
-            // This is the FALLBACK for a Bluetooth row whose device class is
-            // unknown or names a speaker; a pairing that says it is headphones
-            // or car audio draws its own glyph — see ``Device/symbolName``.
+            // This is the FALLBACK for a Bluetooth row whose name names no
+            // product and whose device class is unknown or names a speaker; a
+            // recognised product, or a pairing that says it is headphones or
+            // car audio, draws its own glyph — see ``Device/symbolName``.
             // Not "hifispeaker.2.fill": that is a stereo PAIR, which drew two
             // cabinets for a set of earbuds (Alec, 2026-09-04).
             case .bluetooth:      return "radio.fill"
@@ -175,13 +176,62 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// Its only job is picking the row glyph — see ``symbolName``.
     public var bluetoothDeviceClassMinor: UInt32?
 
+    /// Product phrases that make a Bluetooth device's model unambiguous, and
+    /// the SF Symbol each one earns. MOST SPECIFIC FIRST: the first phrase
+    /// found anywhere in the name wins, so "AirPods Pro" and "AirPods Max" can
+    /// never fall into the plain "airpods" glyph sitting below them.
+    ///
+    /// Phrases are matched against the name with everything but letters and
+    /// digits removed, because people rename their speakers: the pair this was
+    /// written for is called "Alec's AirPods Pro #2". Only the product phrase
+    /// is ever matched — Apple does not translate these, while the words the
+    /// owner puts around them can be any language.
+    ///
+    /// Apple and Beats only, because SF Symbols draws no other manufacturer's
+    /// headphones. Every symbol here is a real product's own glyph; a phrase
+    /// whose best glyph would be a generic cabinet (Beats Pill) is deliberately
+    /// absent, so no entry can return an AirPlay kind's glyph and blur the
+    /// Bluetooth/AirPlay distinction ``Kind/symbolName`` keeps.
+    static let bluetoothProductGlyphs: [(phrase: String, symbol: String)] = [
+        ("airpodsmax", "airpodsmax"),
+        ("airpodspro", "airpodspro"),
+        ("airpods4", "airpods.gen4"),
+        ("airpods3", "airpods.gen3"),
+        ("airpods", "airpods"),
+        ("powerbeatspro", "beats.powerbeatspro"),
+        ("powerbeats", "beats.earphones"),
+        ("beatsfitpro", "beats.fit.pro"),
+        ("beatsstudiobud", "beats.studiobud.right"),
+        ("beatsstudio", "beats.headphones"),
+        ("beatssolo", "beats.headphones"),
+        ("beatsflex", "beats.earphones"),
+        ("beatsx", "beats.earphones"),
+    ]
+
+    /// The product glyph `name` earns, or `nil` when nothing in it names a
+    /// model — which is every device this table does not know, and the reason
+    /// the caller still has the device-class routing under it.
+    static func bluetoothProductSymbol(forName name: String) -> String? {
+        let folded = name.lowercased().filter { $0.isLetter || $0.isNumber }
+        return bluetoothProductGlyphs.first { folded.contains($0.phrase) }?.symbol
+    }
+
     /// The SF Symbol for this device's row icon. Everything but Bluetooth is
     /// decided by ``Kind/symbolName`` alone; a Bluetooth pairing also states
     /// what it IS, and headphones drawn as a speaker cabinet was the defect
     /// this exists to fix (Alec, 2026-09-04).
     ///
-    /// The values are the Audio/Video minor device classes from the Bluetooth
-    /// assigned numbers (`BluetoothAssignedNumbers.h`): headset `0x01`,
+    /// Three steps, and a wrong glyph is worse than a generic one, so each
+    /// falls through to the next rather than guessing. First the name: when it
+    /// carries a product phrase the model is unambiguous and the device gets
+    /// that product's own glyph (``bluetoothProductGlyphs``). A product glyph
+    /// is the deliberate exception to the rule that Bluetooth rows stay
+    /// visually distinct from the AirPlay kinds — it names one real device
+    /// rather than a category, so it cannot be mistaken for a category.
+    ///
+    /// Then the device class. The values are the Audio/Video minor device
+    /// classes from the Bluetooth assigned numbers
+    /// (`BluetoothAssignedNumbers.h`): headset `0x01`,
     /// hands-free `0x02`, loudspeaker `0x05`, headphones `0x06`, portable
     /// `0x07`, car audio `0x08`, HiFi `0x0a`. Spelled as literals rather than
     /// the `kBluetoothDeviceClassMinorAudio*` constants because this target
@@ -191,9 +241,12 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// Everything not named here — the speaker classes, an unclassified
     /// pairing, an unreadable paired list — keeps the kind's own neutral
     /// speaker glyph. Both branch glyphs predate macOS 11, so neither needs an
-    /// availability check against the 14.2 floor.
+    /// availability check against the 14.2 floor, and every product glyph
+    /// resolves on this AppKit (`DeviceBluetoothKindTests`).
     public var symbolName: String {
-        guard kind == .bluetooth, let minor = bluetoothDeviceClassMinor else { return kind.symbolName }
+        guard kind == .bluetooth else { return kind.symbolName }
+        if let product = Self.bluetoothProductSymbol(forName: name) { return product }
+        guard let minor = bluetoothDeviceClassMinor else { return kind.symbolName }
         switch minor {
         case 0x01, 0x02, 0x06: return "headphones"
         case 0x08:             return "car.fill"

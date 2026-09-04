@@ -38,6 +38,14 @@ folder renders; routing arithmetic lives in Core.
   (drawing only; tracking, keyboard and VoiceOver stay stock) because AppKit draws a
   bordered item's hover as a CIRCLE and its selection as a rounded SQUARE. Never put a
   cue behind `#available` — the package deploys to 14.2 (2026-09-04).
+- The CURRENT tab shows its name beside its glyph; the other two never do (2026-09-04).
+  One name on the strip at a time, clamped to `SurfaceToolbarSeat.maxNameWidth` and
+  truncated past it — that pair is what makes the 2026-09-03 failure impossible, where
+  three translated labels widened the strip until AppKit swept the tabs into the
+  overflow chevron. Never reveal a second name, never lift the clamp, and never widen
+  the strip on HOVER: the pointer must not reshape a control it is only passing over.
+  The reveal grows the seat itself and runs on `FoldAnimator`, the app's one reveal
+  clock, which is where Reduce Motion is already answered.
 - The Mixer tab does NOT draw `slider.horizontal.3`: that is the device row's equalizer
   door (`DeviceRowView.eqSymbolName`), and sliders are what an equalizer looks like. The
   tab draws `waveform` (2026-09-04).

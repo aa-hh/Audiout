@@ -451,107 +451,73 @@ import AppKit
                 "one name column across every row shape — got \(trailings)")
     }
 
-    /// The door's active mark (Alec, 2026-09-04): a GOLD SEAT with a dark
-    /// border, its glyph bigger, heavier and in that same dark ink. It was a
-    /// bare gold glyph, which measured 3.64:1 on `canvas` in light against the
-    /// at-rest grey's 5.97:1 — the "on" state read dimmer than the "off" one —
-    /// so the state moved from a hue to a fill. The door stays image-only
-    /// either way.
-    @Test func aShapedSpeakerWearsTheGoldSeatAndAFlatOneDoesNot() {
+    /// The door's active mark: the FILLED
+    /// ``RowAccessorySymbol/equalizerEngaged`` square in
+    /// ``Tokens/Color/equalizer`` with white sliders inside it; a flat curve
+    /// wears the outline square in one neutral ink. It was a bare gold glyph
+    /// until 2026-09-04 (3.64:1 on `canvas` in light against the at-rest
+    /// grey's 5.97:1 — the "on" state read dimmer than the "off" one), then a
+    /// drawn gold seat, and now the symbol's own square. Green, not gold,
+    /// because gold means "audio is flowing here" on this same row.
+    @Test func aShapedSpeakerWearsTheFilledSquareAndAFlatOneDoesNot() {
         let flat = makeRow(btDevice(), delegate: SpyDelegate(), selected: true)
-        #expect(flat.test_eqTintColor == Tokens.Color.label2,
-                "a flat curve leaves the door at rest")
-        #expect(!flat.test_eqSeatIsGoldFilled, "…with no seat behind the glyph")
-        #expect(flat.test_eqSeatBorderWidth == 0, "…and no border")
+        #expect(flat.test_eqDrawsRestSymbol, "a flat curve leaves the door at rest")
+        #expect(!flat.test_eqDrawsEngagedSymbol, "…with no fill behind the marks")
         #expect(flat.test_eqButtonHasTitle == false, "the door is image-only")
 
         let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
                              isEQShaped: true)
-        #expect(shaped.test_eqSeatIsGoldFilled, "the state is a FILL now, not a glyph hue")
-        #expect(shaped.test_eqSeatBorderColor?.isWarmSignalDarkInk == true,
-                "…inside the dark border")
-        #expect(shaped.test_eqTintColor == Tokens.Color.inkOnFill,
-                "the glyph reads dark ON the gold, never gold on gold")
+        #expect(shaped.test_eqDrawsEngagedSymbol, "the state is a FILL now, not a glyph hue")
+        #expect(!shaped.test_eqDrawsRestSymbol)
         #expect(shaped.test_eqButtonHasTitle == false)
     }
 
     /// The mark must not be colour ALONE — the same rule the scope follows.
-    /// The glyph's size/weight step is the second cue for a viewer who cannot
-    /// separate gold from grey, and the spoken value is the third.
+    /// A filled square inks far more of its slot than an outline one, which is
+    /// the cue that survives a viewer who cannot separate the two hues; the
+    /// spoken value is the third.
     @Test func theShapedMarkCarriesMoreThanItsHue() {
         let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
                              isEQShaped: true)
         let flat = makeRow(btDevice(), delegate: SpyDelegate(), selected: true)
-        // Measured on the RENDERED glyph, not on the configuration the code
-        // applied: reading that back would agree with the drawing whatever
-        // size and weight it names.
-        guard let shapedInk = shaped.test_eqGlyphInkFrame,
-              let flatInk = flat.test_eqGlyphInkFrame else {
-            Issue.record("a door glyph rendered no ink — this check covered nothing")
-            return
-        }
-        #expect(shapedInk.width > flatInk.width + 1,
-                "shape survives a viewer who cannot read the hue — \(shapedInk) vs \(flatInk)")
-        #expect(shapedInk.height > flatInk.height + 1,
-                "…in both dimensions — \(shapedInk) vs \(flatInk)")
+        // Measured on the RENDERED mark, not on the configuration the code
+        // applied: reading that back would agree with the drawing whatever it
+        // names.
+        let coverage = "shaped \(shaped.test_eqInkCoverage), flat \(flat.test_eqInkCoverage)"
+        #expect(flat.test_eqInkCoverage > 0, "the at-rest door rendered no ink — \(coverage)")
+        #expect(shaped.test_eqInkCoverage > flat.test_eqInkCoverage * 1.5,
+                "shape survives a viewer who cannot read the hue — \(coverage)")
     }
 
-    /// The door's seat and the muted speaker's seat are ONE shape — same size,
-    /// same corner, same centre line (Alec, 2026-09-04: "the same object in
-    /// two colours"). They were two until then, a 24 x 22 rounded square 6 pt
-    /// from a capsule, and read as two unrelated kinds of control. Hue and
-    /// glyph say which is which now; geometry does not.
-    @Test func theDoorSeatAndTheMuteSeatAreOneShape() {
+    /// The door's mark and the muted speaker's are ONE shape — same size, same
+    /// centre line (Alec, 2026-09-04: "the same object in two colours"). They
+    /// were two until then, a 24 x 22 rounded square 6 pt from a capsule, and
+    /// read as two unrelated kinds of control. Hue says which is which now;
+    /// geometry does not.
+    @Test func theDoorMarkAndTheMuteMarkAreOneShape() {
         let muted = Device(id: "C4-38-75-0E-BF-4A:output", name: "Sonos Move 2",
                            kind: .bluetooth, supportsAirPlay2: false, isMuted: true)
         let shaped = makeRow(muted, delegate: SpyDelegate(), selected: true,
                              isEQShaped: true)
         shaped.layoutSubtreeIfNeeded()
-        let seats = "door \(shaped.test_eqSeatFrame), mute \(shaped.test_muteSeatFrame)"
-        #expect(shaped.test_eqSeatFrame.size == shaped.test_muteSeatFrame.size,
-                "the two engaged marks are different sizes — \(seats)")
-        #expect(shaped.test_eqSeatFrame.size == PopoverColumnGrid.engagedSeatSize,
-                "…and not the shared size — \(seats)")
-        #expect(shaped.test_eqSeatCornerRadius == shaped.test_muteSeatCornerRadius,
-                "the two engaged marks are different corners")
-        #expect(shaped.test_eqSeatCornerRadius == PopoverColumnGrid.engagedSeatCornerRadius)
-        #expect(shaped.test_eqSeatCornerRadius < shaped.test_eqSeatFrame.height / 2,
-                "a rounded rectangle, not a capsule")
-        #expect(abs(shaped.test_eqSeatFrame.midY - shaped.test_muteSeatFrame.midY) <= 0.75,
-                "the two engaged marks sit on one centre line — \(seats)")
-        #expect(shaped.test_eqSeatFrame.height < shaped.test_eqButtonFrame.height,
-                "the seat is sized to the door's slot, not to the button's larger frame")
-        // The seats sit inside the slots their buttons already occupied, so
-        // the gap between the buttons is untouched. No absolute width assert
-        // here — AppKit's rounding grid varies per run.
-        #expect(abs((shaped.test_muteButtonFrame.minX - shaped.test_eqButtonFrame.maxX)
-                    - PopoverColumnGrid.eqToMuteGap) <= 1, "the 6 pt gap to mute is unmoved")
-    }
 
-    /// The mark sits INSIDE its seat with room on every side — the thing an
-    /// 18 pt seat failed: it left 2 pt of gold above the glyph's drawn ink
-    /// against 4.5 pt beside it, so the door read as a glyph filling its
-    /// border rather than a mark resting in a seat. Measured on the RENDERED
-    /// ink, not the symbol image's box, which carries transparent margin and
-    /// would pass either way.
-    @Test func theShapedGlyphSitsInsideItsSeatWithRoomOnEverySide() {
-        let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
-                             isEQShaped: true)
-        shaped.layoutSubtreeIfNeeded()
-        // A failed render fails the test rather than skipping it: a check that
-        // can silently pass on nothing is worse than no check.
-        guard let ink = shaped.test_eqGlyphInkFrame else {
-            Issue.record("the door's glyph rendered no ink — this check covered nothing")
+        guard let doorInk = shaped.test_eqGlyphInkFrame,
+              let muteInk = shaped.test_muteMarkInkFrame else {
+            Issue.record("a mark rendered no ink — this check covered nothing")
             return
         }
-        // Inside the 1 pt border, which is the edge the mark must clear.
-        let interior = shaped.test_eqSeatFrame.insetBy(
-            dx: shaped.test_eqSeatBorderWidth, dy: shaped.test_eqSeatBorderWidth)
-        let room = "ink \(ink), seat interior \(interior)"
-        let clearances = [ink.minX - interior.minX, interior.maxX - ink.maxX,
-                          ink.minY - interior.minY, interior.maxY - ink.maxY]
-        #expect(clearances.allSatisfy { $0 >= 2 },
-                "at least 2 pt of gold on all four sides — \(room), clearances \(clearances)")
+        let marks = "door \(doorInk), mute \(muteInk)"
+        #expect(abs(doorInk.width - muteInk.width) <= 1,
+                "the two engaged marks are different widths — \(marks)")
+        #expect(abs(doorInk.height - muteInk.height) <= 1,
+                "…or different heights — \(marks)")
+        #expect(abs(doorInk.midY - muteInk.midY) <= 0.75,
+                "the two engaged marks sit on one centre line — \(marks)")
+        #expect(doorInk.width <= PopoverColumnGrid.eqButtonWidth,
+                "the mark outgrew its column and would eat the gap — \(marks)")
+        // No absolute width assert here — AppKit's rounding grid varies per run.
+        #expect(abs((shaped.test_muteButtonFrame.minX - shaped.test_eqButtonFrame.maxX)
+                    - PopoverColumnGrid.eqToMuteGap) <= 1, "the 6 pt gap to mute is unmoved")
     }
 
     @Test func clickingTheEQButtonOpensTheEqualizer() {
@@ -1263,45 +1229,52 @@ private extension NSColor {
 extension SerializedSharedState {
 
 @MainActor
-@Suite struct EqualizerSeatBorderTests {
+@Suite struct EqualizerEngagedMarkTests {
 
-    /// The border and the glyph are ONE ink: whatever `inkOnFill` resolves to
-    /// in the row's own appearance. That is dark `#171104` in three of the
-    /// four cells and WHITE in light + Increase Contrast, where the seat is
-    /// the deep `goldText` `#64480C` and a white outline is the readable one —
-    /// the pinned dark ink measured 2.21:1 on that seat, under the 3:1 edge
-    /// floor. The border used to be pinned under `.darkAqua` because the seat
-    /// was pale `gold` there and a white outline on light paper is no outline;
-    /// deepening the seat retired the pin along with its reason (2026-09-04).
-    @Test func theSeatsBorderIsTheSameInkAsItsGlyph() {
+    /// The engaged door paints ``Tokens/Color/equalizer`` on its enclosing
+    /// square and WHITE on the sliders inside it — in all four appearance
+    /// cells, read back out of the rendered pixels. One fill in light and
+    /// dark is the rule (Alec, 2026-09-04), so this suite is also what fails
+    /// if someone re-splits the hue by appearance.
+    ///
+    /// It replaces the seat-border suite that stood here: the border, the
+    /// gold seat and the `inkOnFill` pin all retired with the drawn seat.
+    @Test func theEngagedDoorPaintsTheReservedHueAndWhiteMarks() {
         defer { Tokens.test_increaseContrastOverride = nil }
         let device = Device(id: "C4-38-75-0E-BF-4A:output", name: "Sonos Move 2",
                             kind: .bluetooth, supportsAirPlay2: false)
         let row = DeviceRowView(device: device, showsToggle: true, showsMeter: true,
                                 showsBus: true, showsSyncControls: true)
-        row.apply(device, selected: true, controllable: true, isEQShaped: true)
 
         for (name, appearance) in [("dark", NSAppearance.Name.darkAqua),
                                    ("light", .aqua)] {
             for increaseContrast in [false, true] {
                 Tokens.test_increaseContrastOverride = increaseContrast
                 row.appearance = NSAppearance(named: appearance)
-                // The stamp is re-made by `apply`; a headless view cannot be
+                // The palette is baked by `apply`; a headless view cannot be
                 // trusted to deliver `viewDidChangeEffectiveAppearance` on its
-                // own, and a check that reads a stale stamp checks nothing.
+                // own, and a check that reads a stale image checks nothing.
                 row.apply(device, selected: true, controllable: true, isEQShaped: true)
-                let got = String(describing: row.test_eqSeatBorderColor)
-                let expectsWhite = appearance == .aqua && increaseContrast
-                let matches = expectsWhite
-                    ? row.test_eqSeatBorderColor?.isWarmSignalWhiteInk == true
-                    : row.test_eqSeatBorderColor?.isWarmSignalDarkInk == true
-                #expect(matches, Comment(rawValue:
-                    "\(name), Increase Contrast \(increaseContrast): the border is " +
-                    "\(expectsWhite ? "#FFFFFF" : "#171104"), got \(got)"))
-                #expect(row.test_eqTintColor?.usingColorSpace(.sRGB) != nil,
-                        "\(name): the glyph has no resolvable ink to match the border against")
+
+                var expected = Tokens.Color.equalizer
+                NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
+                    expected = Tokens.Color.equalizer.usingColorSpace(.sRGB) ?? expected
+                }
+                let inks = row.test_eqDrawnInks
+                let cell = "\(name), Increase Contrast \(increaseContrast)"
+                #expect(inks.contains { close($0, expected) },
+                        Comment(rawValue: "\(cell): the square is not the equalizer hue — drew \(inks)"))
+                #expect(inks.contains { close($0, .white) },
+                        Comment(rawValue: "\(cell): the sliders are not white — drew \(inks)"))
             }
         }
+    }
+
+    private func close(_ a: NSColor, _ b: NSColor) -> Bool {
+        guard let a = a.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return false }
+        return abs(a.redComponent - b.redComponent) < 0.02
+            && abs(a.greenComponent - b.greenComponent) < 0.02
+            && abs(a.blueComponent - b.blueComponent) < 0.02
     }
 }
 

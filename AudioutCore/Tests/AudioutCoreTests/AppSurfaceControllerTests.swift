@@ -435,6 +435,53 @@ import AppKit
         #expect(fits, "every header item fits the fixed surface width (used \(used), width \(SurfaceLayout.width))")
     }
 
+    /// The header names the current screen by GROWING that tab, so the
+    /// toolbar has to re-place the item around it — a capsule that widened
+    /// inside an item AppKit never re-measured would clip the name or overlap
+    /// Pin. Measured on the real materialized item viewers, and re-measured
+    /// under every selection, with the fixed-width guard above re-run each
+    /// time so the expanded strip is held to the same line as the collapsed
+    /// one.
+    @Test func theToolbarRePlacesTheTabsItemAsTheOpenNameChangesItsWidth() throws {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        let window = try #require(surface.shell.window)
+        let themeFrame = try #require(window.contentView?.superview)
+        let toolbar = surface.test_toolbarController
+
+        func viewerWidths() -> [CGFloat] {
+            window.layoutIfNeeded()
+            return allViews(in: themeFrame, namedLike: "NSToolbarItemViewer")
+                .map { $0.convert($0.bounds, to: themeFrame) }
+                .sorted { $0.minX < $1.minX }
+                .map(\.width)
+        }
+
+        var slack: [CGFloat] = []
+        for screen in SurfaceScreen.allCases {
+            surface.select(screen)
+            FoldAnimator.shared.test_settleNow()
+            let widths = viewerWidths()
+            let capsuleWidth = try #require(toolbar.test_capsuleFittingWidth)
+            let viewer = try #require(widths.first)
+            #expect(viewer >= capsuleWidth,
+                    Comment(rawValue: "with \(screen.label) open the tabs' item viewer is \(viewer) pt around a capsule asking for \(capsuleWidth)"))
+            // The DELTA, not the width: AppKit pads its own item viewer around
+            // a custom view, and its rounding grid varies per run, so the
+            // number that carries information is that the padding is the same
+            // under every selection — the viewer followed the capsule out
+            // rather than staying at some size of its own.
+            slack.append(viewer - capsuleWidth)
+            #expect(capsuleWidth > SurfaceToolbarSeat.capsuleSize.width,
+                    Comment(rawValue: "and the capsule really did grow past its all-collapsed width"))
+            #expect(widths.reduce(0, +) < SurfaceLayout.width,
+                    Comment(rawValue: "the expanded strip still fits the fixed surface — \(widths.reduce(0, +)) against \(SurfaceLayout.width)"))
+        }
+        let spread = (slack.max() ?? 0) - (slack.min() ?? 0)
+        #expect(spread <= 1,
+                Comment(rawValue: "the viewer sits the same distance around the capsule whichever name is open — \(slack)"))
+    }
+
     @Test func toolbarTracksSelectionAndPin() {
         let (surface, _, _, _) = makeSurface()
         surface.show(anchorRect: nil)

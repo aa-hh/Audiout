@@ -372,10 +372,22 @@ public enum Tokens {
         }
 
         /// **Muted** — the one hue in the app that means "this output is
-        /// deliberately silent". Its single consumer is the device row's
-        /// engaged mute button (`DeviceRowView.updateMuteTint()`), which fills
-        /// the pill OPAQUELY in this tone and knocks the `speaker.slash.fill`
-        /// glyph out of it in ``panel``.
+        /// deliberately silent". Its consumers are the device row's and the
+        /// Main Out row's engaged mute buttons
+        /// (`DeviceRowView.updateMuteTint()`,
+        /// `MainOutRowView.updateMuteTint()`), which fill the
+        /// `custom.speaker.slash.square.fill` symbol's enclosing square
+        /// OPAQUELY in this tone and draw the speaker and slash inside it in
+        /// WHITE.
+        ///
+        /// ONE VALUE IN BOTH APPEARANCES, unlike almost every other token
+        /// here. Two reasons, and the second is the owner's rule. First
+        /// measurement: white marks on the old bright dark value `#8E93F0`
+        /// measure 2.77:1, under the 4.5:1 mark floor — the dark half had to
+        /// come down anyway once the marks stopped being knocked out in
+        /// ``panel``. Second, Alec's rule (2026-09-04): an engaged control
+        /// wears the SAME fill in light and dark, so a muted row looks like a
+        /// muted row wherever you meet it.
         ///
         /// WHERE IT MAY NOT APPEAR: anywhere else. It is not a second cool
         /// accent, not a disabled/dimmed tone, and not available to a control
@@ -399,23 +411,61 @@ public enum Tokens {
         /// WHY OPAQUE, not the translucent pill it replaces. A tint of this
         /// hue tops out at 2.3:1 against the row ground even at 45% — under
         /// the 3:1 non-text floor in every appearance, which is exactly why
-        /// the old 22% neutral pill did not read as anything. Opaque, the pill
-        /// clears the floor with room to spare and the glyph reads as a
+        /// the old 22% neutral pill did not read as anything. Opaque, the
+        /// square clears the floor with room to spare and the marks read as a
         /// knock-out.
         ///
-        /// CONTRAST RATIONALE (measured; floor 3:1 for the pill against every
+        /// CONTRAST RATIONALE (measured; floor 3:1 for the fill against every
         /// ground it sits on — the row at rest on `panel`, the gold-washed
-        /// live row, the hover wash — and 4.5:1 for the ``panel`` glyph
-        /// knocked out of the pill). Dark `#8E93F0` = 6.48:1 vs `panel` /
-        /// 7.14:1 vs `canvas` / 5.69:1 vs `raised` / 5.14:1 vs the live wash /
-        /// 5.15:1 vs the hover wash, glyph 6.48:1; dark Increase Contrast
-        /// `#ADB1F7` = 8.90 / 9.80 / 7.81 / 6.90 / 7.07, glyph 8.90. Light
-        /// `#4A50C7` = 6.17 / 6.17 / 6.17 / 5.41 / 5.10, glyph 6.17; light
-        /// Increase Contrast `#393FA8` = 8.22 / 8.22 / 8.22 / 7.03 / 6.80,
-        /// glyph 8.22.
+        /// live row, the hover wash — and 4.5:1 for the WHITE marks on the
+        /// fill). `#4A50C7` on the DARK row = fill 3.07:1, marks 6.44:1; on
+        /// the LIGHT row = fill 6.17:1, marks 6.44:1.
+        ///
+        /// NO INCREASE CONTRAST VARIANT, and it is the single value that
+        /// forces that. One value serving both appearances sits between two
+        /// opposite grounds: darkening it lifts the white marks and the light
+        /// row but drops the dark row, lightening it does the reverse. Every
+        /// candidate lowers one of the two, and the contrast suites assert
+        /// that Increase Contrast never lowers a ratio. Equal is the only
+        /// direction left.
         public static var muted: NSColor {
-            warmDynamic(name: "muted", dark: 0x8E93F0, darkHighContrast: 0xADB1F7,
-                       light: 0x4A50C7, lightHighContrast: 0x393FA8)
+            warmDynamic(name: "muted", dark: 0x8E93F0, light: 0x8E93F0)
+        }
+
+        /// **Equalizer** — the counterpart to ``muted``: the one hue that
+        /// means "this speaker's curve is not flat". Its consumer is the
+        /// device row's engaged Equalizer door
+        /// (`DeviceRowView.updateEQButton()`), which fills the
+        /// `custom.slider.horizontal.2.square.fill` symbol's enclosing square
+        /// OPAQUELY in this tone and draws the two band sliders inside it in
+        /// WHITE.
+        ///
+        /// WHERE IT MAY NOT APPEAR: anywhere else, on the same fence
+        /// ``muted`` carries. It is not a general "on" green, not a success
+        /// tone, and not available to a second control that happens to be
+        /// engaged. A door that is dark for some other reason — unavailable,
+        /// unsupported — keeps its at-rest ink.
+        ///
+        /// ONE VALUE IN BOTH APPEARANCES, the same rule ``muted`` follows: an
+        /// engaged control wears the same fill in light and dark (Alec,
+        /// 2026-09-04) — and no Increase Contrast variant, for the reason
+        /// spelled out on ``muted``.
+        ///
+        /// WHY THIS GREEN. The door used to wear ``goldText``, and gold means
+        /// "audio is flowing here" everywhere else in the app — one hue
+        /// carrying two ideas on a row that also draws the gold live wash
+        /// behind it. Green is unspoken for. `#227950` was chosen over six
+        /// other candidates on separation: it sits 85° of hue off ``muted``,
+        /// which is the control 6 pt to its right, and 11° off
+        /// ``permissionUsageStats``, which is fenced to onboarding and never
+        /// shares a screen with a device row.
+        ///
+        /// CONTRAST RATIONALE (measured; same floors as ``muted`` — 3:1 for
+        /// the fill on every row ground, 4.5:1 for the white marks on the
+        /// fill). `#227950` on the DARK row = fill 3.70:1, marks 5.35:1; on
+        /// the LIGHT row = fill 5.13:1, marks 5.35:1.
+        public static var equalizer: NSColor {
+            warmDynamic(name: "equalizer", dark: 0x227950, light: 0x227950)
         }
 
         /// The COOL body ink — the same second-rung job as ``label2`` on a

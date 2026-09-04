@@ -75,52 +75,113 @@ import AudioutSharedUI
         }
     }
 
-    /// The tabs are ICON-ONLY (Alec, 2026-09-03). Names on the items' `title`
-    /// were tried and removed: translated labels would widen the strip until
-    /// AppKit swept the tabs into the overflow menu, and primary navigation
-    /// cannot live behind a chevron. The names still reach the reader through
-    /// the tooltip, the accessibility label, and ⌘1/⌘2/⌘3 — none of which
-    /// costs width.
-    @Test func tabsDrawNoNameSoTheStripCannotGrowWithTranslation() {
+    /// EXACTLY ONE name is on the strip, and it is the current screen's (Alec,
+    /// 2026-09-04: "if I were to click on groups or speakers, then it would
+    /// expand out to show the name"). The two tabs you are not on stay
+    /// icon-only, which is what keeps the strip's width independent of how
+    /// many words three languages need.
+    ///
+    /// Measured from what the seats actually let through, not from what they
+    /// carry: a tab too narrow to show its name reads as empty here.
+    @Test func onlyTheCurrentTabDrawsItsName() {
         let (controller, window) = makeAttached()
-        window.layoutIfNeeded()
-        // Hoisted out of `#expect`: the macro decomposes the call, and
-        // `allSatisfy` is `rethrows`, so the expansion refuses to compile.
-        let noTabDrawsAName = controller.test_tabTitles.allSatisfy(\.isEmpty)
-        #expect(noTabDrawsAName, "no tab draws a name")
+        for selected in SurfaceScreen.allCases {
+            controller.setSelectedScreen(selected)
+            FoldAnimator.shared.test_settleNow()
+            window.layoutIfNeeded()
+            let expected = SurfaceScreen.allCases.map { $0 == selected ? $0.label : "" }
+            #expect(controller.test_tabDrawnNames == expected,
+                    Comment(rawValue: "with \(selected.label) showing, the strip draws \(expected)"))
+        }
         #expect(controller.test_tabAccessibilityLabels == SurfaceScreen.allCases.map(\.label),
-                "but VoiceOver is handed the name from the view, which is what speaks now")
+                "all three names still reach VoiceOver, expanded or not")
         #expect(controller.test_tabToolTips == SurfaceScreen.allCases.map { "\($0.label) (⌘\($0.keyEquivalent))" },
-                "and the tooltip spells it out with the shortcut")
+                "and the tooltip still spells each one out with its shortcut")
         #expect(controller.test_allTabImagesResolved,
-                "the glyph is what the tab shows")
+                "the glyph is what an idle tab shows")
         #expect(controller.toolbar.displayMode == .iconOnly)
     }
 
-    /// Both items are fixed-width, and both ask to stay visible — the two
-    /// things that keep the strip out of the overflow chevron.
-    @Test func everyItemIsFixedWidthAndAsksToStayOutOfTheOverflowMenu() {
+    /// The expanded tab really is wider on screen than a collapsed one, and
+    /// only that one is. Real laid-out frames, not the constraint the reveal
+    /// writes into: what fails review is a seat that did not grow.
+    @Test func theCurrentTabIsDrawnWiderThanTheOthers() {
+        let (controller, window) = makeAttached()
+        for selected in SurfaceScreen.allCases {
+            controller.setSelectedScreen(selected)
+            FoldAnimator.shared.test_settleNow()
+            window.layoutIfNeeded()
+            guard let current = controller.test_tabButton(selected) else {
+                Issue.record("\(selected.label) has no seat button")
+                return
+            }
+            #expect(current.frame.width > SurfaceToolbarSeat.size.width,
+                    Comment(rawValue: "\(selected.label) opened — it is \(current.frame.width) pt against a collapsed \(SurfaceToolbarSeat.size.width)"))
+            #expect(current.frame.width == SurfaceToolbarSeat.tabWidth(nameWidth: current.nameWidth),
+                    Comment(rawValue: "and opened by exactly its own name's width"))
+            for other in SurfaceScreen.allCases where other != selected {
+                guard let tab = controller.test_tabButton(other) else { continue }
+                #expect(tab.frame.width == SurfaceToolbarSeat.size.width,
+                        Comment(rawValue: "\(other.label) stayed collapsed at \(tab.frame.width) pt"))
+            }
+        }
+    }
+
+    /// Both items ask to stay visible, Pin never changes size, and the capsule
+    /// is exactly the three tabs plus its padding — one of them open.
+    @Test func everyItemAsksToStayOutOfTheOverflowMenu() {
         let (controller, _) = makeAttached()
-        let expected: [NSToolbarItem.Identifier: NSSize] = [
-            SurfaceToolbarController.tabsItemIdentifier: SurfaceToolbarSeat.capsuleSize,
-            SurfaceToolbarController.pinItemIdentifier: SurfaceToolbarSeat.size,
-        ]
-        for item in controller.toolbar.items {
-            guard let view = item.view, let size = expected[item.itemIdentifier] else { continue }
-            // `fittingSize`, not `frame`: the frame is the size the item was
-            // CONSTRUCTED with, so reading it back would survive the view's
-            // own width/height constraints being deleted. `fittingSize` is
-            // computed from those constraints.
-            #expect(view.fittingSize == size,
-                    Comment(rawValue: "\(item.itemIdentifier.rawValue) must be its fixed size"))
+        for item in controller.toolbar.items where item.view != nil {
             #expect(item.visibilityPriority == .high,
                     Comment(rawValue: "\(item.itemIdentifier.rawValue) must not be sweepable into the chevron"))
         }
+        // `fittingSize`, not `frame`: the frame is the size the item was
+        // CONSTRUCTED with, so reading it back would survive the view's own
+        // constraints being deleted. `fittingSize` is computed from those.
+        #expect(controller.test_pinButton?.fittingSize == SurfaceToolbarSeat.size,
+                "Pin is fixed — nothing about it expands")
+        guard let mixer = controller.test_tabButton(.mixer) else {
+            Issue.record("Mixer has no seat button")
+            return
+        }
+        #expect(controller.test_capsuleFittingWidth
+                    == SurfaceToolbarSeat.capsuleWidth(nameWidth: mixer.nameWidth),
+                "the capsule is two collapsed tabs, the open one, and its padding")
         #expect(SurfaceToolbarSeat.capsuleSize.width
                     == SurfaceToolbarSeat.size.width * 3 + SurfaceToolbarSeat.capsulePadding * 2,
-                "the capsule is exactly three fixed tabs plus its padding")
+                "and with every tab collapsed it is exactly three of them plus that padding")
         #expect(SurfaceToolbarSeat.capsuleCornerRadius == SurfaceToolbarSeat.capsuleSize.height / 2,
                 "half the height, so the capsule reads as a pill and not a rounded box")
+    }
+
+    /// The guard that let names back onto the strip at all. Names were removed
+    /// on 2026-09-03 because three translated labels widened it until AppKit
+    /// swept the tabs into the overflow menu, and primary navigation cannot
+    /// live behind a chevron. Two facts make that impossible now rather than
+    /// unlikely: only ONE tab is ever open, and its name is clamped.
+    ///
+    /// Asserted with a name no translator could produce, so the result does not
+    /// depend on how long "Einstellungen" happens to be.
+    @Test func theStripCannotOutgrowTheSurfaceInAnyLanguage() {
+        #expect(SurfaceToolbarSeat.widestCapsuleWidth + SurfaceToolbarSeat.size.width
+                    < SurfaceLayout.width,
+                "the widest the capsule can ever be, plus Pin, still fits the fixed surface — \(SurfaceToolbarSeat.widestCapsuleWidth) + \(SurfaceToolbarSeat.size.width) against \(SurfaceLayout.width)")
+
+        let absurd = String(repeating: "Lautsprechergruppen ", count: 20)
+        let tab = SurfaceToolbarSeatButton(
+            frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.size))
+        tab.configure(symbol: nil, label: absurd, toolTip: nil, isTab: true)
+        tab.setNameRevealed(true, animated: false)
+        #expect(tab.nameWidth == SurfaceToolbarSeat.maxNameWidth,
+                "a name past the ceiling is clamped to it, and truncates rather than pushing")
+        #expect(tab.test_width == SurfaceToolbarSeat.tabWidth(nameWidth: SurfaceToolbarSeat.maxNameWidth),
+                "so the seat opens to the ceiling and no further — \(tab.test_width) pt")
+
+        let capsule = SurfaceToolbarTabCapsule(tabs: [tab] + (0..<2).map { _ in
+            SurfaceToolbarSeatButton(frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.size))
+        })
+        #expect(capsule.fittingSize.width == SurfaceToolbarSeat.widestCapsuleWidth,
+                "and the capsule around it stops at its widest — \(capsule.fittingSize.width) pt")
     }
 
     @Test func pinResolvesItsGlyph() {
@@ -206,34 +267,125 @@ import AudioutSharedUI
         #expect(controller.test_engagedTabCount == 1, "and never two seats at once")
     }
 
-    /// The capsule must not resize or reflow as the selection moves. AppKit's
-    /// own grouping did exactly that on macOS 26+ — adjacent items merged into
-    /// a shared capsule and the selected item was then pulled out of it, so
-    /// the container's geometry wandered (measured live: Mixer gave circle +
-    /// capsule(2), Groups three circles, Settings capsule(2) + circle). Here
-    /// the capsule is one fixed-size drawn surface and the highlight is a fill
-    /// inside it, so neither can move the other.
-    @Test func theCapsuleNeitherResizesNorReflowsWhenTheSelectionMoves() {
+    /// The capsule's width is the ONLY thing a selection may move, and it moves
+    /// it by exactly the open tab's name. AppKit's own grouping on macOS 26+
+    /// wandered instead: adjacent items merged into a shared capsule and the
+    /// selected item was pulled out of it, so the container's geometry changed
+    /// SHAPE with the selection (measured live: Mixer gave circle + capsule(2),
+    /// Groups three circles, Settings capsule(2) + circle). Here it is one
+    /// drawn surface whose height, order and padding never change.
+    @Test func onlyTheOpenNameResizesTheCapsuleAndNothingElseReflows() {
         let (controller, window) = makeAttached()
         guard let capsule = controller.test_tabCapsule else {
             Issue.record("the tabs item carries no capsule")
             return
         }
         window.layoutIfNeeded()
-        var frames: [NSRect] = []
-        var tabFrames: [[NSRect]] = []
+        var heights: Set<CGFloat> = []
+        var origins: Set<CGFloat> = []
         for screen in SurfaceScreen.allCases {
             controller.setSelectedScreen(screen)
+            FoldAnimator.shared.test_settleNow()
             window.layoutIfNeeded()
-            frames.append(capsule.frame)
-            tabFrames.append(SurfaceScreen.allCases.compactMap { controller.test_tabButton($0)?.frame })
+            guard let open = controller.test_tabButton(screen) else { continue }
+            #expect(capsule.fittingSize.width
+                        == SurfaceToolbarSeat.capsuleWidth(nameWidth: open.nameWidth),
+                    Comment(rawValue: "with \(screen.label) open the capsule is exactly that name wider — \(capsule.fittingSize.width) pt"))
+            heights.insert(capsule.frame.height)
+            origins.insert(capsule.frame.minX)
+            let order = SurfaceScreen.allCases.compactMap { controller.test_tabButton($0)?.frame.minX }
+            #expect(order == order.sorted(),
+                    Comment(rawValue: "and the tabs keep their order with \(screen.label) open — \(order)"))
         }
-        #expect(capsule.fittingSize == SurfaceToolbarSeat.capsuleSize,
-                "the capsule's size comes from three fixed tabs, not from what is selected")
-        #expect(Set(frames.map(NSStringFromRect)).count == 1,
-                "the capsule's own frame is identical under every selection — \(frames)")
-        #expect(Set(tabFrames.map { $0.map(NSStringFromRect).joined() }).count == 1,
-                "and so is every tab's frame inside it — nothing reflows")
+        #expect(heights.count == 1, "the capsule's height never changes — a reveal is horizontal — \(heights)")
+        #expect(origins.count == 1, "and it stays anchored to the same edge of the strip — \(origins)")
+        #expect(capsule.fittingSize.height == SurfaceToolbarSeat.capsuleSize.height)
+    }
+
+    // MARK: The reveal's motion
+
+    /// Reduce Motion means the name is simply THERE — no travel, not a
+    /// disabled animation that still moves. The width is at its terminal value
+    /// in the caller's own turn, before anything can display an intermediate.
+    ///
+    /// Travel runs on `FoldAnimator`, the app's one reveal clock, so this is
+    /// the same synchronous-terminal contract every other clip in the app has.
+    @Test func reduceMotionOpensTheNameWithNoTravel() {
+        defer {
+            FoldAnimator.shared.test_reduceMotionOverride = nil
+            FoldAnimator.shared.test_settleNow()
+        }
+        FoldAnimator.shared.test_reduceMotionOverride = true
+        let (controller, _) = makeAttached()
+
+        controller.setSelectedScreen(.groups)
+
+        guard let groups = controller.test_tabButton(.groups),
+              let mixer = controller.test_tabButton(.mixer) else {
+            Issue.record("the tabs have no seat buttons")
+            return
+        }
+        #expect(groups.test_width == SurfaceToolbarSeat.tabWidth(nameWidth: groups.nameWidth),
+                "Groups is fully open already — \(groups.test_width) pt")
+        #expect(mixer.test_width == SurfaceToolbarSeat.size.width,
+                "and Mixer is fully closed already — \(mixer.test_width) pt")
+        #expect(!FoldAnimator.shared.isFolding, "nothing is left travelling")
+    }
+
+    /// Without Reduce Motion the name is REVEALED: the seat is still near its
+    /// closed width when the click returns and reaches the open one only once
+    /// the clock has run. Sampled off the seat's live width, so a version that
+    /// only asked for an animation would fail here.
+    @Test func withoutReduceMotionTheNameTravelsOpen() {
+        defer {
+            FoldAnimator.shared.test_reduceMotionOverride = nil
+            FoldAnimator.shared.test_settleNow()
+        }
+        FoldAnimator.shared.test_reduceMotionOverride = false
+        let (controller, _) = makeAttached()
+
+        controller.setSelectedScreen(.settings)
+
+        guard let settings = controller.test_tabButton(.settings) else {
+            Issue.record("Settings has no seat button")
+            return
+        }
+        let open = SurfaceToolbarSeat.tabWidth(nameWidth: settings.nameWidth)
+        #expect(settings.test_width < open,
+                "the seat has not jumped to its open width — \(settings.test_width) of \(open) pt")
+        #expect(FoldAnimator.shared.isFolding, "it is travelling there")
+
+        FoldAnimator.shared.test_settleNow()
+
+        #expect(settings.test_width == open, "and arrives")
+        #expect(controller.test_tabButton(.mixer)?.test_width == SurfaceToolbarSeat.size.width,
+                "with Mixer closed again in the same travel")
+    }
+
+    /// Opening a name must not touch what VoiceOver is handed. The visible name
+    /// is the SAME string the tab already speaks, and it is excluded from the
+    /// accessibility tree, so nothing is said twice and nothing contradicts the
+    /// spoken selection.
+    @Test func openingTheNameLeavesTheSpokenSelectionAlone() {
+        let (controller, window) = makeAttached()
+        for selected in SurfaceScreen.allCases {
+            controller.setSelectedScreen(selected)
+            FoldAnimator.shared.test_settleNow()
+            window.layoutIfNeeded()
+            #expect(controller.test_onlySelectedTabIsMarked,
+                    Comment(rawValue: "with \(selected.label) open, exactly it is marked"))
+            for screen in SurfaceScreen.allCases {
+                guard let tab = controller.test_tabButton(screen) else { continue }
+                #expect(tab.isAccessibilitySelected() == (screen == selected),
+                        Comment(rawValue: "\(screen.label)'s spoken selection is unchanged by the reveal"))
+                #expect(tab.accessibilityLabel() == screen.label)
+                #expect(tab.test_name == screen.label,
+                        Comment(rawValue: "\(screen.label) draws the same name it speaks — never a second wording"))
+                let labels = tab.subviews.compactMap { $0.isAccessibilityElement() ? $0 : nil }
+                #expect(labels.isEmpty,
+                        Comment(rawValue: "and the drawn name is not an accessibility element of its own, so \(screen.label) is never spoken twice"))
+            }
+        }
     }
 
     // MARK: The seat's real pixels

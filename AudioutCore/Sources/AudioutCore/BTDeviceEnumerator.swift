@@ -413,9 +413,12 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
     /// unreadable without the Bluetooth grant, which a `swift run` binary does
     /// not hold), and a launchd-started app's stderr goes nowhere readable.
     /// Read it back with
-    /// `log show --last 5m --debug --predicate 'subsystem == "com.audiout.Audiout"'`
-    /// — `--debug` because the one line this writes is `.debug` level and is
-    /// otherwise not kept.
+    /// `log show --last 5m --predicate 'subsystem == "com.audiout.Audiout"'`
+    /// — `.notice`, NOT `.debug`: macOS discards debug messages unless someone
+    /// raises the level with `sudo log config`, so a `.debug` diagnostic cannot
+    /// be read in the one situation it exists for (2026-09-04 — it shipped that
+    /// way and had to be caught on a live `log stream` instead). It carries
+    /// class numbers only, never a device name, so persisting it is safe.
     private static let log = Logger(subsystem: "com.audiout.Audiout", category: "bluetooth")
 
     private static let systemPairedRecords: @Sendable () -> [BTPairedRecord] = {
@@ -428,7 +431,7 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
         // NAMES stay out of it entirely: a unified-log entry is readable by
         // anything on the system, and PRODUCT.md's "Data Collection" line
         // says a speaker's name never leaves the machine.
-        log.debug("paired audio device classes: \(pairedClassSummary(paired), privacy: .public)")
+        log.notice("paired audio device classes: \(pairedClassSummary(paired), privacy: .public)")
         return paired.map { device in
             BTPairedRecord(
                 name: device.name,

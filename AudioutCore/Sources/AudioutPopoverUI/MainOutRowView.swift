@@ -139,15 +139,6 @@ public final class MainOutRowView: NSView {
     /// A speaker mute button sitting LEFT of the master slider (mirrors the
     /// per-device mute glyph in `DeviceRowView`). `pushOnPushOff`: `.on` = muted.
     private let muteButton = NSButton()
-    /// The muted seat behind ``muteButton`` — the SAME rounded rectangle the
-    /// device row's mute and Equalizer door draw
-    /// (``PopoverColumnGrid/engagedSeatSize`` at
-    /// ``PopoverColumnGrid/engagedSeatCornerRadius``), so the two rows cannot
-    /// present the same state as two different objects. Its own view rather
-    /// than a fill on the button's layer: the button carries no height
-    /// constraint, so its frame follows whichever speaker glyph is mounted and
-    /// the old pill changed size on every toggle.
-    private let muteSeatView = NSView()
     private let readoutLabel = NSTextField(labelWithString: "")
     /// The **named** SoundSource-style destination dropdown (task B) — an
     /// `NSPopUpButton` (`pullsDown = false`) whose visible title is the currently
@@ -408,20 +399,19 @@ public final class MainOutRowView: NSView {
 
         // Speaker mute button, LEFT of the master slider (same visual pattern as
         // `DeviceRowView`'s per-device mute): `pushOnPushOff` so the mute STATE
-        // still toggles and the delegate still fires, but the glyph itself stays
-        // swapping to `speaker.slash.fill` when engaged. The glyph used to stay
-        // fixed in both states (Alec, an earlier call); he reversed that on
-        // 2026-09-04 — a mute that changes nothing but its tint reads as no mute
-        // at all. The row wears the same two glyphs and the same `muted` seat as
-        // every device row below it.
+        // still toggles and the delegate still fires, while the SYMBOL swaps
+        // between its outline and filled squares. The mark used to stay fixed
+        // in both states (Alec, an earlier call); he reversed that on
+        // 2026-09-04 — a mute that changes nothing but its tint reads as no
+        // mute at all. This is only the seeded image; `updateMuteTint()` owns
+        // both states and re-makes it on every appearance change.
         muteButton.translatesAutoresizingMaskIntoConstraints = false
         muteButton.setButtonType(.pushOnPushOff)
         muteButton.isBordered = false
         muteButton.imagePosition = .imageOnly
-        let muteConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
-        muteButton.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
-                                   accessibilityDescription: "Mute Main Audio")?
-            .withSymbolConfiguration(muteConfig)
+        muteButton.image = RowAccessorySymbol.image(
+            named: RowAccessorySymbol.muteRest,
+            palette: [Tokens.Color.label2])
         muteButton.target = self
         muteButton.action = #selector(muteToggled(_:))
         muteButton.setContentHuggingPriority(.required, for: .horizontal)
@@ -480,10 +470,6 @@ public final class MainOutRowView: NSView {
         addSubview(haloRingView)
         addSubview(armedDotView)
         addSubview(identityStack)
-        // Seat first: subview order is z-order, and it draws BEHIND the glyph.
-        muteSeatView.translatesAutoresizingMaskIntoConstraints = false
-        muteSeatView.isHidden = true
-        addSubview(muteSeatView)
         addSubview(muteButton)
         addSubview(slider)
         addSubview(readoutLabel)
@@ -564,14 +550,6 @@ public final class MainOutRowView: NSView {
             muteButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             muteButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.muteWidth),
 
-            // The engaged seat, centred on the button at its own fixed size.
-            muteSeatView.centerXAnchor.constraint(equalTo: muteButton.centerXAnchor),
-            muteSeatView.centerYAnchor.constraint(equalTo: muteButton.centerYAnchor),
-            muteSeatView.widthAnchor.constraint(
-                equalToConstant: PopoverColumnGrid.engagedSeatSize.width),
-            muteSeatView.heightAnchor.constraint(
-                equalToConstant: PopoverColumnGrid.engagedSeatSize.height),
-
             slider.centerYAnchor.constraint(equalTo: centerYAnchor),
             slider.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.sliderWidth),
             slider.trailingAnchor.constraint(equalTo: trailingAnchor,
@@ -610,27 +588,42 @@ public final class MainOutRowView: NSView {
 
     // MARK: Private Helpers
 
-    /// Updates the mute button's engaged treatment (tint + the filled
-    /// ``Tokens/Color/muted`` seat, spec §3.4/§3.5) and accessibility label
-    /// for the current state. Drawing-only, on ``muteSeatView`` behind the
-    /// button — behavior, keyboard, and VoiceOver untouched. Mirrors
-    /// `DeviceRowView.updateMuteTint()`, including its shape: the seat's size
-    /// and corner both come from `PopoverColumnGrid`, so the two rows cannot
-    /// drift apart.
+    /// Updates the mute button for the current state: `.on` draws
+    /// ``RowAccessorySymbol/muteEngaged``, the filled square with a
+    /// ``Tokens/Color/muted`` enclosure and white marks; `.off` draws
+    /// ``RowAccessorySymbol/muteRest``, the outline square in one neutral ink.
+    /// Drawing only — behavior, keyboard and VoiceOver untouched. The SAME two
+    /// symbols every device row below wears, so the two rows cannot present
+    /// one state as two different objects.
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
-        muteButton.image = NSImage(
-            systemSymbolName: engaged ? "speaker.slash.fill" : "speaker.wave.2.fill",
-            accessibilityDescription: "Mute Main Audio")?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .regular))
-        muteButton.contentTintColor = engaged ? Tokens.Color.panel : Tokens.Color.secondaryLabel
-        muteSeatView.isHidden = !engaged
-        muteSeatView.wantsLayer = true
-        muteSeatView.layer?.cornerRadius = PopoverColumnGrid.engagedSeatCornerRadius
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            muteSeatView.layer?.backgroundColor = Tokens.Color.muted.cgColor
-        }
+        muteButton.image = RowAccessorySymbol.image(
+            named: engaged ? RowAccessorySymbol.muteEngaged : RowAccessorySymbol.muteRest,
+            palette: engaged ? Self.engagedPalette(in: effectiveAppearance)
+                             : Self.restPalette(in: effectiveAppearance))
         configureAccessibility()
+    }
+
+    /// ``Tokens/Color/muted`` on the enclosing square, WHITE on the marks —
+    /// both resolved in this row's own appearance, because a
+    /// `SymbolConfiguration` keeps whatever `NSColor` it is handed and a
+    /// dynamic one would resolve against whichever appearance is current when
+    /// the image is drawn.
+    private static func engagedPalette(in appearance: NSAppearance) -> [NSColor] {
+        var fill = Tokens.Color.muted
+        appearance.performAsCurrentDrawingAppearance {
+            fill = Tokens.Color.muted.usingColorSpace(.sRGB) ?? fill
+        }
+        return [fill, .white]
+    }
+
+    /// One neutral ink over every layer of the outline square.
+    private static func restPalette(in appearance: NSAppearance) -> [NSColor] {
+        var ink = Tokens.Color.label2
+        appearance.performAsCurrentDrawingAppearance {
+            ink = Tokens.Color.label2.usingColorSpace(.sRGB) ?? ink
+        }
+        return [ink]
     }
 
     /// The pill's engaged fill is a static `CGColor` — re-stamp on a live
@@ -775,15 +768,24 @@ public final class MainOutRowView: NSView {
     public var test_hasWarmFaderSkin: Bool { slider.cell is WarmFaderCell }
     /// The dot's current fill color (resolved) — gold armed / socket dark.
     public var test_dotFillColor: NSColor? { armedDotView.test_fillColor }
-    /// Whether the master-mute button is drawing its ENGAGED pill (S3).
+    /// Whether the master-mute button is drawing its ENGAGED symbol — a
+    /// raster comparison against the same symbol built from the same palette,
+    /// so the hook reads the drawn image rather than a flag.
     public var test_isMutePillEngaged: Bool {
-        muteButton.state == .on && !muteSeatView.isHidden
-            && muteSeatView.layer?.backgroundColor != nil
+        guard muteButton.state == .on,
+              let drawn = muteButton.image?.tiffRepresentation,
+              let reference = RowAccessorySymbol.image(
+                named: RowAccessorySymbol.muteEngaged,
+                palette: Self.engagedPalette(in: effectiveAppearance))?.tiffRepresentation
+        else { return false }
+        return drawn == reference
     }
-    /// The engaged mute seat's frame and corner radius, so a test can pin this
-    /// row's mark to the same shape the device rows below it draw.
-    public var test_muteSeatFrame: NSRect { muteSeatView.frame }
-    public var test_muteSeatCornerRadius: CGFloat { muteSeatView.layer?.cornerRadius ?? 0 }
+    /// The mute mark's frame — the button, which is the mark now, so a test
+    /// can pin this row's control to the same size the device rows below draw.
+    public var test_muteSeatFrame: NSRect {
+        layoutSubtreeIfNeeded()
+        return muteButton.frame
+    }
     /// The row's current VoiceOver VALUE ("muted" / "armed" composition).
     public var test_accessibilityValue: String? { accessibilityValue() as? String }
     /// The master meter's current ballistics TARGET (with

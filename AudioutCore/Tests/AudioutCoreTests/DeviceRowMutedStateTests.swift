@@ -5,10 +5,18 @@ import Testing
 import AudioutCore
 @testable import AudioutSharedUI
 
-/// The engaged mute state's two carriers — a SLASHED speaker and the reserved
-/// ``Tokens/Color/muted`` hue — asserted as DRAWN, in all four appearances
-/// (light/dark x Increase Contrast), plus the fence that keeps the hue to its
-/// one consumer.
+/// The engaged mute state's two carriers — the FILLED
+/// ``RowAccessorySymbol/muteEngaged`` square and the reserved
+/// ``Tokens/Color/muted`` hue inside it — asserted as DRAWN, in all four
+/// appearances (light/dark x Increase Contrast), plus the fence that keeps
+/// the hue to its two consumers.
+///
+/// Every colour assertion here reads the button's RENDERED pixels
+/// (``DeviceRowView/test_muteDrawnInks``) rather than a `contentTintColor` the
+/// row just set. The palette is baked into the image now, so the tint property
+/// no longer carries the state at all — and a palette handed to the wrong
+/// layer would read back correctly from the configuration while painting a
+/// white square with coloured marks.
 ///
 /// Nested into `SerializedSharedState` because every test here drives the
 /// process-global `Tokens.test_increaseContrastOverride` seam, the same reason
@@ -20,17 +28,14 @@ extension SerializedSharedState {
 
     deinit { Tokens.test_increaseContrastOverride = nil }
 
-    private static let restSymbol = "speaker.wave.2.fill"
-    private static let engagedSymbol = "speaker.slash.fill"
-
     private func makeDevice(isMuted: Bool) -> Device {
         Device(id: "dev-1", name: "Test Speaker", kind: .homePod,
                isAvailable: true, isMuted: isMuted, connectionState: .connected)
     }
 
     /// A row settled into one of the four appearance cells. `apply` runs AFTER
-    /// the appearance is set, so the layer colour is stamped under it whether
-    /// or not a detached view gets `viewDidChangeEffectiveAppearance`.
+    /// the appearance is set, so the symbol's palette is resolved under it
+    /// whether or not a detached view gets `viewDidChangeEffectiveAppearance`.
     private func makeRow(muted: Bool, appearanceName: NSAppearance.Name,
                          increaseContrast: Bool) -> DeviceRowView {
         Tokens.test_increaseContrastOverride = increaseContrast
@@ -48,100 +53,128 @@ extension SerializedSharedState {
         "\(appearanceName.rawValue) increaseContrast=\(increaseContrast)"
     }
 
-    /// Compare two colours by resolved sRGB components, the idiom the other row
-    /// suites use: `Tokens.Color.panel` is a computed property, so each read
-    /// builds a fresh dynamic `NSColor` and instance equality proves nothing.
-    private func assertSameHue(_ a: NSColor?, _ b: NSColor?, _ message: String,
-                               sourceLocation: SourceLocation = #_sourceLocation) {
-        guard let a = a?.usingColorSpace(.sRGB), let b = b?.usingColorSpace(.sRGB) else {
-            Issue.record("nil color: \(message)", sourceLocation: sourceLocation)
-            return
+    /// `token` as it resolves in `appearanceName` — the value the row bakes
+    /// into the symbol's palette, and so the value that must come back out of
+    /// the pixels.
+    private func resolved(_ token: NSColor, _ appearanceName: NSAppearance.Name) -> NSColor {
+        var out = token
+        NSAppearance(named: appearanceName)?.performAsCurrentDrawingAppearance {
+            out = token.usingColorSpace(.sRGB) ?? token
         }
-        #expect(abs(a.redComponent - b.redComponent) < 0.01, "\(message)", sourceLocation: sourceLocation)
-        #expect(abs(a.greenComponent - b.greenComponent) < 0.01, "\(message)", sourceLocation: sourceLocation)
-        #expect(abs(a.blueComponent - b.blueComponent) < 0.01, "\(message)", sourceLocation: sourceLocation)
+        return out
+    }
+
+    private func contains(_ inks: [NSColor], _ wanted: NSColor) -> Bool {
+        guard let wanted = wanted.usingColorSpace(.sRGB) else { return false }
+        return inks.contains { ink in
+            guard let ink = ink.usingColorSpace(.sRGB) else { return false }
+            return abs(ink.redComponent - wanted.redComponent) < 0.02
+                && abs(ink.greenComponent - wanted.greenComponent) < 0.02
+                && abs(ink.blueComponent - wanted.blueComponent) < 0.02
+        }
     }
 
     // MARK: The muted row
 
-    @Test func mutedRowDrawsTheSlashedSpeakerInEveryAppearance() {
+    @Test func mutedRowDrawsTheFilledSquareInEveryAppearance() {
         defer { Tokens.test_increaseContrastOverride = nil }
         for (appearanceName, ic) in cells {
             let row = makeRow(muted: true, appearanceName: appearanceName, increaseContrast: ic)
-            #expect(row.test_muteGlyphIsSymbol(Self.engagedSymbol),
-                    "\(describe(appearanceName, ic)): muted must draw \(Self.engagedSymbol)")
-            #expect(!row.test_muteGlyphIsSymbol(Self.restSymbol),
-                    "\(describe(appearanceName, ic)): muted must not keep the at-rest speaker")
+            #expect(row.test_mutePillIsMutedHue,
+                    "\(describe(appearanceName, ic)): muted must draw the filled square")
+            #expect(!row.test_muteDrawsRestSymbol,
+                    "\(describe(appearanceName, ic)): muted must not keep the outline square")
         }
     }
 
-    @Test func mutedRowFillsThePillWithTheReservedHueInEveryAppearance() {
+    /// The engaged square is `muted` with WHITE marks knocked out of it, and
+    /// both have to come back out of the rendered pixels.
+    @Test func mutedRowPaintsTheReservedHueAndWhiteMarksInEveryAppearance() {
         defer { Tokens.test_increaseContrastOverride = nil }
         for (appearanceName, ic) in cells {
             let row = makeRow(muted: true, appearanceName: appearanceName, increaseContrast: ic)
-            #expect(row.test_isMutePillEngaged, "\(describe(appearanceName, ic)): no pill drawn")
-            #expect(row.test_mutePillIsMutedHue,
-                    "\(describe(appearanceName, ic)): the pill is not the muted hue at full opacity")
-            assertSameHue(row.test_muteTintColor, Tokens.Color.panel,
-                          "\(describe(appearanceName, ic)): the glyph is not knocked out in the row's ground tone")
+            #expect(row.test_isMutePillEngaged, "\(describe(appearanceName, ic)): no fill drawn")
+            let inks = row.test_muteDrawnInks
+            #expect(contains(inks, resolved(Tokens.Color.muted, appearanceName)),
+                    "\(describe(appearanceName, ic)): the square is not the muted hue — drew \(inks)")
+            #expect(contains(inks, .white),
+                    "\(describe(appearanceName, ic)): the marks are not white — drew \(inks)")
         }
+    }
+
+    /// The single-value rule (Alec, 2026-09-04): an engaged control wears the
+    /// SAME fill in light and dark. A future re-tune that splits the hue by
+    /// appearance fails here rather than shipping.
+    @Test func theEngagedFillIsOneValueInBothAppearances() {
+        defer { Tokens.test_increaseContrastOverride = nil }
+        Tokens.test_increaseContrastOverride = false
+        #expect(contains([resolved(Tokens.Color.muted, .aqua)],
+                         resolved(Tokens.Color.muted, .darkAqua)),
+                "muted must resolve to one value in both appearances")
     }
 
     // MARK: The unmuted row
 
-    @Test func unmutedRowDrawsNeitherTheSlashNorTheHueInAnyAppearance() {
+    @Test func unmutedRowDrawsTheOutlineSquareAndNoFillInAnyAppearance() {
         defer { Tokens.test_increaseContrastOverride = nil }
         for (appearanceName, ic) in cells {
             let row = makeRow(muted: false, appearanceName: appearanceName, increaseContrast: ic)
-            #expect(row.test_muteGlyphIsSymbol(Self.restSymbol),
-                    "\(describe(appearanceName, ic)): unmuted must draw \(Self.restSymbol)")
-            #expect(!row.test_muteGlyphIsSymbol(Self.engagedSymbol),
-                    "\(describe(appearanceName, ic)): unmuted must never draw the slash")
-            #expect(!row.test_isMutePillEngaged, "\(describe(appearanceName, ic)): unmuted drew a pill")
+            #expect(row.test_muteDrawsRestSymbol,
+                    "\(describe(appearanceName, ic)): unmuted must draw the outline square")
+            #expect(!row.test_isMutePillEngaged, "\(describe(appearanceName, ic)): unmuted drew a fill")
             #expect(!row.test_mutePillIsMutedHue,
-                    "\(describe(appearanceName, ic)): unmuted stamped the muted hue")
-            #expect(row.test_muteTintColor === Tokens.Color.label2,
-                    "\(describe(appearanceName, ic)): unmuted must stay on the neutral secondary ink")
+                    "\(describe(appearanceName, ic)): unmuted painted the muted hue")
+            let inks = row.test_muteDrawnInks
+            #expect(!contains(inks, resolved(Tokens.Color.muted, appearanceName)),
+                    "\(describe(appearanceName, ic)): the muted hue reached the at-rest mark — drew \(inks)")
+            #expect(contains(inks, resolved(Tokens.Color.label2, appearanceName)),
+                    "\(describe(appearanceName, ic)): at rest must be one neutral ink — drew \(inks)")
         }
     }
 
-    /// The mark is ``DeviceRowView``'s own seat view at a fixed size, not the
-    /// button's layer, for exactly this reason: `speaker.slash.fill` and
-    /// `speaker.wave.2.fill` do not share a bounding box and the button
+    /// The mark must not jump size on toggle. It was two `NSView` seats at a
+    /// hand-pinned size for exactly this reason: `speaker.slash.fill` and
+    /// `speaker.wave.2.fill` do not share a bounding box, and the button
     /// carries no height constraint, so a fill on the button changed size
-    /// every time the glyph slashed (which is what this test caught). The
-    /// state is carried by the slash and the hue; the mark must not also jump.
-    @Test func theSeatDoesNotResizeWhenTheGlyphSlashes() {
+    /// every time the glyph slashed. The two custom symbols share one square,
+    /// so the size now holds by construction — this is the test that says so.
+    @Test func theMarkDoesNotResizeWhenTheStateChanges() {
         defer { Tokens.test_increaseContrastOverride = nil }
         Tokens.test_increaseContrastOverride = false
         let muted = makeRow(muted: true, appearanceName: .aqua, increaseContrast: false)
         let unmuted = makeRow(muted: false, appearanceName: .aqua, increaseContrast: false)
-        for row in [muted, unmuted] { row.layoutSubtreeIfNeeded() }
 
         let frames = "muted \(muted.test_muteSeatFrame), unmuted \(unmuted.test_muteSeatFrame)"
         #expect(muted.test_muteSeatFrame.size == unmuted.test_muteSeatFrame.size,
-                "the engaged seat changed size — \(frames)")
-        #expect(muted.test_muteSeatFrame.size == PopoverColumnGrid.engagedSeatSize,
-                "the engaged seat is not the shared size — \(frames)")
+                "the mark changed size — \(frames)")
         #expect(abs(muted.test_muteSeatFrame.midY - unmuted.test_muteSeatFrame.midY) <= 0.5,
-                "the engaged seat moved off centre — \(frames)")
+                "the mark moved off centre — \(frames)")
+
+        guard let engagedInk = muted.test_muteMarkInkFrame,
+              let restInk = unmuted.test_muteMarkInkFrame else {
+            Issue.record("the mute button rendered nothing to measure")
+            return
+        }
+        #expect(abs(engagedInk.width - restInk.width) <= 1,
+                "the drawn square changed width on toggle — \(engagedInk) vs \(restInk)")
+        #expect(abs(engagedInk.height - restInk.height) <= 1,
+                "the drawn square changed height on toggle — \(engagedInk) vs \(restInk)")
     }
 
     // MARK: A live click, not just a host refresh
 
-    @Test func liveClickSwapsBothTheGlyphAndTheFillWithoutWaitingForApply() {
+    @Test func liveClickSwapsTheSymbolWithoutWaitingForApply() {
         defer { Tokens.test_increaseContrastOverride = nil }
         Tokens.test_increaseContrastOverride = false
         let row = DeviceRowView(device: makeDevice(isMuted: false))
         row.apply(makeDevice(isMuted: false), selected: true, controllable: true)
-        #expect(row.test_muteGlyphIsSymbol(Self.restSymbol))
+        #expect(row.test_muteDrawsRestSymbol)
 
         row.test_toggleMute(true)
-        #expect(row.test_muteGlyphIsSymbol(Self.engagedSymbol), "the click must land the slash immediately")
         #expect(row.test_mutePillIsMutedHue, "the click must land the fill immediately")
 
         row.test_toggleMute(false)
-        #expect(row.test_muteGlyphIsSymbol(Self.restSymbol), "unmuting must put the plain speaker back")
+        #expect(row.test_muteDrawsRestSymbol, "unmuting must put the outline square back")
         #expect(!row.test_mutePillIsMutedHue, "unmuting must clear the fill")
     }
 
@@ -152,6 +185,18 @@ extension SerializedSharedState {
     /// which wear one mute language — and a THIRD consumer is a design
     /// decision, not a refactor, so it fails here first.
     @Test func theMutedHueOnlyDressesTheTwoMuteButtons() throws {
+        try expectTokenIsFencedTo("Tokens.Color.muted",
+                                  ["DeviceRowView.swift", "MainOutRowView.swift"])
+    }
+
+    /// `Tokens.Color.equalizer` is fenced the same way, to its one consumer:
+    /// the device row's engaged Equalizer door.
+    @Test func theEqualizerHueOnlyDressesTheEqualizerDoor() throws {
+        try expectTokenIsFencedTo("Tokens.Color.equalizer", ["DeviceRowView.swift"])
+    }
+
+    private func expectTokenIsFencedTo(_ token: String, _ expected: Set<String>,
+                                       sourceLocation: SourceLocation = #_sourceLocation) throws {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // AudioutCoreTests
             .deletingLastPathComponent()   // Tests
@@ -166,14 +211,15 @@ extension SerializedSharedState {
             guard !url.path.hasSuffix("/Tokens.swift"),
                   let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
             for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated()
-            where line.contains("Tokens.Color.muted") {
+            where line.contains(token) {
                 callSites.append("\(url.lastPathComponent):\(index + 1)")
             }
         }
 
         let files = Set(callSites.map { $0.split(separator: ":").first.map(String.init) ?? $0 })
-        #expect(files == ["DeviceRowView.swift", "MainOutRowView.swift"],
-                "Tokens.Color.muted is reserved for the two engaged mute buttons; found: \(callSites)")
+        #expect(files == expected,
+                "\(token) is reserved for \(expected.sorted()); found: \(callSites)",
+                sourceLocation: sourceLocation)
     }
 }
 

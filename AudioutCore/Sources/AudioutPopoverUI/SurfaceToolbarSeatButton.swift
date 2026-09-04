@@ -34,25 +34,70 @@ enum SurfaceToolbarSeat {
     /// the pill rather than as a second pill or a separate seat.
     static let cornerRadius: CGFloat = Tokens.Layout.Radius.control
 
-    /// One tab's fixed hit area, and the size of the highlight drawn behind
-    /// it. Fixed, and icon-only, so the strip's width cannot change with the
-    /// selection, the appearance or the language — which is what would sweep
-    /// the tabs behind the overflow chevron, and primary navigation cannot
-    /// live behind a chevron.
+    /// One COLLAPSED tab's hit area, and the size of the highlight drawn
+    /// behind it. Two of the three tabs are always this size; the current one
+    /// grows to the right of it to show its name (`tabWidth`).
     static let size = NSSize(width: 30, height: 26)
+
+    /// The gap after a revealed name, between the last letter and the end of
+    /// the highlight it sits in. Mirrors the ~7.5 pt the glyph already has on
+    /// its own left, so an expanded tab is padded evenly.
+    static let nameTrailingPadding: CGFloat = 10
+
+    /// The HARD ceiling on a revealed name, whatever language it is in. A name
+    /// longer than this truncates with an ellipsis rather than widening the
+    /// strip, which is the whole reason names could come back at all: three
+    /// translated labels on three tabs is what swept the tabs into the
+    /// overflow chevron on 2026-09-03, and primary navigation cannot live
+    /// behind a chevron.
+    ///
+    /// 120 pt is about two and a half times the widest English name: measured
+    /// at `Tokens.Font.captionMedium`, "Mixer" takes 34 pt, "Groups" 43 and
+    /// "Settings" 49. A translation would have to be well over twice as wide
+    /// as "Settings" before it even reached the ceiling — and reaching it
+    /// costs nothing, because the arithmetic does not depend on any of those
+    /// numbers: only ONE tab is ever expanded, so the widest the strip can be
+    /// is `widestCapsuleWidth` plus Pin, 226 + 30 = 256 pt against a fixed
+    /// 653 pt surface.
+    /// `SurfaceToolbarTests.theStripCannotOutgrowTheSurfaceInAnyLanguage`
+    /// asserts that with a name no language could produce.
+    static let maxNameWidth: CGFloat = 120
+
+    /// The name's face: 11 pt medium, the caption voice the popover's own
+    /// section sub-headers use. Small enough to sit beside a 15 pt glyph
+    /// without competing with it, heavy enough to hold at that size.
+    static var nameFont: NSFont { Tokens.Font.captionMedium }
+
+    /// One tab's width with `nameWidth` points of name revealed — the glyph
+    /// keeps its own collapsed slot and the name is added to the right of it,
+    /// so revealing a name never moves the glyph.
+    static func tabWidth(nameWidth: CGFloat) -> CGFloat {
+        nameWidth <= 0 ? size.width : size.width + nameWidth + nameTrailingPadding
+    }
 
     /// The gap between the capsule's edge and the tabs inside it, on all four
     /// sides. It is what keeps a selected end tab's highlight from touching
     /// the pill's rounded end.
     static let capsulePadding: CGFloat = 3
 
-    /// The capsule holding all three tabs. Derived from the three fixed tabs,
-    /// so it is fixed too: the highlight moving cannot resize it, and nothing
-    /// about the capsule reflows when the selection moves.
+    /// The capsule holding all three tabs with every one of them COLLAPSED —
+    /// the floor its width can never go below, and its height in every state.
     static var capsuleSize: NSSize {
         NSSize(width: size.width * 3 + capsulePadding * 2,
                height: size.height + capsulePadding * 2)
     }
+
+    /// The capsule's width with one tab showing `nameWidth` points of name.
+    /// At most ONE tab is ever expanded, so one name is all this ever adds.
+    static func capsuleWidth(nameWidth: CGFloat) -> CGFloat {
+        capsuleSize.width + (nameWidth <= 0 ? 0 : nameWidth + nameTrailingPadding)
+    }
+
+    /// The widest the capsule can get in ANY language: two collapsed tabs plus
+    /// one expanded to the name ceiling. The guard that keeps the strip out of
+    /// the overflow chevron is this number, not the length of the English
+    /// words — a name past the ceiling truncates instead of pushing.
+    static var widestCapsuleWidth: CGFloat { capsuleWidth(nameWidth: maxNameWidth) }
 
     /// Half the capsule's height, so the capsule reads as a pill.
     static var capsuleCornerRadius: CGFloat { capsuleSize.height / 2 }
@@ -172,6 +217,16 @@ final class SurfaceToolbarSeatCell: NSButtonCell {
         Self.seatPath(in: frame).fill()
     }
 
+    /// The glyph stays in the tab's COLLAPSED slot however wide the seat grows,
+    /// so revealing a name opens space to the right of the icon instead of
+    /// sliding the icon along with it. Stock `.imageOnly` centres the image in
+    /// the whole cell, which would drift every glyph as its own name appeared.
+    override func drawImage(_ image: NSImage, withFrame frame: NSRect, in controlView: NSView) {
+        let slot = NSRect(x: controlView.bounds.minX, y: frame.minY,
+                          width: SurfaceToolbarSeat.size.width, height: frame.height)
+        super.drawImage(image, withFrame: slot, in: controlView)
+    }
+
     override func drawFocusRingMask(withFrame cellFrame: NSRect, in controlView: NSView) {
         Self.seatPath(in: cellFrame).fill()
     }
@@ -203,6 +258,33 @@ final class SurfaceToolbarSeatButton: NSButton {
     private var hoverTrackingArea: NSTrackingArea?
     private var isTab = false
 
+    /// The name, drawn to the right of the glyph and revealed by the seat
+    /// growing past it. It is NOT an accessibility element: the button already
+    /// speaks this exact string as its accessibility label, and a second copy
+    /// inside the radio button would make VoiceOver say it twice.
+    private let nameLabel = NSTextField(labelWithString: "")
+
+    /// The seat's own width — the ONE value the reveal animates. Held so
+    /// `SurfaceToolbarSeat.tabWidth` can be written into it.
+    private var widthConstraint: NSLayoutConstraint!
+
+    /// The name's own width, pinned to the clamped measurement so the letters
+    /// keep their shape while the seat slides open past them.
+    private var nameLabelWidth: NSLayoutConstraint?
+
+    /// How much room this tab's name needs, already clamped to
+    /// `SurfaceToolbarSeat.maxNameWidth`. Zero until `configure` sets a name.
+    private(set) var nameWidth: CGFloat = 0
+
+    /// Whether the name is showing. The three tabs are one radio group and the
+    /// capsule expands only for the current screen, so at most one is `true`.
+    private(set) var isNameRevealed = false
+
+    /// What re-lays-itself-out on every tick of a reveal — the capsule, which
+    /// has to re-measure and let the toolbar re-place it as this seat grows.
+    /// Weak, the same contract `FoldAnimator` holds its followers under.
+    weak var revealFollower: (any FoldFollowing)?
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         commonInit()
@@ -224,11 +306,39 @@ final class SurfaceToolbarSeatButton: NSButton {
         title = ""
         imagePosition = .imageOnly
         translatesAutoresizingMaskIntoConstraints = false
+        // The name is parked OUTSIDE a collapsed seat's bounds and clipped
+        // away, so growing the seat wipes it into view instead of squeezing
+        // the letters open. Without this it would be drawn in full beside a
+        // 30 pt tab, spilling across its neighbour.
+        clipsToBounds = true
+
+        nameLabel.font = SurfaceToolbarSeat.nameFont
+        nameLabel.lineBreakMode = .byTruncatingTail
+        nameLabel.maximumNumberOfLines = 1
+        nameLabel.setAccessibilityElement(false)
+        nameLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(nameLabel)
+
+        widthConstraint = widthAnchor.constraint(equalToConstant: SurfaceToolbarSeat.size.width)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: SurfaceToolbarSeat.size.width),
+            widthConstraint,
             heightAnchor.constraint(equalToConstant: SurfaceToolbarSeat.size.height),
+            // Pinned to the seat's leading edge past the glyph's own slot, and
+            // never to its trailing edge: a trailing pin would let Auto Layout
+            // compress the name as the seat grows, so the reveal would read as
+            // letters unsqueezing rather than a name sliding out.
+            nameLabel.leadingAnchor.constraint(equalTo: leadingAnchor,
+                                               constant: SurfaceToolbarSeat.size.width),
+            nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
         refreshEngagedAppearance()
+    }
+
+    /// The whole seat is one control, including the part of it the name
+    /// occupies: without this a click that lands on the letters would hit the
+    /// text field and go nowhere.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        super.hitTest(point) == nil ? nil : self
     }
 
     /// The `.push` bezel style carries AppKit's own alignment-rect insets,
@@ -248,7 +358,52 @@ final class SurfaceToolbarSeatButton: NSButton {
         self.toolTip = toolTip
         setAccessibilityLabel(label)
         if isTab { setAccessibilityRole(.radioButton) }
+        // Only a tab has a name to reveal. Pin's own label already flips
+        // between "Pin" and "Unpin" to say what it is, and it stands outside
+        // the capsule, so nothing about it expands.
+        setName(isTab ? label : "")
         refreshEngagedAppearance()
+    }
+
+    /// Measure the name once, clamp it, and hold that width — the reveal then
+    /// animates between two numbers instead of re-measuring text on every
+    /// frame. A name past the ceiling truncates, which is what makes the
+    /// strip's width independent of the language it is read in.
+    private func setName(_ name: String) {
+        nameLabel.stringValue = name
+        nameLabelWidth?.isActive = false
+        guard !name.isEmpty else {
+            nameWidth = 0
+            widthConstraint.constant = SurfaceToolbarSeat.tabWidth(nameWidth: 0)
+            return
+        }
+        nameWidth = min(ceil(nameLabel.fittingSize.width), SurfaceToolbarSeat.maxNameWidth)
+        let width = nameLabel.widthAnchor.constraint(equalToConstant: nameWidth)
+        width.isActive = true
+        nameLabelWidth = width
+        widthConstraint.constant = SurfaceToolbarSeat.tabWidth(
+            nameWidth: isNameRevealed ? nameWidth : 0)
+    }
+
+    /// Show or hide this tab's name by growing or shrinking the seat itself.
+    ///
+    /// Travel runs on `FoldAnimator` — the app's ONE reveal clock, at the one
+    /// `Tokens.Motion.collapseRevealDuration` every other clip in the app
+    /// opens at, and the place Reduce Motion is already answered: under it the
+    /// driver settles the width synchronously in this caller's own turn, so
+    /// the name is simply there, with no frame of travel. Passing
+    /// `animated: false` is the same terminal state without going near the
+    /// clock, which is what the strip is built with.
+    func setNameRevealed(_ revealed: Bool, animated: Bool) {
+        guard revealed != isNameRevealed else { return }
+        isNameRevealed = revealed
+        let target = SurfaceToolbarSeat.tabWidth(nameWidth: revealed ? nameWidth : 0)
+        guard animated else {
+            widthConstraint.constant = target
+            revealFollower?.foldAnimatorDidTick()
+            return
+        }
+        FoldAnimator.shared.animate(widthConstraint, to: target, follower: revealFollower) {}
     }
 
     /// The current screen, or Pin while pinned: the drawn seat, the glyph's
@@ -263,6 +418,8 @@ final class SurfaceToolbarSeatButton: NSButton {
 
     private func refreshEngagedAppearance() {
         contentTintColor = SurfaceToolbarSeat.glyphTint(isEngaged: seatCell.isEngaged)
+        // The name is ink on the same seat as the glyph, so it steps with it.
+        nameLabel.textColor = SurfaceToolbarSeat.glyphTint(isEngaged: seatCell.isEngaged)
         setAccessibilityValue(NSNumber(value: seatCell.isEngaged))
         setAccessibilitySelected(seatCell.isEngaged)
         needsDisplay = true
@@ -299,6 +456,21 @@ final class SurfaceToolbarSeatButton: NSButton {
         get { seatCell.isHighlighted }
         set { seatCell.isHighlighted = newValue; needsDisplay = true }
     }
+
+    /// The name this seat CARRIES, whether or not the seat is currently wide
+    /// enough to show it. Empty on Pin.
+    var test_name: String { nameLabel.stringValue }
+
+    /// How much of the name the seat's own bounds actually let through —
+    /// 0 while collapsed, the full clamped name width once open, and a real
+    /// in-between number mid-travel. This is the drawn result, not the intent.
+    var test_visibleNameWidth: CGFloat {
+        max(0, min(nameWidth,
+                   widthConstraint.constant - SurfaceToolbarSeat.size.width))
+    }
+
+    /// The seat's live width, which is what the reveal animates.
+    var test_width: CGFloat { widthConstraint.constant }
 }
 
 /// The ONE capsule the three screen tabs sit in: a single pill-shaped surface
@@ -315,10 +487,11 @@ final class SurfaceToolbarSeatButton: NSButton {
 /// current screen lighter than its surroundings in dark mode without any
 /// per-appearance branch.
 ///
-/// Its size is derived from three fixed tabs plus fixed padding, so the
-/// highlight moving cannot resize it and the selection moving cannot reflow
-/// it. Nothing here is behind `#available`: the package deploys to 14.2.
-final class SurfaceToolbarTabCapsule: NSView {
+/// Its HEIGHT is fixed and its width is derived from the three tabs, so it is
+/// exactly as wide as they are and no wider: the highlight moving cannot
+/// resize it, and only a tab opening to show its name can. Nothing here is
+/// behind `#available`: the package deploys to 14.2.
+final class SurfaceToolbarTabCapsule: NSView, FoldFollowing {
 
     private let tabs: [SurfaceToolbarSeatButton]
 
@@ -337,13 +510,16 @@ final class SurfaceToolbarTabCapsule: NSView {
 
         let padding = SurfaceToolbarSeat.capsulePadding
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: SurfaceToolbarSeat.capsuleSize.width),
+            // No width constraint: the pill is exactly as wide as the three
+            // tabs plus its padding, so the one that is open pushes it out and
+            // nothing else can. Height stays pinned — a reveal is horizontal.
             heightAnchor.constraint(equalToConstant: SurfaceToolbarSeat.capsuleSize.height),
             row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
             row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
             row.topAnchor.constraint(equalTo: topAnchor, constant: padding),
             row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -padding),
         ])
+        for tab in tabs { tab.revealFollower = self }
 
         // Three radio buttons in a group is what this is, so say so: VoiceOver
         // then announces the set the tabs belong to before their own names.
@@ -352,6 +528,18 @@ final class SurfaceToolbarTabCapsule: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unused") }
+
+    /// One tick of a name reveal. The pill is repainted at its new width and
+    /// the toolbar re-places the item around it, so the whole strip travels on
+    /// the tab's single animated width rather than on a clock of its own —
+    /// `FoldAnimator`'s standing rule that a reveal has exactly one animated
+    /// value and everything else is laid out FROM it.
+    func foldAnimatorDidTick() {
+        invalidateIntrinsicContentSize()
+        needsDisplay = true
+        superview?.needsLayout = true
+        window?.layoutIfNeeded()
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         // Both accessibility flags read live, every draw — the app never

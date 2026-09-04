@@ -207,6 +207,13 @@ let package = Package(
         .target(
             name: "AudioutSharedUI",
             dependencies: ["AudioutCore"],
+            // `Resources/Symbols.xcassets` is EXCLUDED, not declared. SwiftPM
+            // never runs `actool`, so a resource rule would copy the directory
+            // in verbatim and every custom symbol would resolve to nil at
+            // runtime with no build error to notice. `scripts/make-app.sh`
+            // compiles it into `Contents/Resources/Assets.car` instead, beside
+            // the wordmark font, and the app reads it through `Bundle.main`.
+            exclude: ["Resources/Symbols.xcassets"],
             resources: [.copy("Resources/Audiout-Hero-1024.svg")],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),

@@ -176,13 +176,12 @@ import AudioutCore
         #expect(row.test_routeArmed)
     }
 
-    // MARK: S3 — engaged mute pill (drawing only)
+    // MARK: S3 — engaged mute fill (drawing only)
 
     @Test func mutePillEngagesViaApply() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true, controllable: true)
-        #expect(row.test_isMutePillEngaged, "muted: a filled pill behind the slashed glyph")
-        assertSameHue(row.test_muteTintColor, Tokens.Color.panel, "muted knocks the glyph out in `panel`")
+        #expect(row.test_isMutePillEngaged, "muted: the filled square with white marks")
     }
 
     @Test func mutePillDisengagesOnUnmute() {
@@ -191,8 +190,8 @@ import AudioutCore
         #expect(row.test_isMutePillEngaged)
 
         row.apply(makeDevice(isMuted: false), selected: true, controllable: true)
-        #expect(!(row.test_isMutePillEngaged), "unmuting removes the pill")
-        #expect(row.test_muteTintColor == Tokens.Color.label2)
+        #expect(!(row.test_isMutePillEngaged), "unmuting removes the fill")
+        #expect(row.test_muteDrawsRestSymbol)
     }
 
     @Test func mutePillEngagesInstantlyOnLiveClick() {
@@ -201,7 +200,7 @@ import AudioutCore
         #expect(!(row.test_isMutePillEngaged))
 
         row.test_toggleMute(true)
-        #expect(row.test_isMutePillEngaged, "the live click lands the pill without waiting for apply")
+        #expect(row.test_isMutePillEngaged, "the live click lands the fill without waiting for apply")
 
         row.test_toggleMute(false)
         #expect(!(row.test_isMutePillEngaged))

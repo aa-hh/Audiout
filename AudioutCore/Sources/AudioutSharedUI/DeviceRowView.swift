@@ -302,44 +302,20 @@ public final class DeviceRowView: NSView {
     /// Mounted only when ``supportsEqualizer``; the layout reserves its slot on
     /// every row either way, so the name truncates identically across rows.
     private let eqButton = NSButton()
-    /// The shaped door's gold seat, mounted behind ``eqButton`` and hidden
-    /// while the curve is flat.
-    ///
-    /// It is its OWN view rather than a fill on the button's backing layer
-    /// because an `.accessoryBar` `NSButton` frames LARGER than the alignment
-    /// rect its constraints size: the door's 24×24 constraint pair produces a
-    /// measured 24.5 × 30.5 frame (alignment insets top 4, bottom 2.5, right
-    /// 0.5), so painting that layer would put a 30 pt gold slab in a 24 pt
-    /// slot, sat 1.5 pt high of centre. ``muteSeatView`` is a separate view
-    /// for a second reason — see it.
-    private let eqSeatView = NSView()
-    /// The muted button's seat — the same rounded rectangle ``eqSeatView``
-    /// draws, in ``Tokens/Color/muted`` instead of gold, hidden while the row
-    /// is unmuted. Its own view for the same two reasons the door's is: a
-    /// fill on the button's backing layer takes the button's frame, and this
-    /// button carries no height constraint, so the old pill changed size
-    /// every time the glyph slashed.
-    private let muteSeatView = NSView()
-    /// The door's glyph — three band faders, the equalizer's own picture.
-    /// Named because ``updateEQButton`` re-makes the image to change its SIZE
-    /// and WEIGHT and must ask for the same symbol the builder mounted.
-    private static let eqSymbolName = "slider.horizontal.3"
-    /// The mute button's at-rest glyph — an ordinary speaker with waves.
-    private static let muteRestSymbolName = "speaker.wave.2.fill"
-    /// The mute button's ENGAGED glyph — the picture of silence. `.fill` to
-    /// keep the weight of ``muteRestSymbolName``; both landed in macOS 10.15
-    /// and 11, well under the package's macOS 14.2 floor. ``updateMuteTint()``
-    /// swaps between the two.
-    private static let muteEngagedSymbolName = "speaker.slash.fill"
-    /// The point size every accessory glyph on this row is drawn at.
+    /// The mute button's at-rest symbol — the outline square.
+    private static let muteRestSymbolName = RowAccessorySymbol.muteRest
+    /// The mute button's ENGAGED symbol — the filled square. The mark inside
+    /// is the same slashed speaker either way; what changes is the square.
+    private static let muteEngagedSymbolName = RowAccessorySymbol.muteEngaged
+    /// The Equalizer door's at-rest symbol — the outline square.
+    private static let eqRestSymbolName = RowAccessorySymbol.equalizerRest
+    /// The Equalizer door's ENGAGED symbol — the filled square.
+    private static let eqEngagedSymbolName = RowAccessorySymbol.equalizerEngaged
+    /// The point size every accessory glyph on this row that is NOT one of the
+    /// four custom symbols is drawn at. The symbols carry their own
+    /// (``RowAccessorySymbol/pointSize``), larger, because their enclosing
+    /// square is the whole control rather than a mark inside a seat.
     private static let accessoryGlyphPointSize: CGFloat = 13
-    /// The SHAPED door's glyph — "just a bit bigger" (Alec, 2026-09-04). It
-    /// grows inside the unchanged 24 pt slot, so
-    /// ``PopoverColumnGrid/eqToMuteGap`` never moves; the seat's own height
-    /// carries the padding (see ``PopoverColumnGrid/engagedSeatSize``).
-    private static let eqShapedGlyphPointSize: CGFloat = 15
-    /// Stroke width of the shaped door's dark border.
-    private static let eqSeatBorderWidth: CGFloat = 1
 
     /// The under-name VU meter (Warm Signal v4 §Call-1), mounted inside the
     /// identity stack only when `showsMeter` — the mixer window leaves it
@@ -911,145 +887,100 @@ public final class DeviceRowView: NSView {
         layer?.add(transition, forKey: Self.brightenTransitionKey)
     }
 
-    /// Updates the mute button's engaged treatment for the current
-    /// `muteButton.state`: `.on` (muted) draws a SLASHED speaker knocked out of
-    /// an OPAQUE ``Tokens/Color/muted`` seat (drawing only, on ``muteSeatView``
-    /// behind the button — behavior/keyboard/VoiceOver untouched); `.off`
-    /// reverts to the at-rest speaker in the neutral secondary tint, with no
-    /// seat. Called from `apply` (model refresh) AND `muteToggled` (a live
-    /// click) so both paths land the same treatment instantly, and from
-    /// `viewDidChangeEffectiveAppearance` (the seat fill is a static CGColor).
+    /// Updates the mute button for the current `muteButton.state`. `.on`
+    /// (muted) draws ``RowAccessorySymbol/muteEngaged`` — the FILLED square,
+    /// its enclosure in an opaque ``Tokens/Color/muted`` and the speaker and
+    /// slash inside it in white. `.off` draws
+    /// ``RowAccessorySymbol/muteRest``, the same mark as an outline square in
+    /// one neutral ink. Drawing only: behavior, keyboard and VoiceOver are
+    /// untouched.
     ///
-    /// Neither half of that treatment may go back to what it replaced — an
-    /// `engagedChrome` capsule at ``PopoverColumnGrid/mutePillFillAlpha``
-    /// behind an unslashed speaker, which drew a faint grey pill with an
-    /// ordinary speaker in it and read as exactly that (Alec, 2026-09-04: "the
-    /// active mute state does not look like any other mute state I have seen
-    /// in my life"). The slash retires the older "the icon never changes on
-    /// toggle" decision; `.fill` rather than plain `speaker.slash` keeps the
-    /// weight of the at-rest `speaker.wave.2.fill` it replaces, and collides
-    /// with nothing — `Device.Kind.symbolName` already avoids the `speaker.*`
-    /// family for the Bluetooth row icon for this reason. The fill is opaque
-    /// because a translucent tint of this hue cannot clear the 3:1 non-text
-    /// floor at any alpha; ``Tokens/Color/muted`` carries the measurements and
-    /// the reason a cool hue is the right direction.
+    /// Called from `apply` (model refresh) AND `muteToggled` (a live click) so
+    /// both paths land the treatment instantly, and from
+    /// `viewDidChangeEffectiveAppearance` — the palette bakes resolved colours
+    /// into the image, so a light/dark switch has to re-make it.
     ///
-    /// The glyph's own ink is ``Tokens/Color/panel``, the row's ground: the
-    /// mark reads as punched THROUGH the pill, and because `panel` is dark in
-    /// dark and light in light it flips polarity with the fill for free
-    /// (6.17:1 at worst). `inkOnFill` cannot do this — it is authored for dark
-    /// ink on the gold family and turns white under light + Increase Contrast.
-    ///
-    /// The Equalizer door 6 pt leading is now the SAME shape — one
-    /// ``PopoverColumnGrid/engagedSeatSize`` rounded rectangle at
-    /// ``PopoverColumnGrid/engagedSeatCornerRadius``, drawn on its own seat
-    /// view (Alec, 2026-09-04: the two engaged states must be "the same object
-    /// in two colours"). Hue and glyph tell the two controls apart: mute is
-    /// cool and slashed, the door is gold, bordered and oversized.
+    /// WHAT IT MAY NOT GO BACK TO. Two treatments are retired here, and
+    /// neither may return. The first was an `engagedChrome` capsule at
+    /// ``PopoverColumnGrid/mutePillFillAlpha`` behind an unslashed speaker — a
+    /// faint grey pill that read as nothing (Alec, 2026-09-04: "the active
+    /// mute state does not look like any other mute state I have seen in my
+    /// life"). The second was its replacement, an opaque `muted` rounded
+    /// rectangle painted on a sibling `NSView` behind a system
+    /// `speaker.slash.fill`: correct on measurement, but two views and two
+    /// hand-pinned sizes to draw one mark. The enclosing square belongs to the
+    /// symbol now.
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
-        muteButton.image = NSImage(
-            systemSymbolName: engaged ? Self.muteEngagedSymbolName : Self.muteRestSymbolName,
-            accessibilityDescription: nil)?
-            .withSymbolConfiguration(Self.accessoryGlyphConfig)
-        muteButton.contentTintColor = engaged ? Tokens.Color.panel : Tokens.Color.label2
-        muteSeatView.isHidden = !engaged
-        muteSeatView.wantsLayer = true
-        muteSeatView.layer?.cornerRadius = PopoverColumnGrid.engagedSeatCornerRadius
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            muteSeatView.layer?.backgroundColor = Tokens.Color.muted.cgColor
-        }
+        muteButton.image = RowAccessorySymbol.image(
+            named: engaged ? Self.muteEngagedSymbolName : Self.muteRestSymbolName,
+            palette: engaged ? Self.engagedPalette(fill: Tokens.Color.muted, in: effectiveAppearance)
+                             : Self.restPalette(in: effectiveAppearance))
+        muteButton.setAccessibilityLabel(engaged ? "Unmute \(device.name)" : "Mute \(device.name)")
     }
 
-    /// The Equalizer door's active MARK: when this speaker's curve is not
-    /// flat the door draws a GOLD SEAT with a dark border, and its glyph
-    /// grows a size and a weight step and flips to the dark ink that sits on
-    /// gold everywhere else in the app. At rest there is no seat at all — a
-    /// `label2` glyph at the accessory size, unchanged.
+    /// The Equalizer door's active MARK: a shaped curve draws
+    /// ``RowAccessorySymbol/equalizerEngaged`` — the FILLED square, its
+    /// enclosure in an opaque ``Tokens/Color/equalizer`` and the two band
+    /// sliders inside it in white. A flat curve draws
+    /// ``RowAccessorySymbol/equalizerRest``, the outline square in the same
+    /// neutral ink mute wears at rest. Mute sits 6 pt trailing wearing the
+    /// same square: the two engaged marks are one object in two colours
+    /// (Alec, 2026-09-04), and hue alone says which control it is.
     ///
-    /// It was a bare gold GLYPH until 2026-09-04, and that failed on
-    /// measurement: gold measures 3.64:1 on `canvas` in light where the
-    /// at-rest `label2` measures 5.97:1, so the "on" state read 39% DIMMER
-    /// than the "off" state; dark separated the two by 1.22:1; and under the
-    /// Subtle accent setting the relationship inverted in every appearance. A
-    /// hue swap cannot carry this state, so a fill carries it instead.
+    /// WHY GREEN AND NOT GOLD. The door wore ``Tokens/Color/goldText`` until
+    /// the symbols landed, and gold means "audio is flowing here" everywhere
+    /// else — including the live wash this row draws behind the door. One hue
+    /// cannot carry both. ``Tokens/Color/equalizer`` carries the measurements
+    /// and the separation from ``Tokens/Color/muted`` beside it.
     ///
-    /// The seat is a DELIBERATE reversal of the rule this comment used to
-    /// state. It said: no border, because the mute button immediately
-    /// trailing already says "engaged" with a filled pill, so a second shape
-    /// for the same idea would give one row three vocabularies. Alec
-    /// overruled that on 2026-09-04, knowing mute sits 6 pt away — "when
-    /// clicked could we give it a black border with a gold fill? make it just
-    /// a bit bigger". Later that day he took the reasoning one step further:
-    /// the two marks must be the SAME shape, "the same object in two
-    /// colours". So both now draw ``PopoverColumnGrid/engagedSeatSize`` at
-    /// ``PopoverColumnGrid/engagedSeatCornerRadius``, and what separates them
-    /// is hue, border and glyph — MUTE a borderless COOL seat
-    /// (``Tokens/Color/muted``, its slashed glyph the same size as at rest),
-    /// the DOOR an opaque gold seat with a 1 pt `inkOnFill` border and a
-    /// larger, heavier glyph in that same ink.
-    ///
-    /// WHY THE SEAT'S GOLD IS ``Tokens/Color/goldText`` AND NOT
-    /// ``Tokens/Color/gold``. `gold` is authored as a fill on the DARK
-    /// ground, where it measures 7.36:1 at worst against the three grounds
-    /// this seat sits on. In LIGHT the same value is a pale wash on paper:
-    /// 3.64:1 on the row at rest, 3.20:1 on the gold live wash and 2.91:1 on
-    /// the neutral hover wash — under the 3:1 floor, and Alec read it as
-    /// "too hard to see" before anyone measured it. `goldText` is the same
-    /// accent voice deepened for light and IDENTICAL to `gold` in dark
-    /// (same hexes), so the dark door — which was right — does not move a
-    /// pixel, and the light one goes to 5.66 / 4.96 / 4.52:1.
-    ///
-    /// One thing the mark still deliberately is NOT: `partySignal`. That
-    /// magenta is the alignment wizard's REFERENCE-LIGHT colour, meaning
-    /// "this is the other speaker in the run", and spending it here would make
-    /// one hue carry two unrelated meanings.
-    ///
-    /// The seat's fill and border are static `CGColor`s on ``eqSeatView``'s
-    /// layer — the same discipline ``updateMuteTint()`` uses one method up,
-    /// re-stamped from the same callers (``apply`` and
-    /// ``viewDidChangeEffectiveAppearance``). See ``eqSeatView`` for why the
-    /// seat is not painted on the button's own layer.
+    /// It is still deliberately NOT `partySignal`: that magenta is the
+    /// alignment wizard's reference-light colour, meaning "this is the other
+    /// speaker in the run".
     private func updateEQButton() {
         guard supportsEqualizer else { return }
         eqButton.setAccessibilityLabel("Equalizer for \(device.name)")
         eqButton.setAccessibilityValue(isEQShaped ? "Shaped" : "Flat")
-        eqButton.contentTintColor = isEQShaped ? Tokens.Color.inkOnFill : Tokens.Color.label2
-        eqSeatView.isHidden = !isEQShaped
-        eqSeatView.wantsLayer = true
-        eqSeatView.layer?.cornerRadius = PopoverColumnGrid.engagedSeatCornerRadius
-        eqSeatView.layer?.borderWidth = Self.eqSeatBorderWidth
-        // Border and glyph are ONE ink, resolved in the row's own appearance.
-        // The border used to be pinned under `.darkAqua` because `inkOnFill`
-        // turns white under light + Increase Contrast, and a white outline
-        // around a PALE gold seat on light paper is no outline at all. The
-        // seat is `goldText` now, which in light + Increase Contrast is
-        // `#64480C` — a dark chip on light paper, where white is the right
-        // outline and the pinned dark ink measured 2.21:1 on it, under the
-        // 3:1 edge floor. The pin's reason went with the pale gold, so the
-        // pin went too.
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            eqSeatView.layer?.backgroundColor = Tokens.Color.goldText.cgColor
-            eqSeatView.layer?.borderColor = Tokens.Color.inkOnFill.cgColor
-        }
-        // The symbol image is re-made rather than re-tinted: size and weight
-        // live in the `SymbolConfiguration`, not in the tint.
-        eqButton.image = NSImage(systemSymbolName: Self.eqSymbolName,
-                                 accessibilityDescription: nil)?
-            .withSymbolConfiguration(isEQShaped ? Self.eqShapedGlyphConfig
-                                                : Self.accessoryGlyphConfig)
+        eqButton.image = RowAccessorySymbol.image(
+            named: isEQShaped ? Self.eqEngagedSymbolName : Self.eqRestSymbolName,
+            palette: isEQShaped
+                ? Self.engagedPalette(fill: Tokens.Color.equalizer, in: effectiveAppearance)
+                : Self.restPalette(in: effectiveAppearance))
     }
 
-    /// The shaped door's glyph configuration. Nothing asserts this constant
-    /// itself — a test that reads it back would agree with the drawing by
-    /// construction; ``test_eqGlyphInkFrame`` measures what it actually
-    /// paints instead.
-    private static let eqShapedGlyphConfig = NSImage.SymbolConfiguration(
-        pointSize: eqShapedGlyphPointSize, weight: .semibold)
-    /// The configuration EVERY accessory glyph on this row is drawn with —
-    /// the mute button in both its states, the Equalizer door at rest, and the
-    /// builder that mounts them. One definition, so a glyph the row swaps at
-    /// runtime cannot drift in size or weight from the one it replaced.
+    /// The engaged palette: `fill` on the symbol's enclosing square, WHITE on
+    /// the marks inside it. Both are resolved in the row's own appearance
+    /// before they reach the palette — a `SymbolConfiguration` keeps the
+    /// `NSColor` it is handed, and a dynamic one would resolve against
+    /// whatever appearance happens to be current when the image is drawn.
+    ///
+    /// White rather than ``Tokens/Color/inkOnFill``: that token is authored as
+    /// dark ink for the gold family and turns white only under light +
+    /// Increase Contrast, so it would flip the marks' polarity on a fill that
+    /// is now the SAME value in both appearances.
+    private static func engagedPalette(fill: NSColor, in appearance: NSAppearance) -> [NSColor] {
+        var resolved = fill
+        appearance.performAsCurrentDrawingAppearance { resolved = fill.usingColorSpace(.sRGB) ?? fill }
+        return [resolved, .white]
+    }
+
+    /// The at-rest palette: ONE ink over every layer, so the outline square
+    /// and the mark inside it read as a single drawn line. `label2` is the
+    /// row's accessory ink — light warm grey in dark, dark warm brown in
+    /// light — and the contrast suites already hold it to the body floor on
+    /// every ground this row puts behind it.
+    private static func restPalette(in appearance: NSAppearance) -> [NSColor] {
+        var resolved = Tokens.Color.label2
+        appearance.performAsCurrentDrawingAppearance {
+            resolved = Tokens.Color.label2.usingColorSpace(.sRGB) ?? Tokens.Color.label2
+        }
+        return [resolved]
+    }
+
+    /// The configuration every accessory glyph on this row that is NOT one of
+    /// the four custom symbols is drawn with. One definition, so a glyph the
+    /// row swaps at runtime cannot drift in size or weight from the one it
+    /// replaced.
     private static let accessoryGlyphConfig = NSImage.SymbolConfiguration(
         pointSize: accessoryGlyphPointSize, weight: .regular)
 
@@ -1635,7 +1566,7 @@ public final class DeviceRowView: NSView {
                                   action: #selector(muteToggled(_:)))
         // Same accessory voice as mute, but a plain push button: this one is a
         // DOOR (it opens the Groups screen's equalizer), never a toggle.
-        configureAccessoryButton(eqButton, symbol: Self.eqSymbolName,
+        configureAccessoryButton(eqButton, symbol: Self.eqRestSymbolName,
                                  action: #selector(equalizerButtonClicked(_:)))
         eqButton.setButtonType(.momentaryChange)
         eqButton.title = ""          // a door, not a labelled control
@@ -1678,20 +1609,8 @@ public final class DeviceRowView: NSView {
         addSubview(identityStack)
         addSubview(slider)
         addSubview(readoutLabel)
-        // Seat first: subview order is z-order, and the seat draws BEHIND the
-        // mute glyph — same arrangement the Equalizer door uses below.
-        muteSeatView.translatesAutoresizingMaskIntoConstraints = false
-        muteSeatView.isHidden = true
-        addSubview(muteSeatView)
         addSubview(muteButton)
-        if supportsEqualizer {
-            // Seat first: subview order is z-order, and the seat draws BEHIND
-            // the door's glyph.
-            eqSeatView.translatesAutoresizingMaskIntoConstraints = false
-            eqSeatView.isHidden = true
-            addSubview(eqSeatView)
-            addSubview(eqButton)
-        }
+        if supportsEqualizer { addSubview(eqButton) }
         // FEED column (v4.1 item 3): only a bus row has the free trailing slot.
         if busActive {
             addSubview(feedStack)
@@ -1751,17 +1670,6 @@ public final class DeviceRowView: NSView {
             muteButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.muteWidth),
             muteButton.trailingAnchor.constraint(
                 equalTo: slider.leadingAnchor, constant: -PopoverColumnGrid.muteToSlider),
-
-            // The engaged seat: centred on the button, at its own fixed size,
-            // exactly like the Equalizer door's. The button's own frame tracks
-            // whichever speaker glyph is mounted, so a seat measured from it
-            // would change size on every toggle.
-            muteSeatView.centerXAnchor.constraint(equalTo: muteButton.centerXAnchor),
-            muteSeatView.centerYAnchor.constraint(equalTo: muteButton.centerYAnchor),
-            muteSeatView.widthAnchor.constraint(
-                equalToConstant: PopoverColumnGrid.engagedSeatSize.width),
-            muteSeatView.heightAnchor.constraint(
-                equalToConstant: PopoverColumnGrid.engagedSeatSize.height),
 
             slider.centerYAnchor.constraint(equalTo: centerYAnchor),
             slider.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.sliderWidth),
@@ -1905,20 +1813,6 @@ public final class DeviceRowView: NSView {
                 eqButton.centerYAnchor.constraint(equalTo: centerYAnchor),
                 eqButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.eqButtonWidth),
                 eqButton.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.eqButtonWidth),
-                // The gold seat is centred on the door's own alignment rect,
-                // at its own size — never on the button's larger frame. That
-                // is also where the cell draws the glyph: the button frames
-                // 24.5 × 30.5 around a 24 × 24 alignment rect, and the drawn
-                // ink lands within 0.25 pt of the alignment rect's centre,
-                // not the frame's (measured at 2x on a real button).
-                // `theShapedGlyphSitsInsideItsSeatWithRoomOnEverySide` holds
-                // the clearance this produces.
-                eqSeatView.centerXAnchor.constraint(equalTo: eqButton.centerXAnchor),
-                eqSeatView.centerYAnchor.constraint(equalTo: eqButton.centerYAnchor),
-                eqSeatView.widthAnchor.constraint(
-                    equalToConstant: PopoverColumnGrid.engagedSeatSize.width),
-                eqSeatView.heightAnchor.constraint(
-                    equalToConstant: PopoverColumnGrid.engagedSeatSize.height),
             ])
         }
 
@@ -2610,73 +2504,129 @@ public final class DeviceRowView: NSView {
     /// from the on-icon dot). Retained for the T-U8 reset test.
     public var test_iconTint: NSColor? { iconView.contentTintColor }
 
-    /// The mute button's current glyph tint — ``Tokens/Color/panel`` (knocked
-    /// out of the opaque pill) while muted, `label2` otherwise.
-    public var test_muteTintColor: NSColor? { muteButton.contentTintColor }
-    /// Whether the mute button's CURRENT glyph rasterises identically to
-    /// `symbolName` drawn at this row's accessory size and weight.
+    /// The opaque inks the MUTE button actually paints, most-used first —
+    /// the button rendered to a bitmap and its fully opaque pixels bucketed by
+    /// 8-bit sRGB value. Engaged, that is the enclosing square's fill and the
+    /// white marks inside it; at rest, one neutral ink.
     ///
-    /// A pixel comparison rather than a name lookup, for two reasons: an
-    /// `NSImage` built by `NSImage(systemSymbolName:)` reports `name()` as
-    /// `nil`, so there is nothing to read back; and comparing rasters also
-    /// pins the size and weight, so a glyph that silently grew or thinned
-    /// fails here too.
-    public func test_muteGlyphIsSymbol(_ symbolName: String) -> Bool {
-        guard let drawn = muteButton.image?.tiffRepresentation,
-              let reference = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
-                  .withSymbolConfiguration(Self.accessoryGlyphConfig)?.tiffRepresentation
-        else { return false }
-        return drawn == reference
+    /// Colours the drawing code applied are no evidence on their own: the
+    /// palette is baked into the image, the button re-tints nothing, and a
+    /// palette handed to the wrong layer still reads back correctly from the
+    /// configuration. This reads pixels.
+    public var test_muteDrawnInks: [NSColor] { drawnInks(of: muteButton) }
+
+    /// The same, for the Equalizer door.
+    public var test_eqDrawnInks: [NSColor] { drawnInks(of: eqButton) }
+
+    /// Every fully opaque colour `button` paints, most-used first, dropping
+    /// anything under 2% of the inked pixels — which is where a symbol's
+    /// antialiased edges land.
+    private func drawnInks(of button: NSButton) -> [NSColor] {
+        layoutSubtreeIfNeeded()
+        guard button.bounds.width > 0, button.bounds.height > 0,
+              let rep = button.bitmapImageRepForCachingDisplay(in: button.bounds)
+        else { return [] }
+        button.cacheDisplay(in: button.bounds, to: rep)
+        var counts: [Int: Int] = [:]
+        var opaque = 0
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                      c.alphaComponent > 0.99 else { continue }
+                opaque += 1
+                let key = (Int(c.redComponent * 255 + 0.5) << 16)
+                    | (Int(c.greenComponent * 255 + 0.5) << 8)
+                    | Int(c.blueComponent * 255 + 0.5)
+                counts[key, default: 0] += 1
+            }
+        }
+        guard opaque > 0 else { return [] }
+        return counts
+            .filter { CGFloat($0.value) / CGFloat(opaque) >= 0.02 }
+            .sorted { $0.value > $1.value }
+            .map {
+                NSColor(srgbRed: CGFloat(($0.key >> 16) & 0xFF) / 255,
+                        green: CGFloat(($0.key >> 8) & 0xFF) / 255,
+                        blue: CGFloat($0.key & 0xFF) / 255, alpha: 1)
+            }
     }
+
     /// Whether this row mounted the Equalizer door at all.
     public var test_hasEQButton: Bool { eqButton.superview != nil }
     public var test_eqButtonFrame: NSRect { eqButton.frame }
     public var test_eqButtonHasTitle: Bool { !eqButton.title.isEmpty }
-    /// The Equalizer door's not-flat mark: its glyph tint — `inkOnFill`, the
-    /// dark ink that sits on the gold seat, when shaped; `label2` at rest.
-    public var test_eqTintColor: NSColor? { eqButton.contentTintColor }
-    /// Whether the door CURRENTLY draws its gold seat — compares what is
-    /// stamped on the layer against `goldText` resolved in this view's own
-    /// appearance, so a test reads the drawn state rather than the intent.
-    /// `goldText`, not `gold`: same hexes in dark, deeper in light, where
-    /// `gold` measured under the 3:1 floor on the row's hover wash.
-    public var test_eqSeatIsGoldFilled: Bool {
-        !eqSeatView.isHidden
-            && stampedColor(eqSeatView.layer?.backgroundColor, matches: Tokens.Color.goldText)
+    /// Whether the door CURRENTLY draws its ENGAGED symbol — the filled
+    /// square with a ``Tokens/Color/equalizer`` enclosure and white marks.
+    /// A pixel comparison against the same symbol built from the same
+    /// palette, so the hook reads the drawn image rather than a flag.
+    public var test_eqDrawsEngagedSymbol: Bool {
+        matchesSymbol(eqButton.image, RowAccessorySymbol.equalizerEngaged,
+                      palette: Self.engagedPalette(fill: Tokens.Color.equalizer,
+                                                   in: effectiveAppearance))
     }
-    /// The seat's border exactly as STAMPED, in sRGB — `nil` while the seat
-    /// is hidden or unstroked. A caller pins the literal ink rather than
-    /// re-resolving `inkOnFill`, which would agree with the drawing code by
-    /// construction.
-    public var test_eqSeatBorderColor: NSColor? {
-        guard !eqSeatView.isHidden, (eqSeatView.layer?.borderWidth ?? 0) > 0,
-              let stamped = eqSeatView.layer?.borderColor else { return nil }
-        return NSColor(cgColor: stamped)?.usingColorSpace(.sRGB)
-    }
-    /// The seat's stroke as DRAWN — zero while the seat is hidden, so a flat
-    /// row reports no border rather than one nobody can see.
-    public var test_eqSeatBorderWidth: CGFloat {
-        eqSeatView.isHidden ? 0 : (eqSeatView.layer?.borderWidth ?? 0)
-    }
-    public var test_eqSeatCornerRadius: CGFloat { eqSeatView.layer?.cornerRadius ?? 0 }
-    /// The seat's frame in the row's own coordinates, after a layout pass —
-    /// what the shape comparison against the mute pill reads.
-    public var test_eqSeatFrame: NSRect { eqSeatView.frame }
 
-    /// The door glyph's DRAWN ink, in the row's own coordinates: the button
-    /// rendered to a bitmap and its non-transparent pixels bounded. The image
-    /// box is no substitute — a symbol image carries transparent margin
-    /// (20 × 17 around 15.5 × 13.5 of ink here), so measuring the box says
-    /// nothing about whether the mark clears the seat's border.
-    /// `nil` only when the render itself fails; a caller must FAIL on that
-    /// rather than skip, or the check silently stops covering anything.
-    public var test_eqGlyphInkFrame: NSRect? {
+    /// Whether the door CURRENTLY draws its AT-REST symbol — the outline
+    /// square in one neutral ink.
+    public var test_eqDrawsRestSymbol: Bool {
+        matchesSymbol(eqButton.image, RowAccessorySymbol.equalizerRest,
+                      palette: Self.restPalette(in: effectiveAppearance))
+    }
+
+    /// The door glyph's frame in the row's own coordinates, after a layout
+    /// pass. The symbol IS the mark now, so the button's frame is what the
+    /// "same size, 6 pt apart" assertions measure.
+    public var test_eqSeatFrame: NSRect {
         layoutSubtreeIfNeeded()
-        guard let rep = eqButton.bitmapImageRepForCachingDisplay(in: eqButton.bounds)
+        return eqButton.frame
+    }
+
+    /// The door symbol's DRAWN ink, in the row's own coordinates. The image
+    /// box is no substitute — a symbol image carries transparent margin around
+    /// its ink, so measuring the box says nothing about how big the enclosing
+    /// square actually lands in the row's 24 pt column.
+    public var test_eqGlyphInkFrame: NSRect? { inkFrame(of: eqButton) }
+
+    /// The same, for the mute button — what proves the two controls draw one
+    /// square at one size, and that the square holds still across a toggle.
+    public var test_muteMarkInkFrame: NSRect? { inkFrame(of: muteButton) }
+
+    /// How much of the Equalizer door's slot its mark actually INKS, 0-1 —
+    /// the measure that separates a filled square from an outline one without
+    /// reading a colour, which is what makes the engaged state legible to
+    /// someone who cannot tell the two hues apart.
+    public var test_eqInkCoverage: CGFloat { inkCoverage(of: eqButton) }
+
+    /// The same, for the mute button.
+    public var test_muteInkCoverage: CGFloat { inkCoverage(of: muteButton) }
+
+    /// The fraction of `button`'s rendered pixels carrying any ink at all.
+    private func inkCoverage(of button: NSButton) -> CGFloat {
+        layoutSubtreeIfNeeded()
+        guard button.bounds.width > 0, button.bounds.height > 0,
+              let rep = button.bitmapImageRepForCachingDisplay(in: button.bounds)
+        else { return 0 }
+        button.cacheDisplay(in: button.bounds, to: rep)
+        var inked = 0
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.02 {
+                inked += 1
+            }
+        }
+        return CGFloat(inked) / CGFloat(rep.pixelsWide * rep.pixelsHigh)
+    }
+
+    /// `button` rendered to a bitmap, with its non-transparent pixels bounded
+    /// and mapped back into the row's own coordinates. `nil` only when the
+    /// render itself fails; a caller must FAIL on that rather than skip, or
+    /// the check silently stops covering anything.
+    private func inkFrame(of button: NSButton) -> NSRect? {
+        layoutSubtreeIfNeeded()
+        guard button.bounds.width > 0, button.bounds.height > 0,
+              let rep = button.bitmapImageRepForCachingDisplay(in: button.bounds)
         else { return nil }
-        eqButton.cacheDisplay(in: eqButton.bounds, to: rep)
-        let scaleX = eqButton.bounds.width / CGFloat(rep.pixelsWide)
-        let scaleY = eqButton.bounds.height / CGFloat(rep.pixelsHigh)
+        button.cacheDisplay(in: button.bounds, to: rep)
+        let scaleX = button.bounds.width / CGFloat(rep.pixelsWide)
+        let scaleY = button.bounds.height / CGFloat(rep.pixelsHigh)
         var minX = rep.pixelsWide, maxX = -1, minY = rep.pixelsHigh, maxY = -1
         for y in 0..<rep.pixelsHigh {
             for x in 0..<rep.pixelsWide where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.02 {
@@ -2688,53 +2638,54 @@ public final class DeviceRowView: NSView {
         // `colorAt` counts rows from the TOP; the row's coordinates are
         // bottom-up, so the bitmap's last inked row is the ink's bottom edge.
         return NSRect(
-            x: eqButton.frame.minX + CGFloat(minX) * scaleX,
-            y: eqButton.frame.minY + eqButton.bounds.height - CGFloat(maxY + 1) * scaleY,
+            x: button.frame.minX + CGFloat(minX) * scaleX,
+            y: button.frame.minY + button.bounds.height - CGFloat(maxY + 1) * scaleY,
             width: CGFloat(maxX - minX + 1) * scaleX,
             height: CGFloat(maxY - minY + 1) * scaleY)
     }
 
-    /// Whether a colour STAMPED on some layer of this row equals `token`
-    /// resolved in the row's own appearance — so a hook reads what is drawn
-    /// rather than comparing a constant to itself. Shared by the Equalizer
-    /// seat's hooks and the mute pill's.
-    private func stampedColor(_ stamped: CGColor?, matches token: NSColor) -> Bool {
-        guard let stamped,
-              let drawn = NSColor(cgColor: stamped)?.usingColorSpace(.sRGB) else { return false }
-        var expected: NSColor?
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            expected = token.usingColorSpace(.sRGB)
-        }
-        guard let expected else { return false }
-        return abs(drawn.redComponent - expected.redComponent) < 0.01
-            && abs(drawn.greenComponent - expected.greenComponent) < 0.01
-            && abs(drawn.blueComponent - expected.blueComponent) < 0.01
-    }
     public func test_clickEQButton() { eqButton.performClick(nil) }
     public var test_muteButtonFrame: NSRect { muteButton.frame }
     public var test_identityStackFrame: NSRect { identityStack.frame }
-    /// The engaged mute seat's frame — the mark itself, which is what has to
-    /// hold still across a toggle and line up with the Equalizer door's.
-    public var test_muteSeatFrame: NSRect { muteSeatView.frame }
-    /// The engaged mute seat's corner radius, for the "one shape" assertion
-    /// against ``test_eqSeatCornerRadius``.
-    public var test_muteSeatCornerRadius: CGFloat { muteSeatView.layer?.cornerRadius ?? 0 }
-
-    /// Whether the mute button is currently drawing its ENGAGED seat: `.on`
-    /// state + a visible seat carrying a fill.
-    public var test_isMutePillEngaged: Bool {
-        muteButton.state == .on && !muteSeatView.isHidden
-            && muteSeatView.layer?.backgroundColor != nil
+    /// The mute mark's frame — the button, which is the mark now. It has to
+    /// hold still across a toggle and match the Equalizer door's.
+    public var test_muteSeatFrame: NSRect {
+        layoutSubtreeIfNeeded()
+        return muteButton.frame
     }
 
-    /// Whether the engaged seat is CURRENTLY filled with the reserved mute
-    /// hue, at full opacity — compares the stamped layer colour against
-    /// ``Tokens/Color/muted`` resolved in this row's own appearance, so the
-    /// test reads pixels rather than intent.
+    /// Whether the mute button is currently drawing its ENGAGED symbol — the
+    /// filled square with a ``Tokens/Color/muted`` enclosure and white marks.
+    public var test_isMutePillEngaged: Bool {
+        muteButton.state == .on && test_mutePillIsMutedHue
+    }
+
+    /// Whether the drawn mute image IS the engaged symbol built from the
+    /// ``Tokens/Color/muted`` palette resolved in this row's own appearance —
+    /// a raster comparison, so the test reads pixels rather than intent.
     public var test_mutePillIsMutedHue: Bool {
-        guard muteButton.state == .on, !muteSeatView.isHidden,
-              let stamped = muteSeatView.layer?.backgroundColor else { return false }
-        return stamped.alpha >= 1 && stampedColor(stamped, matches: Tokens.Color.muted)
+        matchesSymbol(muteButton.image, RowAccessorySymbol.muteEngaged,
+                      palette: Self.engagedPalette(fill: Tokens.Color.muted,
+                                                   in: effectiveAppearance))
+    }
+
+    /// Whether the mute button is drawing its AT-REST symbol.
+    public var test_muteDrawsRestSymbol: Bool {
+        matchesSymbol(muteButton.image, RowAccessorySymbol.muteRest,
+                      palette: Self.restPalette(in: effectiveAppearance))
+    }
+
+    /// Whether `drawn` rasterises identically to `name` built with `palette`.
+    /// A pixel comparison rather than a name lookup: an `NSImage` reconfigured
+    /// with a `SymbolConfiguration` reports no name to read back, and
+    /// comparing rasters pins the palette, the point size and the weight in
+    /// one assertion.
+    private func matchesSymbol(_ drawn: NSImage?, _ name: String, palette: [NSColor]) -> Bool {
+        guard let drawn = drawn?.tiffRepresentation,
+              let reference = RowAccessorySymbol.image(named: name, palette: palette)?
+                  .tiffRepresentation
+        else { return false }
+        return drawn == reference
     }
 
     // MARK: Route-armed dot (spec §3.3) test hooks

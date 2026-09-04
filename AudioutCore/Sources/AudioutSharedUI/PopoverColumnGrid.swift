@@ -517,41 +517,21 @@ public enum PopoverColumnGrid {
     /// measured 1.256:1 on dark `panel`, 1.140:1 on the light ground.
     public static let rowLiveWashAlpha: CGFloat = 0.12
 
-    // MARK: The engaged SEAT behind a row accessory (Warm Signal v3 §3.4/§3.5, S3)
+    // MARK: The engaged fill behind a row accessory (Warm Signal v3 §3.4/§3.5, S3)
     //
     // A row's two engaged accessory marks — the muted speaker and the
-    // Equalizer door on a shaped curve — draw the SAME filled rounded
-    // rectangle behind their glyph, in two different colours. It was two
-    // shapes until 2026-09-04: mute a capsule (the control radius, which
-    // clamps to half the button's own height) and the door a 24 x 22 rounded
-    // square at radius 6, sitting 6 pt apart. Alec: they must be one shape,
-    // "the same object in two colours" — hue and glyph carry which control it
-    // is, geometry no longer does.
-    //
-    // Both marks are their own `NSView` behind the button rather than a fill
-    // on the button's backing layer: an `.accessoryBar` `NSButton` frames
-    // larger than the alignment rect its constraints size, and a button with
-    // no height constraint frames to whatever its current glyph needs — so
-    // `speaker.slash.fill` and `speaker.wave.2.fill` gave the old mute pill
-    // two different sizes on toggle.
+    // Equalizer door on a shaped curve — are ONE rounded square in two
+    // colours (Alec, 2026-09-04: "the same object in two colours"), and that
+    // square is now part of the SYMBOL rather than a rectangle drawn behind
+    // it. `RowAccessorySymbol` owns the four images and their point size; the
+    // seat's own geometry constants, `engagedSeatSize` and
+    // `engagedSeatCornerRadius`, retired with the two `NSView`s that drew it.
 
     /// Alpha of an ``Tokens/Color/engagedChrome`` engaged fill — subtle,
     /// because mute is config-adjacent, not a signal. The strongest alpha in
     /// that token's ladder, since a seat is smaller than a row wash and needs
     /// the extra weight to read at glyph scale.
     public static let mutePillFillAlpha: CGFloat = 0.22
-    /// The engaged seat's size, shared by the mute button and the Equalizer
-    /// door so the two marks cannot drift apart. Width is the door's own
-    /// column (``eqButtonWidth``); 22 pt of height is picked against the
-    /// glyph it surrounds — the door's shaped glyph draws 15.5 x 13.5 pt of
-    /// ink, so 24 x 22 leaves roughly 4 pt of fill on every side rather than
-    /// letting the mark fill its seat vertically inside a 1 pt border.
-    public static let engagedSeatSize = NSSize(width: eqButtonWidth, height: 22)
-    /// Corner radius of that seat. Deliberately NOT
-    /// ``Tokens/Layout/Radius/control`` (10): 6 stays visibly short of the
-    /// 11 pt capsule point of a 22 pt-high seat, so both engaged marks read as
-    /// rounded SQUARES rather than capsules.
-    public static let engagedSeatCornerRadius: CGFloat = 6
 
     // MARK: Single-selection highlight (AppRowView, 2026-07-17)
     //
@@ -685,7 +665,7 @@ public enum PopoverColumnGrid {
     /// control you can press"). What tells it apart from the engaged marks up
     /// the row is the FILL, not the corner: this chip is an OUTLINE around a
     /// value it is showing you, where the mute button and the Equalizer door
-    /// paint a solid `engagedSeatCornerRadius` seat to say "engaged".
+    /// wear a solid filled square to say "engaged".
     public static let syncChipCornerRadius: CGFloat = 5
     /// Stroke width of the chip's border, solid (tuned) or dashed (untuned).
     public static let syncChipBorderWidth: CGFloat = 1

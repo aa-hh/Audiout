@@ -2305,6 +2305,69 @@ import AudioutProtocol
         #expect(!titles.contains { $0.hasPrefix("Resume") })
     }
 
+    /// The live report this fix came from: a group created in the Groups window
+    /// while the surface is on screen (pinned mode never self-dismisses) was
+    /// missing from the App Exceptions menus, because nothing rebuilt them —
+    /// group edits are invisible to `update(devices:)`' structural triggers.
+    @Test func aGroupCreatedWhileTheSurfaceIsOpenAppearsInTheAppMenu() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
+        let (popover, groups, _) = try await makePopover(appRouting: appRouting,
+                                                         runningAppsProvider: routedApps)
+        popover.test_simulateOpen()
+        #expect(popover.test_appRowDestinationTitles(for: "com.example.music")?
+            .contains("Groupy") != true)
+
+        try seedGroup(groups, name: "Groupy")
+        popover.groupsDidChange()
+
+        let titles = try #require(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        #expect(titles.contains("Groupy"), "a group saved mid-open is offered without a reopen")
+        #expect(titles.contains("Output Groups"))
+    }
+
+    /// The same signal covers the other group edits: a rename reaches the menu
+    /// too, and a delete takes the entry back out.
+    @Test func renamingAndDeletingAGroupMidOpenReachesTheAppMenu() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
+        let (popover, groups, _) = try await makePopover(appRouting: appRouting,
+                                                         runningAppsProvider: routedApps)
+        let groupID = try seedGroup(groups)
+        popover.test_simulateOpen()
+
+        var renamed = try #require(groups.groups.first { $0.id == groupID })
+        renamed.name = "Groupy"
+        try groups.saveGroup(renamed)
+        popover.groupsDidChange()
+        #expect(popover.test_appRowDestinationTitles(for: "com.example.music")?
+            .contains("Groupy") == true)
+
+        try groups.deleteGroup(id: groupID)
+        popover.groupsDidChange()
+        #expect(popover.test_appRowDestinationTitles(for: "com.example.music")?
+            .contains("Groupy") != true)
+    }
+
+    /// A group every one of whose speakers the main mix has taken still lists
+    /// (greyed) — and it lists whether or not this row is the one routed to it,
+    /// since a saved group must never look deleted.
+    @Test func aGroupWithNoFreeSpeakerListsForEveryRowNotJustTheRoutedOne() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
+        let (popover, groups, _) = try await makePopover(appRouting: appRouting,
+                                                         runningAppsProvider: routedApps)
+        try seedGroup(groups, name: "Groupy")
+        groups.setMainOut(.selectedDevices)
+        _ = groups.setDeviceSelected("office", true)
+        _ = groups.setDeviceSelected("homepod-bed", true)
+        popover.groupsDidChange()
+
+        let titles = try #require(popover.test_appRowDestinationTitles(for: "com.example.music"))
+        #expect(titles.contains("Groupy"),
+                "the row is on no route at all, and the group is still listed")
+    }
+
     /// The Applications card's collapse default (C5, updated from the old
     /// "redirected app" rule): expanded on open iff ANY app route exists — even a
     /// route still on the neutral "No Redirect" default counts (the user added it

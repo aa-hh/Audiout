@@ -8387,8 +8387,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // The row glyph follows the pairing's device class, so a class
                 // that only becomes readable later (the Bluetooth grant arrives
                 // mid-session and the paired list finally loads) still reaches
-                // the row.
-                updated.bluetoothDeviceClassMinor = snapshot.deviceClassMinor
+                // the row. A snapshot WITHOUT one keeps the last known class
+                // instead of clearing it: `merge` carries `nil` for a
+                // connected output with no paired record, and for every device
+                // while the grant is absent (`refreshLocked` passes `[]`), so
+                // clearing would drop a pair of headphones back to the neutral
+                // speaker glyph mid-session, while it is still connected.
+                if let minor = snapshot.deviceClassMinor {
+                    updated.bluetoothDeviceClassMinor = minor
+                }
                 if updated != existing {
                     let availabilityMoved = updated.isAvailable != existing.isAvailable
                     if availabilityMoved, expectedSelected.contains(id) {

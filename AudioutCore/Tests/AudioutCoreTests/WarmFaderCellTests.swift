@@ -211,6 +211,43 @@ import AppKit
                 "at the maximum value the fill reaches the track's real end, not the knob's inset center")
     }
 
+    /// The same claim, on the PIXELS `drawBar` paints. The arithmetic above
+    /// runs through `test_fillRect`, so it would stay green if `drawBar` were
+    /// wired back to the knob's centre — which is the regression it exists to
+    /// prevent. Probed near each end of the track, clear of the 10 pt thumb.
+    @Test func theDrawnBarFillsToTheTrackEndsToo() throws {
+        let slider = NSSlider()
+        slider.cell = WarmFaderCell()
+        slider.minValue = 0
+        slider.maxValue = 100
+        slider.frame = NSRect(x: 0, y: 0, width: 150, height: 24)
+        slider.appearance = NSAppearance(named: .darkAqua)
+
+        /// The colour at `x` on the track's centre line, in the slider's own
+        /// points, taken from a real render of the control.
+        func pixel(atX x: CGFloat, value: Double) throws -> NSColor {
+            slider.doubleValue = value
+            let rep = try #require(slider.bitmapImageRepForCachingDisplay(in: slider.bounds))
+            slider.cacheDisplay(in: slider.bounds, to: rep)
+            let scale = CGFloat(rep.pixelsWide) / slider.bounds.width
+            let px = min(rep.pixelsWide - 1, max(0, Int(x * scale)))
+            let py = min(rep.pixelsHigh - 1, max(0, Int(slider.bounds.midY * scale)))
+            return try #require(rep.colorAt(x: px, y: py)?.usingColorSpace(.sRGB))
+        }
+
+        // 3 pt in from each end: inside the fill at full, outside the thumb.
+        let trailingAtFull = try pixel(atX: slider.bounds.maxX - 3, value: 100)
+        let trailingAtZero = try pixel(atX: slider.bounds.maxX - 3, value: 0)
+        let leadingAtZero = try pixel(atX: 3, value: 0)
+        let leadingAtFull = try pixel(atX: 3, value: 100)
+
+        func brightness(_ color: NSColor) -> CGFloat { color.brightnessComponent }
+        #expect(brightness(trailingAtFull) > brightness(trailingAtZero) + 0.05,
+                "at 100% the drawn fill reaches the track's trailing end — \(trailingAtFull) vs empty \(trailingAtZero)")
+        #expect(brightness(leadingAtZero) < brightness(leadingAtFull) - 0.05,
+                "…and at 0% it paints no phantom stub at the leading end — \(leadingAtZero) vs filled \(leadingAtFull)")
+    }
+
     // MARK: Deterministic drawing (cacheDisplay double-render, both looks)
 
     @Test func faderRenderIsByteDeterministic() throws {

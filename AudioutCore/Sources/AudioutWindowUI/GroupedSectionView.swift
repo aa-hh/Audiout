@@ -13,8 +13,8 @@ import AudioutSharedUI
 ///   what carries the separation (`containerEdge` vs `raised`: 1.553:1 dark /
 ///   2.020:1 light). Its interior rules are `containerEdge` too: `hairline` on
 ///   `raised` is 1.154:1 dark, under any floor. Exactly one box (`.card` or
-///   `.well`) per page: the Main Audio page's Equalizer and the group
-///   editor's Speakers checklist stay `.card`.
+///   `.well`) per page: the group editor's Speakers checklist stays `.card`;
+///   both Equalizer pages wear `.well`.
 /// - ``Style/well`` — the same one-instrument role, recessed instead of
 ///   raised: `Tokens.Color.well` fill (DESIGN.md "Elevation & Depth" — the
 ///   one neutral that stays visibly sunk even where `raised` flattens to the
@@ -22,10 +22,10 @@ import AudioutSharedUI
 ///   as `.card`, plus a 1 pt `Tokens.Color.shadow` @ 0.18 band along the
 ///   visual top edge — the flat, clipped inset-shade recipe `WarmFaderCell`'s
 ///   trough (`WarmFaderCell.swift:87-95`) and `AlignmentPlateCell`'s bevel
-///   already draw, no blur, no `NSShadow`. The device detail page's
-///   Equalizer wears it (2026-09-04): in light, `raised` measures identical
-///   to the `canvas`/`panel` ground it sits on, so the card read as a 1 pt
-///   outline around nothing.
+///   already draw, no blur, no `NSShadow`. Both Equalizer pages wear it —
+///   the device detail page and Main Audio: in light, `raised` measures
+///   identical to the `canvas`/`panel` ground they sit on, so a card there is
+///   a 1 pt outline around nothing.
 /// - ``Style/panel`` — a stroked-panel row list (the iPhone companion's
 ///   PanelRow): `panel` fill, 1 pt `containerEdge` edge at the row radius,
 ///   `hairline` dividers. The pane ground is `panel` too, so the stroke is the

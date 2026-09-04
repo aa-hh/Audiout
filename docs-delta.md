@@ -24,10 +24,10 @@ with:
 > alias of `NSColor.black`) has three real consumers: `AlignmentPlateCell`
 > (the wizard's answer-plate lip shading, rim shadow blend, and chip shadow
 > fill), `WarmFaderCell` (the fader trough's inset shade), and —
-> since 2026-09-04 — `GroupedSectionView`'s new `.well` style (the device
-> detail page's Equalizer recess): a 1 pt band at 0.18 alpha, clipped inside
-> the shape's top edge, the same flat recipe the other two already draw. The
-> device detail page's Equalizer switched from `.card` to `.well` because
+> since 2026-09-04 — `GroupedSectionView`'s new `.well` style (the Equalizer
+> recess on both the device detail page and Main Audio): a 1 pt band at 0.18
+> alpha, clipped inside the shape's top edge, the same flat recipe the other
+> two already draw. Both Equalizers switched from `.card` to `.well` because
 > `.card`'s `raised` fill is the flat `#FAFAFB` ground in light — identical
 > to the `canvas`/`panel` it sits on — leaving a 1 pt outline around nothing;
 > `well` (`#E9EAEC` light / `#050507` dark) is the one neutral that stays
@@ -51,11 +51,9 @@ clipped inset-shade band along the visual top edge — the same recipe already
 shipping in `WarmFaderCell.swift:87-95` (the fader trough's inset shade) and
 `AlignmentPlateCell.swift:23-39`/`:184-198` (the wizard plate's bevel lips):
 a 1 pt rect filled at `Tokens.Color.shadow` alpha 0.18, clipped to the
-shape's own path, no blur, no `NSShadow`. Only `DeviceDetailViewController`'s
-`eqWell` was switched to `.well` — `MainOutDetailViewController`'s own
-`eqWell` (the Main Audio page) still defaults to `.card` and carries the
-identical defect; that file is outside this track's scope and is called out
-separately in the track report.
+shape's own path, no blur, no `NSShadow`. Both Equalizers wear it:
+`DeviceDetailViewController`'s `eqWell` and `MainOutDetailViewController`'s
+own `eqWell` on the Main Audio page, which carried the identical defect.
 
 Measured, independently recomputed from the WCAG relative-luminance formula
 against the hex values in `Tokens.swift`:

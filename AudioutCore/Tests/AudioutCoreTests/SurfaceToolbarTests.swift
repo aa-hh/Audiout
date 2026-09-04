@@ -87,7 +87,11 @@ import AudioutSharedUI
         let (controller, _) = makeAttached()
         for item in controller.toolbar.items {
             guard let view = item.view else { continue }
-            #expect(view.frame.size == SurfaceToolbarSeat.size,
+            // `fittingSize`, not `frame`: the frame is the size the item was
+            // CONSTRUCTED with, so reading it back would survive the seat's
+            // own width/height constraints being deleted. `fittingSize` is
+            // computed from those constraints.
+            #expect(view.fittingSize == SurfaceToolbarSeat.size,
                     Comment(rawValue: "\(item.itemIdentifier.rawValue) must be the fixed seat size"))
             #expect(item.visibilityPriority == .high,
                     Comment(rawValue: "\(item.itemIdentifier.rawValue) must not be sweepable into the chevron"))
@@ -241,10 +245,10 @@ import AudioutSharedUI
         }
         #expect(hover < engaged, "the current screen outweighs the pointer")
         #expect(engaged < pressed, "and a press outweighs both, wherever it lands")
-        #expect(hover == PopoverColumnGrid.rowHoverWashAlpha,
-                "the header borrows the mixer's own hover weight")
-        #expect(engaged == PopoverColumnGrid.rowSelectionWashAlpha)
-        #expect(pressed == PopoverColumnGrid.mutePillFillAlpha)
+        // The three weights are the mixer's own (`rowHoverWashAlpha`,
+        // `rowSelectionWashAlpha`, `mutePillFillAlpha`). Reading each back
+        // here would only restate the `return` that produced it; what carries
+        // information is the ORDER above, and that a rest seat draws nothing.
     }
 
     /// Increase Contrast is read LIVE on every draw (the app never snapshots
@@ -286,21 +290,57 @@ import AudioutSharedUI
                   let engagedRep = render(engaged, appearanceName: appearanceName),
                   let restPixel = color(restRep, atPoint: seatProbe, in: rest.bounds),
                   let engagedPixel = color(engagedRep, atPoint: seatProbe, in: engaged.bounds) else {
-                // Environment guard: no bitmap rep here, nothing to sample.
+                Issue.record("no bitmap rep under \(appearanceName.rawValue) — nothing was sampled")
                 return
             }
             #expect(restPixel.alphaComponent < 0.01,
                     Comment(rawValue: "an idle tab paints no seat under \(appearanceName.rawValue)"))
             #expect(engagedPixel.alphaComponent > 0.05,
                     Comment(rawValue: "the current screen paints a real seat under \(appearanceName.rawValue) — this is the cue that was missing on macOS 14–25"))
+            // The seat is drawn on a TRANSPARENT ground here, so its own
+            // brightness only restates the token it is painted in. What the
+            // eye judges is the seat COMPOSITED over the strip, so composite
+            // it and require a visible separation from that ground. `panel`
+            // stands in for the title bar's system material, which has no
+            // token of its own.
+            guard let ground = groundColor(appearanceName),
+                  let composited = composite(engagedPixel, over: ground) else {
+                Issue.record("could not resolve the strip's ground under \(appearanceName.rawValue)")
+                return
+            }
+            let separation = composited.brightnessComponent - ground.brightnessComponent
+            let numbers = "seat \(composited.brightnessComponent), ground \(ground.brightnessComponent)"
             if appearanceName == .darkAqua {
-                #expect(engagedPixel.brightnessComponent > 0.5,
-                        "in dark the seat washes the strip LIGHTER, never darker")
+                #expect(separation > 0.04,
+                        Comment(rawValue: "in dark the seat washes the strip LIGHTER, and visibly — \(numbers)"))
             } else {
-                #expect(engagedPixel.brightnessComponent < 0.5,
-                        "in light the seat washes the flat ground darker")
+                #expect(separation < -0.04,
+                        Comment(rawValue: "in light the seat washes the flat ground darker, and visibly — \(numbers)"))
             }
         }
+    }
+
+    /// The ground the header strip sits on, resolved in `appearanceName`.
+    private func groundColor(_ appearanceName: NSAppearance.Name) -> NSColor? {
+        var resolved: NSColor?
+        NSAppearance(named: appearanceName)?.performAsCurrentDrawingAppearance {
+            resolved = Tokens.Color.panel.usingColorSpace(.sRGB)
+        }
+        return resolved
+    }
+
+    /// `top` painted over `bottom` at `top`'s own alpha — source-over, done by
+    /// hand so the seat can be judged against the strip it lands on.
+    private func composite(_ top: NSColor, over bottom: NSColor) -> NSColor? {
+        guard let top = top.usingColorSpace(.sRGB), let bottom = bottom.usingColorSpace(.sRGB) else {
+            return nil
+        }
+        let alpha = top.alphaComponent
+        func mix(_ t: CGFloat, _ b: CGFloat) -> CGFloat { t * alpha + b * (1 - alpha) }
+        return NSColor(srgbRed: mix(top.redComponent, bottom.redComponent),
+                       green: mix(top.greenComponent, bottom.greenComponent),
+                       blue: mix(top.blueComponent, bottom.blueComponent),
+                       alpha: 1)
     }
 
     /// One shape language: hover, selection and press are the SAME rounded
@@ -328,7 +368,8 @@ import AudioutSharedUI
                   let inside = color(rep, atPoint: insideCorner, in: state.seat.bounds),
                   let outside = color(rep, atPoint: outsideCorner, in: state.seat.bounds),
                   let middle = color(rep, atPoint: seatProbe, in: state.seat.bounds) else {
-                return // environment guard, as above
+                Issue.record("\(state.name) rendered nothing to sample")
+                return
             }
             #expect(middle.alphaComponent > 0.05,
                     Comment(rawValue: "\(state.name) draws a seat at all"))

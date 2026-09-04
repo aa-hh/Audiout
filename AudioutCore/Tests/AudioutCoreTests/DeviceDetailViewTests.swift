@@ -631,6 +631,16 @@ import AppKit
         #expect(detail.test_slotTitles == ["Groups", "About"])
     }
 
+    /// The Main Audio page carries the same instrument in the same recess.
+    /// Left as a `.card` it drew a 1 pt outline around nothing in light,
+    /// where `raised` resolves to the pane's own ground.
+    @Test func theMainAudioPagesEqualizerIsRecessedToo() {
+        let page = MainOutDetailViewController(
+            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        page.loadViewIfNeeded()
+        #expect(page.test_eqSectionIsRecessed)
+    }
+
     /// Proves `settings:` actually threads from the host's `init` down to the
     /// editor it builds, rather than each falling back to its own default
     /// `AppSettings()` (which would read `.standard`): a store that already

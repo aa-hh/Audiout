@@ -1004,9 +1004,10 @@ public final class DeviceRowView: NSView {
                                                 : Self.eqFlatGlyphConfig)
     }
 
-    /// The shaped door's glyph configuration — one source shared by
-    /// ``updateEQButton()`` and ``test_eqSymbolIsHeavy``, so the hook cannot
-    /// drift from what is drawn.
+    /// The shaped door's glyph configuration. Nothing asserts this constant
+    /// itself — a test that reads it back would agree with the drawing by
+    /// construction; ``test_eqGlyphInkFrame`` measures what it actually
+    /// paints instead.
     private static let eqShapedGlyphConfig = NSImage.SymbolConfiguration(
         pointSize: eqShapedGlyphPointSize, weight: .semibold)
     /// The at-rest door's glyph configuration.
@@ -2532,15 +2533,9 @@ public final class DeviceRowView: NSView {
     public var test_hasEQButton: Bool { eqButton.superview != nil }
     public var test_eqButtonFrame: NSRect { eqButton.frame }
     public var test_eqButtonHasTitle: Bool { !eqButton.title.isEmpty }
-    /// The Equalizer door's not-flat mark: its glyph tint (`gold` when shaped,
-    /// `label2` at rest) and the symbol weight that rides with it.
+    /// The Equalizer door's not-flat mark: its glyph tint — `inkOnFill`, the
+    /// dark ink that sits on the gold seat, when shaped; `label2` at rest.
     public var test_eqTintColor: NSColor? { eqButton.contentTintColor }
-    /// Whether the door's glyph currently wears the SHAPED configuration —
-    /// bigger and heavier than at rest (2026-09-04: the size step joined the
-    /// weight step, so this reads the whole configuration, not just weight).
-    public var test_eqSymbolIsHeavy: Bool {
-        eqButton.image?.symbolConfiguration == Self.eqShapedGlyphConfig
-    }
     /// Whether the door CURRENTLY draws its gold seat — compares what is
     /// stamped on the layer against `gold` resolved in this view's own
     /// appearance, so a test reads the drawn state rather than the intent.
@@ -2548,10 +2543,16 @@ public final class DeviceRowView: NSView {
         !eqSeatView.isHidden
             && eqSeatColor(eqSeatView.layer?.backgroundColor, matches: Tokens.Color.gold)
     }
-    /// Whether the seat's border is CURRENTLY the app's dark-on-gold ink.
-    public var test_eqSeatBorderIsInkOnFill: Bool {
-        !eqSeatView.isHidden && eqSeatView.layer?.borderWidth ?? 0 > 0
-            && eqSeatColor(eqSeatView.layer?.borderColor, matches: Tokens.Color.inkOnFill)
+    /// The seat's border exactly as STAMPED, in sRGB — `nil` while the seat
+    /// is hidden or unstroked. Deliberately NOT compared against a
+    /// re-resolved `inkOnFill`: that token turns WHITE under light + Increase
+    /// Contrast and this border does not, so re-resolving it would agree with
+    /// the code by construction and disagree with it in the one setting the
+    /// dark-resolved border exists for. A caller pins the literal ink.
+    public var test_eqSeatBorderColor: NSColor? {
+        guard !eqSeatView.isHidden, (eqSeatView.layer?.borderWidth ?? 0) > 0,
+              let stamped = eqSeatView.layer?.borderColor else { return nil }
+        return NSColor(cgColor: stamped)?.usingColorSpace(.sRGB)
     }
     /// The seat's stroke as DRAWN — zero while the seat is hidden, so a flat
     /// row reports no border rather than one nobody can see.

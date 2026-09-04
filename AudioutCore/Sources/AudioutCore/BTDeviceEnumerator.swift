@@ -413,29 +413,40 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
     /// unreadable without the Bluetooth grant, which a `swift run` binary does
     /// not hold), and a launchd-started app's stderr goes nowhere readable.
     /// Read it back with
-    /// `log show --last 5m --predicate 'subsystem == "com.audiout.Audiout"'`.
+    /// `log show --last 5m --debug --predicate 'subsystem == "com.audiout.Audiout"'`
+    /// — `--debug` because the one line this writes is `.debug` level and is
+    /// otherwise not kept.
     private static let log = Logger(subsystem: "com.audiout.Audiout", category: "bluetooth")
 
     private static let systemPairedRecords: @Sendable () -> [BTPairedRecord] = {
         let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+        // Diagnostic: nobody has established what AirPods report in the MINOR
+        // class field, and the glyph mapping in `Device.symbolName` rests on
+        // it. The CLASS NUMBERS are the whole answer, so that is all this
+        // writes — one `.debug` line for the whole enumeration, which
+        // `refreshLocked` runs on every Core Audio device-list change. Device
+        // NAMES stay out of it entirely: a unified-log entry is readable by
+        // anything on the system, and PRODUCT.md's "Data Collection" line
+        // says a speaker's name never leaves the machine.
+        log.debug("paired audio device classes: \(pairedClassSummary(paired), privacy: .public)")
         return paired.map { device in
-            // Diagnostic: nobody has established what AirPods report in the
-            // MINOR class field, and the glyph mapping in `Device.symbolName`
-            // rests on it. One line per pairing per enumeration, so a single
-            // live run with the speakers to hand settles it. `.public` on the
-            // name because os_log redacts dynamic strings by default, which
-            // would make the line unreadable.
-            log.notice("""
-                paired device "\(device.name ?? "?", privacy: .public)" \
-                classMajor=\(device.deviceClassMajor) classMinor=\(device.deviceClassMinor)
-                """)
-            return BTPairedRecord(
+            BTPairedRecord(
                 name: device.name,
                 address: device.addressString,
                 isAudioCapable: isAudioCapable(device),
                 lastUsed: device.recentAccessDate(),
                 deviceClassMinor: device.deviceClassMinor)
         }
+    }
+
+    /// Every pairing's major/minor class pair as one hex string — the only
+    /// part of the paired list the glyph question needs. Audio-capable
+    /// pairings only, so a keyboard or a mouse is not in the answer.
+    private static func pairedClassSummary(_ paired: [IOBluetoothDevice]) -> String {
+        paired
+            .filter { isAudioCapable($0) }
+            .map { String(format: "%02x/%02x", $0.deviceClassMajor, $0.deviceClassMinor) }
+            .joined(separator: " ")
     }
 
     /// A cached A2DP AudioSink SDP record (UUID16 0x110B) is the strong signal;

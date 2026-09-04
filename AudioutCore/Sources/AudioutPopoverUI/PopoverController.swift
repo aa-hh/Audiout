@@ -3544,7 +3544,7 @@ public final class PopoverController: NSObject {
             entries.append(.init(id: Self.resumeDestinationID(forDeviceID: resumeDevice.id),
                                  title: "Resume → \(resumeDevice.name)",
                                  isLocal: false,
-                                 symbolName: resumeDevice.kind.symbolName,
+                                 symbolName: resumeDevice.symbolName,
                                  isStandalone: true,
                                  subtitle: "Return to where this app was playing"))
         }
@@ -3590,14 +3590,14 @@ public final class PopoverController: NSObject {
                 return false
             }
             entries.append(.init(id: device.id, title: device.name, isLocal: false,
-                                 symbolName: device.kind.symbolName,
+                                 symbolName: device.symbolName,
                                  subtitle: othersAlreadyRoutedHere ? Self.sameSpeakerQualitySubtitle : nil))
         }
         if case .device(let id) = current,
            !available.contains(where: { $0.id == id }),
            let device = devices.first(where: { $0.id == id && !$0.isLocalDevice }) {
             entries.append(.init(id: device.id, title: device.name, isLocal: false,
-                                 symbolName: device.kind.symbolName,
+                                 symbolName: device.symbolName,
                                  subtitle: Self.offlineDestinationSubtitle))
         }
         return entries
@@ -3902,6 +3902,15 @@ public final class PopoverController: NSObject {
     /// Devices" split. `nil` if no such row.
     public func test_appRowDestinationTitles(for bundleID: String) -> [String]? {
         appRowsByBundleID[bundleID]?.test_menuTitles
+    }
+
+    /// The glyph `bundleID`'s row offers for one destination — the same
+    /// resolved symbol the device rows draw, so a pair of AirPods is
+    /// headphones in both places rather than a radio here and headphones
+    /// there. `nil` if no such row or destination.
+    public func test_appRowDestinationSymbolName(for bundleID: String,
+                                                 destinationID: String) -> String? {
+        appRowsByBundleID[bundleID]?.test_destinationSymbolName(forDestinationID: destinationID)
     }
 
     /// The currently selected destination id for `bundleID`'s row (the sentinel

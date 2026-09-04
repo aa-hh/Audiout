@@ -463,17 +463,15 @@ import AppKit
                 "a flat curve leaves the door at rest")
         #expect(!flat.test_eqSeatIsGoldFilled, "…with no seat behind the glyph")
         #expect(flat.test_eqSeatBorderWidth == 0, "…and no border")
-        #expect(flat.test_eqSymbolIsHeavy == false)
         #expect(flat.test_eqButtonHasTitle == false, "the door is image-only")
 
         let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
                              isEQShaped: true)
         #expect(shaped.test_eqSeatIsGoldFilled, "the state is a FILL now, not a glyph hue")
-        #expect(shaped.test_eqSeatBorderIsInkOnFill, "…inside the dark border")
+        #expect(shaped.test_eqSeatBorderColor?.isWarmSignalDarkInk == true,
+                "…inside the dark border")
         #expect(shaped.test_eqTintColor == Tokens.Color.inkOnFill,
                 "the glyph reads dark ON the gold, never gold on gold")
-        #expect(shaped.test_eqSymbolIsHeavy,
-                "the size and weight step is the non-colour half of the mark")
         #expect(shaped.test_eqButtonHasTitle == false)
     }
 
@@ -484,8 +482,18 @@ import AppKit
         let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
                              isEQShaped: true)
         let flat = makeRow(btDevice(), delegate: SpyDelegate(), selected: true)
-        #expect(shaped.test_eqSymbolIsHeavy != flat.test_eqSymbolIsHeavy,
-                "shape survives a viewer who cannot read the hue")
+        // Measured on the RENDERED glyph, not on the configuration the code
+        // applied: reading that back would agree with the drawing whatever
+        // size and weight it names.
+        guard let shapedInk = shaped.test_eqGlyphInkFrame,
+              let flatInk = flat.test_eqGlyphInkFrame else {
+            Issue.record("a door glyph rendered no ink — this check covered nothing")
+            return
+        }
+        #expect(shapedInk.width > flatInk.width + 1,
+                "shape survives a viewer who cannot read the hue — \(shapedInk) vs \(flatInk)")
+        #expect(shapedInk.height > flatInk.height + 1,
+                "…in both dimensions — \(shapedInk) vs \(flatInk)")
     }
 
     /// Mute sits 6 pt trailing and is itself a filled pill, so the door's new
@@ -1218,4 +1226,57 @@ import AppKit
                 "a non-Bluetooth row can never carry a drawer")
         #expect(!popover.test_syncDrawerVisible)
     }
+}
+
+/// The pinned dark ink `inkOnFill` carries in three of its four appearances —
+/// `#171104`. Pinned as a literal on purpose: re-resolving the token would
+/// agree with the seat's border by construction, and disagree with it in
+/// light + Increase Contrast, where the token turns white and the border
+/// deliberately does not.
+private extension NSColor {
+    var isWarmSignalDarkInk: Bool {
+        guard let srgb = usingColorSpace(.sRGB) else { return false }
+        return abs(srgb.redComponent - 0x17 / 255.0) < 0.01
+            && abs(srgb.greenComponent - 0x11 / 255.0) < 0.01
+            && abs(srgb.blueComponent - 0x04 / 255.0) < 0.01
+    }
+}
+
+/// Nested under `SerializedSharedState`: forcing Increase Contrast writes
+/// `Tokens.test_increaseContrastOverride`, which is process-wide.
+extension SerializedSharedState {
+
+@MainActor
+@Suite struct EqualizerSeatBorderTests {
+
+    /// The seat's border is a DARK outline around a gold fill in every
+    /// appearance, and light + Increase Contrast is the case it exists for:
+    /// `inkOnFill` flips to white there, which is right for a glyph sitting
+    /// ON the gold and wrong for the outline separating that gold from the
+    /// light canvas behind it — a white outline there is no outline.
+    @Test func theSeatsBorderStaysDarkInLightIncreaseContrast() {
+        defer { Tokens.test_increaseContrastOverride = nil }
+        let device = Device(id: "C4-38-75-0E-BF-4A:output", name: "Sonos Move 2",
+                            kind: .bluetooth, supportsAirPlay2: false)
+        let row = DeviceRowView(device: device, showsToggle: true, showsMeter: true,
+                                showsBus: true, showsSyncControls: true)
+        row.apply(device, selected: true, controllable: true, isEQShaped: true)
+
+        for (name, appearance) in [("dark", NSAppearance.Name.darkAqua),
+                                   ("light", .aqua)] {
+            for increaseContrast in [false, true] {
+                Tokens.test_increaseContrastOverride = increaseContrast
+                row.appearance = NSAppearance(named: appearance)
+                // The stamp is re-made by `apply`; a headless view cannot be
+                // trusted to deliver `viewDidChangeEffectiveAppearance` on its
+                // own, and a check that reads a stale stamp checks nothing.
+                row.apply(device, selected: true, controllable: true, isEQShaped: true)
+                let got = String(describing: row.test_eqSeatBorderColor)
+                #expect(row.test_eqSeatBorderColor?.isWarmSignalDarkInk == true,
+                        "\(name), Increase Contrast \(increaseContrast): the border is #171104, got \(got)")
+            }
+        }
+    }
+}
+
 }

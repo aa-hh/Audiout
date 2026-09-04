@@ -22,6 +22,7 @@ backend.
 - Persistence failures go through `saveOrReport(_:)`, reported in plain words, never swallowed.
 - An unavailable speaker may join a group; `orderedDevices()` is the one ordering rule (2026-08-28).
 - Ink carries temperature (C5, 2026-09-03): `labelCool` on idle names and glyphs, `label` on the live one; chrome and the sidebar stay stock. `GroupsInkTemperatureTests` pins it.
+- `GroupedSectionView`'s `.well` style is this folder's custom-drawn piece: the `Tokens.Color.shadow` inset-shade band, flat and clipped at 0.18, along the box's top edge. Both Equalizer pages wear it — `DeviceDetailViewController` and `MainOutDetailViewController` — because `raised` resolves to the pane's own ground in light, so a `.card` there is an outline around nothing (2026-09-04).
 - `DeviceIcon` is the single resolution point for a device or group symbol.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 

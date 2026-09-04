@@ -1622,6 +1622,31 @@ import AudioutProtocol
         #expect(titles.contains("Office"), "an AirPlay-2 device is still offered normally")
     }
 
+    /// Every destination entry draws the device's RESOLVED glyph, the same one
+    /// its device row draws — a pairing that reports headphones is headphones
+    /// in both places, never a radio here and headphones there. The fixture
+    /// carries `supportsAirPlay2: true` on a Bluetooth kind, which no real
+    /// pairing does (`availableAirPlayDestinations` filters on that flag), so
+    /// that the glyph seam itself is reachable from this list at all.
+    @Test func appRowDestinationsDrawTheDevicesResolvedGlyph() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, _, backend) = try await makePopover(appRouting: appRouting,
+                                                          runningAppsProvider: routedApps)
+        // 0x06 is the Audio/Video minor class for headphones.
+        let headphones = Device(id: "airpods:output", name: "AirPods Pro",
+                                kind: .bluetooth, supportsAirPlay2: true,
+                                bluetoothDeviceClassMinor: 0x06)
+        popover.update(devices: backend.devices + [headphones])
+
+        #expect(popover.test_appRowDestinationSymbolName(for: "com.example.music",
+                                                         destinationID: headphones.id)
+                == "headphones",
+                "the destination list resolves the glyph off the device, not off its kind")
+        #expect(headphones.kind.symbolName != "headphones",
+                "…which is a different glyph from the kind's own, or this proves nothing")
+    }
+
     /// One role per speaker: a device currently in Main Out (Selected Devices,
     /// or the active group) is carrying the whole-system mix, so it must not be
     /// offered as a per-app redirect target — a receiver holds ONE AirPlay

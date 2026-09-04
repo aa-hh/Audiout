@@ -554,12 +554,13 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// centered title floats well right of a single value.
     ///
     /// `secondTrailingTitle` optionally adds ONE more column-header label
-    /// LEFT of `trailingTitle` on the same line, RIGHT-ALIGNED with its
-    /// trailing edge `secondTrailingTitleTrailing` in from the row's trailing
-    /// edge — the Output Devices card's "Offset" title over the sync-chip
-    /// column (2026-08-28 header decision; the legend used to ride the
-    /// subsection header lines). The anchor is the caller's, from
-    /// `PopoverColumnGrid`, so the title cannot drift off its column.
+    /// LEFT of `trailingTitle` on the same line, LEFT-ALIGNED on its own
+    /// column at `secondTrailingTitleLeadingFromTrailing` in from the row's
+    /// trailing edge — the Output Devices card's "Offset" title over the
+    /// sync-chip column (2026-08-28 header decision; the legend used to ride
+    /// the subsection header lines), matching how `trailingTitle` left-aligns
+    /// above it. The anchor is the caller's, from `PopoverColumnGrid`, so the
+    /// title cannot drift off its column.
     ///
     /// `trailingTitleToolTip` / `secondTrailingTitleToolTip` carry each column
     /// legend's plain-speech explanation, shown on hover only.
@@ -568,7 +569,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
                    trailingTitleLeadingFromTrailing: CGFloat? = nil,
                    trailingTitleToolTip: String? = nil,
                    secondTrailingTitle: String? = nil,
-                   secondTrailingTitleTrailing: CGFloat = 0,
+                   secondTrailingTitleLeadingFromTrailing: CGFloat = 0,
                    secondTrailingTitleToolTip: String? = nil,
                    trailingAccessory accessory: HeaderAccessory? = nil,
                    collapsible: Bool = false,
@@ -673,18 +674,18 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             ])
         }
 
-        // The optional SECOND column title (the "Offset" legend), right-aligned
-        // on its column's trailing edge — see the parameter doc above.
+        // The optional SECOND column title (the "Offset" legend), left-aligned
+        // in its own column — see the parameter doc above.
         if let secondTrailingTitle {
             let secondLabel = Self.makeColumnHeaderLabel(secondTrailingTitle)
             secondLabel.toolTip = secondTrailingTitleToolTip
             columnTitleLabelsByHeader[header, default: []].append(secondLabel)
-            secondLabel.alignment = .right
+            secondLabel.alignment = .left
             headerWrap.addSubview(secondLabel)
             NSLayoutConstraint.activate([
-                secondLabel.trailingAnchor.constraint(
+                secondLabel.leadingAnchor.constraint(
                     equalTo: headerWrap.trailingAnchor,
-                    constant: -secondTrailingTitleTrailing),
+                    constant: -secondTrailingTitleLeadingFromTrailing),
                 secondLabel.centerYAnchor.constraint(equalTo: headerWrap.centerYAnchor),
             ])
         }
@@ -1626,6 +1627,26 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// The tooltips on card `title`'s column-title labels, in creation order.
     func test_columnTitleToolTips(title: String) -> [String?] {
         columnTitleLabelsByHeader[title]?.map(\.toolTip) ?? []
+    }
+
+    /// Each of card `title`'s column-title labels' LEADING edge, measured as
+    /// the distance INWARD from its own header row's trailing edge — the same
+    /// "…FromTrailing" units `PopoverColumnGrid`'s anchors are named in, so a
+    /// test can compare directly against e.g. `offsetTitleLeadingFromTrailing`
+    /// without hand-rolling frame math. In creation order ("Source" first,
+    /// then "Offset" when both are present). Reads the label's ALIGNMENT
+    /// RECT, not its raw `frame` — a borderless `NSTextField` label's default
+    /// cell carries a 2 pt `alignmentRectInsets.left`/`.right`, and Auto
+    /// Layout solves the constraint against the alignment rect, so a raw
+    /// `frame.minX` reads 2 pt off the constant that was actually set. Force
+    /// a layout pass first (e.g. via `PopoverController.test_panelView`) so
+    /// frames are current.
+    func test_columnTitleLeadingInsets(title: String) -> [CGFloat] {
+        (columnTitleLabelsByHeader[title] ?? []).compactMap { label in
+            guard let wrap = label.superview else { return nil }
+            let alignmentMinX = label.alignmentRect(forFrame: label.frame).minX
+            return wrap.bounds.maxX - alignmentMinX
+        }
     }
 
     /// The body rows of card `title` in display order. Empty if `title` isn't a

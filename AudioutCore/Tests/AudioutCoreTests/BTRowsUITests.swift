@@ -657,6 +657,27 @@ import AppKit
                 "one listed BT row brings its SYNC chip — and the title back")
     }
 
+    /// "Offset" left-aligns in its OWN column, over the sync chip, matching how
+    /// "Source" left-aligns over the feed pills. Pins the leading anchor so a
+    /// future change to the chip geometry cannot silently drag the legend off
+    /// its column without a test noticing.
+    @Test func offsetColumnTitleLeftAlignsOverTheSyncChipColumn() {
+        let (popover, _, _) = makePopover()
+        popover.update(devices: [airplay(), bt("bt-a:output", name: "Attic Speaker")])
+        #expect(popover.test_offsetColumnTitleShown(), "precondition: the title is printed")
+        _ = popover.test_panelView   // forces layout so label frames are current
+
+        let insets = popover.test_columnTitleLeadingInsets(title: "Output Devices")
+        #expect(insets.count == 2, "Source, then Offset")
+        let (sourceInset, offsetInset) = (insets[0], insets[1])
+        #expect(abs(sourceInset - PopoverColumnGrid.feedColumnLeadingFromTrailing) <= 1,
+                "Source's own anchor is unchanged")
+        #expect(abs(offsetInset - PopoverColumnGrid.offsetTitleLeadingFromTrailing) <= 1,
+                "Offset now left-aligns on the sync chip's own leading edge")
+        #expect(sourceInset - offsetInset >= 1,
+                "Source sits left of Offset, not stacked over it")
+    }
+
     @Test func bluetoothSubsectionRendersAfterAirPlaySortedByRecency() {
         let (popover, _, _) = makePopover()
         let now = Date()

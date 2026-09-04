@@ -1594,7 +1594,9 @@ public final class PopoverController: NSObject {
         // a listed Bluetooth row) actually renders under it — chrome must
         // never name absent content. Gated on the SECTIONS, not on collapse
         // (a collapsed subsection still has its rows, exactly as a collapsed
-        // card keeps its own column titles).
+        // card keeps its own column titles). Left-aligns in its own column
+        // on `offsetTitleLeadingFromTrailing`, matching how "Source"
+        // left-aligns above, over the SYNC chip it names.
         let showsOffsetTitle = sections.contains {
             ($0.title == Self.thisMacSubsectionTitle
                 || $0.title == Self.bluetoothSubsectionTitle) && !$0.devices.isEmpty
@@ -1605,8 +1607,8 @@ public final class PopoverController: NSObject {
                             PopoverColumnGrid.feedColumnLeadingFromTrailing,
                         trailingTitleToolTip: Self.sourceColumnHelp,
                         secondTrailingTitle: showsOffsetTitle ? "Offset" : nil,
-                        secondTrailingTitleTrailing:
-                            PopoverColumnGrid.offsetTitleTrailingFromTrailing,
+                        secondTrailingTitleLeadingFromTrailing:
+                            PopoverColumnGrid.offsetTitleLeadingFromTrailing,
                         secondTrailingTitleToolTip: showsOffsetTitle ? Self.offsetColumnHelp : nil,
                         collapsible: true,
                         collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
@@ -3193,8 +3195,15 @@ public final class PopoverController: NSObject {
     /// `test_fireBluetoothConnectClick`). Deliberately NOT accent-tinted: gold is
     /// spoken for here — it means "in the mix" — and a gold link in a device list
     /// would claim a membership it doesn't have.
+    ///
+    /// Leading edge sits on `firstElementLeading(indented: false)` (38.5), the
+    /// same x a device row's ICON starts at — not `nameColumnLeading` (73.5),
+    /// which is where the NAME starts, one column further in. With no device
+    /// rows present under the subsection title to compare against, the deeper
+    /// anchor would read as an indent nested inside another indent; the "+"
+    /// sits exactly where a device icon would instead.
     private func makeBluetoothConnectRow() -> NSView {
-        let button = PointingHandButton(title: "Connect a Bluetooth device…",
+        let button = PointingHandButton(title: "Connect a Bluetooth speaker",
                                         target: self, action: #selector(bluetoothConnectRowClicked(_:)))
         button.translatesAutoresizingMaskIntoConstraints = false
         button.bezelStyle = .accessoryBar
@@ -3204,8 +3213,9 @@ public final class PopoverController: NSObject {
         // greyed-out placeholder line. `contentTintColor` reliably tints a
         // button's template IMAGE (the comment below covers why the TITLE takes
         // a different route), so the glyph carries the same neutral secondary
-        // tone the title does.
-        button.image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil)
+        // tone the title does. Filled (`plus.circle.fill`) rather than outlined,
+        // for a simpler, more inviting mark.
+        button.image = NSImage(systemSymbolName: "plus.circle.fill", accessibilityDescription: nil)
         button.imagePosition = .imageLeading
         button.contentTintColor = Tokens.Color.secondaryLabel
         // The title's colour is set through `attributedTitle`, not
@@ -3213,18 +3223,21 @@ public final class PopoverController: NSObject {
         // IMAGE, but its effect on a title varies by bezel style. The dynamic
         // token resolves per appearance at draw time (the same way the FEED
         // pills' attributed colours do), so a live light/dark switch follows.
+        // The TITLE reads at full `label` while the GLYPH stays `secondaryLabel`
+        // — the weight difference between the two carries the row's appeal,
+        // instead of a bordered pill.
         button.attributedTitle = NSAttributedString(
             string: button.title,
             attributes: [.font: Tokens.Font.menuItem,
-                         .foregroundColor: Tokens.Color.secondaryLabel])
+                         .foregroundColor: Tokens.Color.label])
         bluetoothConnectButton = button
         let wrapper = NSView()
         wrapper.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(button)
-        let nameColumnLeading = PopoverColumnGrid.nameColumnLeading
+        let leading = PopoverColumnGrid.firstElementLeading(indented: false)
         NSLayoutConstraint.activate([
             wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
-            button.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
+            button.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: leading),
             button.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
         ])
         return wrapper
@@ -3982,6 +3995,12 @@ public final class PopoverController: NSObject {
     public func test_columnTitleToolTips(title: String) -> [String?] {
         panel.test_columnTitleToolTips(title: title)
     }
+    /// Each of `title`'s column legends' leading edge, inward from the header
+    /// row's trailing edge, in creation order — the assertion surface for a
+    /// legend's left-aligned POSITION (e.g. "Source", "Offset").
+    public func test_columnTitleLeadingInsets(title: String) -> [CGFloat] {
+        panel.test_columnTitleLeadingInsets(title: title)
+    }
     /// Whether the header accessory for `title` is enabled (`nil` if none) — F1.
     public func test_cardAccessoryEnabled(title: String) -> Bool? {
         panel.test_accessoryEnabled(title: title)
@@ -4175,6 +4194,17 @@ public final class PopoverController: NSObject {
     /// Whether the mounted Connect row carries its leading glyph — the half of
     /// "reads as clickable" a headless run can actually see.
     public var test_bluetoothConnectRowHasGlyph: Bool { bluetoothConnectButton?.image != nil }
+
+    /// Leading inset of the Connect row's button from its own row's leading
+    /// edge — pinned to `firstElementLeading(indented: false)` (where a
+    /// device row's ICON sits), not the deeper `nameColumnLeading` (where a
+    /// NAME sits), so the "+" reads as one indent step, not two. `nil` if the
+    /// row isn't mounted. Force a layout pass first (e.g. via
+    /// `test_panelView`) so the frame is current.
+    public var test_bluetoothConnectRowLeadingInset: CGFloat? {
+        guard let button = bluetoothConnectButton, let wrap = button.superview else { return nil }
+        return button.frame.minX - wrap.bounds.minX
+    }
 
     /// The AirPlay empty-state line the last rebuild rendered, `nil` when it
     /// rendered none.

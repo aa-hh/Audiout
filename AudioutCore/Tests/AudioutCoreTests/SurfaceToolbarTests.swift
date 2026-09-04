@@ -10,8 +10,14 @@ import AudioutSharedUI
 /// window-attached `NSToolbar` (live-review D1, which retired the custom
 /// `PopoverHeaderView` strip and its three-tier material machinery; the
 /// system toolbar owns materials and Reduce Transparency now, so no tier
-/// seams remain to test), plus the brand header row beneath it. Headless:
-/// items are materialized by attaching the toolbar to a never-shown window.
+/// seams remain to test). Headless: items are materialized by attaching the
+/// toolbar to a never-shown window.
+///
+/// Since 2026-09-04 the items draw their own seat (`SurfaceToolbarSeat`), so
+/// the drawing tests below RENDER a seat and sample its pixels. The version
+/// they replace asserted the intent instead — it reported green while macOS
+/// 14–25 drew no selection at all, because every cue sat inside
+/// `if #available(macOS 26.0, *)`.
 @MainActor
 @Suite struct SurfaceToolbarTests {
 
@@ -55,7 +61,8 @@ import AudioutSharedUI
     /// were tried and removed: translated labels would widen the strip until
     /// AppKit swept the tabs into the overflow menu, and primary navigation
     /// cannot live behind a chevron. The names still reach the reader through
-    /// the tooltip, the `label`, and ⌘1/⌘2/⌘3 — none of which costs width.
+    /// the tooltip, the accessibility label, and ⌘1/⌘2/⌘3 — none of which
+    /// costs width.
     @Test func tabsDrawNoNameSoTheStripCannotGrowWithTranslation() {
         let (controller, window) = makeAttached()
         window.layoutIfNeeded()
@@ -64,7 +71,9 @@ import AudioutSharedUI
         let noTabDrawsAName = controller.test_tabTitles.allSatisfy(\.isEmpty)
         #expect(noTabDrawsAName, "no tab draws a name")
         #expect(controller.test_tabLabels == SurfaceScreen.allCases.map(\.label),
-                "but every tab still carries its name for VoiceOver and the overflow menu")
+                "but every tab still carries its name for the overflow menu")
+        #expect(controller.test_tabAccessibilityLabels == SurfaceScreen.allCases.map(\.label),
+                "and VoiceOver is handed it from the view, which is what speaks now")
         #expect(controller.test_tabToolTips == SurfaceScreen.allCases.map { "\($0.label) (⌘\($0.keyEquivalent))" },
                 "and the tooltip spells it out with the shortcut")
         #expect(controller.test_allTabImagesResolved,
@@ -72,13 +81,58 @@ import AudioutSharedUI
         #expect(controller.toolbar.displayMode == .iconOnly)
     }
 
+    /// Every seat is fixed-width, and every item asks to stay visible — the
+    /// two things that keep the strip out of the overflow chevron.
+    @Test func everySeatIsFixedWidthAndAsksToStayOutOfTheOverflowMenu() {
+        let (controller, _) = makeAttached()
+        for item in controller.toolbar.items {
+            guard let view = item.view else { continue }
+            #expect(view.frame.size == SurfaceToolbarSeat.size,
+                    Comment(rawValue: "\(item.itemIdentifier.rawValue) must be the fixed seat size"))
+            #expect(item.visibilityPriority == .high,
+                    Comment(rawValue: "\(item.itemIdentifier.rawValue) must not be sweepable into the chevron"))
+        }
+    }
 
-    @Test func pinResolvesItsGlyphAndQuitIsAWord() {
+    @Test func pinResolvesItsGlyph() {
         let (controller, _) = makeAttached()
         #expect(controller.test_pinItemHasImage)
     }
 
-    // MARK: No segmented separators, and clicks that really land
+    // MARK: One shape language across the whole strip
+
+    /// The defect this replaces (Alec, 2026-09-04): a bordered `NSToolbarItem`
+    /// draws its HOVER state as a circle and its SELECTED state as a rounded
+    /// square. Neither shape is settable, so the only fix is to draw the strip
+    /// ourselves — and to draw ALL of it, because converting only the tabs is
+    /// what failed live review on 2026-08-30 (bare glyphs beside bordered
+    /// circles).
+    @Test func everyItemInTheStripWearsTheSameSeat() {
+        let (controller, _) = makeAttached()
+        #expect(controller.test_everyItemWearsTheSeat,
+                "the three tabs AND Pin are all SurfaceToolbarSeatButtons — half a conversion is the 2026-08-30 failure")
+        // AppKit's circle and rounded square come from the stock button
+        // cell's bezel. Every seat installs `SurfaceToolbarSeatCell`, whose
+        // `drawBezel` never calls `super`, so that bezel is replaced outright
+        // rather than drawn under ours.
+        let everySeatOwnsItsBezel = controller.toolbar.items
+            .compactMap { $0.view as? SurfaceToolbarSeatButton }
+            .allSatisfy { $0.cell is SurfaceToolbarSeatCell }
+        #expect(everySeatOwnsItsBezel,
+                "no item hands its drawing back to AppKit; the seat is the only chrome in the strip")
+    }
+
+    /// AppKit's own selection highlight must stay OFF: it is the rounded
+    /// square whose hover twin is a circle, and leaving it on would draw a
+    /// second seat behind the authored one.
+    @Test func appKitsOwnSelectionHighlightIsOff() {
+        let (controller, _) = makeAttached()
+        #expect(controller.toolbarSelectableItemIdentifiers(controller.toolbar).isEmpty,
+                "an empty selectable set is what keeps AppKit from drawing its own highlight")
+        controller.setSelectedScreen(.groups)
+        #expect(controller.toolbar.selectedItemIdentifier == nil,
+                "the strip marks itself; nothing is handed to AppKit to draw")
+    }
 
     /// The reason the tabs stopped being one `NSToolbarItemGroup` (live review
     /// 2026-08-29): a segmented control draws a hairline between adjacent
@@ -99,34 +153,22 @@ import AudioutSharedUI
         }
     }
 
-    /// The selection has to be visible without the segmented capsule doing it
-    /// for us, and it has to be visible on exactly one tab.
+    /// The selection has to be visible on exactly one tab.
     @Test func onlyTheSelectedTabIsMarked() {
         let (controller, _) = makeAttached()
         #expect(controller.test_onlySelectedTabIsMarked, "Mixer starts selected, alone")
 
         controller.setSelectedScreen(.settings)
 
-        #expect(controller.test_onlySelectedTabIsMarked, "the fill followed the selection")
-    }
-
-    /// One header, one button style (Alec, live review 2026-08-30). The tabs
-    /// had become custom-view items, which draw NO chrome — bare glyphs beside
-    /// Pin/Quit's bordered circles, two styles
-    /// in one strip. Every tab is the same bordered item Pin and Quit are.
-    @Test func everyTabWearsTheSameControlAsPinAndQuit() {
-        let (controller, _) = makeAttached()
-        #expect(controller.test_allTabsAreBordered,
-                "the tabs are bordered items — the same control Pin and Quit are")
-        #expect(controller.test_pinItemIsBordered,
-                "and Pin/Quit really are bordered, so that comparison means something")
+        #expect(controller.test_onlySelectedTabIsMarked, "the seat followed the selection")
+        #expect(controller.test_engagedTabCount == 1, "and never two seats at once")
     }
 
     /// The tabs are `.space`-separated so the strip cannot RESHAPE with the
-    /// selection. Adjacent bordered items merge into one shared capsule on
-    /// macOS 26+, and `.prominent` pulls the selected item out of that capsule —
-    /// measured live: Mixer gave circle + capsule(2), Groups gave three
-    /// circles, Settings gave capsule(2) + circle. Same wandering geometry the
+    /// selection. Adjacent items merged into one shared capsule on macOS 26+,
+    /// and the selected item was then pulled out of that capsule — measured
+    /// live: Mixer gave circle + capsule(2), Groups gave three circles,
+    /// Settings gave capsule(2) + circle. Same wandering geometry the
     /// segmented divider had.
     @Test func theTabsAreSeparatedSoTheStripCannotReshape() {
         let (controller, _) = makeAttached()
@@ -142,28 +184,199 @@ import AudioutSharedUI
         }
     }
 
-    /// Selection is AppKit's own, not an authored fill. This test replaces
-    /// `theSelectionFillIsNeutralNotGold`, which pinned the bug it was written
-    /// to prevent: it required a PURE grey darker than 0.5 brightness, which
-    /// forbade both a warm value and any value bright enough to clear the
-    /// unselected capsule in dark mode.
+    // MARK: The seat's real pixels
+
+    /// Render a seat and hand back its bitmap, or `nil` where this machine
+    /// cannot cache a display (the same offscreen `cacheDisplay` path the
+    /// snapshot tests use).
+    private func render(_ button: SurfaceToolbarSeatButton,
+                        appearanceName: NSAppearance.Name) -> NSBitmapImageRep? {
+        button.appearance = NSAppearance(named: appearanceName)
+        guard let rep = button.bitmapImageRepForCachingDisplay(in: button.bounds) else { return nil }
+        button.cacheDisplay(in: button.bounds, to: rep)
+        return rep
+    }
+
+    /// The colour at a point given in the seat's own POINTS, scaled to
+    /// whatever pixel density the rep came back at.
+    private func color(_ rep: NSBitmapImageRep, atPoint point: NSPoint,
+                       in bounds: NSRect) -> NSColor? {
+        let scale = CGFloat(rep.pixelsWide) / bounds.width
+        let x = min(rep.pixelsWide - 1, max(0, Int(point.x * scale)))
+        let y = min(rep.pixelsHigh - 1, max(0, Int(point.y * scale)))
+        return rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB)
+    }
+
+    private func makeSeat(isEngaged: Bool = false, isHovered: Bool = false,
+                          isPressed: Bool = false) -> SurfaceToolbarSeatButton {
+        let button = SurfaceToolbarSeatButton(
+            frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.size))
+        button.configure(symbol: NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings"),
+                         label: "Settings", toolTip: nil, isTab: true)
+        button.isEngaged = isEngaged
+        button.isHovered = isHovered
+        button.test_isPressed = isPressed
+        return button
+    }
+
+    /// A point clear of the glyph, on the seat's own left shoulder.
+    private var seatProbe: NSPoint { NSPoint(x: 3, y: SurfaceToolbarSeat.size.height / 2) }
+
+    /// The cue that failed review twice: no selection at all on macOS 14–25,
+    /// because every state sat behind `if #available(macOS 26.0, *)`.
+    /// `fillAlpha` is a plain function of the four state flags with no
+    /// version in it, so what it returns here is what macOS 14.2 draws.
+    @Test func everyStateHasAWeightAndTheLadderRises() {
+        #expect(SurfaceToolbarSeat.fillAlpha(isEngaged: false, isHovered: false,
+                                             isPressed: false, increaseContrast: false) == nil,
+                "rest draws no seat")
+        guard let hover = SurfaceToolbarSeat.fillAlpha(isEngaged: false, isHovered: true,
+                                                       isPressed: false, increaseContrast: false),
+              let engaged = SurfaceToolbarSeat.fillAlpha(isEngaged: true, isHovered: false,
+                                                         isPressed: false, increaseContrast: false),
+              let pressed = SurfaceToolbarSeat.fillAlpha(isEngaged: false, isHovered: false,
+                                                         isPressed: true, increaseContrast: false) else {
+            Issue.record("hover, selection and press must each draw a seat")
+            return
+        }
+        #expect(hover < engaged, "the current screen outweighs the pointer")
+        #expect(engaged < pressed, "and a press outweighs both, wherever it lands")
+        #expect(hover == PopoverColumnGrid.rowHoverWashAlpha,
+                "the header borrows the mixer's own hover weight")
+        #expect(engaged == PopoverColumnGrid.rowSelectionWashAlpha)
+        #expect(pressed == PopoverColumnGrid.mutePillFillAlpha)
+    }
+
+    /// Increase Contrast is read LIVE on every draw (the app never snapshots
+    /// the flag), and it lifts the whole ladder by one factor so the three
+    /// weights keep their spacing instead of collapsing together.
+    @Test func increaseContrastStrengthensEverySeatWithoutFlatteningTheLadder() {
+        let states: [(engaged: Bool, hovered: Bool, pressed: Bool)] =
+            [(false, true, false), (true, false, false), (false, false, true)]
+        var lifted: [CGFloat] = []
+        for state in states {
+            guard let normal = SurfaceToolbarSeat.fillAlpha(isEngaged: state.engaged,
+                                                            isHovered: state.hovered,
+                                                            isPressed: state.pressed,
+                                                            increaseContrast: false),
+                  let high = SurfaceToolbarSeat.fillAlpha(isEngaged: state.engaged,
+                                                          isHovered: state.hovered,
+                                                          isPressed: state.pressed,
+                                                          increaseContrast: true) else {
+                Issue.record("every drawn state must answer in both contrast settings")
+                return
+            }
+            #expect(high > normal, "Increase Contrast strengthens the seat")
+            lifted.append(high)
+        }
+        #expect(lifted == lifted.sorted(), "and the rungs keep their order")
+        #expect(Set(lifted).count == lifted.count, "and stay distinct from each other")
+    }
+
+    /// The seat must be VISIBLE, and in dark mode it must be LIGHTER than the
+    /// strip. The authored fill this replaces got that backwards: it had to
+    /// clear the unselected capsule, which already sat at the same grey, so
+    /// the user's own location rendered as the darkest thing in the header.
+    /// A rest seat draws nothing, so there is no capsule left to clear.
+    @Test func theSelectedSeatPaintsAndLeansTheRightWayInBothAppearances() {
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            let rest = makeSeat()
+            let engaged = makeSeat(isEngaged: true)
+            guard let restRep = render(rest, appearanceName: appearanceName),
+                  let engagedRep = render(engaged, appearanceName: appearanceName),
+                  let restPixel = color(restRep, atPoint: seatProbe, in: rest.bounds),
+                  let engagedPixel = color(engagedRep, atPoint: seatProbe, in: engaged.bounds) else {
+                // Environment guard: no bitmap rep here, nothing to sample.
+                return
+            }
+            #expect(restPixel.alphaComponent < 0.01,
+                    Comment(rawValue: "an idle tab paints no seat under \(appearanceName.rawValue)"))
+            #expect(engagedPixel.alphaComponent > 0.05,
+                    Comment(rawValue: "the current screen paints a real seat under \(appearanceName.rawValue) — this is the cue that was missing on macOS 14–25"))
+            if appearanceName == .darkAqua {
+                #expect(engagedPixel.brightnessComponent > 0.5,
+                        "in dark the seat washes the strip LIGHTER, never darker")
+            } else {
+                #expect(engagedPixel.brightnessComponent < 0.5,
+                        "in light the seat washes the flat ground darker")
+            }
+        }
+    }
+
+    /// One shape language: hover, selection and press are the SAME rounded
+    /// rectangle at different weights. AppKit's bordered item drew a circle on
+    /// hover and a rounded square when selected — two shapes for two states of
+    /// one control, which is the defect.
     ///
-    /// `selectedItemIdentifier` is version-free — the old cue lived inside
-    /// `if #available(macOS 26.0, *)` while the package deploys to 14.2, so
-    /// macOS 14–25 had no cue at all — and it is the selection AppKit exposes
-    /// to VoiceOver, which a rendering style never was.
-    @Test func theToolbarCarriesSelectionItselfOnEveryVersion() {
+    /// The probes are chosen to pin the radius, not just the outline:
+    /// `insideCorner` sits inside a 10 pt corner but OUTSIDE the 13 pt one a
+    /// capsule on this 26 pt-tall seat would have, and `outsideCorner` is
+    /// clear of any rounded corner at all — so a square, a capsule and a
+    /// circle each fail a probe that the drawn shape passes.
+    @Test func hoverSelectionAndPressAreOneShapeAtThreeWeights() {
+        #expect(SurfaceToolbarSeat.cornerRadius == Tokens.Layout.Radius.control,
+                "the seat is the control radius, and the same one in every state")
+        let insideCorner = NSPoint(x: 3, y: 3)
+        let outsideCorner = NSPoint(x: 0.5, y: 0.5)
+        let states: [(name: String, seat: SurfaceToolbarSeatButton)] = [
+            ("hover", makeSeat(isHovered: true)),
+            ("selected", makeSeat(isEngaged: true)),
+            ("pressed", makeSeat(isPressed: true)),
+        ]
+        for state in states {
+            guard let rep = render(state.seat, appearanceName: .darkAqua),
+                  let inside = color(rep, atPoint: insideCorner, in: state.seat.bounds),
+                  let outside = color(rep, atPoint: outsideCorner, in: state.seat.bounds),
+                  let middle = color(rep, atPoint: seatProbe, in: state.seat.bounds) else {
+                return // environment guard, as above
+            }
+            #expect(middle.alphaComponent > 0.05,
+                    Comment(rawValue: "\(state.name) draws a seat at all"))
+            #expect(inside.alphaComponent > 0.05,
+                    Comment(rawValue: "\(state.name)'s corner is cut at the control radius, not the capsule radius a circle would need"))
+            #expect(outside.alphaComponent < 0.05,
+                    Comment(rawValue: "\(state.name)'s corner really is rounded — a square seat would paint here"))
+        }
+    }
+
+    /// Pin wears the same seat, and its "on" reads as selected.
+    @Test func pinnedPinDrawsTheSameSeatAsASelectedTab() {
         let (controller, _) = makeAttached()
-        // Asked of the delegate, because NSToolbar exposes no
-        // `selectableItemIdentifiers` property — only the delegate method.
-        #expect(controller.toolbarSelectableItemIdentifiers(controller.toolbar)
-                    == SurfaceScreen.allCases.map(SurfaceToolbarController.tabItemIdentifier(for:)),
-                "the three screens are the selectable set — without it AppKit draws no highlight")
-        for screen in SurfaceScreen.allCases {
-            controller.setSelectedScreen(screen)
-            #expect(controller.toolbar.selectedItemIdentifier
-                        == SurfaceToolbarController.tabItemIdentifier(for: screen),
-                    "\(screen.label) is what the toolbar reports as selected")
+        guard let pin = controller.test_pinButton else {
+            Issue.record("Pin has no seat button")
+            return
+        }
+        #expect(!pin.isEngaged, "unpinned draws no seat, exactly like an idle tab")
+        controller.setPinned(true)
+        #expect(pin.isEngaged, "pinned wears the selected weight")
+        controller.setPinned(false)
+        #expect(!pin.isEngaged)
+    }
+
+    // MARK: The spoken selection
+
+    /// `NSToolbar.selectedItemIdentifier` is what VoiceOver used to speak, so
+    /// taking over the drawing means taking over the spoken state too. Losing
+    /// it is a regression that has already failed review once.
+    @Test func exactlyTheSelectedTabReportsSelectedToAccessibility() {
+        let (controller, _) = makeAttached()
+        for selected in SurfaceScreen.allCases {
+            controller.setSelectedScreen(selected)
+            for screen in SurfaceScreen.allCases {
+                guard let button = controller.test_tabButton(screen) else {
+                    Issue.record("\(screen.label) has no seat button")
+                    return
+                }
+                let shouldBeSelected = screen == selected
+                #expect(button.isAccessibilitySelected() == shouldBeSelected,
+                        Comment(rawValue: "with \(selected.label) showing, \(screen.label) must report selected == \(shouldBeSelected)"))
+                #expect((button.accessibilityValue() as? NSNumber)?.boolValue == shouldBeSelected,
+                        Comment(rawValue: "\(screen.label)'s accessibility value is what VoiceOver speaks for a radio button"))
+                #expect(button.accessibilityRole() == .radioButton,
+                        Comment(rawValue: "\(screen.label) is one of three, exactly one on"))
+                #expect(button.accessibilityLabel() == screen.label,
+                        Comment(rawValue: "\(screen.label) speaks its name"))
+            }
         }
     }
 
@@ -188,7 +401,7 @@ import AudioutSharedUI
                 "the tabs snapped back to the host-confirmed screen")
     }
 
-    @Test func hostConfirmedSelectionMovesTheSegment() {
+    @Test func hostConfirmedSelectionMovesTheSeat() {
         let (controller, _) = makeAttached()
         #expect(controller.test_selectedTabIndex == SurfaceScreen.mixer.rawValue,
                 "Mixer starts selected")
@@ -199,7 +412,7 @@ import AudioutSharedUI
         #expect(controller.test_selectedTabIndex == SurfaceScreen.settings.rawValue)
     }
 
-    @Test func aConfirmingHostKeepsTheTappedSegment() {
+    @Test func aConfirmingHostKeepsTheTappedTab() {
         // The live wiring: the host's callback calls setSelectedScreen
         // synchronously, so the tapped tab stays.
         let (controller, _) = makeAttached()

@@ -294,6 +294,61 @@ import Testing
         #expect(snapshot.addableApps.contains { $0.bundleID == "com.addable.app" }, "non-excluded addable app survives")
     }
 
+    // MARK: Route destination ids
+
+    /// A group route names WHICH group, in its own field. The phone resolves
+    /// `groupID` against `Snapshot.groups`; with the id in the device slot
+    /// instead it would resolve against the device list and render as a
+    /// missing device, which is why the two slots are separate.
+    @Test func aGroupRouteReportsItsGroupIDAndNoDeviceID() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        try controller.saveGroup(Group(id: "g1", name: "Group 1", memberIDs: ["speaker-b"], memberVolumes: [:]))
+        let appRouting = makeAppRouting()
+        appRouting.addRoute(bundleID: "com.example.safari", displayName: "Safari")
+        appRouting.setDestination(.group(id: "g1"), for: "com.example.safari")
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: [], iconFor: iconFor, addableApps: [],
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+
+        let route = try #require(snapshot.appRoutes.first { $0.bundleID == "com.example.safari" })
+        #expect(route.destinationKind == "group")
+        #expect(route.groupID == "g1")
+        #expect(route.deviceID == nil, "a group id must never occupy the device slot")
+        #expect(snapshot.groups.contains { $0.id == "g1" }, "the id the phone resolves against is in the snapshot")
+    }
+
+    /// The device arm keeps its own slot, and reports no group.
+    @Test func aDeviceRouteReportsItsDeviceIDAndNoGroupID() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        appRouting.setDestination(.device(id: "speaker-b"), for: "com.example.music")
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: [], iconFor: iconFor, addableApps: [],
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+
+        let route = try #require(snapshot.appRoutes.first { $0.bundleID == "com.example.music" })
+        #expect(route.destinationKind == "device")
+        #expect(route.deviceID == "speaker-b")
+        #expect(route.groupID == nil)
+    }
+
     // MARK: Connection fields (D9 full parity)
 
     @Test func connectionCarriesFailureHeadlineAndSuggestion() async throws {

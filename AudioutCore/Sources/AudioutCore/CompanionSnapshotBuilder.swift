@@ -315,6 +315,12 @@ public enum CompanionSnapshotBuilder {
         case .noRedirect:     return ("noRedirect", nil)
         case .currentDevice:  return ("currentDevice", nil)
         case .device(let id): return ("device", id)
+        // `AppRouteState` (AudioutProtocol) carries no group id — only
+        // `deviceID`, and a group id put there would be read as a device id.
+        // So the phone learns the app is routed away without learning where
+        // to. Naming the group needs a `groupID` on the wire struct, which
+        // lives in the shared package and is a versioned change.
+        case .group:          return ("group", nil)
         }
     }
 }

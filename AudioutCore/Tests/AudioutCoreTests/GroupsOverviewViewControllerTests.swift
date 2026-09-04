@@ -52,6 +52,62 @@ import AppKit
         Group(id: id, name: name, memberIDs: members, memberVolumes: [:])
     }
 
+    // MARK: "Playing …" — apps routed to a group
+
+    /// The overview plus an `AppRoutingController` seeded with `routes`
+    /// (bundle id → destination), which is what a card's "Playing" clause reads.
+    private func makeOverviewWithRoutes(
+        groups: [Group], routes: [(bundleID: String, name: String, destination: AppRouteDestination)]
+    ) throws -> GroupsOverviewViewController {
+        let groupController = makeGroupController()
+        for group in groups { _ = try groupController.saveGroup(group) }
+        let appRouting = AppRoutingController(
+            store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        for route in routes {
+            appRouting.addRoute(bundleID: route.bundleID, displayName: route.name)
+            appRouting.setDestination(route.destination, for: route.bundleID)
+        }
+        let overview = GroupsOverviewViewController(groupController: groupController)
+        overview.appRouting = appRouting
+        _ = overview.view
+        overview.reload(devices: [])
+        return overview
+    }
+
+    @Test func oneRoutedAppIsNamedOnTheCard() throws {
+        let overview = try makeOverviewWithRoutes(
+            groups: [group("g1", "Downstairs", members: ["office"])],
+            routes: [("com.apple.Safari", "Safari", .group(id: "g1"))])
+
+        #expect(overview.test_cardFeedingText(id: "g1") == "Playing Safari")
+    }
+
+    @Test func severalRoutedAppsBecomeACount() throws {
+        let overview = try makeOverviewWithRoutes(
+            groups: [group("g1", "Downstairs", members: ["office"])],
+            routes: [("com.apple.Safari", "Safari", .group(id: "g1")),
+                     ("com.apple.Music", "Music", .group(id: "g1")),
+                     ("com.spotify.client", "Spotify", .group(id: "g1"))])
+
+        #expect(overview.test_cardFeedingText(id: "g1") == "Playing 3 apps")
+    }
+
+    @Test func aGroupNoAppTargetsSaysNothingAboutFeeding() throws {
+        let overview = try makeOverviewWithRoutes(
+            groups: [group("g1", "Downstairs", members: ["office"]),
+                     group("g2", "Upstairs", members: ["kitchen"])],
+            routes: [("com.apple.Safari", "Safari", .group(id: "g1")),
+                     ("com.apple.Music", "Music", .device(id: "kitchen"))])
+
+        #expect(overview.test_cardFeedingText(id: "g2") == nil,
+                "a direct device route to a member is not the group being fed")
+    }
+
+    @Test func aHostThatSuppliesNoRoutingTableShowsNoFeedingClause() throws {
+        let (overview, _) = try makeOverview(groups: [group("g1", "Downstairs", members: ["office"])])
+        #expect(overview.test_cardFeedingText(id: "g1") == nil)
+    }
+
     // MARK: The grid follows the model
 
     @Test func cardsFollowTheSavedGroupsInOrder() throws {

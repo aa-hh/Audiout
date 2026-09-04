@@ -3,12 +3,15 @@
 import Foundation
 
 /// Where a per-app redirect sends that app's audio (PLAN-POPOVER-ROUTING.md
-/// decision 8, EXTENDED with a genuine third state). Three cases:
+/// decisions 8 and 4). Four cases:
 ///  - `.noRedirect` — the neutral/unset state. The default for a newly-added
 ///    app; no deliberate choice has been made yet.
 ///  - `.currentDevice` — an explicit, deliberate "play on this Mac" pick, its
 ///    own selectable menu item.
 ///  - `.device(id:)` — names an AirPlay target device by its stable `Device.id`.
+///  - `.group(id:)` — names a SAVED GROUP by its `Group.id`. A live reference,
+///    never a snapshot: editing the group's membership changes what the app
+///    plays on immediately, exactly as it does when the group is Main Out.
 ///
 /// `.noRedirect` and `.currentDevice` both mean "this app plays locally and is
 /// not streamed to a remote device", and they are ENGINE/CAPTURE-EQUIVALENT
@@ -17,23 +20,49 @@ import Foundation
 /// route engages the leveled intercept (``LeveledAppInjector``): the app is
 /// tapped, taken out of the whole-system mix, and summed back into it at that
 /// volume. Every engine/capture call site should still pattern-match positively
-/// on `.device` rather than negatively on `.currentDevice`; the leveled set is a
-/// separate question (`.noRedirect` AND volume < 100).
+/// on `.device`/`.group` rather than negatively on `.currentDevice`; the
+/// leveled set is a separate question (`.noRedirect` AND volume < 100).
 public enum AppRouteDestination: Equatable, Sendable {
     case noRedirect
     case currentDevice
     case device(id: String)
+    case group(id: String)
 }
 
 extension AppRouteDestination {
-    /// True only for `.device(id:)` — the app is actually redirected to an
-    /// AirPlay target. Both `.noRedirect` and `.currentDevice` mean "plays
-    /// locally" and return `false`. The single source of truth for "is this
-    /// route actually routed away" — use this instead of `!= .currentDevice`,
-    /// which silently miscounts `.noRedirect` as routed.
+    /// True only for `.device(id:)` — the app is redirected to ONE named
+    /// AirPlay target. A `.group` route returns `false` here: it names a set of
+    /// speakers, so anything keyed on a single `Device.id` (the one-role-per-
+    /// speaker clear, the app-quit resume of a device) must not match it.
+    /// For "is this route redirected away from the main mix at all", use
+    /// ``isRoutedAway``.
     public var isDeviceRoute: Bool {
         if case .device = self { return true }
         return false
+    }
+
+    /// True for `.device` AND `.group` — the app is streaming on its own,
+    /// outside the whole-system mix. Both `.noRedirect` and `.currentDevice`
+    /// mean "plays locally" and return `false`.
+    public var isRoutedAway: Bool {
+        switch self {
+        case .device, .group: return true
+        case .noRedirect, .currentDevice: return false
+        }
+    }
+}
+
+/// One saved group resolved into the speakers it can currently feed as a
+/// PER-APP route target, each with its own level inside that group. Built by
+/// ``AppRoutingController/resolveGroupTargets(_:devices:)`` and handed to the
+/// backend alongside the route table, so nothing downstream needs a `Group`.
+public struct GroupRouteTarget: Equatable, Sendable {
+    /// Eligible member `Device.id` → that member's 0–100 level inside the group
+    /// (`Group.memberVolumes`, defaulting to 100).
+    public var memberVolumes: [String: Int]
+
+    public init(memberVolumes: [String: Int]) {
+        self.memberVolumes = memberVolumes
     }
 }
 
@@ -85,35 +114,44 @@ public struct AppRouteStore: Sendable {
     /// where the two behave identically at the engine/capture level). No
     /// old reader ever needs to understand `"noRedirect"` (this app doesn't
     /// ship an older binary that reads a newer file), so `currentSchemaVersion`
-    /// stays at 1.
+    /// stays at 1. `"group"` lands the same way, carrying its id in its OWN key
+    /// (`destinationGroupID`) rather than overloading `destinationDeviceID`, so
+    /// the two id spaces can never be read as each other. A group route stores
+    /// only the group's id — never a copy of its membership, which would go
+    /// stale the moment the group is edited.
     public struct PersistedRoute: Codable, Equatable, Sendable {
         public var bundleID: String
         public var displayName: String
-        public var destinationKind: String   // "noRedirect" | "currentDevice" | "device"
+        public var destinationKind: String   // "noRedirect" | "currentDevice" | "device" | "group"
         public var destinationDeviceID: String?
+        public var destinationGroupID: String?
         public var volume: Int
 
         public init(_ route: AppRoute) {
             self.bundleID = route.bundleID
             self.displayName = route.displayName
             self.volume = route.volume
+            self.destinationDeviceID = nil
+            self.destinationGroupID = nil
             switch route.destination {
-            case .noRedirect:            destinationKind = "noRedirect";     destinationDeviceID = nil
-            case .currentDevice:         destinationKind = "currentDevice"; destinationDeviceID = nil
-            case .device(let id):        destinationKind = "device";        destinationDeviceID = id
+            case .noRedirect:            destinationKind = "noRedirect"
+            case .currentDevice:         destinationKind = "currentDevice"
+            case .device(let id):        destinationKind = "device";  destinationDeviceID = id
+            case .group(let id):         destinationKind = "group";   destinationGroupID = id
             }
         }
 
-        /// Reconstruct the `AppRoute`. An unrecognized kind, a `"device"`
-        /// entry missing its id, or the explicit `"noRedirect"` kind all fall
-        /// back to `.noRedirect` — the neutral/unset state is the safe default
-        /// now (previously `.currentDevice` played that role; see the type's
-        /// doc comment). `"currentDevice"` is preserved as the deliberate
+        /// Reconstruct the `AppRoute`. An unrecognized kind, a `"device"` or
+        /// `"group"` entry missing its id, or the explicit `"noRedirect"` kind
+        /// all fall back to `.noRedirect` — the neutral/unset state is the safe
+        /// default now (previously `.currentDevice` played that role; see the
+        /// type's doc comment). `"currentDevice"` is preserved as the deliberate
         /// `.currentDevice` case it always named.
         public var route: AppRoute {
             let destination: AppRouteDestination
             switch destinationKind {
             case "device":         destination = destinationDeviceID.map { .device(id: $0) } ?? .noRedirect
+            case "group":          destination = destinationGroupID.map { .group(id: $0) } ?? .noRedirect
             case "currentDevice":  destination = .currentDevice
             default:               destination = .noRedirect   // "noRedirect" + any unrecognized value
             }

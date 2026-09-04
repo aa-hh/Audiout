@@ -111,12 +111,19 @@ import AudioutCore
                 "…and the screen reader through the row's spoken value")
     }
 
-    @Test func unavailableOverridesTheFeed() {
+    /// The unavailable rung is a GLYPH too (2026-09-04): "Unavailable" needs
+    /// 83.3 pt of a Bluetooth row's 52 pt feed slot, so it clipped exactly
+    /// the way the failure headlines did. Same treatment, same tone, word on
+    /// the tooltip and in the spoken value.
+    @Test func unavailableOverridesTheFeedWithAGlyphAndMovesTheWordOffTheRow() {
         let row = makeBusRow()
         row.apply(makeDevice(isAvailable: false), selected: true, routedAppNames: ["Music"])
-        #expect(row.test_feedText == "Unavailable")
-        #expect(row.test_feedIsErrorColored)
-        #expect(row.test_feedErrorPillHasGlyph)
+        #expect(row.test_feedText == nil, "the unavailable override carries no words of its own")
+        #expect(row.test_feedErrorPillHasGlyph, "it reads by shape (P2-6) — here by shape alone")
+        #expect(row.test_feedErrorGlyphIsFailureColored, "…in the failure tone it has always used")
+        #expect(row.test_feedTooltip == "Unavailable", "the word reaches the pointer on the tooltip")
+        #expect(row.test_accessibilityValue?.contains("Unavailable") == true,
+                "…and the screen reader through the row's spoken value")
     }
 
     // MARK: Connecting/reconnecting/muted are NOT shown in the FEED column
@@ -128,7 +135,7 @@ import AudioutCore
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .connecting), selected: true, controllable: true)
         #expect(row.test_feedText == "System")
-        #expect(!(row.test_feedIsErrorColored))
+        #expect(!row.test_feedErrorPillHasGlyph)
     }
 
     @Test func mutedRowsFeedStillShowsTheCompositeMuteLivesOnTheControl() {

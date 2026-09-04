@@ -106,7 +106,7 @@ import AppKit
         let row = makeRow(btDevice(available: false, state: .connecting), delegate: SpyDelegate())
         #expect(row.test_busNode == .connecting)
         #expect(row.test_ringForm == .connecting)
-        #expect(row.test_feedText != "Unavailable",
+        #expect(!row.test_feedErrorPillHasGlyph,
                 "the in-flight attempt is never shouted over by the unavailable pill")
     }
 
@@ -501,12 +501,38 @@ import AppKit
                 "a rounded rectangle beside mute's capsule, not a second capsule")
         #expect(shaped.test_eqSeatFrame.height < shaped.test_eqButtonFrame.height,
                 "the seat is sized to the door's slot, not to the button's larger frame")
-        #expect(abs(shaped.test_eqSeatFrame.midY - shaped.test_muteButtonFrame.midY) <= 1,
+        #expect(abs(shaped.test_eqSeatFrame.midY - shaped.test_muteButtonFrame.midY) <= 0.75,
                 "the two engaged marks sit on one centre line")
         // The seat grew inside the slot, so the gap to mute is untouched. No
         // absolute width assert here — AppKit's rounding grid varies per run.
         #expect(abs((shaped.test_muteButtonFrame.minX - shaped.test_eqButtonFrame.maxX)
                     - PopoverColumnGrid.eqToMuteGap) <= 1, "the 6 pt gap to mute is unmoved")
+    }
+
+    /// The mark sits INSIDE its seat with room on every side — the thing an
+    /// 18 pt seat failed: it left 2 pt of gold above the glyph's drawn ink
+    /// against 4.5 pt beside it, so the door read as a glyph filling its
+    /// border rather than a mark resting in a seat. Measured on the RENDERED
+    /// ink, not the symbol image's box, which carries transparent margin and
+    /// would pass either way.
+    @Test func theShapedGlyphSitsInsideItsSeatWithRoomOnEverySide() {
+        let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
+                             isEQShaped: true)
+        shaped.layoutSubtreeIfNeeded()
+        // A failed render fails the test rather than skipping it: a check that
+        // can silently pass on nothing is worse than no check.
+        guard let ink = shaped.test_eqGlyphInkFrame else {
+            Issue.record("the door's glyph rendered no ink — this check covered nothing")
+            return
+        }
+        // Inside the 1 pt border, which is the edge the mark must clear.
+        let interior = shaped.test_eqSeatFrame.insetBy(
+            dx: shaped.test_eqSeatBorderWidth, dy: shaped.test_eqSeatBorderWidth)
+        let room = "ink \(ink), seat interior \(interior)"
+        let clearances = [ink.minX - interior.minX, interior.maxX - ink.maxX,
+                          ink.minY - interior.minY, interior.maxY - ink.maxY]
+        #expect(clearances.allSatisfy { $0 >= 2 },
+                "at least 2 pt of gold on all four sides — \(room), clearances \(clearances)")
     }
 
     @Test func clickingTheEQButtonOpensTheEqualizer() {

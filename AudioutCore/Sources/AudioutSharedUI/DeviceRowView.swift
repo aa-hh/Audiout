@@ -313,23 +313,34 @@ public final class DeviceRowView: NSView {
     /// The point size every accessory glyph on this row is drawn at.
     private static let accessoryGlyphPointSize: CGFloat = 13
     /// The SHAPED door's glyph — "just a bit bigger" (Alec, 2026-09-04). It
-    /// grows inside the unchanged 24 pt slot, so the gold seat still keeps
-    /// about 4 pt of padding around the mark and ``PopoverColumnGrid/eqToMuteGap``
-    /// never moves.
+    /// grows inside the unchanged 24 pt slot, so
+    /// ``PopoverColumnGrid/eqToMuteGap`` never moves; the seat's own height
+    /// carries the padding (see ``eqSeatSize``).
     private static let eqShapedGlyphPointSize: CGFloat = 15
     /// The shaped door's gold seat, centred on ``eqButton``. Width is the
-    /// door's own column; height is picked against the control 6 pt trailing:
-    /// the engaged MUTE pill measures 24.5 × 14, so a full 24 × 24 seat would
-    /// stand 71% taller than the pill beside it and dominate a 44 pt row. 18
-    /// keeps the door the bigger of the two marks — which is what "a bit
-    /// bigger" asked for — without turning it into a block.
-    private static let eqSeatSize = NSSize(width: PopoverColumnGrid.eqButtonWidth, height: 18)
+    /// door's own column; height is picked against two things.
+    ///
+    /// The mark it surrounds: the glyph at ``eqShapedGlyphPointSize`` draws
+    /// 15.5 × 13.5 pt of ink (measured on a real `NSButton` at 2x, not from
+    /// the image's own 20 × 17 box, which carries transparent margin). On a
+    /// 24 pt-wide seat that leaves 4.5 / 4 pt of gold each side of the ink
+    /// horizontally, and 22 pt of height matches it: 4.5 / 4 pt top and
+    /// bottom too, so the mark sits in even padding rather than filling the
+    /// seat vertically inside a 1 pt border. Below 20 the gold above the ink
+    /// falls under 2 pt against 4.5 beside it, and the mark reads as
+    /// overrunning the seat it sits in.
+    ///
+    /// And the control 6 pt trailing: the engaged MUTE pill measures 19 × 14
+    /// (measured). A full 24 × 24 seat would stand 71% taller than that pill
+    /// and dominate a 42 pt row; 22 keeps the door the bigger of the two
+    /// marks — which is what "a bit bigger" asked for — without becoming a
+    /// block.
+    private static let eqSeatSize = NSSize(width: PopoverColumnGrid.eqButtonWidth, height: 22)
     /// Corner of that seat. Deliberately NOT ``Tokens/Layout/Radius/control``
-    /// (10): on an 18 pt-high seat that exceeds half the height, so Core
-    /// Animation would clamp it to a capsule — the exact shape the mute pill
-    /// 6 pt trailing already owns (its own 10 clamps to 7 on a 14 pt pill).
-    /// 6 stays visibly short of the 9 pt capsule point, so the two engaged
-    /// marks never read as one vocabulary.
+    /// (10): 6 stays visibly short of the 11 pt capsule point of a 22 pt-high
+    /// seat, so the door reads as a rounded SQUARE and never as a second copy
+    /// of the mute pill 6 pt trailing — whose own 10 clamps to 7 on a 14 pt
+    /// pill, making it a true capsule.
     private static let eqSeatCornerRadius: CGFloat = 6
     /// Stroke width of the shaped door's dark border.
     private static let eqSeatBorderWidth: CGFloat = 1
@@ -1151,6 +1162,25 @@ public final class DeviceRowView: NSView {
     /// already expects between segment WORDS.
     private static let feedSegmentSeparator = " · "
 
+    /// The word the unavailable rung keeps off the row itself, on the tooltip
+    /// and in the spoken value — the same word the non-bus sublabel prints.
+    static let unavailableHeadline = "Unavailable"
+
+    /// Whether the FEED column is drawing the unavailable rung's bare glyph.
+    /// One source for the drawing and for ``configureAccessibility()``, so the
+    /// spoken value can never claim a word the column isn't showing.
+    /// A Bluetooth reconnect attempt keeps `isAvailable == false` until the
+    /// endpoint appears — the connecting ring/node carry that state, so don't
+    /// shout "Unavailable" over an attempt still in flight.
+    private var showsUnavailableFeedGlyph: Bool {
+        guard busActive, !device.isAvailable else { return false }
+        switch device.connectionState {
+        case .failed: return false
+        case .connecting, .reconnecting: return !device.isBluetooth
+        default: return true
+        }
+    }
+
     /// Re-derive and push the FEED column's pills from the current device/
     /// mix/redirect state (``mainMixSourceName``/``feedAppNames``, set by
     /// ``apply``). No-op — hides `feedStack` — when this row hosts no FEED
@@ -1162,8 +1192,9 @@ public final class DeviceRowView: NSView {
     /// 1. `.failed` connection → a SINGLE "Couldn't connect" pill, failure-red
     ///    (spec item 3 "error overrides the feed" — pairs with the red halo
     ///    ring).
-    /// 2. else device unavailable → a single "Unavailable" pill, failure-red
-    ///    (the spec groups both under "failure-red words").
+    /// 2. else device unavailable → the same single failure-red glyph pill,
+    ///    its word on the tooltip and in the spoken value (the spec groups
+    ///    both under "failure-red", and both overflowed the slot as words).
     /// 3. else ONE PILL PER VALUE: `mainMixSourceName` (when non-nil) followed
     ///    by one pill per `feedAppNames` entry, in order — NEVER collapsed to
     ///    a single reason. Empty (nil main-mix AND no app names) renders no
@@ -1194,21 +1225,17 @@ public final class DeviceRowView: NSView {
             feedStack.toolTip = failure.headline
             return
         }
-        if !device.isAvailable {
-            // A BT reconnect attempt keeps `isAvailable == false` until the
-            // endpoint appears — the connecting ring/node carry that state, so
-            // don't shout "Unavailable" over an attempt still in flight.
-            var isConnectingNow: Bool {
-                switch device.connectionState {
-                case .connecting, .reconnecting: return true
-                default: return false
-                }
-            }
-            if !(device.isBluetooth && isConnectingNow) {
-                feedStack.toolTip = nil
-                setFeedText("Unavailable", color: Tokens.Color.failure)
-                return
-            }
+        if showsUnavailableFeedGlyph {
+            // GLYPH ONLY, same as the `.failed` rung above: "Unavailable"
+            // needs 83.3 pt of the Bluetooth row's 52 pt slot (60.3 pt of
+            // text plus the triangle's 19 pt and the pill's own padding), so
+            // the pill clipped to about "Unava". The word rides
+            // `feedStack.toolTip` and the row's spoken value instead.
+            setFeedFailureGlyph()
+            // AFTER the render: `renderFeedPills` → `clearFeedPills()` wipes
+            // `feedStack.toolTip` as it tears the old pills down.
+            feedStack.toolTip = Self.unavailableHeadline
+            return
         }
         var segments: [FeedSegment] = []
         // Pill tint says what is SOUNDING (D7): the main-mix pill goes
@@ -1270,18 +1297,11 @@ public final class DeviceRowView: NSView {
     }
 
     /// Render the SINGLE failure pill: the triangle glyph alone, in
-    /// `failure`, with no words at all. The headline rides `feedStack`'s
+    /// `failure`, with no words at all. Both failure rungs — `.failed` and
+    /// unavailable — draw this one pill; their words ride `feedStack`'s
     /// tooltip and the row's spoken value instead (2026-09-04).
     private func setFeedFailureGlyph() {
         renderFeedPills([(attributedText: NSAttributedString(), isError: true)])
-    }
-
-    /// Render a SINGLE failure-red pill of WORDS — the "Unavailable" rung.
-    /// The `.failed` rung above draws ``setFeedFailureGlyph()`` instead.
-    private func setFeedText(_ text: String, color: NSColor) {
-        let attr = NSAttributedString(
-            string: text, attributes: [.font: Tokens.Font.caption, .foregroundColor: color])
-        renderFeedPills([(attributedText: attr, isError: true)])
     }
 
     /// Compose `segments` (main-mix + app tokens, already colored) into ONE
@@ -1799,7 +1819,13 @@ public final class DeviceRowView: NSView {
                 eqButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.eqButtonWidth),
                 eqButton.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.eqButtonWidth),
                 // The gold seat is centred on the door's own alignment rect,
-                // at its own size — never on the button's larger frame.
+                // at its own size — never on the button's larger frame. That
+                // is also where the cell draws the glyph: the button frames
+                // 24.5 × 30.5 around a 24 × 24 alignment rect, and the drawn
+                // ink lands within 0.25 pt of the alignment rect's centre,
+                // not the frame's (measured at 2x on a real button).
+                // `theShapedGlyphSitsInsideItsSeatWithRoomOnEverySide` holds
+                // the clearance this produces.
                 eqSeatView.centerXAnchor.constraint(equalTo: eqButton.centerXAnchor),
                 eqSeatView.centerYAnchor.constraint(equalTo: eqButton.centerYAnchor),
                 eqSeatView.widthAnchor.constraint(equalToConstant: Self.eqSeatSize.width),
@@ -2420,34 +2446,25 @@ public final class DeviceRowView: NSView {
         return text.isEmpty ? nil : text
     }
 
-    /// Whether the FEED column is CURRENTLY rendering the failure-red override
-    /// (`Couldn't connect` / `Unavailable`, spec item 3) — reads the (single)
-    /// pill's resolved color (an error message is never mixed with normal
-    /// pills), so a test can't drift from what's actually painted.
-    public var test_feedIsErrorColored: Bool {
-        feedPills.first?.test_isErrorColored ?? false
-    }
-
-    /// Whether the FEED column's leading (error-override) pill CURRENTLY
-    /// carries its triangle glyph (P2-6) — an error pill reads by shape, not
-    /// colour alone.
+    /// Whether the FEED column is CURRENTLY rendering an error override
+    /// (`.failed` or unavailable, spec item 3) — reads the (single) pill's
+    /// mounted triangle glyph (P2-6), which is the whole of what either
+    /// override draws since both lost their words on 2026-09-04.
     public var test_feedErrorPillHasGlyph: Bool {
         feedPills.first?.test_hasErrorGlyph ?? false
     }
 
-    /// Whether that glyph is CURRENTLY painted in the failure tone. The
-    /// failure pill lost its words on 2026-09-04, so the colour half of the
-    /// signal now lives on the glyph rather than on a text run — this is what
-    /// ``test_feedIsErrorColored`` used to read for a `.failed` row.
+    /// Whether that glyph is CURRENTLY painted in the failure tone — the
+    /// colour half of the error signal, which lives on the glyph rather than
+    /// on a text run now that neither override carries words.
     public var test_feedErrorGlyphIsFailureColored: Bool {
         feedPills.first?.test_errorGlyphIsFailureColored ?? false
     }
 
     /// The FEED column's leading pill's CURRENTLY-painted foreground color
-    /// (the main-mix pill when not an error override): `label3` while
-    /// ``controlsMuted``, `goldText` while the main mix is sounding here,
-    /// `label2` otherwise. Reads what's actually painted, like
-    /// ``test_feedIsErrorColored``.
+    /// (the main-mix pill; an error override has no text run at all):
+    /// `label3` while ``controlsMuted``, `goldText` while the main mix is
+    /// sounding here, `label2` otherwise. Reads what's actually painted.
     public var test_feedNeutralColor: NSColor? {
         feedPills.first?.test_leadingRunColor
     }
@@ -2545,6 +2562,37 @@ public final class DeviceRowView: NSView {
     /// The seat's frame in the row's own coordinates, after a layout pass —
     /// what the shape comparison against the mute pill reads.
     public var test_eqSeatFrame: NSRect { eqSeatView.frame }
+
+    /// The door glyph's DRAWN ink, in the row's own coordinates: the button
+    /// rendered to a bitmap and its non-transparent pixels bounded. The image
+    /// box is no substitute — a symbol image carries transparent margin
+    /// (20 × 17 around 15.5 × 13.5 of ink here), so measuring the box says
+    /// nothing about whether the mark clears the seat's border.
+    /// `nil` only when the render itself fails; a caller must FAIL on that
+    /// rather than skip, or the check silently stops covering anything.
+    public var test_eqGlyphInkFrame: NSRect? {
+        layoutSubtreeIfNeeded()
+        guard let rep = eqButton.bitmapImageRepForCachingDisplay(in: eqButton.bounds)
+        else { return nil }
+        eqButton.cacheDisplay(in: eqButton.bounds, to: rep)
+        let scaleX = eqButton.bounds.width / CGFloat(rep.pixelsWide)
+        let scaleY = eqButton.bounds.height / CGFloat(rep.pixelsHigh)
+        var minX = rep.pixelsWide, maxX = -1, minY = rep.pixelsHigh, maxY = -1
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.02 {
+                minX = min(minX, x); maxX = max(maxX, x)
+                minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        // `colorAt` counts rows from the TOP; the row's coordinates are
+        // bottom-up, so the bitmap's last inked row is the ink's bottom edge.
+        return NSRect(
+            x: eqButton.frame.minX + CGFloat(minX) * scaleX,
+            y: eqButton.frame.minY + eqButton.bounds.height - CGFloat(maxY + 1) * scaleY,
+            width: CGFloat(maxX - minX + 1) * scaleX,
+            height: CGFloat(maxY - minY + 1) * scaleY)
+    }
 
     private func eqSeatColor(_ stamped: CGColor?, matches token: NSColor) -> Bool {
         guard let stamped,
@@ -3166,6 +3214,9 @@ public final class DeviceRowView: NSView {
         if busActive, case .failed(let failure) = device.connectionState {
             valueParts.append(failure.headline)
         }
+        // Same trade on the unavailable rung: its word left the column on the
+        // same day and for the same reason, so it arrives here instead.
+        if showsUnavailableFeedGlyph { valueParts.append(Self.unavailableHeadline) }
         if device.isMuted || isMasterMuted { valueParts.append("muted") }
         if isRouteArmed { valueParts.append(hasLiveFeeds ? "playing here" : "armed") }
         if volumePendingApply { valueParts.append("applying volume") }

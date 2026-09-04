@@ -161,17 +161,11 @@ final class FeedPillView: NSView {
     /// This pill's plain-text content.
     var test_text: String { label.attributedStringValue.string }
 
-    /// Whether this pill's leading run is CURRENTLY painted in the
-    /// failure-red tone — reads what's actually painted (not just the
-    /// `isError` flag `configure` was called with) so a test can't drift from
-    /// the real drawn state, mirroring the retired `feedLabel`'s own
-    /// `test_feedIsErrorColored`.
-    var test_isErrorColored: Bool { isFailureColored(firstRunColor()) }
-
     /// Whether the leading triangle is mounted AND currently painted in the
-    /// failure tone. A `.failed` pill carries no words at all now, so this is
-    /// where its colour lives — ``test_isErrorColored`` reads an empty run
-    /// and returns false for one.
+    /// failure tone. An error pill carries no words at all now, so this is
+    /// where its colour lives — reads what's actually painted, not the
+    /// `isError` flag `configure` was called with, so a test can't drift from
+    /// the real drawn state.
     var test_errorGlyphIsFailureColored: Bool {
         !errorGlyph.isHidden && isFailureColored(errorGlyph.contentTintColor)
     }

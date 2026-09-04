@@ -887,9 +887,26 @@ fi
 # PostHog must be present in a bundled release because double-clicked apps do not
 # inherit the build shell's environment. CI supplies these values directly; local
 # release builds may use the wizard-managed root .env.
-if [ -f "$REPO_ROOT/.env" ]; then
+#
+# .env is gitignored, so a fresh `git worktree` never has one — only the
+# primary checkout does. Every worktree shares that one repository, so the
+# primary checkout is always findable from `--git-common-dir` (a worktree's is
+# `<primary>/.git`; the primary's own is `.git` itself, whose parent is
+# already $REPO_ROOT, so this is a no-op there). Missing this made the script
+# exit here, before the codesign step, leaving a half-built `.app` that looked
+# present and even launched but carried none of the entitlements below — see
+# dev/notes/make-app-worktree-env-gap.md.
+ENV_FILE="$REPO_ROOT/.env"
+if [ ! -f "$ENV_FILE" ]; then
+  PRIMARY_ROOT="$(cd "$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir)/.." && pwd)"
+  if [ -f "$PRIMARY_ROOT/.env" ] && [ "$PRIMARY_ROOT" != "$REPO_ROOT" ]; then
+    echo "==> No .env in this worktree — using the primary checkout's ($PRIMARY_ROOT/.env)"
+    ENV_FILE="$PRIMARY_ROOT/.env"
+  fi
+fi
+if [ -f "$ENV_FILE" ]; then
   set -a
-  . "$REPO_ROOT/.env"
+  . "$ENV_FILE"
   set +a
 fi
 [ -n "${POSTHOG_PROJECT_TOKEN:-}" ] || { echo "ERROR: POSTHOG_PROJECT_TOKEN is required for a release bundle" >&2; exit 1; }

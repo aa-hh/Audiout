@@ -976,10 +976,22 @@ public func makeBackend(
         // offsets/trims stay at the manager's 0 defaults until BT-OFFSET-UI
         // persists real ones.
         nativeBackend.btSyncedSinkFactory = {
-            BTSyncedSink(
+            // Each sink's clock verdicts feed the freshness store, which is
+            // what decides when the phone's Measure button goes live. `nil`
+            // when the poll is switched off — see ``BTClockWatcher/isEnabled``.
+            let clockObserver: (@Sendable (String, BTClockStability.Outcome) -> Void)?
+            if BTClockWatcher.isEnabled {
+                clockObserver = { [weak nativeBackend] uid, outcome in
+                    nativeBackend?.btAlignmentFreshness.noteClockOutcome(uid: uid, outcome: outcome)
+                }
+            } else {
+                clockObserver = nil
+            }
+            return BTSyncedSink(
                 presentationDelayMs: { [weak nativeBackend] in
                     nativeBackend?.btReferenceDelayMs() ?? startBufferMs
-                })
+                },
+                clockObserver: clockObserver)
         }
         return nativeBackend
     }

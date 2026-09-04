@@ -623,6 +623,8 @@ import Testing
                    + "a switch in System Settings.")
         #expect(vc.test_rowIsBroken(.audio))
         #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
+        #expect(vc.test_ribbonStatusTextColor == Tokens.Color.label2,
+                "the failure hue is graphical-object-only (house rule 8) — the words beside the red glyph stay ordinary body ink")
     }
 
     @Test func theSecondAllowOnDeniedAudioRoutesToTheRecordingPane() async {
@@ -822,6 +824,31 @@ import Testing
         #expect(!vc.test_ribbonIsWaiting, "the wait clears with the answer")
         #expect(!vc.test_rowIsWaiting(.localNetwork), "false after the answer lands")
         #expect(vc.test_spineTitle(of: .localNetwork) == "2 speakers on your network")
+    }
+
+    /// The ribbon's status spinner and the row's own must both honor Reduce
+    /// Motion — the wait itself stays visible in words, but neither spinner
+    /// spins.
+    @Test func reduceMotionDropsTheLocalNetworkWaitSpinners() async {
+        let net = SteppedLocalNetwork(found: 2)
+        let vc = makeVC(model: makeModel(audio: .granted, localNetwork: net))
+        await vc.test_tapAllow(.audio)
+        vc.test_ribbonReduceMotionOverride = true
+        vc.test_setRowReduceMotionOverride(.localNetwork, true)
+
+        let priming = Task { await vc.test_tapAllow(.localNetwork) }
+
+        await net.waitUntilParked()
+        await waitUntil { vc.test_ribbonStatusText == OnboardingViewController.waitingStatus }
+        #expect(vc.test_ribbonStatusText == OnboardingViewController.waitingStatus,
+                "the wait is still named in words")
+        #expect(!vc.test_ribbonIsWaiting, "Reduce Motion: the ribbon's own spinner never shows")
+        #expect(vc.test_rowIsWaiting(.localNetwork), "the row still knows it is waiting")
+        #expect(!vc.test_rowSpinnerIsAnimating(.localNetwork), "Reduce Motion: the row spinner never spins")
+
+        net.resume()
+        net.resume()
+        await priming.value
     }
 
     /// A refusal skips the second half entirely — there is nothing left to
@@ -1367,6 +1394,25 @@ import Testing
         #expect(!vc.test_checkRowIsSpinning)
         #expect(vc.test_doneExists, "the CTA arrives on the pass")
         #expect(vc.test_demoMode == .settled, "…together with the finale")
+    }
+
+    /// The final check's spinner must also honor Reduce Motion — "running" is
+    /// still the logical state the row's title reports, but the spinner
+    /// itself never spins.
+    @Test func reduceMotionDropsTheFinalCheckSpinner() async {
+        let vc = makeVC(model: makeGrantableModel())
+        vc.test_checkRowReduceMotionOverride = true
+
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)   // the last decision — the check auto-runs
+
+        #expect(vc.test_checkRowState == .running)
+        #expect(vc.test_checkRowIsSpinning, "the logical state is still \"running\"")
+        #expect(!vc.test_checkRowSpinnerIsAnimating, "Reduce Motion: the spinner never spins")
+
+        await vc.test_awaitFinalCheck()
+        #expect(vc.test_checkRowState == .passed)
     }
 
     /// The row is real UI (unlike the decorative demo pane): one VoiceOver
@@ -2367,6 +2413,8 @@ import Testing
         #expect(!vc.test_rowIsBroken(.localNetwork))
         #expect(vc.test_ribbonStatusText == "This was on \u{2014} macOS says it's off now.")
         #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
+        #expect(vc.test_ribbonStatusTextColor == Tokens.Color.label2,
+                "the failure hue is graphical-object-only (house rule 8) — the words beside the red glyph stay ordinary body ink")
     }
 
     @Test func permissionLostNamesTheUnmetPermissionInTheHeader() {

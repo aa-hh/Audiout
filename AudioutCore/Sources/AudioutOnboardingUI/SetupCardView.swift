@@ -411,6 +411,12 @@ final class SetupSpineRowView: NSView {
 
     // MARK: State
 
+    /// Whether Reduce Motion is on — through the override seam every animated
+    /// instrument in this codebase uses, so a headless test can drive both sides.
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
     /// Repaint for `state`.
     ///
     /// - Parameters:
@@ -473,7 +479,7 @@ final class SetupSpineRowView: NSView {
         brokenGlyph.isHidden = isWaiting || !isBroken
         applyCheckmark(shown: !isWaiting && !isBroken && isCheckmarked(state),
                        animated: animated && !wasCompleted && isCheckmarked(state))
-        if isWaiting { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        if isWaiting && !reduceMotion { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
 
         applySurface()
         applyAccessibility()
@@ -728,6 +734,13 @@ final class SetupSpineRowView: NSView {
     var test_isBroken: Bool { isBroken }
     /// Whether the trailing slot is showing the waiting spinner.
     var test_isWaiting: Bool { isWaiting }
+    /// Overrides the live Reduce Motion read for the waiting spinner, so a
+    /// headless test can drive both sides deterministically.
+    var test_reduceMotionOverride: Bool?
+    /// Whether the waiting spinner is actually animating right now — distinct
+    /// from ``test_isWaiting``, which is the logical state Reduce Motion must
+    /// not silence.
+    var test_spinnerIsAnimating: Bool { isWaiting && !reduceMotion }
     /// Whether the hero pane is browsing this row.
     var test_isBrowseSelected: Bool { isBrowseSelected }
     /// The leading edge bar's fill, or nil when no bar is drawn — the ember-not-

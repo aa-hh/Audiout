@@ -809,7 +809,7 @@ final class ContentPaneHostViewController: NSViewController {
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
 
         // Warm Signal §5.3: the CONTENT pane (swapped pane + footer strip)
-        // sits on the warm `panel` canvas; the split view / sidebar / chrome
+        // sits on the `panel` canvas; the split view / sidebar / chrome
         // around it stay stock. The root of this host is that canvas.
         let root = WarmPanelView()
         // The seam between the chrome above and this warm pane (design

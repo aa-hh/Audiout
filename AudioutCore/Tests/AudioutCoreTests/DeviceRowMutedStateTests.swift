@@ -105,23 +105,26 @@ extension SerializedSharedState {
         }
     }
 
-    /// The pill is the BUTTON's own layer, so its size is the button's frame.
-    /// `speaker.slash.fill` and `speaker.wave.2.fill` do not share a bounding
-    /// box, and the button carries no height constraint — so the pill would
-    /// change size on toggle if the row let the glyph drive it. The state is
-    /// carried by the slash and the hue; the mark must not also jump.
-    @Test func theButtonDoesNotResizeWhenTheGlyphSlashes() {
+    /// The mark is ``DeviceRowView``'s own seat view at a fixed size, not the
+    /// button's layer, for exactly this reason: `speaker.slash.fill` and
+    /// `speaker.wave.2.fill` do not share a bounding box and the button
+    /// carries no height constraint, so a fill on the button changed size
+    /// every time the glyph slashed (which is what this test caught). The
+    /// state is carried by the slash and the hue; the mark must not also jump.
+    @Test func theSeatDoesNotResizeWhenTheGlyphSlashes() {
         defer { Tokens.test_increaseContrastOverride = nil }
         Tokens.test_increaseContrastOverride = false
         let muted = makeRow(muted: true, appearanceName: .aqua, increaseContrast: false)
         let unmuted = makeRow(muted: false, appearanceName: .aqua, increaseContrast: false)
         for row in [muted, unmuted] { row.layoutSubtreeIfNeeded() }
 
-        let frames = "muted \(muted.test_muteButtonFrame), unmuted \(unmuted.test_muteButtonFrame)"
-        #expect(muted.test_muteButtonFrame.size == unmuted.test_muteButtonFrame.size,
-                "the engaged pill changed size — \(frames)")
-        #expect(abs(muted.test_muteButtonFrame.midY - unmuted.test_muteButtonFrame.midY) <= 0.5,
-                "the engaged pill moved off centre — \(frames)")
+        let frames = "muted \(muted.test_muteSeatFrame), unmuted \(unmuted.test_muteSeatFrame)"
+        #expect(muted.test_muteSeatFrame.size == unmuted.test_muteSeatFrame.size,
+                "the engaged seat changed size — \(frames)")
+        #expect(muted.test_muteSeatFrame.size == PopoverColumnGrid.engagedSeatSize,
+                "the engaged seat is not the shared size — \(frames)")
+        #expect(abs(muted.test_muteSeatFrame.midY - unmuted.test_muteSeatFrame.midY) <= 0.5,
+                "the engaged seat moved off centre — \(frames)")
     }
 
     // MARK: A live click, not just a host refresh
@@ -144,10 +147,11 @@ extension SerializedSharedState {
 
     // MARK: The fence
 
-    /// `Tokens.Color.muted` exists for the engaged mute button and nothing
-    /// else. A second consumer is a design decision, not a refactor, so it
-    /// fails here first.
-    @Test func theMutedHueHasExactlyOneConsumerInShippingSource() throws {
+    /// `Tokens.Color.muted` exists for the engaged MUTE button and nothing
+    /// else. There are two of those — the device row's and the Main Out row's,
+    /// which wear one mute language — and a THIRD consumer is a design
+    /// decision, not a refactor, so it fails here first.
+    @Test func theMutedHueOnlyDressesTheTwoMuteButtons() throws {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // AudioutCoreTests
             .deletingLastPathComponent()   // Tests
@@ -167,8 +171,9 @@ extension SerializedSharedState {
             }
         }
 
-        #expect(callSites.count == 1 && callSites.first?.hasPrefix("DeviceRowView.swift:") == true,
-                "Tokens.Color.muted is reserved for the device row's engaged mute button; found: \(callSites)")
+        let files = Set(callSites.map { $0.split(separator: ":").first.map(String.init) ?? $0 })
+        #expect(files == ["DeviceRowView.swift", "MainOutRowView.swift"],
+                "Tokens.Color.muted is reserved for the two engaged mute buttons; found: \(callSites)")
     }
 }
 

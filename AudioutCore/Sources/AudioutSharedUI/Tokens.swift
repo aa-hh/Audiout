@@ -1103,14 +1103,6 @@ public enum Tokens {
         public static var inkTertiary: NSColor { label3 }
         @available(*, deprecated, renamed: "gold")
         public static var accent: NSColor { gold }
-        @available(*, deprecated, renamed: "failure")
-        public static var warning: NSColor { failure }
-        @available(*, deprecated, renamed: "inkOnFill")
-        public static var inkOnGold: NSColor { inkOnFill }
-        @available(*, deprecated, renamed: "wireCore")
-        public static var syncSignal: NSColor { wireCore }
-        @available(*, deprecated, renamed: "party")
-        public static var partySignal: NSColor { party }
         @available(*, deprecated, renamed: "partyRampDeep")
         public static var partySignalDeep: NSColor { partyRampDeep }
     }

@@ -496,7 +496,7 @@ public final class GeneralSettingsViewController: NSViewController {
     /// empty, so a first phone appearing mid-session can show up live.
     private func makePhoneListViews() -> [NSView] {
         phoneListHeading.font = Tokens.Font.captionEmphasized
-        phoneListHeading.textColor = Tokens.Color.secondaryLabel
+        phoneListHeading.textColor = Tokens.Color.label2
 
         phoneListStack.orientation = .vertical
         phoneListStack.alignment = .leading
@@ -548,7 +548,7 @@ public final class GeneralSettingsViewController: NSViewController {
         let decisionLabel = SettingsForm.label(approval.decision == .approved ? "Allowed" : "Denied")
         decisionLabel.font = Tokens.Font.caption
         decisionLabel.textColor = approval.decision == .approved
-            ? Tokens.Color.secondaryLabel : Tokens.Color.label2
+            ? Tokens.Color.label2 : Tokens.Color.label2
 
         let remove = NSButton()
         remove.translatesAutoresizingMaskIntoConstraints = false
@@ -558,7 +558,7 @@ public final class GeneralSettingsViewController: NSViewController {
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
         remove.image = NSImage(systemSymbolName: "minus.circle.fill", accessibilityDescription: "Remove")?
             .withSymbolConfiguration(config)
-        remove.contentTintColor = Tokens.Color.secondaryLabel
+        remove.contentTintColor = Tokens.Color.label2
         remove.target = self
         remove.action = #selector(revokePhoneTapped(_:))
         remove.identifier = NSUserInterfaceItemIdentifier(approval.clientID)

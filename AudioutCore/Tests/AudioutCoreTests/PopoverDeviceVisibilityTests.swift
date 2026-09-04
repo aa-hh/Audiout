@@ -254,6 +254,13 @@ import AppKit
         #expect(popover.test_bluetoothConnectRowHasGlyph,
                 "the Connect row carries its leading glyph")
 
+        // The header above already says "Bluetooth", so the row says only what
+        // clicking does — and VoiceOver, which announces the button with no
+        // header to lean on, still hears the full phrase.
+        let titles = popover.test_bluetoothConnectRowTitles
+        #expect(titles?.visible == "Connect a speaker")
+        #expect(titles?.spoken == "Connect a Bluetooth speaker")
+
         var pairTaps = 0
         popover.onPairBluetoothSpeaker = { pairTaps += 1 }
         popover.test_fireBluetoothConnectClick()

@@ -29,7 +29,10 @@ import AppKit
 /// - **Thumb**: a capsule cap (`faderThumbWidth × faderThumbHeight`
 ///   ≈ 10×17 pt) replacing the stock white circle — a `raised` body (1.29:1
 ///   on the dark trough; the flat ground itself in light) read entirely by
-///   its `rim` edge (3.39:1 on the dark body, 4.78:1 on the light ground).
+///   its `rim` edge (3.39:1 on the dark body, 4.78:1 on the light ground). It
+///   slides inside the stock knob rect rather than centring on it, so at the
+///   maximum its trailing edge lands on the track's end and at the minimum its
+///   leading edge lands on the start — no strip of trough past the handle.
 ///
 /// Every color goes through `Tokens`, resolved at DRAW time under the
 /// control's effective appearance (AppKit sets the drawing appearance before
@@ -191,7 +194,20 @@ public final class WarmFaderCell: NSSliderCell {
     public override func drawKnob(_ knobRect: NSRect) {
         let size = NSSize(width: PopoverColumnGrid.faderThumbWidth,
                           height: PopoverColumnGrid.faderThumbHeight)
-        let thumb = NSRect(x: (knobRect.midX - size.width / 2).rounded(),
+        // The thumb slides INSIDE `knobRect` rather than centring on it. Stock
+        // `knobRect` is `knobThickness` wide (20 pt on a 150 pt regular slider)
+        // and its EDGES already sit flush with the track at both extremes —
+        // 0…20 at the minimum, 130…150 at the maximum. Centring our narrower
+        // 10 pt thumb on that rect leaves 5 pt of trough showing past the
+        // handle at each end; offsetting it by the value's fraction of the
+        // slack lands the thumb's trailing edge on the track's end at the
+        // maximum and its leading edge on the start at the minimum. `knobRect`
+        // itself — the rect `NSSliderCell` maps mouse tracking against — is
+        // untouched, so this moves paint only.
+        let slack = max(0, knobRect.width - size.width)
+        let offset = (controlView?.userInterfaceLayoutDirection == .rightToLeft)
+            ? 1 - valueFraction : valueFraction
+        let thumb = NSRect(x: (knobRect.minX + slack * offset).rounded(),
                            y: (knobRect.midY - size.height / 2).rounded(),
                            width: size.width, height: size.height)
         let radius = PopoverColumnGrid.faderThumbCornerRadius
@@ -220,12 +236,7 @@ public final class WarmFaderCell: NSSliderCell {
     /// IDENTICAL geometry. Mirrored for right-to-left: the min-value end
     /// sits at `track.maxX` and the fill grows leftward.
     private func fillRect(track: NSRect) -> NSRect {
-        let fraction: CGFloat
-        if maxValue > minValue {
-            fraction = CGFloat((doubleValue - minValue) / (maxValue - minValue))
-        } else {
-            fraction = 0
-        }
+        let fraction = valueFraction
         if controlView?.userInterfaceLayoutDirection == .rightToLeft {
             let fillStartX = track.maxX - track.width * fraction
             return NSRect(x: fillStartX, y: track.minY,
@@ -235,6 +246,15 @@ public final class WarmFaderCell: NSSliderCell {
             return NSRect(x: track.minX, y: track.minY,
                           width: max(0, fillEndX - track.minX), height: track.height)
         }
+    }
+
+    /// How far along its range the current value sits, 0…1 — the one number
+    /// the fill's end and the thumb's position both derive from, so they can
+    /// never disagree about where the value is.
+    private var valueFraction: CGFloat {
+        guard maxValue > minValue else { return 0 }
+        let fraction = (doubleValue - minValue) / (maxValue - minValue)
+        return CGFloat(min(1, max(0, fraction)))
     }
 
     /// The recessed trough: `faderTrackHeight` tall, vertically centered in

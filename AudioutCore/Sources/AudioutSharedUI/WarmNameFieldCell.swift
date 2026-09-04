@@ -147,7 +147,7 @@ public final class WarmNameFieldCell: NSTextFieldCell {
         // straight onto this context would also repaint the opaque `raised`
         // fill we just drew. The handler runs synchronously inside this draw,
         // so `secondaryLabel` still resolves under the live appearance.
-        let tint = Tokens.Color.secondaryLabel
+        let tint = Tokens.Color.label2
         let tinted = NSImage(size: size, flipped: false) { bounds in
             pencil.draw(in: bounds)
             tint.setFill()

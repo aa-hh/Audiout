@@ -15,7 +15,7 @@ import AudioutSharedUI
 /// - `running` shows the small spinner in the trailing slot (the same "a wait
 ///   on screen says what it is waiting for" rule the cards follow: the title
 ///   itself names the wait).
-/// - `passed` earns the same green checkmark a completed card gets.
+/// - `passed` earns the same gold checkmark a completed card gets.
 ///
 /// The glyph is `Tokens.Color.gold` ON PURPOSE, not a permission hue: this
 /// row is the first note of the finale's colour story (gold ripple, gold
@@ -113,8 +113,8 @@ final class SetupCheckRowView: NSView {
     func apply(_ state: SetupFinalCheckState) {
         self.state = state
         titleLabel.stringValue = Self.title(for: state)
-        titleLabel.textColor = state == .pending ? Tokens.Color.tertiaryLabel
-                                                 : Tokens.Color.secondaryLabel
+        titleLabel.textColor = state == .pending ? Tokens.Color.label3
+                                                 : Tokens.Color.label2
         // The tile's only state role is the dormant dimming — the glyph tint
         // itself never changes (the no-flash rule).
         iconTile.alphaValue = state == .pending ? SetupSpineRowView.lockedTileAlpha : 1

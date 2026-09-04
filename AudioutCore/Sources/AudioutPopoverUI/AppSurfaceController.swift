@@ -19,10 +19,20 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
     }
 
     /// Tab glyphs (plan U3). All three resolve on the macOS 14 deployment
-    /// target (verified on this box; each is a macOS 11-era symbol).
+    /// target (verified against CoreGlyphs' availability list: `waveform`
+    /// macOS 10.15, `hifispeaker.2` and `gearshape` macOS 11).
+    ///
+    /// Mixer is NOT the sliders glyph (Alec, 2026-09-04). `slider.horizontal.3`
+    /// is what every device row's equalizer door draws
+    /// (`DeviceRowView.eqSymbolName`) — that is what an equalizer looks like,
+    /// so the equalizer keeps it and the tab moves. `waveform` is audio
+    /// playing rather than a control being adjusted, and it collides with
+    /// nothing else on screen: the rows use `speaker.wave.2.fill` and
+    /// `speaker.slash.fill`, Groups uses `hifispeaker.2`, Settings
+    /// `gearshape`, and the alignment wizard `tuningfork`.
     var symbolName: String {
         switch self {
-        case .mixer: return "slider.horizontal.3"
+        case .mixer: return "waveform"
         case .groups: return "hifispeaker.2"
         case .settings: return "gearshape"
         }
@@ -32,7 +42,7 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
     /// nearest-meaning first.
     var fallbackSymbolNames: [String] {
         switch self {
-        case .mixer: return ["slider.horizontal.below.rectangle", "dial.min"]
+        case .mixer: return ["waveform.path", "waveform.circle"]
         case .groups: return ["hifispeaker.2.fill", "hifispeaker"]
         case .settings: return ["gearshape.fill", "gear"]
         }

@@ -38,23 +38,41 @@ import AudioutSharedUI
     @Test func attachingMaterializesTheItemsInOrder() {
         let (controller, window) = makeAttached()
         #expect(controller.test_itemIdentifiers == [
-            SurfaceToolbarController.tabItemIdentifier(for: .mixer),
-            .space,
-            SurfaceToolbarController.tabItemIdentifier(for: .groups),
-            .space,
-            SurfaceToolbarController.tabItemIdentifier(for: .settings),
+            SurfaceToolbarController.tabsItemIdentifier,
             .flexibleSpace,
             SurfaceToolbarController.pinItemIdentifier,
-        ], "three spaced tabs lead and Pin trails; Quit left the strip for the menus")
+        ], "ONE item carries all three tabs, and Pin trails it outside that capsule")
         #expect(window.toolbar === controller.toolbar)
         #expect(window.toolbarStyle == .unified, "D1: unified — the toolbar IS the one header strip")
     }
 
     @Test func tabsCarryAllThreeScreensWithResolvedGlyphs() {
         let (controller, _) = makeAttached()
-        #expect(controller.test_tabLabels == ["Mixer", "Groups", "Settings"])
+        #expect(controller.test_tabAccessibilityLabels == ["Mixer", "Groups", "Settings"])
         #expect(controller.test_allTabImagesResolved,
                 "every tab resolved a system SF Symbol")
+    }
+
+    /// The Mixer tab must not draw the equalizer's glyph (Alec, 2026-09-04).
+    /// `slider.horizontal.3` is what a device row's equalizer door draws, and
+    /// an equalizer is what sliders mean — so the equalizer keeps them and the
+    /// tab takes another symbol. Every tab glyph is also distinct from every
+    /// other, and each resolves.
+    ///
+    /// Resolving HERE only proves this machine has the symbol; the 14.2 floor
+    /// was checked against CoreGlyphs' `name_availability.plist` by hand
+    /// (`waveform` and `waveform.path` are macOS 10.15, `waveform.circle`
+    /// 10.15, `hifispeaker.2` and `gearshape` 11.0). The runtime check below
+    /// still catches a typo, which is the failure that actually happens.
+    @Test func noTabDrawsTheEqualizersGlyphAndNoTwoTabsShareOne() {
+        let names = SurfaceScreen.allCases.map(\.symbolName)
+        #expect(!names.contains("slider.horizontal.3"),
+                "the sliders glyph belongs to the equalizer door, not to a screen tab")
+        #expect(Set(names).count == names.count, "no two tabs draw the same glyph")
+        for name in names + SurfaceScreen.allCases.flatMap(\.fallbackSymbolNames) {
+            #expect(NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil,
+                    Comment(rawValue: "\(name) must resolve — the package deploys to macOS 14.2"))
+        }
     }
 
     /// The tabs are ICON-ONLY (Alec, 2026-09-03). Names on the items' `title`
@@ -70,10 +88,8 @@ import AudioutSharedUI
         // `allSatisfy` is `rethrows`, so the expansion refuses to compile.
         let noTabDrawsAName = controller.test_tabTitles.allSatisfy(\.isEmpty)
         #expect(noTabDrawsAName, "no tab draws a name")
-        #expect(controller.test_tabLabels == SurfaceScreen.allCases.map(\.label),
-                "but every tab still carries its name for the overflow menu")
         #expect(controller.test_tabAccessibilityLabels == SurfaceScreen.allCases.map(\.label),
-                "and VoiceOver is handed it from the view, which is what speaks now")
+                "but VoiceOver is handed the name from the view, which is what speaks now")
         #expect(controller.test_tabToolTips == SurfaceScreen.allCases.map { "\($0.label) (⌘\($0.keyEquivalent))" },
                 "and the tooltip spells it out with the shortcut")
         #expect(controller.test_allTabImagesResolved,
@@ -81,21 +97,30 @@ import AudioutSharedUI
         #expect(controller.toolbar.displayMode == .iconOnly)
     }
 
-    /// Every seat is fixed-width, and every item asks to stay visible — the
-    /// two things that keep the strip out of the overflow chevron.
-    @Test func everySeatIsFixedWidthAndAsksToStayOutOfTheOverflowMenu() {
+    /// Both items are fixed-width, and both ask to stay visible — the two
+    /// things that keep the strip out of the overflow chevron.
+    @Test func everyItemIsFixedWidthAndAsksToStayOutOfTheOverflowMenu() {
         let (controller, _) = makeAttached()
+        let expected: [NSToolbarItem.Identifier: NSSize] = [
+            SurfaceToolbarController.tabsItemIdentifier: SurfaceToolbarSeat.capsuleSize,
+            SurfaceToolbarController.pinItemIdentifier: SurfaceToolbarSeat.size,
+        ]
         for item in controller.toolbar.items {
-            guard let view = item.view else { continue }
+            guard let view = item.view, let size = expected[item.itemIdentifier] else { continue }
             // `fittingSize`, not `frame`: the frame is the size the item was
-            // CONSTRUCTED with, so reading it back would survive the seat's
+            // CONSTRUCTED with, so reading it back would survive the view's
             // own width/height constraints being deleted. `fittingSize` is
             // computed from those constraints.
-            #expect(view.fittingSize == SurfaceToolbarSeat.size,
-                    Comment(rawValue: "\(item.itemIdentifier.rawValue) must be the fixed seat size"))
+            #expect(view.fittingSize == size,
+                    Comment(rawValue: "\(item.itemIdentifier.rawValue) must be its fixed size"))
             #expect(item.visibilityPriority == .high,
                     Comment(rawValue: "\(item.itemIdentifier.rawValue) must not be sweepable into the chevron"))
         }
+        #expect(SurfaceToolbarSeat.capsuleSize.width
+                    == SurfaceToolbarSeat.size.width * 3 + SurfaceToolbarSeat.capsulePadding * 2,
+                "the capsule is exactly three fixed tabs plus its padding")
+        #expect(SurfaceToolbarSeat.capsuleCornerRadius == SurfaceToolbarSeat.capsuleSize.height / 2,
+                "half the height, so the capsule reads as a pill and not a rounded box")
     }
 
     @Test func pinResolvesItsGlyph() {
@@ -114,16 +139,17 @@ import AudioutSharedUI
     @Test func everyItemInTheStripWearsTheSameSeat() {
         let (controller, _) = makeAttached()
         #expect(controller.test_everyItemWearsTheSeat,
-                "the three tabs AND Pin are all SurfaceToolbarSeatButtons — half a conversion is the 2026-08-30 failure")
+                "the three tabs inside the capsule AND Pin outside it are all SurfaceToolbarSeatButtons — half a conversion is the 2026-08-30 failure")
         // AppKit's circle and rounded square come from the stock button
         // cell's bezel. Every seat installs `SurfaceToolbarSeatCell`, whose
         // `drawBezel` never calls `super`, so that bezel is replaced outright
         // rather than drawn under ours.
-        let everySeatOwnsItsBezel = controller.toolbar.items
-            .compactMap { $0.view as? SurfaceToolbarSeatButton }
-            .allSatisfy { $0.cell is SurfaceToolbarSeatCell }
+        var seats = SurfaceScreen.allCases.compactMap { controller.test_tabButton($0) }
+        if let pin = controller.test_pinButton { seats.append(pin) }
+        #expect(seats.count == SurfaceScreen.allCases.count + 1)
+        let everySeatOwnsItsBezel = seats.allSatisfy { $0.cell is SurfaceToolbarSeatCell }
         #expect(everySeatOwnsItsBezel,
-                "no item hands its drawing back to AppKit; the seat is the only chrome in the strip")
+                "no item hands its drawing back to AppKit; the authored highlight is the only chrome in the strip")
     }
 
     /// AppKit's own selection highlight must stay OFF: it is the rounded
@@ -145,16 +171,28 @@ import AudioutSharedUI
     /// Mixer selected, none with Groups, one on the far side with Settings.
     /// Separate items cannot draw segment separators at all, so this asserts
     /// the structural fact that makes the dividers impossible.
-    @Test func theTabsAreSeparateItemsSoNoSegmentSeparatorCanAppear() {
+    @Test func theTabsAreOneAuthoredCapsuleAndNotAToolbarItemGroup() {
         let (controller, _) = makeAttached()
-        let tabIdentifiers = SurfaceScreen.allCases.map(SurfaceToolbarController.tabItemIdentifier(for:))
-        #expect(Set(tabIdentifiers).isSubset(of: Set(controller.test_itemIdentifiers)),
-                "each screen is its own toolbar item")
-        for identifier in tabIdentifiers {
-            let item = controller.toolbar.items.first { $0.itemIdentifier == identifier }
-            #expect(item as? NSToolbarItemGroup == nil,
-                    "\(identifier.rawValue) must not be a group — a group is the segmented control whose separator moved with the selection")
+        let item = controller.toolbar.items
+            .first { $0.itemIdentifier == SurfaceToolbarController.tabsItemIdentifier }
+        #expect(item as? NSToolbarItemGroup == nil,
+                "a group is the segmented control whose separator moved with the selection; this capsule is drawn, so no separator exists to move")
+        guard let capsule = controller.test_tabCapsule else {
+            Issue.record("the tabs item carries no capsule")
+            return
         }
+        let tabs = SurfaceScreen.allCases.compactMap { controller.test_tabButton($0) }
+        #expect(tabs.count == SurfaceScreen.allCases.count)
+        for tab in tabs {
+            #expect(tab.isDescendant(of: capsule),
+                    "every tab lives INSIDE the one capsule — three siblings in the strip is the three-islands failure")
+        }
+        guard let pin = controller.test_pinButton else {
+            Issue.record("Pin has no seat button")
+            return
+        }
+        #expect(!pin.isDescendant(of: capsule),
+                "Pin is the standalone button BESIDE the group, never a fourth thing inside it")
     }
 
     /// The selection has to be visible on exactly one tab.
@@ -168,24 +206,34 @@ import AudioutSharedUI
         #expect(controller.test_engagedTabCount == 1, "and never two seats at once")
     }
 
-    /// The tabs are `.space`-separated so the strip cannot RESHAPE with the
-    /// selection. Adjacent items merged into one shared capsule on macOS 26+,
-    /// and the selected item was then pulled out of that capsule — measured
-    /// live: Mixer gave circle + capsule(2), Groups gave three circles,
-    /// Settings gave capsule(2) + circle. Same wandering geometry the
-    /// segmented divider had.
-    @Test func theTabsAreSeparatedSoTheStripCannotReshape() {
-        let (controller, _) = makeAttached()
-        let ids = controller.test_itemIdentifiers
-        let tabs = SurfaceScreen.allCases.map(SurfaceToolbarController.tabItemIdentifier(for:))
-        for (first, second) in zip(tabs, tabs.dropFirst()) {
-            guard let a = ids.firstIndex(of: first), let b = ids.firstIndex(of: second) else {
-                Issue.record("a tab item is missing from the toolbar")
-                return
-            }
-            #expect(b == a + 2 && ids[a + 1] == .space,
-                    "a .space must sit between \(first.rawValue) and \(second.rawValue)")
+    /// The capsule must not resize or reflow as the selection moves. AppKit's
+    /// own grouping did exactly that on macOS 26+ — adjacent items merged into
+    /// a shared capsule and the selected item was then pulled out of it, so
+    /// the container's geometry wandered (measured live: Mixer gave circle +
+    /// capsule(2), Groups three circles, Settings capsule(2) + circle). Here
+    /// the capsule is one fixed-size drawn surface and the highlight is a fill
+    /// inside it, so neither can move the other.
+    @Test func theCapsuleNeitherResizesNorReflowsWhenTheSelectionMoves() {
+        let (controller, window) = makeAttached()
+        guard let capsule = controller.test_tabCapsule else {
+            Issue.record("the tabs item carries no capsule")
+            return
         }
+        window.layoutIfNeeded()
+        var frames: [NSRect] = []
+        var tabFrames: [[NSRect]] = []
+        for screen in SurfaceScreen.allCases {
+            controller.setSelectedScreen(screen)
+            window.layoutIfNeeded()
+            frames.append(capsule.frame)
+            tabFrames.append(SurfaceScreen.allCases.compactMap { controller.test_tabButton($0)?.frame })
+        }
+        #expect(capsule.fittingSize == SurfaceToolbarSeat.capsuleSize,
+                "the capsule's size comes from three fixed tabs, not from what is selected")
+        #expect(Set(frames.map(NSStringFromRect)).count == 1,
+                "the capsule's own frame is identical under every selection — \(frames)")
+        #expect(Set(tabFrames.map { $0.map(NSStringFromRect).joined() }).count == 1,
+                "and so is every tab's frame inside it — nothing reflows")
     }
 
     // MARK: The seat's real pixels
@@ -193,11 +241,11 @@ import AudioutSharedUI
     /// Render a seat and hand back its bitmap, or `nil` where this machine
     /// cannot cache a display (the same offscreen `cacheDisplay` path the
     /// snapshot tests use).
-    private func render(_ button: SurfaceToolbarSeatButton,
+    private func render(_ view: NSView,
                         appearanceName: NSAppearance.Name) -> NSBitmapImageRep? {
-        button.appearance = NSAppearance(named: appearanceName)
-        guard let rep = button.bitmapImageRepForCachingDisplay(in: button.bounds) else { return nil }
-        button.cacheDisplay(in: button.bounds, to: rep)
+        view.appearance = NSAppearance(named: appearanceName)
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+        view.cacheDisplay(in: view.bounds, to: rep)
         return rep
     }
 
@@ -378,6 +426,159 @@ import AudioutSharedUI
             #expect(outside.alphaComponent < 0.05,
                     Comment(rawValue: "\(state.name)'s corner really is rounded — a square seat would paint here"))
         }
+    }
+
+    // MARK: The capsule's real pixels
+
+    /// A laid-out capsule with the three tabs in the given states. The tabs
+    /// carry NO glyph: what these tests sample is the capsule's own surface
+    /// and the highlight over it, and a symbol's ink would land in the probes.
+    private func makeCapsule(engaged: SurfaceScreen? = nil,
+                             hovered: SurfaceScreen? = nil) -> SurfaceToolbarTabCapsule {
+        let tabs = SurfaceScreen.allCases.map { screen -> SurfaceToolbarSeatButton in
+            let tab = SurfaceToolbarSeatButton(
+                frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.size))
+            tab.configure(symbol: nil, label: screen.label, toolTip: nil, isTab: true)
+            tab.isEngaged = (screen == engaged)
+            tab.isHovered = (screen == hovered)
+            return tab
+        }
+        let capsule = SurfaceToolbarTabCapsule(tabs: tabs)
+        // Auto Layout needs a host to lay the capsule out in; the capsule's
+        // own constraints then give it its fixed size.
+        let host = NSView(frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.capsuleSize))
+        host.addSubview(capsule)
+        NSLayoutConstraint.activate([
+            capsule.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            capsule.topAnchor.constraint(equalTo: host.topAnchor),
+        ])
+        host.layoutSubtreeIfNeeded()
+        return capsule
+    }
+
+    /// The horizontal middle of tab `index`, at the capsule's mid-height.
+    private func tabProbe(_ index: Int) -> NSPoint {
+        NSPoint(x: SurfaceToolbarSeat.capsulePadding
+                    + SurfaceToolbarSeat.size.width * (CGFloat(index) + 0.5),
+                y: SurfaceToolbarSeat.capsuleSize.height / 2)
+    }
+
+    /// ONE continuous capsule, not three islands (Alec, 2026-09-04). With
+    /// nothing selected or hovered, the same wash must be present at every
+    /// point across the capsule — the middle of each tab, both seams between
+    /// them, and the ends past the outer tabs. Three separate seats would
+    /// leave the seams and the ends empty, which is exactly what the rejected
+    /// version looked like.
+    @Test func theCapsuleIsOneUnbrokenSurfaceBehindAllThreeTabs() {
+        let capsule = makeCapsule()
+        let midHeight = SurfaceToolbarSeat.capsuleSize.height / 2
+        let seam = SurfaceToolbarSeat.capsulePadding + SurfaceToolbarSeat.size.width
+        let probes: [(String, NSPoint)] = [
+            // 2.5 pt in from each end: clear of the 1 pt edge stroke and of
+            // what its anti-aliasing bleeds inward.
+            ("the left end, past Mixer", NSPoint(x: 2.5, y: midHeight)),
+            ("Mixer", tabProbe(0)),
+            ("the Mixer/Groups seam", NSPoint(x: seam, y: midHeight)),
+            ("Groups", tabProbe(1)),
+            ("the Groups/Settings seam", NSPoint(x: seam + SurfaceToolbarSeat.size.width, y: midHeight)),
+            ("Settings", tabProbe(2)),
+            ("the right end, past Settings",
+             NSPoint(x: SurfaceToolbarSeat.capsuleSize.width - 2.5, y: midHeight)),
+        ]
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            guard let rep = render(capsule, appearanceName: appearanceName) else {
+                Issue.record("no bitmap rep under \(appearanceName.rawValue)")
+                return
+            }
+            var sampled: [CGFloat] = []
+            for (name, point) in probes {
+                guard let pixel = color(rep, atPoint: point, in: capsule.bounds) else {
+                    Issue.record("nothing sampled at \(name)")
+                    return
+                }
+                #expect(pixel.alphaComponent > 0.02,
+                        Comment(rawValue: "the capsule paints at \(name) under \(appearanceName.rawValue) — a gap here is the three-islands failure"))
+                sampled.append(pixel.alphaComponent)
+            }
+            let spread = (sampled.max() ?? 0) - (sampled.min() ?? 0)
+            #expect(spread < 0.01,
+                    Comment(rawValue: "and paints the SAME under \(appearanceName.rawValue) all the way across — \(sampled)"))
+        }
+        // A pill, so its corner is cut far harder than a rounded box's.
+        guard let rep = render(capsule, appearanceName: .darkAqua),
+              let corner = color(rep, atPoint: NSPoint(x: 1.5, y: 1.5), in: capsule.bounds) else {
+            Issue.record("nothing sampled at the capsule's corner")
+            return
+        }
+        #expect(corner.alphaComponent < 0.02,
+                "the capsule's corner is cut at half its height — a rounded box would still paint here")
+    }
+
+    /// The selected tab's highlight lives INSIDE the shared capsule and must
+    /// read as a lift OFF it: lighter than the capsule in dark, darker in
+    /// light, with hover the same shape at a weaker weight. An earlier attempt
+    /// had to CLEAR an unselected capsule that already sat at the same grey,
+    /// so in dark mode the user's own location rendered as the darkest thing
+    /// on the strip. Here the highlight is painted ON the capsule, so it can
+    /// only move away from it.
+    @Test func theSelectedHighlightLiftsOffTheCapsuleAndHoverSitsBetween() {
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            // Groups selected, Settings hovered, Mixer idle: one render
+            // carries all three weights over the same capsule.
+            let capsule = makeCapsule(engaged: .groups, hovered: .settings)
+            guard let rep = render(capsule, appearanceName: appearanceName),
+                  let ground = groundColor(appearanceName),
+                  let idle = color(rep, atPoint: tabProbe(0), in: capsule.bounds),
+                  let selected = color(rep, atPoint: tabProbe(1), in: capsule.bounds),
+                  let hovered = color(rep, atPoint: tabProbe(2), in: capsule.bounds),
+                  let idleOnStrip = composite(idle, over: ground),
+                  let selectedOnStrip = composite(selected, over: ground),
+                  let hoveredOnStrip = composite(hovered, over: ground) else {
+                Issue.record("nothing sampled under \(appearanceName.rawValue)")
+                return
+            }
+            let capsuleLevel = idleOnStrip.brightnessComponent
+            let hoverLevel = hoveredOnStrip.brightnessComponent
+            let selectedLevel = selectedOnStrip.brightnessComponent
+            let numbers = "capsule \(capsuleLevel), hover \(hoverLevel), selected \(selectedLevel), strip \(ground.brightnessComponent)"
+            if appearanceName == .darkAqua {
+                #expect(selectedLevel > capsuleLevel + 0.04,
+                        Comment(rawValue: "in dark the current screen is LIGHTER than the capsule, and visibly — \(numbers)"))
+                #expect(hoverLevel > capsuleLevel && hoverLevel < selectedLevel,
+                        Comment(rawValue: "and hover is the same lift, weaker — \(numbers)"))
+            } else {
+                #expect(selectedLevel < capsuleLevel - 0.04,
+                        Comment(rawValue: "in light the current screen is darker than the capsule, and visibly — \(numbers)"))
+                #expect(hoverLevel < capsuleLevel && hoverLevel > selectedLevel,
+                        Comment(rawValue: "and hover is the same wash, weaker — \(numbers)"))
+            }
+        }
+    }
+
+    /// The capsule's own wash stays under the hover rung, in every
+    /// accessibility setting — otherwise a hovered tab would stop separating
+    /// from the surface it sits on. Increase Contrast lifts the capsule by the
+    /// same factor as the highlights; Reduce Transparency answers with a
+    /// heavier edge instead, which is what keeps the gap open.
+    @Test func theCapsuleStaysUnderTheHoverWeightInEveryAccessibilitySetting() {
+        for increaseContrast in [false, true] {
+            guard let hover = SurfaceToolbarSeat.fillAlpha(isEngaged: false, isHovered: true,
+                                                           isPressed: false,
+                                                           increaseContrast: increaseContrast) else {
+                Issue.record("hover must draw a highlight")
+                return
+            }
+            let capsule = SurfaceToolbarSeat.capsuleFillAlpha(increaseContrast: increaseContrast)
+            #expect(capsule > 0, "the capsule always paints — it is the surface all three tabs share")
+            #expect(capsule < hover,
+                    Comment(rawValue: "capsule \(capsule) must stay under hover \(hover) with Increase Contrast \(increaseContrast)"))
+        }
+        #expect(SurfaceToolbarSeat.capsuleFillAlpha(increaseContrast: true)
+                    > SurfaceToolbarSeat.capsuleFillAlpha(increaseContrast: false),
+                "Increase Contrast strengthens the capsule too, so the whole strip keeps its spacing")
+        #expect(SurfaceToolbarSeat.capsuleEdgeColor(reduceTransparency: true)
+                    != SurfaceToolbarSeat.capsuleEdgeColor(reduceTransparency: false),
+                "Reduce Transparency swaps the capsule's edge for the heavier one — the strip's material goes flat, so the pill has to carry itself")
     }
 
     /// Pin wears the same seat, and its "on" reads as selected.

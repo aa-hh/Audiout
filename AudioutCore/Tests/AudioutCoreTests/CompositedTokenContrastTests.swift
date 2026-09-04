@@ -46,6 +46,15 @@ import AppKit
 ///    somewhere else, which drifts silently the first time someone re-tunes it.
 ///    Every alpha used below is read live from `PopoverColumnGrid`, the shared
 ///    public grid the drawing code itself reads.
+///
+/// UNDER-FLOOR EXCEPTIONS — the counterpart to the exclusions above: pairs
+/// this file DOES measure, that fail their floor on a specific appearance x
+/// Increase Contrast cell, with the ruling on file rather than a silently
+/// lowered floor. `exceptions` below lists them; Test A asserts the OPPOSITE
+/// direction for anything listed, so a re-tune that lifts a listed cell over
+/// its floor fails loudly instead of leaving a stale entry here forever —
+/// the same self-cleaning mechanism `TokenContrastMatrixTests.exceptions`
+/// uses.
 @MainActor
 extension SerializedSharedState {
 
@@ -170,12 +179,54 @@ extension SerializedSharedState {
         let appearance: NSAppearance.Name
     }
 
-    private let increaseContrastDrops: [IncreaseContrastDrop] = [
-        // The seat's border resolves `inkOnFill` under DARK whatever the row's
-        // own appearance is (`DeviceRowView.swift:1017-1024`), so it cannot
-        // move; the gold under it brightens with Increase Contrast, closing
-        // the gap. 4.94:1 down to 3.57:1 — still clear of the 3:1 edge floor.
-        IncreaseContrastDrop(pair: "Equalizer seat border on its gold seat", appearance: .aqua),
+    /// Empty since 2026-09-04, when the Equalizer seat's border stopped being
+    /// pinned under `.darkAqua` — the one entry that lived here. Kept as the
+    /// mechanism, not the entry: the next colour pinned to one appearance on a
+    /// ground that resolves in the other goes here with its measurement.
+    private let increaseContrastDrops: [IncreaseContrastDrop] = []
+
+    /// `(pair, appearance, icOn)` cells known to sit under their floor on
+    /// purpose, with the reason on file. The list is meant to self-clean:
+    /// Test A asserts the OPPOSITE direction for anything listed here, so a
+    /// hex re-tune that lifts a listed cell over its floor fails loudly
+    /// instead of leaving a stale exception around forever.
+    private struct Exception: Equatable {
+        let pair: String
+        let appearance: NSAppearance.Name
+        let icOn: Bool
+    }
+
+    /// All five sit on the row's hover wash or the Groups card's live wash.
+    /// The row's hover wash is `engagedChrome` at
+    /// `PopoverColumnGrid.rowHoverWashAlpha` (0.10), drawn at
+    /// `DeviceRowView.swift:3143-3149`; dropping that alpha far enough to
+    /// clear all three inks below needs 0.05, which halves the hover cue on
+    /// every row, and the alternative — re-valuing `rim`/`emberText`/
+    /// `labelCool2` themselves — is blocked by `DESIGN.md`'s Colors section,
+    /// which adopts these hexes case-for-case from the iPhone companion. For
+    /// the Groups card edge: `containerEdge` states measurements and no
+    /// floor of its own (`Tokens.swift:293-301`); 1.25:1 is the edge floor
+    /// that already bans `hairline` from `raised` (`Tokens.swift:265-266`,
+    /// `:290-291`), borrowed here rather than a floor `containerEdge` was
+    /// ever asked to clear — and a live card is separated from its
+    /// neighbours by the gold wash itself, the seat's gold ring, the wave
+    /// marker and the gold "Playing now" text, not the edge alone. All five
+    /// are transient or state-specific (a hover, an idle readout, a silent
+    /// name, a live card) and every one is rescued by Increase Contrast
+    /// (Test B below still holds that direction for each).
+    private let exceptions: [Exception] = [
+        // 2.92:1 vs the 3.0 floor. Passes elsewhere: 3.82 (aqua ic=false),
+        // 4.77 (aqua ic=true), 3.90 (darkAqua ic=true).
+        Exception(pair: "feed pill rim on the row's hover wash", appearance: .darkAqua, icOn: false),
+        // 3.88:1 vs the 4.5 floor. Passes elsewhere: 4.85, 6.46, 6.07.
+        Exception(pair: "emberText readout on the row's hover wash", appearance: .darkAqua, icOn: false),
+        // 4.23:1 vs the 4.5 floor.
+        Exception(pair: "labelCool2 on the row's hover wash", appearance: .aqua, icOn: false),
+        // 3.95:1 vs the 4.5 floor. The two Increase Contrast cells pass at
+        // 6.48 (aqua) and 6.03 (darkAqua).
+        Exception(pair: "labelCool2 on the row's hover wash", appearance: .darkAqua, icOn: false),
+        // 1.21:1 vs the 1.25 floor. Passes elsewhere: 1.77, 4.51, 2.33.
+        Exception(pair: "Groups card edge on its live wash", appearance: .darkAqua, icOn: false),
     ]
 
     private func pairs() -> [CompositePair] {
@@ -215,19 +266,39 @@ extension SerializedSharedState {
             CompositePair(name: "goldText readout on the row's live wash", floor: 4.5,
                           foreground: { self.resolved(Tokens.Color.goldText, appearanceName: $0) },
                           ground: { self.liveWash(over: self.rowGround($0), $0) }),
-            // The Equalizer door's ACTIVE mark: an opaque gold seat
-            // (`DeviceRowView.swift:1011`). This is the pairing the original
-            // defect hid in — the mark was never measured against a wash, only
-            // against the flat surfaces.
+            // The Equalizer door's ACTIVE mark: an opaque `goldText` seat
+            // (`DeviceRowView`'s `updateEQButton()`), measured on ALL THREE
+            // grounds a row can put behind it — at rest, sounding, hovered.
+            // The seat was `gold` until 2026-09-04 and only the live wash was
+            // measured; the ground it actually failed on was the HOVER wash,
+            // where light `gold` reads 2.91:1, under this floor. `goldText` is
+            // the same accent deepened for light and identical in dark, so the
+            // dark door is unmoved and the light one clears by 1.5x.
+            CompositePair(name: "Equalizer gold seat on the row at rest", floor: 3.0,
+                          foreground: { self.resolved(Tokens.Color.goldText, appearanceName: $0) },
+                          ground: { self.rowGround($0) }),
             CompositePair(name: "Equalizer gold seat on the row's live wash", floor: 3.0,
-                          foreground: { self.resolved(Tokens.Color.gold, appearanceName: $0) },
+                          foreground: { self.resolved(Tokens.Color.goldText, appearanceName: $0) },
                           ground: { self.liveWash(over: self.rowGround($0), $0) }),
+            CompositePair(name: "Equalizer gold seat on the row's hover wash", floor: 3.0,
+                          foreground: { self.resolved(Tokens.Color.goldText, appearanceName: $0) },
+                          ground: { self.hoverWash(over: self.rowGround($0), $0) }),
             // A FEED pill's load-bearing edge, measured on its OUTER side —
             // the wash, not the pill's own `well` fill
             // (`FeedPillView.swift:148`, fill and edge stamped together).
+            // The margin here is thin: dark measures 3.06:1 against the 3.0
+            // floor, six hundredths above it. Kept as a passing assertion on
+            // purpose — the next re-tune of `rim` or `gold` turns this red
+            // instead of sliding under unnoticed.
             CompositePair(name: "feed pill rim on the row's live wash", floor: 3.0,
                           foreground: { self.resolved(Tokens.Color.rim, appearanceName: $0) },
                           ground: { self.liveWash(over: self.rowGround($0), $0) }),
+            // The same pill's rim on the OTHER wash a row can wear: the
+            // neutral hover wash rather than gold (`FeedPillView.swift:141-142`
+            // over `DeviceRowView.swift:3143-3149`).
+            CompositePair(name: "feed pill rim on the row's hover wash", floor: 3.0,
+                          foreground: { self.resolved(Tokens.Color.rim, appearanceName: $0) },
+                          ground: { self.hoverWash(over: self.rowGround($0), $0) }),
             // The pill's fill is OPAQUE `well`, so the wash never reaches the
             // text inside it — the pill's own fill is the ground for every
             // word in the FEED column, error pills included
@@ -235,6 +306,20 @@ extension SerializedSharedState {
             CompositePair(name: "failure pill text on the pill's well fill", floor: 4.5,
                           foreground: { self.resolved(Tokens.Color.failure, appearanceName: $0) },
                           ground: { self.resolved(Tokens.Color.well, appearanceName: $0) }),
+            // The `%` readout's not-armed ink (`DeviceRowView.swift:740-750`),
+            // on the row's hover wash. Only the hover wash is reachable here
+            // — `emberText` marks the state where the row is NOT sounding,
+            // and an unarmed row never wears the gold live wash.
+            CompositePair(name: "emberText readout on the row's hover wash", floor: 4.5,
+                          foreground: { self.resolved(Tokens.Color.emberText, appearanceName: $0) },
+                          ground: { self.hoverWash(over: self.rowGround($0), $0) }),
+            // The cool dim ink a silent row's readout/sublabel drops to —
+            // disabled or muted (`DeviceRowView.swift:745`), "Unavailable"
+            // (`:1120`), a quiet routing sublabel (`:1131`) — measured on the
+            // same hover wash those rows can wear while silent.
+            CompositePair(name: "labelCool2 on the row's hover wash", floor: 4.5,
+                          foreground: { self.resolved(Tokens.Color.labelCool2, appearanceName: $0) },
+                          ground: { self.hoverWash(over: self.rowGround($0), $0) }),
 
             // MARK: The Groups overview's live CARD
             //
@@ -247,6 +332,12 @@ extension SerializedSharedState {
                           ground: { self.liveWash(over: self.resolved(Tokens.Color.raised, appearanceName: $0), $0) }),
             CompositePair(name: "goldText on the Groups card's live wash", floor: 4.5,
                           foreground: { self.resolved(Tokens.Color.goldText, appearanceName: $0) },
+                          ground: { self.liveWash(over: self.resolved(Tokens.Color.raised, appearanceName: $0), $0) }),
+            // The card's own outer edge, on the same live wash
+            // (`GroupsOverviewViewController.swift:794-808`: `raised` fill,
+            // the live gold wash over it, then `containerEdge` stroked last).
+            CompositePair(name: "Groups card edge on its live wash", floor: 1.25,
+                          foreground: { self.resolved(Tokens.Color.containerEdge, appearanceName: $0) },
                           ground: { self.liveWash(over: self.resolved(Tokens.Color.raised, appearanceName: $0), $0) }),
 
             // MARK: A banner's TINTED plate
@@ -271,17 +362,16 @@ extension SerializedSharedState {
 
             // MARK: A colour PINNED to one appearance, on a surface that is not
             //
-            // The Equalizer seat's border resolves `inkOnFill` under
-            // `.darkAqua` whatever the row's appearance is, because that token
-            // turns white under light + Increase Contrast and a white outline
-            // on the light canvas is no outline at all
-            // (`DeviceRowView.swift:1017-1024`). The gold under it is NOT
-            // pinned, so the two halves move independently — the mechanism
-            // that broke the wizard's stage bezel, measured here where it
-            // still holds.
-            CompositePair(name: "Equalizer seat border on its gold seat", floor: 3.0,
-                          foreground: { _ in self.resolved(Tokens.Color.inkOnFill, appearanceName: .darkAqua) },
-                          ground: { self.resolved(Tokens.Color.gold, appearanceName: $0) }),
+            // The Equalizer seat's border and glyph, which are one ink
+            // resolved in the row's own appearance. It was pinned under
+            // `.darkAqua` until 2026-09-04 — two halves moving independently,
+            // the mechanism that broke the wizard's stage bezel — and on the
+            // deepened `goldText` seat that pin measured 2.21:1 in light +
+            // Increase Contrast. Un-pinned, the token's own white flip lands
+            // in the one cell that needs it.
+            CompositePair(name: "Equalizer seat ink on its gold seat", floor: 3.0,
+                          foreground: { self.resolved(Tokens.Color.inkOnFill, appearanceName: $0) },
+                          ground: { self.resolved(Tokens.Color.goldText, appearanceName: $0) }),
             // The alignment wizard's primary plate pins BOTH halves under
             // `.darkAqua` (`AlignmentPlateCell.swift:252-271`), which is what
             // makes it survive light + Increase Contrast. Measured in all four
@@ -305,13 +395,22 @@ extension SerializedSharedState {
                     let foreground = composited(pair.foreground(appearanceName), over: ground)
                     let ratio = contrastRatio(foreground, ground)
                     let cell = "\(appearanceName.rawValue) ic=\(increaseContrast)"
-                    let reason = pair.floor >= 4.5
-                        ? "it sets words, so it carries the 4.5:1 body floor"
-                        : "it is a graphical mark or an edge, so it carries the 3:1 floor"
-                    #expect(ratio >= pair.floor, Comment(rawValue:
-                        "\(pair.name) — \(cell): \(String(format: "%.2f", ratio)):1 " +
-                        "under \(pair.floor):1. Measured on the composited ground the app " +
-                        "actually draws, not on a bare token; \(reason)."))
+                    let ratioString = String(format: "%.2f", ratio)
+                    let isException = exceptions.contains(
+                        Exception(pair: pair.name, appearance: appearanceName, icOn: increaseContrast))
+                    if isException {
+                        let message = "listed exception \(pair.name)/\(cell) " +
+                            "now PASSES (\(ratioString):1) — remove it from the exceptions list"
+                        #expect(ratio < pair.floor, Comment(rawValue: message))
+                    } else {
+                        let reason = pair.floor >= 4.5
+                            ? "it sets words, so it carries the 4.5:1 body floor"
+                            : "it is a graphical mark or an edge, so it carries the \(String(format: "%.2f", pair.floor)):1 floor"
+                        #expect(ratio >= pair.floor, Comment(rawValue:
+                            "\(pair.name) — \(cell): \(ratioString):1 " +
+                            "under \(pair.floor):1. Measured on the composited ground the app " +
+                            "actually draws, not on a bare token; \(reason)."))
+                    }
                 }
             }
         }

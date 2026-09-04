@@ -424,8 +424,8 @@ import AppKit
         let viewers = allViews(in: themeFrame, namedLike: "NSToolbarItemViewer")
             .map { $0.convert($0.bounds, to: themeFrame) }
             .sorted { $0.minX < $1.minX }
-        #expect(viewers.count >= SurfaceScreen.allCases.count,
-                "the toolbar materialized a viewer per item")
+        #expect(viewers.count >= 2,
+                "the toolbar materialized at least the tabs' capsule and Pin")
         var used: CGFloat = 0
         for frame in viewers {
             used += frame.width

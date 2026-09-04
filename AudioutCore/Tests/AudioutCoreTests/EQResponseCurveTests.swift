@@ -206,7 +206,7 @@ import AppKit
     @Test func theRulerTextClearsTheTextFloorOnTheScopeGround() {
         for appearance in [NSAppearance.Name.darkAqua, .accessibilityHighContrastDarkAqua] {
             let ground = resolved(Tokens.Color.scopeGround, appearanceName: appearance)
-            let ink = resolved(Tokens.Color.secondaryLabel, appearanceName: appearance)
+            let ink = resolved(Tokens.Color.label2, appearanceName: appearance)
             let ratio = contrastRatio(composited(ink, over: ground), ground)
             #expect(ratio >= 4.5, "ruler text vs scopeGround in \(appearance.rawValue) = \(ratio):1")
         }

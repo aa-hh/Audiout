@@ -21,8 +21,8 @@ import AudioutSharedUI
 ///   paper ground in light), the same `containerEdge` edge and panel radius
 ///   as `.card`, plus a 1 pt `Tokens.Color.shadow` @ 0.18 band along the
 ///   visual top edge — the flat, clipped inset-shade recipe `WarmFaderCell`'s
-///   trough (`WarmFaderCell.swift:87-95`) and `AlignmentPlateCell`'s bevel
-///   already draw, no blur, no `NSShadow`. Both Equalizer pages wear it —
+///   trough (`WarmFaderCell.swift:87-95`) already draws, no blur, no
+///   `NSShadow`. Both Equalizer pages wear it —
 ///   the device detail page and Main Audio: in light, `raised` measures
 ///   identical to the `canvas`/`panel` ground they sit on, so a card there is
 ///   a 1 pt outline around nothing.

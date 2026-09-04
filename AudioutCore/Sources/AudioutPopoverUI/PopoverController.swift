@@ -3190,6 +3190,14 @@ public final class PopoverController: NSObject {
     /// Apple-owned, so the affordance is the Settings trip — the fresh row then
     /// arrives through the ordinary connected-only listing.
     ///
+    /// The row names the ACTION only: the "Bluetooth Devices" header directly
+    /// above it already names the kind, so the word on both lines would make an
+    /// empty section say the same thing twice. VoiceOver hears the full phrase
+    /// through `accessibilityLabel` — a button announced on its own has no
+    /// header to lean on. The header itself stays: it is the collapse key, it
+    /// is the shape the AirPlay empty state uses too, and dropping it would
+    /// only push "Bluetooth" back down into this row.
+    ///
     /// A LINK, never a push button: a bordered pill is the only chrome-drawn
     /// control in a card of borderless rows, which lets an ABSENCE — a section
     /// with nothing in it — pull more eye than the live speakers above it.
@@ -3207,8 +3215,9 @@ public final class PopoverController: NSObject {
     /// anchor would read as an indent nested inside another indent; the "+"
     /// sits exactly where a device icon would instead.
     private func makeBluetoothConnectRow() -> NSView {
-        let button = PointingHandButton(title: "Connect a Bluetooth speaker",
+        let button = PointingHandButton(title: "Connect a speaker",
                                         target: self, action: #selector(bluetoothConnectRowClicked(_:)))
+        button.setAccessibilityLabel("Connect a Bluetooth speaker")
         button.translatesAutoresizingMaskIntoConstraints = false
         button.bezelStyle = .accessoryBar
         button.isBordered = false
@@ -4091,9 +4100,13 @@ public final class PopoverController: NSObject {
 
     // MARK: Device-list ceiling hooks (roadmap 039)
 
-    /// Apply the session's content-height limit exactly as the surface does.
+    /// Apply the session's content-height limit exactly as the surface does —
+    /// including the measure that follows it in `measureSessionContentSize`, which is
+    /// the pass that settles the list's clip view over the new ceiling. Without
+    /// it the scroll view's own geometry still reads its uncapped height.
     public func test_applyContentHeightLimit(_ maxContentHeight: CGFloat) {
         panel.applyContentHeightLimit(maxContentHeight)
+        _ = panel.fittingSizeSettled()
     }
     /// The ceiling the device list currently wears.
     public var test_deviceListCeiling: CGFloat { panel.test_deviceListCeiling }
@@ -4227,6 +4240,14 @@ public final class PopoverController: NSObject {
     /// Whether the mounted Connect row carries its leading glyph — the half of
     /// "reads as clickable" a headless run can actually see.
     public var test_bluetoothConnectRowHasGlyph: Bool { bluetoothConnectButton?.image != nil }
+
+    /// The Connect row's visible title and the label VoiceOver speaks. They
+    /// differ on purpose: the subsection header carries "Bluetooth" for the
+    /// eye, the accessibility label carries it for the ear.
+    public var test_bluetoothConnectRowTitles: (visible: String, spoken: String?)? {
+        guard let button = bluetoothConnectButton else { return nil }
+        return (button.title, button.accessibilityLabel())
+    }
 
     /// Leading inset of the Connect row's button from its own row's leading
     /// edge — pinned to `firstElementLeading(indented: false)` (where a

@@ -151,7 +151,8 @@ public final class AboutViewController: NSViewController {
         var rows: [NSView] = []
 
         // Identity lockup (Warm Signal §5.2 — Settings stays chrome-adjacent:
-        // stock material, semantic colors, NO warm canvas, NO gold): icon on
+        // stock material, semantic colors, NO gold — the canvas here is the
+        // app's plain neutral ground, not warm): icon on
         // the leading edge with name + version stacked beside it, reading as
         // one quiet unit rather than a form row with the icon exiled to the
         // trailing control slot. The name is set in the wordmark face, Clash
@@ -181,7 +182,7 @@ public final class AboutViewController: NSViewController {
 
         let versionLabel = SettingsForm.label(info.versionLine)
         versionLabel.font = Tokens.Font.caption
-        versionLabel.textColor = Tokens.Color.secondaryLabel
+        versionLabel.textColor = Tokens.Color.label2
 
         // The ITF Free Font License REQUIRES this credit: the face's own name
         // table (id 13) reads "You agree to identify the ITF fonts by name and
@@ -216,7 +217,7 @@ public final class AboutViewController: NSViewController {
 
         let creditsLabel = SettingsForm.label("Third-Party Notices")
         creditsLabel.font = Tokens.Font.captionEmphasized
-        creditsLabel.textColor = Tokens.Color.secondaryLabel
+        creditsLabel.textColor = Tokens.Color.label2
         rows.append(creditsLabel)
         rows.append(makeCreditsScrollView())
 
@@ -224,24 +225,24 @@ public final class AboutViewController: NSViewController {
         // minor sections read as one system.
         let privacyLabel = SettingsForm.label("Privacy")
         privacyLabel.font = Tokens.Font.captionEmphasized
-        privacyLabel.textColor = Tokens.Color.secondaryLabel
+        privacyLabel.textColor = Tokens.Color.label2
         rows.append(privacyLabel)
 
         let privacyBody = SettingsForm.label(Self.privacyText)
         privacyBody.font = Tokens.Font.caption
-        privacyBody.textColor = Tokens.Color.secondaryLabel
+        privacyBody.textColor = Tokens.Color.label2
         privacyBody.lineBreakMode = .byWordWrapping
         privacyBody.maximumNumberOfLines = 0
         rows.append(privacyBody)
 
         let supportLabel = SettingsForm.label("Support")
         supportLabel.font = Tokens.Font.captionEmphasized
-        supportLabel.textColor = Tokens.Color.secondaryLabel
+        supportLabel.textColor = Tokens.Color.label2
         rows.append(supportLabel)
 
         let supportBody = SettingsForm.label(Self.supportText)
         supportBody.font = Tokens.Font.caption
-        supportBody.textColor = Tokens.Color.secondaryLabel
+        supportBody.textColor = Tokens.Color.label2
         supportBody.lineBreakMode = .byWordWrapping
         supportBody.maximumNumberOfLines = 0
         // The address is only useful if it can be copied.

@@ -173,6 +173,7 @@ public final class DeviceDetailViewController: NSViewController {
         iconWell.translatesAutoresizingMaskIntoConstraints = false
         iconWell.widthAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
         iconWell.heightAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
+        iconWell.setAccessibilityLabel("Edit speaker icon")
         iconWell.onClick = { [weak self] in
             _ = self?.presentIconPicker()
         }

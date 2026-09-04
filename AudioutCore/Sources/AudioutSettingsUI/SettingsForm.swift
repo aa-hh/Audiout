@@ -60,7 +60,7 @@ enum SettingsForm {
     static func hintLabel(_ string: String = "") -> NSTextField {
         let field = label(string)
         field.font = Tokens.Font.caption
-        field.textColor = Tokens.Color.secondaryLabel
+        field.textColor = Tokens.Color.label2
         field.lineBreakMode = .byWordWrapping
         field.maximumNumberOfLines = 0
         field.preferredMaxLayoutWidth = contentWidth - horizontalPadding * 2
@@ -73,7 +73,7 @@ enum SettingsForm {
     static func sectionHeader(_ string: String) -> NSTextField {
         let field = label(string)
         field.font = Tokens.Font.captionEmphasized
-        field.textColor = Tokens.Color.secondaryLabel
+        field.textColor = Tokens.Color.label2
         return field
     }
 
@@ -89,7 +89,7 @@ enum SettingsForm {
         // the BT sync drawer's value field) — not a second hand-minted
         // monospaced size that drifts from it.
         field.font = Tokens.Font.syncReadout
-        field.textColor = Tokens.Color.secondaryLabel
+        field.textColor = Tokens.Color.label2
         field.alignment = .center
 
         let well = ReadoutWellView()
@@ -113,7 +113,7 @@ enum SettingsForm {
         if let subtitle {
             let sub = label(subtitle)
             sub.font = Tokens.Font.caption
-            sub.textColor = Tokens.Color.secondaryLabel
+            sub.textColor = Tokens.Color.label2
             sub.lineBreakMode = .byWordWrapping
             sub.maximumNumberOfLines = 0
             built = sub
@@ -211,9 +211,11 @@ enum SettingsForm {
 }
 
 /// The value-readout backing: the panel's inset `well` fill in a rounded rect,
-/// drawn in `draw(_:)` (not a stamped layer color) so it re-resolves under the
-/// current appearance on its own, and subscribes for the Increase-Contrast
-/// repaint it cannot get for free — same reasoning as `BorderedListView`.
+/// drawn in `draw(_:)` (not a stamped layer color), so it needs both repaint
+/// triggers to track the current appearance — same reasoning as
+/// `BorderedListView`: `viewDidChangeEffectiveAppearance` for light/dark, and
+/// `redrawOnAccessibilityDisplayChange` for Increase Contrast, which fires no
+/// appearance change of its own (`AccessibilityDisplayRedraw.swift`).
 private final class ReadoutWellView: NSView {
 
     override init(frame frameRect: NSRect) {
@@ -227,6 +229,11 @@ private final class ReadoutWellView: NSView {
         super.draw(dirtyRect)
         Tokens.Color.well.setFill()
         NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }
 

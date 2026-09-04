@@ -341,9 +341,9 @@ final class EmitterFieldView: NSView {
 
     // MARK: Ground
 
-    /// The flat warm ground. It is the whole picture when Metal is unavailable
-    /// or headless, and behind the Metal view it is what stops a black flash
-    /// before the first frame.
+    /// The flat `Tokens.Color.canvas` ground. It is the whole picture when Metal
+    /// is unavailable or headless, and behind the Metal view it is what stops a
+    /// black flash before the first frame.
     private func stampGround() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.backgroundColor = Tokens.Color.canvas.cgColor

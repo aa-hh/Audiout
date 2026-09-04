@@ -140,8 +140,8 @@ final class SetupHeroHeadView: NSView {
     var test_headlineAccessibilityRole: NSAccessibility.Role? { headlineLabel.accessibilityRole() }
 }
 
-/// The LABELLED frame the rehearsal plays inside: a warm well with a caption
-/// band along its top edge saying whose surface this is.
+/// The LABELLED frame the rehearsal plays inside: a `Tokens.Color.well` with
+/// a caption band along its top edge saying whose surface this is.
 ///
 /// The label is the whole reason the frame exists (owner-approved 2026-08-12).
 /// The mock is a drawing of somebody else's window sitting inside ours, and
@@ -190,7 +190,7 @@ final class SetupPreviewFrameView: NSView {
         well.layer?.masksToBounds = true
         addSubview(well)
 
-        captionLabel.textColor = Tokens.Color.tertiaryLabel
+        captionLabel.textColor = Tokens.Color.label3
         captionLabel.translatesAutoresizingMaskIntoConstraints = false
         bandRule.borderWidth = 0
         labelBand.translatesAutoresizingMaskIntoConstraints = false
@@ -283,7 +283,7 @@ final class SetupPreviewFrameView: NSView {
     private static func captionText(_ text: String) -> NSAttributedString {
         NSAttributedString(string: text, attributes: [
             .font: Tokens.Font.microLabel,
-            .foregroundColor: Tokens.Color.tertiaryLabel,
+            .foregroundColor: Tokens.Color.label3,
         ])
     }
 
@@ -398,7 +398,7 @@ final class SetupRibbonView: NSView {
         statusRow.addArrangedSubview(statusLabel)
 
         bodyLabel.font = Tokens.Font.caption
-        bodyLabel.textColor = Tokens.Color.inkSecondary
+        bodyLabel.textColor = Tokens.Color.label2
         bodyLabel.maximumNumberOfLines = 0
         bodyLabel.preferredMaxLayoutWidth = Self.textWidth
         bodyLabel.translatesAutoresizingMaskIntoConstraints = false

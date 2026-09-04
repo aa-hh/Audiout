@@ -114,7 +114,7 @@ final class IconTileView: NSView {
     init(symbolName: String,
          customImage: NSImage? = nil,
          accessibility: String,
-         color: NSColor = Tokens.Color.secondaryLabel,
+         color: NSColor = Tokens.Color.label2,
          side: CGFloat = IconTileView.side,
          pointSize: CGFloat = 15,
          cornerRadius: CGFloat = Tokens.Layout.Radius.control) {
@@ -172,8 +172,8 @@ final class IconTileView: NSView {
 /// A rounded rectangle with an appearance-adaptive fill and hairline border —
 /// the System Settings grouped inset-list container, defaulting to the Warm
 /// Signal `panel` card fill + `hairline` rim (spec §1/§5.8) so the permission
-/// card reads as a warm card on the warm canvas. Children (the permission
-/// rows + hairline separators) are laid out by the caller.
+/// card reads as the app's own themed card, not the system's plain one.
+/// Children (the permission rows + hairline separators) are laid out by the caller.
 /// The fill/border are settable rather than fixed at init: a permission card
 /// re-tints its own surface to mark which step is the live one (see
 /// `SetupSpineRowView.applySurface`), so this has to be re-stampable after the fact.

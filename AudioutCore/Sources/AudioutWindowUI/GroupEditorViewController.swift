@@ -185,7 +185,7 @@ public final class GroupEditorViewController: NSViewController {
     private let reassuranceLabel: NSTextField = {
         let label = NSTextField(wrappingLabelWithString: GroupEditorViewController.savedAsYouGo)
         label.font = Tokens.Font.caption
-        // Stock `.secondaryLabel`: text colours are frozen in this pane
+        // `Tokens.Color.label2`: text colours are frozen in this pane
         // (`AGENTS.md`) — the gold in this pair tints the badge's GLYPH only.
         label.textColor = Tokens.Color.label2
         label.isSelectable = false
@@ -690,8 +690,8 @@ public final class GroupEditorViewController: NSViewController {
     /// Build the header's "Playing now" marker: the sidebar's exact symbol and
     /// wording (`IconLabelCellView`), so the same state can't acquire a second
     /// name. `Tokens.Color.gold` is an INSTRUMENT — it keeps its authored value
-    /// in every theme, and it tints the GLYPH only; the caption stays stock
-    /// `.secondaryLabel` under this pane's frozen-text-colors rule.
+    /// in every theme, and it tints the GLYPH only; the caption stays
+    /// `Tokens.Color.label2` under this pane's frozen-text-colors rule.
     private func buildPlayingBadge() {
         let glyph = NSImageView()
         glyph.translatesAutoresizingMaskIntoConstraints = false

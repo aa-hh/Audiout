@@ -91,7 +91,7 @@ final class UsageStatsConsentCard: NSView {
         // once in each, read as a stutter.
         let body = NSTextField(wrappingLabelWithString: Self.bodyText)
         body.font = .systemFont(ofSize: 12.5)
-        body.textColor = Tokens.Color.inkSecondary
+        body.textColor = Tokens.Color.label2
         body.translatesAutoresizingMaskIntoConstraints = false
 
         declineButton.bezelStyle = .rounded

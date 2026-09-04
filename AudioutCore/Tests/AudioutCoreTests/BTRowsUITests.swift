@@ -496,23 +496,34 @@ import AppKit
                 "…in both dimensions — \(shapedInk) vs \(flatInk)")
     }
 
-    /// Mute sits 6 pt trailing and is itself a filled pill, so the door's new
-    /// seat must not read as the same object. Mute is a capsule — its radius
-    /// clamps to half its own height; the door's seat is a rounded SQUARE,
-    /// short of that. The gap between them is unchanged: the seat grew inside
-    /// the slot the door already occupied, never the slot itself.
-    @Test func theShapedDoorSeatIsNotTheMuteCapsule() {
-        let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
+    /// The door's seat and the muted speaker's seat are ONE shape — same size,
+    /// same corner, same centre line (Alec, 2026-09-04: "the same object in
+    /// two colours"). They were two until then, a 24 x 22 rounded square 6 pt
+    /// from a capsule, and read as two unrelated kinds of control. Hue and
+    /// glyph say which is which now; geometry does not.
+    @Test func theDoorSeatAndTheMuteSeatAreOneShape() {
+        let muted = Device(id: "C4-38-75-0E-BF-4A:output", name: "Sonos Move 2",
+                           kind: .bluetooth, supportsAirPlay2: false, isMuted: true)
+        let shaped = makeRow(muted, delegate: SpyDelegate(), selected: true,
                              isEQShaped: true)
         shaped.layoutSubtreeIfNeeded()
+        let seats = "door \(shaped.test_eqSeatFrame), mute \(shaped.test_muteSeatFrame)"
+        #expect(shaped.test_eqSeatFrame.size == shaped.test_muteSeatFrame.size,
+                "the two engaged marks are different sizes — \(seats)")
+        #expect(shaped.test_eqSeatFrame.size == PopoverColumnGrid.engagedSeatSize,
+                "…and not the shared size — \(seats)")
+        #expect(shaped.test_eqSeatCornerRadius == shaped.test_muteSeatCornerRadius,
+                "the two engaged marks are different corners")
+        #expect(shaped.test_eqSeatCornerRadius == PopoverColumnGrid.engagedSeatCornerRadius)
         #expect(shaped.test_eqSeatCornerRadius < shaped.test_eqSeatFrame.height / 2,
-                "a rounded rectangle beside mute's capsule, not a second capsule")
+                "a rounded rectangle, not a capsule")
+        #expect(abs(shaped.test_eqSeatFrame.midY - shaped.test_muteSeatFrame.midY) <= 0.75,
+                "the two engaged marks sit on one centre line — \(seats)")
         #expect(shaped.test_eqSeatFrame.height < shaped.test_eqButtonFrame.height,
                 "the seat is sized to the door's slot, not to the button's larger frame")
-        #expect(abs(shaped.test_eqSeatFrame.midY - shaped.test_muteButtonFrame.midY) <= 0.75,
-                "the two engaged marks sit on one centre line")
-        // The seat grew inside the slot, so the gap to mute is untouched. No
-        // absolute width assert here — AppKit's rounding grid varies per run.
+        // The seats sit inside the slots their buttons already occupied, so
+        // the gap between the buttons is untouched. No absolute width assert
+        // here — AppKit's rounding grid varies per run.
         #expect(abs((shaped.test_muteButtonFrame.minX - shaped.test_eqButtonFrame.maxX)
                     - PopoverColumnGrid.eqToMuteGap) <= 1, "the 6 pt gap to mute is unmoved")
     }
@@ -1228,17 +1239,22 @@ import AppKit
     }
 }
 
-/// The pinned dark ink `inkOnFill` carries in three of its four appearances —
-/// `#171104`. Pinned as a literal on purpose: re-resolving the token would
-/// agree with the seat's border by construction, and disagree with it in
-/// light + Increase Contrast, where the token turns white and the border
-/// deliberately does not.
+/// The dark ink `inkOnFill` carries in three of its four appearances —
+/// `#171104`. Written as a literal on purpose: re-resolving the token would
+/// agree with the seat's border by construction.
 private extension NSColor {
     var isWarmSignalDarkInk: Bool {
         guard let srgb = usingColorSpace(.sRGB) else { return false }
         return abs(srgb.redComponent - 0x17 / 255.0) < 0.01
             && abs(srgb.greenComponent - 0x11 / 255.0) < 0.01
             && abs(srgb.blueComponent - 0x04 / 255.0) < 0.01
+    }
+
+    /// The white `inkOnFill` flips to under light + Increase Contrast.
+    var isWarmSignalWhiteInk: Bool {
+        guard let srgb = usingColorSpace(.sRGB) else { return false }
+        return srgb.redComponent > 0.99 && srgb.greenComponent > 0.99
+            && srgb.blueComponent > 0.99
     }
 }
 
@@ -1249,12 +1265,15 @@ extension SerializedSharedState {
 @MainActor
 @Suite struct EqualizerSeatBorderTests {
 
-    /// The seat's border is a DARK outline around a gold fill in every
-    /// appearance, and light + Increase Contrast is the case it exists for:
-    /// `inkOnFill` flips to white there, which is right for a glyph sitting
-    /// ON the gold and wrong for the outline separating that gold from the
-    /// light canvas behind it — a white outline there is no outline.
-    @Test func theSeatsBorderStaysDarkInLightIncreaseContrast() {
+    /// The border and the glyph are ONE ink: whatever `inkOnFill` resolves to
+    /// in the row's own appearance. That is dark `#171104` in three of the
+    /// four cells and WHITE in light + Increase Contrast, where the seat is
+    /// the deep `goldText` `#64480C` and a white outline is the readable one —
+    /// the pinned dark ink measured 2.21:1 on that seat, under the 3:1 edge
+    /// floor. The border used to be pinned under `.darkAqua` because the seat
+    /// was pale `gold` there and a white outline on light paper is no outline;
+    /// deepening the seat retired the pin along with its reason (2026-09-04).
+    @Test func theSeatsBorderIsTheSameInkAsItsGlyph() {
         defer { Tokens.test_increaseContrastOverride = nil }
         let device = Device(id: "C4-38-75-0E-BF-4A:output", name: "Sonos Move 2",
                             kind: .bluetooth, supportsAirPlay2: false)
@@ -1272,8 +1291,15 @@ extension SerializedSharedState {
                 // own, and a check that reads a stale stamp checks nothing.
                 row.apply(device, selected: true, controllable: true, isEQShaped: true)
                 let got = String(describing: row.test_eqSeatBorderColor)
-                #expect(row.test_eqSeatBorderColor?.isWarmSignalDarkInk == true,
-                        "\(name), Increase Contrast \(increaseContrast): the border is #171104, got \(got)")
+                let expectsWhite = appearance == .aqua && increaseContrast
+                let matches = expectsWhite
+                    ? row.test_eqSeatBorderColor?.isWarmSignalWhiteInk == true
+                    : row.test_eqSeatBorderColor?.isWarmSignalDarkInk == true
+                #expect(matches, Comment(rawValue:
+                    "\(name), Increase Contrast \(increaseContrast): the border is " +
+                    "\(expectsWhite ? "#FFFFFF" : "#171104"), got \(got)"))
+                #expect(row.test_eqTintColor?.usingColorSpace(.sRGB) != nil,
+                        "\(name): the glyph has no resolvable ink to match the border against")
             }
         }
     }

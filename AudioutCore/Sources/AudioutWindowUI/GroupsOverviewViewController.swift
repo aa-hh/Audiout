@@ -897,8 +897,9 @@ private final class IconSeatView: NSView {
 }
 
 /// One member speaker's 24 pt chip along a card's bottom edge — a `raised`
-/// fill in a `containerEdge` edge at the control radius — or the dashed
-/// borderless `+N` chip standing in for the members past the fourth.
+/// fill in a `containerEdge` edge at the control radius — or the dashed,
+/// unfilled `+N` chip standing in for the members past the fourth, sharing
+/// the same `containerEdge` stroke.
 private final class MemberChipView: NSView {
 
     private let isOverflow: Bool
@@ -961,15 +962,14 @@ private final class MemberChipView: NSView {
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
                                 xRadius: radius, yRadius: radius)
         path.lineWidth = 1
+        Tokens.Color.containerEdge.setStroke()
         if isOverflow {
             path.setLineDash([3, 2], count: 2, phase: 0)
-            Tokens.Color.hairline.setStroke()
             path.stroke()
             return
         }
         Tokens.Color.raised.setFill()
         path.fill()
-        Tokens.Color.containerEdge.setStroke()
         path.stroke()
     }
 

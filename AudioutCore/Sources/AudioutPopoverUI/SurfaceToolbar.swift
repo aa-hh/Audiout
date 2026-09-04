@@ -14,43 +14,60 @@ import AudioutSharedUI
 ///   2026-09-03) because three translated labels would widen the strip until
 ///   AppKit swept the tabs into the overflow menu, and primary navigation
 ///   cannot live behind a chevron. Nothing is lost to a reader: the tooltips
-///   ("Mixer (⌘1)"), the items' `label`s (VoiceOver and the overflow menu)
+///   ("Mixer (⌘1)"), each tab's accessibility label (what VoiceOver speaks)
 ///   and ⌘1/⌘2/⌘3 all still carry the names, and none of them costs strip
 ///   width in any language;
-/// - Pin as a trailing item wearing the same control.
+/// - Pin as a trailing item, standing OUTSIDE the tabs' capsule.
 ///
-/// **The strip draws its own chrome** (Alec, 2026-09-04). Every item is an
-/// `NSToolbarItem` whose view is a `SurfaceToolbarSeatButton`, and the seat it
-/// draws is one rounded rectangle in every state — rest, hover, pressed,
-/// selected, and Pin's on/off. What that replaces: AppKit draws a BORDERED
-/// item's hover state as a circle and its selected state as a rounded square,
-/// two shapes for two states of one control, and neither shape is settable.
-/// The strip is converted WHOLE — the tabs and Pin together — because
-/// converting only the tabs is what failed live review on 2026-08-30 (three
-/// bare glyphs beside two bordered circles, two styles in one header).
-/// `SurfaceToolbarSeat` holds the shape, the size and the wash strengths.
+/// **The three tabs are ONE capsule** (Alec, 2026-09-04, second pass). A
+/// single `NSToolbarItem` carries a `SurfaceToolbarTabCapsule`: one
+/// pill-shaped surface drawn once, with the three tabs as buttons layered over
+/// it. The current tab is marked by a soft rounded highlight INSIDE that pill,
+/// hover is the same highlight weaker, and an idle tab draws nothing of its
+/// own — the grouping macOS 26 uses in its own toolbars. What that replaces:
+/// three separate circular seats, one per tab, each its own island.
+///
+/// **Pin is the standalone button beside the group.** The reference puts such
+/// a button outside the pill, optionally behind a thin divider; here a
+/// `.flexibleSpace` already throws the full width of the strip between them,
+/// so a divider would sit orphaned in the middle of that gap and none is
+/// drawn.
+///
+/// Underneath both passes is the same reason for drawing the strip at all:
+/// AppKit draws a BORDERED item's hover state as a circle and its selected
+/// state as a rounded square, two shapes for two states of one control, and
+/// neither shape is settable. Pin wears the same authored highlight as a tab,
+/// because half a conversion — bare glyphs beside bordered circles — is what
+/// failed live review on 2026-08-30. `SurfaceToolbarSeat` holds every shape,
+/// size and wash strength in the strip.
 ///
 /// The `NSToolbar` itself stays: it is the window's one unified title-bar
 /// strip, and it supplies the system material and the Reduce Transparency
 /// handling that the retired custom header had to hand-build.
 ///
-/// **Three earlier attempts, so none of them comes back:**
+/// **Four earlier attempts, so none of them comes back:**
 /// - an `NSToolbarItemGroup` segmented control drew a hairline between
 ///   adjacent segments and suppressed the one beside the SELECTED segment, so
 ///   the divider moved with the selection and no API draws them consistently;
 /// - custom-view tabs beside the bordered Pin item left bare glyphs next to
 ///   bordered circles — two styles in one header, which is why the conversion
-///   is now all of the strip or none of it;
+///   is all of the strip or none of it;
 /// - an authored fill put every cue inside `if #available(macOS 26.0, *)`
 ///   while the package deploys to 14.2, so macOS 14–25 showed three identical
 ///   circles and no current screen at all — and the suite stayed green
 ///   because the seams asserted the intent rather than the pixels. It also
 ///   had to clear the UNSELECTED capsule, and in dark mode that capsule
 ///   already sat at the same grey, so the selected tab rendered as the
-///   darkest thing in the strip. Neither trap survives here: nothing in
-///   `SurfaceToolbarSeat` is behind an availability check, an unselected seat
-///   draws nothing for a selected one to clear, and the tests below sample
-///   real pixels.
+///   darkest thing in the strip;
+/// - three `.space`-separated items, each drawing its own seat, read as three
+///   islands rather than one control.
+///
+/// None of those traps survives here: nothing in `SurfaceToolbarSeat` or
+/// `SurfaceToolbarTabCapsule` is behind an availability check; the capsule is
+/// one drawn surface and the highlight is painted ON it, never instead of it,
+/// so a selected tab can only end up lighter than its ground in dark mode; the
+/// capsule's size is derived from three fixed tabs, so no selection can resize
+/// or reflow it; and the tests below sample real pixels.
 ///
 /// One toolbar per process: unlike the retired per-screen header instances,
 /// the toolbar belongs to the shell WINDOW, so there is nothing to keep in
@@ -71,10 +88,10 @@ final class SurfaceToolbarController: NSObject {
 
     static let pinItemIdentifier = NSToolbarItem.Identifier("SurfacePin")
 
-    /// One stable, non-localized identifier per screen.
-    static func tabItemIdentifier(for screen: SurfaceScreen) -> NSToolbarItem.Identifier {
-        NSToolbarItem.Identifier("SurfaceTab\(screen.rawValue)")
-    }
+    /// The ONE item carrying all three tabs. Three identifiers, one per
+    /// screen, is what let the tabs drift apart into three islands; one item
+    /// is what makes the capsule a single drawn surface.
+    static let tabsItemIdentifier = NSToolbarItem.Identifier("SurfaceTabs")
 
     /// A tab was clicked. The host decides what a selection means; the tabs are
     /// re-asserted from `selectedScreen` after this returns (the host confirms
@@ -90,11 +107,12 @@ final class SurfaceToolbarController: NSObject {
 
     let toolbar: NSToolbar
 
-    private var tabItems: [SurfaceScreen: NSToolbarItem] = [:]
+    private var tabsItem: NSToolbarItem?
+    private var tabButtons: [SurfaceScreen: SurfaceToolbarSeatButton] = [:]
     private var pinItem: NSToolbarItem?
 
     private func tabButton(_ screen: SurfaceScreen) -> SurfaceToolbarSeatButton? {
-        tabItems[screen]?.view as? SurfaceToolbarSeatButton
+        tabButtons[screen]
     }
 
     private var pinButton: SurfaceToolbarSeatButton? {
@@ -170,7 +188,7 @@ final class SurfaceToolbarController: NSObject {
 
     @objc private func tabTapped(_ sender: Any?) {
         guard let view = sender as? NSView,
-              let screen = SurfaceScreen.allCases.first(where: { tabItems[$0]?.view === view })
+              let screen = SurfaceScreen.allCases.first(where: { tabButtons[$0] === view })
         else { return }
         onSelectScreen?(screen)
         // Host-confirmed: whatever the callback decided (it normally called
@@ -198,9 +216,9 @@ final class SurfaceToolbarController: NSObject {
 
     /// The toolbar's materialized items, in display order.
     var test_itemIdentifiers: [NSToolbarItem.Identifier] { toolbar.items.map(\.itemIdentifier) }
-    /// The tabs' names, in tab order — spoken, not drawn.
-    var test_tabLabels: [String] {
-        SurfaceScreen.allCases.compactMap { tabItems[$0]?.label }
+    /// The one capsule the three tabs live in.
+    var test_tabCapsule: SurfaceToolbarTabCapsule? {
+        tabsItem?.view as? SurfaceToolbarTabCapsule
     }
     /// What VoiceOver is handed for each tab, in tab order. The item's `label`
     /// stops being the spoken name once the item carries a view, so the view
@@ -244,12 +262,18 @@ final class SurfaceToolbarController: NSObject {
     var test_onlySelectedTabIsMarked: Bool {
         test_engagedTabCount == 1 && test_selectedTabIndex == selectedScreen.rawValue
     }
-    /// Whether every item in the strip — the three tabs AND Pin — wears the
-    /// one seat control. The 2026-08-30 failure was half the strip converted.
+    /// Whether the strip is exactly the capsule plus Pin, and every clickable
+    /// thing in it — the three tabs inside the capsule AND Pin outside it —
+    /// wears the one authored control. The 2026-08-30 failure was half the
+    /// strip converted.
     var test_everyItemWearsTheSeat: Bool {
         let views = toolbar.items.compactMap(\.view)
-        return views.count == SurfaceScreen.allCases.count + 1
-            && views.allSatisfy { $0 is SurfaceToolbarSeatButton }
+        guard views.count == 2,
+              let capsule = views.first as? SurfaceToolbarTabCapsule,
+              views.last is SurfaceToolbarSeatButton else { return false }
+        let tabs = SurfaceScreen.allCases.compactMap(tabButton)
+        return tabs.count == SurfaceScreen.allCases.count
+            && tabs.allSatisfy { $0.isDescendant(of: capsule) }
     }
     /// Whether the pin item resolved a symbol image.
     var test_pinItemHasImage: Bool { pinButton?.image != nil }
@@ -268,18 +292,14 @@ final class SurfaceToolbarController: NSObject {
 extension SurfaceToolbarController: NSToolbarDelegate {
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        // A `.space` BETWEEN the tabs, and a `.flexibleSpace` before Pin: they
-        // had sat one pixel apart, so a click aimed at Pin could quit the app
-        // instead. The gaps also keep every seat a discrete rounded rectangle —
-        // adjacent items used to MERGE into one shared capsule on macOS 26+,
-        // and the container then RESHAPED as the selection moved (Mixer gave
-        // circle + capsule(2), Groups gave three circles, Settings gave
-        // capsule(2) + circle). That is the wandering geometry the segmented
-        // divider was, wearing a different hat.
-        Array(SurfaceScreen.allCases.map(Self.tabItemIdentifier(for:))
-                .flatMap { [$0, NSToolbarItem.Identifier.space] }.dropLast())
-            + [.flexibleSpace,
-               Self.pinItemIdentifier]
+        // Two items and the width of the strip between them. The tabs are ONE
+        // item because they are one capsule; letting AppKit space three tab
+        // items is what produced three islands, and letting it merge them is
+        // what produced a container that reshaped as the selection moved
+        // (measured on macOS 26: Mixer gave circle + capsule(2), Groups three
+        // circles, Settings capsule(2) + circle). A capsule we draw ourselves
+        // has neither behaviour.
+        [Self.tabsItemIdentifier, .flexibleSpace, Self.pinItemIdentifier]
     }
 
     /// Deliberately EMPTY. This seam is what turns AppKit's own selection
@@ -298,35 +318,36 @@ extension SurfaceToolbarController: NSToolbarDelegate {
     func toolbar(_ toolbar: NSToolbar,
                  itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        if let screen = SurfaceScreen.allCases
-            .first(where: { Self.tabItemIdentifier(for: $0) == itemIdentifier }) {
+        switch itemIdentifier {
+        case Self.tabsItemIdentifier:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            let button = SurfaceToolbarSeatButton(
-                frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.size))
-            button.target = self
-            button.action = #selector(tabTapped(_:))
-            button.configure(symbol: Self.resolveSymbol(screen.symbolName,
-                                                        fallbacks: screen.fallbackSymbolNames,
-                                                        accessibilityDescription: screen.label),
-                             label: screen.label,
-                             // No drawn name: the tabs are icon-only, so the
-                             // name reaches the reader through this tooltip
-                             // (which also carries ⌘1/⌘2/⌘3, riding the shell
-                             // panel's key-equivalent seam), the accessibility
-                             // label, and the shortcut itself.
-                             toolTip: "\(screen.label) (⌘\(screen.keyEquivalent))",
-                             isTab: true)
-            item.view = button
-            // The item's own NAME, for the overflow menu.
-            item.label = screen.label
+            let buttons = SurfaceScreen.allCases.map { screen -> SurfaceToolbarSeatButton in
+                let button = SurfaceToolbarSeatButton(
+                    frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.size))
+                button.target = self
+                button.action = #selector(tabTapped(_:))
+                button.configure(symbol: Self.resolveSymbol(screen.symbolName,
+                                                            fallbacks: screen.fallbackSymbolNames,
+                                                            accessibilityDescription: screen.label),
+                                 label: screen.label,
+                                 // No drawn name: the tabs are icon-only, so
+                                 // the name reaches the reader through this
+                                 // tooltip (which also carries ⌘1/⌘2/⌘3,
+                                 // riding the shell panel's key-equivalent
+                                 // seam), the accessibility label, and the
+                                 // shortcut itself.
+                                 toolTip: "\(screen.label) (⌘\(screen.keyEquivalent))",
+                                 isTab: true)
+                tabButtons[screen] = button
+                return button
+            }
+            item.view = SurfaceToolbarTabCapsule(tabs: buttons)
             // Navigation cannot live behind the overflow chevron.
             item.visibilityPriority = .high
-            tabItems[screen] = item
+            tabsItem = item
             applySelectionToTabs()
             return item
-        }
 
-        switch itemIdentifier {
         case Self.pinItemIdentifier:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             let button = SurfaceToolbarSeatButton(

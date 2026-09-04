@@ -42,6 +42,15 @@ import AppKit
         popover.configure(groupController: groups)
         groups.ensureDefaultSelection()
         popover.test_isShownOverride = true
+        // `MockBackend.devices` stays empty until `start()` has published the
+        // fleet on its own queue. Reading it before that hands the popover an
+        // empty list, and every row assertion below then measures the "Looking
+        // for speakers…" placeholder instead of the speakers.
+        backend.start()
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline && backend.devices.count < deviceCount {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        }
         popover.update(devices: backend.devices)
         popover.test_panelView.layoutSubtreeIfNeeded()
         return popover
@@ -105,20 +114,42 @@ import AppKit
     /// bounds are the lower of each other, not one or the other.
     @Test func aShortScreenLowersTheCeilingBelowTheTwelveRowMaximum() throws {
         let popover = makePopover(deviceCount: 24)
-        // Deliberately mean: a content budget far below what twelve rows plus
-        // the chrome would need.
-        popover.test_applyContentHeightLimit(420)
+        // A budget between the three-row floor and the twelve-row maximum, so
+        // the SCREEN is what sets the ceiling and neither bound gets there
+        // first. Derived from the chrome this build actually measures rather
+        // than a fixed number, which would drift with any row or banner change.
+        let budget = chromeAroundTheList(popover)
+            + (PopoverPanelViewController.deviceListMaxHeight
+               + PopoverPanelViewController.deviceListMinHeight) / 2
+        popover.test_applyContentHeightLimit(budget)
 
         let ceiling = popover.test_deviceListCeiling
         #expect(ceiling < PopoverPanelViewController.deviceListMaxHeight,
                 Comment(rawValue: "the screen's budget won, not the maximum "
                         + "(ceiling \(ceiling)pt)"))
-        #expect(ceiling >= PopoverPanelViewController.deviceListMinHeight,
-                "and never below the three-row floor")
+        #expect(ceiling > PopoverPanelViewController.deviceListMinHeight,
+                "and the floor never came into it")
 
         let height = popover.test_panelFittingSize.height
-        #expect(height <= 420 + 1,
-                Comment(rawValue: "the panel measures \(height)pt against a 420pt budget"))
+        #expect(height <= budget + 1,
+                Comment(rawValue: "the panel measures \(height)pt against a \(budget)pt budget"))
+    }
+
+    /// The other end of the same clamp: a budget too small even for three rows
+    /// stops at the floor rather than shrinking further. The panel then wants
+    /// more than the budget on purpose — `measureSessionContentSize` takes that
+    /// surplus off with its own screen clamp, so the list never collapses to a
+    /// sliver on a very short screen.
+    @Test func aBudgetBelowTheFloorStopsAtThreeRows() throws {
+        let popover = makePopover(deviceCount: 24)
+        popover.test_applyContentHeightLimit(0)
+
+        let floor = PopoverPanelViewController.deviceListMinHeight
+        #expect(popover.test_deviceListCeiling == floor,
+                "a budget of nothing still leaves three rows")
+        let list = try #require(popover.test_cardBodyClipHeight(title: devicesCard))
+        #expect(abs(list - floor) < 1,
+                Comment(rawValue: "the list draws \(list)pt, floor \(floor)pt"))
     }
 
     // MARK: Chrome holds still
@@ -204,6 +235,16 @@ import AppKit
     private func devicesHeader(_ popover: PopoverController, panel: NSView) -> NSRect {
         guard let header = popover.test_cardHeaderRow(title: devicesCard) else { return .zero }
         return header.convert(header.bounds, to: panel)
+    }
+
+    /// Everything in the panel except the device list — banners, the Main Audio
+    /// block, both card headers, the App Routing card. Measured the same way
+    /// `applyContentHeightLimit` measures it: the whole panel with the list
+    /// uncapped, less the list.
+    private func chromeAroundTheList(_ popover: PopoverController) -> CGFloat {
+        popover.test_applyContentHeightLimit(.greatestFiniteMagnitude)
+        let list = popover.test_cardBodyClipHeight(title: devicesCard) ?? 0
+        return popover.test_panelFittingSize.height - list
     }
 
     private func deviceRows(under view: NSView) -> [DeviceRowView] {

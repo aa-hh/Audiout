@@ -78,7 +78,11 @@ final class BTAlignmentNoteView: NSView {
         sentenceButton.title = ""
         sentenceButton.target = self
         sentenceButton.action = #selector(alignClicked(_:))
-        sentenceButton.setAccessibilityLabel("Align \(deviceName)")
+        // The button's label is the visible clickable text — the sentence,
+        // not the device name. The parent group already carries the device
+        // name in its own label (see `background.setAccessibilityLabel`
+        // below), and the tooltip keeps the full sentence.
+        sentenceButton.setAccessibilityLabel(Self.noteAlignCall)
         sentenceButton.toolTip = Self.noteCopy(name: deviceName)
         background.addSubview(sentenceButton)
 

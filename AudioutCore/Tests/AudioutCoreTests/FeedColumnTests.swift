@@ -126,6 +126,70 @@ import AudioutCore
                 "…and the screen reader through the row's spoken value")
     }
 
+    // MARK: Where the pills SIT in the column
+
+    /// Lay a row out at a realistic popover width so the trailing columns get
+    /// real frames — `DeviceRowView` constrains only its height.
+    private func laidOut(_ row: DeviceRowView) -> DeviceRowView {
+        row.frame = NSRect(x: 0, y: 0, width: 420, height: DeviceRowView.rowHeight)
+        row.layoutSubtreeIfNeeded()
+        return row
+    }
+
+    /// The failure rung is a lone glyph in a column of its own, so it CENTRES
+    /// (Alec, 2026-09-04). It used to keep the leading edge a left-aligned
+    /// TEXT pill needs, which left the triangle hanging at the column's left
+    /// margin with 120 pt of empty column beside it.
+    @Test func theFailureGlyphCentresInItsColumn() {
+        let row = laidOut(makeBusRow())
+        row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
+                  selected: true, controllable: true)
+        row.layoutSubtreeIfNeeded()
+        let feed = row.test_trailingSlotFrames.feed
+        let wanted = row.bounds.maxX - PopoverColumnGrid.trailingControlCenterFromTrailing
+        #expect(abs(feed.midX - wanted) <= 1,
+                "the glyph pill is off centre — \(feed) in \(row.bounds), wanted midX \(wanted)")
+    }
+
+    /// …and the unavailable rung, which draws the same lone glyph.
+    @Test func theUnavailableGlyphCentresInItsColumnToo() {
+        let row = laidOut(makeBusRow())
+        row.apply(makeDevice(isAvailable: false), selected: true)
+        row.layoutSubtreeIfNeeded()
+        let feed = row.test_trailingSlotFrames.feed
+        let wanted = row.bounds.maxX - PopoverColumnGrid.trailingControlCenterFromTrailing
+        #expect(abs(feed.midX - wanted) <= 1,
+                "the glyph pill is off centre — \(feed) in \(row.bounds)")
+    }
+
+    /// Pills that carry WORDS are unmoved: they still start on the column's
+    /// leading edge, so a list of rows reads down one left edge. This is the
+    /// half the centring must not disturb.
+    @Test func pillsWithWordsStillStartOnTheColumnsLeadingEdge() {
+        let row = laidOut(makeBusRow())
+        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
+        row.layoutSubtreeIfNeeded()
+        let feed = row.test_trailingSlotFrames.feed
+        let wanted = row.bounds.maxX - PopoverColumnGrid.feedColumnLeadingFromTrailing
+        #expect(abs(feed.minX - wanted) <= 1,
+                "a text pill moved off the column's leading edge — \(feed) in \(row.bounds)")
+    }
+
+    /// A row that goes from failed to feeding puts the pills BACK on the
+    /// leading edge — the two placements are one pair, and only one may be
+    /// live at a time.
+    @Test func recoveringFromFailureRestoresTheLeadingEdge() {
+        let row = laidOut(makeBusRow())
+        row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
+                  selected: true, controllable: true)
+        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
+        row.layoutSubtreeIfNeeded()
+        let feed = row.test_trailingSlotFrames.feed
+        let wanted = row.bounds.maxX - PopoverColumnGrid.feedColumnLeadingFromTrailing
+        #expect(abs(feed.minX - wanted) <= 1,
+                "the centred placement outlived the failure — \(feed) in \(row.bounds)")
+    }
+
     // MARK: Connecting/reconnecting/muted are NOT shown in the FEED column
 
     @Test func connectingShowsTheMultiSourceCompositeNotAConnectingWord() {

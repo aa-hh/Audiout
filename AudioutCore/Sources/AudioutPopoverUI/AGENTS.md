@@ -26,13 +26,21 @@ folder renders; routing arithmetic lives in Core.
 - The Mixer carries an equalizer DOOR (the row button beside mute, and the row menu) and one mark (magenta border when the curve is not flat). No editor, no curve, no tone control on the Mixer (2026-08-22, amended 2026-09-03).
 - A never-aligned Bluetooth row's chip IS the wizard's door; a measured one opens the drawer.
 - A first-join alignment note is session state: ✕ hides it, nothing is written down.
-- The header strip draws its OWN chrome: every toolbar item — the three tabs AND Pin —
-  is a `SurfaceToolbarSeatButton` wearing `SurfaceToolbarSeatCell`, the folder's one
-  custom-drawn exception (drawing only; tracking, keyboard and VoiceOver stay stock).
-  One rounded rectangle at the control radius carries rest/hover/pressed/selected and
-  Pin's on/off, because AppKit draws a bordered item's hover as a CIRCLE and its
-  selection as a rounded SQUARE. Convert the strip whole or not at all, and never put
-  a cue behind `#available` — the package deploys to 14.2 (2026-09-04).
+- The header strip draws its OWN chrome, and the three tabs are ONE capsule: a single
+  `NSToolbarItem` carries a `SurfaceToolbarTabCapsule` (a pill-shaped surface drawn
+  once) with the three `SurfaceToolbarSeatButton`s layered over it. Three separate
+  seats, one per tab, read as three islands and were rejected. The current tab is a
+  soft rounded highlight INSIDE the pill, hover the same highlight weaker, an idle tab
+  nothing — always painted ON the capsule, never instead of it, which is what keeps the
+  current screen lighter than its ground in dark mode. Pin is the standalone button
+  outside the capsule, wearing the same highlight; converting only half the strip failed
+  review on 2026-08-30. The seat button is the folder's one custom-drawn exception
+  (drawing only; tracking, keyboard and VoiceOver stay stock) because AppKit draws a
+  bordered item's hover as a CIRCLE and its selection as a rounded SQUARE. Never put a
+  cue behind `#available` — the package deploys to 14.2 (2026-09-04).
+- The Mixer tab does NOT draw `slider.horizontal.3`: that is the device row's equalizer
+  door (`DeviceRowView.eqSymbolName`), and sliders are what an equalizer looks like. The
+  tab draws `waveform` (2026-09-04).
 - Known stability findings in this target carry `STABILITY(id)` inline markers — details and fix sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 

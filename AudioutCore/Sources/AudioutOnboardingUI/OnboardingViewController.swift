@@ -1368,7 +1368,7 @@ public final class OnboardingViewController: NSViewController {
 
         // A wait takes every button away: the answer is somewhere else now.
         if step == .localNetwork, model.localNetworkPhase == .verifying {
-            content.status = (nil, "Checking your network\u{2026}", Tokens.Color.inkSecondary, true)
+            content.status = (nil, "Checking your network\u{2026}", Tokens.Color.label2, true)
             content.body = Self.ribbonBody(copy.detail)
             return content
         }
@@ -1569,7 +1569,7 @@ public final class OnboardingViewController: NSViewController {
                     // body is 11 pt caption, and a `bodyEmphasized` run inside
                     // it sets a bigger face on the one word that matters.
                     .font: isBold ? Tokens.Font.captionEmphasized : Tokens.Font.caption,
-                    .foregroundColor: Tokens.Color.inkSecondary,
+                    .foregroundColor: Tokens.Color.label2,
                 ]))
             }
             isBold.toggle()
@@ -1720,13 +1720,13 @@ public final class OnboardingViewController: NSViewController {
             headerMessage = .resume
             titleLabel.stringValue = "Pick up where you left off"
             subtitleLabel.stringValue = Self.resumeSubtitle
-            subtitleLabel.textColor = Tokens.Color.inkSecondary
+            subtitleLabel.textColor = Tokens.Color.label2
             return
         }
         headerMessage = .welcome
         titleLabel.stringValue = "Welcome to Audiout"
         subtitleLabel.stringValue = Self.welcomeSubtitle
-        subtitleLabel.textColor = Tokens.Color.inkSecondary
+        subtitleLabel.textColor = Tokens.Color.label2
     }
 
     static let welcomeSubtitle = "Play your Mac's sound on the speakers around your home. "
@@ -2220,7 +2220,7 @@ public final class OnboardingViewController: NSViewController {
     /// The check row's on-screen title (the state-carrying copy).
     public var test_checkRowTitle: String { _ = view; return checkRow.test_title }
 
-    /// Whether the check row is showing its earned green checkmark.
+    /// Whether the check row is showing its earned gold checkmark.
     public var test_checkRowHasCheckmark: Bool { _ = view; return checkRow.test_hasCheckmark }
 
     /// Whether the check row's spinner is on screen (the running state).

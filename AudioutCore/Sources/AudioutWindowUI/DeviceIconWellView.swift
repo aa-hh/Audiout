@@ -19,7 +19,7 @@ import AudioutSharedUI
 /// The whole well is the click target (a camera-badge-style pattern: the badge
 /// is the cue, the glyph is the button). The BADGE stays layer-backed
 /// properties; the WELL surface itself draws in `draw(_:)` (see the Warm
-/// Signal note below) so its warm tokens re-resolve live per appearance.
+/// Signal note below) so its tokens re-resolve live per appearance.
 ///
 /// The badge step-up goes through `setOverlayVisible(_:)`, so Reduce Motion
 /// (`../AGENTS.md`'s system-settings rule) disables the animation in one place:

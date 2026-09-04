@@ -153,7 +153,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         let why = NSTextField(wrappingLabelWithString:
             "It takes one key to open — yours is in your receipt email, starting with AUDT.")
         why.font = Tokens.Font.titleLarge
-        why.textColor = Tokens.Color.secondaryLabel
+        why.textColor = Tokens.Color.label2
         why.alignment = .center
         why.preferredMaxLayoutWidth = Self.columnWidth
 
@@ -183,7 +183,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         buttonSlot.addSubview(resendButton)
 
         gutterLine.font = Tokens.Font.titleLarge
-        gutterLine.textColor = Tokens.Color.secondaryLabel
+        gutterLine.textColor = Tokens.Color.label2
         gutterLine.alignment = .center
         gutterLine.maximumNumberOfLines = 2
         gutterLine.preferredMaxLayoutWidth = Self.columnWidth
@@ -303,7 +303,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// The quiet tier's two links. `ProminentButton` stamps its own title, so
     /// these carry their ink themselves.
     private func setQuietLinkTitle(_ title: String, on button: NSButton,
-                                   ink: NSColor = Tokens.Color.secondaryLabel) {
+                                   ink: NSColor = Tokens.Color.label2) {
         button.attributedTitle = NSAttributedString(
             string: title,
             attributes: [.foregroundColor: ink,
@@ -315,8 +315,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private func setPasteKeyEnabled(_ enabled: Bool) {
         pasteKeyButton.isEnabled = enabled
         setQuietLinkTitle("Paste key", on: pasteKeyButton,
-                          ink: enabled ? Tokens.Color.secondaryLabel
-                                       : Tokens.Color.tertiaryLabel)
+                          ink: enabled ? Tokens.Color.label2
+                                       : Tokens.Color.label3)
     }
 
     /// Authored rather than inferred from frames: field, the commit button,

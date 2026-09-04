@@ -139,6 +139,15 @@ public final class MainOutRowView: NSView {
     /// A speaker mute button sitting LEFT of the master slider (mirrors the
     /// per-device mute glyph in `DeviceRowView`). `pushOnPushOff`: `.on` = muted.
     private let muteButton = NSButton()
+    /// The muted seat behind ``muteButton`` — the SAME rounded rectangle the
+    /// device row's mute and Equalizer door draw
+    /// (``PopoverColumnGrid/engagedSeatSize`` at
+    /// ``PopoverColumnGrid/engagedSeatCornerRadius``), so the two rows cannot
+    /// present the same state as two different objects. Its own view rather
+    /// than a fill on the button's layer: the button carries no height
+    /// constraint, so its frame follows whichever speaker glyph is mounted and
+    /// the old pill changed size on every toggle.
+    private let muteSeatView = NSView()
     private let readoutLabel = NSTextField(labelWithString: "")
     /// The **named** SoundSource-style destination dropdown (task B) — an
     /// `NSPopUpButton` (`pullsDown = false`) whose visible title is the currently
@@ -403,7 +412,7 @@ public final class MainOutRowView: NSView {
         // swapping to `speaker.slash.fill` when engaged. The glyph used to stay
         // fixed in both states (Alec, an earlier call); he reversed that on
         // 2026-09-04 — a mute that changes nothing but its tint reads as no mute
-        // at all. The row wears the same two glyphs and the same `muted` pill as
+        // at all. The row wears the same two glyphs and the same `muted` seat as
         // every device row below it.
         muteButton.translatesAutoresizingMaskIntoConstraints = false
         muteButton.setButtonType(.pushOnPushOff)
@@ -471,6 +480,10 @@ public final class MainOutRowView: NSView {
         addSubview(haloRingView)
         addSubview(armedDotView)
         addSubview(identityStack)
+        // Seat first: subview order is z-order, and it draws BEHIND the glyph.
+        muteSeatView.translatesAutoresizingMaskIntoConstraints = false
+        muteSeatView.isHidden = true
+        addSubview(muteSeatView)
         addSubview(muteButton)
         addSubview(slider)
         addSubview(readoutLabel)
@@ -551,6 +564,14 @@ public final class MainOutRowView: NSView {
             muteButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             muteButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.muteWidth),
 
+            // The engaged seat, centred on the button at its own fixed size.
+            muteSeatView.centerXAnchor.constraint(equalTo: muteButton.centerXAnchor),
+            muteSeatView.centerYAnchor.constraint(equalTo: muteButton.centerYAnchor),
+            muteSeatView.widthAnchor.constraint(
+                equalToConstant: PopoverColumnGrid.engagedSeatSize.width),
+            muteSeatView.heightAnchor.constraint(
+                equalToConstant: PopoverColumnGrid.engagedSeatSize.height),
+
             slider.centerYAnchor.constraint(equalTo: centerYAnchor),
             slider.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.sliderWidth),
             slider.trailingAnchor.constraint(equalTo: trailingAnchor,
@@ -589,11 +610,13 @@ public final class MainOutRowView: NSView {
 
     // MARK: Private Helpers
 
-    /// Updates the mute button's engaged treatment (tint + the S3 filled
-    /// accent pill, spec §3.4/§3.5) and accessibility label for the current
-    /// state. Drawing-only, on the real `NSButton`'s backing layer — behavior,
-    /// keyboard, and VoiceOver untouched; the glyph NEVER swaps to a slash
-    /// (locked decision). Mirrors `DeviceRowView.updateMuteTint()`.
+    /// Updates the mute button's engaged treatment (tint + the filled
+    /// ``Tokens/Color/muted`` seat, spec §3.4/§3.5) and accessibility label
+    /// for the current state. Drawing-only, on ``muteSeatView`` behind the
+    /// button — behavior, keyboard, and VoiceOver untouched. Mirrors
+    /// `DeviceRowView.updateMuteTint()`, including its shape: the seat's size
+    /// and corner both come from `PopoverColumnGrid`, so the two rows cannot
+    /// drift apart.
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
         muteButton.image = NSImage(
@@ -601,10 +624,11 @@ public final class MainOutRowView: NSView {
             accessibilityDescription: "Mute Main Audio")?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .regular))
         muteButton.contentTintColor = engaged ? Tokens.Color.panel : Tokens.Color.secondaryLabel
-        muteButton.wantsLayer = true
-        muteButton.layer?.cornerRadius = PopoverColumnGrid.mutePillCornerRadius
+        muteSeatView.isHidden = !engaged
+        muteSeatView.wantsLayer = true
+        muteSeatView.layer?.cornerRadius = PopoverColumnGrid.engagedSeatCornerRadius
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            muteButton.layer?.backgroundColor = engaged ? Tokens.Color.muted.cgColor : nil
+            muteSeatView.layer?.backgroundColor = Tokens.Color.muted.cgColor
         }
         configureAccessibility()
     }
@@ -753,8 +777,13 @@ public final class MainOutRowView: NSView {
     public var test_dotFillColor: NSColor? { armedDotView.test_fillColor }
     /// Whether the master-mute button is drawing its ENGAGED pill (S3).
     public var test_isMutePillEngaged: Bool {
-        muteButton.state == .on && muteButton.layer?.backgroundColor != nil
+        muteButton.state == .on && !muteSeatView.isHidden
+            && muteSeatView.layer?.backgroundColor != nil
     }
+    /// The engaged mute seat's frame and corner radius, so a test can pin this
+    /// row's mark to the same shape the device rows below it draw.
+    public var test_muteSeatFrame: NSRect { muteSeatView.frame }
+    public var test_muteSeatCornerRadius: CGFloat { muteSeatView.layer?.cornerRadius ?? 0 }
     /// The row's current VoiceOver VALUE ("muted" / "armed" composition).
     public var test_accessibilityValue: String? { accessibilityValue() as? String }
     /// The master meter's current ballistics TARGET (with

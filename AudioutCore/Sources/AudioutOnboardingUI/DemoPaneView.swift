@@ -2022,7 +2022,7 @@ final class DemoSettledMockView: NSView {
         headline.alignment = .center
 
         line.font = Tokens.Font.body
-        line.textColor = Tokens.Color.secondaryLabel
+        line.textColor = Tokens.Color.label2
         line.alignment = .center
 
         let stack = NSStackView(views: [icon, headline, line])

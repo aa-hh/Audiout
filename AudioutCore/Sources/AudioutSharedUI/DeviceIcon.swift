@@ -79,10 +79,11 @@ public enum DeviceIcon {
         resolve("hifispeaker.arrow.forward.fill", default: "hifispeaker.fill")
     }
 
-    /// The cache behind ``image(_:pointSize:weight:)``. MAIN-THREAD ONLY — every
-    /// call site is AppKit view code, so no lock is bought for a dictionary that
-    /// is only ever touched from one thread.
-    private nonisolated(unsafe) static var imageCache: [String: NSImage] = [:]
+    /// The cache behind ``image(_:pointSize:weight:)``. Main-actor isolated —
+    /// every call site is AppKit view code, so no lock is bought for a
+    /// dictionary that is only ever touched from the main actor.
+    @MainActor
+    private static var imageCache: [String: NSImage] = [:]
 
     /// A template `NSImage` for the SF Symbol `name`, built once and reused.
     ///
@@ -96,6 +97,7 @@ public enum DeviceIcon {
     /// The returned image is SHARED — callers must NOT mutate it. Tinting is a
     /// view property (`contentTintColor`), which is what every call site
     /// already uses.
+    @MainActor
     public static func image(_ name: String,
                              pointSize: CGFloat? = nil,
                              weight: NSFont.Weight = .regular) -> NSImage? {

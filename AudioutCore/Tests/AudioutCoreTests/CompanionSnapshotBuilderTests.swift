@@ -553,6 +553,40 @@ import Testing
         #expect(group.memberNames == ["speaker-b": "Speaker B", "ghost": "Old Kitchen"],
                 "offline member keeps its last-known name; live name wins; unnamed member is absent")
     }
+
+    // MARK: The Bluetooth clock verdict
+
+    /// The Mac publishes a verdict and no number: `clockState` carries the
+    /// report's raw value, `settleRemainingSeconds` goes over as nil, and a
+    /// non-Bluetooth row carries neither.
+    @Test func aBluetoothRowCarriesTheClockVerdictOntoTheWire() async throws {
+        let backend = try await makeBackend([
+            Device(id: "local", name: "Mac", kind: .localMac, isLocalDevice: true),
+            Device(id: "bt-a", name: "Kitchen", kind: .bluetooth),
+        ])
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs,
+            alignmentFor: { device in
+                guard device.kind == .bluetooth else { return nil }
+                return BTAlignmentReport(status: .tuned, settleRemainingSeconds: nil,
+                                         clockState: .settling)
+            }
+        )
+        let alignment = try #require(snapshot.devices.first { $0.id == "bt-a" }?.alignment)
+        #expect(alignment.clockState == "settling")
+        #expect(alignment.settleRemainingSeconds == nil)
+        #expect(snapshot.devices.first { $0.id == "local" }?.alignment == nil,
+                "only Bluetooth rows ever carry an alignment")
+    }
 }
 
 private actor CountBox {

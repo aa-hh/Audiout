@@ -144,4 +144,38 @@ import Testing
                 "no canonical key in the answer ⇒ the typed one stays as typed")
         #expect(settings.licenseMaxMajor == nil)
     }
+
+    @Test func anActiveAnswerWithATokenStoresTheCompanionToken() async {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        settings.licenseKey = Self.key
+        let transport = Transport()
+        transport.stub(status: 200,
+                       json: #"{"status":"active","companion_token":"tok-123"}"#)
+
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.companionToken == "tok-123")
+    }
+
+    @Test func anActiveAnswerWithNoTokenLeavesTheStoredTokenUntouched() async {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        settings.licenseKey = Self.key
+        settings.companionToken = "stale-token"
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"active"}"#)
+
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.companionToken == "stale-token",
+                "old server or unconfigured secret — expiry bounds the staleness")
+    }
+
+    @Test func aNonActiveVerifiedAnswerClearsTheCompanionToken() async {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        settings.licenseKey = Self.key
+        settings.companionToken = "will-be-revoked"
+        let transport = Transport()
+        transport.stub(status: 200, json: #"{"status":"revoked"}"#)
+
+        #expect(await validate(settings, transport) == .verified(.revoked))
+        #expect(settings.companionToken == nil, "revocation bites")
+    }
 }

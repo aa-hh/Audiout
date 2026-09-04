@@ -2657,4 +2657,30 @@ import Testing
         wc.test_finishWithDone()     // and again
         #expect(counter.count == 1, "onFinished fires exactly once")
     }
+
+    /// The alert triangle always carries `failure`, and any other status glyph
+    /// takes the line's own ink.
+    ///
+    /// `SetupRibbonView` holds its own copy of the symbol name so the view can
+    /// stay ignorant of who filled its content tuple in. Nothing in the
+    /// compiler binds that copy to `OnboardingViewController.alertSymbol`, so
+    /// this test is the binding: it feeds the CONTROLLER's constant to the VIEW
+    /// and fails if either literal is edited on its own.
+    @Test func onlyTheAlertTriangleTakesTheFailureTint() {
+        let ribbon = SetupRibbonView()
+
+        var alert = RibbonContent()
+        alert.status = (OnboardingViewController.alertSymbol, "macOS says it's off now.",
+                        Tokens.Color.label2, false)
+        ribbon.apply(alert)
+        #expect(resolvedSRGB(ribbon.test_statusGlyphTint) == resolvedSRGB(Tokens.Color.failure),
+                "the alert triangle is red whatever colour the line's words take")
+
+        var skipped = RibbonContent()
+        skipped.status = ("slash.circle", "You skipped this earlier.",
+                          Tokens.Color.label2, false)
+        ribbon.apply(skipped)
+        #expect(resolvedSRGB(ribbon.test_statusGlyphTint) == resolvedSRGB(Tokens.Color.label2),
+                "any other glyph takes the line's own ink")
+    }
 }

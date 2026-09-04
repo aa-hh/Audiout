@@ -39,6 +39,10 @@ import AudioutCore
 /// the neutral ``Tokens/Color/scopeFlatLine`` hairline — nothing pretends to
 /// be engaged. Shaping deviates in gold; a bypassed shape goes dashed and
 /// hollow, stating that the settings exist but are not reaching the air.
+///
+/// The iPhone companion's `lampWell` (`#050507` dark / `#14120F` light, dark
+/// in both appearances so a lit thing has a dark surround to read against) is
+/// the same decision; this scope stays on `scopeGround` for the same reason.
 public final class EQResponseCurveView: NSView {
 
     // MARK: Geometry + sampling constants

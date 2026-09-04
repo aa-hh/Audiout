@@ -52,7 +52,11 @@ public final class MembershipRowView: NSView {
     /// member discs gold. Host-set; `.systemSheet` rows have no node and ignore
     /// it.
     public var railArmed: Bool = true {
-        didSet { if railArmed != oldValue { updateBus() } }
+        didSet {
+            guard railArmed != oldValue else { return }
+            applyInk()
+            updateBus()
+        }
     }
 
     /// Fired whenever the user toggles the row's checkbox.
@@ -89,6 +93,11 @@ public final class MembershipRowView: NSView {
         self.iconSymbolName = iconSymbolName
         self.surface = surface
         super.init(frame: NSRect(x: 0, y: 0, width: 280, height: Self.rowHeight))
+        // A checked device here is dimmed for exactly one reason — it's
+        // physically unavailable, not merely outside some other target — so
+        // the rim carries the extra weight the popover's own dimmed member
+        // (a configuration divergence, still fully reachable) doesn't need.
+        busView.emphasizesDimmedMemberRim = true
         buildSubviews()
         apply(device: device, checked: checked, iconSymbolName: iconSymbolName)
     }
@@ -120,6 +129,7 @@ public final class MembershipRowView: NSView {
             checked = newValue
             checkbox.state = newValue ? .on : .off
             updateCheckboxAccessibilityLabel()
+            applyInk()
             updateBus()
         }
     }
@@ -143,10 +153,6 @@ public final class MembershipRowView: NSView {
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.imageScaling = .scaleProportionallyDown
         iconView.setContentHuggingPriority(.required, for: .horizontal)
-        // Identity-neutral secondary tint, matching the sidebar's device rows
-        // (`SidebarViewController.makeIconLabel`) — no accent-on-membership,
-        // since this checklist has no "currently active" concept to show.
-        iconView.contentTintColor = Tokens.Color.secondaryLabel
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.font = Tokens.Font.body
@@ -156,7 +162,6 @@ public final class MembershipRowView: NSView {
 
         unavailableLabel.translatesAutoresizingMaskIntoConstraints = false
         unavailableLabel.font = Tokens.Font.caption
-        unavailableLabel.textColor = Tokens.Color.secondaryLabel
         unavailableLabel.stringValue = "Unavailable"
         unavailableLabel.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -230,6 +235,47 @@ public final class MembershipRowView: NSView {
         ])
     }
 
+    /// The row's three inks — name, glyph and the "Unavailable" word — set
+    /// together from one decision, because every path that can change them
+    /// (a host refresh, an arming flip, a toggle) can change all three.
+    ///
+    /// ONE unavailable tone, and all three elements take it together: each
+    /// states the same fact, so splitting them across tones makes the row
+    /// argue with itself. On the warm pane that tone is `labelCool2` —
+    /// authored, all four variants, 4.59:1 on dark `raised` and 5.30:1 on the
+    /// light ground.
+    ///
+    /// NOT `.disabledControlTextColor`: it is black at 24.7% alpha, so it
+    /// composites against its ground to 1.80:1 on `raised` — under half the
+    /// 4.5:1 text floor — and being a system colour it carries no
+    /// Increase-Contrast variant and no measured floor to fail on.
+    ///
+    /// Still fully interactive: an unavailable device stays
+    /// checkable/uncheckable so an existing member can be removed offline.
+    ///
+    /// Warm on the warm pane means the audio is genuinely reaching this member
+    /// — the group is armed AND the device is in it (C5). Everything else is
+    /// cool. The system sheet is Apple's, so it keeps stock ink.
+    private func applyInk() {
+        switch surface {
+        case .warmPane:
+            guard device.isAvailable else {
+                nameLabel.textColor = Tokens.Color.labelCool2
+                iconView.contentTintColor = Tokens.Color.labelCool2
+                unavailableLabel.textColor = Tokens.Color.labelCool2
+                return
+            }
+            let live = railArmed && checked
+            nameLabel.textColor = live ? Tokens.Color.label : Tokens.Color.labelCool
+            iconView.contentTintColor = live ? Tokens.Color.label2 : Tokens.Color.labelCool2
+            unavailableLabel.textColor = Tokens.Color.labelCool2
+        case .systemSheet:
+            nameLabel.textColor = device.isAvailable ? Tokens.Color.label : Tokens.Color.label3
+            iconView.contentTintColor = device.isAvailable ? Tokens.Color.label2 : Tokens.Color.label3
+            unavailableLabel.textColor = Tokens.Color.label3
+        }
+    }
+
     /// Re-derive the drawn node from the current membership state. The node
     /// vocabulary here is deliberately BINARY — filled gold `.member` when
     /// checked, hollow `.nonMember` when not — because this checklist edits
@@ -240,7 +286,12 @@ public final class MembershipRowView: NSView {
     /// in this group". No-op on `.systemSheet`, which mounts no node at all.
     private func updateBus() {
         guard surface == .warmPane else { return }
-        busView.apply(node: checked ? .member : .nonMember, armed: railArmed)
+        // The node dims with the rest of the row — fill only: an unavailable
+        // member keeps its seat and rim on the rail and goes grey where it
+        // would be gold, so it still reads as "in this group, not playing".
+        busView.apply(node: checked ? .member : .nonMember,
+                      dimmed: !device.isAvailable,
+                      armed: railArmed)
     }
 
     // MARK: Model
@@ -264,10 +315,7 @@ public final class MembershipRowView: NSView {
                                           weight: .regular)
 
         nameLabel.stringValue = device.name
-        // Dimmed like the sidebar's unavailable devices — de-emphasized, still
-        // fully interactive (an unavailable device stays checkable/uncheckable
-        // so an existing member can be removed even while offline).
-        nameLabel.textColor = device.isAvailable ? Tokens.Color.label : .disabledControlTextColor
+        applyInk()
 
         unavailableLabel.isHidden = device.isAvailable
 
@@ -315,6 +363,43 @@ public final class MembershipRowView: NSView {
     /// host-set ``railArmed`` value, read back through the drawn node itself.
     public var test_railArmed: Bool {
         surface == .warmPane ? busView.test_armed : railArmed
+    }
+
+    // MARK: The glyph tile (warm pane only)
+
+    /// A 24 pt recess under the member's glyph, the Mac reading of the iPhone
+    /// editor's member row (audiout-remote DESIGN.md:940-943). Drawn, not a
+    /// layer colour, so both tokens re-resolve per appearance flip and
+    /// Increase Contrast on every paint.
+    ///
+    /// `hairline` on `well` measures 1.491:1 dark / 1.310:1 light — legal —
+    /// and `well` against the `raised` checklist card behind it is 1.292:1
+    /// dark / 1.154:1 light, which is why the tile carries an edge at all.
+    ///
+    /// The tile is centred INSIDE the 26 pt icon view's frame, 1 pt in on each
+    /// side, so nothing about the row's layout moves. The system sheet is
+    /// Apple's and gets no tile.
+    private static let glyphTileSide: CGFloat = 24
+
+    public override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard surface == .warmPane else { return }
+        let tile = NSRect(x: iconView.frame.midX - Self.glyphTileSide / 2,
+                          y: iconView.frame.midY - Self.glyphTileSide / 2,
+                          width: Self.glyphTileSide,
+                          height: Self.glyphTileSide).insetBy(dx: 0.5, dy: 0.5)
+        let radius = Tokens.Layout.Radius.control
+        let path = NSBezierPath(roundedRect: tile, xRadius: radius, yRadius: radius)
+        Tokens.Color.well.setFill()
+        path.fill()
+        Tokens.Color.hairline.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 
     // MARK: The whole row is one click target (warm pane only)
@@ -424,6 +509,12 @@ public final class MembershipRowView: NSView {
 
     /// The checkbox's current state (for structural assertions).
     public var test_isChecked: Bool { checked }
+
+    /// The three inks `applyInk()` decided, and whether the glyph tile draws.
+    public var test_nameColor: NSColor? { nameLabel.textColor }
+    public var test_glyphTint: NSColor? { iconView.contentTintColor }
+    public var test_unavailableLabelColor: NSColor? { unavailableLabel.textColor }
+    public var test_drawsGlyphTile: Bool { surface == .warmPane }
 
     /// Simulate the user clicking the row's checkbox — flips the state and
     /// fires `onToggle`, exactly like a real click.

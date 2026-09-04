@@ -28,7 +28,7 @@ public final class GeneralSettingsViewController: NSViewController {
     private let reconnectSwitch = NSSwitch()
     private let touchBarSwitch = NSSwitch()
     private let reconnectHint = SettingsForm.hintLabel()
-    private let remoteControlCheckbox = NSButton()
+    private let remoteControlSwitch = NSSwitch()
     private let remoteControlOverrideNote = SettingsForm.label("")
     private let consentSwitch = NSSwitch()
     private let consentHint = SettingsForm.hintLabel()
@@ -41,6 +41,11 @@ public final class GeneralSettingsViewController: NSViewController {
     private let enterLicenseButton = NSButton()
     private let loginApprovalButton = NSButton()
     private var loginApprovalRow: NSView?
+    // The pane's column stack: the approval row is mounted into and unmounted
+    // from it (never hidden in place — `NSStackView` keeps a hidden child's
+    // last height, AGENTS.md).
+    private weak var paneStack: NSStackView?
+    private var licenseStatusRow: NSView?
     private var licenseRow: NSView?
     /// Guards against a second in-flight `LicenseValidator` round trip while
     /// one is already out — the button is disabled too, but appearing re-entry
@@ -58,7 +63,7 @@ public final class GeneralSettingsViewController: NSViewController {
     private let openURL: (URL) -> Void
 
     // Remembered iPhones (T24): the per-phone approval list, mounted under
-    // the remote-control checkbox — nil when the app layer didn't inject the
+    // the remote-control switch — nil when the app layer didn't inject the
     // controller (headless constructions), in which case the section never
     // exists.
     private let approvals: CompanionApprovalController?
@@ -68,9 +73,9 @@ public final class GeneralSettingsViewController: NSViewController {
     private static let phoneRowHeight: CGFloat = 28
 
     /// Resolved once at init (the env var, if any, can't change for the life of
-    /// this process) — what the checkbox must honestly reflect: the EFFECTIVE
+    /// this process) — what the switch must honestly reflect: the EFFECTIVE
     /// state, not the raw persisted ``AppSettings/allowRemoteControl`` (FIX-C).
-    /// When ``AppSettings/RemoteControlResolution/isForced`` the checkbox
+    /// When ``AppSettings/RemoteControlResolution/isForced`` the switch
     /// renders disabled and ``remoteControlOverrideNote`` explains why.
     private let remoteControlResolution: AppSettings.RemoteControlResolution
 
@@ -81,7 +86,7 @@ public final class GeneralSettingsViewController: NSViewController {
 
     /// Fired after "Allow control from iPhone on this network" changes and
     /// persists (T6), so the app layer can start/stop the companion server to
-    /// match. Nil (unset) leaves the checkbox inert beyond persisting the
+    /// match. Nil (unset) leaves the switch inert beyond persisting the
     /// setting — the app layer claims it in `openSettings`, matching
     /// ``onRunSetupAgain``'s single-assignment idiom.
     public var onAllowRemoteControlChanged: (() -> Void)?
@@ -106,7 +111,7 @@ public final class GeneralSettingsViewController: NSViewController {
     public var onCheckForUpdates: (() -> Void)?
 
     /// - Parameters:
-    ///   - settings: backs the "Allow control from iPhone" checkbox; injectable
+    ///   - settings: backs the "Allow control from iPhone" switch; injectable
     ///     so tests use a throwaway `UserDefaults` suite, never `.standard`.
     ///   - environment: resolves ``AppSettings/RemoteControlResolution`` alongside
     ///     `settings` (the `AUDIOUT_COMPANION` dev knob); defaults to the real
@@ -159,7 +164,7 @@ public final class GeneralSettingsViewController: NSViewController {
         // `SMAppService.register()` can succeed into `.requiresApproval` —
         // registered, but inert until the user allows it in System Settings.
         // The switch springs back on its own; this row is the explanation and
-        // the shortcut. Hidden until `syncFromLoginItem()` finds that state.
+        // the shortcut. Unmounted until `syncFromLoginItem()` finds that state.
         loginApprovalButton.title = "Open Login Items…"
         loginApprovalButton.bezelStyle = .rounded
         loginApprovalButton.controlSize = .small
@@ -181,7 +186,6 @@ public final class GeneralSettingsViewController: NSViewController {
         approvalRow.alignment = .firstBaseline
         approvalRow.spacing = 8
         approvalRow.translatesAutoresizingMaskIntoConstraints = false
-        approvalRow.isHidden = true
         loginApprovalRow = approvalRow
 
         // Reconnect-at-launch (roadmap 050): the opt-in that lets
@@ -193,26 +197,27 @@ public final class GeneralSettingsViewController: NSViewController {
         reconnectSwitch.setAccessibilityLabel("Reconnect last speakers when Audiout starts")
         let reconnectRow = SettingsForm.row(
             title: "Reconnect last speakers when Audiout starts",
+            subtitleLabel: reconnectHint,
             control: reconnectSwitch)
-        // Live hint (spec §5.2) — re-written on every toggle.
+        // Live hint (spec §5.2) — re-written on every toggle. It is the row's
+        // own subtitle, so it sits with its title the way Launch at login's
+        // subtitle does instead of hanging a stack row below.
         reconnectHint.stringValue = Self.reconnectHintLine(settings.reconnectAtLaunch)
 
-        // AppKit checkbox (matches DeviceRowView/MembershipRowView's boolean
-        // idiom) — no inline title, the row label carries it. Reflects the
-        // EFFECTIVE state (`remoteControlResolution.value`), not the raw
+        // An `NSSwitch` like the four sibling on/off rows in this pane: one
+        // control style for parallel on/off settings (launch review). Reflects
+        // the EFFECTIVE state (`remoteControlResolution.value`), not the raw
         // persisted setting, and is disabled while an override is in force —
         // toggling it must be IMPOSSIBLE, not silently ineffective (FIX-C).
-        remoteControlCheckbox.setButtonType(.switch)
-        remoteControlCheckbox.title = ""
-        remoteControlCheckbox.state = remoteControlResolution.value ? .on : .off
-        remoteControlCheckbox.isEnabled = !remoteControlResolution.isForced
-        remoteControlCheckbox.target = self
-        remoteControlCheckbox.action = #selector(remoteControlToggled)
-        remoteControlCheckbox.setAccessibilityLabel("Allow control from iPhone on this network")
+        remoteControlSwitch.state = remoteControlResolution.value ? .on : .off
+        remoteControlSwitch.isEnabled = !remoteControlResolution.isForced
+        remoteControlSwitch.target = self
+        remoteControlSwitch.action = #selector(remoteControlToggled)
+        remoteControlSwitch.setAccessibilityLabel("Allow control from iPhone on this network")
         let remoteControlRow = SettingsForm.row(
             title: "Allow control from iPhone on this network",
             subtitle: "Lets the Audiout companion app on your iPhone see and control this Mac's speakers.",
-            control: remoteControlCheckbox)
+            control: remoteControlSwitch)
 
         // Same idiom as the Audio pane's `AIRPLAY_START_BUFFER_MS` override
         // note: `.warning`-colored caption, wrapping, explicit
@@ -221,7 +226,7 @@ public final class GeneralSettingsViewController: NSViewController {
         // when an override is actually in force.
         remoteControlOverrideNote.stringValue =
             "Controlled by the \(AppSettings.allowRemoteControlEnvironmentVariableName) "
-            + "setting for this launch — the checkbox can't change it."
+            + "setting for this launch — the switch can't change it."
         remoteControlOverrideNote.font = Tokens.Font.caption
         remoteControlOverrideNote.textColor = Tokens.Color.warning
         remoteControlOverrideNote.lineBreakMode = .byWordWrapping
@@ -236,6 +241,7 @@ public final class GeneralSettingsViewController: NSViewController {
         consentSwitch.setAccessibilityLabel("Share anonymous usage statistics")
         let consentRow = SettingsForm.row(
             title: "Share anonymous usage statistics",
+            subtitleLabel: consentHint,
             control: consentSwitch)
         consentHint.stringValue = Self.consentHintLine(settings.telemetryOptIn)
 
@@ -280,6 +286,7 @@ public final class GeneralSettingsViewController: NSViewController {
         licenseStatusRow.alignment = .firstBaseline
         licenseStatusRow.spacing = 8
         licenseStatusRow.translatesAutoresizingMaskIntoConstraints = false
+        self.licenseStatusRow = licenseStatusRow
 
         // Footer strip (roadmap 050): Setup and About are rare-use, so they
         // share one quiet button strip instead of two full title+subtitle rows.
@@ -324,9 +331,7 @@ public final class GeneralSettingsViewController: NSViewController {
         // array merges cleanly.
         var rows: [NSView] = [
             launchRow,
-            approvalRow,
             reconnectRow,
-            reconnectHint,
             remoteControlRow,
         ]
         if remoteControlResolution.isForced {
@@ -347,7 +352,6 @@ public final class GeneralSettingsViewController: NSViewController {
         }
         rows.append(contentsOf: [
             consentRow,
-            consentHint,
             licenseKeyRow,
             licenseStatusRow,
             checkInDisclosureHint,
@@ -356,6 +360,7 @@ public final class GeneralSettingsViewController: NSViewController {
         ])
 
         view = SettingsForm.paneView(rows: rows)
+        paneStack = launchRow.superview as? NSStackView
         rebuildPhoneList()
         // Claimed here (single-assignment, like the app layer's claims on
         // this pane's own callbacks): a prompt answered or a phone revoked
@@ -377,8 +382,10 @@ public final class GeneralSettingsViewController: NSViewController {
     private static func licenseStatusLine(keyIsEmpty: Bool,
                                           status: LicenseStatus?) -> String {
         if keyIsEmpty {
-            return "Unregistered. Audiout is fully functional without a license — "
-                + "buying one funds development and unlocks official downloads and updates."
+            // Post-gate truth (2026-08-30): an official build asks for its key
+            // at launch, so "fully functional without a license" would lie here.
+            return "Unregistered. Audiout keeps working for this session, and asks "
+                + "for a license key the next time it opens."
         }
         guard let status else {
             return "Not verified yet — Audiout couldn’t reach the license server. Your key is saved."
@@ -396,6 +403,11 @@ public final class GeneralSettingsViewController: NSViewController {
         let serverConfigured = settings.licenseServerURL != nil
         licenseRow?.isHidden = !serverConfigured
         licenseStatusHint.isHidden = !serverConfigured
+        // The row itself, not just its children: an empty row still costs the
+        // stack its spacing. `serverConfigured` is fixed for the pane's life
+        // and this first runs before the first layout, so plain `isHidden` is
+        // safe here (the row is never shown-then-hidden).
+        licenseStatusRow?.isHidden = !serverConfigured
 
         let key = settings.licenseKey ?? ""
         let status = settings.licenseStatus
@@ -521,8 +533,6 @@ public final class GeneralSettingsViewController: NSViewController {
         }
         // (The container itself is width-pinned by `SettingsForm.paneView`,
         // like every other row.)
-        view.layoutSubtreeIfNeeded()
-        preferredContentSize = NSSize(width: SettingsForm.contentWidth, height: view.fittingSize.height)
     }
 
     /// One remembered phone: name · Allowed/Denied · ✕. The identity shown is
@@ -580,7 +590,7 @@ public final class GeneralSettingsViewController: NSViewController {
     /// The usage-analytics consent live hint: what sharing does or doesn't do.
     private static func consentHintLine(_ enabled: Bool) -> String {
         enabled
-            ? "Anonymous feature counts are shared to improve Audiout."
+            ? "Anonymous feature counts help improve Audiout."
             : "No usage data leaves this Mac."
     }
 
@@ -594,12 +604,6 @@ public final class GeneralSettingsViewController: NSViewController {
 
     @objc private func touchBarToggled() {
         settings.touchBarControlsEnabled = touchBarSwitch.state == .on
-    }
-
-    public override func viewDidLoad() {
-        super.viewDidLoad()
-        view.layoutSubtreeIfNeeded()
-        preferredContentSize = NSSize(width: SettingsForm.contentWidth, height: view.fittingSize.height)
     }
 
     public override func viewWillAppear() {
@@ -639,20 +643,31 @@ public final class GeneralSettingsViewController: NSViewController {
     /// is holding the registration for the user to allow.
     private func syncFromLoginItem() {
         launchSwitch.state = loginItem.isEnabled ? .on : .off
-        loginApprovalRow?.isHidden = !loginItem.needsApproval
+        // Mount/unmount rather than `isHidden`: the stack keeps a hidden
+        // child's last height, so the row is only ever in the stack while it
+        // has something to say.
+        guard let row = loginApprovalRow, let stack = paneStack else { return }
+        if loginItem.needsApproval, row.superview == nil {
+            stack.insertArrangedSubview(row, at: 1) // right under Launch at login
+            // `removeFromSuperview` dropped the width pin `paneView` gave it.
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        } else if !loginItem.needsApproval, row.superview != nil {
+            stack.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
     }
 
     @objc private func remoteControlToggled() {
         // Toggling while overridden must be IMPOSSIBLE, not silently
-        // ineffective (FIX-C) — the checkbox is disabled so a real click
+        // ineffective (FIX-C) — the switch is disabled so a real click
         // never reaches here, but a `test_` hook drives the action directly,
         // so the guard lives here too: bounce back to the effective value
         // rather than persisting a setting that can't take effect.
         guard !remoteControlResolution.isForced else {
-            remoteControlCheckbox.state = remoteControlResolution.value ? .on : .off
+            remoteControlSwitch.state = remoteControlResolution.value ? .on : .off
             return
         }
-        settings.allowRemoteControl = remoteControlCheckbox.state == .on
+        settings.allowRemoteControl = remoteControlSwitch.state == .on
         onAllowRemoteControlChanged?()
     }
 
@@ -804,7 +819,7 @@ public final class GeneralSettingsViewController: NSViewController {
     /// Whether the "allow Audiout in Login Items" explanation is on screen.
     public var test_loginApprovalHintIsVisible: Bool {
         _ = view
-        return !(loginApprovalRow?.isHidden ?? true)
+        return loginApprovalRow?.superview != nil
     }
 
     /// Invoke "Open Login Items…" as a click would.
@@ -821,20 +836,20 @@ public final class GeneralSettingsViewController: NSViewController {
 
     // MARK: Test-support hooks (Companion — T6, FIX-C)
 
-    /// Whether the checkbox currently reads "on" — the EFFECTIVE state
+    /// Whether the switch currently reads "on" — the EFFECTIVE state
     /// (`remoteControlResolution.value`), not necessarily the raw persisted
     /// `AppSettings.allowRemoteControl` (FIX-C: they can legitimately differ
     /// while an override is in force).
     public var test_allowRemoteControlIsOn: Bool {
         _ = view
-        return remoteControlCheckbox.state == .on
+        return remoteControlSwitch.state == .on
     }
 
-    /// Whether the checkbox is currently clickable — `false` while
+    /// Whether the switch is currently clickable — `false` while
     /// `AUDIOUT_COMPANION` (or an explicit override) is in force (FIX-C).
     public var test_allowRemoteControlIsEnabled: Bool {
         _ = view
-        return remoteControlCheckbox.isEnabled
+        return remoteControlSwitch.isEnabled
     }
 
     /// The override explanation line's text, or `nil` when no override is in
@@ -844,12 +859,12 @@ public final class GeneralSettingsViewController: NSViewController {
         return remoteControlResolution.isForced ? remoteControlOverrideNote.stringValue : nil
     }
 
-    /// Drive the checkbox to `on`/`off` and run the same action a real click
+    /// Drive the switch to `on`/`off` and run the same action a real click
     /// would. While overridden this is a no-op on the persisted setting (the
     /// action itself refuses, mirroring the disabled real control) — FIX-C.
     public func test_toggleAllowRemoteControl(_ on: Bool) {
         _ = view
-        remoteControlCheckbox.state = on ? .on : .off
+        remoteControlSwitch.state = on ? .on : .off
         remoteControlToggled()
     }
 

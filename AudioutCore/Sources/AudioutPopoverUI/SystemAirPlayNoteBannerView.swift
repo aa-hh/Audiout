@@ -7,13 +7,13 @@ import AudioutSharedUI
 /// note (Wave 3 W3-T3, `BackendEvent.systemDefaultIsAirPlayActive`) — shown
 /// when the macOS SYSTEM default output is itself an AirPlay device WHILE this
 /// app is actively streaming a captured whole-system mix to AirPlay, which
-/// risks the same audio going out twice (echo). A stock rounded inset card
-/// with a glyph and a wrapping label, tinted per `Severity`: `.info`
-/// (system-blue, the default) for this and the takeover strip, `.warning`
-/// (system-orange, T-UI's routing-blocked-needs-default note) for the more
-/// urgent tier — the same tint `SilenceFallbackBannerView` uses for "speakers
-/// unreachable", reused here rather than forking a second banner class.
-/// System colors only; no custom drawing beyond the layer-backed rounded rect.
+/// risks the same audio going out twice (echo). The iOS Status Banner recipe,
+/// shared with `SilenceFallbackBannerView`: the tier's tint at 12 % on the
+/// control radius, no border, a glyph and a wrapping label. `.info` (the
+/// default) carries this note and the takeover strip; `.warning` carries
+/// T-UI's routing-blocked-needs-default note, the urgent tier that reuses the
+/// silence banner's own tint rather than forking a second banner class. No
+/// custom drawing beyond the layer-backed rounded rect.
 final class SystemAirPlayNoteBannerView: NSView {
 
     /// An optional trailing call-to-action (T6, takeover status strip state 1:
@@ -27,30 +27,19 @@ final class SystemAirPlayNoteBannerView: NSView {
         let handler: () -> Void
     }
 
-    /// Tint tier (T-UI, routing-blocked-needs-default): the note slot is
-    /// otherwise informational (`.info`, system-blue) — a routing-dead
-    /// condition is urgent enough to reuse `SilenceFallbackBannerView`'s
-    /// system-orange tier instead, without forking a second banner class.
+    /// Tint tier (T-UI, routing-blocked-needs-default). `.info` is a note the
+    /// reader can act on later, so it wears `ring`; `.warning` is a real
+    /// problem — routing is dead — so it wears `failure`, the same tint
+    /// `SilenceFallbackBannerView` carries, without forking a second banner
+    /// class. Both fill at 12 % on the control radius with no border.
     enum Severity {
         case info
         case warning
 
         var tintColor: NSColor {
             switch self {
-            case .info: return Tokens.Color.info
-            case .warning: return Tokens.Color.warning
-            }
-        }
-        var backgroundAlpha: CGFloat {
-            switch self {
-            case .info: return 0.12
-            case .warning: return 0.14
-            }
-        }
-        var borderAlpha: CGFloat {
-            switch self {
-            case .info: return 0.35
-            case .warning: return 0.40
+            case .info: return Tokens.Color.ring
+            case .warning: return Tokens.Color.failure
             }
         }
         var symbolName: String {
@@ -114,9 +103,8 @@ final class SystemAirPlayNoteBannerView: NSView {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.cornerRadius = Tokens.Layout.bannerCornerRadius
+        layer?.cornerRadius = Tokens.Layout.Radius.control
         layer?.cornerCurve = .continuous
-        layer?.borderWidth = 1
         stampLayerColors()
 
         // The icon+text pair sits at its own natural (leading-hugging) width —
@@ -193,21 +181,15 @@ final class SystemAirPlayNoteBannerView: NSView {
     private func stampLayerColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.backgroundColor = severity.tintColor
-                .withAlphaComponent(severity.backgroundAlpha).cgColor
-            layer?.borderColor = severity.tintColor
-                .withAlphaComponent(severity.borderAlpha).cgColor
+                .withAlphaComponent(0.12).cgColor
         }
     }
 
-    /// The layer's currently-stamped fill/border, read back as `NSColor` —
-    /// asserts they resolve from `Tokens.Color.info`/`.warning`, not a raw
-    /// `NSColor.systemBlue`/`.systemOrange` literal.
+    /// The layer's currently-stamped fill, read back as `NSColor` — asserts it
+    /// resolves from `Tokens.Color.ring` / `.failure` per tier, never a raw
+    /// system-color literal.
     var test_backgroundColor: NSColor? {
         guard let cgColor = layer?.backgroundColor else { return nil }
-        return NSColor(cgColor: cgColor)
-    }
-    var test_borderColor: NSColor? {
-        guard let cgColor = layer?.borderColor else { return nil }
         return NSColor(cgColor: cgColor)
     }
 }

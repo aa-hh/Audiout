@@ -15,17 +15,17 @@ public enum AppearanceTheme: String, CaseIterable, Sendable {
 }
 
 /// The accent dial (Settings › Appearance › Accent — Warm Signal spec §1.3,
-/// decision i): how strongly the gold instrument tokens (`gold`/`ember`/`glow`)
-/// render. `.fullGold` is the flagship default; `.subtle` desaturates the gold
-/// channel and removes the glow; `.systemAccent` pulls the Mac's accent color
-/// into every gold slot. The dial remaps ONLY the gold channel — `failure`,
-/// `caution`, `ring-connected`, and all text tokens are never remapped. Core
-/// owns only the persisted choice; the token remap itself lives with the token
-/// module (`AudioutSharedUI.Tokens`), since Core imports no AppKit.
+/// decision i): how strongly the gold instrument tokens render. TWO positions
+/// — `.fullGold` is the flagship default; `.subtle` desaturates the gold
+/// channel and removes the glow. The dial remaps ONLY the gold channel;
+/// `failure`, the edge tokens and every text token are never remapped. A value
+/// persisted by a build that had a third position no longer decodes, and the
+/// getter's existing `?? .fullGold` fallback catches it. Core owns only the
+/// persisted choice; the token remap itself lives with the token module
+/// (`AudioutSharedUI.Tokens`), since Core imports no AppKit.
 public enum AccentStyle: String, CaseIterable, Sendable {
     case fullGold
     case subtle
-    case systemAccent
 }
 
 /// What the license server last said about the stored key (`POST /v1/validate`).
@@ -98,9 +98,11 @@ public struct AppSettings {
         static let licenseCheckInURL = "license.checkInURL"
         static let licenseStatus = "license.status"
         static let licenseMaxMajor = "license.maxMajor"
+        static let companionToken = "license.companionToken"
         static let telemetryOptIn = "telemetry.optIn"
         static let telemetryAsked = "telemetry.asked"
         static let touchBarControls = "general.touchBarControls"
+        static let mixerMembershipHintDismissed = "mixer.membershipHintDismissed"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -453,6 +455,14 @@ public struct AppSettings {
         nonmutating set { defaults.set(newValue, forKey: Keys.eqAdvancedExpanded) }
     }
 
+    /// Whether the Mixer's first-run membership hint has been dismissed. Set
+    /// the first time the user toggles a speaker's membership in the Mixer;
+    /// the hint shows on every Mixer open while this is `false`.
+    public var mixerMembershipHintDismissed: Bool {
+        get { defaults.bool(forKey: Keys.mixerMembershipHintDismissed) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.mixerMembershipHintDismissed) }
+    }
+
     /// The purchase licence key, entered once from the receipt (Settings ›
     /// General, roadmap 054). `nil` when unset — Audiout is fully functional
     /// without one (the Ardour model: the binary is what's sold, never a
@@ -463,7 +473,10 @@ public struct AppSettings {
         get { defaults.string(forKey: Keys.licenseKey) }
         nonmutating set {
             defaults.set(newValue, forKey: Keys.licenseKey)
-            if newValue == nil { licenseStatus = nil }
+            if newValue == nil {
+                licenseStatus = nil
+                companionToken = nil
+            }
         }
     }
 
@@ -501,6 +514,15 @@ public struct AppSettings {
             return stored == 0 ? nil : stored
         }
         nonmutating set { defaults.set(newValue, forKey: Keys.licenseMaxMajor) }
+    }
+
+    /// The opaque licence-server token for the companion server to forward
+    /// to approved iPhones in `welcome`, so the iOS app can unlock offline.
+    /// Written only by ``LicenseValidator``. `nil` when never issued, or
+    /// cleared alongside ``licenseKey``/``licenseStatus``.
+    public var companionToken: String? {
+        get { defaults.string(forKey: Keys.companionToken) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.companionToken) }
     }
 
     /// The license server this build talks to, from the bundle's

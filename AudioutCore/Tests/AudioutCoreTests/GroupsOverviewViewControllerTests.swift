@@ -179,6 +179,11 @@ import AppKit
                 "no overflow chip when every member already has one")
     }
 
+    @Test func memberChipGlyphIsTintedLabel() {
+        #expect(GroupsOverviewViewController.test_memberChipGlyphTint === Tokens.Color.label,
+                "the chip glyph is label: black on the light seat, near-white on the dark one")
+    }
+
     @Test func exactlyFourMembersDrawFourChipsAndNoOverflow() throws {
         let members = ["a", "b", "c", "d"]
         let (overview, _) = try makeOverview(

@@ -88,6 +88,10 @@ enum AboutCredits {
     (github.com/sparkle-project/Sparkle). Copyright (c) Sparkle Project \
     contributors.
 
+    Clash Display Semibold — Copyright 2021 Indian Type Foundry. Clash is a \
+    trademark of the Indian Type Foundry. Licensed under the ITF Free Font \
+    License (fontshare.com/terms).
+
     All third-party files retain their original copyright notices and \
     license headers in source. The repository's NOTICE file is the \
     authoritative, complete per-file breakdown.
@@ -150,9 +154,12 @@ public final class AboutViewController: NSViewController {
         // stock material, semantic colors, NO warm canvas, NO gold): icon on
         // the leading edge with name + version stacked beside it, reading as
         // one quiet unit rather than a form row with the icon exiled to the
-        // trailing control slot. Display voice = `Tokens.Font.heading` (the
-        // app's existing +3pt semibold display step — no new token; the spec
-        // names none for About).
+        // trailing control slot. The name is set in the wordmark face, Clash
+        // Display Semibold — About states the product's identity, which is the
+        // one job the iPhone companion's Name Only Rule reserves the face for
+        // (`Tokens.swift:1205-1207`). Outside a `make-app.sh`-assembled `.app`
+        // the system bold face is the normal path, not an error
+        // (`Tokens.swift:1213-1216`).
         let icon = NSImageView()
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.imageScaling = .scaleProportionallyUpOrDown
@@ -169,14 +176,24 @@ public final class AboutViewController: NSViewController {
         ])
 
         let nameLabel = SettingsForm.label(info.appName)
-        nameLabel.font = Tokens.Font.heading
+        nameLabel.font = Tokens.Font.wordmark(size: 22)
         nameLabel.textColor = Tokens.Color.label
 
         let versionLabel = SettingsForm.label(info.versionLine)
         versionLabel.font = Tokens.Font.caption
         versionLabel.textColor = Tokens.Color.secondaryLabel
 
-        let identityText = NSStackView(views: [nameLabel, versionLabel])
+        // The ITF Free Font License REQUIRES this credit: the face's own name
+        // table (id 13) reads "You agree to identify the ITF fonts by name and
+        // credit the ITF's ownership of the trademarks and copyrights in any
+        // design or production credits." This line identifies the face; the
+        // ownership half is discharged by `AboutCredits.thirdPartyNoticesText`
+        // and the repo's NOTICE, which carry the copyright and trademark.
+        let typeCreditLabel = SettingsForm.label("Clash Display by Indian Type Foundry")
+        typeCreditLabel.font = Tokens.Font.caption
+        typeCreditLabel.textColor = Tokens.Color.label3
+
+        let identityText = NSStackView(views: [nameLabel, versionLabel, typeCreditLabel])
         identityText.orientation = .vertical
         identityText.alignment = .leading
         identityText.spacing = 0

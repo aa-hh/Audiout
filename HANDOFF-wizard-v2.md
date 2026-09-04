@@ -379,7 +379,6 @@ visual pass done.
 - Commit (Alec runs Guard 7 self-review), merge + PR per repo workflow.
 - Live hardware pass incl. one REAL ✕ window-close mid-run (the
   re-entrant AppKit close path is only headlessly tested).
-- Figma design-system mirror of the new screen (house rule; not started).
 - Purge test-build residue: bundle ids `com.audiouter.Audiouter.wizardv1`
   and `.wizardv2` (`scripts/purge-dev-installs.sh`, dry-run first).
 - `.impeccable/critique/` snapshot was not yet persisted (critique was

@@ -377,7 +377,7 @@ public final class OnboardingViewController: NSViewController {
     private func makeHeroPane() -> NSView {
         let pane = RoundedContainerView(fill: Tokens.Color.panel,
                                         border: Tokens.Color.hairline,
-                                        radius: 12)
+                                        radius: Tokens.Layout.Radius.row)
         heroHead = SetupHeroHeadView(width: SetupRibbonView.textWidth)
         previewFrame = SetupPreviewFrameView()
         demoPane = DemoPaneView()
@@ -1377,7 +1377,7 @@ public final class OnboardingViewController: NSViewController {
             // wait names the symptom and demotes a way round the frozen dialog.
             if isStuck(step) {
                 content.status = (Self.alertSymbol, Self.stuckPromptHint,
-                                  Tokens.Color.warningText, false)
+                                  Tokens.Color.label2, false)
                 content.body = Self.ribbonBody(copy.detail)
                 content.quietLink = "Open Settings…"
                 return content
@@ -1387,7 +1387,7 @@ public final class OnboardingViewController: NSViewController {
             // dialog, and only the words have something new to say.
             content.status = (nil,
                               closeRefusedDuringPrompt ? Self.closeRefusedStatus : Self.waitingStatus,
-                              Tokens.Color.warningText, true)
+                              Tokens.Color.label2, true)
             content.body = Self.ribbonBody(copy.detail)
             return content
         }
@@ -1411,7 +1411,7 @@ public final class OnboardingViewController: NSViewController {
         if step == .speakerSync, didTripLoginItems,
            model.ptpHelperStatus == .requiresApproval {
             content.status = (Self.alertSymbol, Self.speakerSyncRecoveryStatus,
-                              Tokens.Color.warningText, false)
+                              Tokens.Color.label2, false)
             content.body = Self.ribbonBody(Self.speakerSyncRecoveryBody)
             content.primary = ("Open Login Items…", .prominent)
             content.showsSkip = true
@@ -1435,7 +1435,7 @@ public final class OnboardingViewController: NSViewController {
         // so the pane is a demotion beside it, never a replacement.
         if localNetworkUnanswered(step) {
             content.status = (Self.alertSymbol, Self.localNetworkUnansweredStatus,
-                              Tokens.Color.warningText, false)
+                              Tokens.Color.label2, false)
             content.body = Self.ribbonBody(copy.detail)
             content.primary = ("Try Again", .prominent)
             content.quietLink = offersSettingsLink(step) ? "Open Settings…" : nil
@@ -1456,7 +1456,7 @@ public final class OnboardingViewController: NSViewController {
         content = firstAskRibbonContent(step)
         if reopenedSteps.contains(step) {
             content.status = ("slash.circle", "You skipped this earlier \u{2014} nothing's lost.",
-                              Tokens.Color.warningText, false)
+                              Tokens.Color.label2, false)
         }
         return content
     }
@@ -1712,7 +1712,7 @@ public final class OnboardingViewController: NSViewController {
                 headerMessage = .permissionLost
                 titleLabel.stringValue = "Let's get your sound back"
                 subtitleLabel.stringValue = Self.permissionLostText(for: stillMissing)
-                subtitleLabel.textColor = Tokens.Color.warningText
+                subtitleLabel.textColor = Tokens.Color.label2
                 return
             }
         }
@@ -2240,7 +2240,7 @@ public final class OnboardingViewController: NSViewController {
     }
 
     /// Whether the gate button is the gold prominent CTA — a `ProminentButton`
-    /// carrying the `goldCTA` fill, not a plain bezel. Compared by RESOLVED
+    /// carrying the gold fill, not a plain bezel. Compared by RESOLVED
     /// sRGB components: two accesses of a provider-backed token are distinct
     /// `NSColor` instances, and their `isEqual` is not documented to see
     /// through the provider.
@@ -2250,7 +2250,7 @@ public final class OnboardingViewController: NSViewController {
               let done = ribbon.primaryButton as? ProminentButton else { return false }
         var matches = false
         NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
-            matches = done.fill.usingColorSpace(.sRGB) == Tokens.Color.goldCTA.usingColorSpace(.sRGB)
+            matches = done.fill.usingColorSpace(.sRGB) == Tokens.Color.gold.usingColorSpace(.sRGB)
         }
         return matches
     }

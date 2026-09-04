@@ -286,7 +286,7 @@ public final class PopoverController: NSObject {
     ///
     /// `persist == false` is the drawer's live ruler scrub (D6): apply to
     /// audio, do NOT write the JSON store. Every discrete gesture — drag end,
-    /// a stepper click, a typed commit, Revert — arrives with `true`.
+    /// a stepper click, a typed commit — arrives with `true`.
     public var onSetBTTrim: ((_ ms: Double, _ deviceID: String, _ persist: Bool) -> Void)?
 
     /// The saved Sync trim for a Bluetooth device id — seeds each row's value
@@ -337,6 +337,15 @@ public final class PopoverController: NSObject {
     public var onLocalTrimPreview: ((_ ms: Double) -> Void)?
     /// End a local preview: non-nil keeps (and persists) it, `nil` restores.
     public var onLocalTrimEndPreview: ((_ keepMs: Double?) -> Void)?
+
+    /// Whether the Mixer's first-run membership hint is still owed. `nil` — the
+    /// default, and what the tests and the snapshot tools leave it at — means
+    /// never show it, so no headless render can grow a card note.
+    public var membershipHintShownProvider: (() -> Bool)?
+    /// The user has just made their first membership toggle in the Mixer: the
+    /// host persists the dismissal, so the provider above reads `false` from
+    /// here on (including the reconcile that runs later in the same toggle).
+    public var onMembershipHintDismissed: (() -> Void)?
 
     /// A CAST receiver's BY-EAR offset (CAST-SYNC). Third store, same
     /// affordance: the chip and drawer are the Bluetooth ones, the value lives
@@ -402,13 +411,6 @@ public final class PopoverController: NSObject {
     /// Same edge discipline as `update(devices:)`'s Bluetooth availability
     /// deselect, and the mirror of the diagnosis panel's `wantsAudio` prune.
     private var expandedSyncDeviceWasSelected = false
-
-    /// Set when a drawer is opened for a device, cleared once `noteOpened` has
-    /// seeded the Revert baseline (D8). `BTSyncDrawerView.configure` alone
-    /// cannot tell a fresh open from a routine refresh, and the ONE drawer
-    /// instance below is reconfigured across devices, so the distinction has
-    /// to live here.
-    private var syncDrawerNeedsOpenBaseline = false
     /// Whether the drawer's value field was mid-edit when `rebuild()` detached
     /// it, so `reconcileSyncDrawer` can hand focus back after re-mounting.
     /// See the detach site in `rebuild()` for why this exists.
@@ -436,12 +438,14 @@ public final class PopoverController: NSObject {
     /// tone controls — it hands the id over and forgets it.
     public var onOpenEqualizer: ((String) -> Void)?
 
-    // MARK: First-mix alignment intercept + wizard (W3/W4)
+    /// Whether a device's saved curve is anything but flat — read from the
+    /// SAME `DeviceEQStore` the Groups screen's detail pane writes through, so
+    /// there is one answer and no second store. The row's Equalizer door wears
+    /// its one mark from this; nothing else on the Mixer reads tone.
+    public var deviceEQIsShaped: ((String) -> Bool)?
 
-    /// Answers the card (all three actions release the backend's hold-silent;
-    /// `dismissed: true` records the FINAL "Not now"). Wired to
-    /// `(backend as? BTOutputControlling)?.resolveBTAlignmentPrompt`.
-    public var onResolveBTAlignmentPrompt: ((_ deviceID: String, _ dismissed: Bool) -> Void)?
+    // MARK: First-join alignment note + wizard (W3/W4)
+
     /// The wizard's live candidate push (never persisted). Wired to
     /// `setBTWizardTrimPreview`.
     public var onBTWizardTrimPreview: ((_ ms: Double, _ deviceID: String) -> Void)?
@@ -500,17 +504,13 @@ public final class PopoverController: NSObject {
     /// Keep that is the freshly-zeroed one, after every other exit the user's.
     private var btWizardSuspendedTrimDeviceID: String?
 
-    /// The device whose first-mix card should currently show (survives
-    /// rebuilds AND popover close/reopen — the backend's hold outlives a
-    /// click-away, so the offer must too).
-    private var btAlignmentPromptDeviceID: String?
-    private var btAlignmentPromptView: BTAlignmentPromptView?
-    /// Devices whose first-mix offer arrived while another card or the wizard
-    /// held the one alignment slot (two never-aligned speakers joining one
-    /// mix). Each queued device stays backend-held-silent until ITS card
-    /// resolves — the per-device hold is only released by
-    /// `onResolveBTAlignmentPrompt` (or the backend's own watchdog/deselect).
-    private var btAlignmentPromptQueue: [String] = []
+    /// Devices the backend has offered alignment for since launch
+    /// (`BackendEvent.btFirstMixAlignmentPrompt`) and the ones whose note the
+    /// user hid. Neither is written down: the backend offers again on the next
+    /// launch while the speaker stays unmeasured.
+    private var btAlignmentOfferedIDs: Set<String> = []
+    private var btAlignmentNoteHiddenIDs: Set<String> = []
+    private var btAlignmentNoteViews: [String: BTAlignmentNoteView] = [:]
     /// The device whose wizard is open, its live session, the view, and the
     /// floating window hosting it. Session lifetime == WINDOW lifetime: the
     /// wizard is no longer a row in the card stack, so it survives a popover
@@ -1023,7 +1023,7 @@ public final class PopoverController: NSObject {
                 // escalates to a rebuild exactly when the note must change.
                 refreshDeviceRowsReconcilingCardNote()
                 reconcileDiagnosisPanels(animated: true)
-                reconcileBTAlignmentPanels(animated: true)
+                reconcileBTAlignmentNotes(animated: true)
                 // Re-reads the usable range from the provider (T3's trap) and
                 // auto-collapses a drawer whose device has gone unavailable or
                 // left the mix. The rebuild branch above reaches the same call
@@ -1506,11 +1506,11 @@ public final class PopoverController: NSObject {
         // (`openDiagnosisIDs`) survives and is re-applied below (brief §7.3 —
         // "rebuild() restores open panels").
         diagnosisPanelsByID.removeAll()
-        // Same lifetime rule for the W3 card: the view dies with the row tree
-        // here; the intent (`btAlignmentPromptDeviceID`) survives and remounts
+        // Same lifetime rule for the W3 notes: the views die with the row tree
+        // here; the intent (`btAlignmentOfferedIDs`) survives and remounts
         // below. The W4 wizard is NOT in this tree — it lives in its own
         // window and a rebuild does not touch it.
-        btAlignmentPromptView = nil
+        btAlignmentNoteViews.removeAll()
         // The ONE reused drawer view (D2) can't just be forgotten the way the
         // per-id panels above are: `clearRows()` drops the cards, but the
         // drawer stays parented to the orphaned body stack it was inserted
@@ -1615,9 +1615,11 @@ public final class PopoverController: NSObject {
         panel.beginCard(header: Self.outputDevicesCardTitle, trailingTitle: "Source",
                         trailingTitleLeadingFromTrailing:
                             PopoverColumnGrid.feedColumnLeadingFromTrailing,
+                        trailingTitleToolTip: Self.sourceColumnHelp,
                         secondTrailingTitle: showsOffsetTitle ? "Offset" : nil,
                         secondTrailingTitleTrailing:
                             PopoverColumnGrid.offsetTitleTrailingFromTrailing,
+                        secondTrailingTitleToolTip: showsOffsetTitle ? Self.offsetColumnHelp : nil,
                         collapsible: true,
                         collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
                         onToggle: { [weak self] in self?.toggleCard(Self.outputDevicesCardTitle) })
@@ -1631,6 +1633,13 @@ public final class PopoverController: NSObject {
         renderedDevicesCardNote = devicesCardNote
         if let note = devicesCardNote {
             panel.addCardNote(note)
+        }
+        // The first-run hint yields to the dormancy note: "Inactive" and "click
+        // a name to play here" cannot both be true of the same card.
+        let showsHint = membershipHintShouldShow(sections: sections)
+        renderedMembershipHint = showsHint
+        if showsHint {
+            panel.addCardNote(Self.membershipHintText)
         }
         // The Mac's own row is PINNED directly under the card header (header
         // decision 2026-08-28): no "This Mac" subsection wrapper any more — no
@@ -1694,7 +1703,7 @@ public final class PopoverController: NSObject {
             selectedAppBundleID = nil
         }
         let title = Self.applicationsCardTitle
-        panel.beginCard(header: title, trailingTitle: "Redirect",
+        panel.beginCard(header: title, trailingTitle: "Output",
                         collapsible: true,
                         collapsed: collapsedState(for: title, default: !applicationsDefaultExpanded),
                         onToggle: { [weak self] in self?.toggleCard(title) })
@@ -1711,6 +1720,8 @@ public final class PopoverController: NSObject {
         }
         applicationsFooter.isRemoveEnabled = selectedAppBundleID != nil
         panel.addRow(applicationsFooter)
+        // Every card exists now, so the titles can take their liveness tint.
+        refreshCardHeaderLiveness()
 
         // Groups card removed (2026-07-16): the popover no longer renders a Groups
         // SECTION. Group ROUTING lives in the Main Out selector (refreshMainOutRow)
@@ -1725,7 +1736,7 @@ public final class PopoverController: NSObject {
         reconcileDiagnosisPanels(animated: false)
         // Same restore for the first-mix alignment card / wizard panel (W3/W4):
         // their intent survives the rebuild; the mounted views don't.
-        reconcileBTAlignmentPanels(animated: false)
+        reconcileBTAlignmentNotes(animated: false)
         // Same restore for the Sync drawer, and the same un-animated reasoning.
         reconcileSyncDrawer(animated: false)
 
@@ -2082,7 +2093,7 @@ public final class PopoverController: NSObject {
             // height is the whole subsection's.
             addSubsectionRows(section)
             reconcileDiagnosisPanels(animated: false)
-            reconcileBTAlignmentPanels(animated: false)
+            reconcileBTAlignmentNotes(animated: false)
             reconcileSyncDrawer(animated: false)
             updateRailRows()
         }
@@ -2091,7 +2102,7 @@ public final class PopoverController: NSObject {
     /// Drop the MODEL for a subsection collapsing away: its rows, the panels
     /// mounted under them, and the ONE reused sync drawer (D2), which — exactly
     /// as in `rebuild()` — cannot be left parented to a tree that is about to be
-    /// torn down. The INTENTS (`openDiagnosisIDs`, `btAlignmentPromptDeviceID`)
+    /// torn down. The INTENTS (`openDiagnosisIDs`, `btAlignmentOfferedIDs`)
     /// are deliberately untouched: collapse is display only, and the expand's
     /// reconcile remounts from them. The wizard's window is not in this tree at
     /// all, so a collapse never reaches it.
@@ -2099,7 +2110,7 @@ public final class PopoverController: NSObject {
         for device in section.devices {
             deviceRowsByID.removeValue(forKey: device.id)
             diagnosisPanelsByID.removeValue(forKey: device.id)
-            if btAlignmentPromptDeviceID == device.id { btAlignmentPromptView = nil }
+            btAlignmentNoteViews.removeValue(forKey: device.id)
             if mountedSyncDrawerID == device.id {
                 mountedSyncDrawerID = nil
                 syncDrawer.removeFromSuperview()
@@ -2136,16 +2147,28 @@ public final class PopoverController: NSObject {
     // MARK: Collapse-default policy (T-5, PLAN §B)
 
     /// The three card titles — Warm Signal §5.1's silkscreen vocabulary
-    /// ("System Audio" / "Output Devices" / "App Exceptions"; the panel renders as-is
+    /// ("System Audio" / "Output Devices" / "App Routing"; the panel renders as-is
     /// the displayed header, the title-case copy lives here). Named constants
     /// because the title string IS the card's lookup/collapse key. The System
     /// Audio card was "Main Audio" pre-v4 (§Call-1 renamed the SECTION header to
     /// "System Audio"; the ROW inside it is now titled "Main Audio").
     static let mainAudioCardTitle = "System Audio"
     static let outputDevicesCardTitle = "Output Devices"
+    /// Hover help for the Output Devices card's "Source" column legend.
+    static let sourceColumnHelp =
+        "What each speaker is playing. System is your Mac's audio. "
+        + "An app name means only that app is sent to this speaker."
+    /// Hover help for the same card's "Offset" column legend.
+    static let offsetColumnHelp =
+        "Shifts a speaker's timing so it plays in step with the others. "
+        + "Not set means it has never been tuned."
+    /// The first-run hint on the Output Devices card: the Mixer's rows are all
+    /// affordances and none of them says so.
+    static let membershipHintText =
+        "Click a speaker's name to play your audio on it. Click it again to stop."
     /// The Applications card's title, so its default is keyed identically to
     /// every other card even though the card itself isn't built yet (T-8).
-    static let applicationsCardTitle = "App Exceptions"
+    static let applicationsCardTitle = "App Routing"
 
     /// Warm Signal §5.9's locked empty-state copy for the Applications card.
     static let applicationsEmptyPlaceholderText =
@@ -2274,6 +2297,42 @@ public final class PopoverController: NSObject {
                          // keeps full emphasis, the dropdown title carrying the
                          // group identity.
                          busOriginDimmed: devicesCardDivergence() != nil)
+        refreshCardHeaderLiveness()
+    }
+
+    /// Push each card title's "is this section sounding" state into the panel
+    /// (iOS Section Header rule: a sounding section's title reads `goldText`).
+    /// The three predicates are computed HERE, from this controller's own
+    /// model — the same inputs the rows render from — never read back off a
+    /// row, so the title and the rows below it can never disagree.
+    ///
+    /// With no `groupController` the main-mix terms are all false and only a
+    /// live app feed can arm a device row, which is exactly what the
+    /// no-controller branch of `applySelectionState` renders.
+    private func refreshCardHeaderLiveness() {
+        let controller = groupController
+        let mainOutSounding: Bool = {
+            guard let controller else { return false }
+            if case .connected = mainOutConnectionState(controller), !controller.isMainOutMuted {
+                return true
+            }
+            return mainOutIsLocalOnlyArmed(controller)
+        }()
+        let anyDeviceSounding = deviceRowsByID.keys.contains { id in
+            guard let device = devicesByID[id] else { return false }
+            if !(liveRoutedAppNames[id] ?? []).isEmpty { return true }
+            guard let controller, controller.isMainOutMember(id) else { return false }
+            guard case .connected = device.connectionState else { return false }
+            return !(device.isMuted || controller.isMuted(id)) && !controller.isMainOutMuted
+        }
+        let anyRouteSounding = appRouting.appRoutes.contains { route in
+            !isAppExcluded(route.bundleID)
+                && route.destination != .noRedirect
+                && !offlineBundleIDs.contains(route.bundleID)
+        }
+        panel.setCardHeaderLive(title: Self.mainAudioCardTitle, live: mainOutSounding)
+        panel.setCardHeaderLive(title: Self.outputDevicesCardTitle, live: anyDeviceSounding)
+        panel.setCardHeaderLive(title: Self.applicationsCardTitle, live: anyRouteSounding)
     }
 
     // MARK: Energize (Warm Signal v4.1 item 9)
@@ -2569,7 +2628,7 @@ public final class PopoverController: NSObject {
         // lives on underneath (§4.8). The mixer window / group members keep the
         // default `false` (plain switch), so their rendering is unchanged.
         let view = DeviceRowView(device: device, indented: indented, showsToggle: showsToggle,
-                                 paintsSelectionBackground: false, showsMeter: true, showsBus: true,
+                                 showsMeter: true, showsBus: true,
                                  // Roadmap 056 Part 1: the Mac's own output is
                                  // a trimmable device too, and gets the identical
                                  // chip/drawer/wizard surface. CAST-SYNC adds
@@ -2664,12 +2723,26 @@ public final class PopoverController: NSObject {
     /// `refreshDeviceRowsReconcilingCardNote()`).
     private var renderedDevicesCardNote: String?
 
+    /// Whether the LAST `rebuild()` rendered the first-run membership hint —
+    /// the hint's twin of `renderedDevicesCardNote`, for the same reason.
+    private var renderedMembershipHint = false
+
+    /// Whether the Devices card should currently carry the first-run hint: the
+    /// host still owes it, no dormancy note is taking the same slot, and there
+    /// is at least one speaker row besides the Mac to click.
+    private func membershipHintShouldShow(sections: [DeviceSection]) -> Bool {
+        guard membershipHintShownProvider?() == true else { return false }
+        guard devicesCardNoteText() == nil else { return false }
+        return sections.contains { $0.title != Self.thisMacSubsectionTitle && !$0.devices.isEmpty }
+    }
+
     /// In-place device-section repaint that escalates to a full `rebuild()` when
     /// the Devices card's dormancy note must appear/disappear/rename (a card-note
     /// change is structural — only `rebuild()` mounts/unmounts it). Everything
     /// else stays the cheap `refreshDeviceRows()` + `refreshMainOutRow()` path.
     private func refreshDeviceRowsReconcilingCardNote() {
-        if devicesCardNoteText() != renderedDevicesCardNote {
+        if devicesCardNoteText() != renderedDevicesCardNote
+            || membershipHintShouldShow(sections: deviceSections()) != renderedMembershipHint {
             rebuild()
             panel.panelContentDidChangeHeight(animated: true)
         } else {
@@ -2706,7 +2779,6 @@ public final class PopoverController: NSObject {
                       routedAppNames: appRouting.routedAppNames(for: device.id,
                                                               groupTargets: groupRouteTargets()),
                       liveAppNames: liveRoutedAppNames[device.id] ?? [],
-                      appTintColors: appTintColorsByName(),
                       appRouteGroupNames: appRouteGroupNames(),
                       mainOutTargetsGroupName: activeMainOutGroupName,
                       energizePending: energizePendingIDs.contains(device.id),
@@ -2714,7 +2786,8 @@ public final class PopoverController: NSObject {
                       syncTrimMs: btSyncTrim(for: device),
                       syncTrimIsSet: btSyncTrimIsSet(for: device),
                       syncMeasuredLatencyMs: device.isBluetooth ? btMeasuredLatency(for: device.id) : nil,
-                      syncDrawerExpanded: expandedSyncDeviceID == device.id)
+                      syncDrawerExpanded: expandedSyncDeviceID == device.id,
+                      isEQShaped: deviceEQIsShaped?(device.id) ?? false)
             return
         }
         let selected = controller.isSpeakerSelected(device.id)
@@ -2761,7 +2834,6 @@ public final class PopoverController: NSObject {
                   routedAppNames: appRouting.routedAppNames(for: device.id,
                                                               groupTargets: groupRouteTargets()),
                   liveAppNames: liveRoutedAppNames[device.id] ?? [],
-                  appTintColors: appTintColorsByName(),
                   appRouteGroupNames: appRouteGroupNames(),
                   masterMuted: controller.isMainOutMuted,
                   inActiveTarget: inActiveTarget,
@@ -2780,7 +2852,8 @@ public final class PopoverController: NSObject {
                   // its own timer self-expires it — no pruning machinery needed.
                   volumePendingApply: castVolumePendingIDs.contains(device.id)
                       && device.castVolumeLagSeconds != nil
-                      && device.connectionState == .connected)
+                      && device.connectionState == .connected,
+                  isEQShaped: deviceEQIsShaped?(device.id) ?? false)
     }
 
     /// A trimmable row's current Sync trim: the session cache first (the
@@ -2853,7 +2926,6 @@ public final class PopoverController: NSObject {
         if !closingThisOne {
             expandedSyncDeviceID = id
             expandedSyncDeviceWasSelected = groupController?.isSpeakerSelected(id) ?? false
-            syncDrawerNeedsOpenBaseline = true
         }
         reconcileSyncDrawer(animated: animated)
         // Both chips repaint: the one losing its drawer drops back to its
@@ -2868,7 +2940,6 @@ public final class PopoverController: NSObject {
         guard let id = expandedSyncDeviceID else { return }
         expandedSyncDeviceID = nil
         expandedSyncDeviceWasSelected = false
-        syncDrawerNeedsOpenBaseline = false
         if alignTickDeviceID == id { setAlignTick(nil) }
     }
 
@@ -2912,10 +2983,6 @@ public final class PopoverController: NSObject {
             panel.insertRow(syncDrawer, after: row, animated: animated)
         }
         pushSyncDrawerState(device)
-        if syncDrawerNeedsOpenBaseline {
-            syncDrawerNeedsOpenBaseline = false
-            syncDrawer.noteOpened(trimMs: btSyncTrim(for: device))
-        }
         if syncDrawerWasEditing {
             syncDrawerWasEditing = false
             // Give the field its editing session back — see the detach site
@@ -2934,7 +3001,8 @@ public final class PopoverController: NSObject {
                              isSet: btSyncTrimIsSet(for: device),
                              usableRangeMs: btUsableTrimRange(for: device.id),
                              alignTickActive: alignTickDeviceID == device.id,
-                             canReset: canResetAlignment(for: device))
+                             canReset: canResetAlignment(for: device),
+                             canAlignAgain: !device.isCast)
     }
 
     /// Whether this device has anything STORED for Reset to clear: a trim entry
@@ -3023,6 +3091,7 @@ public final class PopoverController: NSObject {
         // The rail's dormancy and its far end both track state a mid-open toggle
         // can change (v4 §Call-1), so re-point it on every in-place repaint too.
         updateRailRows()
+        refreshCardHeaderLiveness()
     }
 
     /// Re-point the membership rail at the mounted device rows (Warm Signal v4
@@ -3448,13 +3517,6 @@ public final class PopoverController: NSObject {
     private func makeAppRow(_ route: AppRoute, devices: [Device]) -> AppRowView {
         let row = AppRowView(showsMeter: true)
         row.delegate = self
-        // Tether chip (Warm Signal v4.1 CORRECTIONS, extending item 7): only
-        // a redirect away from the main mix has matching device-row FEED
-        // segments to tether to (one per speaker a group route reaches) —
-        // "No Redirect"/"Current Device" get no chip.
-        let tetherColor: NSColor? = route.destination.isRoutedAway
-            ? appTintColor(for: route.bundleID)
-            : nil
         row.apply(AppRowView.Configuration(
             appID: route.bundleID,
             name: route.displayName,
@@ -3463,8 +3525,7 @@ public final class PopoverController: NSObject {
             selectedDestinationID: destinationID(for: route.destination),
             destinations: appDestinations(devices: devices, keeping: route.destination,
                                          bundleID: route.bundleID),
-            isRunning: !offlineBundleIDs.contains(route.bundleID),
-            tetherColor: tetherColor),
+            isRunning: !offlineBundleIDs.contains(route.bundleID)),
                   isSelected: route.bundleID == selectedAppBundleID)
         appRowsByBundleID[route.bundleID] = row
         return row
@@ -3769,9 +3830,6 @@ public final class PopoverController: NSObject {
     /// app's real icon from disk/`NSWorkspace` instead of falling straight to the
     /// placeholder below. Only an app `AppIconCache` truly can't find (never
     /// installed, or an invalid bundle id) reaches the generic placeholder. This
-    /// also means `appTintColor(for:)` below, which derives its tint from this
-    /// icon, now resolves a quit app's real brand hue instead of the neutral
-    /// placeholder tint.
     private func appIcon(for bundleID: String) -> NSImage? {
         if let running = runningAppsProvider().first(where: { $0.bundleID == bundleID }),
            let icon = running.icon {
@@ -3783,33 +3841,6 @@ public final class PopoverController: NSObject {
         let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .regular)
         return NSImage(systemSymbolName: Self.missingAppIconSymbolName, accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
-    }
-
-    /// This app's `AppTetherColor` tint (Warm Signal v4.1 CORRECTIONS,
-    /// extending T7/item 7) — derived from the same icon `appIcon(for:)`
-    /// resolves for the App Exceptions row, so a routed-but-quit app (icon
-    /// falls back to the generic placeholder) and a running one resolve
-    /// identically to whichever a redirect target's device row shows.
-    /// `AppTetherColor.color(forBundleID:icon:)` caches per bundle id itself
-    /// (Warm Signal v4 §Call 2), so repeated calls here are cheap.
-    private func appTintColor(for bundleID: String) -> NSColor {
-        AppTetherColor.color(forBundleID: bundleID, icon: appIcon(for: bundleID))
-    }
-
-    /// Every currently-routed app's tether tint, keyed by DISPLAY NAME —
-    /// `DeviceRowView`'s FEED column only carries app display names (never
-    /// bundle ids), so this is the map its `apply(appTintColors:)` parameter
-    /// needs. Built from `appRouting.appRoutes` regardless of each route's
-    /// destination (a device row only ever looks up names that are actually
-    /// in ITS OWN `feedAppNames`, i.e. routed to that specific device, so an
-    /// unrelated "Current Device"/"No Redirect" entry in this map is simply
-    /// never read).
-    private func appTintColorsByName() -> [String: NSColor] {
-        var result: [String: NSColor] = [:]
-        for route in appRouting.appRoutes {
-            result[route.displayName] = appTintColor(for: route.bundleID)
-        }
-        return result
     }
 
     // MARK: Actions
@@ -3958,7 +3989,7 @@ public final class PopoverController: NSObject {
         refreshDeviceRowsReconcilingCardNote()
         // A deselect may have taken the alignment wizard's target out of the
         // user's audio intent — tear it down now, not on the next snapshot.
-        reconcileBTAlignmentPanels(animated: true)
+        reconcileBTAlignmentNotes(animated: true)
 
         // A4: an auto-swap toggled the LOCAL row's membership for the user (not a
         // direct click on that row), so flash it once to draw the eye. Must run
@@ -4107,6 +4138,15 @@ public final class PopoverController: NSObject {
     /// dormancy annotation's assertion surface.
     public func test_cardNoteTexts(title: String) -> [String] {
         panel.test_cardNotes(title: title).map(\.stringValue)
+    }
+    /// The ink `title`'s card header currently carries — gold while the
+    /// section is sounding, `label2` while it is silent.
+    public func test_cardHeaderTitleColor(title: String) -> NSColor? {
+        panel.test_headerTitleColor(title: title)
+    }
+    /// The tooltips on `title`'s column legends, in creation order.
+    public func test_columnTitleToolTips(title: String) -> [String?] {
+        panel.test_columnTitleToolTips(title: title)
     }
     /// Whether the header accessory for `title` is enabled (`nil` if none) — F1.
     public func test_cardAccessoryEnabled(title: String) -> Bool? {
@@ -4419,6 +4459,13 @@ extension PopoverController: DeviceRowView.Delegate {
         if let kind = devicesByID[id]?.kind { props["kind"] = kind.rawValue }
         if let reason = result.refusalReason { props["refusal_reason"] = reason }
         Analytics.capture(on ? "mixer:device_selected" : "mixer:device_deselected", props)
+        // The first membership toggle made in the Mixer retires the first-run
+        // hint. The host flips the stored flag synchronously, so the reconcile
+        // inside `handleSelection` below already sees the provider go false.
+        if membershipHintShownProvider?() == true {
+            onMembershipHintDismissed?()
+            Analytics.capture("mixer:membership_hint_dismissed")
+        }
         // Any membership edit retires a standing offer; a live removal raises a
         // fresh one. A refused edit changed nothing, so it offers nothing.
         if wasLiveRemoval && result.refusalReason == nil {
@@ -4455,17 +4502,19 @@ extension PopoverController: DeviceRowView.Delegate {
         toggleSyncDrawer(deviceID: id, animated: true)
     }
 
-    /// The "Align speaker…" context-menu item (and the drawer's ⌥-click on
-    /// the metronome button, via `syncDrawerDidRequestAlignmentWizard`): the
-    /// manual way back into the guided wizard (the first-mix card's "Not now"
-    /// is final, so this stays reachable forever).
-    public func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView) {
-        startBTAlignmentWizard(deviceID: row.device.id)
+    /// The row's two direct doors into the guided wizard: the "Align speaker…"
+    /// context-menu item, and the untuned Bluetooth chip.
+    public func deviceRow(_ row: DeviceRowView,
+                          didRequestAlignmentWizardFor id: String,
+                          door: BTAlignmentWizardDoor) {
+        startBTAlignmentWizard(deviceID: id, door: door)
     }
 
-    /// The "Equalizer…" context-menu item (and the row icon, which pops the
-    /// same menu): a deep link, nothing more. The Mixer edits no tone.
-    public func deviceRowDidRequestEqualizer(_ row: DeviceRowView) {
+    /// The row's two Equalizer doors — the button beside mute and the
+    /// "Equalizer…" menu item (which the row ICON also pops). Both are deep
+    /// links, nothing more: the Mixer edits no tone.
+    public func deviceRowDidRequestEqualizer(_ row: DeviceRowView, fromButton: Bool) {
+        Analytics.capture("eq:opened", ["door": fromButton ? "row_button" : "menu"])
         onOpenEqualizer?(row.device.id)
     }
 
@@ -4495,26 +4544,18 @@ extension PopoverController: DeviceRowView.Delegate {
         }
     }
 
-    // MARK: First-mix alignment intercept + wizard (W3/W4)
+    // MARK: First-join alignment note + wizard (W3/W4)
 
-    /// A never-aligned BT device just joined its first mix and the backend is
-    /// holding it silent (`BackendEvent.btFirstMixAlignmentPrompt`): remember
-    /// the offer and mount the anchored card under its row. One card at a
-    /// time — while another card or the wizard holds the slot, the offer
-    /// QUEUES (still backend-held-silent) and mounts when the slot frees, so
-    /// two never-aligned speakers joining one mix each get their card.
-    public func showBTAlignmentPrompt(deviceID: String) {
-        guard btAlignmentPromptDeviceID != deviceID, btWizardDeviceID != deviceID,
-              !btAlignmentPromptQueue.contains(deviceID) else { return }
-        if btAlignmentPromptDeviceID != nil || btWizardDeviceID != nil {
-            btAlignmentPromptQueue.append(deviceID)
-            return
-        }
-        btAlignmentPromptDeviceID = deviceID
-        reconcileBTAlignmentPanels(animated: true)
+    /// A never-aligned BT device just joined its first mix and is playing
+    /// as-is (`BackendEvent.btFirstMixAlignmentPrompt`): remember the offer and
+    /// mount a note under its row. No queue — every offered speaker gets its
+    /// own note, and several may stand at once.
+    public func offerBTAlignment(deviceID: String) {
+        guard btAlignmentOfferedIDs.insert(deviceID).inserted else { return }
+        reconcileBTAlignmentNotes(animated: true)
     }
 
-    /// Whether the wizard/card target still makes sense to align: present,
+    /// Whether the wizard/note target still makes sense to align: present,
     /// powered on, and part of the user's audio intent. A power-off keeps the
     /// row (greyed) but drops the sink — a wizard asking "which side?" over a
     /// silent target must die with the availability, not with the row.
@@ -4522,35 +4563,31 @@ extension PopoverController: DeviceRowView.Delegate {
         devicesByID[id]?.isAvailable == true && wantsAudio(id)
     }
 
-    /// Mount/unmount the card and wizard panel to match the intent state —
-    /// the `reconcileDiagnosisPanels` idiom, called from the same rebuild
-    /// sites. A missing row (device gone / filtered) keeps the intent parked
-    /// until the row returns; a missing DEVICE drops the whole offer (the
-    /// backend released its hold on the deselect edge already).
-    private func reconcileBTAlignmentPanels(animated: Bool) {
-        // Wizard first: a torn-down wizard frees the alignment slot for this
-        // same pass.
+    /// Mount/unmount the notes and the wizard sheet to match the intent state
+    /// — the `reconcileDiagnosisPanels` idiom, called from the same rebuild
+    /// sites. A missing row (device gone / filtered) keeps the offer parked
+    /// until the row returns; a measured speaker drops its offer for good.
+    private func reconcileBTAlignmentNotes(animated: Bool) {
+        // Wizard first: a torn-down wizard may free its target for a note in
+        // this same pass.
         reconcileBTWizardLiveness()
-        // Prompt card.
-        if let id = btAlignmentPromptDeviceID, devicesByID[id] == nil {
-            btAlignmentPromptDeviceID = nil
-        }
-        btAlignmentPromptQueue.removeAll { devicesByID[$0] == nil }
-        if btAlignmentPromptDeviceID == nil, btWizardDeviceID == nil,
-           !btAlignmentPromptQueue.isEmpty {
-            btAlignmentPromptDeviceID = btAlignmentPromptQueue.removeFirst()
-        }
-        if let view = btAlignmentPromptView, btAlignmentPromptDeviceID == nil {
-            btAlignmentPromptView = nil
+        // A measured speaker has nothing left to offer — drop the intent, not
+        // just the view, so a later re-offer for the same id cannot revive it.
+        btAlignmentOfferedIDs.subtract(
+            btAlignmentOfferedIDs.filter { btMeasuredLatency(for: $0) != nil })
+        for (id, view) in btAlignmentNoteViews where !btAlignmentNoteShouldStand(id) {
+            btAlignmentNoteViews.removeValue(forKey: id)
             panel.removeRow(view, animated: animated)
         }
-        if let id = btAlignmentPromptDeviceID, btAlignmentPromptView == nil,
-           let row = deviceRowsByID[id], let device = devicesByID[id] {
-            let view = BTAlignmentPromptView(deviceName: device.name)
-            view.onAlignWithMusic = { [weak self] in self?.btAlignmentAlignWithMusic(id) }
-            view.onAlignWithTicks = { [weak self] in self?.btAlignmentAlignWithTicks(id) }
-            view.onNotNow = { [weak self] in self?.btAlignmentNotNow(id) }
-            btAlignmentPromptView = view
+        for id in btAlignmentOfferedIDs.sorted()
+        where btAlignmentNoteViews[id] == nil && btAlignmentNoteShouldStand(id) {
+            guard let row = deviceRowsByID[id], let device = devicesByID[id] else { continue }
+            let view = BTAlignmentNoteView(deviceName: device.name)
+            view.onAlign = { [weak self] in
+                self?.startBTAlignmentWizard(deviceID: id, door: .note)
+            }
+            view.onHide = { [weak self] in self?.hideBTAlignmentNote(id) }
+            btAlignmentNoteViews[id] = view
             panel.insertRow(view, after: row, animated: animated)
         }
         // Wizard sheet (its liveness ran first, above). It needs no row: the
@@ -4599,64 +4636,53 @@ extension PopoverController: DeviceRowView.Delegate {
         }
     }
 
-    /// "Align with your music": unmute (release the hold) and route straight
-    /// to the manual SYNC affordance — the row's sync drawer (BT-SYNC-DRAWER),
-    /// opened under the row so its steppers/field are immediately at hand.
-    private func btAlignmentAlignWithMusic(_ id: String) {
-        Analytics.capture("bt_sync:method_chosen", ["method": "music"])
-        onResolveBTAlignmentPrompt?(id, false)
-        clearBTAlignmentPrompt()
-        if expandedSyncDeviceID != id {
-            toggleSyncDrawer(deviceID: id, animated: true)
-        }
+    /// Whether this device's note belongs on screen: it was offered, the user
+    /// has not hidden it, the row is a Bluetooth speaker (never Cast), the
+    /// target is still live, and nothing has been measured for it yet.
+    private func btAlignmentNoteShouldStand(_ id: String) -> Bool {
+        guard !btAlignmentNoteHiddenIDs.contains(id),
+              btAlignmentOfferedIDs.contains(id),
+              let device = devicesByID[id],
+              device.isBluetooth, !device.isCast else { return false }
+        return btAlignmentTargetIsLive(id) && btMeasuredLatency(for: id) == nil
     }
 
-    /// "Align with ticks": open the wizard panel in the card's place. The
-    /// unmute and the card's unmount belong to `startBTAlignmentWizard` — EVERY
-    /// way into the wizard has to leave its target audible, not just this one.
-    /// Both clear the intent DIRECTLY rather than through a reconcile:
-    /// reconciling before the wizard opens would hand the freed slot to a
-    /// queued device's card, mounting it alongside this device's wizard.
-    private func btAlignmentAlignWithTicks(_ id: String) {
-        Analytics.capture("bt_sync:method_chosen", ["method": "ticks"])
-        startBTAlignmentWizard(deviceID: id)
-        if btWizardDeviceID != id {
-            // Refused (the target went un-live under the card): the offer
-            // still has to be answered or the device stays held silent.
-            onResolveBTAlignmentPrompt?(id, false)
-            btAlignmentPromptDeviceID = nil
-        }
-        reconcileBTAlignmentPanels(animated: true)
+    /// The note's ✕: session-only. The backend offers again on the next
+    /// launch while the speaker stays unmeasured; nothing is written down.
+    private func hideBTAlignmentNote(_ id: String) {
+        Analytics.capture("bt_sync:note_hidden")
+        btAlignmentNoteHiddenIDs.insert(id)
+        reconcileBTAlignmentNotes(animated: true)
     }
 
-    /// "Not now": unmute and record the FINAL dismissal — never auto-prompted
-    /// again for this device.
-    private func btAlignmentNotNow(_ id: String) {
-        onResolveBTAlignmentPrompt?(id, true)
-        clearBTAlignmentPrompt()
-    }
-
-    private func clearBTAlignmentPrompt() {
-        btAlignmentPromptDeviceID = nil
-        reconcileBTAlignmentPanels(animated: true)
-    }
-
-    /// Open the wizard for `deviceID` — the card's ticks action AND the row's
-    /// manual relaunches (⌥-click on the metronome button, the "Align
-    /// speaker…" context-menu item), so "Not now" never strands a device
-    /// (the FINAL dismissal only silences the auto-prompt). Builds the
-    /// session over the row's freshest trim and mounts the panel under the
-    /// row. Refused for an un-live target (gone, powered off, or deselected)
-    /// — the same conditions that tear an open wizard down.
-    func startBTAlignmentWizard(deviceID: String) {
-        guard let device = devicesByID[deviceID], btAlignmentTargetIsLive(deviceID) else { return }
+    /// Open the wizard for `deviceID` through one of its four doors — the
+    /// untuned row chip, the first-join note, the drawer's "Align again…", or
+    /// the row's "Align speaker…" menu item. Builds the session over the row's
+    /// freshest trim and mounts the sheet. Refused only for a target that is
+    /// GONE (unpaired, powered off) — a speaker that is merely out of the mix
+    /// is put into it, see below.
+    func startBTAlignmentWizard(deviceID: String, door: BTAlignmentWizardDoor) {
+        guard let device = devicesByID[deviceID], device.isAvailable else { return }
         // A Cast receiver has no run to give: it plays seconds behind live, and
         // no ±500 ms bisection converges on that. Its row's own doors are
-        // absent (`DeviceRowView.supportsAlignmentWizard`); this refuses the
-        // drawer's hidden ⌥-click, the one entry point with no visible
-        // affordance to hide.
+        // absent (`DeviceRowView.supportsAlignmentWizard`).
         guard !device.isCast else { return }
         tearDownBTWizard()
+        // The run measures a speaker that is PLAYING, so a target outside the
+        // mix has to join before it can be aligned — and clicking Align is
+        // that join, not a refusal. It goes through the ONE selection owner
+        // the row's own checkbox uses, so the mix, the backend and the rail
+        // all follow, and a refused join speaks through `handleSelection`
+        // rather than leaving a door that does nothing silently. Unlike the
+        // run's REFERENCE — borrowed by `engageBTWizardReference` and handed
+        // back on teardown — the target STAYS: the user asked for this speaker
+        // by name. Ordered after `tearDownBTWizard()`, which may itself be
+        // releasing this same device as the previous run's reference.
+        if !wantsAudio(deviceID) {
+            let result = groupController?.setDeviceSelected(deviceID, true) ?? .ok
+            handleSelection(result, deviceID: deviceID)
+            guard result.applied else { return }
+        }
         let isLocalTarget = device.isLocalDevice
         // The Mac's run still measures its own sync OFFSET; a Bluetooth run now
         // measures the speaker's LATENCY (roadmap 056 Part A) and leaves the
@@ -4681,14 +4707,11 @@ extension PopoverController: DeviceRowView.Delegate {
         // The single tick source: a running manual metronome would fight the
         // wizard's own run.
         setAlignTick(nil)
-        // The wizard replaces this device's card (a manual relaunch can arrive
-        // while one stands) and releases its hold. A wizard over a held-silent
-        // target ticks into a muted speaker — `resolveBTAlignmentPrompt` is
-        // idempotent and records nothing at `dismissed: false`, so releasing
-        // here is safe even for a device that was never held.
-        btAlignmentPromptQueue.removeAll { $0 == deviceID }
-        if btAlignmentPromptDeviceID == deviceID { btAlignmentPromptDeviceID = nil }
-        onResolveBTAlignmentPrompt?(deviceID, false)
+        // The offer is NOT dropped here. A run stopped before it measures
+        // anything leaves the speaker exactly as unaligned as the note said it
+        // was, so the invitation has to survive it (decision 3 — the note
+        // stands until the speaker is measured). `reconcileBTAlignmentNotes`
+        // drops it on the measurement, which is the only thing that ends it.
         // Zero-click: a speaker that has been measured before opens straight on
         // the PROPOSAL at its stored value — "still right?" is one click where
         // a fresh run is a dozen. The prior behind it stays flat; this is a UI
@@ -4752,7 +4775,7 @@ extension PopoverController: DeviceRowView.Delegate {
                     }
                     // The drawer this run was very likely launched FROM is
                     // still open under the row, holding the pre-run value —
-                    // and one gesture (a stepper, Revert, or the value field
+                    // and one gesture (a stepper, or the value field
                     // committing what it shows as focus leaves) writes it back
                     // over what was just measured.
                     self?.noteWizardTrimIntoOpenDrawer(
@@ -4787,8 +4810,10 @@ extension PopoverController: DeviceRowView.Delegate {
             setTempo: { [weak self] bpm in self?.onBTWizardTempo?(bpm) })
         btWizardDeviceID = deviceID
         btWizardSession = session
-        Analytics.capture("bt_sync:wizard_started", ["target": isLocalTarget ? "local" : "bluetooth"])
-        reconcileBTAlignmentPanels(animated: true)
+        Analytics.capture("bt_sync:wizard_started",
+                          ["target": isLocalTarget ? "local" : "bluetooth",
+                           "door": door.rawValue])
+        reconcileBTAlignmentNotes(animated: true)
         refreshDeviceRows()
     }
 
@@ -4964,15 +4989,15 @@ extension PopoverController: DeviceRowView.Delegate {
     }
 
     /// The wizard's own close (Keep / Done / Stop / Esc): the session already
-    /// committed or restored; drop sheet + session, repaint the row's trim
-    /// display, and let a queued first-mix card take the freed slot.
+    /// committed or restored; drop sheet + session and repaint the row's trim
+    /// display.
     private func finishBTWizard() {
         if btWizardSession != nil {
             Analytics.capture("bt_sync:wizard_finished")
         }
         tearDownBTWizard(viaFinish: true)
         refreshDeviceRows()
-        reconcileBTAlignmentPanels(animated: true)
+        reconcileBTAlignmentNotes(animated: true)
     }
 
     /// Cancel-and-unmount. The session's `cancel()` restores the prior trim
@@ -5022,9 +5047,10 @@ extension PopoverController: DeviceRowView.Delegate {
 
     // MARK: Test hooks (W3/W4)
 
-    public func test_btAlignmentPromptDeviceID() -> String? { btAlignmentPromptDeviceID }
-    public func test_btAlignmentPromptQueue() -> [String] { btAlignmentPromptQueue }
-    func test_btAlignmentPromptView() -> BTAlignmentPromptView? { btAlignmentPromptView }
+    public func test_btAlignmentOfferedIDs() -> Set<String> { btAlignmentOfferedIDs }
+    func test_btAlignmentNoteView(_ id: String) -> BTAlignmentNoteView? {
+        btAlignmentNoteViews[id]
+    }
     func test_btWizardView() -> BTAlignmentWizardView? { btWizardView }
     func test_btWizardSheet() -> AlignmentWizardViewController? { btWizardSheet }
     public func test_btWizardIsOpen() -> Bool { btWizardSession != nil }
@@ -5066,12 +5092,11 @@ extension PopoverController: BTSyncDrawerViewDelegate {
         refreshDeviceRows()
     }
 
-    /// ⌥-click on the drawer's metronome button (W4 relaunch): the guided
-    /// wizard for the device whose drawer is open — the seat the row-level
-    /// metronome ⌥-click moved to when the button moved into the drawer (D9).
+    /// "Align again…" in the drawer (W4 relaunch): the guided wizard for the
+    /// device whose drawer is open, opening on its last result.
     public func syncDrawerDidRequestAlignmentWizard(_ d: BTSyncDrawerView) {
         guard let id = expandedSyncDeviceID else { return }
-        startBTAlignmentWizard(deviceID: id)
+        startBTAlignmentWizard(deviceID: id, door: .drawer)
     }
 
     /// "Reset alignment": drop this device's stored alignment everywhere it is
@@ -5094,6 +5119,13 @@ extension PopoverController: BTSyncDrawerViewDelegate {
         btTrimsByID.removeValue(forKey: id)
         btLatenciesByID.removeValue(forKey: id)
         btTunedDeviceIDs.remove(id)
+        // A cleared BLUETOOTH row's chip becomes the wizard's door, so it can
+        // no longer close the drawer it opened — leaving one open with no way
+        // to dismiss it. Collapse it here instead.
+        if devicesByID[id]?.isBluetooth == true, devicesByID[id]?.isCast == false {
+            closeSyncDrawerIntent()
+            reconcileSyncDrawer(animated: true)
+        }
         refreshDeviceRows()
     }
 }
@@ -5137,6 +5169,7 @@ extension PopoverController: MainOutRowView.Delegate {
     /// Main Audio's "Equalizer…" door, addressed by the ``mainOutEQID``
     /// sentinel because the whole mix has no device id.
     public func mainOutRowDidRequestEqualizer(_ row: MainOutRowView) {
+        Analytics.capture("eq:opened", ["door": "main_out_menu"])
         onOpenEqualizer?(Self.mainOutEQID)
     }
 }

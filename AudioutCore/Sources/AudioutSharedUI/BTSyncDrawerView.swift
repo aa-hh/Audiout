@@ -6,8 +6,8 @@ import AudioutCore
 /// Reports every gesture out of a ``BTSyncDrawerView`` (PLAN-BT-SYNC-DRAWER
 /// T5) back to its host.
 public protocol BTSyncDrawerViewDelegate: AnyObject {
-    /// A committed trim change — a stepper click, a typed field commit, or
-    /// Revert. Apply AND persist. (There is no longer a live-scrub /
+    /// A committed trim change — a stepper click or a typed field commit.
+    /// Apply AND persist. (There is no longer a live-scrub /
     /// don't-persist case: the scrubbing ruler that needed it was cut. Every
     /// change the drawer now makes is a discrete, complete gesture, so
     /// `committed` is always true — the parameter stays for the host's
@@ -22,14 +22,12 @@ public protocol BTSyncDrawerViewDelegate: AnyObject {
     /// drawer has no visible close affordance of its own (T6's row chip
     /// owns opening/closing); the host decides how — or whether — to react.
     func syncDrawerDidRequestClose(_ d: BTSyncDrawerView)
-    /// ⌥-click on the align-by-ear (metronome) button: the guided alignment
-    /// wizard instead of the manual tick (W4 relaunch — the first-mix card's
-    /// "Not now" is final, so this stays reachable forever). The row's
-    /// "Align speaker…" context-menu item is the discoverable twin.
+    /// "Align again…", the drawer's leading button: re-run the guided
+    /// alignment wizard for this device, opening on its last result. The row's
+    /// "Align speaker…" context-menu item is the other visible door.
     func syncDrawerDidRequestAlignmentWizard(_ d: BTSyncDrawerView)
     /// "Reset alignment" (roadmap 056): delete this device's STORED alignment —
     /// its measured latency and its trim — returning the row to "Not set".
-    /// Distinct from Revert, which only restores the value the drawer opened on.
     func syncDrawerDidRequestResetAlignment(_ d: BTSyncDrawerView)
 }
 
@@ -44,14 +42,14 @@ public extension BTSyncDrawerViewDelegate {
 /// underneath a Bluetooth row when its SYNC value chip (T6) is clicked. ONE
 /// horizontal band:
 ///
-///     [♪ Align by ear] [Revert] [Reset alignment]   hold ⇧ for 10 ms   [ − | −414 ms | + ]
+///     [⑂ Align again…] [♪ Align by ear] [Reset alignment]   hold ⇧ for 10 ms   [ − | −414 ms | + ]
 ///
-/// **Why the two halves sit at opposite ends.** Align-by-ear and Revert lead
-/// the band; the value cluster hugs the trailing edge so it lands directly
-/// beneath the chip that opened the drawer. Revert is destructive-ish and its
-/// natural moment comes *after* a run of stepper clicks, so it is parked as
-/// far from the steppers as the band allows — a Revert adjacent to `−` is one
-/// slipped click away from discarding the adjustment in progress.
+/// **Why the two halves sit at opposite ends.** The two alignment doors and
+/// Reset lead the band; the value cluster hugs the trailing edge so it lands
+/// directly beneath the chip that opened the drawer. Reset deletes what is
+/// stored, so it is parked as far from the steppers as the band allows — a
+/// Reset adjacent to `−` is one slipped click away from discarding the
+/// adjustment in progress.
 ///
 /// **Why the value cluster is one bound box.** A stepper has to read as
 /// attached to the number it changes (Apple's own steppers are welded to their
@@ -75,10 +73,19 @@ public extension BTSyncDrawerViewDelegate {
 ///
 /// **Colour:** the background is ``Tokens/Color/well`` — the recessed/inset
 /// fill already used behind slider troughs, darker than the row card in BOTH
-/// themes, which is what "opens downward" needs to read. No drawn edge or
-/// border (live feedback): the well fill alone reads as a recess belonging to
-/// the row above. The align-by-ear button keeps the exact
-/// accent/secondaryLabel treatment it has on the row today
+/// themes, which is what "opens downward" needs to read. It is also EDGED,
+/// in two weights (2026-09-03), because the fill alone stopped carrying it:
+/// on the flat light ground the well is only 1.154:1 from the card, under the
+/// 1.25:1 edge floor, so the boundary has to be drawn. The sides and bottom
+/// bound the recess and take the container's own edge
+/// (``Tokens/Color/containerEdge``, 1.75:1 on `well` light, 2.01:1 dark); the
+/// TOP is not a card edge at all but the divider between this drawer and the
+/// device row above it — the drawer is a full-width row clip inside the card
+/// stack — so it takes ``Tokens/Color/hairline``, the rank below (1.31:1 on
+/// `well` light, 1.49:1 dark, both over the edge floor). This overrides an
+/// earlier live finding that the well needed no edge; it is on the owed
+/// eye-check list. The align-by-ear button
+/// keeps the exact `engagedChrome`/`label2` treatment it has on the row today
 /// (`DeviceRowView.alignTapped`). The background is drawn in `draw(_:)`, not
 /// stamped into a `CALayer`, so it re-resolves live on every pass with no
 /// `viewDidChangeEffectiveAppearance` observer needed. Every control in the
@@ -88,8 +95,8 @@ public final class BTSyncDrawerView: NSView {
 
     // MARK: Auto-repeat timing
     //
-    // Timing, not geometry: `PopoverColumnGrid` is the Figma contract's mirror
-    // and holds METRICS, so these live with the control they time. Matched to
+    // Timing, not geometry: `PopoverColumnGrid` holds METRICS, so these live
+    // with the control they time. Matched to
     // the platform's own key-repeat feel — long enough that a deliberate
     // single click never repeats, fast enough that holding covers the ±500 ms
     // range (with ⇧, ~7 s end to end) without becoming a drag race.
@@ -102,10 +109,14 @@ public final class BTSyncDrawerView: NSView {
     /// SF-Symbol point size of the `−`/`+` glyphs.
     private static let stepperGlyphPointSize: CGFloat = 10
 
+    /// What "Align again…" promises: another guided run, seeded by the last.
+    static let alignAgainTooltip =
+        "Measure this speaker again. Opens on the last result."
+
     // MARK: Subviews
 
+    private let alignAgainButton = NSButton()
     private let alignButton = NSButton()
-    private let revertButton = NSButton()
     private let resetButton = NSButton()
     private let hintLabel = NSTextField(labelWithString: "")
     private let minusButton = NSButton()
@@ -116,20 +127,26 @@ public final class BTSyncDrawerView: NSView {
 
     public weak var delegate: BTSyncDrawerViewDelegate?
 
-    // MARK: State — pushed by `configure`; `noteOpened` separately seeds the
-    // Revert baseline (D8), since `configure` alone can't tell a fresh open
-    // from a routine refresh of an already-open drawer (T7 reuses one
-    // instance across devices rather than creating one per row).
+    // MARK: State — pushed by `configure` (T7 reuses one instance across
+    // devices rather than creating one per row).
 
     private var deviceName = ""
     private var trimMs: Double = 0
     private var isSet = false
-    private var openTimeMs: Double = 0
     /// Whether this device has anything STORED to reset — a measured latency, a
     /// trim, or (on the Mac's row) a set local offset. Pushed by the host,
     /// which owns both stores; a Reset button over nothing to clear is an
     /// offer the gesture would refuse.
     private var canReset = false
+    /// Whether this device has a guided wizard at all — pushed by the host,
+    /// which owns the refusal (a Cast receiver plays seconds behind live, so
+    /// no by-ear bisection converges on it). A visible button whose click the
+    /// host would refuse is worse than no button.
+    private var canAlignAgain = false
+    /// The band's leading anchor, swapped when "Align again…" is hidden: the
+    /// metronome takes its place rather than leaving a 110 pt hole.
+    private var alignLeadingToAlignAgain: NSLayoutConstraint?
+    private var alignLeadingToEdge: NSLayoutConstraint?
     private var usableRangeMs: ClosedRange<Double> = -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
     /// The direction-spelled value last pushed to the field's accessibility
     /// value (D7). Mirrored here because `NSTextField.accessibilityValue()`
@@ -160,8 +177,8 @@ public final class BTSyncDrawerView: NSView {
         configureValueField()
         configureButtons()
         configureLabels()
-        for subview in [minusButton, plusButton, valueField,
-                        alignButton, revertButton, resetButton, hintLabel] as [NSView] {
+        for subview in [minusButton, plusButton, valueField, alignAgainButton,
+                        alignButton, resetButton, hintLabel] as [NSView] {
             // ONE place, unskippable, for every present and future subview.
             // Live-found: labels that missed this flag kept their translated
             // mask constraints (position 0,0), which fought the explicit chain
@@ -277,7 +294,7 @@ public final class BTSyncDrawerView: NSView {
                 break
             }
         }
-        alignButton.contentTintColor = Tokens.Color.secondaryLabel
+        alignButton.contentTintColor = Tokens.Color.label2
         // `DeviceRowView.alignTooltip` — one string, shared across its module
         // (both types live in `AudioutSharedUI`), not re-authored here.
         alignButton.toolTip = DeviceRowView.alignTooltip
@@ -286,16 +303,24 @@ public final class BTSyncDrawerView: NSView {
         alignButton.target = self
         alignButton.action = #selector(alignTapped(_:))
 
-        revertButton.bezelStyle = .rounded
-        revertButton.controlSize = .small
-        revertButton.font = Tokens.Font.caption
-        revertButton.title = "Revert"
-        revertButton.setAccessibilityLabel("Revert to the value when this drawer opened")
-        revertButton.target = self
-        revertButton.action = #selector(revertTapped(_:))
+        // Same push-button voice as the metronome toggle beside it, and the
+        // same glyph configuration — the two are the drawer's two alignment
+        // doors: this one re-runs the guided wizard, that one plays ticks.
+        alignAgainButton.bezelStyle = .rounded
+        alignAgainButton.controlSize = .small
+        alignAgainButton.font = Tokens.Font.caption
+        alignAgainButton.imagePosition = .imageLeading
+        alignAgainButton.title = "Align again…"
+        alignAgainButton.image = NSImage(systemSymbolName: "tuningfork",
+                                         accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .regular))
+        alignAgainButton.contentTintColor = Tokens.Color.label2
+        alignAgainButton.toolTip = Self.alignAgainTooltip
+        alignAgainButton.setAccessibilityLabel("Align again")
+        alignAgainButton.setAccessibilityHelp(Self.alignAgainTooltip)
+        alignAgainButton.target = self
+        alignAgainButton.action = #selector(alignAgainTapped(_:))
 
-        // Same push-button voice as Revert beside it — the two are neighbours
-        // but not twins: Revert restores the value this drawer opened on,
         // Reset deletes the stored alignment (the measured latency AND the
         // nudge) so the row goes back to "Not set". Shown only when there IS
         // something stored to clear.
@@ -317,7 +342,7 @@ public final class BTSyncDrawerView: NSView {
         // nobody is told about does not exist.
         hintLabel.stringValue = "hold \u{21E7} for 10 ms"
         hintLabel.font = Tokens.Font.caption
-        hintLabel.textColor = Tokens.Color.tertiaryLabel
+        hintLabel.textColor = Tokens.Color.label3
 
     }
 
@@ -333,20 +358,19 @@ public final class BTSyncDrawerView: NSView {
         let stepperW = PopoverColumnGrid.syncDrawerStepperButtonWidth
 
         NSLayoutConstraint.activate([
-            // LEADING half: the align/revert pair, together, as far from the
-            // steppers as the band allows (see the type's header comment).
-            alignButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            // LEADING half: the two alignment doors and Reset, together, as
+            // far from the steppers as the band allows (see the header comment).
+            alignAgainButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            alignAgainButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            alignAgainButton.widthAnchor.constraint(
+                equalToConstant: PopoverColumnGrid.syncDrawerAlignAgainButtonWidth),
+            alignAgainButton.heightAnchor.constraint(equalToConstant: controlH),
+
             alignButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             alignButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerAlignButtonWidth),
             alignButton.heightAnchor.constraint(equalToConstant: controlH),
 
-            revertButton.leadingAnchor.constraint(equalTo: alignButton.trailingAnchor,
-                                                  constant: PopoverColumnGrid.syncDrawerButtonGap),
-            revertButton.centerYAnchor.constraint(equalTo: alignButton.centerYAnchor),
-            revertButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerRevertButtonWidth),
-            revertButton.heightAnchor.constraint(equalToConstant: controlH),
-
-            resetButton.leadingAnchor.constraint(equalTo: revertButton.trailingAnchor,
+            resetButton.leadingAnchor.constraint(equalTo: alignButton.trailingAnchor,
                                                  constant: PopoverColumnGrid.syncDrawerButtonGap),
             resetButton.centerYAnchor.constraint(equalTo: alignButton.centerYAnchor),
             resetButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerResetButtonWidth),
@@ -381,14 +405,52 @@ public final class BTSyncDrawerView: NSView {
                                                 constant: -PopoverColumnGrid.syncDrawerHintToClusterGap),
             hintLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+
+        // Two leading anchors for the metronome, one live at a time: behind
+        // "Align again…" when that door exists, at the band's own edge when it
+        // does not. Hiding a button Auto Layout still anchors to would leave
+        // its width as a hole.
+        alignLeadingToAlignAgain = alignButton.leadingAnchor.constraint(
+            equalTo: alignAgainButton.trailingAnchor,
+            constant: PopoverColumnGrid.syncDrawerButtonGap)
+        alignLeadingToEdge = alignButton.leadingAnchor.constraint(
+            equalTo: leadingAnchor, constant: inset)
+        applyAlignAgainVisibility()
     }
 
-    // MARK: Drawing — background only, no border (see header comment)
+    /// Mount or hide the guided-wizard door and move the band's leading edge
+    /// with it.
+    private func applyAlignAgainVisibility() {
+        alignAgainButton.isHidden = !canAlignAgain
+        alignLeadingToAlignAgain?.isActive = canAlignAgain
+        alignLeadingToEdge?.isActive = !canAlignAgain
+    }
+
+    // MARK: Drawing — well fill, containerEdge recess, hairline divider
 
     public override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         Tokens.Color.well.setFill()
         bounds.fill()
+
+        // Two edge weights, because the four sides are not the same thing.
+        // The sides and the bottom BOUND the recess, so they carry the
+        // container's own edge; the top is the divider between this drawer and
+        // the device row it opened under — rows inside one container — which
+        // is `hairline`, a rank lighter. This view is not flipped, so the
+        // visual top is `maxY`.
+        let inset = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let recess = NSBezierPath()
+        recess.move(to: NSPoint(x: inset.minX, y: inset.maxY))
+        recess.line(to: NSPoint(x: inset.minX, y: inset.minY))
+        recess.line(to: NSPoint(x: inset.maxX, y: inset.minY))
+        recess.line(to: NSPoint(x: inset.maxX, y: inset.maxY))
+        recess.lineWidth = 1
+        Tokens.Color.containerEdge.setStroke()
+        recess.stroke()
+
+        Tokens.Color.hairline.setFill()
+        NSRect(x: bounds.minX, y: bounds.maxY - 1, width: bounds.width, height: 1).fill()
     }
 
 
@@ -401,22 +463,19 @@ public final class BTSyncDrawerView: NSView {
     /// way, only the on-screen text is protected.
     public func configure(deviceName: String, trimMs: Double, isSet: Bool,
                           usableRangeMs: ClosedRange<Double>, alignTickActive: Bool,
-                          canReset: Bool = false) {
+                          canReset: Bool = false, canAlignAgain: Bool = false) {
         self.deviceName = deviceName
         self.trimMs = trimMs
         self.isSet = isSet
         self.usableRangeMs = usableRangeMs
         self.canReset = canReset
+        self.canAlignAgain = canAlignAgain
         alignButton.state = alignTickActive ? .on : .off
         alignButton.contentTintColor = alignTickActive
-            ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
+            ? Tokens.Color.engagedChrome : Tokens.Color.label2
         refreshDisplay()
     }
 
-    /// Captures `trimMs` as the value Revert restores (D8). Call this exactly
-    /// once, right when the drawer opens for a device — `configure` alone
-    /// can't tell a fresh open from a routine refresh of an already-open
-    /// drawer.
     /// Whether the value field currently owns a live editing session — i.e.
     /// the user is typing in it right now. The host reads this before a
     /// structural repaint detaches this view, because detaching mid-edit ends
@@ -451,16 +510,11 @@ public final class BTSyncDrawerView: NSView {
     /// value back, and until then nothing has been written.
     ///
     /// Deliberately NOT `noteExternalTrimChange`: that is a gesture the user
-    /// already made, so it moves the model and the Revert baseline with it.
+    /// already made, so it moves the model with it.
     public func beginEditingSuggestedValue(_ ms: Double) {
         focusValueField()
         valueField.stringValue = "\(Int(BTSyncTrim.snap(ms)))"
         valueField.currentEditor()?.selectAll(nil)
-    }
-
-    public func noteOpened(trimMs: Double) {
-        openTimeMs = trimMs
-        refreshDisplay()
     }
 
     /// A trim written by something OUTSIDE the drawer while it stands open —
@@ -471,12 +525,10 @@ public final class BTSyncDrawerView: NSView {
     /// would go on SHOWING the pre-run value and commit it straight back over
     /// the measurement on its way out (live defect, 2026-08-22). This is a
     /// gesture in its own right, so it wins over a live edit exactly as the
-    /// steppers do, and it moves the Revert baseline with it: a nudge the run
-    /// just measured away is not a value to go back to.
+    /// steppers do.
     public func noteExternalTrimChange(_ ms: Double) {
         trimMs = ms
         isSet = true
-        openTimeMs = ms
         refreshDisplay()
         valueFieldEditor.overrideEditedValue(ms)
     }
@@ -499,24 +551,17 @@ public final class BTSyncDrawerView: NSView {
         applyCommit(clampToUsableRange(BTSyncTrim.snap(trimMs + deltaMs)))
     }
 
+    @objc private func alignAgainTapped(_ sender: NSButton) {
+        delegate?.syncDrawerDidRequestAlignmentWizard(self)
+    }
+
     @objc private func alignTapped(_ sender: NSButton) {
-        if optionIsHeld {
-            // ⌥-click asks for the guided wizard instead of the manual tick —
-            // undo the `pushOnPushOff` flip so the toggle never moves.
-            sender.state = sender.state == .on ? .off : .on
-            delegate?.syncDrawerDidRequestAlignmentWizard(self)
-            return
-        }
         // `pushOnPushOff` has already flipped the state; land the tint now
         // so the toggle reads immediately, before the host's re-apply echoes
         // it — mirrors `DeviceRowView.alignTapped` exactly.
         alignButton.contentTintColor = sender.state == .on
-            ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
+            ? Tokens.Color.engagedChrome : Tokens.Color.label2
         delegate?.syncDrawer(self, didToggleAlignTick: sender.state == .on)
-    }
-
-    @objc private func revertTapped(_ sender: NSButton) {
-        applyCommit(clampToUsableRange(openTimeMs))
     }
 
     /// Reset alignment: a gesture of this drawer's own, so it moves its OWN
@@ -524,12 +569,10 @@ public final class BTSyncDrawerView: NSView {
     /// is a background model push and by contract never overwrites text being
     /// edited, which would leave the field showing (and later committing) the
     /// value just cleared. Same reasoning as `noteExternalTrimChange`, but this
-    /// one lands on NOT-SET rather than on a value. The Revert baseline moves
-    /// with it: a nudge that has just been deleted is not a value to go back to.
+    /// one lands on NOT-SET rather than on a value.
     @objc private func resetTapped(_ sender: NSButton) {
         trimMs = 0
         isSet = false
-        openTimeMs = 0
         canReset = false
         refreshDisplay()
         valueFieldEditor.overrideEditedValue(0)
@@ -550,8 +593,8 @@ public final class BTSyncDrawerView: NSView {
         Swift.min(usableRangeMs.upperBound, Swift.max(usableRangeMs.lowerBound, ms))
     }
 
-    /// A discrete, complete gesture (stepper click, typed commit, Revert):
-    /// apply AND persist.
+    /// A discrete, complete gesture (stepper click or typed commit): apply
+    /// AND persist.
     ///
     /// `fromField` marks the typed-Return / focus-loss path, which arrives via
     /// the field editor's own commit and has already written the field. Every
@@ -567,12 +610,12 @@ public final class BTSyncDrawerView: NSView {
 
     private func refreshDisplay() {
         valueFieldEditor.setCommittedValue(trimMs, displayText: Self.fieldText(trimMs))
-        revertButton.isEnabled = BTSyncTrim.snap(trimMs) != BTSyncTrim.snap(openTimeMs)
         // Hidden, not disabled: with nothing stored there is nothing to explain
-        // — a permanently dead button beside Revert would only invite the
+        // — a permanently dead button in the band would only invite the
         // question. Nothing is anchored to it, so hiding it moves no other
         // control.
         resetButton.isHidden = !canReset
+        applyAlignAgainVisibility()
         // D7 (never a bare signed number with no direction) lives in the
         // spoken value and the field's tooltip — the visible number carries
         // its sign, and the row chip above the drawer states "N ms" for
@@ -598,8 +641,7 @@ public final class BTSyncDrawerView: NSView {
         "\(Int(BTSyncTrim.snap(ms))) ms"
     }
 
-    // MARK: ⇧ modifier seam (mirrors `SyncValueFieldEditor
-    // .test_optionModifierOverride`: a headless click carries no real
+    // MARK: ⇧ modifier seam (a headless click carries no real
     // `NSApp.currentEvent`, and in a narrowly filtered `swift test` run `NSApp`
     // itself — an implicitly-unwrapped optional — can still be nil, so this
     // reads it via `?`, never force-unwrapped.)
@@ -610,25 +652,27 @@ public final class BTSyncDrawerView: NSView {
         test_shiftModifierOverride ?? (NSApp?.currentEvent?.modifierFlags.contains(.shift) ?? false)
     }
 
-    /// Same seam for ⌥ (the align button's wizard relaunch).
-    public var test_optionModifierOverride: Bool?
-
-    private var optionIsHeld: Bool {
-        test_optionModifierOverride ?? (NSApp?.currentEvent?.modifierFlags.contains(.option) ?? false)
-    }
-
     // MARK: Test hooks — real dispatch through the exact delegate/action seam
     // (house convention, `AudioutSharedUI/AGENTS.md`)
 
     public var test_trimMs: Double { trimMs }
     public var test_isSet: Bool { isSet }
     public var test_usableRangeMs: ClosedRange<Double> { usableRangeMs }
-    public var test_revertEnabled: Bool { revertButton.isEnabled }
     /// Whether the "Reset alignment" button is on screen at all (it is hidden,
     /// not disabled, when there is nothing stored to clear).
     public var test_resetVisible: Bool { !resetButton.isHidden }
     public var test_resetTitle: String { resetButton.title }
     public var test_alignActive: Bool { alignButton.state == .on }
+    public var test_alignAgainTitle: String { alignAgainButton.title }
+    /// Whether the guided-wizard door is on screen at all (it is hidden, not
+    /// disabled, for a device with no wizard).
+    public var test_alignAgainVisible: Bool { !alignAgainButton.isHidden }
+    /// The band's leading buttons and the hint, for the layout guards.
+    public var test_bandFrames: (alignAgain: NSRect, align: NSRect, reset: NSRect,
+                                hint: NSRect, minus: NSRect) {
+        (alignAgainButton.frame, alignButton.frame, resetButton.frame,
+         hintLabel.frame, minusButton.frame)
+    }
     public var test_valueField: NSTextField { valueField }
     public var test_valueFieldText: String { valueField.stringValue }
     public var test_valueFieldIsBezeled: Bool { valueField.isBezeled }
@@ -650,8 +694,8 @@ public final class BTSyncDrawerView: NSView {
 
     public func test_fireMinusClick() { minusButton.performClick(nil) }
     public func test_firePlusClick() { plusButton.performClick(nil) }
+    public func test_fireAlignAgainClick() { alignAgainButton.performClick(nil) }
     public func test_fireAlignClick() { alignButton.performClick(nil) }
-    public func test_fireRevertClick() { revertButton.performClick(nil) }
     public func test_fireResetClick() { resetButton.performClick(nil) }
     public func test_fireCancelOperation() { cancelOperation(nil) }
 }

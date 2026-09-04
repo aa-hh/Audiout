@@ -70,9 +70,29 @@ public final class MembershipBusView: NSView {
     }
 
     private var node: Node = .nonMember
-    /// Dormant-divergent tint (spec §4.7): dim the node + line to `text-3` via
-    /// tint (not alpha) when the Selected set genuinely diverges from the active
-    /// group target.
+    /// De-emphasis tint (spec §4.7 dormant-divergent, and an unavailable
+    /// device): a tint, never alpha. It reaches the FILL only. The rim belongs
+    /// to the rail — the node is still ON the wire, still in the group — so a
+    /// dimmed `.member` keeps its rim in the spine's tone and fills its disc
+    /// with `socket` — the same unlit seat the route-armed dot rests in
+    /// when nothing is armed: same seat, gold lifted out. A hollow node has no
+    /// fill, so a dimmed `.nonMember` draws exactly like a live one — "not in
+    /// the group" already has nothing to grey out. `.failed` is never dimmed
+    /// (the red ring carries it); the whole-rail dormant tone is the overlay's
+    /// own flag, not this one.
+    ///
+    /// The seat is NOT `railDormant`, which is the WIRE's dormancy tone and is
+    /// pinned to a 3:1 floor against the surfaces. That floor is what parks it
+    /// beside the rim it has to be told from: `railDormant` measures 1.09:1
+    /// against dark `ember` and 1.09:1 against light `gold`, so on an idle
+    /// dark rail — or an armed light one — the rim was a hue edge with no
+    /// brightness behind it. A disc ringed by its own rim carries no ground
+    /// floor (the rim does that job), so the seat is free to drop clear of
+    /// both rim tones instead. Measured (WCAG luminance ratios): dark
+    /// `#4A443B` sits 1.92:1 from `ember` and 5.22:1 from `gold`; light
+    /// `#E0D8C6` sits 4.28:1 from `ember` and 2.92:1 from `gold`. Every dial
+    /// column x appearance x Increase-Contrast cell is swept by
+    /// `TokenContrastMatrixTests.dimmedNodeSeatSeparatesFromBothRimTones`.
     private var dimmed = false
     /// Whether the `.origin` hook draws GOLD (the Main Audio spine is armed —
     /// connected members are feeding it) vs the quiet `ember` idle tone (v4
@@ -86,6 +106,15 @@ public final class MembershipBusView: NSView {
     /// (`Tokens.Color.spineTone`). Defaults to true: the popover's rows ARE the
     /// live signal path and keep their gold unchanged.
     private var armed = true
+    /// Whether a dimmed `.member`'s rim draws at `busNodeDimmedRimWidth`
+    /// instead of the standard `busNodeRimWidth`. Off by default — the
+    /// popover's dimmed member is a CONFIGURATION divergence (a checked
+    /// device outside the active Main Out target, still fully reachable), and
+    /// doesn't need the extra weight. `MembershipRowView` (the Groups editor)
+    /// turns this on: there, `dimmed` means the checked device is physically
+    /// unavailable, and the thicker rim is what the row's own `Unavailable`
+    /// label already says in text.
+    public var emphasizesDimmedMemberRim = false
     /// Whether the pointer is over the row's bus-gutter region — the node
     /// RESIZES to ``postClickRadius(for:)``, the size it would rest at once the
     /// click lands, so the pointer previews the toggle instead of just admitting
@@ -234,19 +263,22 @@ public final class MembershipBusView: NSView {
             // place the rail's gap (on-spine) or detour arc (off-spine).
             let cx = bounds.midX
             let cy = bounds.midY
-            let ember = dimmed ? Tokens.Color.railDormant : Tokens.Color.ember
             let rect = NSRect(x: cx - r, y: cy - r, width: 2 * r, height: 2 * r)
             if node == .member {
-                // Filled disc + rim in the spine's own tone: gold on an armed
-                // rail, ember on an idle one (same split the wire draws with).
-                let fill = dimmed ? Tokens.Color.railDormant : Tokens.Color.spineTone(armed: armed)
+                // Rim in the spine's own tone: gold on an armed rail, ember on
+                // an idle one (same split the wire draws with). The fill is the
+                // same tone, or the unlit `socket` seat when dimmed — see
+                // `dimmed`.
+                let rim = Tokens.Color.spineTone(armed: armed)
+                let fill = dimmed ? Tokens.Color.socket : rim
                 fill.setFill()
                 NSBezierPath(ovalIn: rect).fill()
-                strokeNodeRim(in: rect, color: fill, dashed: false)
+                strokeNodeRim(in: rect, color: rim, dashed: false)
             } else {
                 // Hollow node: connecting = gold dashed, failed = heavier
-                // failure-red ring, non-member/blocked = plain rim.
-                strokeNodeRim(in: rect, color: rimColor(for: node, ember: ember),
+                // failure-red ring, non-member/blocked = plain ember rim.
+                // `dimmed` has nothing to reach here — there is no fill.
+                strokeNodeRim(in: rect, color: rimColor(for: node),
                               dashed: isDashed(node))
             }
         }
@@ -254,9 +286,14 @@ public final class MembershipBusView: NSView {
 
     /// Stroke a node's rim (hollow node border, or the filled node's edge).
     private func strokeNodeRim(in rect: NSRect, color: NSColor, dashed: Bool) {
-        let width: CGFloat = node == .failed
-            ? PopoverColumnGrid.haloRingFailedStroke
-            : PopoverColumnGrid.busNodeRimWidth
+        let width: CGFloat
+        if node == .failed {
+            width = PopoverColumnGrid.haloRingFailedStroke
+        } else if node == .member, dimmed, emphasizesDimmedMemberRim {
+            width = PopoverColumnGrid.busNodeDimmedRimWidth
+        } else {
+            width = PopoverColumnGrid.busNodeRimWidth
+        }
         let rim = NSBezierPath(ovalIn: rect.insetBy(dx: width / 2, dy: width / 2))
         rim.lineWidth = width
         if dashed {
@@ -267,13 +304,13 @@ public final class MembershipBusView: NSView {
         rim.stroke()
     }
 
-    /// The rim colour for a hollow node.
-    private func rimColor(for node: Node, ember: NSColor) -> NSColor {
+    /// The rim colour for a hollow node. Never dimmed: the rim is the rail's.
+    private func rimColor(for node: Node) -> NSColor {
         switch node {
-        case .connecting:              return dimmed ? Tokens.Color.railDormant : Tokens.Color.gold
-        case .failed:                  return Tokens.Color.failure  // never dimmed
+        case .connecting:              return Tokens.Color.gold
+        case .failed:                  return Tokens.Color.failure
         case .nonMember, .member,
-             .origin:                  return ember
+             .origin:                  return Tokens.Color.ember
         }
     }
 
@@ -337,8 +374,9 @@ public final class MembershipBusView: NSView {
     /// The node rendering currently drawn (structural hook — the same `node` the
     /// drawing reads, so it can't drift from the pixels).
     public var test_node: Node { node }
-    /// Whether this row's node is rendered dimmed via the dormant-divergent tint
-    /// (spec §4.7) — a tint, never alpha.
+    /// Whether this row's node FILL is the de-emphasis tint (`socket`) —
+    /// a tint, never alpha. The rim is never dimmed, and a hollow node has no
+    /// fill, so on a `.nonMember` this flag changes no pixel (see `dimmed`).
     public var test_dimmed: Bool { dimmed }
     /// The disc radius this row's node draws at THIS frame — mid-tween while a
     /// hover is travelling. Structural hook, same value `draw` reads, so it

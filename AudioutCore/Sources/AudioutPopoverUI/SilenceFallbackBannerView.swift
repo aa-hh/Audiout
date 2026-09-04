@@ -4,10 +4,10 @@ import AppKit
 import AudioutSharedUI
 
 /// The popover's "Speakers unreachable — playing on this Mac" banner (Wave 2
-/// W2-T2, R11). A stock system-orange rounded inset card with a warning glyph and
-/// a wrapping label — the same grouped-container warning look the onboarding
-/// permission-lost banner uses, rebuilt self-contained here so PopoverUI need not
-/// depend on OnboardingUI. System colors only; no custom drawing beyond the
+/// W2-T2, R11). The iOS Status Banner recipe: `Tokens.Color.failure` at 12 % on
+/// the control radius, no border, a warning glyph and a wrapping label. Built
+/// self-contained here so PopoverUI need not depend on OnboardingUI, whose
+/// permission-lost banner wears the same recipe. No custom drawing beyond the
 /// layer-backed rounded rect.
 final class SilenceFallbackBannerView: NSView {
 
@@ -26,7 +26,7 @@ final class SilenceFallbackBannerView: NSView {
         icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
                              accessibilityDescription: "Warning")
         icon.symbolConfiguration = .init(pointSize: 15, weight: .semibold)
-        icon.contentTintColor = Tokens.Color.warning
+        icon.contentTintColor = Tokens.Color.failure
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.setContentHuggingPriority(.required, for: .horizontal)
         icon.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -61,9 +61,8 @@ final class SilenceFallbackBannerView: NSView {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.cornerRadius = Tokens.Layout.bannerCornerRadius
+        layer?.cornerRadius = Tokens.Layout.Radius.control
         layer?.cornerCurve = .continuous
-        layer?.borderWidth = 1
         stampLayerColors()
 
         // The icon+text pair sits at its own natural (leading-hugging) width;
@@ -127,8 +126,7 @@ final class SilenceFallbackBannerView: NSView {
     /// idiom, so a dynamic token resolves for the appearance actually on screen.
     private func stampLayerColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = Tokens.Color.warning.withAlphaComponent(0.14).cgColor
-            layer?.borderColor = Tokens.Color.warning.withAlphaComponent(0.40).cgColor
+            layer?.backgroundColor = Tokens.Color.failure.withAlphaComponent(0.12).cgColor
         }
     }
 
@@ -139,15 +137,10 @@ final class SilenceFallbackBannerView: NSView {
     /// Simulate a click on the action button. No-op if there isn't one.
     func test_tapActionButton() { actionButtonTapped() }
 
-    /// The layer's currently-stamped fill/border, read back as `NSColor` —
-    /// asserts they resolve from `Tokens.Color.warning`, not a raw
-    /// `NSColor.systemOrange` literal.
+    /// The layer's currently-stamped fill, read back as `NSColor` — asserts it
+    /// resolves from `Tokens.Color.failure`, never a raw system-color literal.
     var test_backgroundColor: NSColor? {
         guard let cgColor = layer?.backgroundColor else { return nil }
-        return NSColor(cgColor: cgColor)
-    }
-    var test_borderColor: NSColor? {
-        guard let cgColor = layer?.borderColor else { return nil }
         return NSColor(cgColor: cgColor)
     }
 }

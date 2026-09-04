@@ -6,6 +6,7 @@
 import AVFoundation
 import CoreAudio
 import Foundation
+import ProbeKit
 
 extension ISO8601DateFormatter {
     /// Colons are legal in a macOS filename but the Finder shows them as `/`,

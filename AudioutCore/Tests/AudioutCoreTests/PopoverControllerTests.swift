@@ -450,7 +450,7 @@ import AudioutProtocol
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         let row = try #require(popover.test_deviceRow(for: "office"))
         #expect(row.isSelectedInSet, "selected after ON")
-        #expect(!(row.test_isShowingSelectedBackground), "popover row paints no selected-background pill, even when selected")
+        #expect(row.test_isShowingLiveWash == row.test_routeArmed, "the wash follows the armed predicate, not selection")
         #expect(row.test_isEnabledOn, "switch is ON")
         // The icon is neutral in BOTH states now (2026-07-17 redesign): identity
         // only, no accent-when-selected fill. Selection reads from the switch.
@@ -459,7 +459,7 @@ import AudioutProtocol
         // Toggle it OFF — the row must return to the unselected appearance.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
         #expect(!(row.isSelectedInSet), "not selected after OFF")
-        #expect(!(row.test_isShowingSelectedBackground), "deselected row paints NO selected background (no stale highlight)")
+        #expect(!(row.test_isShowingLiveWash), "a deselected row is not armed, so no wash")
         #expect(!(row.test_isHovered), "no stale hover wash after deselect")
         #expect(!(row.test_isEnabledOn), "switch returned to OFF")
         #expect(row.test_iconTint == Tokens.Color.secondaryLabel, "icon tint stays neutral (always secondary)")
@@ -1068,7 +1068,7 @@ import AudioutProtocol
     }
 
     /// Toggling a card flips its disclosure chevron symbol (`chevron.down`
-    /// expanded ⇄ `chevron.right` collapsed — GroupRowView precedent).
+    /// expanded ⇄ `chevron.right` collapsed).
     @Test func toggleFlipsChevronSymbol() async throws {
         let (popover, _, _) = try await makePopover()
         let title = "System Audio"
@@ -1545,7 +1545,7 @@ import AudioutProtocol
         #expect(popover.test_appRowCount == 2, "one AppRowView per route")
         #expect(popover.test_appRowBundleIDs() == ["com.example.music", "com.example.safari"], "rows render in stable appRoutes order")
         // The card exists and is the LAST card (after System + Selected Devices).
-        #expect(popover.test_isCardCollapsed(title: "App Exceptions") != nil, "the Applications card is present")
+        #expect(popover.test_isCardCollapsed(title: "App Routing") != nil, "the Applications card is present")
     }
 
     /// Empty state: no routes ⇒ the card is still present with zero app rows (just
@@ -1555,7 +1555,7 @@ import AudioutProtocol
         let (popover, _, _) = try await makePopover(appRouting: appRouting,
                                                      runningAppsProvider: routedApps)
         #expect(popover.test_appRowCount == 0, "no routes ⇒ no app rows")
-        #expect(popover.test_isCardCollapsed(title: "App Exceptions") != nil, "the card is still present as the empty state (Add row only)")
+        #expect(popover.test_isCardCollapsed(title: "App Routing") != nil, "the card is still present as the empty state (Add row only)")
     }
 
     /// A row's destination menu leads with the standalone "No Redirect" entry
@@ -2168,8 +2168,8 @@ import AudioutProtocol
     }
 
     /// The collapsed pop-up names the group the way Main Out's own dropdown
-    /// does, and the row wears the tether chip a device route wears.
-    @Test func aGroupRoutedRowNamesTheGroupAndWearsTheTetherChip() async throws {
+    /// does.
+    @Test func aGroupRoutedRowNamesTheGroup() async throws {
         let appRouting = tempAppRoutingController()
         seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
         let (popover, groups, backend) = try await makePopover(appRouting: appRouting,
@@ -2180,7 +2180,6 @@ import AudioutProtocol
 
         let row = try #require(popover.test_appRow(for: "com.example.music"))
         #expect(row.test_collapsedDestinationTitle == "→ Kitchen")
-        #expect(row.test_hasTetherChip, "a group route tethers to its speakers' FEED chips too")
     }
 
     /// Every eligible member's FEED column names the app — a group route fans
@@ -2318,7 +2317,7 @@ import AudioutProtocol
         let (popoverNone, _, _) = try await makePopover(appRouting: none,
                                                         runningAppsProvider: routedApps)
         popoverNone.test_simulateOpen()
-        #expect(popoverNone.test_isCardCollapsed(title: "App Exceptions") == true, "no routes ⇒ Applications starts collapsed")
+        #expect(popoverNone.test_isCardCollapsed(title: "App Routing") == true, "no routes ⇒ Applications starts collapsed")
 
         // A route on the neutral "No Redirect" default ⇒ NOW expanded (C5 change).
         let neutral = tempAppRoutingController()
@@ -2326,7 +2325,7 @@ import AudioutProtocol
         let (popoverNeutral, _, _) = try await makePopover(appRouting: neutral,
                                                            runningAppsProvider: routedApps)
         popoverNeutral.test_simulateOpen()
-        #expect(popoverNeutral.test_isCardCollapsed(title: "App Exceptions") == false, "any route (even .noRedirect) ⇒ Applications starts expanded (C5)")
+        #expect(popoverNeutral.test_isCardCollapsed(title: "App Routing") == false, "any route (even .noRedirect) ⇒ Applications starts expanded (C5)")
 
         // A redirected app ⇒ expanded on open (unchanged).
         let redirected = tempAppRoutingController()
@@ -2335,7 +2334,7 @@ import AudioutProtocol
         let (popover, _, _) = try await makePopover(appRouting: redirected,
                                                      runningAppsProvider: routedApps)
         popover.test_simulateOpen()
-        #expect(popover.test_isCardCollapsed(title: "App Exceptions") == false, "≥1 redirected app ⇒ Applications starts expanded")
+        #expect(popover.test_isCardCollapsed(title: "App Routing") == false, "≥1 redirected app ⇒ Applications starts expanded")
     }
 
     // MARK: Live level dispatch (task T8, extends the T5 meter wiring)
@@ -3454,5 +3453,114 @@ import AudioutProtocol
 
         popover.setSystemAirPlayNoteActive(false)
         #expect(popover.test_systemAirPlayNoteText == nil, "both conditions ended — the slot is empty")
+    }
+
+    // MARK: First-run cues on the Output Devices card
+
+    @Test func membershipHintShowsUntilTheFirstToggleThenStaysGone() async throws {
+        let (popover, _, backend) = try await makePopover()
+        var dismissed = false
+        popover.membershipHintShownProvider = { !dismissed }
+        popover.onMembershipHintDismissed = { dismissed = true }
+        popover.rebuild()
+        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [PopoverController.membershipHintText],
+                "a first-run user gets the hint on the Output Devices card")
+
+        // Through the ROW's own delegate seam — the dismissal lives in
+        // `deviceRow(_:didToggleEnabled:for:)`, which `test_toggleDeviceEnabled`
+        // deliberately bypasses.
+        popover.test_deviceRow(for: "office")?.test_toggleEnabled(true)
+        await drain(backend)
+        #expect(dismissed, "the first membership toggle in the Mixer retires the hint")
+        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [],
+                "…and the card rebuilds without it in the same gesture")
+
+        popover.test_deviceRow(for: "office")?.test_toggleEnabled(false)
+        await drain(backend)
+        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "it never comes back")
+
+        let (fresh, _, _) = try await makePopover()
+        fresh.rebuild()
+        #expect(fresh.test_cardNoteTexts(title: "Output Devices") == [],
+                "no provider wired means never shown — what keeps the snapshot tools unchanged")
+    }
+
+    @Test func outputDevicesLegendsCarryPlainSpeechTooltips() async throws {
+        let (popover, _, _) = try await makePopover()
+        #expect(popover.test_columnTitleToolTips(title: "Output Devices")
+                    == [PopoverController.sourceColumnHelp, PopoverController.offsetColumnHelp],
+                "both column legends explain themselves on hover")
+    }
+
+    // MARK: Card titles follow their rows' liveness
+
+    private func assertSameRGBA(_ a: NSColor?, _ b: NSColor, _ message: String) {
+        guard let a = a?.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else {
+            Issue.record("nil or non-convertible color: \(message)")
+            return
+        }
+        #expect(abs(a.redComponent - b.redComponent) <= 0.004, "red: \(message)")
+        #expect(abs(a.greenComponent - b.greenComponent) <= 0.004, "green: \(message)")
+        #expect(abs(a.blueComponent - b.blueComponent) <= 0.004, "blue: \(message)")
+        #expect(abs(a.alphaComponent - b.alphaComponent) <= 0.004, "alpha: \(message)")
+    }
+
+    /// The controller computes each card's liveness from its OWN model, so the
+    /// titles and the rows below them can never disagree — pinned here against
+    /// the rows' rendered armed state.
+    @Test func cardTitlesTintGoldWhileTheirRowsSound() async throws {
+        let (popover, _, backend) = try await makePopover()
+        // The fixture opens with only the Mac selected, so Main Out is
+        // local-only armed — sounding, even though no remote ring is lit and
+        // the row's armed dot stays dark.
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
+                       Tokens.Color.goldText, "the Mac alone is still the mix")
+        #expect(popover.test_mainOutRow.test_routeArmed == false)
+        for title in ["Output Devices", "App Routing"] {
+            assertSameRGBA(popover.test_cardHeaderTitleColor(title: title),
+                           Tokens.Color.label2, "\(title) starts silent")
+        }
+
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        popover.update(devices: backend.devices)
+
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
+                       Tokens.Color.goldText, "System Audio sounds")
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "Output Devices"),
+                       Tokens.Color.goldText, "Output Devices sounds")
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "App Routing"),
+                       Tokens.Color.label2, "no route, no gold")
+        #expect(popover.test_deviceRow(for: "office")?.test_routeArmed == true)
+        #expect(popover.test_mainOutRow.test_routeArmed == true)
+
+        popover.mainOutRow(popover.test_mainOutRow, didSetMuted: true)
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
+                       Tokens.Color.label2, "master mute silences System Audio")
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "Output Devices"),
+                       Tokens.Color.label2, "…and every device with it")
+        #expect(popover.test_deviceRow(for: "office")?.test_routeArmed == false)
+        #expect(popover.test_mainOutRow.test_routeArmed == false)
+    }
+
+    /// A redirect that is routed AND running is what makes the App Routing
+    /// title gold. The route is seeded BEFORE the popover exists: an
+    /// externally-added route triggers no rebuild.
+    @Test func appRoutingTitleTintsGoldForARunningRedirect() async throws {
+        let appRouting = tempAppRoutingController()
+        seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music",
+                  destination: .device(id: "office"))
+        let (popover, _, _) = try await makePopover(
+            appRouting: appRouting,
+            runningAppsProvider: { [RunningAppInfo(bundleID: "com.example.music",
+                                                   displayName: "Music", icon: nil)] })
+
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "App Routing"),
+                       Tokens.Color.goldText, "a running redirect sounds")
+        #expect(popover.test_appRow(for: "com.example.music")?.test_isFaderEngaged == true)
+
+        popover.applyRoutedAppRunning(bundleID: "com.example.music", isRunning: false)
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "App Routing"),
+                       Tokens.Color.label2, "the app quit, the route stops sounding")
     }
 }

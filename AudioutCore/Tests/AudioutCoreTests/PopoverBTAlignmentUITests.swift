@@ -6,8 +6,8 @@ import AppKit
 @testable import AudioutPopoverUI
 @testable import AudioutSharedUI
 
-/// W3/W4 at the popover level: the first-mix alignment card (mount, three
-/// actions, rebuild/close survival) and the wizard panel (every screen
+/// W3/W4 at the popover level: the first-join alignment note (mount, its two
+/// actions, rebuild/close survival) and the wizard sheet (every screen
 /// transition through REAL button dispatch — `performClick`, the same
 /// target/action AppKit runs; this repo was bitten by hooks bypassing
 /// dispatch). `.serialized` for the same reason `PopoverControllerTests` is.
@@ -37,9 +37,6 @@ import AppKit
         backend.start()
         waitFor { backend.devices.count == fleet.count }
         let recorder = Recorder()
-        popover.onResolveBTAlignmentPrompt = { id, dismissed in
-            recorder.resolves.append((id, dismissed))
-        }
         // Roadmap 056 Part A: a Bluetooth target's run MEASURES latency, and
         // SUSPENDS the device's trim while it does — so the two seams carry
         // different stories and are recorded apart. `previews`/`ends` are the
@@ -79,7 +76,6 @@ import AppKit
     }
 
     final class Recorder {
-        var resolves: [(id: String, dismissed: Bool)] = []
         var previews: [(ms: Double, id: String)] = []
         /// How sure the run was about each candidate — threaded through purely
         /// for the trial's telemetry line.
@@ -115,11 +111,11 @@ import AppKit
     /// The first-mix shape: the BT device SELECTED into a mix with the
     /// AirPlay speaker (the intercept only ever fires for a selected member,
     /// and the wizard refuses a target outside the user's audio intent).
-    private func showPrompt(_ popover: PopoverController, id: String = "bt-a:output") {
+    private func showNote(_ popover: PopoverController, id: String = "bt-a:output") {
         popover.update(devices: [local(), airplay(), bt(id)])
         popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         popover.test_toggleDeviceEnabled(deviceID: id, on: true)
-        popover.showBTAlignmentPrompt(deviceID: id)
+        popover.offerBTAlignment(deviceID: id)
     }
 
     /// Fire "Align speaker…" through real AppKit menu dispatch, found by
@@ -134,66 +130,102 @@ import AppKit
         return true
     }
 
-    // MARK: Card mount + copy
+    // MARK: Note mount + copy
 
-    @Test func promptMountsTheCardUnderTheRowWithTheLockedCopy() {
+    @Test func anOfferMountsTheNoteUnderTheRowWithTheLockedCopy() {
         let (popover, _) = makePopover()
-        showPrompt(popover)
-        let card = popover.test_btAlignmentPromptView()
-        #expect(card != nil)
-        #expect(card?.test_copyText == BTAlignmentPromptView.promptCopy)
-        #expect(card?.test_buttonTitles == ["Align with your music", "Align with ticks", "Not now"])
-        #expect(popover.test_btAlignmentPromptDeviceID() == "bt-a:output")
+        showNote(popover)
+        let note = popover.test_btAlignmentNoteView("bt-a:output")
+        #expect(note != nil)
+        #expect(note?.test_copyText == BTAlignmentNoteView.noteCopy(name: "Move 2"))
+        #expect(popover.test_btAlignmentOfferedIDs() == ["bt-a:output"])
     }
 
-    @Test func cardIntentSurvivesARebuildAndACloseReopen() {
+    @Test func theNoteSurvivesARebuildAndACloseReopen() {
         let (popover, _) = makePopover()
-        showPrompt(popover)
+        showNote(popover)
         popover.rebuild()
-        #expect(popover.test_btAlignmentPromptView() != nil, "a rebuild remounts the card")
+        #expect(popover.test_btAlignmentNoteView("bt-a:output") != nil,
+                "a rebuild remounts the note")
 
         popover.surfaceDidHide()
         popover.rebuild()   // the next open's rebuildForOpen path
-        #expect(popover.test_btAlignmentPromptView() != nil,
-                "the offer survives close/reopen — the backend's hold does too")
+        #expect(popover.test_btAlignmentNoteView("bt-a:output") != nil,
+                "the offer survives close/reopen — the speaker is still unaligned")
     }
 
-    // MARK: The three actions (real dispatch)
+    // MARK: The note's two actions (real dispatch)
 
-    @Test func notNowResolvesDismissedAndUnmounts() {
-        let (popover, recorder) = makePopover()
-        showPrompt(popover)
-        popover.test_btAlignmentPromptView()?.test_clickNotNow()
-        #expect(recorder.resolves.map(\.id) == ["bt-a:output"])
-        #expect(recorder.resolves.map(\.dismissed) == [true], "Not now records the FINAL dismissal")
-        #expect(popover.test_btAlignmentPromptView() == nil)
+    /// ✕ is a SESSION hide, not a record: the note goes, and a fresh offer for
+    /// the same id in the same session stays hidden. Nothing is written down —
+    /// the backend offers again on the next launch.
+    @Test func hidingTheNoteIsSessionOnly() {
+        let (popover, _) = makePopover()
+        showNote(popover)
+        popover.test_btAlignmentNoteView("bt-a:output")?.test_clickHide()
+        #expect(popover.test_btAlignmentNoteView("bt-a:output") == nil)
+
+        popover.offerBTAlignment(deviceID: "bt-a:output")
+        #expect(popover.test_btAlignmentNoteView("bt-a:output") == nil,
+                "a re-offer in the same session stays hidden")
+    }
+
+    /// Decision 3: the note stands until the speaker is MEASURED. A run
+    /// stopped before it measures anything leaves the speaker exactly as
+    /// unaligned as the note said, so the invitation has to come back.
+    @Test func stoppingTheWizardLeavesTheNoteStanding() {
+        let (popover, _) = makePopover()
+        showNote(popover)
+        popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
+        #expect(popover.test_btWizardIsOpen())
+
+        #expect(popover.test_btWizardView()?
+            .test_sendKey(keyCode: 53, characters: "\u{1b}") == true)
         #expect(popover.test_btWizardIsOpen() == false)
+        #expect(popover.test_btAlignmentNoteView("bt-a:output") != nil,
+                "nothing was measured, so the offer still stands")
+        #expect(popover.test_btAlignmentOfferedIDs() == ["bt-a:output"])
     }
 
-    @Test func alignWithMusicReleasesAndRoutesToTheSyncControl() {
-        let (popover, recorder) = makePopover()
-        showPrompt(popover)
-        popover.test_btAlignmentPromptView()?.test_clickAlignWithMusic()
-        #expect(recorder.resolves.map(\.dismissed) == [false], "unmute, no dismissal record")
-        #expect(popover.test_btAlignmentPromptView() == nil)
-        #expect(popover.test_btWizardIsOpen() == false,
-                "music path goes to the row's SYNC control, not the wizard")
-    }
-
-    @Test func alignWithTicksReleasesAndOpensTheWizard() {
-        let (popover, recorder) = makePopover()
-        showPrompt(popover)
-        popover.test_btAlignmentPromptView()?.test_clickAlignWithTicks()
-        #expect(recorder.resolves.map(\.dismissed) == [false], "the wizard needs the device audible")
-        #expect(popover.test_btAlignmentPromptView() == nil, "the wizard replaces the card")
+    @Test func clickingTheNoteOpensTheWizardWithTheNoteDoor() {
+        let (popover, _) = makePopover()
+        showNote(popover)
+        popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
         #expect(popover.test_btWizardIsOpen())
         #expect(popover.test_btWizardView()?.test_screen == .intro)
-        // The default reference is the Mac, so this pair spans two transports
-        // and the intro names the two sounds — see
-        // `theIntroNamesTheTwoSoundsOnlyWhenThePairMakesTwo`.
-        #expect(popover.test_btWizardView()?.test_bodyText
-                == BTAlignmentWizardView.introCopyNamingSounds(
-                    target: "Move 2", targetIsBluetooth: true, reference: "This Mac"))
+        // The note is NOT consumed by opening the wizard — the sheet covers
+        // it, and a run that measures nothing must leave the offer standing
+        // (`stoppingTheWizardLeavesTheNoteStanding`).
+        #expect(popover.test_btAlignmentNoteView("bt-a:output") != nil)
+    }
+
+    /// Two never-aligned speakers joining one mix each get their own note —
+    /// there is no queue and no one-at-a-time slot any more.
+    @Test func twoOffersMountTwoNotes() {
+        let (popover, _) = makeTwoNotes()
+        #expect(popover.test_btAlignmentNoteView("bt-a:output") != nil)
+        #expect(popover.test_btAlignmentNoteView("bt-b:output") != nil)
+        #expect(popover.test_btAlignmentOfferedIDs() == ["bt-a:output", "bt-b:output"])
+    }
+
+    /// The note is an invitation to MEASURE: once the speaker has a measured
+    /// latency there is nothing left to invite, and a speaker dropped out of
+    /// the mix has nothing to align against.
+    @Test func theNoteDropsWhenTheSpeakerIsMeasuredOrDeselected() {
+        let (popover, _) = makePopover()
+        showNote(popover)
+        popover.btLatencyProvider = { $0 == "bt-a:output" ? 320 : nil }
+        popover.rebuild()
+        #expect(popover.test_btAlignmentNoteView("bt-a:output") == nil,
+                "a measured speaker's note is gone")
+        #expect(popover.test_btAlignmentOfferedIDs().isEmpty,
+                "…and the offer with it, so a re-offer cannot revive it")
+
+        let (other, _) = makePopover()
+        showNote(other)
+        other.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: false)
+        #expect(other.test_btAlignmentNoteView("bt-a:output") == nil,
+                "a deselected speaker has nothing to align against")
     }
 
     /// The tick's two timbres are split by TRANSPORT, not by role: the
@@ -205,8 +237,8 @@ import AppKit
     /// giving is worse than saying nothing (research brief §1/§5).
     @Test func theIntroNamesTheTwoSoundsOnlyWhenThePairMakesTwo() {
         let (popover, _) = makePopover()
-        showPrompt(popover)
-        popover.test_btAlignmentPromptView()?.test_clickAlignWithTicks()
+        showNote(popover)
+        popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
         #expect(popover.test_btWizardView()?.test_bodyText
                 == "You’ll hear a bright click from Move 2 and a low knock from "
                 + "This Mac. Tap the one you hear first.")
@@ -218,70 +250,27 @@ import AppKit
         btOnly.update(devices: fleet)
         btOnly.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
         btOnly.test_toggleDeviceEnabled(deviceID: "bt-b:output", on: true)
-        btOnly.startBTAlignmentWizard(deviceID: "bt-a:output")
+        btOnly.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         #expect(btOnly.test_btWizardView()?.test_bodyText == BTAlignmentWizardView.introCopy)
     }
 
-    // MARK: Two never-aligned devices in one first mix — the queue
-
-    /// Two BT speakers selected into one first mix: both prompts arrive; the
-    /// second QUEUES behind the first card and mounts when it resolves, so
-    /// neither device's offer is dropped (its backend hold is only released
-    /// by ITS OWN card's resolution).
-    private func showTwoPrompts() -> (PopoverController, Recorder) {
+    /// Two BT speakers selected into one first mix, both offered.
+    private func makeTwoNotes() -> (PopoverController, Recorder) {
         let fleet = [local(), bt("bt-a:output", name: "A"), bt("bt-b:output", name: "B")]
         let (popover, recorder) = makePopover(fleet: fleet)
         popover.update(devices: fleet)
         popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
         popover.test_toggleDeviceEnabled(deviceID: "bt-b:output", on: true)
-        popover.showBTAlignmentPrompt(deviceID: "bt-a:output")
-        popover.showBTAlignmentPrompt(deviceID: "bt-b:output")
+        popover.offerBTAlignment(deviceID: "bt-a:output")
+        popover.offerBTAlignment(deviceID: "bt-b:output")
         return (popover, recorder)
-    }
-
-    @Test func aSecondPromptQueuesBehindTheFirstWithoutReleasingIt() {
-        let (popover, recorder) = showTwoPrompts()
-        #expect(recorder.resolves.isEmpty, "neither device's hold is touched while both offers stand")
-        #expect(popover.test_btAlignmentPromptDeviceID() == "bt-a:output",
-                "the first offer's card shows")
-        #expect(popover.test_btAlignmentPromptQueue() == ["bt-b:output"],
-                "…and the second waits its turn")
-    }
-
-    @Test func resolvingTheFirstCardMountsTheQueuedSecond() {
-        let (popover, recorder) = showTwoPrompts()
-        popover.test_btAlignmentPromptView()?.test_clickNotNow()
-        #expect(recorder.resolves.map(\.id) == ["bt-a:output"])
-        #expect(popover.test_btAlignmentPromptDeviceID() == "bt-b:output",
-                "any resolution frees the slot for the queued device")
-        #expect(popover.test_btAlignmentPromptView() != nil)
-        #expect(popover.test_btAlignmentPromptQueue().isEmpty)
-    }
-
-    @Test func queuedCardWaitsOutTheFirstDevicesWizardThenMounts() {
-        let (popover, recorder) = showTwoPrompts()
-        popover.test_btAlignmentPromptView()?.test_clickAlignWithTicks()
-        #expect(popover.test_btWizardIsOpen())
-        #expect(popover.test_btAlignmentPromptView() == nil,
-                "the wizard replaces the card; the queued offer never mounts beside it")
-        #expect(popover.test_btAlignmentPromptQueue() == ["bt-b:output"])
-
-        // The key, not the button — `theIntrosStopIsTheSameExitAsEscape`
-        // covers the button and proves the two land in the same place.
-        #expect(popover.test_btWizardView()?
-            .test_sendKey(keyCode: 53, characters: "\u{1b}") == true)
-        #expect(popover.test_btWizardIsOpen() == false)
-        #expect(popover.test_btAlignmentPromptDeviceID() == "bt-b:output",
-                "the wizard's close hands the slot to the queued device")
-        #expect(recorder.resolves.map(\.id) == ["bt-a:output"],
-                "the queued device's hold is still untouched")
     }
 
     // MARK: Wizard screens (every transition through real dispatch)
 
     private func openWizard(_ popover: PopoverController) -> BTAlignmentWizardView? {
-        showPrompt(popover)
-        popover.test_btAlignmentPromptView()?.test_clickAlignWithTicks()
+        showNote(popover)
+        popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
         return popover.test_btWizardView()
     }
 
@@ -430,6 +419,27 @@ import AppKit
         // The click count rides the title row's right slot — "about 15",
         // because a variable-length run has no exact total to give.
         #expect(wizard?.test_clickCountText == BTAlignmentWizardView.clickCountCopy(1))
+    }
+
+    /// Identity colour names WHICH speaker: green for the target, steel blue
+    /// for the reference. Magenta is group identity now, and never appears on
+    /// this sheet.
+    @Test func theAnswerPlatesWearGreenAndSteelBlueNeverMagenta() throws {
+        let (popover, _) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+
+        let target = try #require(wizard?.test_plateIdentityTint("Move 2")?
+            .usingColorSpace(.sRGB))
+        #expect(target.greenComponent > target.blueComponent
+                    && target.blueComponent > target.redComponent,
+                "the target plate is green-led, got \(target)")
+
+        let reference = try #require(wizard?.test_plateIdentityTint("This Mac")?
+            .usingColorSpace(.sRGB))
+        #expect(reference.blueComponent > reference.redComponent + 0.15
+                    && reference.greenComponent > reference.redComponent,
+                "the reference plate is blue-led, got \(reference)")
     }
 
     @Test func backUndoesTheLastAnswerAndReAsksThatTrial() {
@@ -639,13 +649,15 @@ import AppKit
         let (popover, recorder) = makePopover()
         var manualGates: [Bool] = []
         popover.onAlignTickActiveChange = { manualGates.append($0) }
-        showPrompt(popover)
-        // The metronome button lives in the sync drawer now (D9).
+        showNote(popover)
+        // The metronome button lives in the sync drawer now (D9). The host's
+        // own toggle, not the chip: this row must stay UNTUNED so its note
+        // stands, and an untuned Bluetooth chip is the wizard's door.
         popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
         popover.test_syncDrawer?.test_fireAlignClick()
         #expect(manualGates == [true])
 
-        popover.test_btAlignmentPromptView()?.test_clickAlignWithTicks()
+        popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
         popover.test_btWizardView()?.test_clickButton(titled: "Start")
         #expect(manualGates == [true, false], "one tick source at a time")
         #expect(recorder.ticks == [true])
@@ -735,11 +747,10 @@ import AppKit
             trims[id] = 0            // `endBTWizardLatencyPreview` writes both
         }
         _ = selectMixedBT(popover)
-        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
         #expect(popover.test_syncDrawer?.test_trimMs == 244)
 
-        popover.test_syncDrawer?.test_optionModifierOverride = true
-        popover.test_syncDrawer?.test_fireAlignClick()
+        popover.test_syncDrawer?.test_fireAlignAgainClick()
         let wizard = popover.test_btWizardView()
         wizard?.test_clickButton(titled: "Start")
         driveWizard(wizard, recorder, targetTitle: "Move 2", referenceTitle: "This Mac",
@@ -771,8 +782,6 @@ import AppKit
         let drawer = popover.test_syncDrawer
         #expect(drawer?.test_trimMs == 0, "the open drawer agrees with the store")
         #expect(drawer?.test_valueFieldText == "0 ms")
-        #expect(drawer?.test_revertEnabled == false,
-                "Revert's baseline moved with it — the suspended nudge is not a value to go back to")
 
         // The live stomp: the field commits whatever it is SHOWING when it
         // loses focus (the user clicking away, or the drawer closing), so a
@@ -804,7 +813,7 @@ import AppKit
         #expect(recorder.ends.map(\.keep) == [latencyMs], "Keep persists the measurement")
         // The nudge was a manual stand-in for exactly that latency; keeping both
         // would double the correction, so it starts fresh from the measurement.
-        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
         #expect(popover.test_syncDrawer?.test_trimMs == 0,
                 "the row's trim reads 0 after the run, not the pre-run −300")
     }
@@ -819,7 +828,7 @@ import AppKit
         popover.update(devices: fleet)
         popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
-        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         let wizard = popover.test_btWizardView()
         wizard?.test_clickButton(titled: "Start")
         #expect(wizard?.test_buttonTitles.first == longName)
@@ -838,7 +847,7 @@ import AppKit
         popover.update(devices: fleet)
         popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
-        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         let wizard = popover.test_btWizardView()
         wizard?.test_clickButton(titled: "Start")
         #expect(wizard?.test_clickCountText == "Click 1 of about 15")
@@ -858,20 +867,21 @@ import AppKit
         return popover.test_deviceRow(for: "bt-a:output")
     }
 
-    @Test func optionClickOnTheDrawerMetronomeOpensTheWizardPlainClickKeepsTheManualTick() {
+    @Test func theDrawersTwoDoorsAreSeparateButtons() {
         let (popover, _) = makePopover()
+        // A MEASURED speaker: the drawer belongs to a tuned row, and its chip
+        // is what opens it.
+        popover.btTrimIsSetProvider = { _ in true }
         _ = selectMixedBT(popover)
-        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
         let drawer = popover.test_syncDrawer
-        drawer?.test_optionModifierOverride = false
         drawer?.test_fireAlignClick()
         #expect(popover.test_alignTickDeviceID() == "bt-a:output",
-                "a plain click stays the manual tick")
+                "the metronome stays the manual tick")
         #expect(popover.test_btWizardIsOpen() == false)
 
-        drawer?.test_optionModifierOverride = true
-        drawer?.test_fireAlignClick()
-        #expect(popover.test_btWizardIsOpen(), "⌥-click opens the guided wizard")
+        drawer?.test_fireAlignAgainClick()
+        #expect(popover.test_btWizardIsOpen(), "Align again… opens the guided wizard")
         #expect(popover.test_alignTickDeviceID() == nil,
                 "…which stops the running manual tick (one tick source)")
         #expect(popover.test_syncDrawer?.test_alignActive == false,
@@ -890,48 +900,6 @@ import AppKit
         #expect(popover.test_deviceRow(for: "office")?.test_contextMenu()?.items.map(\.title)
                 == ["Equalizer…"],
                 "AirPlay rows carry the Equalizer door but no alignment item")
-    }
-
-    @Test func notNowIsFinalButTheWizardStaysReachableFromTheRow() {
-        let (popover, recorder) = makePopover()
-        showPrompt(popover)
-        popover.test_btAlignmentPromptView()?.test_clickNotNow()
-        #expect(recorder.resolves.map(\.dismissed) == [true])
-
-        #expect(fireAlignItem(popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()))
-        #expect(popover.test_btWizardIsOpen(),
-                "the FINAL dismissal only silences the auto-prompt, never the manual way in")
-    }
-
-    // MARK: The target is audible whichever door the wizard came through
-
-    /// A relaunch reaching a device whose card still stands (the ⌥/menu route,
-    /// which never went through the card's own action) releases the backend
-    /// hold and takes the card's place. A wizard over a held-silent target is
-    /// a run with nothing to hear — the live 2026-08-08 report.
-    @Test func aRelaunchOverAStandingCardReleasesTheHoldAndReplacesIt() {
-        let (popover, recorder) = makePopover()
-        showPrompt(popover)
-        #expect(recorder.resolves.isEmpty, "the hold stands while the card is up")
-
-        #expect(fireAlignItem(popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()))
-        #expect(popover.test_btWizardIsOpen())
-        #expect(recorder.resolves.map(\.id) == ["bt-a:output"])
-        #expect(recorder.resolves.map(\.dismissed) == [false],
-                "un-mute, and never record a dismissal the user didn't give")
-        #expect(popover.test_btAlignmentPromptView() == nil, "the wizard takes the card's place")
-        #expect(popover.test_btAlignmentPromptDeviceID() == nil)
-    }
-
-    /// A device waiting in the QUEUE gets the same treatment when the wizard
-    /// opens straight onto it — its hold would otherwise sit out the run.
-    @Test func aRelaunchOnAQueuedDeviceReleasesItsHoldAndDropsItFromTheQueue() {
-        let (popover, recorder) = showTwoPrompts()
-        #expect(popover.test_btAlignmentPromptQueue() == ["bt-b:output"])
-        popover.startBTAlignmentWizard(deviceID: "bt-b:output")
-        #expect(popover.test_btWizardIsOpen())
-        #expect(recorder.resolves.map(\.id) == ["bt-b:output"])
-        #expect(popover.test_btAlignmentPromptQueue().isEmpty)
     }
 
     // MARK: The reference speaker (default, engage, restore, change)
@@ -963,7 +931,7 @@ import AppKit
         popover.update(devices: fleet)
         popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
-        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         #expect(popover.test_btWizardReferenceID() == "office")
         #expect(popover.test_btWizardEngagedReferenceID() == nil,
                 "an already-audible reference is left exactly as the user had it")
@@ -979,7 +947,7 @@ import AppKit
         popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
         #expect(popover.test_isSpeakerSelected("office") == false)
 
-        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         #expect(popover.test_btWizardReferenceID() == "office")
         #expect(popover.test_btWizardEngagedReferenceID() == "office")
         #expect(popover.test_isSpeakerSelected("office"),
@@ -1006,7 +974,7 @@ import AppKit
         let (popover, _) = makePopover(fleet: fleet)
         popover.update(devices: fleet)
         popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
-        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         let wizard = popover.test_btWizardView()
         wizard?.test_clickButton(titled: "Start")
         #expect(popover.test_isSpeakerSelected("office"))
@@ -1030,7 +998,7 @@ import AppKit
         let (popover, _) = makePopover(fleet: fleet)
         popover.update(devices: fleet)
         popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
-        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         popover.test_btWizardView()?.test_clickButton(titled: "Start")
         #expect(popover.test_isSpeakerSelected("office"))
 
@@ -1062,7 +1030,7 @@ import AppKit
         let (popover, recorder) = makePopover(fleet: fleet)
         popover.update(devices: fleet)
         popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
-        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         let wizard = popover.test_btWizardView()
         wizard?.test_clickButton(titled: "Start")
         wizard?.test_clickButton(titled: "Move 2")
@@ -1091,7 +1059,7 @@ import AppKit
         let (popover, recorder) = makePopover(fleet: fleet)
         popover.update(devices: fleet)
         popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
-        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         let wizard = popover.test_btWizardView()
         wizard?.test_clickButton(titled: "Start")
         #expect(recorder.tickTargets == ["bt-a:output"])
@@ -1134,7 +1102,7 @@ import AppKit
         let (popover, recorder) = makePopover(fleet: fleet)
         popover.update(devices: fleet)
         popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
-        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         let wizard = popover.test_btWizardView()
         #expect(popover.test_btWizardReferenceID() == nil)
         #expect(wizard?.test_referenceLineText == BTAlignmentWizardView.noReferenceCopy)
@@ -1161,7 +1129,7 @@ import AppKit
     /// button's real dispatch it leaves exactly the state the key leaves.
     @Test func theIntrosStopIsTheSameExitAsEscape() {
         func endTheIntro(byStop: Bool)
-            -> (open: Bool, ticks: [Bool], endRuns: Int, resolved: [String]) {
+            -> (open: Bool, ticks: [Bool], endRuns: Int) {
             let (popover, recorder) = makePopover()
             let wizard = openWizard(popover)
             #expect(wizard?.test_screen == .intro)
@@ -1172,8 +1140,7 @@ import AppKit
             } else {
                 #expect(wizard?.test_sendKey(keyCode: 53, characters: "\u{1b}") == true)
             }
-            return (popover.test_btWizardIsOpen(), recorder.ticks, recorder.endRuns,
-                    recorder.resolves.map(\.id))
+            return (popover.test_btWizardIsOpen(), recorder.ticks, recorder.endRuns)
         }
         let stopped = endTheIntro(byStop: true)
         #expect(stopped.open == false, "Stop closes the sheet from the intro")
@@ -1189,7 +1156,7 @@ import AppKit
         let (popover, _) = makePopover(fleet: fleet)
         popover.update(devices: fleet)
         popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
-        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         let wizard = popover.test_btWizardView()
         #expect(popover.test_btWizardReferenceID() == "mac")
         #expect(wizard?.test_referenceLineText == "Compare against This Mac")
@@ -1208,7 +1175,11 @@ import AppKit
     @Test func aPreviouslyMeasuredSpeakerOpensOnTheProposal() {
         let (popover, recorder) = makePopover()
         popover.btLatencyProvider = { $0 == "bt-a:output" ? 244 : nil }
-        let wizard = openWizard(popover)
+        // A measured speaker gets no note (it has nothing left to be invited
+        // to) — its drawer's "Align again…" is the door back in.
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        let wizard = popover.test_btWizardView()
         wizard?.test_clickButton(titled: "Start")
         #expect(wizard?.test_screen == .proposal(valueMs: 244),
                 "got \(String(describing: wizard?.test_screen))")
@@ -1233,7 +1204,7 @@ import AppKit
         // outside the user's audio intent.
         popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         popover.test_toggleDeviceEnabled(deviceID: "mac", on: true)
-        popover.startBTAlignmentWizard(deviceID: "mac")
+        popover.startBTAlignmentWizard(deviceID: "mac", door: .menu)
         let wizard = popover.test_btWizardView()
         wizard?.test_clickButton(titled: "Start")
         guard case .question? = wizard?.test_screen else {
@@ -1423,9 +1394,45 @@ import AppKit
         // proves the guard now.
         #expect(popover.test_deviceRow(for: "bt-a:output") == nil,
                 "the un-live target is off the list entirely")
-        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         #expect(popover.test_btWizardIsOpen() == false,
                 "an un-live target never opens — the same conditions that tear one down")
+    }
+
+    /// A CONNECTED speaker outside the mix is NOT an un-live one. The run
+    /// measures a speaker that is playing, so the click joins it rather than
+    /// refusing — a door that is offered has to open.
+    @Test func alignJoinsAConnectedTargetThatIsNotInTheMixYet() {
+        let (popover, _) = makePopover()
+        popover.btTrimIsSetProvider = { _ in false }
+        popover.update(devices: [local(), airplay(), bt()])
+        popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        #expect(popover.test_isSpeakerSelected("bt-a:output") == false,
+                "the target starts outside the mix")
+
+        popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
+
+        #expect(popover.test_isSpeakerSelected("bt-a:output"),
+                "the untuned chip's click puts the speaker into the mix")
+        #expect(popover.test_btWizardIsOpen(), "…and opens the run on it")
+    }
+
+    /// The join is the user's, not the run's. The REFERENCE is borrowed and
+    /// handed back on the way out (`releaseBTWizardReference`); the TARGET was
+    /// asked for by name, so it stays in the mix after the run ends.
+    @Test func aTargetJoinedByTheAlignClickStaysInTheMixAfterTheRun() {
+        let fleet = [airplay("office"), bt()]
+        let (popover, _) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .chip)
+        #expect(popover.test_isSpeakerSelected("bt-a:output"))
+
+        popover.test_btWizardView()?.test_clickButton(titled: BTAlignmentWizardView.stopTitle)
+
+        #expect(popover.test_btWizardIsOpen() == false)
+        #expect(popover.test_isSpeakerSelected("bt-a:output"),
+                "the speaker the user asked to align keeps its seat in the mix")
     }
 
     // MARK: Reset alignment (roadmap 056) — the way back out of a Keep
@@ -1434,7 +1441,7 @@ import AppKit
     /// shows it — and the drawer's Reset is the one way to clear it. The row
     /// must return to "Not set" straight away, off the popover's own caches,
     /// without waiting for a backend push.
-    @Test func resetClearsTheStoredAlignmentAndReturnsTheChipToNotSet() {
+    @Test func resetClearsTheStoredAlignmentAndReturnsTheChipToItsAlignDoor() {
         let (popover, recorder) = makePopover()
         var latency: Double? = 429
         var trimIsSet = false
@@ -1457,9 +1464,31 @@ import AppKit
 
         drawer?.test_fireResetClick()
         #expect(recorder.resets == ["bt-a:output"], "one clear, for this device only")
-        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "Not set")
+        // A cleared BLUETOOTH speaker is never-measured again, so its chip is
+        // the wizard's door once more — not a readout of nothing.
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "Align")
         #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipIsDashed == true,
                 "back to the dashed invitation")
+    }
+
+    /// Reset flips a Bluetooth row's chip to the wizard's door, so the chip
+    /// can no longer close the drawer it opened — leaving one standing with no
+    /// way out. The reset collapses it instead.
+    @Test func resettingABluetoothRowCollapsesTheDrawerItLeftDoorless() {
+        let (popover, _) = makePopover()
+        var latency: Double? = 429
+        popover.btLatencyProvider = { _ in latency }
+        popover.btTrimIsSetProvider = { _ in false }
+        popover.onResetBTAlignment = { _ in latency = nil }
+        popover.update(devices: [local(), airplay(), bt()])
+
+        popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
+        #expect(popover.test_expandedSyncDeviceID == "bt-a:output")
+
+        popover.test_syncDrawer?.test_fireResetClick()
+        #expect(popover.test_expandedSyncDeviceID == nil,
+                "the drawer goes with the chip that opened it")
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "Align")
     }
 
     @Test func resetIsNotOfferedForADeviceWithNothingStored() {
@@ -1467,7 +1496,124 @@ import AppKit
         popover.btLatencyProvider = { _ in nil }
         popover.btTrimIsSetProvider = { _ in false }
         popover.update(devices: [local(), airplay(), bt()])
-        popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
+        // An untuned Bluetooth chip is the wizard's door, so the drawer is
+        // reached through the host's own toggle here.
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
         #expect(popover.test_syncDrawer?.test_resetVisible == false)
+    }
+}
+
+/// The wizard's four doors, asserted on the REAL `bt_sync:wizard_started`
+/// event rather than on the enum's spelling.
+///
+/// Nested under `SerializedSharedState` because `Analytics.install` mutates
+/// process-global state — the rule in `SerializedSharedStateSuite.swift`. The
+/// parent suite above stays parallel; only this handful of tests pays for the
+/// global sink.
+extension SerializedSharedState {
+    @MainActor
+    @Suite struct WizardDoorAnalyticsTests {
+
+        private final class Captured: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [(String, [String: String])] = []
+            func append(_ name: String, _ props: [String: String]) {
+                lock.withLock { items.append((name, props)) }
+            }
+            /// The `door` property of every `bt_sync:wizard_started` captured.
+            func doors() -> [String?] {
+                lock.withLock {
+                    items.filter { $0.0 == "bt_sync:wizard_started" }.map { $0.1["door"] }
+                }
+            }
+        }
+
+        private func local() -> Device {
+            Device(id: "mac", name: "This Mac", kind: .localMac, isLocalDevice: true)
+        }
+
+        private func bt() -> Device {
+            Device(id: "bt-a:output", name: "Move 2", kind: .bluetooth,
+                   isAvailable: true, supportsAirPlay2: false)
+        }
+
+        /// A popover over a started `MockBackend`, with the Bluetooth speaker
+        /// in a mix so the wizard will accept it as a target. `tuned` decides
+        /// which door the row's own chip is.
+        private func makePopover(tuned: Bool) -> PopoverController {
+            let fleet = [local(), Device(id: "office", name: "Office", kind: .homePod), bt()]
+            let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            let controller = GroupController(
+                backend: backend,
+                store: GroupStore(directory: FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString, isDirectory: true)),
+                routingStore: RoutingStore(directory: FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString, isDirectory: true)),
+                loadPersisted: false)
+            let popover = PopoverController()
+            popover.configure(groupController: controller)
+            popover.test_isShownOverride = true
+            backend.start()
+            SuiteWait.untilOnRunLoop { backend.devices.count == fleet.count }
+            popover.btTrimIsSetProvider = { _ in tuned }
+            popover.update(devices: fleet)
+            popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+            popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+            return popover
+        }
+
+        /// Runs `body` with a consenting sink installed and hands back the
+        /// doors it captured.
+        private func doorsCaptured(_ body: () -> Void) -> [String?] {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+            body()
+            return captured.doors()
+        }
+
+        @Test func theNoteDoorIsCaptured() {
+            let popover = makePopover(tuned: false)
+            let doors = doorsCaptured {
+                popover.offerBTAlignment(deviceID: "bt-a:output")
+                popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
+            }
+            #expect(popover.test_btWizardIsOpen())
+            #expect(doors == ["note"])
+        }
+
+        @Test func theChipDoorIsCaptured() {
+            let popover = makePopover(tuned: false)
+            let doors = doorsCaptured {
+                popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
+            }
+            #expect(popover.test_btWizardIsOpen())
+            #expect(doors == ["chip"])
+        }
+
+        @Test func theMenuDoorIsCaptured() throws {
+            let popover = makePopover(tuned: false)
+            let menu = try #require(popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu())
+            let index = try #require(menu.items.firstIndex { $0.title == "Align speaker…" })
+            let doors = doorsCaptured {
+                menu.performActionForItem(at: index)   // real AppKit menu dispatch
+            }
+            #expect(popover.test_btWizardIsOpen())
+            #expect(doors == ["menu"])
+        }
+
+        @Test func theDrawerDoorIsCaptured() {
+            // A measured speaker: its chip opens the drawer, whose
+            // "Align again…" is the door under test.
+            let popover = makePopover(tuned: true)
+            popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
+            let doors = doorsCaptured {
+                popover.test_syncDrawer?.test_fireAlignAgainClick()
+            }
+            #expect(popover.test_btWizardIsOpen())
+            #expect(doors == ["drawer"])
+        }
     }
 }

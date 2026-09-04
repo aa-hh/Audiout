@@ -17,8 +17,9 @@ import AudioutSharedUI
 ///   half-width thresholds of its own — a word boundary and a look boundary
 ///   are physically the same constant, in ``AlignmentStageView/Rung``.
 /// - **Identity color names WHICH speaker, never state.** The target plate
-///   wears `syncSignal`, the reference plate `partySignal` (their Deep
-///   companions in light mode) — resolved HERE, per `effectiveAppearance`,
+///   wears `wireCore`, the reference plate `ring` (the target's Deep
+///   companion / `ring`'s own light hex at 0.9 in light mode) — resolved
+///   HERE, per `effectiveAppearance`,
 ///   and handed to the plate cell, which never picks a hue itself. Gold
 ///   stays the app's "is it live" voice and is spent only on the one primary
 ///   plate per screen.
@@ -259,7 +260,6 @@ public final class BTAlignmentWizardView: NSView {
     private static let answerPlateWidth: CGFloat = 236
     private static let answerPlateHeight: CGFloat = 88
     private static let answerPlateGap: CGFloat = 32
-    private static let answerPlateFont = NSFont.systemFont(ofSize: 15, weight: .semibold)
     /// The unsettled screen's three-up: 160 × 3 + 12 × 2 also fills the width.
     private static let narrowPlateWidth: CGFloat = 160
     private static let togetherBarWidth: CGFloat = 400
@@ -332,7 +332,7 @@ public final class BTAlignmentWizardView: NSView {
         titleLabel.font = Tokens.Font.bodyEmphasized
         titleLabel.textColor = Tokens.Color.label
         clickCountLabel.font = Tokens.Font.caption
-        clickCountLabel.textColor = Tokens.Color.inkSecondary
+        clickCountLabel.textColor = Tokens.Color.label2
         clickCountLabel.alignment = .right
         // The two slots are pinned to OPPOSITE edges of a plain container, so
         // nothing but this stops a long device name running straight under
@@ -491,21 +491,25 @@ public final class BTAlignmentWizardView: NSView {
         effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
     }
 
-    /// The tint carries the plate RIM's alpha. Dark = the electric value at
+    /// The tint carries the plate RIM's alpha. Dark = the light's own hex at
     /// FULL strength (owner ruling 2026-08-23, over spec §2.1's 0.45: at
     /// 0.45 the rims measured olive and mauve, 45% of the lights' chroma —
-    /// the plates did not wear the lights' colour); light = the Deep
-    /// companion at 0.9. The cell restores full alpha for the keycap glyph.
+    /// the plates did not wear the lights' colour); light = the token's own
+    /// light hex at 0.9. The target reaches its light hex through
+    /// `syncSignalDeep`; `ring` carries its own, so the reference needs no
+    /// Deep companion. Composited on the flat light ground the reference rim
+    /// measures 4.45:1, and the cell restores full alpha for the keycap glyph
+    /// (5.47:1).
     private var targetTint: NSColor {
         isDarkAppearance
-            ? Tokens.Color.syncSignal
+            ? Tokens.Color.wireCore
             : Tokens.Color.syncSignalDeep.withAlphaComponent(Self.lightRimAlpha)
     }
 
     private var referenceTint: NSColor {
         isDarkAppearance
-            ? Tokens.Color.partySignal
-            : Tokens.Color.partySignalDeep.withAlphaComponent(Self.lightRimAlpha)
+            ? Tokens.Color.ring
+            : Tokens.Color.ring.withAlphaComponent(Self.lightRimAlpha)
     }
 
     private static let lightRimAlpha: CGFloat = 0.9
@@ -681,7 +685,7 @@ public final class BTAlignmentWizardView: NSView {
             let reference = makePlate(referenceName, keycap: "→", tint: referenceTint,
                                       action: #selector(referenceClicked(_:)),
                                       width: Self.answerPlateWidth, height: Self.answerPlateHeight)
-            for plate in [target, reference] { plate.font = Self.answerPlateFont }
+            for plate in [target, reference] { plate.font = Tokens.Font.plateTitle }
             targetPlate = target
             referencePlate = reference
             addEdgePlateRow(target, reference, gap: Self.answerPlateGap)
@@ -878,7 +882,7 @@ public final class BTAlignmentWizardView: NSView {
         line.append(NSAttributedString(
             string: " · " + word,
             attributes: [.font: Tokens.Font.caption,
-                         .foregroundColor: Tokens.Color.inkSecondary,
+                         .foregroundColor: Tokens.Color.label2,
                          .paragraphStyle: centred]))
         return line
     }
@@ -897,14 +901,14 @@ public final class BTAlignmentWizardView: NSView {
     }
 
     /// The Warm Signal micro-label voice (One Case rule, roadmap 059): plain
-    /// semibold at `inkSecondary`, sentence case as authored — the corner
+    /// semibold at `label2`, sentence case as authored — the corner
     /// rows' `⌘Z`/`ESC` key chips, and nothing else on this sheet since the
     /// title row stopped being a nameplate.
     private func applyMicroVoice(_ field: NSTextField, _ text: String) {
         field.attributedStringValue = NSAttributedString(
             string: text,
             attributes: [.font: Tokens.Font.microLabel,
-                         .foregroundColor: Tokens.Color.inkSecondary])
+                         .foregroundColor: Tokens.Color.label2])
         // MANDATORY, and the reason is invisible until you measure it: a
         // label left in the default multi-line mode publishes no HORIZONTAL
         // content-size constraint, so Auto Layout is free to hand it zero
@@ -926,13 +930,13 @@ public final class BTAlignmentWizardView: NSView {
         stage.onLockedSettled = { [weak self] in self?.crossfadeReadout(text) }
     }
 
-    /// The stage's caption voice — caption-size tabular digits in
-    /// `inkSecondary` (tabular, so the centred line doesn't shimmy as the
-    /// numbers change); the proposal's number is the one hero readout.
+    /// The stage's caption voice — caption-size semibold tabular digits (iOS
+    /// Readout weight) in `label2` (tabular, so the centred line doesn't
+    /// shimmy as the numbers change); the proposal's hero readout differs by
+    /// ink, not weight.
     private func styleReadout(hero: Bool) {
-        readout.font = .monospacedDigitSystemFont(
-            ofSize: NSFont.smallSystemFontSize, weight: hero ? .semibold : .regular)
-        readout.textColor = hero ? Tokens.Color.label : Tokens.Color.inkSecondary
+        readout.font = Tokens.Font.readout
+        readout.textColor = hero ? Tokens.Color.label : Tokens.Color.label2
     }
 
     /// Which screens print a caption under the stage. Driven off the SCREEN,
@@ -969,13 +973,13 @@ public final class BTAlignmentWizardView: NSView {
 
     // MARK: Content bands
 
-    /// Plain speech: body regular, `inkSecondary`, centred, wrapping at the
+    /// Plain speech: body regular, `label2`, centred, wrapping at the
     /// together bar's measure. Never the loudest text on a screen — the
     /// plates and the readout are.
     private func addBody(_ text: String, hero: Bool = false) {
         let label = NSTextField(wrappingLabelWithString: text)
         label.font = hero ? Tokens.Font.bodyEmphasized : Tokens.Font.body
-        label.textColor = hero ? Tokens.Color.label : Tokens.Color.inkSecondary
+        label.textColor = hero ? Tokens.Color.label : Tokens.Color.label2
         label.alignment = .center
         label.preferredMaxLayoutWidth = Self.bodyMeasure
         contentStack.addArrangedSubview(label)
@@ -1054,7 +1058,7 @@ public final class BTAlignmentWizardView: NSView {
     private func makeCaption(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)
         label.font = Tokens.Font.caption
-        label.textColor = Tokens.Color.inkSecondary
+        label.textColor = Tokens.Color.label2
         return label
     }
 
@@ -1176,8 +1180,8 @@ public final class BTAlignmentWizardView: NSView {
     /// yet" reads exactly like "undo is right here".
     private func styleCornerButton(_ button: NSButton) {
         let ink = button.isEnabled
-            ? Tokens.Color.inkSecondary
-            : Tokens.Color.inkSecondary
+            ? Tokens.Color.label2
+            : Tokens.Color.label2
                 .withAlphaComponent(PopoverColumnGrid.faderDisabledAlpha)
         button.attributedTitle = NSAttributedString(
             string: button.title,
@@ -1303,6 +1307,14 @@ public final class BTAlignmentWizardView: NSView {
     var test_buttonIsEnabled: (String) -> Bool {
         { [weak self] title in
             self?.actionButtons.first { $0.title == title }?.isEnabled ?? false
+        }
+    }
+    /// The identity tint a named plate is wearing — which speaker its rim and
+    /// keycap chip say it is.
+    var test_plateIdentityTint: (String) -> NSColor? {
+        { [weak self] title in
+            (self?.actionButtons.first { $0.title == title } as? AlignmentPlateButton)?
+                .test_identityTint
         }
     }
     var test_referenceLineText: String? { referenceLineLabel?.stringValue }

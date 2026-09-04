@@ -19,10 +19,10 @@ import AudioutCore
 ///   form instead.
 /// - `.connecting` / `.reconnecting` → **dashed ring, breathing** (opacity +
 ///   scale pulse). Under Reduce Motion the dashed FORM survives, STATIC (no
-///   animation) — "incomplete", legible frozen. Same `ringConnected` hue as
-///   connected: form, not color, carries pending (spec §3.2 "zero new colors").
-/// - `.connected` → **solid quiet ring**, `ringConnected` token (hue-neutral
-///   warm-grey), stroke ~1.6 pt. Tested ≥3:1 vs the panel at `haloRingDiameter`
+///   animation) — "incomplete", legible frozen. The steel-blue `ring` token:
+///   the connecting form carries colour as well as dash.
+/// - `.connected` → **solid quiet ring**, the shared cool `rim` token,
+///   stroke ~1.6 pt. Tested ≥3:1 vs the panel at `haloRingDiameter`
 ///   (26 px, Warm Signal v4.1 item 2), both themes.
 /// - `.failed` → **red solid ring**, `failure` token, stroke ~1.8 pt (heavier so
 ///   the failed row wins the scan beside flickering meters).
@@ -31,8 +31,8 @@ import AudioutCore
 ///   `.off` because there's no remote AirPlay handshake to track (the
 ///   `mainOutConnectionState` fallthrough is correct and untouched). Without
 ///   this form the rail's curve into the ring (`BusRailOverlayView`) lands on
-///   a hidden ring and reads as unfinished. Renders the SHARED, hue-neutral
-///   `ringConnected` token at the SHARED `haloRingConnectedStroke` (1.6 pt) —
+///   a hidden ring and reads as unfinished. Renders the SHARED cool
+///   `rim` token at the SHARED `haloRingConnectedStroke` (1.6 pt) —
 ///   deliberately thinner than Main Audio's bespoke gold/ember
 ///   `mainAudioRingConnectedStroke` (2 pt, matched to the rail's own
 ///   `busLineWidth`) and never recolored via `connectedSpineArmed`/
@@ -69,13 +69,13 @@ public final class HaloRingView: NSView {
         /// `.connecting` / `.reconnecting` — dashed, breathing (static under
         /// Reduce Motion).
         case connecting
-        /// `.connected` — solid quiet ring, `ringConnected`.
+        /// `.connected` — solid quiet ring, `rim`.
         case connected
         /// `.failed` — solid red ring, `failure`, heavier stroke.
         case failed
         /// Main Audio only: armed local-only playback with no remote target
         /// to track (`state == .off && restingArmed == true`) — solid quiet
-        /// ring at the shared `ringConnected` hue and shared (thinner)
+        /// ring at the shared `rim` hue and shared (thinner)
         /// `haloRingConnectedStroke`, never the Main Audio gold/ember
         /// override, so it reads as distinct from a real `.connected` ring.
         case resting
@@ -119,12 +119,12 @@ public final class HaloRingView: NSView {
         didSet { updateLayerAppearance() }
     }
     /// Makes the **connected** form wear the rail's SPINE TONE instead of the
-    /// shared `ringConnected` token (Warm Signal nitpicks): the Main Audio ring
+    /// shared `rim` token (Warm Signal nitpicks): the Main Audio ring
     /// is the rail's terminus, so its connected color must match whatever tone
     /// the rail's curve is drawn in for the join to read as one continuous line
     /// rather than two different colors touching. `true`/`false` = the spine is
-    /// armed / not; `nil` (every device row) keeps the hue-neutral
-    /// `Tokens.Color.ringConnected`, untouched by the accent dial.
+    /// armed / not; `nil` (every device row) keeps the shared
+    /// `Tokens.Color.rim`, untouched by the accent dial.
     ///
     /// It carries the armed STATE, never a resolved color: the tone itself
     /// comes from `Tokens.Color.spineTone(armed:)` at stamp time — the same
@@ -243,12 +243,12 @@ public final class HaloRingView: NSView {
             width = 0
             dashed = false
         case .connecting:
-            strokeToken = Tokens.Color.ringConnected
+            strokeToken = Tokens.Color.ring
             width = PopoverColumnGrid.haloRingConnectingStroke
             dashed = true
         case .connected:
             strokeToken = connectedSpineArmed.map(Tokens.Color.spineTone(armed:))
-                ?? Tokens.Color.ringConnected
+                ?? Tokens.Color.rim
             width = connectedStrokeWidthOverride ?? PopoverColumnGrid.haloRingConnectedStroke
             dashed = false
         case .failed:
@@ -259,11 +259,11 @@ public final class HaloRingView: NSView {
             // Deliberately NOT `connectedSpineArmed`/
             // `connectedStrokeWidthOverride` — those exist so a real
             // `.connected` ring can match the rail's gold/ember + matched
-            // stroke. `.resting` stays the shared hue-neutral token at the
+            // stroke. `.resting` stays the shared cool `rim` at the
             // shared (thinner) stroke so it never wears that combination —
             // the one visual signature Main Audio's real connected ring
             // always carries.
-            strokeToken = Tokens.Color.ringConnected
+            strokeToken = Tokens.Color.rim
             width = PopoverColumnGrid.haloRingConnectedStroke
             dashed = false
         }
@@ -359,8 +359,9 @@ public final class HaloRingView: NSView {
     /// the bead melts INTO this ring, so the acknowledgment is the RING's own
     /// stroke blooming — a `glow`-toned copy of the ring's circle that starts
     /// a touch wide of the circumference and CONTRACTS onto it as it fades.
-    /// Light spreading inward, not an explosion outward, and quiet (peak
-    /// opacity well under 1): the desk taking the room in.
+    /// A stroke, never a shadow: the instruments carry no blooms. Light
+    /// spreading inward, not an explosion outward, and quiet (peak opacity
+    /// well under 1): the desk taking the room in.
     ///
     /// Same settled-model contract as every other transient here
     /// (`RouteArmedDotView`, the rail's own bead): the bloom layer's MODEL
@@ -385,13 +386,8 @@ public final class HaloRingView: NSView {
         bloom.anchorPoint = CGPoint(x: 0.5, y: 0.5)
         bloom.fillColor = nil
         bloom.lineWidth = ringLayer.lineWidth * 2
-        bloom.shadowOffset = .zero
-        bloom.shadowRadius = 4
-        bloom.shadowOpacity = 0.8
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            let glow = Tokens.Color.glow.cgColor
-            bloom.strokeColor = glow
-            bloom.shadowColor = glow
+            bloom.strokeColor = Tokens.Color.glow.cgColor
         }
         bloom.opacity = 0
         hostLayer.addSublayer(bloom)

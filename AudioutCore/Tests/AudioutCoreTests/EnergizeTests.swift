@@ -32,7 +32,7 @@ import Testing
 
     private func makeBusRow() -> DeviceRowView {
         DeviceRowView(device: makeDevice(connectionState: .off), showsToggle: true,
-                      paintsSelectionBackground: false, showsMeter: true, showsBus: true)
+                      showsMeter: true, showsBus: true)
     }
 
     private func makeDevice(id: String = "en-dev",

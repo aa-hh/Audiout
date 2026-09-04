@@ -140,19 +140,9 @@ public final class AppRowView: NSView {
         /// the route destination). Defaults to `true` so existing callers and
         /// tests that don't pass this field see no behavior change.
         public let isRunning: Bool
-        /// This app's `AppTetherColor` tint when it currently redirects to an
-        /// AirPlay DEVICE (Warm Signal v4.1 CORRECTIONS, extending item 7's
-        /// "wire the same chip onto that app's App Exceptions redirect entry
-        /// so the tether reads at both ends") — `nil` for "No Redirect" or
-        /// "Current Device" (nothing on a device's own FEED column to match
-        /// against). The HOST computes this the same way it computes the
-        /// matching `DeviceRowView` FEED chip's color, so both ends agree.
-        /// Defaults to `nil` so every existing caller renders exactly as
-        /// before (no chip).
-        public let tetherColor: NSColor?
         public init(appID: String, name: String, icon: NSImage?, volume: Int,
                    selectedDestinationID: String, destinations: [Destination],
-                   isRunning: Bool = true, tetherColor: NSColor? = nil) {
+                   isRunning: Bool = true) {
             self.appID = appID
             self.name = name
             self.icon = icon
@@ -160,7 +150,6 @@ public final class AppRowView: NSView {
             self.selectedDestinationID = selectedDestinationID
             self.destinations = destinations
             self.isRunning = isRunning
-            self.tetherColor = tetherColor
         }
     }
 
@@ -286,17 +275,20 @@ public final class AppRowView: NSView {
         // 100 and summed back into the whole-system mix at that volume, so there
         // is no destination left whose volume does nothing.
         slider.isEnabled = true
-        readoutLabel.textColor = Tokens.Color.secondaryLabel
         // Fader armed state (the app-row equivalent of the device rows' §3.3
         // predicate — spec §5.1: routed ∧ running, pure model): the gold fill
         // renders only while the redirect route is live; an unrouted or idle
         // row keeps the neutral warm fill.
         faderCell.isRouteArmed = !isNoRedirect && configuration.isRunning
+        // The readout never hides: it reads `goldText` while the route is
+        // actually sounding and `emberText` while it only holds a stored level.
+        readoutLabel.textColor = faderCell.isRouteArmed
+            ? Tokens.Color.goldText : Tokens.Color.emberText
 
-        // Name treatment (Warm Signal spec §2/§3.5, S6): the name color follows
-        // LIVENESS, not mere list presence — a live exception route is the
-        // bright anchor of the APP EXCEPTIONS section at full `label`; every
-        // non-live name sits at `secondaryLabel`. "Routed" = destination ≠ the
+        // Name treatment (iOS rule 1): the name colour follows LIVENESS, not
+        // mere list presence — a live exception route is the bright anchor of
+        // the APP EXCEPTIONS section at warm `label`; every non-live name sits
+        // at the cool `labelCool`. "Routed" = destination ≠ the
         // standalone follows-main-output sentinel (an explicit Current Device
         // pick IS an exception route with its own stream, Bug T2). LIVENESS
         // PROXY: `Configuration` exposes only `isRunning` (process alive) —
@@ -307,57 +299,37 @@ public final class AppRowView: NSView {
         // flag.
         //
         // A routed-but-idle app (route saved, process not running) appends the
-        // spec's **" (idle)" tertiary suffix** (§3.5's `AppName (idle)`
+        // spec's **" (idle)" suffix in `labelCool2`** (§3.5's `AppName (idle)`
         // pattern) so an enabled-but-quiet slider always has a visible cause —
         // this REPLACES the old warning-badge treatment for routed rows: idle
         // is a calm, expected state, not an alert (and the badge's yellow
         // reads gold-adjacent, violating the gold-is-signal-only budget).
         let isRouted = !isNoRedirect
         let showsIdleSuffix = isRouted && !isRunning
-        // The derived-colour tether CHIP (Warm Signal v4.1 CORRECTIONS,
-        // extending item 7): prefixed onto the name ONLY when the host says
-        // this app currently redirects to an AirPlay device — the identical
-        // chip a matching `DeviceRowView` FEED segment wears, so the tether
-        // reads at both ends. Doesn't change the existing liveness-driven
-        // TEXT color logic below at all — the chip is a separate, additive
-        // glyph, never a substitute for it.
-        let chipPrefix: NSAttributedString? = configuration.tetherColor.map {
-            FeedChip.attachmentString(color: $0, font: Tokens.Font.menuItem)
-        }
         if showsIdleSuffix {
             let truncatingTail = NSMutableParagraphStyle()
             truncatingTail.lineBreakMode = .byTruncatingTail
             let composed = NSMutableAttributedString()
-            if let chipPrefix { composed.append(chipPrefix) }
             composed.append(NSAttributedString(
                 string: configuration.name,
                 attributes: [
                     .font: Tokens.Font.menuItem,
-                    .foregroundColor: Tokens.Color.secondaryLabel,
+                    .foregroundColor: Tokens.Color.labelCool,
                     .paragraphStyle: truncatingTail,
                 ]))
             composed.append(NSAttributedString(
                 string: " (idle)",
                 attributes: [
                     .font: Tokens.Font.menuItem,
-                    .foregroundColor: Tokens.Color.tertiaryLabel,
+                    .foregroundColor: Tokens.Color.labelCool2,
                     .paragraphStyle: truncatingTail,
-                ]))
-            nameLabel.attributedStringValue = composed
-        } else if let chipPrefix {
-            let composed = NSMutableAttributedString(attributedString: chipPrefix)
-            composed.append(NSAttributedString(
-                string: configuration.name,
-                attributes: [
-                    .font: Tokens.Font.menuItem,
-                    .foregroundColor: (isRouted && isRunning) ? Tokens.Color.label : Tokens.Color.secondaryLabel,
                 ]))
             nameLabel.attributedStringValue = composed
         } else {
             nameLabel.stringValue = configuration.name
             nameLabel.font = Tokens.Font.menuItem
             nameLabel.textColor = (isRouted && isRunning)
-                ? Tokens.Color.label : Tokens.Color.secondaryLabel
+                ? Tokens.Color.label : Tokens.Color.labelCool
         }
 
         // The T4 warning badge survives ONLY for an unrouted, not-running row
@@ -463,7 +435,7 @@ public final class AppRowView: NSView {
                 string: title,
                 attributes: [
                     .font: Tokens.Font.captionEmphasized,
-                    .foregroundColor: Tokens.Color.tertiaryLabel,
+                    .foregroundColor: Tokens.Color.label3,
                 ])
             menu.addItem(item)
         }
@@ -546,7 +518,7 @@ public final class AppRowView: NSView {
                     string: subtitle,
                     attributes: [
                         .font: Tokens.Font.caption,
-                        .foregroundColor: Tokens.Color.secondaryLabel,
+                        .foregroundColor: Tokens.Color.label2,
                     ]))
                 item.attributedTitle = attributedTitle
             }
@@ -582,8 +554,8 @@ public final class AppRowView: NSView {
         slider.action = #selector(volumeChanged(_:))
 
         readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = Tokens.Font.caption
-        readoutLabel.textColor = Tokens.Color.secondaryLabel
+        readoutLabel.font = Tokens.Font.readout
+        readoutLabel.textColor = Tokens.Color.emberText
         readoutLabel.alignment = .right
         readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -689,18 +661,20 @@ public final class AppRowView: NSView {
 
     // MARK: Drawing
 
-    /// Row highlight colour, `nil` when neither selected nor hovered.
-    /// Selection and hover use DIFFERENT colours so they read distinctly:
-    /// selection is a translucent ACCENT wash; hover is a translucent NEUTRAL
-    /// wash (shown only when NOT selected) — both at the unified alphas
-    /// `DeviceRowView` shares via `PopoverColumnGrid`, so the two row types
-    /// present the same interactive-state styling. Neither uses a fully
+    /// Row highlight colour, `nil` when none of the three states apply. The
+    /// order is keyboard selection > live > hover (D3): `isSelected` is the
+    /// host's single-selection focus and must stay visible over a sounding row,
+    /// so it keeps the neutral selection wash; a sounding row (routed ∧
+    /// running) takes the gold live wash `DeviceRowView` paints; hover is the
+    /// faintest and only shows when neither applies. None uses a fully
     /// opaque system background, which would obscure the row's slider /
     /// readout / destination popup. Factored out of `draw(_:)` so offscreen
     /// tests (which never rasterize `draw(_:)`'s actual pixels) can assert it.
     private var currentHighlightColor: NSColor? {
         if isSelected {
             return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha)
+        } else if faderCell.isRouteArmed {
+            return Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha)
         } else if isHovered {
             return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
         } else {
@@ -747,7 +721,7 @@ public final class AppRowView: NSView {
     // the view that doesn't have its own context menu (the slider/popup do,
     // so this never overrides theirs) — presents this menu: a "Route to"
     // submenu mirroring the trailing destination popup, a separator, then
-    // "Remove from list" LAST, styled destructive.
+    // "Remove from list" LAST, styled in the failure red.
 
     public override func menu(for event: NSEvent) -> NSMenu? {
         buildContextMenu()
@@ -772,7 +746,7 @@ public final class AppRowView: NSView {
         removeItem.target = self
         removeItem.attributedTitle = NSAttributedString(
             string: "Remove from list",
-            attributes: [.foregroundColor: Tokens.Color.destructive])
+            attributes: [.foregroundColor: Tokens.Color.failure])
         menu.addItem(removeItem)
 
         return menu
@@ -874,46 +848,25 @@ public final class AppRowView: NSView {
         return cell.usesItemFromMenu ? destinationPopUp.titleOfSelectedItem : cell.menuItem?.title
     }
 
-    /// The name label's full displayed text — includes the " (idle)" tertiary
-    /// suffix when a routed app's process isn't running (spec §3.5 pattern).
-    /// Strips a leading tether-chip attachment's object-replacement character
-    /// (Warm Signal v4.1 CORRECTIONS), if present, so a test reading WORDS
-    /// never has to know a chip exists.
-    public var test_nameDisplayText: String {
-        nameLabel.stringValue.replacingOccurrences(of: FeedChip.objectReplacementCharacter, with: "")
-    }
+    /// The name label's full displayed text — includes the " (idle)" suffix
+    /// when a routed app's process isn't running (spec §3.5 pattern).
+    public var test_nameDisplayText: String { nameLabel.stringValue }
 
-    /// The colour of the NAME portion of the label (the first character AFTER
-    /// any leading tether-chip attachment, when the idle suffix or a chip is
-    /// composed, else the label's plain `textColor`): full `label` for a live
-    /// exception route — the section's bright anchor — `secondaryLabel`
-    /// otherwise. Skipping the chip run (Warm Signal v4.1 CORRECTIONS) keeps
-    /// this reading the NAME's own color, not the chip's.
+    /// The colour of the NAME portion of the label (the composed string's first
+    /// run when the idle suffix is present, else the label's plain
+    /// `textColor`): warm `label` for a live exception route — the section's
+    /// bright anchor — cool `labelCool` otherwise.
     public var test_nameTextColor: NSColor? {
         let attributed = nameLabel.attributedStringValue
         guard attributed.length > 0 else { return nameLabel.textColor }
-        let plain = attributed.string as NSString
-        var index = 0
-        while index < plain.length, plain.character(at: index) == 0xFFFC { index += 1 }
-        guard index < attributed.length else { return nameLabel.textColor }
-        if let color = attributed.attribute(.foregroundColor, at: index, effectiveRange: nil) as? NSColor {
+        if let color = attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor {
             return color
         }
         return nameLabel.textColor
     }
 
-    /// Whether the name label currently wears the leading tether CHIP (Warm
-    /// Signal v4.1 CORRECTIONS) — `true` only when the host supplied a
-    /// non-nil `Configuration.tetherColor` (this app currently redirects to
-    /// an AirPlay device).
-    public var test_hasTetherChip: Bool {
-        let attributed = nameLabel.attributedStringValue
-        guard attributed.length > 0 else { return false }
-        return attributed.attribute(.attachment, at: 0, effectiveRange: nil) != nil
-    }
-
     /// The colour of the " (idle)" suffix when present — `nil` when the name
-    /// carries no idle suffix. Must be `tertiaryLabel` (spec §3.5 idle voice).
+    /// carries no idle suffix. Must be `labelCool2` (spec §3.5 idle voice).
     public var test_idleSuffixColor: NSColor? {
         let attributed = nameLabel.attributedStringValue
         guard attributed.length > 0, attributed.string.hasSuffix("(idle)") else { return nil }

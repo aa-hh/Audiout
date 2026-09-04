@@ -2,6 +2,7 @@
 
 import AppKit
 import AudioutCore
+import AudioutSharedUI
 
 /// The "Enter License…" sheet (Settings › General): the ONLY place a key is
 /// typed. The pane itself never shows an editable field — the convention every
@@ -33,7 +34,7 @@ public final class LicenseSheetViewController: NSViewController {
     private let buyButton = NSButton()
     private let removeButton = NSButton()
     private let cancelButton = NSButton()
-    private let registerButton = NSButton()
+    private var registerButton: ProminentButton!
 
     /// Fired exactly once, whatever ends the sheet — Register (verified or
     /// key-saved-unverified), Remove, or Cancel — so the pane re-reads
@@ -51,10 +52,10 @@ public final class LicenseSheetViewController: NSViewController {
     /// `SettingsForm.contentWidth`; wide enough for a full key plus slop.
     private static let sheetContentWidth: CGFloat = 320
 
-    /// The shape of a key, in ONE place — the field's placeholder and the
-    /// `.invalid` verdict both read it, so the two can never disagree about
-    /// what a key looks like. `AUDT` is the prefix the license worker issues.
-    static let keyFormatHint = "AUDT-XXXXX-XXXXX-XXXXX-XXXXX"
+    /// The shape of a key lives in Core (`LicenseCopy.keyFormatHint`) since the
+    /// first-open gate started sharing it; this alias keeps the sheet's call
+    /// sites reading naturally.
+    static let keyFormatHint = LicenseCopy.keyFormatHint
 
     public init(settings: AppSettings,
                 transport: LicenseValidator.Transport?,
@@ -67,25 +68,21 @@ public final class LicenseSheetViewController: NSViewController {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// The one wording for each server verdict, shared with the pane's status
-    /// line so the two surfaces can never drift apart. Plain words, and never
-    /// a claim the app is about to stop working (the check gates nothing).
+    /// The one wording for each server verdict, owned by Core (`LicenseCopy`)
+    /// so the pane, this sheet, and the first-open gate can never drift apart.
     static func statusLine(for status: LicenseStatus) -> String {
-        switch status {
-        case .active: return "Registered. Thank you for supporting Audiout."
-        case .revoked: return "This key was refunded or revoked. It no longer gets updates."
-        case .unknown: return "This key isn’t recognized. Check it against your receipt."
-        case .invalid: return "That doesn’t look like an Audiout key (\(keyFormatHint))."
-        }
+        LicenseCopy.statusLine(for: status)
     }
 
     public override func loadView() {
         let heading = SettingsForm.label("Enter your license key")
 
-        // The honest one-liner about what a key actually does in this model —
-        // it never unlocks features, and saying so is the pitch.
+        // The honest one-liner about what a key does in this model. Since the
+        // first-open gate (2026-08-30) an official build ASKS for its key at
+        // launch, so the old "fully functional without one" line would lie
+        // here — the free path is the source build, and saying so is the pitch.
         let explainer = SettingsForm.hintLabel(
-            "Audiout is fully functional without one. A license funds development and unlocks official downloads and updates.")
+            "Your license links this official build to your purchase and keeps it updated. Building Audiout from source is always free.")
         explainer.preferredMaxLayoutWidth = Self.sheetContentWidth
 
         keyField.stringValue = settings.licenseKey ?? ""
@@ -122,11 +119,20 @@ public final class LicenseSheetViewController: NSViewController {
         cancelButton.target = self
         cancelButton.action = #selector(cancelTapped)
 
-        registerButton.title = "Register"
-        registerButton.bezelStyle = .rounded
+        // One action, one treatment: Register here is the same act as Register
+        // on the first-open licence gate (`LicenseGateViewController.swift:148`),
+        // so it wears the same gold. The folder's "no gold in these panes" rule
+        // holds — a sheet is not a pane.
+        //
+        // It is also the folder's exception to "every view sets
+        // `translatesAutoresizingMaskIntoConstraints = false`": this button is
+        // an arranged subview of `buttonRow` below, which owns that flag, and
+        // setting it here would fight the stack. The sheet's four other buttons
+        // never set it either, and `onboardingActionButton` sets it only for
+        // the constraint-hosted card slot.
+        registerButton = ProminentButton(title: "Register", target: self,
+                                         action: #selector(registerTapped))
         registerButton.keyEquivalent = "\r"
-        registerButton.target = self
-        registerButton.action = #selector(registerTapped)
 
         let spacer = NSView()
         spacer.translatesAutoresizingMaskIntoConstraints = false
@@ -198,8 +204,9 @@ public final class LicenseSheetViewController: NSViewController {
 
         let alert = NSAlert()
         alert.messageText = "Remove your license key?"
-        alert.informativeText = "Audiout keeps working, but it will stop getting "
-            + "official updates until you enter a key again."
+        alert.informativeText = "Audiout keeps working for now, but it will ask "
+            + "for a key the next time it opens and stops getting official "
+            + "updates until you enter one."
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         // Return keeps the key: the destructive button is never the one an

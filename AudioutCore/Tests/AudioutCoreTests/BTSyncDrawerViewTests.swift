@@ -6,12 +6,12 @@ import AppKit
 @testable import AudioutSharedUI
 
 /// The **BT sync drawer** (`BTSyncDrawerView`, PLAN-BT-SYNC-DRAWER §3 T5, as
-/// redesigned after live feedback): one band — align-by-ear and Revert
-/// leading, a ⇧ hint, and a bound `[ − | value ms | + ]` cluster around a
+/// redesigned after live feedback): one band — the two alignment doors and
+/// Reset leading, a ⇧ hint, and a bound `[ − | value ms | + ]` cluster around a
 /// click-to-type field, right-aligned under the chip that opened it. The four
 /// loose `±1`/`±10` pills were cut: one pair of buttons steps 1 ms, or 10 with
 /// ⇧ held. Covers the field/spoken-value mapping (set/unset/negative/
-/// at-floor), Revert enablement (D8), each step amount including the ⇧ coarse
+/// at-floor), each step amount including the ⇧ coarse
 /// path, auto-repeat, range clamping, field editing with whole-ms snapping and
 /// the signed round-trip, and the align round-trip. Drives gestures via the
 /// `test_*` seams so each test exercises the real delegate/action path.
@@ -40,12 +40,12 @@ import AppKit
     private func makeDrawer(trimMs: Double = 24, isSet: Bool = true,
                             usableRangeMs: ClosedRange<Double> = -500...500,
                             alignTickActive: Bool = false,
-                            canReset: Bool = false) -> (BTSyncDrawerView, Spy) {
+                            canReset: Bool = false,
+                            canAlignAgain: Bool = true) -> (BTSyncDrawerView, Spy) {
         let drawer = BTSyncDrawerView()
         drawer.configure(deviceName: "Kitchen Speaker", trimMs: trimMs, isSet: isSet,
                          usableRangeMs: usableRangeMs, alignTickActive: alignTickActive,
-                         canReset: canReset)
-        drawer.noteOpened(trimMs: trimMs)
+                         canReset: canReset, canAlignAgain: canAlignAgain)
         let spy = Spy()
         drawer.delegate = spy
         return (drawer, spy)
@@ -85,31 +85,7 @@ import AppKit
         #expect(drawer.test_valueFieldAXValue == "in sync")
     }
 
-    // MARK: Revert enablement (D8)
-
-    @Test func revertDisabledWhenUnchangedSinceOpen() {
-        let (drawer, _) = makeDrawer(trimMs: 24)
-        #expect(!drawer.test_revertEnabled)
-    }
-
-    @Test func revertEnabledAfterAChange() {
-        let (drawer, _) = makeDrawer(trimMs: 24)
-        drawer.test_fireMinusClick()
-        #expect(drawer.test_revertEnabled)
-    }
-
-    @Test func revertRestoresTheOpenTimeValueAndDisablesAgain() {
-        let (drawer, spy) = makeDrawer(trimMs: 24)
-        drawer.test_fireMinusClick()
-        #expect(drawer.test_trimMs != 24)
-        drawer.test_fireRevertClick()
-        #expect(drawer.test_trimMs == 24)
-        #expect(!drawer.test_revertEnabled)
-        #expect(spy.changes.last?.ms == 24)
-        #expect(spy.changes.last?.committed == true, "Revert applies AND persists")
-    }
-
-    // MARK: Reset alignment (roadmap 056) — the neighbour Revert is NOT
+    // MARK: Reset alignment (roadmap 056)
 
     /// Only offered when there is something stored to clear; hidden, not
     /// disabled, so an empty state carries no dead control to explain.
@@ -120,13 +96,24 @@ import AppKit
         let (stored, _) = makeDrawer(trimMs: 0, isSet: true, canReset: true)
         #expect(stored.test_resetVisible)
         #expect(stored.test_resetTitle == "Reset alignment",
-                "spelled out — a \"Revert\"/\"Reset\" pair is one glance from a wrong click")
+                "spelled out, so nobody mistakes it for a smaller undo")
     }
 
-    /// Reset lands the drawer on NOT SET — a distinct destination from
-    /// Revert's, which restores the value the drawer opened on. It reports
-    /// through its own delegate call, never as a trim change of 0 (which the
-    /// host would store as a deliberate zero).
+    /// A device with no guided wizard (a Cast receiver — it plays seconds
+    /// behind live, so no by-ear bisection converges on it) gets NO
+    /// "Align again…" button. Hidden, not disabled: the host refuses the
+    /// click, so a visible-but-dead door is worse than no door.
+    @Test func alignAgainIsHiddenForADeviceWithNoWizard() {
+        let (without, _) = makeDrawer(canAlignAgain: false)
+        #expect(!without.test_alignAgainVisible)
+
+        let (with, _) = makeDrawer(canAlignAgain: true)
+        #expect(with.test_alignAgainVisible)
+    }
+
+    /// Reset lands the drawer on NOT SET. It reports through its own delegate
+    /// call, never as a trim change of 0 (which the host would store as a
+    /// deliberate zero).
     @Test func resetClearsTheValueAndReportsItsOwnGestureNotATrimOfZero() {
         let (drawer, spy) = makeDrawer(trimMs: 24, isSet: true, canReset: true)
         drawer.test_fireResetClick()
@@ -137,14 +124,6 @@ import AppKit
         #expect(drawer.test_valueFieldText == "0 ms")
         #expect(drawer.test_valueFieldAXValue == "Not set")
         #expect(!drawer.test_resetVisible, "nothing left to reset")
-    }
-
-    /// The Revert baseline moves with the reset: a nudge that has just been
-    /// deleted is not a value to go back to.
-    @Test func resetMovesTheRevertBaselineWithIt() {
-        let (drawer, _) = makeDrawer(trimMs: 24, isSet: true, canReset: true)
-        drawer.test_fireResetClick()
-        #expect(!drawer.test_revertEnabled, "Revert must not offer the value just cleared")
     }
 
     // MARK: One stepper pair — 1 ms a click, 10 while ⇧ is held
@@ -223,6 +202,46 @@ import AppKit
         let (drawer, _) = makeDrawer()
         #expect(drawer.test_stepperButtonsAreBezeled,
                 "a button with no edge of its own is invisible against a flat drawer")
+    }
+
+    /// The recess is bounded by an edge, not by its fill alone: on the flat
+    /// light ground the `well` is only 1.154:1 from the card it opens under,
+    /// so the lip is what says "this belongs to the row above".
+    @Test func theRecessIsBoundedByAContainerEdge() throws {
+        let (drawer, _) = makeDrawer()
+        drawer.appearance = NSAppearance(named: .aqua)
+        drawer.widthAnchor.constraint(equalToConstant: SurfaceLayout.width).isActive = true
+        drawer.layoutSubtreeIfNeeded()
+        drawer.setFrameSize(drawer.fittingSize)
+        let rep = try #require(drawer.bitmapImageRepForCachingDisplay(in: drawer.bounds))
+        drawer.cacheDisplay(in: drawer.bounds, to: rep)
+
+        let scale = CGFloat(rep.pixelsWide) / drawer.bounds.width
+        let midY = rep.pixelsHigh / 2
+        let edge = try #require(rep.colorAt(x: 0, y: midY)?.usingColorSpace(.sRGB))
+        let fill = try #require(rep.colorAt(x: Int(3 * scale), y: midY)?.usingColorSpace(.sRGB))
+
+        expectMatches(edge, resolved(Tokens.Color.containerEdge, appearanceName: .aqua),
+                      tolerance: 0.03, what: "the drawer's left rim")
+        expectMatches(fill, resolved(Tokens.Color.well, appearanceName: .aqua),
+                      tolerance: 0.03, what: "the fill 3 pt inside the rim")
+    }
+
+    private func expectMatches(_ drawn: NSColor, _ expected: NSColor,
+                               tolerance: CGFloat, what: String) {
+        guard let want = expected.usingColorSpace(.sRGB) else { return }
+        #expect(abs(drawn.redComponent - want.redComponent) < tolerance
+                    && abs(drawn.greenComponent - want.greenComponent) < tolerance
+                    && abs(drawn.blueComponent - want.blueComponent) < tolerance,
+                "\(what): drawn \(drawn) is not \(want)")
+    }
+
+    private func resolved(_ color: NSColor, appearanceName: NSAppearance.Name) -> NSColor {
+        var result = color
+        NSAppearance(named: appearanceName)?.performAsCurrentDrawingAppearance {
+            result = color.usingColorSpace(.sRGB) ?? color
+        }
+        return result
     }
 
     /// The unit sits INSIDE the box at rest, and cannot be deleted — not
@@ -335,18 +354,6 @@ import AppKit
         #expect(drawer.test_trimMs == 24, "reverted, never committed")
     }
 
-    // MARK: `noteOpened` reuse (T7 reuses one drawer instance across devices)
-
-    @Test func noteOpenedResetsTheRevertBaseline() {
-        let (drawer, _) = makeDrawer(trimMs: 10)
-        drawer.test_fireMinusClick()
-        #expect(drawer.test_revertEnabled)
-        drawer.configure(deviceName: "Office Speaker", trimMs: 50, isSet: true,
-                         usableRangeMs: -500...500, alignTickActive: false)
-        drawer.noteOpened(trimMs: 50)
-        #expect(!drawer.test_revertEnabled, "a fresh open's baseline is the fresh device's own value")
-    }
-
     // MARK: Height — definite, derived (Trap #6: an ambiguous height silently
     // collapses the popover instead of erroring)
 
@@ -368,8 +375,9 @@ import AppKit
     @Test func aRealLayoutPassGivesEverySubviewRealHeight() {
         let drawer = BTSyncDrawerView()
         drawer.configure(deviceName: "Move 2", trimMs: 34, isSet: true,
-                         usableRangeMs: -100...500, alignTickActive: false)
-        drawer.widthAnchor.constraint(equalToConstant: 623).isActive = true
+                         usableRangeMs: -100...500, alignTickActive: false,
+                         canAlignAgain: true)
+        drawer.widthAnchor.constraint(equalToConstant: SurfaceLayout.width).isActive = true
         drawer.layoutSubtreeIfNeeded()
 
         #expect(drawer.frame.height == PopoverColumnGrid.syncDrawerHeight)

@@ -67,8 +67,6 @@ review. In order:
   `4a14ebd6`/wave-2 correction after v5 was built). **Build a fresh
   `Audiout Dev` before trusting the visual state** — see §6 step 3.
 - **Merge go-ahead.** Never merge without it (standing rule).
-- Figma design-system mirror of the Tokens/PopoverColumnGrid renames — Figma
-  MCP was unauthenticated all session. Owed separately, not blocking.
 
 ## 4. The BTM/permissions detour (context you need before building anything)
 

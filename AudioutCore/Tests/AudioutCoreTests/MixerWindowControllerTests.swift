@@ -251,6 +251,61 @@ import AppKit
         #expect(window.test_sidebar.test_groupsRowIsSelected)
     }
 
+    /// The surface's Escape asks this: an open editor pops and reports so;
+    /// with nothing to pop the answer is `false` and Escape closes the window.
+    @Test func dismissEditorPopsAnOpenEditorAndRefusesWhenNoneIsOpen() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        await drain()
+        #expect(window.test_isShowingOverview)
+        #expect(!window.dismissEditor(), "nothing to step back from")
+
+        window.test_overview.test_clickCard(id: saved.id)
+        await drain()
+        #expect(window.test_isShowingEditor)
+
+        #expect(window.dismissEditor())
+        #expect(window.test_isShowingOverview)
+        #expect(!window.dismissEditor(), "a second press has nothing left to pop")
+    }
+
+    @Test func doneAndCommandBracketBothReturnToTheOverview() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+
+        window.test_overview.test_clickCard(id: saved.id)
+        await drain()
+        #expect(window.test_isShowingEditor)
+        window.test_editor.test_done()
+        await drain()
+        #expect(window.test_isShowingOverview, "Done leaves the editor")
+
+        window.test_overview.test_clickCard(id: saved.id)
+        await drain()
+        #expect(window.test_isShowingEditor)
+        #expect(window.test_editor.test_performBackKeyEquivalent(), "the editor claims ⌘[")
+        await drain()
+        #expect(window.test_isShowingOverview, "⌘[ leaves the editor")
+    }
+
+    @Test func clickingTheSelectedGroupsRowReturnsToTheOverview() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_overview.test_clickCard(id: saved.id)
+        await drain()
+        #expect(window.test_isShowingEditor)
+        #expect(window.test_sidebar.test_groupsRowIsSelected)
+
+        window.test_sidebar.test_clickGroupsRow()
+        await drain()
+
+        #expect(window.test_isShowingOverview,
+                "the highlighted Groups row is a way back, not a dead click")
+    }
+
     @Test func theGroupsRowMenuOffersOnlyNewGroup() async throws {
         let (window, controller, backend) = try await makeWindow()
         _ = try makeGroup1(controller)
@@ -447,18 +502,25 @@ import AppKit
         #expect(completedResult?.alreadyExisted == false)
         let firstID = controller.groups[0].id
 
-        // Same member set again (order swapped) must resolve to the existing group.
+        // Same member set again (order swapped). The sheet REFUSES TO ARM
+        // rather than letting the user press Create into a refusal (Alec,
+        // 2026-09-03) — the count line names the group that already holds them.
         window.test_presentCreateSheet(preselected: ["appletv-lr", "office"])
         await drain()
         sheet = try #require(window.test_createSheet)
         completedResult = nil
         sheet.onComplete = { completedResult = $0 }
+
+        #expect(!sheet.test_isCreateEnabled, "Create cannot be pressed into a set that is already a group")
+        #expect(sheet.test_countText.contains(controller.groups[0].name),
+                Comment(rawValue: "and the count line says which group holds them: " + sheet.test_countText))
+
         sheet.test_commit()
         await drain()
 
         #expect(controller.groups.count == 1, "no duplicate group for an identical member set")
-        #expect(completedResult?.group.id == firstID)
-        #expect(completedResult?.alreadyExisted == true)
+        #expect(controller.groups[0].id == firstID)
+        #expect(completedResult == nil, "a disarmed Create reports nothing at all")
     }
 
     /// Reversed 2026-08-28 (Alec): an offline speaker MAY join a brand-new
@@ -828,6 +890,67 @@ import AppKit
         #expect(sheet.test_checkedDeviceIDs == ["homepod-bed"], "the selection survives the refusal")
     }
 
+    /// Return in the name field and the default button both reach `commit()`,
+    /// so a single keypress could run it twice — the second run then found the
+    /// group the first had just saved and refused its own name. Live-caught
+    /// 2026-09-03 on a first-ever group.
+    @Test func committingTheCreateSheetTwiceCreatesOneGroupAndNoRefusal() async throws {
+        let (window, controller, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+
+        sheet.test_setName("Kitchen")
+        sheet.test_setMembership(deviceID: "homepod-bed", isChecked: true)
+        sheet.test_commit()
+        sheet.test_commit()
+        await drain()
+
+        #expect(controller.groups.map(\.name) == ["Kitchen"], "one group, created once")
+        #expect(!sheet.test_duplicateNameRefused,
+                "the sheet never refuses the name of the group it just created")
+    }
+
+    /// A second Return while the sheet's own alert is still up used to raise a
+    /// second alert on a window that already had one attached, which AppKit
+    /// hosts on a blank window of its own. Live-caught 2026-09-03.
+    @Test func theSheetRaisesNoSecondAlertWhileOneIsStillUp() async throws {
+        let (window, controller, _) = try await makeWindow()
+        let existing = try makeGroup1(controller)   // "Group 1"
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+
+        // The member set that already belongs to "Group 1" — the dedup path,
+        // which is what reports an outcome (headlessly it completes rather
+        // than raising the alert a presented sheet would).
+        for id in existing.memberIDs { sheet.test_setMembership(deviceID: id, isChecked: true) }
+        sheet.test_setName("Kitchen")
+        var completed = false
+        sheet.onComplete = { _ in completed = true }
+        sheet.test_alertIsUpOverride = true
+        sheet.test_commit()
+        await drain()
+
+        #expect(!completed, "the second landing does nothing at all while the alert is up")
+        #expect(controller.groups.count == 1, "and writes nothing")
+    }
+
+    /// A text field sends its action whenever editing ENDS unless told
+    /// otherwise, so closing the sheet after a refusal ran `commit()` once
+    /// more — against a window already leaving the screen, and AppKit hosted
+    /// that alert on a blank "Untitled" window. Live-caught 2026-09-03 on a
+    /// build that already had both re-entry guards above.
+    @Test func theCreateSheetNameFieldCommitsOnReturnOnly() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+
+        #expect(!sheet.test_nameFieldCommitsOnEndEditing,
+                "tabbing out of the name field, or the sheet closing, must not commit")
+    }
+
     // MARK: The creation sheet reports a failed save (P1-4)
 
     @Test func createSheetReportsAFailedSaveAndKeepsTheForm() async throws {
@@ -865,9 +988,10 @@ import AppKit
         #expect(sheet.test_isCreateEnabled, "…and Create stays live, so the user can try again")
     }
 
-    /// The dedup announcement is a WINDOW-path sheet; headless keeps today's
-    /// silent resolve, which every existing flow depends on.
-    @Test func aHeadlessDedupStillCompletesWithAlreadyExisted() async throws {
+    /// The dedup outcome is now unreachable from the sheet at all — Create is
+    /// disarmed for a set that is already a group, window or not, so nobody
+    /// arrives at the announcement by pressing a live button (Alec, 2026-09-03).
+    @Test func aSetThatIsAlreadyAGroupNeverArmsCreate() async throws {
         let (window, controller, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: ["office", "homepod-bed"])
         await drain()
@@ -880,11 +1004,13 @@ import AppKit
         let second = try #require(window.test_createSheet)
         var result: (group: Group, alreadyExisted: Bool)?
         second.onComplete = { result = $0 }
+
+        #expect(!second.test_isCreateEnabled, "Create is disarmed for a set that is already a group")
         second.test_commit()
         await drain()
 
-        #expect(controller.groups.count == 1, "the identical member set resolved to the existing group")
-        #expect(result?.alreadyExisted == true, "and headless still reports it, rather than waiting on a sheet")
+        #expect(controller.groups.count == 1, "nothing was written")
+        #expect(result == nil, "and nothing was reported — there is no outcome to announce")
     }
 
     // MARK: The creation sheet's empty checklist (P1-5)

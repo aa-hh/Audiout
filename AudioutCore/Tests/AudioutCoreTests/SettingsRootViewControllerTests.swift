@@ -191,7 +191,7 @@ import AudioutSharedUI
                                                     settings: settings)
         general.licenseTransport = transport.closure
 
-        #expect(general.test_licenseStatusText == "Unregistered. Audiout is fully functional without a license — buying one funds development and unlocks official downloads and updates.")
+        #expect(general.test_licenseStatusText == "Unregistered. Audiout keeps working for this session, and asks for a license key the next time it opens.")
         #expect(general.test_enterLicenseButtonTitle == "Enter License…")
 
         transport.replies(#"{"status":"active"}"#)
@@ -531,6 +531,31 @@ import AudioutSharedUI
         #expect(abs(root.test_scrollDocumentHeight - pane.fittingSize.height) <= 1,
                 Comment(rawValue: "the scroll document must be exactly as tall as the pane, got " +
                 "\(root.test_scrollDocumentHeight)"))
+    }
+
+    /// The Login Items approval row is mounted and unmounted, never hidden
+    /// in place: an `NSStackView` keeps a hidden child's last height. The
+    /// document must return to exactly its pre-approval height.
+    @Test func loginApprovalRowGivesItsHeightBack() throws {
+        let login = FakeLoginItem(enabled: false)
+        let (root, general, _, _) = makeRoot(loginItem: login)
+        root.view.setFrameSize(NSSize(width: SurfaceLayout.width, height: 800))
+        general.test_syncFromLoginItem()
+        let baseline = root.test_scrollDocumentHeight
+
+        login.approvalRequired = true
+        general.test_syncFromLoginItem()
+        #expect(general.test_loginApprovalHintIsVisible)
+        #expect(root.test_scrollDocumentHeight > baseline,
+                Comment(rawValue: "the approval row must add height, was \(baseline), " +
+                "now \(root.test_scrollDocumentHeight)"))
+
+        login.approvalRequired = false
+        general.test_syncFromLoginItem()
+        #expect(!general.test_loginApprovalHintIsVisible)
+        #expect(abs(root.test_scrollDocumentHeight - baseline) <= 1,
+                Comment(rawValue: "the pane must give the approval row's height back, " +
+                "expected \(baseline), got \(root.test_scrollDocumentHeight)"))
     }
 
     /// A pane that grows at RUNTIME with no section switch

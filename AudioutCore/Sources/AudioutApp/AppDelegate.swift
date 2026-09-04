@@ -223,6 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The first-run onboarding/permission-priming window, retained while open
     /// (first launch, or "Open Setup…" from Settings ▸ General).
     private var onboardingWindowController: OnboardingWindowController?
+    private var licenseGateWindowController: LicenseGateWindowController?
 
     /// The `SetupModel` behind the last-presented onboarding window, kept alive
     /// after the window closes and REUSED by every subsequent automatic
@@ -344,6 +345,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// unset, so a fresh install advertises without being asked twice — the
     /// Local Network grant is already the user's consent to this.
     private let companionServer = CompanionServer()
+    /// The last token pushed to connected phones (`applyLicenseState()`), so
+    /// the many callers of that method don't resend an unchanged one.
+    private var pushedCompanionToken: String?
 
     /// The per-phone approval model (T24): remembers each phone's
     /// allow/deny answer (`CompanionApprovalStore`, alongside the other
@@ -391,6 +395,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 20/sec sustained (the phone's own slider send policy) + a 40 burst.
     /// Main-thread only, touched inside the command/disconnect main hops.
     private var companionRateLimiter = CompanionCommandRateLimiter()
+
+    /// Which phone staged the sync-calibration run for each device, so the
+    /// two probe messages go back to it alone and a client that vanishes
+    /// mid-run takes its run down with it. Main-thread only, touched inside
+    /// the command/disconnect main hops like the rate limiter above.
+    private var companionAlignmentClientByDeviceID: [String: UUID] = [:]
 
     /// Cached `.regular` running-app list backing `addableApps`/`isRunning`
     /// in the snapshot (FIX-B2 finding 2b). `NSWorkspace.runningApplications`
@@ -607,6 +617,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Bring up Settings ▸ General with the license sheet open on `key`.
     @MainActor
     private func openLicenseSheet(registering key: String) {
+        // While the first-open gate is up it IS the licence surface: the
+        // purchase link lands straight in its field.
+        if let gate = licenseGateWindowController {
+            gate.submit(key: key)
+            return
+        }
         guard surface != nil else {
             pendingLicenseKeyFromURL = key
             return
@@ -642,6 +658,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Returns `false` either way: we have opened what there is to open, and
     /// AppKit must not go looking for an untitled window to make.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if let gate = licenseGateWindowController {
+            gate.present()
+            return false
+        }
         if onboardingWindowController != nil {
             onboardingWindowController?.present()
             return false
@@ -689,6 +709,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItemController = StatusItemController()
         statusItemController.onButtonClicked = { [weak self] _ in
             guard let self else { return }
+            // The licence gate, while open, owns the click outright — it is
+            // the only thing the app is until it is answered.
+            if let gate = self.licenseGateWindowController {
+                gate.present()
+                return
+            }
             let action = self.surface.clickAction(
                 setupIsOpen: self.onboardingWindowController != nil)
             if action == .refrontSetup {
@@ -993,13 +1019,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onAlignTickActiveChange = { [weak self] active in
             (self?.backend as? BTOutputControlling)?.setBTAlignTickActive(active)
         }
-        // W3/W4 — the first-mix alignment intercept + wizard: the card's and
-        // panel's four backend actuators, capability-gated like everything
-        // above (nil casts on MockBackend/OwnToneBackend degrade to no-ops).
-        popoverController.onResolveBTAlignmentPrompt = { [weak self] deviceID, dismissed in
-            (self?.backend as? BTOutputControlling)?
-                .resolveBTAlignmentPrompt(forDevice: deviceID, dismissed: dismissed)
+        // The row's Equalizer door wears one mark when the curve is not flat.
+        // The answer comes off `Device.eq` on the device model — the same
+        // field the Groups screen's detail pane reads, seeded by the backend
+        // from `DeviceEQStore` — so the Mixer holds no tone state of its own.
+        popoverController.deviceEQIsShaped = { [weak self] deviceID in
+            self?.devicesByID[deviceID]?.eq.isFlat == false
         }
+        // W4 — the alignment wizard's backend actuators, capability-gated like
+        // everything above (nil casts on MockBackend/OwnToneBackend degrade to
+        // no-ops).
         popoverController.onBTWizardTrimPreview = { [weak self] ms, deviceID in
             (self?.backend as? BTOutputControlling)?
                 .setBTWizardTrimPreview(ms, forDevice: deviceID)
@@ -1091,6 +1120,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onLocalTrimEndPreview = { [weak self] keepMs in
             (self?.backend as? LocalSyncOffsetControlling)?.endLocalTrimPreview(keepMs: keepMs)
         }
+        // The Mixer's first-run hint: shown until the user's first membership
+        // toggle there, then never again.
+        popoverController.membershipHintShownProvider = { [weak self] in
+            !(self?.settings.mixerMembershipHintDismissed ?? true)
+        }
+        popoverController.onMembershipHintDismissed = { [weak self] in
+            self?.settings.mixerMembershipHintDismissed = true
+        }
         // Excluded apps (Settings › Audio) are un-routable: the popover reads this
         // to drop them from the Applications picker + rows.
         popoverController.isAppExcluded = { [weak self] bundleID in
@@ -1115,6 +1152,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The Groups content skips its rebuild while hidden (B8) and has no
         // window of its own to ask about visibility any more, so the surface
         // tells it which screen the user is looking at.
+        // Escape in a group's editor steps back to the overview; the next
+        // Escape closes the surface.
+        surface.groupsCancelHandler = { [weak self] in
+            self?.mixerWindowController?.dismissEditor() ?? false
+        }
         surface.onVisibleScreenChange = { [weak self] screen in
             self?.mixerWindowController?.setHostVisible(screen == .groups)
             // Settings' panes are built once and cached for the process's
@@ -1228,80 +1270,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // can ever wake; the Settings pane re-pushes on change.
         pushWakeRestoreSetting()
 
-        // First-run priming: on the native path, explain BOTH permissions before
-        // either system prompt fires. We hold the backend (its discovery triggers
-        // the Local Network prompt) until the user has seen the setup screen —
-        // otherwise the OS dialog would be their first exposure to the ask, which
-        // is the exact thing this flow exists to prevent. Every other launch (and
-        // every non-native backend) starts immediately.
-        let presentOnLaunch = SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: backendKind)
-        // T5: the onboarding-presentation gate's decision + the inputs behind
-        // it. `hasCompletedSetup` is the "setup says done/granted" side of
-        // tonight's bug; the live `SystemAudioCaptureTCC.isGranted()` read
-        // just below (logged separately) is the "real gate" side — together
-        // they let a reader see the exact moment those two disagree.
-        Telemetry.log(.permission, "onboarding_gate", [
-            "site": "AppDelegate.launch.shouldPresentOnLaunch",
-            "decision": presentOnLaunch ? "present" : "skip",
-            "hasCompletedSetup": "\(settings.hasCompletedSetup)",
-            "backendKind": "\(backendKind)",
-        ])
-        if presentOnLaunch {
-            log("Audiout launched (backend: \(type(of: backend))) — first-run setup")
-            presentSetup()
+        // First-open licence gate (owner decision 2026-08-30): a purchased
+        // build (`AudioutLicenseServerURL` in Info.plist) links itself to a
+        // licence before anything else runs. Its pass runs the exact first-run
+        // block this used to be, so Setup's permission priming and the backend
+        // deferral are preserved behind it; its abort quits. A build from
+        // source carries no server URL and never gates (`LicenseGate`).
+        if LicenseGate.shouldPresent(settings: settings) {
+            log("Audiout launched — first-open license gate")
+            presentLicenseGate()
         } else {
-            startBackendIfNeeded()
-            log("Audiout launched (backend: \(type(of: backend)))")
-            // Existing users who completed onboarding before the PTP helper
-            // daemon existed never got `register()` called — it previously only
-            // ran from `OnboardingViewController.viewDidLoad`, which this launch
-            // path skips entirely. Give every native-backend launch one silent
-            // registration attempt so their Login Items entry appears too.
-            registerPTPHelperIfNeeded()
-            healPTPHelperZombieIfNeeded()
-            // If audio capture is already NOT granted at launch (revoked or reset
-            // since setup completed), present setup NOW — synchronously, since the
-            // grant is a silent read — so it's the first thing on screen. Without
-            // this, setup only reappeared via the async reactivate/wake audit,
-            // which lagged the launch: the user saw the popover first (a menu-bar
-            // click, `onboardingWindowController` still nil) and setup flashed in
-            // after. Local Network / PTP gaps are still caught by that audit.
-            //
-            // T4 (B1): reads `effectiveStatus()`, NOT `isGranted()` — `isGranted()`
-            // collapses `.undetermined` to `false`, which used to fire the
-            // alarming `.permissionLost` "your permission was turned off" banner
-            // for a user who simply never granted it yet (Done doesn't require a
-            // grant — see `OnboardingViewController`'s Done handler), a SECOND
-            // false-banner path that never showed up in the probe telemetry at
-            // all. Only an explicit `.denied` — something WAS decided and is now
-            // off — gets the alarm; `.undetermined` takes the same friendly
-            // `.firstRun` path the popover-open check below uses, one-shot-gated
-            // by `presentSetupForUndeterminedIfNeeded()` so the two call sites
-            // can't double-present.
-            let effectiveAudioStatus = SystemAudioCaptureTCC.effectiveStatus()
-            // T5: the live-permission-triggered half of the gate. Logged
-            // unconditionally (not only when it re-presents) so the common
-            // "still granted" case is on record too, not just the exception —
-            // and `backendKind` is included because this specific check, unlike
-            // `shouldPresentOnLaunch` above, runs regardless of backend kind.
-            Telemetry.log(.permission, "onboarding_gate", [
-                "site": "AppDelegate.launch.liveAudioCaptureCheck",
-                "decision": (onboardingWindowController == nil && effectiveAudioStatus != .granted) ? "present" : "skip",
-                "hasCompletedSetup": "\(settings.hasCompletedSetup)",
-                "backendKind": "\(backendKind)",
-                "effectiveStatus": "\(effectiveAudioStatus)",
-            ])
-            switch effectiveAudioStatus {
-            case .denied:
-                if onboardingWindowController == nil {
-                    log("Audio capture explicitly denied at launch — presenting setup")
-                    presentSetup(reason: .permissionLost([.audioCapture]))
-                }
-            case .undetermined:
-                presentSetupForUndeterminedIfNeeded()
-            case .granted:
-                break
-            }
+            runFirstRunGateAndStartBackend()
         }
 
         // T6-rev: arm the mid-session grant detector. Both launch branches above
@@ -1421,6 +1400,120 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         warnIfTranslocated()
     }
 
+    /// The launch step the licence gate defers: the first-run Setup gate
+    /// (permission priming defers the backend) or the immediate backend start
+    /// with its live TCC re-checks. Extracted verbatim from
+    /// `applicationDidFinishLaunching`; both the gate's pass and the ungated
+    /// launch run it exactly once.
+    @MainActor
+    private func runFirstRunGateAndStartBackend() {
+        // First-run priming: on the native path, explain BOTH permissions before
+        // either system prompt fires. We hold the backend (its discovery triggers
+        // the Local Network prompt) until the user has seen the setup screen —
+        // otherwise the OS dialog would be their first exposure to the ask, which
+        // is the exact thing this flow exists to prevent. Every other launch (and
+        // every non-native backend) starts immediately.
+        let presentOnLaunch = SetupModel.shouldPresentOnLaunch(settings: settings, backendKind: backendKind)
+        // T5: the onboarding-presentation gate's decision + the inputs behind
+        // it. `hasCompletedSetup` is the "setup says done/granted" side of
+        // tonight's bug; the live `SystemAudioCaptureTCC.isGranted()` read
+        // just below (logged separately) is the "real gate" side — together
+        // they let a reader see the exact moment those two disagree.
+        Telemetry.log(.permission, "onboarding_gate", [
+            "site": "AppDelegate.launch.shouldPresentOnLaunch",
+            "decision": presentOnLaunch ? "present" : "skip",
+            "hasCompletedSetup": "\(settings.hasCompletedSetup)",
+            "backendKind": "\(backendKind)",
+        ])
+        if presentOnLaunch {
+            log("Audiout launched (backend: \(type(of: backend))) — first-run setup")
+            presentSetup()
+        } else {
+            startBackendIfNeeded()
+            log("Audiout launched (backend: \(type(of: backend)))")
+            // Existing users who completed onboarding before the PTP helper
+            // daemon existed never got `register()` called — it previously only
+            // ran from `OnboardingViewController.viewDidLoad`, which this launch
+            // path skips entirely. Give every native-backend launch one silent
+            // registration attempt so their Login Items entry appears too.
+            registerPTPHelperIfNeeded()
+            healPTPHelperZombieIfNeeded()
+            // If audio capture is already NOT granted at launch (revoked or reset
+            // since setup completed), present setup NOW — synchronously, since the
+            // grant is a silent read — so it's the first thing on screen. Without
+            // this, setup only reappeared via the async reactivate/wake audit,
+            // which lagged the launch: the user saw the popover first (a menu-bar
+            // click, `onboardingWindowController` still nil) and setup flashed in
+            // after. Local Network / PTP gaps are still caught by that audit.
+            //
+            // T4 (B1): reads `effectiveStatus()`, NOT `isGranted()` — `isGranted()`
+            // collapses `.undetermined` to `false`, which used to fire the
+            // alarming `.permissionLost` "your permission was turned off" banner
+            // for a user who simply never granted it yet (Done doesn't require a
+            // grant — see `OnboardingViewController`'s Done handler), a SECOND
+            // false-banner path that never showed up in the probe telemetry at
+            // all. Only an explicit `.denied` — something WAS decided and is now
+            // off — gets the alarm; `.undetermined` takes the same friendly
+            // `.firstRun` path the popover-open check below uses, one-shot-gated
+            // by `presentSetupForUndeterminedIfNeeded()` so the two call sites
+            // can't double-present.
+            let effectiveAudioStatus = SystemAudioCaptureTCC.effectiveStatus()
+            // T5: the live-permission-triggered half of the gate. Logged
+            // unconditionally (not only when it re-presents) so the common
+            // "still granted" case is on record too, not just the exception —
+            // and `backendKind` is included because this specific check, unlike
+            // `shouldPresentOnLaunch` above, runs regardless of backend kind.
+            Telemetry.log(.permission, "onboarding_gate", [
+                "site": "AppDelegate.launch.liveAudioCaptureCheck",
+                "decision": (onboardingWindowController == nil && effectiveAudioStatus != .granted) ? "present" : "skip",
+                "hasCompletedSetup": "\(settings.hasCompletedSetup)",
+                "backendKind": "\(backendKind)",
+                "effectiveStatus": "\(effectiveAudioStatus)",
+            ])
+            switch effectiveAudioStatus {
+            case .denied:
+                if onboardingWindowController == nil {
+                    log("Audio capture explicitly denied at launch — presenting setup")
+                    presentSetup(reason: .permissionLost([.audioCapture]))
+                }
+            case .undetermined:
+                presentSetupForUndeterminedIfNeeded()
+            case .granted:
+                break
+            }
+        }
+    }
+
+    /// Present (or re-front) the first-open licence gate. The gate owns the
+    /// launch until it is answered: pass re-applies licence state and runs
+    /// the deferred first-run block; abort (✕ or Quit) terminates — a hard
+    /// gate's close IS declining to run the paid build.
+    @MainActor
+    private func presentLicenseGate() {
+        if let gate = licenseGateWindowController {
+            gate.present()
+            return
+        }
+        let gate = LicenseGateWindowController(
+            settings: settings,
+            openURL: { NSWorkspace.shared.open($0) },
+            onPassed: { [weak self] in
+                guard let self else { return }
+                self.licenseGateWindowController = nil
+                self.applyLicenseState()
+                // Same as `general.onLicenseChanged` below: a key entered at
+                // the gate registers the device now, not at the next launch.
+                LicenseCheckIn(settings: self.settings).checkInIfNeeded()
+                self.runFirstRunGateAndStartBackend()
+            },
+            onAbort: { [weak self] in
+                self?.licenseGateWindowController = nil
+                NSApp?.terminate(nil)
+            })
+        licenseGateWindowController = gate
+        gate.present()
+    }
+
     /// Tell the user when Gatekeeper is running us from its randomized
     /// read-only mount ("app translocation") — what happens when a downloaded
     /// app is opened straight out of Downloads or a mounted disk image.
@@ -1439,7 +1532,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func warnIfTranslocated() {
         guard Bundle.main.bundleURL.path.contains("/AppTranslocation/") else { return }
-        NSApp.activate()
+        NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Audiout is running from a temporary location"
         alert.informativeText = """
@@ -1874,6 +1967,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // gesture that ends it does both — the backends make that split.
         controller.onSetDeviceEQ = { [weak self] eq, deviceID, committed in
             self?.backend.setEQ(eq, for: deviceID, commit: committed)
+            // A committed write moves the Mixer row's Equalizer mark; a live
+            // scrub does not, because nothing was saved yet.
+            if committed {
+                self?.devicesByID[deviceID]?.eq = eq
+                self?.repaintFromCurrentState()
+            }
         }
         controller.onSetMainOutEQ = { [weak self] eq, committed in
             self?.backend.setMainOutEQ(eq, commit: committed)
@@ -2095,6 +2194,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController?.setUnregisteredNoteActive(unregistered)
         updaterController?.updater.httpHeaders = key.isEmpty ? nil : ["Authorization": "Bearer \(key)"]
 
+        // A licence that lands while phones are connected: push the token
+        // their welcome would have carried, once per distinct token.
+        if let token = settings.companionToken, token != pushedCompanionToken {
+            pushedCompanionToken = token
+            companionServer.sendCompanionToken(token)
+        }
+
         // License identity for analytics (PRODUCT.md Data Collection stream 1,
         // owner-approved): the installID stays the identity even when the
         // license is removed — only the super properties change. Never
@@ -2210,7 +2316,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // snapped back. Mirrors the Mac pane's own ordering, where
                 // `onSettingChanged` fires after `await latency.apply`.
                 await self.scheduleCompanionBroadcast()
-            })
+            },
+            alignmentActions: makeCompanionAlignmentActions())
+
+        // A reconnect (or an alignment landing) changes what the phone's
+        // speaker row says, and nothing else broadcasts for it — the freshness
+        // store is the only thing that saw the edge.
+        (backend as? BTOutputControlling)?.onBTAlignmentChanged = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, !self.isTerminating else { return }
+                self.scheduleCompanionBroadcast()
+            }
+        }
 
         // Group/Main-Out/mute state — the broadest snapshot input, and the only
         // signal behind a USER-driven Main Out master move: that emits no
@@ -2287,7 +2404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.serveAppIconPages(requested, to: clientID)
                     return  // no snapshot broadcast — icons are not snapshot state
                 }
-                let result = self.companionDispatcher.execute(command)
+                let result = self.companionDispatcher.execute(command, clientID: clientID)
                 reply(CompanionServer.CommandResult(
                     applied: result.applied,
                     refusalReason: result.refusalReason,
@@ -2308,10 +2425,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // rewrites no device level — the immediate snapshot is exact.
                 // `setStartBufferMs` is async too; finding 1's post-apply
                 // schedule carries it.
+                // The alignment family is asynchronous for the same reason:
+                // what a run or a commit changes in the snapshot lands through
+                // the backend's own queues and the freshness store's callback,
+                // so an immediate rebuild is guaranteed to carry the state
+                // from before the command.
                 let effectIsAsynchronous: Bool
                 switch command {
                 case .setDeviceVolume, .setDeviceMuted,
-                     .setMainOutMuted, .setGroupMuted, .setStartBufferMs:
+                     .setMainOutMuted, .setGroupMuted, .setStartBufferMs,
+                     .startAlignmentProbe, .cancelAlignmentProbe,
+                     .reportAlignmentMeasurement, .setAlignmentTick,
+                     .nudgeAlignmentTrim, .revertAlignmentNudge,
+                     .clearAlignmentTuning, .playAlignmentDemo:
                     effectIsAsynchronous = true
                 default:
                     effectIsAsynchronous = false
@@ -2333,6 +2459,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
                 self.companionRateLimiter.forgetClient(clientID)
+                // A run, a fine-tune session and an A/B receipt are all
+                // per-client state, and a phone that walks out of range would
+                // otherwise leave the room holding a sweep feed with every
+                // other speaker silent, or a metronome nobody can stop. The
+                // backend's cancel is what each of them means when the client
+                // goes: a run is abandoned and its suspended nudge restored, a
+                // receipt is put back, and a fine-tune session ENDS — writing
+                // down what the user had already nudged, rather
+                // than throwing it away.
+                let orphaned = self.companionAlignmentClientByDeviceID
+                    .filter { $0.value == clientID }.map(\.key)
+                for deviceID in orphaned {
+                    self.companionAlignmentClientByDeviceID.removeValue(forKey: deviceID)
+                    (self.backend as? BTOutputControlling)?
+                        .cancelCompanionAlignmentProbe(targetID: deviceID)
+                }
             }
         }
 
@@ -2343,6 +2485,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // same discipline as onCommand; if we're terminating, don't answer —
         // the server teardown closes the held connection, and no decision
         // gets persisted on the way out.
+        // Read per welcome, not captured once: a licence check-in that lands
+        // after the server started still reaches the next phone to connect.
+        companionServer.companionToken = { [settings] in settings.companionToken }
         companionServer.onApprovalRequest = { [weak self] clientID, clientName, decide in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
@@ -2460,6 +2605,178 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .filter { !routedIDs.contains($0.bundleID) && !excludedApps.isExcluded($0.bundleID) }
     }
 
+    /// The live device list in a stable order, for the two Core-level
+    /// alignment rules that read the whole room.
+    @MainActor
+    private var companionAlignmentDevices: [Device] {
+        Array(devicesByID.values).sorted { $0.id < $1.id }
+    }
+
+    /// The speaker a run for `targetID` would be measured against — the SAME
+    /// rule, over the same inputs, that puts `referenceID` in every snapshot.
+    /// One function, so the phone's CTA and what a run actually plays can
+    /// never be two different speakers.
+    ///
+    /// `isMainOutMember` is the audible read, never `isSpeakerSelected`: under
+    /// a saved-group Main Out target the latter is wrong in both directions,
+    /// so it would hide every group member from the run's candidates and
+    /// publish no reference at all for a room that is plainly playing.
+    @MainActor
+    private func companionAlignmentReferenceID(forTarget targetID: String) -> String? {
+        CompanionSnapshotBuilder.alignmentReferenceID(
+            forTarget: targetID,
+            among: companionAlignmentDevices,
+            isAudible: groupController.isMainOutMember)
+    }
+
+    /// The eight sync-calibration actuators the companion dispatcher calls.
+    ///
+    /// Decision 5's preconditions and the sentences they refuse with live in
+    /// `CompanionAlignmentPreconditions` (Core), not here: this target is
+    /// invisible to the test suite, so a rule decided in it is untestable by
+    /// construction. What remains here is wiring — which backend, which live
+    /// device list, and which phone asked. The backend answers only what it
+    /// alone knows: whether the target has a live delay line, and whether
+    /// anything else is already running.
+    @MainActor
+    private func makeCompanionAlignmentActions() -> CompanionAlignmentActions {
+        CompanionAlignmentActions(
+            startProbe: { [weak self] targetID, clientID in
+                guard let self, let bt = self.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                let referenceID: String
+                switch CompanionAlignmentPreconditions.evaluate(
+                    targetID: targetID,
+                    among: self.companionAlignmentDevices,
+                    isAudible: self.groupController.isMainOutMember
+                ) {
+                case .refused(let reason):
+                    self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                    return reason
+                case .ready(let id):
+                    referenceID = id
+                }
+                let refusal = bt.startCompanionAlignmentProbe(
+                    targetID: targetID, referenceID: referenceID,
+                    onStarted: { [weak self] in
+                        self?.sendCompanionProbeEvent(targetID: targetID, started: true)
+                    },
+                    onFinished: { [weak self] in
+                        self?.sendCompanionProbeEvent(targetID: targetID, started: false)
+                    })
+                // Recorded only on a run that actually staged, and before any
+                // callback can be serviced: both fire through a main-queue hop
+                // that cannot run until this synchronous closure returns. A
+                // refusal drops any older entry rather than leaving one behind
+                // for a run that never started.
+                if refusal == nil, let clientID {
+                    self.companionAlignmentClientByDeviceID[targetID] = clientID
+                } else if refusal != nil {
+                    self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                }
+                return refusal
+            },
+            cancelProbe: { [weak self] targetID in
+                guard let self else { return nil }
+                self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                (self.backend as? BTOutputControlling)?
+                    .cancelCompanionAlignmentProbe(targetID: targetID)
+                return nil
+            },
+            reportMeasurement: { [weak self] targetID, offsetMs, confidence in
+                // `confidence` rides the wire for the PHONE's own gate — it
+                // decides whether a recording was clean enough to report at
+                // all. A measurement that arrives has already passed that, and
+                // the Mac has nothing better to judge it with, so it does not
+                // gate on it — it only records it, for the measurement log.
+                guard let self, let bt = self.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                let clientID = self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                switch bt.applyCompanionAlignmentMeasurement(
+                    targetID: targetID, offsetMs: offsetMs, confidence: confidence) {
+                case .refused(let reason):
+                    return reason
+                case .applied(let measuredMs, let correctedMs):
+                    // Enqueued on the server queue before this command's own
+                    // reply is, so it reaches the phone first — but the phone
+                    // does not lean on that order.
+                    if let clientID {
+                        self.companionServer.sendAlignmentApplied(
+                            deviceID: targetID, measuredMs: measuredMs,
+                            correctedMs: correctedMs, to: clientID)
+                    }
+                    return nil
+                }
+            },
+            setTick: { [weak self] targetID, active, clientID in
+                guard let self, let bt = self.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                let refusal = bt.setCompanionAlignmentTick(targetID: targetID, active: active)
+                // A fine-tune session is per-client state exactly as a run is,
+                // and it is the half that leaves a metronome in the room and
+                // the user's nudges unwritten if the phone vanishes. Registered
+                // on the same map, so the disconnect hop ends it.
+                if active, refusal == nil, let clientID {
+                    self.companionAlignmentClientByDeviceID[targetID] = clientID
+                } else if !active || refusal != nil {
+                    self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                }
+                return refusal
+            },
+            nudgeTrim: { [weak self] targetID, deltaMs in
+                guard let bt = self?.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                return bt.nudgeCompanionAlignmentTrim(targetID: targetID, deltaMs: deltaMs)
+            },
+            revertNudge: { [weak self] targetID in
+                guard let bt = self?.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                return bt.revertCompanionAlignmentNudge(targetID: targetID)
+            },
+            clearTuning: { [weak self] targetID in
+                guard let bt = self?.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                bt.clearCompanionAlignmentTuning(targetID: targetID)
+                return nil
+            },
+            playDemo: { [weak self] targetID, clientID in
+                guard let self, let bt = self.backend as? BTOutputControlling else {
+                    return "This Mac can't measure speaker timing."
+                }
+                let refusal = bt.playCompanionAlignmentDemo(
+                    targetID: targetID,
+                    referenceID: self.companionAlignmentReferenceID(forTarget: targetID))
+                // Four seconds of held-silent speakers is short, but a phone
+                // that drops inside it must still put the room back.
+                if refusal == nil, let clientID {
+                    self.companionAlignmentClientByDeviceID[targetID] = clientID
+                } else if refusal != nil {
+                    self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                }
+                return refusal
+            })
+    }
+
+    /// Address one of the run's two moments back to the phone that staged it,
+    /// and to nobody else. Fired from the pacer's own thread, so it hops.
+    private func sendCompanionProbeEvent(targetID: String, started: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isTerminating,
+                  let clientID = self.companionAlignmentClientByDeviceID[targetID] else { return }
+            if started {
+                self.companionServer.sendAlignmentProbeStarted(deviceID: targetID, to: clientID)
+            } else {
+                self.companionServer.sendAlignmentProbeFinished(deviceID: targetID, to: clientID)
+            }
+        }
+    }
+
     /// Build the full snapshot from the live controllers and hand it to the
     /// server (which owns encoding + identical-snapshot suppression).
     @MainActor
@@ -2489,7 +2806,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             connectVolumeMin: AppSettings.minConnectVolume,
             connectVolumeMax: AppSettings.maxConnectVolume,
             startBufferMs: settings.startBufferMs,
-            startBufferOptionsMs: AppSettings.startBufferOptionsMs)
+            startBufferOptionsMs: AppSettings.startBufferOptionsMs,
+            // Bluetooth rows only, and only under a backend that keeps the
+            // store and watches the link edges — everything else reports no
+            // alignment at all, which the phone reads as "not reported".
+            alignmentFor: { [weak self] device in
+                (self?.backend as? BTOutputControlling)?.btAlignmentReport(forDevice: device.id)
+            })
         companionServer.broadcast(snapshot)
     }
 
@@ -2740,10 +3063,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         case .btFirstMixAlignmentPrompt(let deviceID):
             // W3: a never-aligned BT speaker just joined its first mix and is
-            // being held silent — surface the anchored alignment card under its
-            // row. The popover controller resolves it back through
-            // `onResolveBTAlignmentPrompt`; no device model changed here.
-            popoverController.showBTAlignmentPrompt(deviceID: deviceID)
+            // playing as-is — offer alignment in a note under its row. No
+            // device model changed here.
+            popoverController.offerBTAlignment(deviceID: deviceID)
             logEvent(event)
             return
         }
@@ -2869,7 +3191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .routingBlockedNeedsDefault(let active):
             return "routingBlockedNeedsDefault(\(active)) — \(active ? "actively routing but the aggregate isn't the Mac's default output" : "aggregate is default again / routing stopped")"
         case .btFirstMixAlignmentPrompt(let deviceID):
-            return "btFirstMixAlignmentPrompt(\(deviceID)) — never-aligned BT speaker held silent in its first mix"
+            return "btFirstMixAlignmentPrompt(\(deviceID)) — never-aligned BT speaker joined its first mix, playing as-is"
         }
     }
 

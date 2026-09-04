@@ -26,7 +26,7 @@ import Testing
 
     private func makeBusRow(_ device: Device) -> DeviceRowView {
         DeviceRowView(device: device, showsToggle: true,
-                      paintsSelectionBackground: false, showsMeter: true, showsBus: true)
+                      showsMeter: true, showsBus: true)
     }
 
     private func makeCastDevice(id: String = "cast-dev",

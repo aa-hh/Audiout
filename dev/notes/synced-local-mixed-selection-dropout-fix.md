@@ -313,3 +313,238 @@ untouched.
   genuine device/rate rebuild.
 
 **Test suite:** `swift test --parallel` reports 998/998 green.
+
+---
+
+## 8. Follow-up fix — T3 rapid-toggle storm: coalesce bursts + guarded RTP re-sync
+
+**Symptom (Alec, live by-ear on `claude/warm-signal-full`):** after the §7 fix landed,
+the single-toggle connect latency was cured. But rapidly clicking the Mac's "Current
+Device" checkbox (toggling on/off/on/off rapidly over 2–3 seconds) permanently silences
+AirPlay audio — the exact same symptom as §0's nominal-sample-rate bug, but triggered
+by a *different root cause*: the whole-system tap rebuild that `setSyncedLocalSink`
+itself *deliberately forces on every attach/detach* (see `NativeCaptureCoordinator`'s
+`setSyncedLocalSink` → `updateRouting` → `recreateTap`), not by a hardware sample-rate
+renegotiation.
+
+**Root cause — STABILITY(C6) coalescing only protects half the problem.** The
+`NativeCaptureCoordinator` already has coalescing (`pendingDeviceChange` guard, C6 in
+`PLAN-SYNCED-LOCAL-DROPOUT-FIX.md`) that prevents a rebuild landing while *one is
+already in flight* — call it serialization. But rapid toggling bypasses that: each
+click calls `setOutputSet` → `applySyncedLocalSinkTransition` (the pre-fix code path)
+→ `attachSyncedLocalSink` → `recreateTap`, and if each rebuild *completes cleanly
+before the next click arrives*, the C6 guard does NOT prevent it. Telemetry evidence:
+~19 whole-system tap rebuilds in 2.5s of rapid clicking, each completing successfully
+before the next one began, `desiredOn` set unchanged across all of them (user never
+actually *changed* which devices were selected, just spammed the toggle).
+
+Each rebuild is an `.exclusionChange` (the `syncedLocalSink`'s render PID changed from
+missing to present or vice versa), NOT a `.deviceOrRateChange` — so the rebuild
+deliberately does NOT reset the AirPlay receiver's RTP session (§7's `onDeviceRateRebuild`
+callback doesn't fire). The receiver clock stays at its old PTP timeline while the
+Mac-side tap's `mach → monotonic` mapping is STALE in every one of those 19 rebuilds.
+The receiver's audio samples desync relative to the tap's delivery, RTP playback
+becomes incoherent → silent output on the receiver. Mac-side capture coordinator
+reports perfectly healthy (both the tap and the `NativeCaptureCoordinator` are running
+normally; they just have an out-of-sync clock mapping).
+
+Why nothing logged an error: `.exclusionChange` rebuilds are CORRECT to skip the reset.
+They are ordinarily benign (a per-app routing change, for example, doesn't need an RTP
+reset). The reset exists to handle *device/rate changes* that HAVE moved the receiver's
+clock (§7). A tap rebuild alone — with the device and rate unchanged — is not an error
+condition at the coordinator level, and the coordinator has no way to know whether this
+particular rapid series is pathological or deliberate.
+
+**Fix — coalesce at the backend level.** `NativeBackend.swift` owns BOTH the tap rebuild
+(via `applySyncedLocalSinkTransition` → `attachSyncedLocalSink`) AND the sink re-anchor
+(the ~977ms session re-fire happens inside `SyncedLocalSink`'s attach/start). So one fix
+there addresses both symptoms. T1 + T2 (commit `32a632d`, 2026-07-25):
+
+### T1 — Debounce synced-local attach/detach on a trailing-edge window
+
+> The window is **0.5s** and churn has a second, cadence-independent arming path; T6 below
+> explains why the original 250ms-only shape was not enough. The 250ms figures in T1/T2/T3
+> are the as-first-shipped values, kept because the reasoning still reads correctly.
+
+**Location:** `NativeBackend.swift`, new methods `scheduleSyncedLocalSettleLocked()` and
+`fireSyncedLocalSettle()`, new `stateQueue`-confined fields `syncedLocalSinkApplied`,
+`pendingSyncedLocalSettle`, `syncedLocalCoalescedCount`.
+
+**Mechanism:** Every Mac select/deselect updates `syncedLocalSinkEnabled` (the DESIRED
+state) inside `stateQueue` (already serialized). Instead of running the attach/detach
+immediately, `setOutputSet` calls `scheduleSyncedLocalSettleLocked()`, which:
+
+1. Increments `syncedLocalCoalescedCount` (how many distinct toggle decisions landed).
+2. Cancels `pendingSyncedLocalSettle` if already armed.
+3. (Re)schedules `fireSyncedLocalSettle` to run 250ms from now on `stateQueue` via
+   `stateQueue.asyncAfter(deadline: .now() + 0.25)`.
+
+The `DispatchWorkItem` is stored in `pendingSyncedLocalSettle` so a newer toggle can
+cancel it before it fires. On fire, `fireSyncedLocalSettle()`:
+
+1. Clears the pending item and coalesce counter.
+2. **Bails if desired == already-applied** (net no-op burst like on→off→on landing back
+   on ON — no transition needed, no reset needed).
+3. Sets `syncedLocalSinkApplied = desired` and enqueues `applySyncedLocalSinkTransition`
+   on `captureControlQueue` (the same serial queue every capture start/stop runs on, so
+   a tap recreate never races a gate toggle).
+4. If `coalesced >= 2` (churn detected), also calls `resetAirPlaySessionForWholeSystem()`
+   to re-establish the receiver's RTP session exactly once after the transition.
+
+A normal single toggle decision coalesces to exactly 1, so step 4 is structurally
+unreachable on a single click.
+
+**250ms window is trailing-edge only (planner's recommendation).** On a single toggle,
+the user experiences a 250ms latency from click to transition — an accepted tradeoff
+for simplicity and guarantee that the last toggle's decision wins (no leading-edge
+fast path needed).
+
+### T2 — Guarded safety-net RTP re-sync for churny settles
+
+The coalescing alone fixes the tap-rebuild storm (T1), which kills the tap's clock
+desync immediately. But the sink's session re-anchor happens in parallel: each attach
+re-fires the ~977ms anchor window. With N rebuilds, that became N overlapping re-anchor
+cycles, thrashing the session's PTP timeline. Simply collapsing to one rebuild (T1)
+also collapses to one re-anchor, fixing the symptom.
+
+T2 adds a safety net: if the settle absorbed `>= 2` distinct toggle decisions (genuine
+churn), fire a one-shot `resetAirPlaySessionForWholeSystem()` after the transition
+settles. This is **already single-flighted** by the existing per-device `converging`
+claim and generation counter, so:
+
+- It cannot fire redundantly on a single toggle (coalesce count = 1 bails).
+- It cannot fight a concurrent device convergence or thrash a healthy session.
+- It is emitted as a Telemetry event (`synced_local_churn_resync`) for observability.
+
+### T3 — Hermetic regression tests
+
+**Files:** `NativeBackendSyncedLocalSelectionTests.swift` (cases a, c, e) and
+`NativeBackendTests.swift` (cases b, d, production default).
+
+The six test cases guard the fix against regressions:
+
+**(a)** `rapidToggleBurstProducesAtMostOneTransition` — a 5-decision burst
+(on→off→on→off→on in ~50ms, settled in 50ms window) must collapse to exactly ONE sink
+transition, not 5. The spy `SyncedLocalSinkControlling` records every call; a broken
+(uncoalesced) path would show 5 `start`/`stop` cycles.
+
+**(c)** `netNoOpBurstDoesNothing` — a burst that lands back on the already-applied
+state (enabled initially, then off→on→off→on landing back on enabled) must do absolutely
+NOTHING — no sink call, no reset. This is critical: it catches forgetting the
+`desired != applied` guard that prevents churn-count-based resets on a redundant burst.
+
+**(e)** `stopCancelsPendingSettle` — `stop()` must cancel a still-pending settle so
+it never fires against a torn-down backend. Uses a 1.0s window (much longer than usual)
+to create a scenario where the settle is still armed. The test reads `test_hasPendingSyncedLocalSettle`
+(an injected `stateQueue.sync` accessor) before and after `stop()` to verify the pending
+item is cleared synchronously, independent of any other guard. (Belt-and-suspenders: even
+if `stop()` forgets to cancel, `fireSyncedLocalSettle`'s own `desired != applied` bail
+would still prevent a crash, but this test catches the regression directly.)
+
+**(b)** `singleSyncedLocalToggleAppliesTransitionWithZeroResets` — **THE SHARPEST
+correctness constraint:** a NORMAL SINGLE Mac toggle must (1) apply the transition
+(sink starts listening) and (2) issue ZERO `resetAirPlaySessionForWholeSystem` calls.
+This guards against reintroducing the redundant RTP re-establish on every ordinary
+connect that §7's follow-up fix already removed once. A broken churn detector that fired
+on every toggle (not just `>= 2`) would cause this case to fail.
+
+**(d)** `churnyToggleBurstLandingOnNewStateFiresTransitionPlusExactlyOneReset` — a
+genuine 3-decision burst (off→on→off→on over ~50ms, landing on a new state different
+from currently-applied) must fire the sink transition PLUS exactly ONE `resetAirPlaySessionForWholeSystem`
+call. Detects the reset as exactly one engine flush (`SpyEngine.flushedIDs`), which is what
+today's whole-system reset issues.
+
+**Test-only seam:** `syncedLocalSettleWindow` is injected through the designated
+initializer (`init(..., syncedLocalSettleWindow: TimeInterval = 0.25)`) rather than a
+module-level constant, same shape as `processNotYetAudibleRetryDelay` and
+`rebindRecoveryRetryDelay` elsewhere in the file. The convenience init (every real
+production call site, including `makeBackend`) takes no such parameter, so production
+always inherits the 0.25s default unchanged. Case (f), `syncedLocalSettleWindowProductionDefaultIsUnchanged`,
+pins the default so the seam itself never silently drifts.
+
+Two injected accessors were added:
+- `test_syncedLocalSettleWindow: TimeInterval` — returns the private `syncedLocalSettleWindow`
+  to verify the production default is 0.25s (case f).
+- `test_hasPendingSyncedLocalSettle: Bool` — reads `pendingSyncedLocalSettle != nil` on
+  `stateQueue`, used by case (e) to discriminate a missing cancel from other guards.
+
+**Test suite:** `swift test --parallel` reports 1270 tests green. All six cases were
+verified NOT vacuous: temporarily reverting different pieces of `32a632d` caused them
+to fail with the exact expected diagnostics (e.g., removing the `coalesced >= 2` guard
+made case b fail; removing `pendingSyncedLocalSettle = nil` made case e fail).
+
+### T6 — Cadence-proof arming (the review's H-1), and what it changed
+
+The adversarial gate found that T1+T2 as shipped were **window-proof, not cadence-proof**.
+The 250ms window was the only protection, so a user clicking the Mac checkbox every ~330ms
+(~3/s, a comfortable sustained human rate) landed every click OUTSIDE the window: each got
+its own settle with `coalesced == 1`, `churned` was always false, and the T2 safety net was
+**provably unreachable** — one full tap rebuild per click, zero re-syncs, behaviour identical
+to pre-fix. The reported bug still reproduced at moderate clicking speeds.
+
+Both halves of the remediation, in the order the memory-leak audit established for this storm
+class (`docs/plans/PLAN-MEMORY-LEAK-AUDIT.md`: its structural loop-breaker T8 landed BEFORE
+its debounces T9/T10, precisely because a window must never be the only protection):
+
+1. **Structural, cadence-independent arming.** `fireSyncedLocalSettle` now appends a monotonic
+   timestamp (`DispatchTime.now().uptimeNanoseconds`) for every transition it REALLY applies —
+   past the `desired != applied` guard, never per toggle decision — into
+   `syncedLocalTransitionTimes`, pruned to a rolling `syncedLocalTransitionHorizon` (2s). Churn
+   is now `coalesced >= 2 || recentTransitions >= 2`. The second disjunct is what recovers a
+   cadence slower than the window; the first still catches faster-than-window bursts.
+2. **Window widened 0.25s → 0.5s.** 500ms is the top of the band that plan used for
+   user-facing debounces (T10's shared monitor, 300–500ms) — deliberately not its 1–2s scan
+   window (T9), which gated a background process-list scan rather than a user-visible action,
+   and which its own T11 warns costs first-start latency.
+
+**The invariant is untouched.** A normal single toggle satisfies neither disjunct: one
+decision, and its own transition alone inside the horizon. Two *deliberate* toggles several
+seconds apart are likewise one transition each per horizon and pay nothing — the horizon is
+exactly what separates them from churn. The horizon's floor is the settle window (or a cadence
+just outside the window slips through the same hole again); its ceiling is deliberate
+reconsideration, and since every transition already trails its click by the window, a 2s gap
+between transitions is a 2s gap between clicks.
+
+No second rate limiter guards a SUSTAINED storm, by design: `resetAirPlaySessionForWholeSystem`
+is already single-flighted, so a device still recovering sits in `converging` and the next call
+skips it (`whole_system_rebind_skipped`).
+
+Three more findings closed in the same pass:
+
+- **H-2 (the pin test was vacuous).** `makeBackend` re-declared `syncedLocalSettleWindow = 0.25`
+  and always forwarded it, so `syncedLocalSettleWindowProductionDefaultIsUnchanged` pinned
+  the *helper's* literal — the real default could drift underneath it. The two pin tests construct
+  the backend directly through the designated init with no timing arguments, so they read the
+  real default rather than a helper literal. Verified by temporarily setting the default to 2.5s: the test fails.
+  `test_syncedLocalTransitionHorizon` + a matching pin case cover the horizon the same way.
+- **H-3 (false-failure risk).** The coalescing cases shrank the window to 30–50ms, under
+  scheduling jitter with `--parallel`; a split burst inverted their meaning. Now 0.15s. The
+  H-1 case deliberately keeps a SHORT (0.05s) window — its hazard is inverted: it needs each
+  click to fall OUTSIDE the window, so a merge (which needs a 280ms stall) is its only failure
+  mode.
+- **H-6 (meter led the audio).** `isMeterable` read the DESIRED flag, so the local row's meter
+  moved up to a full window ahead of physical audio in both directions. It now reads
+  `syncedLocalSinkApplied`, and `setOutputSet`'s eager `emitCombinedLevel(forDevice:)` — which
+  existed ONLY because the desired flag flipped instantly — moved into `fireSyncedLocalSettle`
+  alongside the applied flag, so the clear still happens, at the moment the transition lands.
+
+New hermetic cases (all `IsolatedSuite`, no audio): `slowCadenceToggleStormArmsExactlyOneReset`
+(the H-1 regression — two clicks 330ms apart, each outside the window, arm exactly one re-sync;
+verified to FAIL with `recentTransitions >= 2` removed, reporting 0 resets),
+`twoUnhurriedTogglesOutsideTheHorizonArmNoReset`,
+`syncedLocalTransitionHorizonProductionDefaultIsUnchanged`, and
+`localDeviceMeterFollowsAppliedNotDesiredSyncedLocalState` (verified to FAIL against the
+desired-flag `isMeterable`).
+
+### Cross-reference
+
+- **PLAN:** `docs/plans/PLAN-RAPID-TOGGLE-DROPOUT-FIX.md` (decisions Q1–Q5, task list,
+  risk analysis, §H adversarial-review ledger).
+- **Commit:** `32a632d` ("Debounce rapid synced-local toggling; guarded RTP re-sync on
+  churn"), 2026-07-25.
+- **Prior fix that this reuses:** §7 above (the `.deviceOrRateChange` callback that
+  CORRECTLY fires on a genuine device/rate rebuild, which this rapid-toggle fix must
+  NOT regress).
+- **Related:** the nominal-sample-rate listener itself (§1.1), which is still the
+  safety net for real hardware rate changes; this fix addresses rapid *toggling* as a
+  separate (and orthogonal) coalescing problem.

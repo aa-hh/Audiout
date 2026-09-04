@@ -39,10 +39,10 @@ import AudioutSharedUI
 /// step-up of the corner badge's alpha through the same `setOverlayVisible(_:)`
 /// path — so a sighted keyboard user gets the same "this is interactive" cue a
 /// mouse user gets on hover, not just the ring.
-/// WARM SIGNAL (spec §1 / §5.3): the well now draws itself as a real *raised
-/// well* — a rounded rect filled with `Tokens.Color.raised` (§1's stated role
-/// for that token: "raised well (icon well…)") edged with the `hairline`
-/// token — so the 64 pt box reads as one clickable control whose LEFT EDGE
+/// WARM SIGNAL (spec §1 / §5.3): the well draws itself as a real seat — a
+/// rounded rect filled `raised` at the control radius (on light that is the
+/// flat ground, so only the edge draws the seat) edged with
+/// `containerEdge` — so the 64 pt box reads as one clickable control whose LEFT EDGE
 /// aligns with the column (the previous bare glyph floated centered in an
 /// invisible box, which read as a left-alignment drift against the labels
 /// below it). Hovering (or keyboard focus) adds a neutral wash at
@@ -51,8 +51,11 @@ import AudioutSharedUI
 /// shown group is the ACTIVE Main Out target (`isActiveGroup`, set by the
 /// group editor from `GroupController.activeGroupID`), the well's edge
 /// becomes the thin gold ring the spec's Groups section describes ("the icon
-/// well with its halo ring", §5.3) — drawing only, gold on an instrument per
-/// house rule 1. All fills/strokes resolve inside `draw(_:)` so every token
+/// well with its halo ring", §5.3) at 1.5 pt — drawing only, gold on an
+/// instrument per house rule 1. The glyph inside is IDENTITY, so it is
+/// `labelCool` until the group actually sounds and `label` once it does (C5),
+/// and the well owns that tint: no host sets it.
+/// All fills/strokes resolve inside `draw(_:)` so every token
 /// re-resolves live per appearance + Increase Contrast, never a frozen
 /// `.cgColor` (the `WarmCanvasView` pattern).
 final class DeviceIconWellView: NSView {
@@ -62,8 +65,8 @@ final class DeviceIconWellView: NSView {
     static let size: CGFloat = 64
 
     /// Corner radius of the raised-well rounded rect (and of the focus ring /
-    /// hover wash that trace the same shape).
-    private static let wellCornerRadius: CGFloat = 12
+    /// hover wash that trace the same shape) — the control radius.
+    private static let wellCornerRadius: CGFloat = Tokens.Layout.Radius.control
 
     /// Inset from the well's edge to the glyph, so the symbol sits IN the
     /// well rather than spanning the whole box edge-to-edge.
@@ -112,7 +115,12 @@ final class DeviceIconWellView: NSView {
     /// `GroupController.activeGroupID`), never audio-driven, matching the
     /// §3.3 "state, not signal" discipline. Drawing-only.
     var isActiveGroup: Bool = false {
-        didSet { if isActiveGroup != oldValue { needsDisplay = true } }
+        didSet {
+            guard isActiveGroup != oldValue else { return }
+            iconImageView.contentTintColor = isActiveGroup ? Tokens.Color.label
+                                                           : Tokens.Color.labelCool
+            needsDisplay = true
+        }
     }
 
     /// True when the membership rail's origin hook lands on this well — i.e.
@@ -142,6 +150,7 @@ final class DeviceIconWellView: NSView {
 
         iconImageView.translatesAutoresizingMaskIntoConstraints = false
         iconImageView.imageScaling = .scaleProportionallyUpOrDown
+        iconImageView.contentTintColor = Tokens.Color.labelCool
 
         badgeView.translatesAutoresizingMaskIntoConstraints = false
         badgeView.wantsLayer = true
@@ -230,7 +239,7 @@ final class DeviceIconWellView: NSView {
 
     // MARK: Warm-well drawing (Warm Signal §1/§5.3)
 
-    /// Paints the raised well: `raised` fill, `hairline` edge (or the thin
+    /// Paints the seat: `raised` fill, `containerEdge` edge (or the thin
     /// gold ring while `isActiveGroup`), plus the neutral hover/focus wash.
     /// A `draw(_:)` override — not frozen layer colors — so every token
     /// re-resolves per appearance and Increase Contrast on every paint
@@ -262,14 +271,14 @@ final class DeviceIconWellView: NSView {
         // Gold when the group is the live target; the quiet `ember` when it's
         // an idle rail origin — the exact tone the rail itself draws in, so the
         // spine and the ring it lands on never disagree. Everything else keeps
-        // the neutral resting hairline.
+        // the neutral resting edge.
         let edge: NSColor
         if isActiveGroup {
             edge = Tokens.Color.gold
         } else if isRailOrigin {
             edge = Tokens.Color.ember
         } else {
-            edge = Tokens.Color.hairline
+            edge = Tokens.Color.containerEdge
         }
         edge.setStroke()
         path.lineWidth = strokeWidth

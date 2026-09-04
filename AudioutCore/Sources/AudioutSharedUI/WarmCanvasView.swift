@@ -16,20 +16,16 @@ import AppKit
 /// than satisfying it conditionally: this view was never translucent to
 /// begin with, so there's no vibrancy to defeat or fall back from.
 ///
-/// Paints a vertical gradient — `canvasHi` (top) → `canvas` (bottom) — the
-/// "gradient ladder" spec §1.1 describes for the dark palette, extended here
-/// to light by the same construction since §1.2 doesn't re-state it (the
-/// quietest reading of an otherwise-silent section — flagged in the V2
-/// report). A faint, fully DETERMINISTIC grain texture (§1.1: "~5% white
-/// alpha") glazes the gradient in dark mode only — see `WarmSignalGrain`'s
-/// doc comment for the determinism contract this exists to satisfy (V2 §F:
-/// snapshots must be byte-identical run-to-run) and the doc comment below
-/// for why light mode omits it.
+/// Paints the flat `canvas` colour in both appearances. A faint, fully
+/// DETERMINISTIC grain texture (§1.1: "~5% white alpha") glazes it in dark
+/// mode only — see `WarmSignalGrain`'s doc comment for the determinism
+/// contract this exists to satisfy (V2 §F: snapshots must be byte-identical
+/// run-to-run) and the doc comment below for why light mode omits it.
 ///
-/// Both the gradient AND the grain are replaced by the FLAT `canvas` base
-/// color (no texture) under Reduce Transparency OR Increase Contrast — V2
-/// §D: "the canvas must render fully opaque with adequate contrast" and
-/// "grain... must be omitted under Reduce Transparency/Increase Contrast."
+/// The grain drops under Reduce Transparency OR Increase Contrast, leaving
+/// the bare `canvas` fill — V2 §D: "the canvas must render fully opaque with
+/// adequate contrast" and "grain... must be omitted under Reduce
+/// Transparency/Increase Contrast."
 public final class WarmCanvasView: NSView {
 
     public override init(frame frameRect: NSRect) {
@@ -48,8 +44,8 @@ public final class WarmCanvasView: NSView {
             object: nil)
     }
 
-    /// A mid-session accessibility-display change flips the gradient+grain ↔
-    /// flat-`canvas` decision, so the whole surface repaints (§D live path).
+    /// A mid-session accessibility-display change flips the grain ↔ flat-`canvas`
+    /// decision, so the whole surface repaints (§D live path).
     @objc private func accessibilityDisplayOptionsDidChange() {
         needsDisplay = true
     }
@@ -82,23 +78,8 @@ public final class WarmCanvasView: NSView {
             return
         }
 
-        let top = Tokens.Color.canvasHi.cgColor
-        let bottom = Tokens.Color.canvas.cgColor
-        if let gradient = CGGradient(colorsSpace: nil, colors: [top, bottom] as CFArray,
-                                     locations: [0, 1]) {
-            ctx.saveGState()
-            ctx.addRect(bounds)
-            ctx.clip()
-            // Non-flipped view: the visual top edge is maxY.
-            ctx.drawLinearGradient(gradient,
-                                   start: CGPoint(x: bounds.midX, y: bounds.maxY),
-                                   end: CGPoint(x: bounds.midX, y: bounds.minY),
-                                   options: [])
-            ctx.restoreGState()
-        } else {
-            Tokens.Color.canvas.setFill()
-            bounds.fill()
-        }
+        Tokens.Color.canvas.setFill()
+        bounds.fill()
 
         // Grain is spec'd (§1.1) only for the dark flagship palette; §1.2
         // (warm paper) doesn't restate it, and white noise over a near-white

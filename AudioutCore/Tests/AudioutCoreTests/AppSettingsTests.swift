@@ -403,6 +403,16 @@ import Testing
         #expect(!AppSettings(defaults: defaults).surfacePinned)
     }
 
+    @Test func mixerMembershipHintDismissedDefaultsFalseAndRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        #expect(!settings.mixerMembershipHintDismissed, "fresh install: the hint is still owed")
+        settings.mixerMembershipHintDismissed = true
+        #expect(settings.mixerMembershipHintDismissed)
+        #expect(AppSettings(defaults: defaults).mixerMembershipHintDismissed, "persisted across instances")
+        settings.mixerMembershipHintDismissed = false
+        #expect(!AppSettings(defaults: defaults).mixerMembershipHintDismissed)
+    }
+
     // MARK: License check-in (roadmap 054)
 
     @Test func licenseKeyDefaultsNilAndRoundTrips() {

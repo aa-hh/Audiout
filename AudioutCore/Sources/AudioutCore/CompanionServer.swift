@@ -121,6 +121,13 @@ public final class CompanionServer: @unchecked Sendable {
     /// (un-helloed) connections are never counted.
     public var onClientCountChanged: (@Sendable (Int) -> Void)?
 
+    /// The licence server's companion token to hand each approved phone in
+    /// its `welcome` (`AppSettings.companionToken`), asked for at send time
+    /// so a check-in that lands mid-session reaches the next phone to
+    /// connect. Left nil, or answering nil, the `welcome` carries no token
+    /// and the phone stays locked — an unlicensed Mac unlocks nothing.
+    public var companionToken: (@Sendable () -> String?)?
+
     // MARK: - State (queue-confined)
 
     private let log = Logger(subsystem: "com.audiout.Audiout", category: "companion")
@@ -436,6 +443,52 @@ public final class CompanionServer: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self, let client = self.clients[clientID], client.isWelcomed else { return }
             self.send(.appIcons(page: page, pageCount: pageCount, icons: icons), to: client)
+        }
+    }
+
+    /// The Mac's licence came through after these phones connected: hand
+    /// every welcomed client the token its `welcome` would have carried, so
+    /// a phone locked on a token-less welcome unlocks without reconnecting.
+    /// Later connections get it from ``companionToken`` in their `welcome`.
+    public func sendCompanionToken(_ token: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            for client in self.clients.values where client.isWelcomed {
+                self.send(.companionToken(token), to: client)
+            }
+        }
+    }
+
+    /// Tell the phone that staged a sync-calibration run that its sweeps have
+    /// entered the feed — its cue to start recording. Addressed to exactly one
+    /// client, like the icon pages and for the same reason: nobody else asked
+    /// for this run and nobody else's microphone is in the room. A clientID
+    /// that is no longer promoted is a silent no-op.
+    public func sendAlignmentProbeStarted(deviceID: String, to clientID: UUID) {
+        queue.async { [weak self] in
+            guard let self, let client = self.clients[clientID], client.isWelcomed else { return }
+            self.send(.alignmentProbeStarted(deviceID: deviceID), to: client)
+        }
+    }
+
+    /// The matching "the last sweep frame is in the feed" moment — see
+    /// ``sendAlignmentProbeStarted(deviceID:to:)``. The air still lags it by
+    /// the sinks' pipeline delay, which is the phone's to wait out.
+    public func sendAlignmentProbeFinished(deviceID: String, to clientID: UUID) {
+        queue.async { [weak self] in
+            guard let self, let client = self.clients[clientID], client.isWelcomed else { return }
+            self.send(.alignmentProbeFinished(deviceID: deviceID), to: client)
+        }
+    }
+
+    /// What the Mac made of the phone's measurement, sent only to the client
+    /// that staged the run — it is the verdict that client is waiting to show.
+    public func sendAlignmentApplied(deviceID: String, measuredMs: Double,
+                                     correctedMs: Double, to clientID: UUID) {
+        queue.async { [weak self] in
+            guard let self, let client = self.clients[clientID], client.isWelcomed else { return }
+            self.send(.alignmentApplied(deviceID: deviceID, measuredMs: measuredMs,
+                                        correctedMs: correctedMs), to: client)
         }
     }
 
@@ -824,7 +877,9 @@ public final class CompanionServer: @unchecked Sendable {
                 reply(CommandResult(applied: false, refusalReason: "server not ready"))
             }
 
-        case .welcome, .awaitingApproval, .state, .commandResult, .goodbye, .appIcons, .unknown:
+        case .welcome, .awaitingApproval, .state, .commandResult, .goodbye, .appIcons,
+             .alignmentProbeStarted, .alignmentProbeFinished, .alignmentApplied,
+             .companionToken, .unknown:
             // Server-to-client message types arriving FROM a client, or a
             // frame type from a future protocol: not actionable, not worth a
             // disconnect. Ignore (forward-compat, `CompanionMessage.unknown`).
@@ -840,7 +895,8 @@ public final class CompanionServer: @unchecked Sendable {
     /// ``accept(_:)`` test seam exercises without ever starting a listener.
     private func sendWelcome(_ snapshot: Snapshot, to client: Client) {
         client.isWelcomed = true
-        send(.welcome(serverName: snapshot.serverName, protoVersion: CompanionProto.version, snapshot: snapshot), to: client)
+        send(.welcome(serverName: snapshot.serverName, protoVersion: CompanionProto.version, snapshot: snapshot,
+                      companionToken: companionToken?()), to: client)
     }
 
     private func send(_ message: CompanionMessage, to client: Client, whenDone: (@Sendable () -> Void)? = nil) {

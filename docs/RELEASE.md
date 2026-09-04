@@ -36,7 +36,7 @@ scripts/make-release.sh
 | Variable | Info.plist key | What it turns on |
 |---|---|---|
 | `AUDIOUT_LICENSE_URL` | `AudioutLicenseServerURL` | The soft license check: key validation (`POST /v1/validate`), check-ins, and the unregistered note. Also supplies `SPARKLE_FEED_URL` when that isn't set. |
-| `AUDIOUT_BUY_URL` | `AudioutBuyURL` | The "Buy Audiout…" button in Settings and the Mixer note's "Buy…" action. Absent ⇒ both hidden. |
+| `AUDIOUT_BUY_URL` | `AudioutBuyURL` | The "Buy Audiout" button on the first-open gate, in Settings and in the Mixer note. Absent ⇒ all hidden. `make-staging.sh` and `make-release.sh` default it to `https://audiout.app/buy`. |
 | `SPARKLE_FEED_URL` | `SUFeedURL` | Where the updater checks. Defaults to `$AUDIOUT_LICENSE_URL/appcast.xml`. |
 | `SPARKLE_ED_PUBLIC_KEY` | `SUPublicEDKey` | The EdDSA public key update archives are verified against. |
 
@@ -69,6 +69,15 @@ iteration anyway. For live testing, use a throwaway `APP_NAME`/`BUNDLE_ID` via
 The one manual proof this runbook does call for —
 `scripts/verify-standalone-app.sh` — is a Homebrew-less *launch* check, not a
 live-testing session; do it, then don't keep using that copy.
+
+## Staging rehearsal
+
+`APP_VERSION=… BUILD_NUMBER=… scripts/make-staging.sh` runs the same pipeline
+against the staging license server and then goes further: wraps the stapled
+app in a notarised, stapled DMG, signs it with `sign_update`, writes
+`latest-vN.json` + `appcast-vN.xml`, and uploads everything to the
+`audiout-releases-staging` R2 bucket. `SKIP_NOTARIZE=1` and `SKIP_DMG=1`
+skip those steps for fast iteration. It never touches the production bucket.
 
 ## What the pipeline does *not* do
 
@@ -144,12 +153,15 @@ the website. For every release meant to reach existing users via Sparkle, with
    header on the enclosure fetch too, and the server resolves which file that
    key is entitled to.
 3. Write `latest-vN.json`: `{"version": "<version>", "file": "releases/Audiout-<version>.zip"}`.
-4. Upload all three:
+4. Upload all three. `--remote` and `-J eu` are both required: without
+   `--remote` wrangler writes to the local simulator and still says "Upload
+   complete", and the buckets live in the EU jurisdiction.
+
 
    ```bash
-   wrangler r2 object put audiout-releases/releases/Audiout-1.0.0.zip --file build/Audiout-1.0.0.zip
-   wrangler r2 object put audiout-releases/releases/latest-v1.json --file latest-v1.json
-   wrangler r2 object put audiout-releases/appcast-v1.xml --file appcast-v1.xml
+   wrangler r2 object put audiout-releases-live/releases/Audiout-1.0.0.zip --file build/Audiout-1.0.0.zip -J eu --remote
+   wrangler r2 object put audiout-releases-live/releases/latest-v1.json --file latest-v1.json -J eu --remote
+   wrangler r2 object put audiout-releases-live/appcast-v1.xml --file appcast-v1.xml -J eu --remote
    ```
 
 ### f. Choose the license server's public URL

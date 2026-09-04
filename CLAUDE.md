@@ -10,10 +10,11 @@ A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers
 |---|---|
 | `AudioutCore/` | The whole app: Swift package with the core library, AppKit UI targets, and the shipping menu-bar executable |
 | `AirPlayEngine/` | Standalone Swift package: vendored AirPlay 2 C sender wrapped in a Swift actor. Separate package on purpose — licensing boundary, no app concepts inside |
-| _(external)_ `audiout-shared` | The companion wire protocol, at https://github.com/aa-hh/audiout-shared. MIT, not GPL — the closed-source iPhone app links the same code, so it has one home outside both apps. Pinned by version in `AudioutCore/Package.swift` |
+| _(external)_ `audiout-shared` | Two products: ProbeKit (the sync-probe DSP) and AudioutProtocol (the companion wire protocol), at https://github.com/aa-hh/audiout-shared. MIT, not GPL — the closed-source iPhone app links the same code, so it has one home outside both apps. Pinned by version in `AudioutCore/Package.swift` |
 | `dev/` | Offline dev tooling (fake speakers, dev scripts); `dev/notes/` holds research briefs |
 | `docs/SPEC.md` | Product spec — the source of truth for *what* to build |
 | `scripts/make-app.sh` | Wraps the executable into a signed `.app` bundle (required for TCC/process-tap) |
+| `scripts/make-staging.sh` | The staging environment: a standing `com.audiout.Audiout.staging` build pointed at the staging licence server |
 
 ## iOS companion app
 
@@ -42,6 +43,9 @@ AIRPLAY_BACKEND=mock swift run --package-path AudioutCore AudioutApp
 # Real hardware (needs a signed .app and TCC grant first):
 bash scripts/make-app.sh
 open build/Audiout.app
+
+# Licence gate / purchase / resend, wired to the STAGING server:
+bash scripts/make-staging.sh
 ```
 
 `build.sh` and `make-app.sh` route the compile to the second Mac under the same
@@ -77,6 +81,14 @@ is the failure this rule was originally written against. Builds are
 automatically), and TCC then stores a signature-based requirement that
 **survives every rebuild of the same id** — see the same reasoning at
 `scripts/make-app.sh:132` and in `PermissionMode.swift`.
+
+- **Testing the licence gate, the purchase return or "I lost my key"** — none
+  of it exists without a licence server in Info.plist, so `swift run` cannot
+  reach any of it: **`bash scripts/make-staging.sh`**. Standing
+  `com.audiout.Audiout.staging` id, pointed at `license-staging.audiout.app`,
+  approved once and silent after. It is a different daemon identity from the
+  dev id, so it needs no live-test slot and cannot clobber a dev build someone
+  else is testing.
 
 Reusing one dev id also dodges a second wall: since 2026-08-28 macOS refuses
 `SMAppService` daemon registration for every NEW bundle id until someone
@@ -130,6 +142,15 @@ bash scripts/run-tests.sh
 that know about the second Mac, the machine-wide concurrency cap and the
 unchanged-sources cache; typing the bare command opts out of all three and pins
 the work to this machine, which is also the one running every other agent.
+
+Both Macs' selected developer directory must be a full Xcode install, not
+Command Line Tools — check with `xcode-select -p`; a path under
+`/Library/Developer/CommandLineTools` cannot run `swift test` for any package
+on macOS. `run-tests.sh` refuses with a message rather than let this surface as
+a mysterious build failure, and its message names the exact command for the
+Xcode it finds: `sudo xcode-select -s
+/Applications/<Xcode>.app/Contents/Developer`. `AUDIOUT_TEST_MODE=serial`
+runs the suite strictly one test at a time, for flake hunting.
 
 ## Critical workflow rules
 

@@ -431,7 +431,7 @@ New seams: `test_rung`, `test_lastTransition`.
   boundaries, identity-color doctrine note, plate cell = drawing-only skin,
   clock now nameplate chrome, reference row intro-only) and
   `AudiouterSharedUI/AGENTS.md` Tokens row (new instrument tokens). Trim to
-  stay inside the word discipline. Figma mirror owed (note, don't do).
+  stay inside the word discipline.
 
 ## 7. Verification
 

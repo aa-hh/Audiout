@@ -838,7 +838,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// case.
     private func refreshIcon() {
         guard let device = shownDevice else { return }
-        let name = deviceIconController?.symbolName(for: device) ?? device.kind.symbolName
+        let name = deviceIconController?.symbolName(for: device) ?? device.symbolName
         let image = NSImage(systemSymbolName: name, accessibilityDescription: device.name)
         image?.isTemplate = true
         iconWell.iconImageView.image = image
@@ -856,7 +856,7 @@ public final class DeviceDetailViewController: NSViewController {
     @discardableResult
     private func presentIconPicker() -> IconPickerViewController {
         let device = shownDevice
-        let defaultName = device?.kind.symbolName ?? ""
+        let defaultName = device?.symbolName ?? ""
         let currentOverride = device.flatMap { deviceIconController?.overrides[$0.id] }
 
         let picker = IconPickerViewController()
@@ -992,7 +992,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// The symbol name currently rendered by the icon well.
     public var test_iconSymbolName: String? {
         guard let device = shownDevice else { return nil }
-        return deviceIconController?.symbolName(for: device) ?? device.kind.symbolName
+        return deviceIconController?.symbolName(for: device) ?? device.symbolName
     }
 
     /// HEADER PARITY hooks — the three numbers that must match

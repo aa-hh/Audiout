@@ -949,7 +949,8 @@ public final class DeviceRowView: NSView {
     /// different: MUTE is a translucent NEUTRAL capsule (`engagedChrome` at
     /// ``PopoverColumnGrid/mutePillFillAlpha``, no border, its glyph the same
     /// size as at rest); the DOOR is an opaque GOLD rounded square at
-    /// ``eqSeatCornerRadius`` with a 1 pt `inkOnFill` border and a larger,
+    /// ``eqSeatCornerRadius`` with a 1 pt border in dark-resolved `inkOnFill`
+    /// (see ``updateEQButton()``) and a larger,
     /// heavier glyph in that same dark ink.
     ///
     /// One thing the mark still deliberately is NOT: `partySignal`. That
@@ -973,8 +974,17 @@ public final class DeviceRowView: NSView {
         eqSeatView.layer?.borderWidth = Self.eqSeatBorderWidth
         effectiveAppearance.performAsCurrentDrawingAppearance {
             eqSeatView.layer?.backgroundColor = Tokens.Color.gold.cgColor
-            eqSeatView.layer?.borderColor = Tokens.Color.inkOnFill.cgColor
         }
+        // The border resolves `inkOnFill` under DARK, whatever the row's own
+        // appearance is. That token turns white under light + Increase
+        // Contrast, which is right for a glyph sitting ON the gold and wrong
+        // for the outline around it: a white outline on the light canvas is no
+        // outline at all, and this mark is a dark border around a gold fill in
+        // every appearance.
+        (NSAppearance(named: .darkAqua) ?? effectiveAppearance)
+            .performAsCurrentDrawingAppearance {
+                eqSeatView.layer?.borderColor = Tokens.Color.inkOnFill.cgColor
+            }
         // The symbol image is re-made rather than re-tinted: size and weight
         // live in the `SymbolConfiguration`, not in the tint.
         eqButton.image = NSImage(systemSymbolName: Self.eqSymbolName,
@@ -1738,7 +1748,7 @@ public final class DeviceRowView: NSView {
                         lessThanOrEqualToConstant: PopoverColumnGrid.btFeedSlotWidth),
                     // The chip: one fixed-width control closing the slot. The
                     // card header's "Offset" title trailing-aligns on
-                    // `offsetTitleTrailingFromTrailing`, which follows
+                    // `offsetTitleLeadingFromTrailing`, which follows
                     // `syncTrailing`, so it lands over the chip either way.
                     syncChipButton.trailingAnchor.constraint(
                         equalTo: trailingAnchor,

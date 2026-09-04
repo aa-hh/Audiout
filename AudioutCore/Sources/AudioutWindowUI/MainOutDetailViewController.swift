@@ -136,6 +136,10 @@ public final class MainOutDetailViewController: NSViewController {
         eqResetButton.action = #selector(resetTapped(_:))
         eqResetButton.setAccessibilityLabel("Reset tone to flat")
 
+        // The Equalizer sits in a recess for the same reason it does on the
+        // device page: `raised` resolves to the pane's own ground in light, so
+        // a `.card` here is an outline around nothing.
+        eqWell.style = .well
         for well in [headerWell, eqWell] {
             well.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(well)

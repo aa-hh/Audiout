@@ -11,15 +11,15 @@ import AppKit
 ///
 /// The screen is ONE housing: bare lists on `panel`, and exactly one lifted
 /// card per page (`GroupedSectionView` `.card` — `raised`, bounded by a
-/// `containerEdge` and ruled inside by `hairline`). Before any of it the
+/// `containerEdge` and ruled inside by `containerEdge` too, rule 5). Before any of it the
 /// checklist painted no surface at all — measured on the real tones, `panel`
 /// vs `canvas` is 1.101:1 dark and 1.000:1 light (light resolves both to the
 /// same hex), effectively invisible as a boundary.
 ///
-/// Locked constraint (Alec): text colors stay frozen everywhere — separation
-/// must come entirely from surfaces
-/// (`Tokens.Color.raised`/`.containerEdge`/`.hairline`), never
-/// a text-color change. These tests assert the measured floors against
+/// Ink carries temperature since C5 (2026-09-03) — `GroupsInkTemperatureTests`
+/// pins that; these tests measure the surfaces
+/// (`Tokens.Color.raised`/`.containerEdge`/`.hairline`).
+/// These tests assert the measured floors against
 /// `Tokens.Color.panel` the task specifies, in BOTH appearances, using the
 /// SAME real WCAG relative-luminance math `AppTetherColorTests` already
 /// established for a token contrast floor (its `relativeLuminance`/

@@ -6,9 +6,8 @@ import AudioutSharedUI
 /// The Settings screen's source list: one non-selectable "Settings" header row
 /// over one leaf row per section. Deliberately the Groups sidebar's own
 /// arrangement — `SurfaceLayout.sidebarWidth` wide, `.sourceList` style,
-/// `.medium` rows, the same icon/label cell geometry, the same
-/// `SidebarWarmSurfaceView` wash behind it — so the two arrangement screens
-/// read as one surface rather than two different sidebars.
+/// `.medium` rows, the same icon/label cell geometry — so the two arrangement
+/// screens read as one surface rather than two different sidebars.
 ///
 /// What the Groups sidebar has and this deliberately does NOT: an add bar,
 /// a context menu, double-click, Cmd-N, multi-selection, an active marker.
@@ -38,11 +37,6 @@ final class SettingsSidebarViewController: NSViewController {
 
     private let outlineView = NSOutlineView()
     private let scrollView = NSScrollView()
-    /// `rendersOnGlass: false` on every OS: the surface's split items are
-    /// plain ones (see `SettingsRootViewController`), so no system sidebar
-    /// material sits behind this wash for it to tint — it draws the opaque
-    /// warm backing itself.
-    private let warmSurfaceView = SidebarWarmSurfaceView(rendersOnGlass: false)
     private let root: Node
 
     init(sections: [(title: String, symbolName: String)]) {
@@ -80,19 +74,9 @@ final class SettingsSidebarViewController: NSViewController {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
         let container = NSView()
-        // The warm wash goes in FIRST so it is the bottommost subview, under
-        // the untouched outline view (its `hitTest` returns nil, so it can
-        // never swallow a row click).
-        warmSurfaceView.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(warmSurfaceView)
         container.addSubview(scrollView)
 
         NSLayoutConstraint.activate([
-            warmSurfaceView.topAnchor.constraint(equalTo: container.topAnchor),
-            warmSurfaceView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            warmSurfaceView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            warmSurfaceView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-
             scrollView.topAnchor.constraint(equalTo: container.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),

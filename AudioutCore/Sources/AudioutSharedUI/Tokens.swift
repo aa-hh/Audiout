@@ -1054,10 +1054,6 @@ public enum Tokens {
         public static var tertiaryLabel: NSColor { label3 }
         @available(*, deprecated, renamed: "label3")
         public static var inkTertiary: NSColor { label3 }
-        @available(*, deprecated, renamed: "raised")
-        public static var iconSeatFill: NSColor { raised }
-        @available(*, deprecated, renamed: "panel")
-        public static var sidebarWarmTint: NSColor { panel }
         @available(*, deprecated, renamed: "gold")
         public static var accent: NSColor { gold }
         @available(*, deprecated, renamed: "failure")
@@ -1258,19 +1254,18 @@ public enum Tokens {
         /// quit-in-progress HUD (`AppDelegate.QuittingIndicatorPanel`) both
         /// draw at this radius — previously two independent `12` literals.
         public static let panelCornerRadius: CGFloat = 12
-        /// The System Settings "grouped inset-list" card corner radius,
-        /// shared by onboarding's `RoundedContainerView` (the permission
-        /// card) and the Groups window's `GroupedSectionView` — both
-        /// explicitly modeled on the same macOS grouped-list idiom;
-        /// previously two independent `10` literals.
+        /// The System Settings "grouped inset-list" card corner radius —
+        /// onboarding's `RoundedContainerView` (the permission card) rounds
+        /// at it. The Groups window rounds on the ``Radius`` ladder below.
         public static let groupedSectionCornerRadius: CGFloat = 10
 
         /// The iPhone companion's three corner radii (`WarmSignal.Radius` in
         /// `audiout-remote`), carried across so the two apps round the same
-        /// shapes by the same amounts. NO consumer is re-pointed at them in
-        /// the commit that adds them — each surface PR adopts the rung it
-        /// needs. Distinct from ``panelCornerRadius`` above, which is the
-        /// control-panel shell's bubble and stays 12.
+        /// shapes by the same amounts. The rows PR and the Groups PR adopted
+        /// them (D6 of PR 5: card/tile = row, seats/chips/plate/picker =
+        /// control, the Equalizer and checklist card = panel). Distinct from
+        /// ``panelCornerRadius`` above, which is the control-panel shell's
+        /// bubble and stays 12.
         public enum Radius {
             /// A control's own corner — buttons, chips, fields.
             public static let control: CGFloat = 10

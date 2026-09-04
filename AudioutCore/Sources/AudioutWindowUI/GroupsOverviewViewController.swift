@@ -89,7 +89,7 @@ public final class GroupsOverviewViewController: NSViewController {
         titleGlyph.image = NSImage(systemSymbolName: Group.defaultIconSymbolName,
                                    accessibilityDescription: nil)
         titleGlyph.image?.isTemplate = true
-        titleGlyph.contentTintColor = Tokens.Color.secondaryLabel
+        titleGlyph.contentTintColor = Tokens.Color.label2
 
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.font = Tokens.Font.heading
@@ -97,7 +97,7 @@ public final class GroupsOverviewViewController: NSViewController {
 
         countLabel.translatesAutoresizingMaskIntoConstraints = false
         countLabel.font = Tokens.Font.caption
-        countLabel.textColor = Tokens.Color.inkTertiary
+        countLabel.textColor = Tokens.Color.label3
 
         let layout = NSCollectionViewFlowLayout()
         layout.itemSize = NSSize(width: GroupsOverviewLayout.cardWidth,
@@ -130,11 +130,11 @@ public final class GroupsOverviewViewController: NSViewController {
         scrollView.borderType = .noBorder
 
         emptyMessageLabel.font = Tokens.Font.titleLarge
-        emptyMessageLabel.textColor = Tokens.Color.secondaryLabel
+        emptyMessageLabel.textColor = Tokens.Color.label2
         emptyMessageLabel.alignment = .center
 
         emptySubtitleLabel.font = Tokens.Font.subtitleLarge
-        emptySubtitleLabel.textColor = Tokens.Color.inkTertiary
+        emptySubtitleLabel.textColor = Tokens.Color.label3
         emptySubtitleLabel.alignment = .center
         emptySubtitleLabel.isSelectable = false
         // A PARAGRAPH, not a width driver: on one line this sentence is the
@@ -362,6 +362,48 @@ public final class GroupsOverviewViewController: NSViewController {
         MemberChipView(symbolName: "hifispeaker").test_glyphTint
     }
 
+    /// One card built off-screen, for the ink and seat seams below: the grid's
+    /// real cells are never realized headlessly, so a test that read them
+    /// would read nothing.
+    private static func makeCard(isLive: Bool) -> GroupCardView {
+        let card = GroupCardView()
+        card.plan = CardPlan(groupID: "g",
+                             name: "Test",
+                             symbolName: Group.defaultIconSymbolName,
+                             memberCount: 2,
+                             isLive: isLive,
+                             chipSymbolNames: [],
+                             overflowText: nil)
+        return card
+    }
+
+    /// A card's name colour — cool while the group is idle, `label` while it
+    /// is the live Main Out.
+    public static func test_cardNameColor(isLive: Bool) -> NSColor? {
+        makeCard(isLive: isLive).test_nameColor
+    }
+
+    /// A card's glyph tint, on the same cool/warm rule as its name.
+    public static func test_cardGlyphTint(isLive: Bool) -> NSColor? {
+        makeCard(isLive: isLive).test_glyphTint
+    }
+
+    /// A card's meta line, attributes included — the "Playing now" range's
+    /// `goldText` is only visible here.
+    public static func test_cardMetaAttributedString(isLive: Bool) -> NSAttributedString {
+        makeCard(isLive: isLive).test_metaAttributedString
+    }
+
+    /// The edge the card's icon seat draws, read off the seat's own decision.
+    public static func test_cardSeatStroke(isLive: Bool) -> (color: NSColor, width: CGFloat) {
+        makeCard(isLive: isLive).test_seatStroke
+    }
+
+    /// Whether the card carries the identity glow, BEHIND its seat.
+    public static func test_cardHasIdentityGlow(isLive: Bool) -> Bool {
+        makeCard(isLive: isLive).test_hasIdentityGlow
+    }
+
     /// The titles the card's right-click menu would show.
     public func test_contextMenuItems(forCard id: String) -> [String] {
         guard let index = index(ofGroup: id) else { return [] }
@@ -496,7 +538,19 @@ enum GroupsOverviewLayout {
     static let cardPadding: CGFloat = 12
     /// The gap between member chips along a card's bottom edge.
     static let chipGap: CGFloat = 6
-    static let chipCornerRadius: CGFloat = 6
+
+    /// The icon seat on a group card. 28, not the iPhone's 44: the card is
+    /// 118 tall with 12 pt padding, and a seat of side S puts the meta line's
+    /// bottom at S + 52 (name 16 pt at +7, meta 14 pt at +3) against the
+    /// bottom-pinned 24 pt chip row at y 82 — so S ≤ 30 fits without the
+    /// side-by-side re-flow this pass does not do. 28 leaves 2 pt of air.
+    static let cardSeatSize: CGFloat = 28
+
+    /// The identity glow mounted behind the card's seat: 24 pt of radius, so
+    /// 10 pt of magenta leaks past the 28 pt seat and the whole thing still
+    /// sits inside the card (`GroupIdentityGlowView.side`, 60, would overhang
+    /// the top and leading edges by 4 pt).
+    static let cardGlowSide: CGFloat = 48
     /// How many member chips a card draws before the `+N` chip takes over.
     static let maxChips: Int = 4
 
@@ -567,9 +621,16 @@ private final class GroupCardItem: NSCollectionViewItem {
 }
 
 /// One saved group's card, in `GroupedSectionView`'s `.card` vocabulary:
-/// a `raised` fill inside a 1 pt `hairline` edge at the grouped-list radius.
-/// The active Main Out group's card wears that edge in gold instead — gold
-/// means LIVE, and the group genuinely is.
+/// a `raised` fill inside a 1 pt `containerEdge` edge at the row radius.
+/// Live — this group is the Main Out — adds a flat gold 12 % wash over the
+/// whole card, a 1.5 pt gold ring on the seat, the wave marker, and "Playing
+/// now" in `goldText`; the card's own edge never changes.
+///
+/// The glyph sits in a `well` seat, recessed rather than raised because the
+/// card is already `raised` and a raised seat on it would be stroke-only in
+/// both appearances. Behind the seat, active or not, is
+/// `GroupIdentityGlowView`: the magenta is the group's identity, never its
+/// state.
 ///
 /// `draw(_:)`-based rather than a frozen layer colour, for the same reason
 /// `GroupedSectionView` is: every token re-resolves per appearance flip and
@@ -583,6 +644,8 @@ private final class GroupCardView: NSView {
     var isSelectedInGrid: Bool = false { didSet { needsDisplay = true } }
 
     private let glyphView = NSImageView()
+    private let seatView = IconSeatView()
+    private let identityGlow = GroupIdentityGlowView()
     private let liveMarkerView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let metaLabel = NSTextField(labelWithString: "")
@@ -597,7 +660,7 @@ private final class GroupCardView: NSView {
 
     private func build() {
         glyphView.translatesAutoresizingMaskIntoConstraints = false
-        glyphView.contentTintColor = Tokens.Color.secondaryLabel
+        glyphView.contentTintColor = Tokens.Color.labelCool
 
         liveMarkerView.translatesAutoresizingMaskIntoConstraints = false
         liveMarkerView.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
@@ -610,13 +673,13 @@ private final class GroupCardView: NSView {
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.font = Tokens.Font.bodyEmphasized
-        nameLabel.textColor = Tokens.Color.label
+        nameLabel.textColor = Tokens.Color.labelCool
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         metaLabel.translatesAutoresizingMaskIntoConstraints = false
         metaLabel.font = Tokens.Font.caption
-        metaLabel.textColor = Tokens.Color.inkTertiary
+        metaLabel.textColor = Tokens.Color.labelCool2
         metaLabel.lineBreakMode = .byTruncatingTail
         metaLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -624,7 +687,14 @@ private final class GroupCardView: NSView {
         chipStack.orientation = .horizontal
         chipStack.spacing = GroupsOverviewLayout.chipGap
 
-        addSubview(glyphView)
+        seatView.translatesAutoresizingMaskIntoConstraints = false
+        identityGlow.translatesAutoresizingMaskIntoConstraints = false
+
+        // Glow first so it sits UNDER the seat it lights, then the seat, then
+        // everything the card says.
+        addSubview(identityGlow)
+        addSubview(seatView)
+        seatView.addSubview(glyphView)
         addSubview(liveMarkerView)
         addSubview(nameLabel)
         addSubview(metaLabel)
@@ -632,17 +702,27 @@ private final class GroupCardView: NSView {
 
         let pad = GroupsOverviewLayout.cardPadding
         NSLayoutConstraint.activate([
-            glyphView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad),
-            glyphView.topAnchor.constraint(equalTo: topAnchor, constant: pad),
+            seatView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad),
+            seatView.topAnchor.constraint(equalTo: topAnchor, constant: pad),
+            seatView.widthAnchor.constraint(equalToConstant: GroupsOverviewLayout.cardSeatSize),
+            seatView.heightAnchor.constraint(equalToConstant: GroupsOverviewLayout.cardSeatSize),
+
+            identityGlow.centerXAnchor.constraint(equalTo: seatView.centerXAnchor),
+            identityGlow.centerYAnchor.constraint(equalTo: seatView.centerYAnchor),
+            identityGlow.widthAnchor.constraint(equalToConstant: GroupsOverviewLayout.cardGlowSide),
+            identityGlow.heightAnchor.constraint(equalToConstant: GroupsOverviewLayout.cardGlowSide),
+
+            glyphView.centerXAnchor.constraint(equalTo: seatView.centerXAnchor),
+            glyphView.centerYAnchor.constraint(equalTo: seatView.centerYAnchor),
             glyphView.widthAnchor.constraint(equalToConstant: 17),
             glyphView.heightAnchor.constraint(equalToConstant: 17),
 
             liveMarkerView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -pad),
-            liveMarkerView.centerYAnchor.constraint(equalTo: glyphView.centerYAnchor),
+            liveMarkerView.centerYAnchor.constraint(equalTo: seatView.centerYAnchor),
 
             nameLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad),
             nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -pad),
-            nameLabel.topAnchor.constraint(equalTo: glyphView.bottomAnchor, constant: 7),
+            nameLabel.topAnchor.constraint(equalTo: seatView.bottomAnchor, constant: 7),
 
             metaLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad),
             metaLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -pad),
@@ -662,6 +742,10 @@ private final class GroupCardView: NSView {
         glyphView.image = NSImage(systemSymbolName: plan.symbolName, accessibilityDescription: nil)
         glyphView.image?.isTemplate = true
         liveMarkerView.isHidden = !plan.isLive
+        seatView.isLive = plan.isLive
+        // Identity is cool until the group actually sounds (C5).
+        glyphView.contentTintColor = plan.isLive ? Tokens.Color.label : Tokens.Color.labelCool
+        nameLabel.textColor = plan.isLive ? Tokens.Color.label : Tokens.Color.labelCool
 
         nameLabel.stringValue = plan.name
         metaLabel.attributedStringValue = metaAttributedString(plan)
@@ -679,29 +763,36 @@ private final class GroupCardView: NSView {
         needsDisplay = true
     }
 
-    /// The meta line: the speaker count in the frozen tertiary text colour,
-    /// and — on the live card only — the "Playing now" half in gold. One of
-    /// the live card's THREE gold sites (with its wave glyph and its border),
-    /// under the module's seven-site rule in `AGENTS.md`.
+    /// The meta line: the speaker count cool on an idle card, one step warmer
+    /// on a live one (`labelCool2` measures 3.57:1 over the gold wash — under
+    /// the floor), and the "Playing now" half in `goldText`. That text is one
+    /// of the live card's FOUR gold sites, with the wash, the seat's ring and
+    /// the wave marker, under the module's seven-site rule in `AGENTS.md`.
     private func metaAttributedString(_ plan: CardPlan) -> NSAttributedString {
         let text = plan.metaText
+        let base = plan.isLive ? Tokens.Color.label2 : Tokens.Color.labelCool2
         let attributed = NSMutableAttributedString(
             string: text,
             attributes: [.font: Tokens.Font.caption,
-                         .foregroundColor: Tokens.Color.inkTertiary])
+                         .foregroundColor: base])
         guard plan.isLive, let liveRange = text.range(of: "Playing now") else { return attributed }
-        attributed.addAttribute(.foregroundColor, value: Tokens.Color.gold,
+        attributed.addAttribute(.foregroundColor, value: Tokens.Color.goldText,
                                 range: NSRange(liveRange, in: text))
         return attributed
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let radius = Tokens.Layout.groupedSectionCornerRadius
+        let radius = Tokens.Layout.Radius.row
         let body = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
                                 xRadius: radius, yRadius: radius)
         Tokens.Color.raised.setFill()
         body.fill()
-        (plan?.isLive == true ? Tokens.Color.gold : Tokens.Color.hairline).setStroke()
+        if plan?.isLive == true {
+            // The same flat gold wash a live row wears, over the whole card.
+            Tokens.Color.gold.withAlphaComponent(PopoverColumnGrid.rowLiveWashAlpha).setFill()
+            body.fill()
+        }
+        Tokens.Color.containerEdge.setStroke()
         body.lineWidth = 1
         body.stroke()
 
@@ -713,6 +804,21 @@ private final class GroupCardView: NSView {
         NSColor.keyboardFocusIndicatorColor.setStroke()
         focus.lineWidth = 2
         focus.stroke()
+    }
+
+    // MARK: Test-support hooks
+
+    var test_nameColor: NSColor? { nameLabel.textColor }
+    var test_glyphTint: NSColor? { glyphView.contentTintColor }
+    var test_metaAttributedString: NSAttributedString { metaLabel.attributedStringValue }
+    var test_seatStroke: (color: NSColor, width: CGFloat) { seatView.strokeSpec }
+    /// True when the glow is mounted AND sits below the seat in z-order —
+    /// magenta behind the seat is light the group gives off, in front of it it
+    /// would be chrome.
+    var test_hasIdentityGlow: Bool {
+        guard let glowIndex = subviews.firstIndex(of: identityGlow),
+              let seatIndex = subviews.firstIndex(of: seatView) else { return false }
+        return glowIndex < seatIndex
     }
 
     override func mouseDown(with event: NSEvent) { onActivate?() }
@@ -734,9 +840,47 @@ private final class GroupCardView: NSView {
     }
 }
 
-/// One member speaker's 24 pt chip along a card's bottom edge — a `well` fill
-/// in a hairline edge — or the dashed borderless `+N` chip standing in for the
-/// members past the fourth.
+/// The recessed seat a group card's glyph sits in: a `well` fill at the
+/// control radius, edged `containerEdge` — or ringed 1.5 pt gold while this
+/// group is the live Main Out, which is the card's one piece of state chrome
+/// that is a shape rather than a wash. `well` and not `raised` because the
+/// card underneath is already `raised`: a raised seat on it would be
+/// stroke-only in both appearances (1.000:1), where `well` measures 1.292:1
+/// dark and 1.154:1 light with a `containerEdge` edge at 2.006:1 / 1.751:1.
+private final class IconSeatView: NSView {
+
+    var isLive: Bool = false { didSet { needsDisplay = true } }
+
+    /// The edge this seat draws, and how thick — read by `draw(_:)` and by the
+    /// headless seam, so a test can never assert a colour the screen doesn't.
+    var strokeSpec: (color: NSColor, width: CGFloat) {
+        isLive ? (Tokens.Color.gold, 1.5) : (Tokens.Color.containerEdge, 1)
+    }
+
+    // The card owns the click; the seat is a picture, not a control.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let (color, width) = strokeSpec
+        let radius = Tokens.Layout.Radius.control
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: width / 2, dy: width / 2),
+                                xRadius: radius, yRadius: radius)
+        Tokens.Color.well.setFill()
+        path.fill()
+        color.setStroke()
+        path.lineWidth = width
+        path.stroke()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+}
+
+/// One member speaker's 24 pt chip along a card's bottom edge — a `raised`
+/// fill in a `containerEdge` edge at the control radius — or the dashed
+/// borderless `+N` chip standing in for the members past the fourth.
 private final class MemberChipView: NSView {
 
     private let isOverflow: Bool
@@ -769,7 +913,7 @@ private final class MemberChipView: NSView {
         label.translatesAutoresizingMaskIntoConstraints = false
         label.stringValue = overflowText
         label.font = Tokens.Font.caption
-        label.textColor = Tokens.Color.inkTertiary
+        label.textColor = Tokens.Color.labelCool2
         label.alignment = .center
         addSubview(label)
         NSLayoutConstraint.activate([
@@ -793,7 +937,7 @@ private final class MemberChipView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
-        let radius = GroupsOverviewLayout.chipCornerRadius
+        let radius = Tokens.Layout.Radius.control
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
                                 xRadius: radius, yRadius: radius)
         path.lineWidth = 1
@@ -803,7 +947,7 @@ private final class MemberChipView: NSView {
             path.stroke()
             return
         }
-        Tokens.Color.iconSeatFill.setFill()
+        Tokens.Color.raised.setFill()
         path.fill()
         Tokens.Color.containerEdge.setStroke()
         path.stroke()
@@ -855,7 +999,7 @@ private final class NewGroupTileView: NSView {
         plusView.translatesAutoresizingMaskIntoConstraints = false
         plusView.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
         plusView.image?.isTemplate = true
-        plusView.contentTintColor = Tokens.Color.secondaryLabel
+        plusView.contentTintColor = Tokens.Color.label2
 
         ringView.translatesAutoresizingMaskIntoConstraints = false
         ringView.wantsLayer = true
@@ -866,7 +1010,7 @@ private final class NewGroupTileView: NSView {
 
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = Tokens.Font.caption
-        label.textColor = Tokens.Color.inkTertiary
+        label.textColor = Tokens.Color.label3
 
         addSubview(ringView)
         addSubview(label)
@@ -891,12 +1035,12 @@ private final class NewGroupTileView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let radius = Tokens.Layout.groupedSectionCornerRadius
+        let radius = Tokens.Layout.Radius.row
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
                                 xRadius: radius, yRadius: radius)
         path.lineWidth = 1
         path.setLineDash([4, 3], count: 2, phase: 0)
-        Tokens.Color.hairline.setStroke()
+        Tokens.Color.containerEdge.setStroke()
         path.stroke()
     }
 
@@ -927,7 +1071,7 @@ private final class NewGroupTileView: NSView {
     /// The standard system focus ring, traced around the tile's own dashed
     /// rounded rect so the ring hugs what the user can see.
     override func drawFocusRingMask() {
-        let radius = Tokens.Layout.groupedSectionCornerRadius
+        let radius = Tokens.Layout.Radius.row
         NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
     }
 

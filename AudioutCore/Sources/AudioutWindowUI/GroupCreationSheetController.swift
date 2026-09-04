@@ -181,7 +181,7 @@ public final class GroupCreationSheetController: NSViewController {
 
         let speakersLabel = NSTextField(labelWithString: "Speakers")
         speakersLabel.translatesAutoresizingMaskIntoConstraints = false
-        speakersLabel.textColor = Tokens.Color.secondaryLabel
+        speakersLabel.textColor = Tokens.Color.label2
 
         stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.orientation = .vertical
@@ -201,7 +201,7 @@ public final class GroupCreationSheetController: NSViewController {
 
         countLabel.translatesAutoresizingMaskIntoConstraints = false
         countLabel.font = Tokens.Font.caption
-        countLabel.textColor = Tokens.Color.secondaryLabel
+        countLabel.textColor = Tokens.Color.label2
 
         cancelButton.translatesAutoresizingMaskIntoConstraints = false
         cancelButton.title = "Cancel"
@@ -306,7 +306,7 @@ public final class GroupCreationSheetController: NSViewController {
             let label = NSTextField(wrappingLabelWithString: Self.emptyChecklistText)
             label.translatesAutoresizingMaskIntoConstraints = false
             label.font = Tokens.Font.body
-            label.textColor = Tokens.Color.secondaryLabel
+            label.textColor = Tokens.Color.label2
             stackView.addArrangedSubview(label)
             label.leadingAnchor.constraint(equalTo: stackView.leadingAnchor).isActive = true
             label.trailingAnchor.constraint(equalTo: stackView.trailingAnchor).isActive = true
@@ -413,7 +413,7 @@ public final class GroupCreationSheetController: NSViewController {
         let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Group icon")
         image?.isTemplate = true
         iconWellButton.image = image
-        iconWellButton.contentTintColor = Tokens.Color.secondaryLabel
+        iconWellButton.contentTintColor = Tokens.Color.label2
     }
 
     /// Persist the checked candidates as a new group via

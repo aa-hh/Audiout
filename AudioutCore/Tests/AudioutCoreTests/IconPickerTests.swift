@@ -132,24 +132,24 @@ import AppKit
                 "the label spells it as two words; the raw name does not")
     }
 
-    // MARK: The gold selection ring re-resolves live (design-system P3-5)
+    // MARK: The curated cells re-resolve live (design-system P3-5)
 
-    /// The ring is a stamped layer color, so it keeps showing an old gold
-    /// until something re-stamps it. Increase Contrast and the accent dial
-    /// each arrive on their own notification — both must reach it.
-    @Test @MainActor func selectionRingReResolvesOnAccentAndAccessibilityNotifications() {
+    /// Every cell is a stamped layer colour, so the grid keeps showing an old
+    /// gold until something re-stamps it. Increase Contrast and the accent
+    /// dial each arrive on their own notification — both must reach it.
+    @Test @MainActor func curatedCellsRestampOnAccentAndAccessibilityNotifications() {
         let picker = IconPickerViewController()
         picker.configure(currentSymbolName: "airpods", defaultSymbolName: "hifispeaker.fill")
         _ = picker.view
-        #expect(picker.test_currentRingSymbolName == "airpods", "a ring exists to re-resolve")
+        #expect(picker.test_selectedCellSymbolName == "airpods", "a selected cell exists to re-resolve")
 
-        let baseline = picker.test_ringRefreshCount
+        let baseline = picker.test_cellRestampCount
         NSWorkspace.shared.notificationCenter.post(
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         NotificationCenter.default.post(name: Tokens.accentStyleDidChangeNotification, object: nil)
 
-        #expect(picker.test_ringRefreshCount == baseline + 2,
-                "both the Increase-Contrast and accent-dial broadcasts re-stamp the ring")
+        #expect(picker.test_cellRestampCount == baseline + 2,
+                "both the Increase-Contrast and accent-dial broadcasts re-stamp the grid")
     }
 
     // MARK: Search field validation — Apply gating + live preview

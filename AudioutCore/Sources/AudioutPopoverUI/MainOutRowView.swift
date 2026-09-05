@@ -265,27 +265,33 @@ public final class MainOutRowView: NSView {
         selectedTitle = nil
         var currentItem: NSMenuItem?
         var currentButtonTitle: String?
+        var sawHeader = false
         for option in options {
-            let item = NSMenuItem(title: option.title, action: nil, keyEquivalent: "")
             if option.isHeader {
-                item.isEnabled = false
-                item.attributedTitle = NSAttributedString(
-                    string: option.title,
-                    attributes: [
-                        .font: Tokens.Font.captionEmphasized,
-                        .foregroundColor: Tokens.Color.tertiaryLabel,
-                    ])
-            } else {
-                item.target = self
-                item.action = #selector(selectionChanged(_:))
-                item.representedObject = option.target
-                let isCurrent = option.target == current
-                item.state = isCurrent ? .on : .off
-                if isCurrent {
-                    selectedTitle = option.title
-                    currentItem = item
-                    currentButtonTitle = option.buttonTitle
+                sawHeader = true
+                // A rule above every section but the first, then AppKit's own
+                // section header — see the same pair in `AppRowView.addHeader`
+                // for why a hand-disabled item cannot stand in for it here.
+                if let last = menu.items.last, !last.isSeparatorItem {
+                    menu.addItem(.separator())
                 }
+                menu.addItem(.sectionHeader(title: option.title))
+                continue
+            }
+            let item = NSMenuItem(title: option.title, action: nil, keyEquivalent: "")
+            // One step in from the section header above it — see
+            // `AppRowView.addEntries` for why the indentation is there and what
+            // it trades away. An entry ahead of any header stays flush.
+            item.indentationLevel = sawHeader ? 1 : 0
+            item.target = self
+            item.action = #selector(selectionChanged(_:))
+            item.representedObject = option.target
+            let isCurrent = option.target == current
+            item.state = isCurrent ? .on : .off
+            if isCurrent {
+                selectedTitle = option.title
+                currentItem = item
+                currentButtonTitle = option.buttonTitle
             }
             menu.addItem(item)
         }

@@ -403,6 +403,7 @@ import AppKit
                 "the interval is on the stage's tooltip, got \(String(describing: wizard?.test_stage.toolTip))")
         #expect(wizard?.test_buttonTitles
                 == ["Move 2", "This Mac", BTAlignmentWizardView.togetherTitle,
+                    BTAlignmentWizardView.noSoundTitle,
                     BTAlignmentWizardView.backTitle, BTAlignmentWizardView.stopTitle],
                 "the which-side buttons carry the ACTUAL device names, and there is a way out")
         #expect(wizard?.test_buttonIsEnabled(BTAlignmentWizardView.backTitle) == false,
@@ -424,6 +425,63 @@ import AppKit
     /// Identity colour names WHICH speaker: green for the target, steel blue
     /// for the reference. Magenta is group identity now, and never appears on
     /// this sheet.
+    /// The count used to print a denominator the run is allowed to walk
+    /// straight past: `BTAlignmentPosterior.maxAnswers` is 40, so a long run
+    /// reached "Click 27 of about 15" — the sheet contradicting itself in the
+    /// one slot whose arithmetic the user can check.
+    @Test func theClickCountDropsItsTotalOnceTheRunPassesIt() {
+        let expected = BTAlignmentWizardView.expectedClicks
+        #expect(BTAlignmentWizardView.clickCountCopy(1) == "Click 1 of about \(expected)")
+        #expect(BTAlignmentWizardView.clickCountCopy(expected)
+                == "Click \(expected) of about \(expected)",
+                "the advertised run still names its total right up to the end of it")
+        #expect(BTAlignmentWizardView.clickCountCopy(expected + 1)
+                .contains("of about") == false,
+                "past the advertised total the denominator goes, not the count")
+        #expect(BTAlignmentWizardView.clickCountCopy(27) == "Click 27 — a few extra to be sure")
+    }
+
+    /// A muted target, an asleep speaker or a volume at zero used to have no
+    /// screen at all: the run asked forty questions the user was guessing at
+    /// and blamed the ESTIMATE ("your answers aren't settling"). The escape
+    /// leaves the session running — the tick is the whole point of coming
+    /// back — so the questions are still there afterwards.
+    @Test func theSilentSpeakerEscapeSwapsTheAnswersForWhatToCheck() {
+        let (popover, _) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.noSoundTitle)
+        #expect(wizard?.test_bodyText == BTAlignmentWizardView.noSoundCopy)
+        #expect(wizard?.test_buttonTitles
+                == [BTAlignmentWizardView.keepListeningTitle,
+                    BTAlignmentWizardView.stopTitle],
+                "the three answers are gone while the user is not listening to them")
+        guard case .question? = wizard?.test_screen else {
+            Issue.record("the RUN is untouched — only the band changed")
+            return
+        }
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.keepListeningTitle)
+        #expect(wizard?.test_buttonTitles.first == "Move 2",
+                "…and the same question comes straight back")
+    }
+
+    /// Esc is the reflex key on any sheet, and it used to discard a run in
+    /// silence — fourteen answers of careful listening gone to a keystroke
+    /// nobody aimed. Past the threshold the exit asks first; below it there is
+    /// nothing to lose and it stays instant.
+    @Test func stopAsksBeforeDiscardingARunWithAnswersInIt() {
+        let (popover, _) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        #expect(wizard?.test_stopNeedsConfirm == false, "nothing to lose yet")
+        for _ in 0..<5 {
+            guard case .question? = wizard?.test_screen else { break }
+            wizard?.test_clickButton(titled: "Move 2")
+        }
+        #expect(wizard?.test_stopNeedsConfirm == true,
+                "five answers in, a stray Esc is worth a question first")
+    }
+
     @Test func theAnswerPlatesWearGreenAndSteelBlueNeverMagenta() throws {
         let (popover, _) = makePopover()
         let wizard = openWizard(popover)
@@ -1048,6 +1106,7 @@ import AppKit
         #expect(recorder.previews.count == 3, "a fresh run's first candidate is applied")
         #expect(wizard?.test_buttonTitles
                 == ["Move 2", "Office", BTAlignmentWizardView.togetherTitle,
+                    BTAlignmentWizardView.noSoundTitle,
                     BTAlignmentWizardView.backTitle, BTAlignmentWizardView.stopTitle])
     }
 

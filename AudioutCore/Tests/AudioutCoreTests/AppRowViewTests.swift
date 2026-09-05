@@ -103,9 +103,57 @@ import AppKit
         #expect(titles.contains("Current Device"), "expected a 'Current Device' header, got \(titles)")
         #expect(titles.contains("AirPlay Devices"), "expected an 'AirPlay Devices' header, got \(titles)")
         // Exactly the two headers + three destination entries, no Groups section.
-        #expect(titles.count == 5, "unexpected menu items: \(titles)")
+        // Separators are the section rules, not content — they're excluded here
+        // and asserted by `everySectionHeaderIsPrecededByARule`.
+        #expect(titles.filter { !$0.isEmpty }.count == 5, "unexpected menu items: \(titles)")
         #expect(!titles.contains { $0.uppercased().contains("GROUP") },
                        "Groups must not appear in the app row's destination menu (decision 4)")
+    }
+
+    /// A section header set in sentence case (One Case) sits in the same type
+    /// register as the entries around it, so with nothing between them a header
+    /// reads as a bolded choice rather than a heading. Every header therefore
+    /// leads with the menu's own rule, unless it opens the menu or already
+    /// follows one.
+    @Test func everySectionHeaderIsPrecededByARule() {
+        let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
+        // A header is the only non-separator item carrying no `representedObject`
+        // — matching on title would also catch the local entry, which is itself
+        // titled "Current Device".
+        let items = row.test_menuItems
+        let headerIndices = items.indices.filter {
+            !items[$0].isSeparatorItem && items[$0].representedObject == nil
+        }
+        #expect(!headerIndices.isEmpty, "expected section headers, got \(items.map(\.title))")
+        for index in headerIndices {
+            #expect(index > 0, "a header must never open the menu here")
+            #expect(items[index - 1].isSeparatorItem,
+                    "'\(items[index].title)' must follow a separator, not '\(items[index - 1].title)'")
+        }
+    }
+
+    /// Sentence-case headers sit in the entries' own type register, so the
+    /// separation is carried structurally instead: every entry belonging to a
+    /// section steps one level in, leaving its header hanging to the left. The
+    /// standalone entry answers to no header and stays flush with them.
+    @Test func entriesIndentUnderTheirHeaderWhileHeadersAndStandalonesStayFlush() {
+        let (row, _) = makeRowWithThreeStates(selected: "no-redirect")
+        let items = row.test_menuItems
+        for item in items where item.isSectionHeader {
+            #expect(item.indentationLevel == 0,
+                    "header '\(item.title)' must hang left of its entries")
+        }
+        let standalone = items.first { $0.title == "Follows main output" }
+        #expect(standalone?.indentationLevel == 0,
+                "the standalone entry sits under no header, so it must not indent")
+        // Every entry that follows a header belongs to a section.
+        var underHeader = false
+        for item in items {
+            if item.isSectionHeader { underHeader = true; continue }
+            guard underHeader, !item.isSeparatorItem else { continue }
+            #expect(item.indentationLevel == 1,
+                    "'\(item.title)' sits in a section and must indent under its header")
+        }
     }
 
     @Test func menuSectionOrderIsCurrentDeviceThenAirPlayDevices() {

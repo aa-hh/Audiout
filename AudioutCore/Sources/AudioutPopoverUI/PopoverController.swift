@@ -226,7 +226,7 @@ public final class PopoverController: NSObject {
     /// actively routing but the aggregate isn't the Mac's current default
     /// output, so audio isn't reaching it. The app wires this to whatever
     /// re-selects the aggregate as the system default output. The user's own
-    /// click is the intent here (Alec's Q6 call), so this does NOT violate
+    /// click is the intent here (the owner's Q6 call), so this does NOT violate
     /// the "never auto-reselect" rule elsewhere. `nil` (the default) means
     /// the button, if ever rendered, taps into nothing.
     public var onReselectAudiout: (() -> Void)?
@@ -696,7 +696,7 @@ public final class PopoverController: NSObject {
 
     /// The Output Devices card's footer row: the "+" that fronts
     /// `makeOutputDevicesPlusMenu()`. Lives at the BOTTOM of the card, below
-    /// every subsection (Alec's call, 2026-08-08 — a list-management control
+    /// every subsection (the owner's call, 2026-08-08 — a list-management control
     /// belongs under the list, not in the column-title header row). Add-only:
     /// nothing removes a device from the list.
     private let devicesFooter = CardFooterView(showsRemove: false)
@@ -878,7 +878,7 @@ public final class PopoverController: NSObject {
         // settle tracker debounces this to know when the fleet has quiesced.
         onDeviceSnapshot?(Set(devicesByID.keys))
         // A SELECTED Bluetooth device that LOSES availability is DESELECTED
-        // (Alec's call — off = unselected, replacing the backend's power-off
+        // (the owner's call — off = unselected, replacing the backend's power-off
         // park). Both loss paths — a listed-but-disconnected snapshot AND a
         // vanish (unpair mid-session, sleep) — reach this surface as the same
         // availability edge on a kept row, so one edge covers them. Routed
@@ -1374,7 +1374,7 @@ public final class PopoverController: NSObject {
             handler: { [weak self] in self?.onBuyAudiout?() })
     }
 
-    /// The routing-blocked warning's action button (T-UI, Alec's Q6 — the
+    /// The routing-blocked warning's action button (T-UI, the owner's Q6 — the
     /// user's own click is their intent, so re-selecting the aggregate here
     /// does NOT violate "never auto-reselect").
     private var routingBlockedNeedsDefaultAction: SystemAirPlayNoteBannerView.Action {
@@ -4065,7 +4065,7 @@ public final class PopoverController: NSObject {
         // A deselect may have taken the alignment wizard's target out of the
         // user's audio intent — tear it down now, not on the next snapshot.
         reconcileBTAlignmentNotes(animated: true)
-        // An auto-swap does NOT flash the Mac's row (Alec, live, 2026-09-05:
+        // An auto-swap does NOT flash the Mac's row (owner's call, live, 2026-09-05:
         // "it quickly flashes on the MacBook before going to the device I just
         // clicked on … same thing when it goes backwards"). The A4 attention
         // pulse is `Tokens.Color.gold`, which everywhere else on this panel

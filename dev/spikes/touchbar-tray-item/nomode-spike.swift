@@ -3,11 +3,11 @@
 // Does a full-width Touch Bar presentation need PresentationModeGlobal changed,
 // or does presentSystemModalTouchBar stand on its own?
 //
-// This matters beyond tidiness. Writing that pref is what stranded Alec's Touch
-// Bar on nothing-but-the-emoji-key when the app was force-quit: the setting
-// outlives the process, so any exit we don't catch leaves the user somewhere
-// they didn't choose. If the bar presents with the pref untouched, we stop
-// writing it and that failure becomes impossible rather than merely
+// This matters beyond tidiness. Writing that pref is what stranded the owner's
+// Touch Bar on nothing-but-the-emoji-key when the app was force-quit: the
+// setting outlives the process, so any exit we don't catch leaves the user
+// somewhere they didn't choose. If the bar presents with the pref untouched, we
+// stop writing it and that failure becomes impossible rather than merely
 // recoverable.
 //
 // Deliberately touches NO preference domain. Nothing to restore afterwards —

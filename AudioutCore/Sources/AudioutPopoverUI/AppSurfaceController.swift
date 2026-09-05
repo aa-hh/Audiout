@@ -22,8 +22,8 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
     /// target (verified against CoreGlyphs' availability list: `waveform`
     /// macOS 10.15, `hifispeaker.2` and `gearshape` macOS 11).
     ///
-    /// Mixer is NOT the sliders glyph (Alec, 2026-09-04). `slider.horizontal.3`
-    /// is what every device row's equalizer door draws
+    /// Mixer is NOT the sliders glyph (owner's call, 2026-09-04).
+    /// `slider.horizontal.3` is what every device row's equalizer door draws
     /// (`DeviceRowView.eqSymbolName`) — that is what an equalizer looks like,
     /// so the equalizer keeps it and the tab moves. `waveform` is audio
     /// playing rather than a control being adjusted, and it collides with

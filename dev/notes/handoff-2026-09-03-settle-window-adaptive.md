@@ -2,7 +2,7 @@
 
 Self-contained. The question: the phone's sync sheet makes the user wait up to
 60 seconds before the Measure button goes live, showing only `Ready in 47s`
-with no reason. Alec wants that wait gone, and proposed a specific mechanism
+with no reason. The owner wants that wait gone, and proposed a specific mechanism
 for removing it entirely. This file is the evidence, the mechanism's one
 untested assumption, and the experiment that settles it.
 
@@ -51,7 +51,7 @@ pure dead time.
 Related: `dev/notes/mic-probe-calibration-brief.md:116` restates the finding;
 the spike tool that produced it is `AudioutCore/Sources/core-audio-diagnostic/`.
 
-## Alec's proposal, and the one thing that has to be tested first
+## The owner's proposal, and the one thing that has to be tested first
 
 > Go straight to adaptive, and then after those 60 seconds, measure whatever
 > the difference was and adapt what you had from the adaptive to the measured
@@ -78,7 +78,7 @@ It is cheap to test.
 
 ## The experiment that decides it
 
-Needs a real Sonos Move 2 (the brand that actually exhibits settling) and Alec
+Needs a real Sonos Move 2 (the brand that actually exhibits settling) and the owner
 in the loop; a Sony or similar makes a useful negative control.
 
 1. Reconnect the speaker. At t≈5 s run an alignment measurement; record the raw
@@ -113,8 +113,8 @@ its *meaning* while keeping its shape is additive on the wire; per
 
 ## The UX bug, which is separate and cheap
 
-Whatever happens to the timing, `Ready in 47s` never says why. Alec hit this
-before he hit any accuracy question. One line under the button — the speaker's
+Whatever happens to the timing, `Ready in 47s` never says why. The owner hit
+this before they hit any accuracy question. One line under the button — the speaker's
 clock is still settling after reconnecting, and measuring now would measure the
 settling — fixes the confusion on its own and is worth doing even if the wait
 later disappears. Copy rules: `.claude/skills/audiout-copy-review`, and the
@@ -146,7 +146,7 @@ phone's `DESIGN.md` for where sheet text lives.
 
 Round 2 of the sync calibration merged today: Mac `0c075e13`, phone `c5266d6`,
 protocol `0.6.0`. Phone unit tests pass on iOS 18.5 (mule simulator) and iOS
-27.0 (Alec's iPhone 15 Pro), 225 tests each. The feature has still never
-completed a real measurement against a real speaker — Alec's first attempt is
-what surfaced the missing microphone string. The settle gate is what he hit
-next.
+27.0 (the owner's iPhone 15 Pro), 225 tests each. The feature has still never
+completed a real measurement against a real speaker — the owner's first attempt
+is what surfaced the missing microphone string. The settle gate is what they
+hit next.

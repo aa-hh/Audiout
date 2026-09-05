@@ -1,6 +1,6 @@
 # Two-tone distinguishability — Sync Green vs Party Magenta
 
-**Question (Alec):** are `syncSignal` `#2BFF8F` (target, left) and `partySignal`
+**Question (the owner):** are `syncSignal` `#2BFF8F` (target, left) and `partySignal`
 `#FF90E9` (reference, right) the scientifically best pair for this job, and is
 there anything cheap to do that makes them easier to tell apart?
 
@@ -81,9 +81,9 @@ unintentionally, given it's the marketing brand pair, not a chosen a11y pair
 | Option | What | Cost | Verdict |
 |---|---|---|---|
 | **(a) Keep as-is** | Ship the current pair, current redundancy | None | **Recommended.** ΔE2000 ≈86, survives all 3 CVD types, WCAG 1.4.1 already satisfied via non-color cues (position/names/keycaps) independent of the hue pair |
-| (b) Tune luminance/chroma | Nudge one or both L* to push mutual contrast toward 3:1, same hue family | Touches the two "instrument, fixed both appearances" tokens (§2.1) — needs the same Alec sign-off as any wizard-color change, plus a re-run of `AlignmentTokenContrastTests`. Small brand risk (these are the marketing site's literal secondary hexes) | Not justified — the gap it closes (1.5:1→3:1 luminance-only contrast) is already covered by the existing non-color redundancy; nothing in the CVD sim or the ΔE number is actually failing |
+| (b) Tune luminance/chroma | Nudge one or both L* to push mutual contrast toward 3:1, same hue family | Touches the two "instrument, fixed both appearances" tokens (§2.1) — needs the same owner sign-off as any wizard-color change, plus a re-run of `AlignmentTokenContrastTests`. Small brand risk (these are the marketing site's literal secondary hexes) | Not justified — the gap it closes (1.5:1→3:1 luminance-only contrast) is already covered by the existing non-color redundancy; nothing in the CVD sim or the ΔE number is actually failing |
 | (c) Add a per-light shape/stroke cue | Distinct dash pattern or ring style for target vs reference | Real engineering cost — the rings are now `CADisplayLink`-driven living rings with wobble/squash/breathing (bullet 44); a shape cue has to survive that motion and be re-verified across all 8 rungs' radii/line-widths, and against Reduce Motion's pinned-phase path | Not justified — position (always left/right) already *is* the non-hue geometric cue the WCAG exception is asking for; a second one is redundant-on-redundant |
-| (d) Swap a hue | Replace green or magenta with a different identity color | Brand cost — these are the marketing site's sanctioned secondaries (owner rule, 2026-08-23) | **Flagging only, not recommending.** No measurement here calls for it; raise with Alec only if he wants a design reason unrelated to distinguishability |
+| (d) Swap a hue | Replace green or magenta with a different identity color | Brand cost — these are the marketing site's sanctioned secondaries (owner rule, 2026-08-23) | **Flagging only, not recommending.** No measurement here calls for it; raise with the owner only if they want a design reason unrelated to distinguishability |
 
 ## Recommendation
 

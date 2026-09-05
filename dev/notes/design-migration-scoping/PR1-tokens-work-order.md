@@ -1,7 +1,7 @@
 # PR 1 work order: shared tokens + wordmark font
 
 Executor: Opus. Branch `claude/macos-design-md-migration-059ffa`, worktree
-`/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/delay-trim-sync-wizard-b99148`.
+`~/Projects/AirPlay Controller/.claude/worktrees/delay-trim-sync-wizard-b99148`.
 Every path below is relative to that worktree unless absolute. Every ratio below was computed
 with the WCAG 2.x relative-luminance formula (the same one `MembershipWellContrastTests` carries)
 by `scratchpad/contrast.py` during scoping; the executor may cite them without recomputing.
@@ -180,7 +180,7 @@ from the table, the iOS rule that `hairline` is never drawn on `raised` (1.154:1
 `raised` = `#FAFAFB`; separation on paper is edge weight). The `// MARK: Warm Signal custom palette (V2, spec §1)` line at :200 SURVIVES, retitled
 `// MARK: Warm Signal custom palette`. Delete the block comment under it (:201-232) and
 replace it with a short one: the ladder is the iPhone companion's (`audiout-remote`
-`AudioutRemote/UI/Shared/WarmSignal.swift`), both appearances cool-neutral (Alec 2026-08-30/2026-09-03), four
+`AudioutRemote/UI/Shared/WarmSignal.swift`), both appearances cool-neutral (owner's call, 2026-08-30/2026-09-03), four
 variants per token per house rule 3, resolved live by `NSColor(name:dynamicProvider:)`. No
 "Circuit", no Figma, no `@sumup-oss` anywhere in the file after this step.
 
@@ -354,7 +354,7 @@ it). No other change in these two files.
 
 ### Step 8 — wordmark font: fetched at app assembly, never in git
 
-Alec: this repo WILL go public, and the ITF Free Font License §02 forbids redistributing the font
+Owner: this repo WILL go public, and the ITF Free Font License §02 forbids redistributing the font
 through a public repository. So: nothing under `AudioutSharedUI/Resources/`, no `Package.swift`
 change, `BrandMark.resourceBundle` stays `private`. The font reaches the app only through
 `scripts/make-app.sh`'s local assembly phase. `scripts/make-staging.sh` calls `make-app.sh`
@@ -566,7 +566,7 @@ feedPillText→label2.
 
 ## Interim visible effects (between PR 1 merge and the owning surface PR)
 
-| alias | live surface (file:line) | what Alec will see until the surface PR |
+| alias | live surface (file:line) | what the owner will see until the surface PR |
 |---|---|---|
 | canvasHi→canvas | WarmCanvasView.swift:85 | Dark popover/window canvas is flat `#0A0A0C` with grain, no gradient. |
 | sidebarWarmTint→panel | SidebarWarmSurfaceView.swift:106 | Groups sidebar wash goes cool (panel at ~0.30 alpha); C6 deletes it later. |
@@ -818,9 +818,9 @@ note below, the verification output, and the footer
   (`api.fontshare.com/v2/fonts/download/clash-display`) is not a published contract: the two
   sha256 pins are the guard (a re-packaged zip is tolerated, a changed `.otf` fails the build), and
   when the URL dies `AUDIOUT_WORDMARK_FONT=/path/to/ClashDisplay-Semibold.otf` (still checksummed)
-  is the fallback. Alec to confirm (a)–(c): embed is permitted, public repo carries no font bytes,
+  is the fallback. The owner to confirm (a)–(c): embed is permitted, public repo carries no font bytes,
   About credit line lands with Settings.
-- The `emberText`/`goldText` Subtle light-IC coincidence (`#584C2E`) — Alec may want the
+- The `emberText`/`goldText` Subtle light-IC coincidence (`#584C2E`) — the owner may want the
   emberText one pushed a step deeper.
 - `inkOnFill` light-IC = white (D4) — a visible ink flip under Increase Contrast on paper.
 

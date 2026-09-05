@@ -45,17 +45,19 @@ public enum PopoverColumnGrid {
     //
     // Warm Signal v4 retires the leading VERTICAL meter column (the meter moves
     // UNDER THE NAME, `meterUnderName*` below) and re-homes the leading gutter as
-    // the **membership rail's spine**. Per Alec's clearance refinement the gutter
-    // is WIDENED so every node has clear negative space to its right before the
-    // icon tile — the spine reads airy, not cramped. The reserve is DERIVED from
-    // the rail geometry (`railGutterCenterX` + node radius + `busNodeClearance`)
-    // so widening any of those reflows the leading columns consistently. Only the
-    // LEADING columns move; VOLUME (slider) and OUTPUT (trailing) columns are
-    // trailing-anchored, so their alignment across sections is untouched.
+    // the **membership rail's spine**. Per the owner's clearance refinement the
+    // gutter is WIDENED so every node has clear negative space to its right
+    // before the icon tile — the spine reads airy, not cramped. The reserve is
+    // DERIVED from the rail geometry (`railGutterCenterX` + node radius +
+    // `busNodeClearance`) so widening any of those reflows the leading columns
+    // consistently. Only the LEADING columns move; VOLUME (slider) and OUTPUT
+    // (trailing) columns are trailing-anchored, so their alignment across
+    // sections is untouched.
 
     /// Horizontal negative space between a bus node's right edge and the icon
-    /// tile to its right (Alec's clearance refinement) — the node must not crowd
-    /// the icon. Also the single knob that widens the whole leading gutter.
+    /// tile to its right (the owner's clearance refinement) — the node must
+    /// not crowd the icon. Also the single knob that widens the whole leading
+    /// gutter.
     public static let busNodeClearance: CGFloat = 12
     /// The leading gutter reserve: from the plain `leadingInset` to the icon —
     /// wide enough for the rail spine (node radius) plus clear padding to the
@@ -148,9 +150,9 @@ public enum PopoverColumnGrid {
 
     // MARK: Main Audio ring — rail terminus (Warm Signal nitpicks)
     //
-    // Alec, reviewing the rail-into-ring mock: the Main Audio ring is the
+    // The owner, reviewing the rail-into-ring mock: the Main Audio ring is the
     // rail's TERMINUS, not a peer of the device rows' connection rings — it
-    // gets its OWN size/weight (his call, "bespoke since its origin/master"),
+    // gets its OWN size/weight (their call, "bespoke since its origin/master"),
     // tuned so the rail's `busLineWidth` stroke and the ring's stroke read as
     // one continuous line where the rail curves into it, matching the
     // `warm-signal-nitpicks` mock's `ringLeftX`/`mr` geometry.
@@ -432,10 +434,10 @@ public enum PopoverColumnGrid {
     /// dim.
     public static let busNodeDimmedRimWidth: CGFloat = busNodeRimWidth * 2
     /// The unstroked VERTICAL gap between a node's edge and where the rail line
-    /// stops/resumes above and below it (Alec's clearance refinement) — the rail
-    /// "meets" a node with breathing room instead of jamming into it, so
-    /// consecutive nodes read airy. Applied to the straight through-rail (member /
-    /// connecting / pending / failed nodes, which sit ON the spine).
+    /// stops/resumes above and below it (the owner's clearance refinement) —
+    /// the rail "meets" a node with breathing room instead of jamming into it,
+    /// so consecutive nodes read airy. Applied to the straight through-rail
+    /// (member / connecting / pending / failed nodes, which sit ON the spine).
     public static let busNodeRailGap: CGFloat = 3
     /// How far the detour arc bows out past an off-spine node's own edge, so the
     /// line visibly goes AROUND a node it doesn't run through. Added to that
@@ -448,13 +450,13 @@ public enum PopoverColumnGrid {
     /// rather than performing for it.
     public static let busNodeHoverGrowDuration: CFTimeInterval = 0.12
     /// FULL-WIRE travel time of the rail's one-shot CONNECT PULSE (Warm Signal
-    /// v4.1 item 9, reshaped per Alec 2026-08-12): the glowing bead's climb
-    /// from the joining room's node into the Main Audio ring. A mid-wire
-    /// departure takes proportionally less (constant speed). Settled by Alec's
-    /// live reads — slowed 0.45 → 0.7 → 1.05 ("too fast… too subtle"), then
-    /// back up 25% to 0.84 once the arrival bloom was right: the bead is the
-    /// connect story's one authored moment, so it may take a visible beat —
-    /// but it stays under a second because live audio is high-stakes and the
+    /// v4.1 item 9, reshaped per the owner, 2026-08-12): the glowing bead's
+    /// climb from the joining room's node into the Main Audio ring. A mid-wire
+    /// departure takes proportionally less (constant speed). Settled by the
+    /// owner's live reads — slowed 0.45 → 0.7 → 1.05 ("too fast… too subtle"),
+    /// then back up 25% to 0.84 once the arrival bloom was right: the bead is
+    /// the connect story's one authored moment, so it may take a visible beat
+    /// — but it stays under a second because live audio is high-stakes and the
     /// panel must never feel like it lags the room.
     public static let railConnectPulseDuration: CFTimeInterval = 0.84
     /// The arrival bloom's life: the soft `glow` burst at the Main Audio ring
@@ -521,10 +523,10 @@ public enum PopoverColumnGrid {
     //
     // A row's two engaged accessory marks — the muted speaker and the
     // Equalizer door on a shaped curve — are ONE rounded square in two
-    // colours (Alec, 2026-09-04: "the same object in two colours"), and that
-    // square is now part of the SYMBOL rather than a rectangle drawn behind
-    // it. `RowAccessorySymbol` owns the four images and their point size; the
-    // seat's own geometry constants, `engagedSeatSize` and
+    // colours (owner's call, 2026-09-04: "the same object in two colours"),
+    // and that square is now part of the SYMBOL rather than a rectangle drawn
+    // behind it. `RowAccessorySymbol` owns the four images and their point
+    // size; the seat's own geometry constants, `engagedSeatSize` and
     // `engagedSeatCornerRadius`, retired with the two `NSView`s that drew it.
 
     /// Alpha of an ``Tokens/Color/engagedChrome`` engaged fill — subtle,

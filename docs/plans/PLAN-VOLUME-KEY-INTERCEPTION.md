@@ -34,7 +34,7 @@ The 2026-08-07 revision inferred from `ControlStrip.app`'s imported symbols
 (`_DFRFoundationPostHIDUsage` vs `_AudioObjectSetPropertyData`) that the Touch
 Bar's **discrete** volume buttons post a HID usage a `CGEventTap` can catch
 even while greyed. **Live probe disproved this** (`dev/spikes/volume-key-tap/
-probe.swift`, dual session+HID `.listenOnly` taps, Alec pressing keys):
+probe.swift`, dual session+HID `.listenOnly` taps, the owner pressing keys):
 
 - **Greyed Touch Bar volume buttons post NOTHING** — at either tap level.
   Other Touch Bar buttons printed; volume did not. ControlStrip checks
@@ -46,7 +46,7 @@ probe.swift`, dual session+HID `.listenOnly` taps, Alec pressing keys):
   Keys" (Accessibility-gated event tap, confirmed from their docs) is
   independent convergence on the same design. SoundSource's Touch Bar never
   *looks* dead only because their admin-installed HAL driver publishes a
-  settable volume control — the driver route Alec rejected.
+  settable volume control — the driver route the owner rejected.
 - The probe also cleared the plumbing: both taps install and receive events,
   Accessibility behaves, `.cgSessionEventTap` sees everything the HID tap sees.
 
@@ -55,17 +55,17 @@ the app drawing **its own button** in the Control Strip region — §7.
 
 ## 3. Scope and locked decisions
 
-1. **No virtual/HAL driver** (Alec): requires an admin-password install. Not
+1. **No virtual/HAL driver** (owner's call): requires an admin-password install. Not
    revisited even though it is how SoundSource keeps every surface alive.
    Research preserved at `dev/spikes/virtual-device/SPIKE-REPORT.md`
    (worktree `agent-a8f62fddcb614b153`).
-2. **Dead sliders are acceptable** (Alec): menu bar, Control Center, Touch
+2. **Dead sliders are acceptable** (owner's call): menu bar, Control Center, Touch
    Bar slider stay greyed. The app and its shortcuts are the volume surface.
 3. **Touch Bar gets OUR button, reversibly, driven by the current output**
-   (Alec, 2026-08-08): while Audiout is the output the user keeps their own
+   (owner's call, 2026-08-08): while Audiout is the output the user keeps their own
    non-audio buttons, dead audio controls go, our working control appears; the
    moment they switch away, everything restores exactly. Never permanent.
-4. **No HUD** (Alec): consuming a key kills the crossed-out HUD and we post
+4. **No HUD** (owner's call): consuming a key kills the crossed-out HUD and we post
    nothing in its place; the app's UI reflects the change. No `OSDUIHelper`.
 5. **Mute key toggles Main mute** — `GroupController.setMainOutMuted(_:)`
    (`GroupController.swift:873`), no new entry point.
@@ -151,7 +151,7 @@ known proof on 27. Spike: `dev/spikes/touchbar-tray-item/bundled-spike.swift`.
    say so. Applies to every future live test.
 3. Renders **only** in "App Controls with Control Strip" mode
    (`com.apple.touchbar.agent` → `PresentationModeGlobal =
-   appWithControlStrip`); invisible in `fullControlStrip` (Alec's own mode)
+   appWithControlStrip`); invisible in `fullControlStrip` (the owner's own mode)
    and in Apple's *expanded* strip generally — a foreign identifier in the
    `FullCustomized` layout array is not rendered by ControlStrip (it draws
    only its own catalog).
@@ -164,7 +164,7 @@ is wired to it. Fallback if a pair won't render: two separate tray items
 or a single mute-style button plus press-and-hold. Do not build past this
 until the pair is proven.
 
-### 7b. Behavior (Alec's decision, 2026-08-08, "keep theirs, remove the dead
+### 7b. Behavior (the owner's decision, 2026-08-08, "keep theirs, remove the dead
 audio, add ours")
 
 On `weOwnVolume` becoming true AND Touch Bar hardware present:
@@ -225,7 +225,7 @@ mode-swap plans), restore-declines-on-user-edit, crash-marker recovery. The
 tray registration itself and the tap shell are thin and not headlessly
 testable; keep them dumb.
 
-**Live (owed to Alec, in one session, ONE build, launched via `open`, all
+**Live (owed to the owner, in one session, ONE build, launched via `open`, all
 other Audiout builds quit):**
 1. −/+ pair renders as one tray item (7a's open question) — FIRST; stop if not.
 2. Aggregate active → our buttons appear, taps move Main, Mac's own speakers
@@ -257,5 +257,5 @@ output: physical keys via the interceptor, Touch Bar via our own Control
 Strip buttons; the Mac's own output actually attenuates; the user's Touch Bar
 setup is never permanently altered and survives crashes; normal outputs
 behave exactly as before; a revoked Accessibility grant is visible and only
-degrades the keys, never the Touch Bar buttons; Alec's live checklist passes.
+degrades the keys, never the Touch Bar buttons; the owner's live checklist passes.
 Do NOT merge to main — hand back a committed, pushed branch (house rule).

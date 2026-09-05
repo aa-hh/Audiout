@@ -42,9 +42,9 @@ jobs:
     # happens here, on every PR that touches the build. The clean runner also
     # installs the brew dependencies from scratch, so it catches a build that
     # has come to depend on something missing from the list below.
-    # macos-26 (Xcode 26.x): matches the Swift toolchains on both of Alec's
-    # Macs; macos-15's Xcode 16.4 is older than anything this repo is built
-    # with locally.
+    # macos-26 (Xcode 26.x): matches the Swift toolchains on both of the
+    # owner's Macs; macos-15's Xcode 16.4 is older than anything this repo is
+    # built with locally.
     runs-on: macos-26
     env:
       # The runner has neither of this project's Macs to route a compile to.

@@ -176,7 +176,7 @@ All group logic goes through the shared
   in the editor, not by expansion), **available first, unavailable dimmed at
   the bottom** — `MixerWindowController.orderedDevices()` is the ONE ordering
   rule, shared by the sidebar, the editor's checklist, the creation sheet and
-  the overview's chips (Alec 2026-08-28, chosen over keep-in-place; a row
+  the overview's chips (owner's call, 2026-08-28, chosen over keep-in-place; a row
   moving when availability flips is the accepted trade). **An unavailable
   speaker may JOIN a group** — the sheet and editor offer every device (same
   decision; reverses the old available-only candidate rules), which is also

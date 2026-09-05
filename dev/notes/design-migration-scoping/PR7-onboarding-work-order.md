@@ -191,7 +191,7 @@ git status --short dev/notes/window-snapshots dev/notes/settings-snapshots dev/n
 
 Done = every command above run in the executor's session with the stated output pasted.
 
-## Owed checks (Alec, in a `make-app.sh` build — this PR needs no dev build or live-test slot)
+## Owed checks (the owner, in a `make-app.sh` build — this PR needs no dev build or live-test slot)
 
 1. **The light-mode gate field** (D1) — the shared ramp now runs on white ground: crests read dark warm before blooming gold. This is the change most likely to be rejected by eye.
 2. The dark gate field, which should be indistinguishable from today at the Full-gold dial and slightly warmer at Subtle (D2).

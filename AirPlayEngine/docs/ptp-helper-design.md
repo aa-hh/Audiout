@@ -536,7 +536,7 @@ only, not live-tested, until Developer-ID signing lands.
 - [ ] Crash-respawn: helper crashes mid-session (`kill -9`); launchd respawns on KeepAlive;
       engine's next session peer-add detects stale shm and surfaces "clock unavailable"; recovery on retry.
 - [ ] Idle-exit: session ends (all peers removed) → helper self-exits ≤ 45 s → ports free → system AirPlay dropdown works.
-- [ ] Two-host live test (dev Mac = helper, receiver = shairport) still pending (Alec's post-commit checklist).
+- [ ] Two-host live test (dev Mac = helper, receiver = shairport) still pending (the owner's post-commit checklist).
 
 ---
 

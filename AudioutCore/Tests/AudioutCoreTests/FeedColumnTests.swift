@@ -112,11 +112,11 @@ import AudioutCore
 
     // MARK: Error overrides the feed (failure-red words)
 
-    /// The failure override is now a GLYPH, not words (Alec, 2026-09-04):
-    /// every headline overflowed the feed slot, so the words moved to the
-    /// tooltip and the spoken value. The rung itself is unchanged — a failure
-    /// still takes the whole column, in the failure tone, and still overrides
-    /// any composite the row would otherwise draw.
+    /// The failure override is now a GLYPH, not words (owner's call,
+    /// 2026-09-04): every headline overflowed the feed slot, so the words
+    /// moved to the tooltip and the spoken value. The rung itself is
+    /// unchanged — a failure still takes the whole column, in the failure
+    /// tone, and still overrides any composite the row would otherwise draw.
     @Test func failedOverridesTheFeedWithAGlyphAndMovesTheHeadlineOffTheRow() {
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
@@ -156,9 +156,9 @@ import AudioutCore
     }
 
     /// The failure rung is a lone glyph in a column of its own, so it CENTRES
-    /// (Alec, 2026-09-04). It used to keep the leading edge a left-aligned
-    /// TEXT pill needs, which left the triangle hanging at the column's left
-    /// margin with 120 pt of empty column beside it.
+    /// (owner's call, 2026-09-04). It used to keep the leading edge a
+    /// left-aligned TEXT pill needs, which left the triangle hanging at the
+    /// column's left margin with 120 pt of empty column beside it.
     @Test func theFailureGlyphCentresInItsColumn() {
         let row = laidOut(makeBusRow())
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
@@ -234,10 +234,10 @@ import AudioutCore
 
     /// The retired "Older AirPlay" micro-tag. It read `supportsAirPlay2`,
     /// which is false for Bluetooth, Cast AND the Mac's own row as well as a
-    /// genuine AP1 receiver — so it labelled a Chromecast as AirPlay. Alec
-    /// dropped it outright rather than narrowing it to real AP1 receivers: the
-    /// column carries what a device is PLAYING, and a protocol attribute was
-    /// never that.
+    /// genuine AP1 receiver — so it labelled a Chromecast as AirPlay. The
+    /// owner dropped it outright rather than narrowing it to real AP1
+    /// receivers: the column carries what a device is PLAYING, and a protocol
+    /// attribute was never that.
     @Test func noDeviceGetsAProtocolTagWhateverItsAirPlay2Flag() {
         for supportsAirPlay2 in [true, false] {
             let row = makeBusRow()

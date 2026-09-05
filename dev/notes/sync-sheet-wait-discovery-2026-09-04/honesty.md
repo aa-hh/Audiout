@@ -10,7 +10,7 @@ The adaptive branch already cuts the real wait for a well-behaved speaker from 6
 11, but the **number on screen still starts at 60 for everyone**, because the detector cannot say
 anything until it has 10 seconds of evidence. The screen is therefore promising a wait five times
 longer than it will usually deliver. That is the honesty problem worth designing around, and it
-points the opposite way from Alec's brief: the wait does not need filling, it needs not being
+points the opposite way from the owner's brief: the wait does not need filling, it needs not being
 announced as a minute.
 
 ---
@@ -338,7 +338,7 @@ is a live test, not a design decision, and it should happen before this ships.
 ### Concept 2 — when the wait is genuinely long, spend it on the other speakers
 
 For the rare speaker that is still jumping past the floor, the wait is real and the walk is over. Then
-the screen has honest work: the rest of the room. This is Alec's own idea, scoped to the case that
+the screen has honest work: the rest of the room. This is the owner's own idea, scoped to the case that
 earns it.
 
 **The experience, step by step**
@@ -392,19 +392,19 @@ of preparing the queue can lengthen the queue.
 ## 6. Ranked pick
 
 **Concept 1 first, and on its own.** The wait for a well-behaved speaker is already about eleven
-seconds on the branch. The problem Alec is reacting to is mostly a copy problem wearing a countdown:
+seconds on the branch. The problem the owner is reacting to is mostly a copy problem wearing a countdown:
 the screen announces a minute, delivers eleven seconds, and explains neither. Fixing the sentence is
 small, ships on the branches that already exist, and removes the reason for most of the machinery
 anyone would otherwise build.
 
-**Concept 2 second, gated on evidence.** It is the right answer for the long wait and it is Alec's own
+**Concept 2 second, gated on evidence.** It is the right answer for the long wait and it is the owner's own
 instinct, but it should not be built until someone knows how often the long wait actually happens.
 Today the whole distribution is two speakers.
 
 **Measure-early: demote.** Keep it, move it behind the long-wait condition, and change the verdict
 sentence so it stops saying "Fixed." for a number it plans to replace.
 
-### Three questions only Alec can answer
+### Three questions only the owner can answer
 
 1. **The measured wait, on real speakers.** After the branches land, how long does the button actually
    take to go live on each speaker you own, from link-up with music already playing? Everything above

@@ -1,10 +1,10 @@
 # Wispr-style permission flow — design brief
 
-Shaped and confirmed with Alec 2026-08-11 (one correction round: the Reduce
+Shaped and confirmed with the owner 2026-08-11 (one correction round: the Reduce
 Motion rule). No code written yet. Branch: `claude/wispr-flow-permissions-f1a9a3`.
 Scope: the permission-granting interaction ONLY — no other onboarding content.
 
-## Decisions (Alec, 2026-08-11)
+## Decisions (owner's call, 2026-08-11)
 
 1. **Hard gate (full Wispr).** Done is absent — not disabled — until every
    required grant verifies. This REVERSES the documented "setup is guidance,
@@ -21,7 +21,7 @@ Scope: the permission-granting interaction ONLY — no other onboarding content.
    stops when occluded — zero idle CPU still holds). Reduce Motion on → the
    demo plays ONCE, then shows a replay button. All other choreography
    (card expand, checkmark) is instant under Reduce Motion per house rules.
-5. **Bluetooth joins the flow** (Alec, mid-shape): today the BT prompt fires
+5. **Bluetooth joins the flow** (owner's call, mid-shape): today the BT prompt fires
    right AFTER setup — onboarding defers `backend.start()` until the window
    closes, and the backend's BT enumerator asks on startup. Jarring. It
    becomes its own card, and a skipped/denied card must ALSO stop the
@@ -46,7 +46,7 @@ Scope: the permission-granting interaction ONLY — no other onboarding content.
   rewrites from imperative to earned capability, next card expands and the
   demo pane swaps.
   - Title pattern per step, imperative → capability (final strings are the
-    builder's, Alec reviews): "Let Audiout hear your Mac's sound" →
+    builder's, the owner reviews): "Let Audiout hear your Mac's sound" →
     "Audiout can now hear your Mac's sound". Existing row detail copy is
     reused as the card description.
 - Allow is two-mode (Wispr's trick): first click fires the native prompt /
@@ -105,7 +105,7 @@ Scope: the permission-granting interaction ONLY — no other onboarding content.
 - `.permissionLost` re-entry: same window, sequence starts at the first
   unmet card; the banner concept can fold into the header line.
 
-## Amendments (Alec, 2026-08-11, during the UI build)
+## Amendments (owner's call, 2026-08-11, during the UI build)
 
 - **Demo mocks are styled as macOS system UI, not Warm Signal**: semantic system
   colors + system font inside the mock (systemBlue toggle, window-background
@@ -121,7 +121,7 @@ Scope: the permission-granting interaction ONLY — no other onboarding content.
 
 ## Window layering + prompt sequencing (added after reading Wispr's main-process code)
 
-- **Float, but yield to Settings (Alec, 2026-08-11):** the window stays `.floating`
+- **Float, but yield to Settings (owner's call, 2026-08-11):** the window stays `.floating`
   (buried-window fix), but any Settings deep link drops it to `.normal` so System
   Settings sits on top; restore `.floating` on grant/refocus. Native permission
   alerts already sit above floating — this only fixes Settings occlusion. A

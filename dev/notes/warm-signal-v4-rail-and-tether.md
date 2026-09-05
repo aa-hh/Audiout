@@ -1,6 +1,6 @@
 # Warm Signal v4 — Left-Spine Rail + Derived Tether
 
-**Status: LOCKED by Alec, 2026-07-22.** Supersedes the v3 bus geometry (right-column
+**Status: LOCKED by the owner, 2026-07-22.** Supersedes the v3 bus geometry (right-column
 membership bus) and the v3 under-fader meter. Everything else in `warm-signal-v3.md`
 still holds unless contradicted here. This doc is the single source of truth for the
 popover re-architecture; build to it exactly.
@@ -23,7 +23,7 @@ same checkbox.
 Not full height.
 - Unselected nodes *within* that span get the wire-hop detour — a **wider, rounder bypass
   arc** than v3 (give skipped nodes generous berth; `busDetourBulge` grows).
-- **Larger clearance radius around every node** (Alec, all sides): widen the left gutter so a
+- **Larger clearance radius around every node** (owner's call, all sides): widen the left gutter so a
   node never crowds the icon tile to its right, and give each node generous vertical clearance
   along the rail (larger unstroked gap where the rail meets the node + a touch more node-to-node
   rhythm) so the whole spine reads calm/airy, not cramped. Drive from named `PopoverColumnGrid`

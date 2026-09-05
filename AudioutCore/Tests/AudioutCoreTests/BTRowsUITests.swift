@@ -165,12 +165,13 @@ import AppKit
 
     // MARK: Failure mark (glyph on the row, headline on the tooltip)
 
-    /// The row draws ONE failure glyph whatever the cause (Alec, 2026-09-04).
-    /// This retires the BT-UI decision that "Connected elsewhere" and "Not
-    /// paired" must read distinctly ON THE ROW — every headline overflowed the
-    /// 52 pt Bluetooth feed slot and clipped mid-word, and Alec chose one
-    /// consistent glyph over words-when-they-fit. The distinction survives, on
-    /// the tooltip and in the spoken value. Still no instructional sublabels.
+    /// The row draws ONE failure glyph whatever the cause (owner's call,
+    /// 2026-09-04). This retires the BT-UI decision that "Connected elsewhere"
+    /// and "Not paired" must read distinctly ON THE ROW — every headline
+    /// overflowed the 52 pt Bluetooth feed slot and clipped mid-word, and the
+    /// owner chose one consistent glyph over words-when-they-fit. The
+    /// distinction survives, on the tooltip and in the spoken value. Still no
+    /// instructional sublabels.
     @Test func failedRowRendersAGlyphAndKeepsTheHeadlineOnTheTooltip() {
         let spy = SpyDelegate()
         let elsewhere = makeRow(
@@ -495,10 +496,10 @@ import AppKit
     }
 
     /// The door's mark and the muted speaker's are ONE shape — same size, same
-    /// centre line (Alec, 2026-09-04: "the same object in two colours"). They
-    /// were two until then, a 24 x 22 rounded square 6 pt from a capsule, and
-    /// read as two unrelated kinds of control. Hue says which is which now;
-    /// geometry does not.
+    /// centre line (owner's call, 2026-09-04: "the same object in two
+    /// colours"). They were two until then, a 24 x 22 rounded square 6 pt from
+    /// a capsule, and read as two unrelated kinds of control. Hue says which
+    /// is which now; geometry does not.
     @Test func theDoorMarkAndTheMuteMarkAreOneShape() {
         let muted = Device(id: "C4-38-75-0E-BF-4A:output", name: "Sonos Move 2",
                            kind: .bluetooth, supportsAirPlay2: false, isMuted: true)
@@ -1239,8 +1240,8 @@ extension SerializedSharedState {
     /// The engaged door paints ``Tokens/Color/equalizer`` on its enclosing
     /// square and WHITE on the sliders inside it — in all four appearance
     /// cells, read back out of the rendered pixels. One fill in light and
-    /// dark is the rule (Alec, 2026-09-04), so this suite is also what fails
-    /// if someone re-splits the hue by appearance.
+    /// dark is the rule (owner's call, 2026-09-04), so this suite is also
+    /// what fails if someone re-splits the hue by appearance.
     ///
     /// It replaces the seat-border suite that stood here: the border, the
     /// gold seat and the `inkOnFill` pin all retired with the drawn seat.

@@ -24,7 +24,7 @@ import Testing
         let store = makeStore()
         let approval = CompanionApproval(
             clientID: Self.phoneID,
-            lastKnownName: "Alec's iPhone",
+            lastKnownName: "Owner's iPhone",
             decision: .approved,
             firstSeen: Date(timeIntervalSince1970: 1_000),
             lastSeen: Date(timeIntervalSince1970: 2_000))
@@ -123,9 +123,9 @@ import Testing
         var prompts: [(name: String, respond: (Bool) -> Void)] = []
         controller.presentPrompt = { name, respond in prompts.append((name, respond)) }
 
-        controller.handleRequest(clientID: Self.phoneID, clientName: "Alec's iPhone") { _ in }
+        controller.handleRequest(clientID: Self.phoneID, clientName: "Owner's iPhone") { _ in }
         controller.handleRequest(clientID: UUID().uuidString, clientName: "Guest's iPhone") { _ in }
-        #expect(prompts.map(\.name) == ["Alec's iPhone", "Guest's iPhone"])
+        #expect(prompts.map(\.name) == ["Owner's iPhone", "Guest's iPhone"])
     }
 
     // MARK: - Revocation

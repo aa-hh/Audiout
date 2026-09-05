@@ -135,7 +135,7 @@ repo. `AudioutCore` pins it by version.
 - **Inner-loop test command:** see [AudioutCore/AGENTS.md](AudioutCore/AGENTS.md) for
   guidance on scoping tests with `--filter`, and for the "tests must stay
   invisible" rule every UI test has to obey.
-- **New tests buy their place (Alec, 2026-09-04).** The suite is ~3,500 tests
+- **New tests buy their place (owner's call, 2026-09-04).** The suite is ~3,500 tests
   and every one is a permanent tax on every commit, so:
   1. A new test NAMES ITS DEFECT — one comment sentence stating the code change
      that would turn it red. Can't write that sentence, don't write the test.
@@ -187,7 +187,7 @@ repo. `AudioutCore` pins it by version.
   `done` frees it — and `scripts/make-app.sh` refuses to build that one bundle
   id unless you hold it. **Acquisition never blocks**: exit 2 means busy, so
   report your queue position and go do other work rather than waiting. Free it
-  as soon as Alec gives a verdict. Details and the 45-minute expiry rule are in
+  as soon as the owner gives a verdict. Details and the 45-minute expiry rule are in
   [CLAUDE.md](CLAUDE.md) under "Build & run"; the traps are in the script's own
   header. A fresh per-handover bundle id is a different daemon identity and
   needs no slot.
@@ -226,7 +226,7 @@ repo. `AudioutCore` pins it by version.
   precedes every file removal and the daemon is restarted at the end.
 
 - **Dev tooling that outlives its session must be labelled, parked outside the
-  app's data, and purgeable (Alec, 2026-09-05).** A dev performance watchdog —
+  app's data, and purgeable (owner's call, 2026-09-05).** A dev performance watchdog —
   `~/Library/Application Support/Audiouter/perfwatch.sh`, kept alive by
   `~/Library/LaunchAgents/com.audiouter.perfwatch.plist` — ran unnoticed for 6
   days 22 hours: never committed, written straight onto the machine, dropped

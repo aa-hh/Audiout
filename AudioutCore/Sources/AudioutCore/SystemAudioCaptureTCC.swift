@@ -15,7 +15,7 @@ import CoreGraphics   // last-resort survival path only — see combinedStatus()
 /// Apple ships **no public API** for the audio-capture grant, so this file (and
 /// the bundled `tcc-probe` helper) resolve the private `TCCAccessPreflight` at
 /// runtime via `dlsym`. That is fine for Developer ID + notarization — what this
-/// app ships — but the App Store rejects private-symbol use outright. Alec
+/// app ships — but the App Store rejects private-symbol use outright. The owner
 /// confirmed 2026-07-25 that App Store distribution is not a goal, now or later,
 /// and accepted this cost knowingly. **Do not remove the private read to "fix"
 /// an App Store concern without re-opening that decision** — the only public

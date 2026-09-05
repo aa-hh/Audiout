@@ -295,7 +295,7 @@ extension SerializedSharedState {
     /// the exclusion set on EVERY Mac+AirPlay connect, recreating the tap; an
     /// app-route change does the same. Treating those benign rebuilds as a rate-
     /// renegotiation recapture fired a redundant removeOutput→addOutput RTP
-    /// re-establish on every connect — the long silence Alec heard after an
+    /// re-establish on every connect — the long silence the owner heard after an
     /// already-fast connect. `recreateTap(cause: .exclusionChange)` must stay silent;
     /// only `recreateTap(cause: .deviceOrRateChange)` (the device-change/nominal-rate
     /// listener path) may fire `onDeviceRateRebuild`.

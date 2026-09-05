@@ -23,7 +23,7 @@ grew inside the seat the door already had." with:
 > `engagedSeatCornerRadius`, shared with the engaged mute button 6pt trailing,
 > because the two engaged marks are ONE shape. They were two until 2026-09-04 —
 > this rounded square beside a capsule whose `Radius.control` clamped to half
-> its own height — and Alec read them as two unrelated kinds of control. Hue,
+> its own height — and the owner read them as two unrelated kinds of control. Hue,
 > border and glyph tell them apart now: the door is gold, bordered and
 > oversized; mute is a cool fill with a slashed speaker at the at-rest glyph
 > size. Geometry no longer carries any of that.
@@ -52,7 +52,7 @@ grew inside the seat the door already had." with:
 > can sit on comfortably (9.74:1 at rest, 7.73:1 on the gold live wash, 7.36:1
 > on the neutral hover wash). In LIGHT the same value is a pale wash on paper:
 > 3.64 / 3.20 / 2.91:1 — the hovered row is under the 3:1 non-text floor, and
-> Alec read the engaged door as too hard to see in light before anyone measured
+> The owner read the engaged door as too hard to see in light before anyone measured
 > it. `goldText` is the same accent voice deepened for light and carries
 > `gold`'s own hexes in dark, so the dark door does not move a pixel and the
 > light one goes to 5.66 / 4.96 / 4.52:1. Increase Contrast raises all six
@@ -68,7 +68,7 @@ grew inside the seat the door already had." with:
 > under the 3:1 edge floor, where white measures 8.49:1. On the seat the ink
 > now measures 3.18 / 8.49 / 10.18 / 11.72:1 across the four cells. That first
 > number is the trade this deepening makes: the glyph inside the seat gives up
-> 4.94:1 so the seat itself can clear its ground, which is the half Alec could
+> 4.94:1 so the seat itself can clear its ground, which is the half the owner could
 > not see. `CompositedTokenContrastTests` measures both halves in all four
 > cells, and `increaseContrastDrops` is now EMPTY — the pinned border was its
 > only entry.
@@ -269,7 +269,7 @@ following where that row icon is described.
 > Pro", "Beats Studio Buds" — names one model, and the row draws that product's
 > own SF Symbol. Phrases are matched with everything but letters and digits
 > stripped and the most specific phrase checked first, because people rename
-> their speakers: the pair this was written for is called "Alec's AirPods Pro
+> their speakers: the pair this was written for is called "the owner's AirPods Pro
 > #2", and a table that checked "AirPods" before "AirPods Pro" would draw the
 > wrong product on every Pro. Only the product phrase is matched — Apple does
 > not translate those, while the owner's own words around them may be any
@@ -312,7 +312,7 @@ grew inside the seat the door already had." with:
 > `engagedSeatCornerRadius`, shared with the engaged mute button 6pt trailing,
 > because the two engaged marks are ONE shape. They were two until 2026-09-04 —
 > this rounded square beside a capsule whose `Radius.control` clamped to half
-> its own height — and Alec read them as two unrelated kinds of control. Hue,
+> its own height — and the owner read them as two unrelated kinds of control. Hue,
 > border and glyph tell them apart now: the door is gold, bordered and
 > oversized; mute is a cool fill with a slashed speaker at the at-rest glyph
 > size. Geometry no longer carries any of that.
@@ -341,7 +341,7 @@ grew inside the seat the door already had." with:
 > can sit on comfortably (9.74:1 at rest, 7.73:1 on the gold live wash, 7.36:1
 > on the neutral hover wash). In LIGHT the same value is a pale wash on paper:
 > 3.64 / 3.20 / 2.91:1 — the hovered row is under the 3:1 non-text floor, and
-> Alec read the engaged door as too hard to see in light before anyone measured
+> The owner read the engaged door as too hard to see in light before anyone measured
 > it. `goldText` is the same accent voice deepened for light and carries
 > `gold`'s own hexes in dark, so the dark door does not move a pixel and the
 > light one goes to 5.66 / 4.96 / 4.52:1. Increase Contrast raises all six
@@ -357,7 +357,7 @@ grew inside the seat the door already had." with:
 > under the 3:1 edge floor, where white measures 8.49:1. On the seat the ink
 > now measures 3.18 / 8.49 / 10.18 / 11.72:1 across the four cells. That first
 > number is the trade this deepening makes: the glyph inside the seat gives up
-> 4.94:1 so the seat itself can clear its ground, which is the half Alec could
+> 4.94:1 so the seat itself can clear its ground, which is the half the owner could
 > not see. `CompositedTokenContrastTests` measures both halves in all four
 > cells, and `increaseContrastDrops` is now EMPTY — the pinned border was its
 > only entry.
@@ -626,7 +626,7 @@ grew inside the seat the door already had." with:
 > `engagedSeatCornerRadius`, shared with the engaged mute button 6pt trailing,
 > because the two engaged marks are ONE shape. They were two until 2026-09-04 —
 > this rounded square beside a capsule whose `Radius.control` clamped to half
-> its own height — and Alec read them as two unrelated kinds of control. Hue,
+> its own height — and the owner read them as two unrelated kinds of control. Hue,
 > border and glyph tell them apart now: the door is gold, bordered and
 > oversized; mute is a cool fill with a slashed speaker at the at-rest glyph
 > size. Geometry no longer carries any of that.
@@ -655,7 +655,7 @@ grew inside the seat the door already had." with:
 > can sit on comfortably (9.74:1 at rest, 7.73:1 on the gold live wash, 7.36:1
 > on the neutral hover wash). In LIGHT the same value is a pale wash on paper:
 > 3.64 / 3.20 / 2.91:1 — the hovered row is under the 3:1 non-text floor, and
-> Alec read the engaged door as too hard to see in light before anyone measured
+> The owner read the engaged door as too hard to see in light before anyone measured
 > it. `goldText` is the same accent voice deepened for light and carries
 > `gold`'s own hexes in dark, so the dark door does not move a pixel and the
 > light one goes to 5.66 / 4.96 / 4.52:1. Increase Contrast raises all six
@@ -671,7 +671,7 @@ grew inside the seat the door already had." with:
 > under the 3:1 edge floor, where white measures 8.49:1. On the seat the ink
 > now measures 3.18 / 8.49 / 10.18 / 11.72:1 across the four cells. That first
 > number is the trade this deepening makes: the glyph inside the seat gives up
-> 4.94:1 so the seat itself can clear its ground, which is the half Alec could
+> 4.94:1 so the seat itself can clear its ground, which is the half the owner could
 > not see. `CompositedTokenContrastTests` measures both halves in all four
 > cells, and `increaseContrastDrops` is now EMPTY — the pinned border was its
 > only entry.
@@ -887,7 +887,7 @@ buttons (the device row's and Main Out's), `equalizer` to the device row's
 engaged Equalizer door. A second consumer fails a test.
 
 Both are ONE value in light and dark, which almost nothing else here is. The
-rule is Alec's (2026-09-04): an engaged control wears the same fill in both
+rule is the owner's (2026-09-04): an engaged control wears the same fill in both
 appearances, so a muted row looks like a muted row wherever you meet it.
 Neither carries an Increase Contrast variant, and that follows from the single
 value rather than being a separate decision — one value sits between two
@@ -992,7 +992,7 @@ Header Strip section, which describes the control that triggers it.
 > it is the one clock holding the frame still while the content changes behind
 > it.
 >
-> Motion is the second half of the answer, and the smaller half. Alec's report
+> Motion is the second half of the answer, and the smaller half. The owner's report
 > was that Groups and the Equalizer door "load very juddery" (2026-09-04), and
 > measured headless against the seven-speaker demo fleet the first Groups
 > selection blocked the main thread for 56 ms — 50 of them constructing
@@ -1034,12 +1034,12 @@ The radius, both sizes and the one-shape claim all changed. Replace from
 >
 > Two things are derived from that and must never be retyped. The capsule is
 > exactly `pinDiameter` tall, so the pill and Pin stand at the same 34pt — they
-> were 32 and 26 until 2026-09-05, and Alec read the mismatch immediately. And
+> were 32 and 26 until 2026-09-05, and the owner read the mismatch immediately. And
 > a tab's height is the capsule minus its 3pt padding, which puts the tab's
 > radius at `capsuleCornerRadius - capsulePadding` (17 − 3 = 14): the arithmetic
 > concentric rounded rectangles require. Cutting the highlight at 10pt inside a
 > 17pt pill left a gap that measured 3pt at the tab's mid-height and 6pt into
-> its corner, and against the pill's rounded end that unevenness is what Alec
+> its corner, and against the pill's rounded end that unevenness is what the owner
 > rejected as "the highlight does not perfectly conform with the border".
 >
 > Four states, three drawn weights, in `engagedChrome` at the ladder the mixer's

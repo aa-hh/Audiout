@@ -6,7 +6,7 @@ Read this whole file before doing anything. It is the ground truth; the code pat
 
 Audiout: a Mac menu-bar app that sends all system audio to many AirPlay 2 and Bluetooth speakers in sync. A paid iPhone companion (SwiftUI, "audiout-remote") remote-controls the Mac and carries the one thing the Mac cannot do: a microphone. The phone's **sync sheet** measures how late a Bluetooth speaker plays versus another speaker (the "reference") by having the Mac play chirps while the phone listens from the listening position, then tells the Mac the correction. It is the product's answer to Bluetooth speakers being out of step with AirPlay speakers.
 
-## The problem Alec stated (verbatim)
+## The problem the owner stated (verbatim)
 
 > audit the waiting state in the sync wizard as we wait for the connection to stabilize. At the moment, it's just text-heavy and an empty screen with a single CTA that gives you the option to pass through if you feel like it. But most users have no understanding as to what exactly it is they need to wait for and the benefit of waiting, their interest is playing their speakers now, syncing it now. They don't really want to understand that there's variance until the connection settles. Nor will they have necessarily the patience for it. So we need to introduce essentially an experience that gives them a feeling of control while we wait for what we need to settle down so that we can give them that control.
 >
@@ -19,11 +19,11 @@ Audiout: a Mac menu-bar app that sends all system audio to many AirPlay 2 and Bl
 - Bluetooth latency is **per connection, not per device**: every reconnect re-rolls it (one day −410 ms, next day ~46 ms). So a stored tuning goes stale on every reconnect, and the Mac marks it "stale, reason: reconnected". After a mid-stream disruption the latency can also walk over minutes (17→61→86 ms).
 - **Today on main:** a fixed 60 s countdown from link-up (`BTAlignmentFreshness.settleSeconds = 60`). The Mac publishes `settleRemainingSeconds` on the wire; the phone counts it down locally. The phone is the only consumer. **The Mac's own alignment wizard (the by-ear one in the popover) has no gate at all** — the same speaker can be measured at once from the Mac and not for a minute from the phone.
 - **Unmerged Mac branch `claude/settle-window-adaptive`** (commit 0465183f): adds `BTClockStability`, a detector that watches the speaker's pacing clock and reports when it has gone 10 s without a jump. The 60 s floor still holds until the detector has evidence; a clock that settles early clears the window early; one still jumping past 60 s keeps counting. A measurement applied while still settling is marked `measuredWhileSettling`; a chunky clock step after alignment marks it `moved`. Both are stale reasons on the wire so the phone can ask for a re-check. **Read this critically: as written, the floor means a Sony still waits up to 60 s unless the detector clears it sooner — check `BTAlignmentFreshness.swift` on that branch for what "evidence" means.**
-- **Unmerged phone branch `claude/settle-window-phone`** (commit 65a1dbc): the Measure button waits on the Mac's clock verdict rather than a timer; a footnote says why and roughly how long; a gold "Measure it now" line lets the user measure early; an early measurement is marked and the sheet re-checks automatically once the Mac says the speaker settled (announced on the verdict page, refusable with "Not now", only while that page is on screen); the row says "Check timing again"; a light haptic when the button goes live; screen kept awake while counting/running. Alec has most likely seen a build of this or of main; his "single CTA that gives you the option to pass through" is that "Measure it now" line or the "Adjust by ear" link.
+- **Unmerged phone branch `claude/settle-window-phone`** (commit 65a1dbc): the Measure button waits on the Mac's clock verdict rather than a timer; a footnote says why and roughly how long; a gold "Measure it now" line lets the user measure early; an early measurement is marked and the sheet re-checks automatically once the Mac says the speaker settled (announced on the verdict page, refusable with "Not now", only while that page is on screen); the row says "Check timing again"; a light haptic when the button goes live; screen kept awake while counting/running. The owner has most likely seen a build of this or of main; their "single CTA that gives you the option to pass through" is that "Measure it now" line or the "Adjust by ear" link.
 - The settle number the Mac sends is its own estimate of seconds left, sent when it changes; the phone ticks it down between snapshots. `nil` means settled.
 - A measurement run takes roughly 10–20 s: phases "Hearing the room" → "Chirping" → "Letting it land" → "Measuring". Music must be playing on both speakers during it (the chirps ride on the feed). The phone measures the room from where it stands; standing beside a speaker gives a wrong answer.
 
-## The current phone screen (what Alec is reacting to)
+## The current phone screen (what the owner is reacting to)
 
 The sync sheet (`SyncSheet.swift`) has pages: placement → run → verdict → fine-tune, plus refusal and microphone states. Entered from: the row's `tuningfork` glyph (only on untuned/stale Bluetooth rows), the row's long-press "Tune…", and an invite card after the user saves a group or points Main Out at one. After a verdict, one line offers the next untuned speaker ("X isn't set either — tune it next?").
 
@@ -61,18 +61,18 @@ Plain words a non-specialist understands; no invented names for things (no "the 
 
 ## Code and notes to read (read-only; never edit, never build, never check out a branch)
 
-Phone repo, main checkout: `/Users/alechenderson/Projects/audiout-remote/`
+Phone repo, main checkout: `~/Projects/audiout-remote/`
 - `AudioutRemote/UI/Sync/SyncSheet.swift` (the whole sheet), `AudioutRemote/UI/Sync/SyncInviteCard.swift`
 - `AudioutRemote/Model/AlignmentRunController.swift` (run phases, refusals, copy)
 - `AudioutRemote/UI/Speakers/DeviceRowView.swift` (row glyph, alignment word, ~lines 455–480 and 750–810), `AudioutRemote/UI/Speakers/SpeakersView.swift` (what the phone can select/route)
 - `DESIGN.md` lines 120–175 (overview), 308–338 (green), 978–1004 (haptics), 1079–1141 (decision record + sync surfaces), 1141–1204 (do/don't)
-- Phone branch, via `git -C /Users/alechenderson/Projects/audiout-remote show claude/settle-window-phone:AudioutRemote/UI/Sync/SyncSheet.swift` and `git -C /Users/alechenderson/Projects/audiout-remote diff main claude/settle-window-phone -- DESIGN.md`
+- Phone branch, via `git -C ~/Projects/audiout-remote show claude/settle-window-phone:AudioutRemote/UI/Sync/SyncSheet.swift` and `git -C ~/Projects/audiout-remote diff main claude/settle-window-phone -- DESIGN.md`
 
-Mac repo, this worktree: `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/sync-wizard-waiting-ux-b93148/`
-- `dev/notes/handoff-2026-09-03-settle-window-adaptive.md` (the full problem statement and Alec's own engineering proposal)
+Mac repo, this worktree: `~/Projects/AirPlay Controller/.claude/worktrees/sync-wizard-waiting-ux-b93148/`
+- `dev/notes/handoff-2026-09-03-settle-window-adaptive.md` (the full problem statement and the owner's own engineering proposal)
 - `dev/notes/bt-spike-findings-2026-08-07.md` (search "Pacing-clock probe")
 - `AudioutCore/Sources/AudioutCore/BTAlignmentFreshness.swift`, `AudioutCore/Sources/AudioutCore/CompanionSnapshotBuilder.swift` (~line 200–260)
 - Mac branch: `git show claude/settle-window-adaptive:AudioutCore/Sources/AudioutCore/BTClockStability.swift` and `git show claude/settle-window-adaptive:AudioutCore/Sources/AudioutCore/BTAlignmentFreshness.swift`
 - `PRODUCT.md` (users, principles, voice)
 - The Mac's own by-ear wizard for voice parity: `AudioutCore/Sources/AudioutPopoverUI/BTAlignmentWizardView.swift` (copy constants near the top) and its look: `dev/notes/wizard-v2-handoff/1-intro-dark.png`, `3-question-mid-dark.png`, `6-kept-dark.png`
-- Wire struct: `/Users/alechenderson/Projects/audiout-shared/Sources/AudioutProtocol/CompanionSnapshot.swift` (~lines 40–70)
+- Wire struct: `~/Projects/audiout-shared/Sources/AudioutProtocol/CompanionSnapshot.swift` (~lines 40–70)

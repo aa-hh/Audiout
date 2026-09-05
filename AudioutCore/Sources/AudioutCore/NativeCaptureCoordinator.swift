@@ -3716,7 +3716,8 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     // (`byteSize / bytesPerFrame`), so buffers keep flowing at full cadence — but
     // building the `AVAudioConverter` from the stale 44100 makes it reinterpret
     // every 48000-rate buffer as 44100: a sustained ~8.8% (48000/44100) pitch-UP,
-    // exactly the live symptom Alec heard on the simplest single-AirPlay selection.
+    // exactly the live symptom the owner heard on the simplest single-AirPlay
+    // selection.
     // Read the aggregate's REAL nominal rate here — after it exists and its IOProc
     // has started, so it has settled — and correct `format`/`asbd` to it so the
     // converter's assumed input rate can never diverge from what the hardware is

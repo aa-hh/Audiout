@@ -343,7 +343,7 @@ before committing** — the orchestrator reviewed and committed their verified
 work (967ca26f, c8df2082). And the program is **not merged**: the live
 verification checklist below is the open gate before anything reaches `main`.
 
-## Live verification owed to Alec before merge
+## Live verification owed to the owner before merge
 
 Pin/unpin transitions; click-outside vs status-click; frame memory across
 relaunch; pinned-closed reopen; Setup-over-surface; sheet-over-transient;

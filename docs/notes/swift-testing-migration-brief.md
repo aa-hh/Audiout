@@ -13,7 +13,7 @@ proposal, kept for history; it is no longer the plan of record.
 
 ---
 
-Status: **not started, not scheduled** — written as a costed option per Alec's
+Status: **not started, not scheduled** — written as a costed option per the owner's
 request, alongside the finding in
 [test-parallel-spawn-measurement.md](test-parallel-spawn-measurement.md) that
 consolidating test *classes* cannot reduce the ~1025-process spawn overhead
@@ -100,4 +100,4 @@ cost, not just an engineering one.
 Worth doing eventually if the CPU cost keeps mattering and the machine's load
 profile doesn't improve with what's already shipped. Not worth starting
 casually — it is a real project, not an afternoon task, and should get its own
-spike-gated plan when Alec decides to prioritize it.
+spike-gated plan when the owner decides to prioritize it.

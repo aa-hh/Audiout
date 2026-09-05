@@ -28,7 +28,7 @@ public final class MembershipRowView: NSView {
 
     /// Which host surface this row is drawn on — the one input that decides
     /// whether it wears the Warm Signal v4 rail/node language or stays a plain
-    /// stock checkbox row (Alec, Q6 2026-07-25).
+    /// stock checkbox row (owner's call, Q6 2026-07-25).
     ///
     /// The row has exactly TWO hosts and they are visually different surfaces:
     /// the Groups editor is the app's own themed pane, while "Add scene" is a

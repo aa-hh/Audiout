@@ -59,7 +59,7 @@ Concretely: the first time the Applications card is empty, show inline
 text explaining what per-app routing does and how to add an app (a "+" hint
 where the footer control already lives); the first time the Groups-editor
 window is opened with zero groups, show equivalent inline copy on the
-empty state ("No groups — click here to create one," per Alec's proposed
+empty state ("No groups — click here to create one," per the owner's proposed
 fix for G1-N4) instead of a bare empty list. Each hint is a small, dismiss-
 once row or empty-state string driven by a persisted "has this been seen"
 flag (mirroring how `AppSettings.hasCompletedSetup` already gates
@@ -111,12 +111,12 @@ been told groups exist" by itself, since nothing points them to it.
 ## Recommendation
 
 Ship Option B first — contextual, first-use hints at the two concrete gaps
-Alec already flagged (empty Applications, empty Groups) — because it is
+the owner already flagged (empty Applications, empty Groups) — because it is
 both the cheapest slice to build right now (it piggybacks on the empty-state
 fixes G1-N4 already needs) and, done well, the most effective for a genuinely
 new user, since it teaches each feature at the moment it's concrete rather
 than as abstract slide-copy several clicks earlier; but be honest that it
-does not guarantee full coverage the way a forced tour does, so if Alec
+does not guarantee full coverage the way a forced tour does, so if the owner
 wants every new user to leave first-run knowing groups and per-app routing
 exist *regardless of which cards they happen to open*, that guarantee only
 comes from Option A's forced tour step, at the cost of a longer, partly

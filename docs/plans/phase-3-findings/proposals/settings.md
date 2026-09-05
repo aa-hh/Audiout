@@ -5,7 +5,7 @@ really matters: **General** (launch at login, a button to re-run the
 permission flow), **Appearance** (a light/dark/system theme picker), and
 **Audio** (an excluded-apps list, a "restore Mac audio after wake" delay, and
 an advanced audio-buffer size). That's it — four real, tunable choices in the
-whole app. Alec's own reaction during the live walkthrough was that Settings
+whole app. The owner's own reaction during the live walkthrough was that Settings
 "doesn't feel comprehensive" for something people are expected to pay for
 (`gated-ux-walkthrough.md` G1-N15). This document is a curated brainstorm of
 what a paid, general-public AirPlay-routing utility should offer instead —

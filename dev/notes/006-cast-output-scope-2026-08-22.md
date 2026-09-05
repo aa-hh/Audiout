@@ -24,9 +24,9 @@ Three cost centers, in order:
    breaks things technically (not legally); OSS ecosystem patches within
    weeks-to-months.
 
-## Direction check — SETTLED (Alec, 2026-08-22)
+## Direction check — SETTLED (owner's call, 2026-08-22)
 
-Roadmap 006's text mentioned two directions; Alec confirmed **output only**
+Roadmap 006's text mentioned two directions; the owner confirmed **output only**
 (casting TO Cast devices). The receiver direction (other apps casting into
 Audiout) is out of scope and not planned.
 
@@ -159,7 +159,7 @@ Things that need **new abstraction** (the hidden half of the estimate):
   real hardware: discover, TLS+auth-skip, launch Default Media Receiver, serve
   WAV and AAC live streams, measure BUFFERING→PLAYING latency + its variance
   + volume round-trip. Exit criterion: reproducible ≤2.5 s latency with a known
-  recipe. (Blocked until Alec's Cast device arrives.)
+  recipe. (Blocked until the owner's Cast device arrives.)
 - **Phase 1 — output plumbing:** Cast devices listed + selectable, stream +
   volume/mute; groups appear as single devices.
 - **Phase 2 — sync integration (completes v1):** reference-timeline
@@ -169,10 +169,10 @@ Things that need **new abstraction** (the hidden half of the estimate):
   routing decision, TV wake/standby handling, latency-upgrade research
   (paths B/C).
 
-## Decisions (Alec, 2026-08-22)
+## Decisions (owner's call, 2026-08-22)
 
 1. **Output only.** The Cast-receiver direction is out of scope, not planned.
-2. **Hardware**: Alec doesn't own a Cast device yet, **will get one**. Phase 0
+2. **Hardware**: the owner doesn't own a Cast device yet, **will get one**. Phase 0
    stays blocked until it arrives; ideally one speaker + a second for a group.
 3. **Sync ships in v1.** v1 = Phases 0–2 (spike, output, sync integration) —
    the Airfoil model: everything delayed ~2 s when a Cast device is in the mix,
@@ -271,7 +271,7 @@ after a stall only with 5 s buffered). The Streamer is an Android TV box; Airfoi
 figure (2016) was measured on Chromium-era Chromecast/Chromecast Audio. Codec buys
 nothing — WAV is the best and simplest. Stock Default Media Receiver floor here ≈ 5 s.
 Open: 206/Content-Range reply to the Range request (AirConnect does this); custom
-receiver with CAF `PlaybackConfig` buffer knobs (path B, needs Alec's Google account +
+receiver with CAF `PlaybackConfig` buffer knobs (path B, needs the owner's Google account +
 $5); a Nest speaker for comparison (likely the 2 s class).
 
 **2026-08-22 — 206/Content-Range experiment: inconclusive, not pursued further.** Answering
@@ -280,7 +280,7 @@ made it error within ~250ms every time (never buffered, never played) — contro
 played normally at the established ~5.5s. Confound: `bytes 0-/*` omits the required
 last-byte-pos (RFC 7233); AirConnect sends a real end offset from its 2MB replay cache.
 Could be "TV hates 206 for a live stream" or "TV hates a malformed Content-Range" — not
-distinguished. Not chasing further: path B (custom receiver, Alec mid-registration
+distinguished. Not chasing further: path B (custom receiver, the owner mid-registration
 2026-08-22) is the more promising next step for going below the ~5s stock-receiver floor.
 
 **2026-08-22 — Custom Web Receiver (path B), Google TV Streamer: NEGATIVE RESULT, closes

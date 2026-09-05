@@ -6,20 +6,20 @@ rather than trusting it blind.
 
 ## What this branch does
 
-Worktree: `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/delay-trim-sync-wizard-b99148`
+Worktree: `~/Projects/AirPlay Controller/.claude/worktrees/delay-trim-sync-wizard-b99148`
 Branch: `claude/delay-trim-sync-wizard-b99148`
 Work order (full spec, already executed): [`dev/notes/first-mix-wizard-default-work-order.md`](first-mix-wizard-default-work-order.md)
 Approved mock (three rounds, all decisions traceable): claude.ai/code/artifact/11ed7cb2-fa33-447d-b11c-370c11337f49
 Critique snapshot: `.impeccable/critique/2026-09-03T01-59-30Z__urces-audioutpopoverui-btalignmentpromptview-swift.md` (27/40, pre-fix)
 
-Alec's direction: the guided alignment wizard becomes the default way to
+The owner's direction: the guided alignment wizard becomes the default way to
 sync a Bluetooth speaker's delay. The old three-button "first-mix card"
 (Align with your music / Align with ticks / Not now) is gone, along with
 its hold-silent join and its permanent dismissal. The Mac popover row now
 advertises the sync tool and the equalizer the way the iPhone app already
 does, without adding a fourth column.
 
-**Nine decisions, each confirmed with Alec via a structured question,
+**Nine decisions, each confirmed with the owner via a structured question,
 recorded in memory as [[first-mix-wizard-default-decisions]]:**
 
 1. No hold-silent. A never-aligned Bluetooth speaker plays immediately,
@@ -42,13 +42,13 @@ recorded in memory as [[first-mix-wizard-default-decisions]]:**
    reference-light colour) outline when that speaker's curve is not
    flat. The glyph itself never changes colour — only the border.
 7. The popover (and the Groups window, same frame) widened
-   `SurfaceLayout.width` 623 → 653 to make room, at Alec's explicit call
+   `SurfaceLayout.width` 623 → 653 to make room, at the owner's explicit call
    ("we can expand the total width of our app").
-8. The wizard stays a sheet — Alec live-approved that across v7-v14; this
+8. The wizard stays a sheet — the owner live-approved that across v7-v14; this
    branch doesn't touch it.
-9. **The iPhone app is completely untouched.** Alec's opening phrasing
+9. **The iPhone app is completely untouched.** The owner's opening phrasing
    ("the tuning fork should trigger the Mac wizard") was a misstatement
-   he corrected mid-session — he meant the Mac row should advertise the
+   they corrected mid-session — they meant the Mac row should advertise the
    tool the way the phone's fork glyph already does, not that the phone
    should remote-control the Mac's sheet. Do not build that.
 
@@ -61,7 +61,7 @@ A signed dev build is **already running** as of this handoff:
   is `1179057d`, tree has the branch's changes staged on top, nothing
   committed yet.
 - Launched via `open "build/Audiout Dev.app"`. Check `pgrep -lf "Audiout Dev"`
-  before assuming it's still up — Alec may have quit it between sessions.
+  before assuming it's still up — the owner may have quit it between sessions.
 - **Live-test slot**: I hold it, label `delay-trim-sync-wizard-b99148`, ~25
   min left as of this handoff (`bash scripts/livetest.sh status` to check
   the real number). **Re-acquire under your own label before you build or
@@ -94,13 +94,13 @@ was not in a mix did nothing at all — no sheet, no message.
 `startBTAlignmentWizard` guarded on `btAlignmentTargetIsLive`
 (`isAvailable && wantsAudio`) and dropped the click with a bare `return`,
 while the chip's own enablement is only `device.isAvailable`
-(`DeviceRowView.swift:742`). Alec's ruling: **the click IS the join** — it
-selects the speaker into the mix and runs (he rejected dimming the chip, and
+(`DeviceRowView.swift:742`). The owner's ruling: **the click IS the join** — it
+selects the speaker into the mix and runs (they rejected dimming the chip, and
 rejected a transient explain-on-click line). The target then STAYS in the mix,
 unlike the run's reference, which `engageBTWizardReference` borrows and hands
 back. Fixed at that one shared entry point so the chip, the note and the
 "Align speaker…" menu item all inherit it; a refused join now speaks through
-`handleSelection` instead of vanishing. Two tests cover it. Alec live-verified:
+`handleSelection` instead of vanishing. Two tests cover it. The owner live-verified:
 "it worked".
 
 **Still owed** — everything that needs a speaker in a mix and a pair of ears:
@@ -172,7 +172,7 @@ appear unless you also set the env var and relaunch.
   after a successful-looking `acquire`. Re-running `acquire` a second
   time fixed it. If `make-app.sh` refuses, don't assume you're locked
   out — just re-acquire and retry once before escalating.
-- **This branch was merged with `origin/main` mid-session** (Alec asked
+- **This branch was merged with `origin/main` mid-session** (the owner asked
   for it explicitly, along with pulling `audiout-shared`'s main — that
   one was already up to date, no-op). Main had landed ~90 commits since
   this branch forked, including a design-system change: inset-container
@@ -197,7 +197,7 @@ appear unless you also set the env var and relaunch.
   change `audiout.remoteSlots` (the mule's concurrency cap) while a suite
   is mid-run; doing that made round two of the full suite noisier than
   round one.
-- **`audiout.remoteSlots` is currently 4** (Alec's explicit instruction
+- **`audiout.remoteSlots` is currently 4** (the owner's explicit instruction
   this session — was 3, briefly 6, corrected to 4). It's shared git
   config across every worktree of this repo, not a per-worktree setting.
 
@@ -214,7 +214,7 @@ appear unless you also set the env var and relaunch.
 - **Nothing is committed.** The working tree is dirty on purpose — nine
   small fixes plus the two blocking ones from an independent review are
   folded into the same uncommitted diff as the original work order, on
-  top of the merged main. Committing is Alec's call, not something to do
+  top of the merged main. Committing is the owner's call, not something to do
   unprompted (per this repo's standing rule — see
   `[[feedback-no-merge-without-explicit-go-ahead]]` in memory).
 
@@ -222,11 +222,11 @@ appear unless you also set the env var and relaunch.
 
 - `bash scripts/livetest.sh done` to release the slot if you hold it —
   don't sit on it.
-- Report findings back to Alec directly; if something's broken, fix it in
+- Report findings back to the owner directly; if something's broken, fix it in
   this same worktree (don't spin up a parallel one — see
   `[[parallel-agents-shared-worktree-collide]]`) and re-verify through
   `scripts/build.sh` / `scripts/run-tests.sh`, never a bare `swift`
   command.
-- If Alec gives the go-ahead to merge, that's a `git merge` into `main`
+- If the owner gives the go-ahead to merge, that's a `git merge` into `main`
   (this repo is merge-only on `main`, Guard 1) — not something to do
   without being asked either.

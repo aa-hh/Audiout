@@ -233,7 +233,7 @@ public final class DeviceRowView: NSView {
     /// of pills that starts at a different x per row is unreadable down a
     /// list. The failure rung is a lone glyph in a column of its own, so it
     /// CENTRES instead of sitting where a left-aligned text pill used to
-    /// start (Alec, 2026-09-04).
+    /// start (owner's call, 2026-09-04).
     private var feedStackLeadingConstraint: NSLayoutConstraint?
     private var feedStackCenterConstraint: NSLayoutConstraint?
     /// The transient **"Removed: Undo"** affordance shown after the user takes
@@ -912,9 +912,9 @@ public final class DeviceRowView: NSView {
     /// WHAT IT MAY NOT GO BACK TO. Two treatments are retired here, and
     /// neither may return. The first was an `engagedChrome` capsule at
     /// ``PopoverColumnGrid/mutePillFillAlpha`` behind an unslashed speaker — a
-    /// faint grey pill that read as nothing (Alec, 2026-09-04: "the active
-    /// mute state does not look like any other mute state I have seen in my
-    /// life"). The second was its replacement, an opaque `muted` rounded
+    /// faint grey pill that read as nothing (owner's call, 2026-09-04: "the
+    /// active mute state does not look like any other mute state I have seen
+    /// in my life"). The second was its replacement, an opaque `muted` rounded
     /// rectangle painted on a sibling `NSView` behind a system
     /// `speaker.slash.fill`: correct on measurement, but two views and two
     /// hand-pinned sizes to draw one mark. The enclosing square belongs to the
@@ -940,7 +940,7 @@ public final class DeviceRowView: NSView {
     /// ``RowAccessorySymbol/equalizerRest``, the outline square in the same
     /// neutral ink mute wears at rest. Mute sits 6 pt trailing wearing the
     /// same square: the two engaged marks are one object in two colours
-    /// (Alec, 2026-09-04), and hue alone says which control it is.
+    /// (owner's call, 2026-09-04), and hue alone says which control it is.
     ///
     /// WHY GREEN AND NOT GOLD. The door wore ``Tokens/Color/goldText`` until
     /// the symbols landed, and gold means "audio is flowing here" everywhere
@@ -1021,8 +1021,8 @@ public final class DeviceRowView: NSView {
     /// On a **bus row** the sublabel carries ONLY state words now (Warm Signal
     /// v4.1 item 3 — the routing/failure content that used to live here moved
     /// to the FEED column, ``updateFeedText()``): a muted device (master mute
-    /// included — a muted row always says so, Alec 2026-08-23) that is
-    /// neither failed nor unavailable shows the Muted token alone; every
+    /// included — a muted row always says so, per the owner, 2026-08-23) that
+    /// is neither failed nor unavailable shows the Muted token alone; every
     /// other state hides the sublabel. A **non-bus row** (mixer window / a generic
     /// caller) has no FEED column to fall back on — it keeps the FULL legacy
     /// ladder (``resolveLegacySublabel()``) so that host doesn't silently lose
@@ -1038,11 +1038,11 @@ public final class DeviceRowView: NSView {
         } else if !device.isAvailable {
             hideSublabel()
         } else if device.isMuted {
-            // A muted row always says so (Alec, 2026-08-23) — including under
-            // master mute, which is realized by muting every member. Replaces
-            // matrix §3.6's "the Main Out pill carries it" suppression, which
-            // read as the label vanishing when the muted row was the only
-            // member.
+            // A muted row always says so (owner's call, 2026-08-23) —
+            // including under master mute, which is realized by muting every
+            // member. Replaces matrix §3.6's "the Main Out pill carries it"
+            // suppression, which read as the label vanishing when the muted
+            // row was the only member.
             showMutedSublabel()
         } else {
             hideSublabel()
@@ -1067,8 +1067,8 @@ public final class DeviceRowView: NSView {
             // its EXISTING feed sublabel — never to a single-line row (this
             // branch only runs when a sublabel already exists, so the row
             // height is untouched — R7 no-reflow, this host only). A muted
-            // row always says so (Alec, 2026-08-23), master mute included —
-            // see ``resolveSublabel``.
+            // row always says so (owner's call, 2026-08-23), master mute
+            // included — see ``resolveSublabel``.
             if device.isMuted {
                 showLegacyMutedSublabel(feeds: routing)
             } else {
@@ -1192,15 +1192,15 @@ public final class DeviceRowView: NSView {
         }
         if case .failed(let failure) = device.connectionState {
             // GLYPH ONLY, with the words on the tooltip and in the row's
-            // spoken value (Alec, 2026-09-04). Every one of the twelve
-            // headlines overflowed the Bluetooth feed slot — "Couldn't
+            // spoken value (owner's call, 2026-09-04). Every one of the
+            // twelve headlines overflowed the Bluetooth feed slot — "Couldn't
             // connect" needs 113.2 pt of a 52 pt slot and the triangle eats
             // 19 pt before the first character, so the pill clipped mid-word.
-            // Alec chose the consistent version over "words when they fit",
-            // so an AirPlay row's wider slot draws the same bare glyph. The
-            // headline is not lost: `feedStack.toolTip` carries it on hover
-            // and `configureAccessibility` speaks it. This DOES retire the
-            // BT-UI spec's "'Connected elsewhere' and 'Not paired' read
+            // The owner chose the consistent version over "words when they
+            // fit", so an AirPlay row's wider slot draws the same bare glyph.
+            // The headline is not lost: `feedStack.toolTip` carries it on
+            // hover and `configureAccessibility` speaks it. This DOES retire
+            // the BT-UI spec's "'Connected elsewhere' and 'Not paired' read
             // distinctly on the row" — knowingly traded for one shape.
             setFeedFailureGlyph()
             // AFTER the render: `renderFeedPills` → `clearFeedPills()` wipes

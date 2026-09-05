@@ -255,9 +255,9 @@ import AppKit
     // MARK: The editor's top action band
 
     /// The two controls that LEAVE the editor share one band above the form
-    /// (Alec, 2026-09-03): "‹ Groups" on the left, the Done/Save primary on
-    /// the right, the same height so they read as a matched secondary/primary
-    /// pair rather than a caption beside a button.
+    /// (owner's call, 2026-09-03): "‹ Groups" on the left, the Done/Save
+    /// primary on the right, the same height so they read as a matched
+    /// secondary/primary pair rather than a caption beside a button.
     @Test func theWayBackAndThePrimaryShareOneBandAtTheTopOfTheForm() throws {
         let (window, _, _, group) = try makeWindow()
         window.test_select(.group(id: group.id))

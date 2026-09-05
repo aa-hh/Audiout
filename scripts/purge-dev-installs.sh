@@ -438,10 +438,10 @@ echo
 # directory: EVERY plist under ~/Library/LaunchAgents carrying either product
 # name is dev residue, unconditionally.
 #
-# Why this section exists (Alec, 2026-09-05): com.audiouter.perfwatch, a dev
-# performance watchdog no session ever committed, was found still running after
-# 6 days 22 hours. It was installed under the OLD product name, so the rename
-# hid it, and nothing had ever looked in this directory.
+# Why this section exists (owner's call, 2026-09-05): com.audiouter.perfwatch,
+# a dev performance watchdog no session ever committed, was found still running
+# after 6 days 22 hours. It was installed under the OLD product name, so the
+# rename hid it, and nothing had ever looked in this directory.
 echo "==> User launchd agents (${NAMESPACE}* / ${OLD_NAMESPACE}*)"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 agent_plists=()

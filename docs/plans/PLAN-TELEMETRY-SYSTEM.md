@@ -21,12 +21,12 @@ decisions** (`NativeBackend` `setOutputSet`/`desiredOn`/`rebindRecoveryGen`). Th
 non-blocking (hands off to its own serial queue, never calls back into callers, never
 touches the real-time IOProc render path) and self-neutralizes under `swift test` via the
 existing `HeadlessRuntime.isActive` seam so the always-on default cannot pollute or race
-the suite. When Alec next hits a live bug, an assisting agent `Read`/`grep`s one file and
+the suite. When the owner next hits a live bug, an assisting agent `Read`/`grep`s one file and
 reconstructs the causal chain instead of reasoning blind from static source.
 
 This is an MVP: instrument the four proven-hot subsystems only, on a small reusable helper.
 It is **not** a metrics/analytics system, not a live dashboard, and requires nothing of
-Alec at the time a bug occurs.
+the owner at the time a bug occurs.
 
 ---
 
@@ -314,7 +314,7 @@ new file; T7 is `AGENTS.md`. The only shared dependency is the T1 API surface.
 **`agents`.** Rationale: 7 tasks with a single real barrier (T1) then a clean 6-wide fan-out
 with **zero hot-file contention**, but the work is judgment-heavy exactly where it matters —
 T1's always-on concurrency, T4's subtle rebind/generation fields, and T5's divergence
-semantics — and the core deliverable is *which events/fields to record*, which Alec will
+semantics — and the core deliverable is *which events/fields to record*, which the owner will
 want to see and redirect ("also log X", "don't log device names"). Watched agents keep those
 choices visible and steerable mid-flight; the disjoint file sets mean agents run truly
 concurrently without needing a workflow's enforced barriers. It is under the 8+-task,
@@ -323,7 +323,7 @@ uniform-mechanical bar that would earn `workflow`'s overhead.
 - Tie-breaker applied: on a close call, prefer `agents` — visibility here is the point.
 - The one argument for `workflow` is per-task effort control (T1/T4 high vs T7 low); that is
   real but modest and is handled by assigning the right agent per task, so it does not
-  outweigh visibility. If Alec would rather batch the three mechanical tasks (T2, T3, T7)
+  outweigh visibility. If the owner would rather batch the three mechanical tasks (T2, T3, T7)
   deterministically while watching T1/T4/T5, run it as **`hybrid`** — those three in a small
   workflow, T1/T4/T5/T6 as watched agents. Default remains `agents`.
 
@@ -373,8 +373,8 @@ out **T2–T7** as concurrent agents; finish with the Wave-3 combined `swift tes
   additive — no new awaits, no synchronous writes, no reordering inside critical sections, and
   nothing on the IOProc render path (Q4 recommended: stay off it in v1).
 - **R5 — PII in a local file (Q6).** Device names / bundle IDs logged in cleartext are local
-  only; confirm Alec is fine with that before enabling (recommended yes).
-- **R6 — Path/retention are Alec's calls (Q1–Q3).** T1 hard-codes defaults; leave the path,
+  only; confirm the owner is fine with that before enabling (recommended yes).
+- **R6 — Path/retention are the owner's calls (Q1–Q3).** T1 hard-codes defaults; leave the path,
   size-bound, and always-on flag as single named constants so the answers to Q1–Q3 are a
   one-line change, not a redesign.
 - **R7 — Engine-side events are out of reach by design.** If a future bug needs

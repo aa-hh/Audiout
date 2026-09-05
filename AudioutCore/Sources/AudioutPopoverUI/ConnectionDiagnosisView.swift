@@ -22,13 +22,13 @@ public final class ConnectionDiagnosisView: NSView {
     /// the tinted background reads as its own inset card rather than flush with
     /// the row (matches the mockup's "inset to align with the name column").
     private static let horizontalInset: CGFloat = 10
-    /// LEADING inset, which is NOT symmetric with the trailing one (Alec, live
-    /// 2026-08-06): the panel used `horizontalInset` on both sides, so its card
-    /// began inside the rail GUTTER — the column the membership spine owns — and
-    /// read as belonging to the whole panel rather than to the row it is about.
-    /// It now starts at the icon column (`firstElementLeading`), the same edge the
-    /// device row's own leading element uses, so the card visibly hangs off the
-    /// device it refers to and leaves the spine's column clear.
+    /// LEADING inset, which is NOT symmetric with the trailing one (owner's call,
+    /// live 2026-08-06): the panel used `horizontalInset` on both sides, so its
+    /// card began inside the rail GUTTER — the column the membership spine owns —
+    /// and read as belonging to the whole panel rather than to the row it is
+    /// about. It now starts at the icon column (`firstElementLeading`), the same
+    /// edge the device row's own leading element uses, so the card visibly hangs
+    /// off the device it refers to and leaves the spine's column clear.
     private static var leadingInset: CGFloat {
         PopoverColumnGrid.firstElementLeading(indented: false)
     }

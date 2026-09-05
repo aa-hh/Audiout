@@ -407,10 +407,10 @@ public final class MainOutRowView: NSView {
         // `DeviceRowView`'s per-device mute): `pushOnPushOff` so the mute STATE
         // still toggles and the delegate still fires, while the SYMBOL swaps
         // between its outline and filled squares. The mark used to stay fixed
-        // in both states (Alec, an earlier call); he reversed that on
-        // 2026-09-04 — a mute that changes nothing but its tint reads as no
-        // mute at all. This is only the seeded image; `updateMuteTint()` owns
-        // both states and re-makes it on every appearance change.
+        // in both states (an earlier call); they reversed that on 2026-09-04 — a
+        // mute that changes nothing but its tint reads as no mute at all. This
+        // is only the seeded image; `updateMuteTint()` owns both states and
+        // re-makes it on every appearance change.
         muteButton.translatesAutoresizingMaskIntoConstraints = false
         muteButton.setButtonType(.pushOnPushOff)
         muteButton.isBordered = false

@@ -10,7 +10,7 @@ touching anything.
   (HEAD `202dc4e4`, pushed). **Everything described below is UNCOMMITTED
   working-tree state.** Do not restore from HEAD; the tree is the truth.
   Nobody has committed on purpose: Guard 7 (self-review) is the owner's step.
-- `main` is merge-only; work stays on this branch until Alec merges.
+- `main` is merge-only; work stays on this branch until the owner merges.
 - Build/tests go through the wrappers ONLY (`bash scripts/build.sh`,
   `bash scripts/run-tests.sh --filter <Suite>`) — never bare
   `swift build`/`swift test`. TRAP: piping build output to `| tail` returns
@@ -87,7 +87,7 @@ the two lights into warm white `#FFF4E2`.
 ## STATUS 2026-08-23 (third pass) — critique rulings applied
 
 `/impeccable critique` scored the second pass 26/40 (snapshot in
-`.impeccable/critique/`). Alec ruled on its five questions; spec §0b records
+`.impeccable/critique/`). The owner ruled on its five questions; spec §0b records
 the rulings. Applied, 210 tests green, renders refreshed in `after/`:
 plates hero (236×88) over a 112 pt stage strip · `Which clicked first? ·
 <word>` readout, interval on the stage tooltip · click count replaces the
@@ -98,7 +98,7 @@ proposal corner row + unsettled secondary; Try again is every bow-out's
 default · `Undo ⌘Z` · light spill off · locked halo 56 @ 0.55 (static
 carrier for Reduce Motion) · short screens centred in the band.
 
-**Open decision (Alec):** modal-over-the-app vs the current floating window
+**Open decision (owner):** modal-over-the-app vs the current floating window
 (spec §0b.7). Not built. Also not done: "Set it manually" behind Stop (would
 need a new session screen — Stop stays an immediate exit); stock pop-up
 chrome on the intro; WarmCanvasView grain.
@@ -274,7 +274,7 @@ px÷2 = pt; window content = 560 pt wide.
 - [P3] Right-aligned text rows land at x=530 vs the 532 column edge —
   2 pt ragged right across nameplate clock / ESC / stage edge.
 
-**Type & copy (copy changes need Alec's sign-off — locked-string
+**Type & copy (copy changes need the owner's sign-off — locked-string
 governance):**
 - [P1] Kept-screen hierarchy is inverted: bold near-white body ("Fine-tune
   anytime…" — the fine print) outranks the achievement; promote the
@@ -299,7 +299,7 @@ governance):**
   (owner call).
 - [P3] Unsettled primary: gold plate = "Set it by hand" makes the loudest
   offer more manual work; "Try again" may be the kinder default. Design
-  question for Alec, not a bug (spec currently says Set-by-hand primary).
+  question for the owner, not a bug (spec currently says Set-by-hand primary).
 
 **What already works (do not break):** the stage band geometry is
 pixel-exact (504×176 on the 28 pt column, wire at 0.58, correct rung
@@ -323,12 +323,12 @@ were praised by the owner as "extremely smooth and well implemented."
    emotional payoff.
 7. Then the stage list (span seam, emptiness, threshold sub-signal,
    ticks), then chassis (light-mode bezel, spill, intro band), then
-   type/copy (copy items via Alec).
+   type/copy (copy items via the owner).
 
 After fixing: re-run `swift run wizard-snapshot`, EYEBALL the renders
 against `wizard-mock-v2.html` (this step was skipped before and is
 exactly how the gap shipped), then run the six verification suites, then
-a fresh-bundle-id live build for Alec.
+a fresh-bundle-id live build for the owner.
 
 ## Assessment B (mechanical measurement pass) — completed before the stop
 
@@ -376,7 +376,7 @@ visual pass done.
 
 ## Owed beyond the fix list
 
-- Commit (Alec runs Guard 7 self-review), merge + PR per repo workflow.
+- Commit (the owner runs Guard 7 self-review), merge + PR per repo workflow.
 - Live hardware pass incl. one REAL ✕ window-close mid-run (the
   re-entrant AppKit close path is only headlessly tested).
 - Purge test-build residue: bundle ids `com.audiouter.Audiouter.wizardv1`

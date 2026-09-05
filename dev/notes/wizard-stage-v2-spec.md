@@ -5,7 +5,7 @@ the 2026-08-23 live test of the v1 window. Owner rulings applied. This document
 is the single source of truth for the v2 build; where it conflicts with older
 comments in the wizard files, this wins.
 
-## 0. Owner rulings (Alec, 2026-08-23)
+## 0. Owner rulings (2026-08-23)
 
 1. **Colors = the brand's two secondaries from the website** (`~/Projects/Audiouter
    Website/DESIGN.md`): **Sync Green `#2BFF8F`** (target — the speaker being
@@ -39,7 +39,7 @@ comments in the wizard files, this wins.
 4. **Colour rule, binding app-wide:** gold is the primary colour, always.
    Sync Green / Party Magenta are the website's two secondaries and may be
    used here because two speakers need two identities. Any future use of
-   either hue outside this window requires asking Alec first, with a clear
+   either hue outside this window requires asking the owner first, with a clear
    rationale — never by analogy to this screen. In dark mode the plate rims
    and keycaps wear the electric value at FULL alpha (§2.1's 0.45 measured
    as olive/mauve, 45% of the lights' chroma); light keeps the Deep
@@ -55,7 +55,7 @@ comments in the wizard files, this wins.
 6. `Back ⌘Z` → `Undo ⌘Z`. Disabled Start wears no keycap. The locked look's
    halo (56 @ 0.55) carries the fusion statically for Reduce Motion. Room
    spill is off in light mode (measured invisible).
-7. **Open:** Alec envisioned the wizard as a MODAL over the app surface, not
+7. **Open:** The owner envisioned the wizard as a MODAL over the app surface, not
    a separate window. The window rehost exists because the popover-anchored
    panel died on click-away; a modal over the popover re-opens that. Decision
    owed — see HANDOFF-wizard-v2.md.

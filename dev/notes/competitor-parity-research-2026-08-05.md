@@ -79,7 +79,7 @@ Ranking = demand strength × fit with the native-macOS / audio-only / multi-room
 
 ### 1. Per-device delay trim (manual sync offset)
 
-The only gap that showed up as *shipped table-stakes* in four of five families (Google Home, TuneBlade, snapcast) *and* as an explicit user request in the other (Airfoil forums, OwnTone #560). It fits the engine unusually well: the engine already owns a shared PTP presentation timeline per output, so a per-device ±ms offset is an adjustment to an anchor that already exists — and it becomes near-mandatory the moment Bluetooth outputs (roadmap 004) land, because BT hardware latency varies wildly and PLAN-UNIVERSAL-SYNC's auto-offset will need a manual escape hatch anyway. Fits Alec's bare-numbers-over-presets preference (a numeric ms field per device, like the existing global buffer setting).
+The only gap that showed up as *shipped table-stakes* in four of five families (Google Home, TuneBlade, snapcast) *and* as an explicit user request in the other (Airfoil forums, OwnTone #560). It fits the engine unusually well: the engine already owns a shared PTP presentation timeline per output, so a per-device ±ms offset is an adjustment to an anchor that already exists — and it becomes near-mandatory the moment Bluetooth outputs (roadmap 004) land, because BT hardware latency varies wildly and PLAN-UNIVERSAL-SYNC's auto-offset will need a manual escape hatch anyway. Fits the owner's bare-numbers-over-presets preference (a numeric ms field per device, like the existing global buffer setting).
 **Upside:** closes a real sync complaint class cheaply; de-risks the BT plan; snapcast #476 shows users expect trims to persist — Audiout's per-device persistence pattern (DeviceIconStore) is ready to copy.
 **Downside:** it's an escape hatch that can mask genuine sync bugs (a user "fixes" drift that the engine should have fixed); one more per-device control in an already dense row UI.
 
@@ -133,7 +133,7 @@ SoundSource 6 ships it; Audiout's gain-staging architecture has the plumbing, an
 
 ### 10. Cast-like output (already roadmap 006 — keep as research, rank last for building)
 
-The one structural feature gap vs Airfoil/AirParrot (cross-protocol AirPlay+Cast groups). Kept on the shortlist because it's already Alec's roadmap 006 and the sweeps confirm it's a real differentiator — but ranked last on feasibility: it's an entire second sender protocol with its own sync domain, and AirParrot's reviews show cross-protocol sync is fragile even for a company that ships it full-time.
+The one structural feature gap vs Airfoil/AirParrot (cross-protocol AirPlay+Cast groups). Kept on the shortlist because it's already the owner's roadmap 006 and the sweeps confirm it's a real differentiator — but ranked last on feasibility: it's an entire second sender protocol with its own sync domain, and AirParrot's reviews show cross-protocol sync is fragile even for a company that ships it full-time.
 **Upside:** would make Audiout the only maintained macOS app spanning both ecosystems; unlocks Chromecast-only households.
 **Downside:** the engine's PTP timeline doesn't extend to Cast — cross-protocol sync is a research problem, not a feature; large ongoing compat surface (two reverse-engineered/foreign protocols to chase instead of one).
 

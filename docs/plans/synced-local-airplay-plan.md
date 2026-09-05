@@ -2,7 +2,7 @@
 
 Status: **APPROVED plan, Stage 4 checkpoint cleared 2026-07-22 — execution NOT YET STARTED.**
 Worktree: `.claude/worktrees/synced-local-airplay`, branch `claude/synced-local-airplay`, based off `main` at `4e3fa30`.
-Say "go" to launch Wave 1. Per standing rule: commits to this branch don't need sign-off; **merging into `main` does** — wait for Alec's explicit go-ahead, and only after he's live-tested it.
+Say "go" to launch Wave 1. Per standing rule: commits to this branch don't need sign-off; **merging into `main` does** — wait for the owner's explicit go-ahead, and only after they've live-tested it.
 
 ## Feasibility verdict
 
@@ -11,24 +11,24 @@ Say "go" to launch Wave 1. Per standing rule: commits to this branch don't need 
 - The presentation delay is a known constant we set, not something to measure: `startBufferMs − 250 ms` (`AirPlayEngine.swift:48-49`; `sender/airplay.c:1229`, `AIRPLAY_AUDIO_LATENCY_MS = 250` at `airplay.c:94`).
 - The clock-domain reconciliation ("the hard part") already ships: `AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift:1049-1093` already converts Core Audio `mHostTime` ↔ `CLOCK_MONOTONIC` with a per-instance, sleep-aware rebase offset.
 
-**One decision materially raises the risk: Alec chose studio-grade, phase-perfect sync** over the simpler ~10ms/periodic-hard-resync design. That pulls in a continuous micro-rate control loop and may exceed what `AVAudioEngine`'s public scheduling APIs cleanly deliver — see Risk R7. A feasibility spike (T-SPIKE-PHASE) is inserted before the expensive DSP task specifically to prove this on real hardware before committing, rather than discovering a public-API ceiling late.
+**One decision materially raises the risk: the owner chose studio-grade, phase-perfect sync** over the simpler ~10ms/periodic-hard-resync design. That pulls in a continuous micro-rate control loop and may exceed what `AVAudioEngine`'s public scheduling APIs cleanly deliver — see Risk R7. A feasibility spike (T-SPIKE-PHASE) is inserted before the expensive DSP task specifically to prove this on real hardware before committing, rather than discovering a public-API ceiling late.
 
 External reality check: there is no public Apple API that hands you the AirPlay presentation clock to delay a local copy against — you build it yourself (this plan). macOS's own Multi-Output/Aggregate devices do NOT keep AirPlay in sync with local speakers (drift-correction/resampling fallback, widely reported to still drift). Apple's genuinely synchronized multiroom lives only inside Music.app, not as a system API. So "be the grandmaster + schedule a deliberately-delayed local sink on `hostTime`" is the right and essentially only public-API path.
 
-There's also a prior engineering brief worth reading before executing, not re-deriving: `dev/notes/p2b-synced-local-brief.md` (§4 latency formula, §5 API choice, §6 drift strategy, §7 device/sleep handling). And a prior decision doc that recommended the UI-only fallback first: `docs/plans/phase-3-findings/proposals/local-mix.md` — Alec explicitly chose to build the real feature instead (see decisions below), so that doc's recommendation is superseded for this plan; mark it resolved once this ships.
+There's also a prior engineering brief worth reading before executing, not re-deriving: `dev/notes/p2b-synced-local-brief.md` (§4 latency formula, §5 API choice, §6 drift strategy, §7 device/sleep handling). And a prior decision doc that recommended the UI-only fallback first: `docs/plans/phase-3-findings/proposals/local-mix.md` — the owner explicitly chose to build the real feature instead (see decisions below), so that doc's recommendation is superseded for this plan; mark it resolved once this ships.
 
 ## End state
 
 The Mac's own speakers become a first-class, PTP-aligned Audiout output. Selecting the Mac alongside ≥1 AirPlay device mutes the Mac's raw system output (already `.mutedWhenTapped`) and renders a deliberately delayed copy of the captured audio through a new app-layer `AVAudioSourceNode`-backed sink, scheduled in `hostTime` and held phase-locked by a continuous micro-rate correction loop (studio-grade target). A user-facing numeric ms offset (Audio settings) biases the target for devices that misreport latency. The `GroupController` local-mix refusal is lifted with a precise, unchanged auto-drop rule; the popover allows the combined selection; correctness is confirmed by a gated by-ear hardware test.
 
-## Decisions locked (were open questions — all confirmed by Alec)
+## Decisions locked (were open questions — all confirmed by the owner)
 
 - **Q1 → BUILD NOW.** Full plan proceeds.
 - **Q2 → APP LAYER**, sibling to `LocalPlaybackEngine`. T-PLACEHOLDER retires/deprecates the engine's `localOutput`/`setLocalOutputEnabled`/`LocalOutputSink` placeholder rather than filling it in.
 - **Q3 → MANUAL OFFSET SLIDER IN V1.** New task T-OFFSET-UI (numeric ms control in Audio settings + persistence).
 - **Q4 → STUDIO-GRADE, PHASE-PERFECT.** T-DRIFT replaced by T-CORRECTION (continuous micro-rate correction) preceded by T-SPIKE-PHASE (feasibility spike). See Risk R7.
 - **Q5 → AUTO-DROP FOR FIRST-TIME AIRPLAY USE ONLY** (not removed entirely). Precise state-transition spec is in T-GROUPCTL below.
-- **Cost-check outcome:** the model-critic flagged T-SPIKE-PHASE as a candidate downgrade (opus→sonnet, high→medium) since it's throwaway test code. Alec chose to **keep it on opus/high** — its real job is correctly judging real-hardware measurements and picking the right technical approach for T-CORRECTION (the hardest task in the plan); a wrong call there is expensive to unwind. **No other downgrades applied — the table below is the final, approved assignment.**
+- **Cost-check outcome:** the model-critic flagged T-SPIKE-PHASE as a candidate downgrade (opus→sonnet, high→medium) since it's throwaway test code. The owner chose to **keep it on opus/high** — its real job is correctly judging real-hardware measurements and picking the right technical approach for T-CORRECTION (the hardest task in the plan); a wrong call there is expensive to unwind. **No other downgrades applied — the table below is the final, approved assignment.**
 
 ## Task list
 
@@ -53,11 +53,11 @@ Kind: new-code · Depends on: T-LATENCY, T-ENGINE-DELAY · **Model: opus 4.8 · 
 Verify: offline harness feeds a known ramp+pts, asserts first-non-silence frame lands at the computed `hostTime` within tolerance.
 Note: this file becomes the shared hot file T-LIFECYCLE, T-CORRECTION, and T-OFFSET-UI all edit later — never edit it concurrently with those.
 
-**T-SPIKE-PHASE — studio-grade feasibility spike (kept opus/high per Alec)**
+**T-SPIKE-PHASE — studio-grade feasibility spike (kept opus/high per the owner)**
 Files: throwaway harness under `dev/` + notes in `dev/notes/`
-What: on real hardware, measure the achievable phase-lock precision of the T-SINK graph — how tight a phase error the render-block `AVAudioTime` feedback + a rate-correction node (`AVAudioUnitTimePitch` / `AVAudioUnitVarispeed`, or a custom fractional resampler) can hold, and whether public `AVAudioEngine` scheduling can hit sub-ms or bottoms out at buffer granularity (which would force raw-HAL + custom resampler). Recommend the concrete correction mechanism for T-CORRECTION and confirm/renegotiate the "phase-perfect" target with Alec (R7).
+What: on real hardware, measure the achievable phase-lock precision of the T-SINK graph — how tight a phase error the render-block `AVAudioTime` feedback + a rate-correction node (`AVAudioUnitTimePitch` / `AVAudioUnitVarispeed`, or a custom fractional resampler) can hold, and whether public `AVAudioEngine` scheduling can hit sub-ms or bottoms out at buffer granularity (which would force raw-HAL + custom resampler). Recommend the concrete correction mechanism for T-CORRECTION and confirm/renegotiate the "phase-perfect" target with the owner (R7).
 Kind: investigation · Depends on: T-SINK · **Model: opus 4.8 · Effort: high**
-Verify: written finding with measured phase-error numbers + a go/no-go mechanism recommendation; **Alec confirms the target before T-CORRECTION starts — this is a checkpoint, not a pass-through.**
+Verify: written finding with measured phase-error numbers + a go/no-go mechanism recommendation; **The owner confirms the target before T-CORRECTION starts — this is a checkpoint, not a pass-through.**
 
 **T-CORRECTION — continuous micro-rate correction loop (studio-grade)**
 Files: `SyncedLocalSink.swift` (+ possibly a new `PhaseController.swift`)
@@ -127,8 +127,8 @@ Verify: `swift test --parallel` green; new tests subclass `IsolatedTestCase`.
 **T-DOCS-LIVE — docs + gated by-ear hardware test**
 Files: `PROGRESS.md`, `AudioutCore/AGENTS.md` / `AirPlayEngine/AGENTS.md`, `dev/notes/`, mark `docs/plans/phase-3-findings/proposals/local-mix.md` resolved (Option A built)
 What: document the shipped design; run the user-present, PTP-port-gated by-ear test with a real AirPlay 2 receiver + Mac speakers — confirm phase alignment against the studio-grade target, no echo (R2), sleep/wake resync (R3), and offset-slider effect (R1).
-Kind: docs + test · Depends on: all above · **Model: haiku 4.5 (docs); the live test is a manual Alec-run step · Effort: low**
-Verify: Alec confirms by ear against the studio-grade target; findings recorded.
+Kind: docs + test · Depends on: all above · **Model: haiku 4.5 (docs); the live test is a manual owner-run step · Effort: low**
+Verify: The owner confirms by ear against the studio-grade target; findings recorded.
 
 ## Parallelization
 
@@ -145,7 +145,7 @@ Hot files — never edit concurrently: `SyncedLocalSink.swift` (T-SINK, T-LIFECY
 
 ## Execution mode: **watched agents** (not a workflow)
 
-Judgment-heavy real-time-audio work with one hard serial chain everything hangs off, a built-in go/no-go decision point (T-SPIKE-PHASE may find the studio-grade target isn't achievable with public APIs and need to come back to Alec), and a real-hardware gate at the end. Not a uniform mechanical fan-out, so workflow overhead isn't earned. Launch Wave 1's four independent tasks together; each wave waits for the previous to land; pause for review at T-SPIKE-PHASE (before committing to T-CORRECTION) and at T-DOCS-LIVE (the live listening test only Alec can run).
+Judgment-heavy real-time-audio work with one hard serial chain everything hangs off, a built-in go/no-go decision point (T-SPIKE-PHASE may find the studio-grade target isn't achievable with public APIs and need to come back to the owner), and a real-hardware gate at the end. Not a uniform mechanical fan-out, so workflow overhead isn't earned. Launch Wave 1's four independent tasks together; each wave waits for the previous to land; pause for review at T-SPIKE-PHASE (before committing to T-CORRECTION) and at T-DOCS-LIVE (the live listening test only the owner can run).
 
 ## Test + docs impact
 
@@ -154,11 +154,11 @@ Judgment-heavy real-time-audio work with one hard serial chain everything hangs 
 - Tap self-exclude needs the Goertzel tone-test pattern (feedback-loop proof).
 - T-OFFSET-UI adds a persisted `AppSettings` key — cover load/default/persist.
 - Docs: `PROGRESS.md`, both `AGENTS.md`, mark `local-mix.md` resolved, remove retired `LocalOutputSink` placeholder references.
-- **Merge to `main` only after Alec live-tests and explicitly gives the go-ahead** — standing rule, applies especially here given the real-time-audio correctness stakes.
+- **Merge to `main` only after the owner live-tests and explicitly gives the go-ahead** — standing rule, applies especially here given the real-time-audio correctness stakes.
 
 ## Open risks
 
-- **R7 (NEW, from the studio-grade choice — highest risk in the plan): "phase-perfect" may exceed public `AVAudioEngine` scheduling.** Render-block `AVAudioTime` feedback is buffer-granular, and `AVAudioUnitTimePitch`/`Varispeed` add their own latency and aren't guaranteed sample-accurate/click-free on rate changes — sub-ms continuous phase-lock may require a custom fractional resampler and possibly a raw HAL IOProc instead of AVAudioEngine. Also: "phase-perfect" between a Mac speaker and a cross-room AirPlay speaker is physically bounded by acoustic propagation (~3ms/m) and room geometry — the target is meaningful at the electronic-output boundary, not necessarily at the listener's ear. **T-SPIKE-PHASE exists specifically to measure this and confirm/renegotiate the target with Alec before T-CORRECTION is committed.** If the spike shows a public-API ceiling, escalate scope (raw HAL + custom resampler) or revisit the studio-grade choice — do not silently ship a looser result.
+- **R7 (NEW, from the studio-grade choice — highest risk in the plan): "phase-perfect" may exceed public `AVAudioEngine` scheduling.** Render-block `AVAudioTime` feedback is buffer-granular, and `AVAudioUnitTimePitch`/`Varispeed` add their own latency and aren't guaranteed sample-accurate/click-free on rate changes — sub-ms continuous phase-lock may require a custom fractional resampler and possibly a raw HAL IOProc instead of AVAudioEngine. Also: "phase-perfect" between a Mac speaker and a cross-room AirPlay speaker is physically bounded by acoustic propagation (~3ms/m) and room geometry — the target is meaningful at the electronic-output boundary, not necessarily at the listener's ear. **T-SPIKE-PHASE exists specifically to measure this and confirm/renegotiate the target with the owner before T-CORRECTION is committed.** If the spike shows a public-API ceiling, escalate scope (raw HAL + custom resampler) or revisit the studio-grade choice — do not silently ship a looser result.
 - **R1:** Bluetooth/exotic devices misreport `kAudioDevicePropertyLatency` — the T-OFFSET-UI manual slider is the day-one escape hatch. Still measure vs observed on real hardware.
 - **R2:** feedback-loop/echo if the tap self-exclude targets the wrong process identity — audible, easy to miss in a quiet test. Explicit tone test required (T-FANOUT/T-TESTS).
 - **R3:** sleep/wake + device-change are silent failure modes (stale offset/drift, not a crash), easy to under-test on an always-awake dev machine. Manual test required (T-DOCS-LIVE).

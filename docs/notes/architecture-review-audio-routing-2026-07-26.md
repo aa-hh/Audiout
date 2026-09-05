@@ -59,7 +59,7 @@ one L (A), one M (D), two S (B-remainder, C). The work is now consolidation of w
 rather than bug-fixing.
 
 **New sequencing caveat:** much of the just-merged machinery (rate-reset chain, rebind recovery, Firefox routing)
-still awaits Alec's live verification. Consolidating A + D would churn exactly that code and invalidate the pending
+still awaits the owner's live verification. Consolidating A + D would churn exactly that code and invalidate the pending
 live checks — run the owed live-test sessions first, or accept re-running them after consolidation.
 
 ---
@@ -312,7 +312,7 @@ merged.
    an agent with no context to execute.
 
 Standing project rules apply to the eventual execution: work in a dedicated worktree (not the live `main` checkout),
-staff-level review before it reaches Alec, and no merge without his explicit go-ahead.
+staff-level review before it reaches the owner, and no merge without their explicit go-ahead.
 
 ---
 

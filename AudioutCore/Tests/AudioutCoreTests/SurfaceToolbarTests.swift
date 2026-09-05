@@ -57,11 +57,11 @@ import AudioutSharedUI
                 "every tab resolved a system SF Symbol")
     }
 
-    /// The Mixer tab must not draw the equalizer's glyph (Alec, 2026-09-04).
-    /// `slider.horizontal.3` is what a device row's equalizer door draws, and
-    /// an equalizer is what sliders mean — so the equalizer keeps them and the
-    /// tab takes another symbol. Every tab glyph is also distinct from every
-    /// other, and each resolves.
+    /// The Mixer tab must not draw the equalizer's glyph (owner's call,
+    /// 2026-09-04). `slider.horizontal.3` is what a device row's equalizer
+    /// door draws, and an equalizer is what sliders mean — so the equalizer
+    /// keeps them and the tab takes another symbol. Every tab glyph is also
+    /// distinct from every other, and each resolves.
     ///
     /// Resolving HERE only proves this machine has the symbol; the 14.2 floor
     /// was checked against CoreGlyphs' `name_availability.plist` by hand
@@ -79,11 +79,11 @@ import AudioutSharedUI
         }
     }
 
-    /// EXACTLY ONE name is on the strip, and it is the current screen's (Alec,
-    /// 2026-09-04: "if I were to click on groups or speakers, then it would
-    /// expand out to show the name"). The two tabs you are not on stay
-    /// icon-only, which is what keeps the strip's width independent of how
-    /// many words three languages need.
+    /// EXACTLY ONE name is on the strip, and it is the current screen's
+    /// (owner's call, 2026-09-04: "if I were to click on groups or speakers,
+    /// then it would expand out to show the name"). The two tabs you are not
+    /// on stay icon-only, which is what keeps the strip's width independent of
+    /// how many words three languages need.
     ///
     /// Measured from what the seats actually let through, not from what they
     /// carry: a tab too narrow to show its name reads as empty here.
@@ -192,12 +192,12 @@ import AudioutSharedUI
 
     // MARK: One shape language across the whole strip
 
-    /// The defect this replaces (Alec, 2026-09-04): a bordered `NSToolbarItem`
-    /// draws its HOVER state as a circle and its SELECTED state as a rounded
-    /// square. Neither shape is settable, so the only fix is to draw the strip
-    /// ourselves — and to draw ALL of it, because converting only the tabs is
-    /// what failed live review on 2026-08-30 (bare glyphs beside bordered
-    /// circles).
+    /// The defect this replaces (owner's call, 2026-09-04): a bordered
+    /// `NSToolbarItem` draws its HOVER state as a circle and its SELECTED
+    /// state as a rounded square. Neither shape is settable, so the only fix
+    /// is to draw the strip ourselves — and to draw ALL of it, because
+    /// converting only the tabs is what failed live review on 2026-08-30 (bare
+    /// glyphs beside bordered circles).
     @Test func everyItemInTheStripWearsTheSameSeat() {
         let (controller, _) = makeAttached()
         #expect(controller.test_everyItemWearsTheSeat,
@@ -550,9 +550,9 @@ import AudioutSharedUI
     /// control, which is the defect the authored seat exists to fix.
     ///
     /// What is NOT one shape any more is the two kinds of item: Pin is a
-    /// circle and a tab is a stadium (Alec, 2026-09-05). Both come out of one
-    /// rule — every seat is cut at half its own height — so this asserts the
-    /// rule and the two tests below assert each shape's real pixels.
+    /// circle and a tab is a stadium (owner's call, 2026-09-05). Both come out
+    /// of one rule — every seat is cut at half its own height — so this asserts
+    /// the rule and the two tests below assert each shape's real pixels.
     ///
     /// The probes pin the tab's radius rather than just its outline. On a
     /// 28 pt-tall seat, `(3, 3)` lies inside a 10 pt corner but outside a
@@ -701,12 +701,12 @@ import AudioutSharedUI
                 y: SurfaceToolbarSeat.capsuleSize.height / 2)
     }
 
-    /// ONE continuous capsule, not three islands (Alec, 2026-09-04). With
-    /// nothing selected or hovered, the same wash must be present at every
-    /// point across the capsule — the middle of each tab, both seams between
-    /// them, and the ends past the outer tabs. Three separate seats would
-    /// leave the seams and the ends empty, which is exactly what the rejected
-    /// version looked like.
+    /// ONE continuous capsule, not three islands (owner's call, 2026-09-04).
+    /// With nothing selected or hovered, the same wash must be present at
+    /// every point across the capsule — the middle of each tab, both seams
+    /// between them, and the ends past the outer tabs. Three separate seats
+    /// would leave the seams and the ends empty, which is exactly what the
+    /// rejected version looked like.
     @Test func theCapsuleIsOneUnbrokenSurfaceBehindAllThreeTabs() {
         let capsule = makeCapsule()
         let midHeight = SurfaceToolbarSeat.capsuleSize.height / 2
@@ -793,9 +793,9 @@ import AudioutSharedUI
         }
     }
 
-    /// The strip is ONE height: the capsule is exactly as tall as Pin (Alec,
-    /// 2026-09-05, "make the component slightly bigger to meet the same height
-    /// as the pin button"). It was 32 pt against a 26 pt Pin before.
+    /// The strip is ONE height: the capsule is exactly as tall as Pin (owner's
+    /// call, 2026-09-05, "make the component slightly bigger to meet the same
+    /// height as the pin button"). It was 32 pt against a 26 pt Pin before.
     ///
     /// A tab's height is DERIVED from that, and the arithmetic below is the
     /// whole reason the highlight can be concentric: a seat cut at half its own
@@ -812,10 +812,11 @@ import AudioutSharedUI
                 "which is what makes a tab's radius concentric with the pill — \(SurfaceToolbarSeat.seatCornerRadius(forHeight: SurfaceToolbarSeat.size.height)) against \(SurfaceToolbarSeat.capsuleCornerRadius) - \(SurfaceToolbarSeat.capsulePadding)")
     }
 
-    /// "The highlight does not perfectly conform with the border" (Alec,
-    /// 2026-09-05). Measured, not eyeballed: concentric rounded rectangles put
-    /// the inner boundary the SAME distance from the outer one at every angle,
-    /// so this walks the capsule's left end cap and requires exactly that.
+    /// "The highlight does not perfectly conform with the border" (owner's
+    /// call, 2026-09-05). Measured, not eyeballed: concentric rounded
+    /// rectangles put the inner boundary the SAME distance from the outer one
+    /// at every angle, so this walks the capsule's left end cap and requires
+    /// exactly that.
     ///
     /// The leftmost tab is the one selected, so its highlight sits against the
     /// pill's rounded end — the place the uneven gap showed. Both arcs are

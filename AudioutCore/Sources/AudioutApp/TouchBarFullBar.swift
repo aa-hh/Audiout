@@ -266,7 +266,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
 
     /// - Parameter repeatsWhenHeld: `true` for the stepping controls (volume,
     ///   brightness, backlight) — a real function key repeats while held, and
-    ///   without this the user has to tap once per step, which is what Alec hit.
+    ///   without this the user has to tap once per step, which is what the owner hit.
     ///   Left `false` for toggles: a repeating mute would flap on and off.
     private func button(_ identifier: NSTouchBarItem.Identifier,
                         symbol: String, label: String,

@@ -450,11 +450,11 @@ public final class AppRowView: NSView {
 
         /// `indented` sets the entries one step in from their section header, so
         /// the header hangs to their left and reads as a heading rather than
-        /// another choice (Alec, 2026-09-05). This is a deliberate departure from
-        /// the HIG, which prefers a submenu to indentation; a submenu would put
-        /// every speaker an extra hop away, and reaching a speaker fast is the
-        /// point of this menu. Standalone entries sit under no header and so
-        /// stay flush.
+        /// another choice (owner's call, 2026-09-05). This is a deliberate
+        /// departure from the HIG, which prefers a submenu to indentation; a
+        /// submenu would put every speaker an extra hop away, and reaching a
+        /// speaker fast is the point of this menu. Standalone entries sit under
+        /// no header and so stay flush.
         func addEntries(_ entries: [Destination], indented: Bool = true) {
             for entry in entries {
                 let item = menuItem(

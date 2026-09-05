@@ -218,7 +218,7 @@ import AudioutCore
     }
 
     @Test func gutterHoverShrinksAMemberIntoItsNonMemberSize() {
-        // Alec's correction: the hover previews the POST-CLICK state, so a
+        // The owner's correction: the hover previews the POST-CLICK state, so a
         // member — whose click REMOVES it from the mix — travels DOWN. The
         // direction of travel is what says which way the click goes.
         let row = makeBusRow()

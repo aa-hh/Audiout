@@ -183,7 +183,7 @@ screen, everything else white with dividers. Instruments on `raised` clear
   `well`. One line; kills the holes; keeps four equal boxes, so the scope
   still competes with the facts. A fair first step.
 
-## Decisions for Alec
+## Decisions for the owner
 
 1. Hero loses its box on all three pages (A) — or keeps it (B)?
 2. Groups and About as bare divider rows (A) vs kept in boxes (B)?
@@ -204,5 +204,5 @@ screen, everything else white with dividers. Instruments on `raised` clear
 - `DeviceDetailViewTests` (38) assert exact strings, `test_sectionCount == 4`
   and hint pins — all churn.
 - Group-row click = `SidebarViewController.select(_:)`; needs a `test_` mirror.
-- About always below the fold at default height — by design, but Alec may
+- About always below the fold at default height — by design, but the owner may
   want Status visible; the fallback is a one-line status under the name.

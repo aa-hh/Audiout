@@ -1,8 +1,8 @@
-# Plan — Memory-leak fixes: live test checklist (Alec-only)
+# Plan — Memory-leak fixes: live test checklist (owner-only)
 
 Status: **NOT YET RUN.** Branch `claude/memory-leak-investigation-396ac3` (main merged in,
 2-parent merge `893938d`). All code committed + hermetic suites green (AudioutCore full
-parallel + AirPlayEngine 156/156). These are the LIVE gates that only Alec can run — Claude
+parallel + AirPlayEngine 156/156). These are the LIVE gates that only the owner can run — Claude
 never plays or captures audio. Nothing merges to `main` until these pass.
 
 ## Why these exist
@@ -22,7 +22,7 @@ C-A/C-B, T16/T17) and `PLAN-FIREFOX-ROUTING-LEAK.md` for the routing fix.
 3. **Build + launch this worktree's app** (the `CPATH=…` workaround is NO LONGER needed — main's
    `5c55386` fixed the include paths):
    ```
-   cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/memory-leak-investigation-396ac3" && scripts/make-app.sh ./build && open ./build/Audiout.app
+   cd "$HOME/Projects/AirPlay Controller/.claude/worktrees/memory-leak-investigation-396ac3" && scripts/make-app.sh ./build && open ./build/Audiout.app
    ```
    Launch via `open` (not from a shell/Xcode) so it gets real TCC permissions. It's a **menu-bar
    app** — no Dock icon, no window after setup; find it top-right near the clock.
@@ -65,7 +65,7 @@ grep '"cat":"captureWS"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -20
 ## Test 3 — Wave 3 (Firefox/Chrome per-app routing leak)
 **Run the silent diagnostic FIRST, while the browser is actively playing audio:**
 ```
-cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/memory-leak-investigation-396ac3/AudioutCore" && swift run process-audio-dump
+cd "$HOME/Projects/AirPlay Controller/.claude/worktrees/memory-leak-investigation-396ac3/AudioutCore" && swift run process-audio-dump
 ```
 It dumps live audio process objects (pid/parent) — confirms the browser's audio child is a
 ppid-descendant of its main process on this machine (the assumption the fix rests on).
@@ -104,6 +104,6 @@ confirm: no new dropouts on a single-AirPlay connect, and no pitch shift (main's
 `reconciledFormat` + our rate/device listeners now coexist — Test 3/4 exercise both triggers).
 
 ## After all pass
-Report results; only then discuss merging this branch to `main` (Alec's explicit go-ahead
+Report results; only then discuss merging this branch to `main` (the owner's explicit go-ahead
 required — passing tests ≠ ready). Remaining non-live work: Wave 4 (T18 combined verify + docs,
 deferred B1 `airplay_events.c` teardown nits).

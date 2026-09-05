@@ -19,9 +19,9 @@ hardware found three bugs, and two fix tracks were built in response.
 
 ## The live test that found the bugs
 
-Alec built a signed test app (`APP_NAME="Audiout Cast v1"
+The owner built a signed test app (`APP_NAME="Audiout Cast v1"
 BUNDLE_ID="com.audiout.Audiout.castv1"`) from `76bbc2e4` and tested
-against his Google TV Streamer (192.168.4.54, wired Ethernet, same subnet as
+against their Google TV Streamer (192.168.4.54, wired Ethernet, same subnet as
 the Mac's Wi-Fi). Results:
 
 1. AirPlay unaffected — as required.
@@ -42,7 +42,7 @@ A background research agent read the app's own JSON telemetry log
 (`~/Library/Logs/Audiout/telemetry.jsonl`, filtered `"cat":"cast"`) with
 real timestamps, correlated it against the code, and produced root causes +
 exact fix specs. **Full diagnosis text**:
-`/private/tmp/claude-501/-Users-alechenderson-Projects-AirPlay-Controller--claude-worktrees-cast-devices-support-scope-d72349/46a6fb14-da61-42a7-b2ef-04a790fb967b/scratchpad/castv1-diagnosis.md`
+`/private/tmp/claude-501/-Users-<user>-Projects-AirPlay-Controller--claude-worktrees-cast-devices-support-scope-d72349/46a6fb14-da61-42a7-b2ef-04a790fb967b/scratchpad/castv1-diagnosis.md`
 (146 lines — **this scratchpad may not survive session end**; the summary
 below is complete enough to work from, but re-read the original if it is
 still there). The Cast-only telemetry extract it worked from is at
@@ -97,7 +97,7 @@ leaves `.connecting` for `.failed`, and *then* the watchdog is free to arm.
 
 Distinct failure signature: `connecting → media IDLE, IDLE, IDLE → failed`,
 **no BUFFERING ever**, always immediately after a prior deselect/teardown
-(<1 s later). The receiver visibly launched (Alec saw "trying to stream") so
+(<1 s later). The receiver visibly launched (the owner saw "trying to stream") so
 LAUNCH succeeded, but no fetch ever happened.
 
 Two live hypotheses the existing telemetry can't distinguish:
@@ -150,10 +150,10 @@ Two Opus executors were launched in **separate git worktrees**, both forked
 from `76bbc2e4` (the committed Phase (i) HEAD), so their diffs merge
 independently:
 
-- **Track T1** — worktree `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/cast-p1-fix-t1`, branch `claude/cast-p1-fix-t1` (pushed to origin). Files: `AudioutCore/Sources/AudioutCore/NativeBackend.swift`,
+- **Track T1** — worktree `~/Projects/AirPlay Controller/.claude/worktrees/cast-p1-fix-t1`, branch `claude/cast-p1-fix-t1` (pushed to origin). Files: `AudioutCore/Sources/AudioutCore/NativeBackend.swift`,
   `AudioutCore/Tests/AudioutCoreTests/NativeBackendCastTests.swift`.
   Covers Bug 1 (primary fix) and Bug 3 (availability debounce + `cast_row_state` telemetry).
-- **Track T2** — worktree `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/cast-p1-fix-t2`, branch `claude/cast-p1-fix-t2` (pushed to origin). Files: `AudioutCore/Sources/AudioutCore/CastOutputManager.swift`,
+- **Track T2** — worktree `~/Projects/AirPlay Controller/.claude/worktrees/cast-p1-fix-t2`, branch `claude/cast-p1-fix-t2` (pushed to origin). Files: `AudioutCore/Sources/AudioutCore/CastOutputManager.swift`,
   `AudioutCore/Sources/CastSender/CastClient.swift`,
   `AudioutCore/Sources/CastFakeReceiver/FakeCastReceiver.swift`,
   `AudioutCore/Tests/AudioutCoreTests/CastOutputManagerTests.swift`.
@@ -286,14 +286,14 @@ re-run properly.
    concurrency/lifecycle of the new gain ramp and teardown-completion chain,
    spec compliance, honesty of whatever report comes out of step 3.
 5. **Commit** on `claude/cast-devices-support-scope-d72349` (still not
-   merged to main — that's Alec's call, later). Push.
+   merged to main — that's the owner's call, later). Push.
 6. **Build a fresh signed test app** with a NEW bundle id/name (never reuse
    `com.audiout.Audiout.castv1` — TCC grants pin to bundle id + code
    signature, so re-signing the same id with changed code produces
    confusing stale-permission failures). Example:
    `APP_NAME="Audiout Cast v2" BUNDLE_ID="com.audiout.Audiout.castv2"
    bash scripts/make-app.sh`.
-7. **Guide Alec through the live-test checklist again**, this time
+7. **Guide the owner through the live-test checklist again**, this time
    specifically re-testing the reselect flow (select → deselect → reselect,
    repeat a few times) since that's exactly what Bug 1 and Bug 2 targeted,
    plus the volume slider on the Streamer, plus the two deferred steps from
@@ -310,7 +310,7 @@ re-run properly.
    (stale server address) apart this time — re-read the diagnosis's
    "SECONDARY" section for exactly what each hypothesis would look like in
    the new events.
-9. Only after a clean live test: decide (with Alec) whether to proceed to
+9. Only after a clean live test: decide (with the owner) whether to proceed to
    Phase (ii) (the synced N-way timeline + AirPlay pre-delay line design in
    `006-cast-sync-architecture-2026-08-22.md`) or pause here.
 

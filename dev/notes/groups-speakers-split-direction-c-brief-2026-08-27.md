@@ -1,6 +1,6 @@
 # Groups screen redesign — Direction C brief (2026-08-27)
 
-Alec's decision from a four-direction discovery (mock-ups in the "The
+The owner's decision from a four-direction discovery (mock-ups in the "The
 Groups–Speakers Split" artifact; the chosen direction's mock-up is saved
 beside this file as `groups-direction-c-mockup.html`). Rejected: A (two
 peer screens in the header capsule), B (sidebar mode toggle), D (outline

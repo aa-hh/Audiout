@@ -66,9 +66,9 @@ normal paths; all stores; MockBackend; no Combine and no CGEventTap anywhere in 
 - **Merge local `main` (≥ `48c3a82`)** into this worktree before any task runs `swift test`
   (test-only loopback-bind fix; kills the firewall prompt storm). Merge-approval hook applies.
 - All work in THIS worktree; waves land as serialized merges within the branch; **nothing
-  merges to `main` without Alec's explicit go-ahead**.
-- Live audio is **Alec-only** (standing rule): agents verify with silent `swift build` +
-  `swift test --parallel`; every wave that touches the audio path ends in an Alec live gate.
+  merges to `main` without the owner's explicit go-ahead**.
+- Live audio is **owner-only** (standing rule): agents verify with silent `swift build` +
+  `swift test --parallel`; every wave that touches the audio path ends in an owner live gate.
 - Native live testing is single-instance (PTP ports) — one live test at a time, coordinated.
 
 ## Execution mode — orchestrated watched agents
@@ -84,7 +84,7 @@ pass under `swift test --filter <Suite>`, the COMBINED tree builds + passes
 
 ## Wave 0 — measurement + residuals (all three lanes parallel, no code conflicts)
 
-### W0.1 · Measurement kit — **Alec** (~20 min at the Mac) · unblocked NOW
+### W0.1 · Measurement kit — **the owner** (~20 min at the Mac) · unblocked NOW
 > Claude never plays/captures audio. Passive observation only; you do the redirects.
 
 **Terminal window 1 — leave running the whole session:**
@@ -134,7 +134,7 @@ per-task at launch; the table is the authoritative scope/assignment.
 | T6 | **DACP hardening**: idle receive deadline (~30 s, cancel+prune) + confine `listener`/`connections` mutations to `queue` (`DACPServer.swift:68-155`). | **sonnet · low** | NWConnection lifecycle needs mild care; scope is one small file. |
 | T7 | **Meter displaylink retain fix**: `passUnretained` → `passRetained` with stop-before-release ordering (or `NSView.displayLink(target:selector:)`), `LevelMeterView.swift:198-208` vs `:72-74`. | **haiku · medium** | Exact pattern dictated in-spec; crash-class hardening, tiny surface. |
 
-**Gate W1:** combined `swift test --parallel` + lead diff review + **Alec live smoke**
+**Gate W1:** combined `swift test --parallel` + lead diff review + **owner live smoke**
 (redirect Music on/off ×3, quit a "play on this Mac" app, watch T5 counters return to zero).
 
 ## Wave 2 — storm damping (coordinator cluster SEQUENTIAL; 4 side lanes parallel)
@@ -145,7 +145,7 @@ Cluster (same files, strictly ordered, one agent may carry through all three via
 |----|------|----------------|-----|
 | T8 | **Rebuild guard**: store built-against `(deviceID, nominalRate)`; on any listener fire, read current pair and NO-OP if unchanged (PAC + NCC) — the structural C-A loop breaker. Also replay `pendingDeviceChange` from initial `beginStart` commit (the A1 gap). + tests w/ scripted tap fakes. | **opus · high** | Semantics must preserve every legitimate rebuild (documented silent-tap pathology); wrong guard = silent audio regression. RT-adjacent judgment survives any spec. |
 | T9 | **Process-list debounce** (1–2 s trailing, both coordinators) + drop non-retryable `.failed` slots from re-drive scans. PAC. | **sonnet · medium** | Pattern (debounced DispatchSourceTimer) prescribed; semantics preserved by backoff floor. After T8 (file ownership). |
-| T10 | **Shared device-event monitor**: ONE default-device + ONE rate listener on a dedicated serial queue, trailing-edge debounce 300–500 ms, sequential fan-out to NCC + both PAC coordinators, cross-coordinator generation coalescing; per-tap listeners removed; rebuilds leave HAL notification threads. New file + PAC/NCC/NativeBackend wiring. | **opus · xhigh**, mandatory lead line-review + Alec live gate | The riskiest change in the plan: replaces the listener topology under live audio. Highest residual design judgment; prior live regressions in adjacent code. |
+| T10 | **Shared device-event monitor**: ONE default-device + ONE rate listener on a dedicated serial queue, trailing-edge debounce 300–500 ms, sequential fan-out to NCC + both PAC coordinators, cross-coordinator generation coalescing; per-tap listeners removed; rebuilds leave HAL notification threads. New file + PAC/NCC/NativeBackend wiring. | **opus · xhigh**, mandatory lead line-review + owner live gate | The riskiest change in the plan: replaces the listener topology under live audio. Highest residual design judgment; prior live regressions in adjacent code. |
 
 Parallel side lanes (disjoint from cluster and each other):
 
@@ -156,7 +156,7 @@ Parallel side lanes (disjoint from cluster and each other):
 | T13 | **UI batch**: `presentSetup` nil-guard (mirror :395), Groups-window B8 gate (`skip refreshAll when !isVisible`, refresh on show — mirror PopoverController :436-441), `QuittingIndicatorPanel.isReleasedWhenClosed = false`. | **haiku · medium** | Three point-fixes with the exact sibling pattern cited for each. |
 | T14 | **Engine write-queue cap**: bounded depth at `enqueue` (drop-oldest + diag counter) so an engine-thread stall can't grow memory at audio rate (`EngineThread.swift:138-181`, `AirPlayEngine.swift:1064-1072`). | **opus · medium** | Drop policy on the audio path = judgment; cap mechanics are simple. |
 
-**Gate W2:** combined suite + lead review + **Alec live gate** (device flip during playback
+**Gate W2:** combined suite + lead review + **owner live gate** (device flip during playback
 with 2 routed apps: no audio gap > 1 s, `PAC.handleDeviceChange FIRED` log count bounded,
 coreaudiod CPU settles < 10 s).
 
@@ -168,14 +168,14 @@ coreaudiod CPU settles < 10 s).
 | T16 | Whole-system tap `.failed` → wire `onStateChange` retry (mirror per-app backoff pattern; E10). NB + NCC. | **sonnet · medium** |
 | T17 | Engine slot-cleanup ordering: make timed-out-op cleanup tracked/ordered so it can't clobber the next op's slot (A9-F4). | **opus · medium** |
 
-**Gate W3:** Firefox plan's own live gates (Alec, real Firefox + BT hardware) + suite.
+**Gate W3:** Firefox plan's own live gates (the owner, real Firefox + BT hardware) + suite.
 
 ## Wave 4 — verification + closure (serial)
 
 | ID | Task | Owner |
 |----|------|-------|
 | T18 | Combined verification: full `swift test --parallel`, cross-cutting regression tests for L1/L2 shapes, lead end-to-end diff review of ALL waves. | lead + sonnet·medium for test gaps |
-| T19 | **Alec re-runs the measurement kit** on the fixed build — Phase A flat, Phase B flat (post-T15), Phase C no-drop; plus by-ear redirect QA. | Alec |
+| T19 | **The owner re-runs the measurement kit** on the fixed build — Phase A flat, Phase B flat (post-T15), Phase C no-drop; plus by-ear redirect QA. | The owner |
 | T20 | Docs: AGENTS.md deltas, STABILITY ledger updates, memory notes, backlog filing. | haiku · low |
 
 ## Deferred backlog (explicitly NOT scheduled — LOW/dormant, filed in T20)
@@ -207,7 +207,7 @@ per-callback `Data` allocation churn (perf, RT hygiene); popover metering-tap ch
   else) — not done here since it's out of scope for a memory-leak audit.
 
 ## Parallelization summary
-- **W0:** 3 lanes parallel (Alec ∥ merge ∥ residual audit).
+- **W0:** 3 lanes parallel (the owner ∥ merge ∥ residual audit).
 - **W1:** 7 lanes fully parallel — disjoint file ownership verified (NB+AppDelegate / LPE /
   Probe / C files / NCC+PAC logging / DACP / LMV).
 - **W2:** T8→T9→T10 strictly sequential (shared files) ∥ T11 ∥ T12 ∥ T13 ∥ T14.
@@ -222,7 +222,7 @@ ambiguity, then challenged by a model-critic pass — **verdict 2026-07-23: 0 of
 no over-provisioning found** (spec quality + lead's line-review gate carry the cheap tiers).
 
 ## Guardrails (standing, non-negotiable)
-- Live audio testing is **Alec-only**; agents verify silently.
-- **No merge to `main` without Alec's explicit go-ahead**; passing tests ≠ ready.
+- Live audio testing is **owner-only**; agents verify silently.
+- **No merge to `main` without the owner's explicit go-ahead**; passing tests ≠ ready.
 - Main checkout is a live workspace — never touched.
 - New tests subclass `IsolatedTestCase`; pre-commit Guard 4 runs the full parallel suite.

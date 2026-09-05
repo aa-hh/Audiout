@@ -141,12 +141,12 @@ final class UsageStatsConsentCard: NSView {
     /// full. Keep it in step with what is actually sent — audited against a
     /// real ingested event on 2026-08-29, not against intent.
     ///
-    /// It leads with the thing that makes this not tracking (Alec's call): there
-    /// is no identity to attach anything to. Then it is specific, because the
-    /// autocaptured payload is wider than an earlier draft claimed — that draft
-    /// promised "never your network" and "never your licence key" while the SDK
-    /// was sending both, which is the failure mode this string exists to
-    /// prevent. "City" rather than "region" is deliberate too: PostHog's
+    /// It leads with the thing that makes this not tracking (the owner's call):
+    /// there is no identity to attach anything to. Then it is specific, because
+    /// the autocaptured payload is wider than an earlier draft claimed — that
+    /// draft promised "never your network" and "never your licence key" while
+    /// the SDK was sending both, which is the failure mode this string exists
+    /// to prevent. "City" rather than "region" is deliberate too: PostHog's
     /// location enrichment resolves to postal-code precision.
     static let bodyText = "No account, no name. Just a random ID for this copy of "
         + "Audiout. It counts which features get used, and notes your Mac, macOS version, "

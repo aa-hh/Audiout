@@ -10,7 +10,7 @@ discovery record; this file is state + plan.
 
 Discovery only — no product code written. Three research tracks (GPL
 legality, Paddle fulfillment, backend tiers) synthesized into the brief.
-Alec then decided:
+The owner then decided:
 
 1. **Runtime behavior = soft check.** License field in Settings; a build
    without a valid key keeps every feature working but shows a "please buy"
@@ -20,20 +20,20 @@ Alec then decided:
 2. **Backend = Tier B**: self-owned serverless — Cloudflare Worker + D1
    (SQLite) + R2 (DMG storage). ~$0–5/mo.
 3. **Sharing posture = monitor + manual revoke.** No automatic caps.
-4. **Name/trademark**: Alec is not sold on "Audiout"; roadmap entry 063
+4. **Name/trademark**: the owner is not sold on "Audiout"; roadmap entry 063
    tracks name decision + trademark registration. Not this workstream's job.
 5. **Download links**: the emailed/thank-you-page link is the durable keyed
    endpoint `/download?key=…` (lives as long as the key is active, dies on
-   revoke); it 302s to a ~15-min presigned R2 URL at click time. Alec
+   revoke); it 302s to a ~15-min presigned R2 URL at click time. The owner
    explicitly rejected short-lived emailed links; this construction is the
    agreed answer — don't email presigned URLs.
 
 ## State after the build session (2026-08-23, later)
 
-- Key scheme APPROVED by Alec as recommended; backend home = **separate
+- Key scheme APPROVED by the owner as recommended; backend home = **separate
   repo**: `~/Projects/Audiout License Server` →
   github.com/aa-hh/audiout-license-server (private). Its README is the
-  endpoint contract + Alec's setup checklist. Built and tested (22 tests in
+  endpoint contract + the owner's setup checklist. Built and tested (22 tests in
   workerd). One swap from the plan below: `/download` streams the zip from R2
   through the Worker instead of 302-ing to a presigned URL — same property
   (no file URL outlives the key), no S3 signing.
@@ -43,7 +43,7 @@ Alec then decided:
   check (validate, status line, buy button, popover note, Sparkle bearer
   header, make-app.sh plist keys) is specified in
   `work-order-2026-08-23-license-soft-check.md`.
-- Still Alec's: Cloudflare/Paddle-sandbox/Resend setup per the server README,
+- Still the owner's: Cloudflare/Paddle-sandbox/Resend setup per the server README,
   then a sandbox end-to-end (tunnel → webhook → /thanks), then merge go-ahead.
 
 ## Open item 1 — key generation scheme (APPROVED 2026-08-23)
@@ -53,13 +53,13 @@ Recommendation: **random opaque key** `AUDR-XXXXX-XXXXX-XXXXX-XXXXX`
 (100 bits Crockford base32, server-side D1 lookup only, no crypto in the
 key) — signed keys' offline verification is worthless under the GPL/soft-
 check design, and the hard gates are server lookups regardless. `max_major`
-lives in the D1 row for "updates until next major" semantics. Get Alec's
+lives in the D1 row for "updates until next major" semantics. Get the owner's
 sign-off on that spec before building; the note has the full table
 (canonicalization, D1 schema, delivery, URL-scheme registration).
 
 ## Open item 2 — the build (after scheme is chosen)
 
-Backend (likely its own repo or a new top-level dir — ask Alec; the website
+Backend (likely its own repo or a new top-level dir — ask the owner; the website
 lives separately at `~/Projects/Audiout Website` and the buy button is
 already there from the 054 work):
 
@@ -86,16 +86,16 @@ already there from the 054 work):
   signature verify via CryptoKit, and activate the inert check-in client —
   NOTE: `LicenseCheckIn.swift` + License Settings rows were built in the 054
   work which is UNCOMMITTED in worktree
-  `.claude/worktrees/foreman-roadmap-list-87195b` (awaiting Alec's review,
+  `.claude/worktrees/foreman-roadmap-list-87195b` (awaiting the owner's review,
   10+ days old — verify it still exists before depending on it).
-- Credential handoffs Alec must do (pattern: "Alec's actions" checklist like
+- Credential handoffs the owner must do (pattern: "Owner's actions" checklist like
   docs/RELEASE.md from 054): Cloudflare account/API token, Paddle sandbox
   webhook secret + API key, email-sending provider choice, Ed25519 signing
   keypair generation.
 
 ## House rules that bind this work
 
-- Nothing merges without Alec's explicit go-ahead. `main` is merge-only;
+- Nothing merges without the owner's explicit go-ahead. `main` is merge-only;
   work stays on this branch (or new worktree branches, each pushed to origin
   immediately).
 - Never attach an EULA/no-redistribution terms to the binary; never revoke a

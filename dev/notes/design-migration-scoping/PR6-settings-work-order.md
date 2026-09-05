@@ -398,7 +398,7 @@ This PR FINALISES for its surface: the CTA treatment on the licence sheet AND on
 prominent button (F4 — gold fill, `inkOnFill` ink, no measured pick anywhere), About's display face
 and its type credit (F6), the buffer-override note's ink, and the selected theme tile's ring.
 
-| what | until | what Alec sees |
+| what | until | what the owner sees |
 |---|---|---|
 | The About name renders in system bold under `swift run`/`swift test` | a `make-app.sh`-assembled `.app` | Clash Display appears only in a real build; the credit line is there either way (D7) |
 | The gate and ribbon CTAs still fill from the `goldCTA` alias | PR 7 re-points them | Identical pixels (the alias resolves to `gold`), but the ink is already `inkOnFill` |
@@ -454,7 +454,7 @@ gh pr create --base main --head claude/design-pr6-settings --title "Design migra
 
 Do NOT merge the PR.
 
-## Owed checks (eye-check list for Alec; do not block the PR)
+## Owed checks (eye-check list for the owner; do not block the PR)
 
 1. Build an `.app` (`APP_NAME="Audiout Dev" BUNDLE_ID="com.audiout.Audiout.dev" bash scripts/make-app.sh`,
    holding the livetest slot) and open About: the product name must render in Clash Display, not

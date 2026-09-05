@@ -54,7 +54,7 @@ compile — assembly, dylib bundling and codesigning always happen locally, so t
 `.app` is identical either way. `AUDIOUT_BUILD_LOCAL=1` forces local.
 
 **Know what is being tested, then pick the bundle id — and say which you
-picked and why when you hand the build over** (Alec, 2026-08-28):
+picked and why when you hand the build over** (owner's call, 2026-08-28):
 
 - **Testing the permissions path itself** — onboarding, TCC grants (system
   audio capture, Bluetooth, Local Network), the PTP helper's Login Items
@@ -103,7 +103,7 @@ the same daemon identity and the loser's `register()` silently no-ops. Bare
 ### Hold the live-test slot before touching the dev id
 
 One agent at a time may build or launch `com.audiout.Audiout.dev`. Rebuilding
-it under Alec overwrites the `.app` he is testing and starts a second copy
+it under the owner overwrites the `.app` they are testing and starts a second copy
 fighting the running one for the same daemon identity — both fail silently.
 `scripts/livetest.sh` is the machine-wide slot; `make-app.sh` refuses to build
 the dev id unless you hold it.
@@ -117,10 +117,10 @@ bash scripts/livetest.sh done                            # free it
 - **Busy? Report and keep working.** `acquire` never blocks — exit 2 names the
   holder, how long they have held it, and your place in line. Say that in your
   next message, go do something else, retry later. Never sit in a wait loop.
-- **Release the moment Alec gives a verdict** on the build you handed over.
+- **Release the moment the owner gives a verdict** on the build you handed over.
   A slot nobody frees is 45 minutes of the machine's testing capacity gone.
 - **Expiry is 45 minutes**, after which the next agent takes it over with a
-  loud warning. That warning is not permission — if Alec may still be at the
+  loud warning. That warning is not permission — if the owner may still be at the
   speakers, ask before you build.
 - Only the shared dev id is gated. A **fresh handover id** is a different
   bundle and a different daemon identity, so it needs no slot and cannot

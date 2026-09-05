@@ -1,7 +1,7 @@
 # Audio Scheduling Measurement Protocol
 
 **Status:** Template for human-in-the-loop measurement. This is NOT an automated test.
-**Owner:** Alec (manual execution)
+**Owner:** the project owner (manual execution)
 **Related plan:** `docs/plans/PLAN-AUDIO-THREAD-SCHEDULING.md`, tasks T10 and T17
 
 ---
@@ -89,13 +89,13 @@ Fill in after all four phases complete. Each row represents one measurement pass
 | Idle (after fixes) | None (idle, load avg ~5.5) | **clear** | 50 | 270 | 580 | 1280 | 11.61 | 11.83 | 720 | N | N | N |
 | Loaded (after fixes) | 16 spinners (load avg peaked **35.7**, roughly 2x the load-16 originally observed stuttering under) | **clear** | 30 | 270 | 640 | 1020 | 11.61 | 11.67 | 600 | N | N | N |
 
-**2026-07-26, Alec live, quiet machine:** ran on a fresh `APP_NAME=AudioutSchedProbe` build of this worktree
+**2026-07-26, owner live, quiet machine:** ran on a fresh `APP_NAME=AudioutSchedProbe` build of this worktree
 (commit b849320, Stage 1 complete), connected to a real receiver, `scripts/load-gen.sh 16 30`. Numbers above are
 from the last 5-second probe sample of each 30-second window (`log stream --predicate 'subsystem ==
 "com.airplayengine" AND category == "write-scheduling"'`). No "before fixes" comparison was run — Stage 1 was
 already committed to this worktree before this session, so getting a true before/after would need a separate
 build off the pre-Stage-1 commit (84270da). Treat the "before" rows as the qualitative baseline instead:
-Alec's original 2026-07-25 observation (load avg 16, 2.1% CPU, stuttering, zero telemetry errors) is what
+The owner's original 2026-07-25 observation (load avg 16, 2.1% CPU, stuttering, zero telemetry errors) is what
 prompted this plan.
 
 ### Interpreting the Results
@@ -142,7 +142,7 @@ run under that condition.
 
 - This is a **human-in-the-loop measurement**, not an automated test. The steps must be executed manually, and audio quality assessment is subjective but valid (stuttering is unmistakable).
 - Metrics are provided by task T1's scheduling probe. The probe reports `p50/p95/p99/max` for wake latency, inter-arrival gap, and in-cycle work time.
-- Measurement must be performed on the same quiet machine each time (typically Alec's live system) to avoid noise from other workloads.
+- Measurement must be performed on the same quiet machine each time (typically the owner's live system) to avoid noise from other workloads.
 - If the system stutters even at idle after fixes, investigate whether other unrelated issues have been introduced (e.g., regression in capture or encoding).
 - The load generator (`scripts/load-gen.sh`) is reproducible across runs. If you need to vary load, adjust the N parameter.
 

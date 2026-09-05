@@ -325,11 +325,12 @@ public struct AppSettings {
 
     /// Whether the iPhone companion app may connect to and control this Mac
     /// (Settings › General "Allow control from iPhone on this network").
-    /// Defaults to **`true`** when unset (T22 flip, Alec's call 2026-08-06):
-    /// the phone app ships alongside the Mac app now, and the per-phone
-    /// approval gate (T24) means an enabled listener still admits nobody the
-    /// user hasn't explicitly approved. Unchecking the Settings › General
-    /// checkbox stores `false` and wins. See ``resolvedAllowRemoteControl(explicit:environment:)``
+    /// Defaults to **`true`** when unset (T22 flip, the owner's call
+    /// 2026-08-06): the phone app ships alongside the Mac app now, and the
+    /// per-phone approval gate (T24) means an enabled listener still admits
+    /// nobody the user hasn't explicitly approved. Unchecking the Settings ›
+    /// General checkbox stores `false` and wins. See
+    /// ``resolvedAllowRemoteControl(explicit:environment:)``
     /// for the env-var override AppDelegate actually reads at launch.
     public var allowRemoteControl: Bool {
         get {

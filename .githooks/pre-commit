@@ -146,7 +146,7 @@ fi
 # coverage guarantee — nothing broken gets committed, and since everything that
 # reaches main was committed here first, main stays green.
 #
-# How much runs depends on the commit (Alec, 2026-09-04):
+# How much runs depends on the commit (owner's call, 2026-09-04):
 #   - a branch commit runs only the suites that plausibly cover its staged
 #     Swift, derived by guard-test-scope.sh (which fails closed to the full
 #     suite whenever it cannot map a file)

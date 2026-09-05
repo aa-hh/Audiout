@@ -90,7 +90,7 @@ From `dev/notes/stability-audit-2026-07-18.md`:
   pending" — and it never landed. See Critical #1.** Several Section-3 items
   (B6a/B6b/B9/C3) still carry "live proof pending" caveats → G1/G2.
 
-## Confirm status with Alec (external tracker — not investigated)
+## Confirm status with the owner (external tracker — not investigated)
 
 Per the owner's decision, these ledger IDs are tracked in an external scheduling
 system we are not chasing. Listed verbatim for status confirmation. NOTE: the

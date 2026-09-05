@@ -4,7 +4,7 @@ Companion to `license-key-backend-brief-2026-08-23.md`. Question: since
 Paddle Billing has no native key generation, what scheme generates ours?
 Options compared: random opaque key, Ed25519-signed-payload key, hybrid
 (short key + signed receipt on activation). **Recommendation: random opaque
-key.** Alec sign-off pending.
+key.** Owner sign-off pending.
 
 ## Why not signed keys
 

@@ -9,7 +9,7 @@ All file:line anchors are against `main` @ 2042de1.
 # PLAN — Connect-volume seed redesign: device-reported → last-known → connect-default
 
 **Status:** READ-ONLY research complete. No code written.
-**Worktree:** `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/connect-volume-seed`
+**Worktree:** `~/Projects/AirPlay Controller/.claude/worktrees/connect-volume-seed`
 **Branch:** `claude/connect-volume-seed` (off `main` @ 2042de1, NOT merged).
 
 ---

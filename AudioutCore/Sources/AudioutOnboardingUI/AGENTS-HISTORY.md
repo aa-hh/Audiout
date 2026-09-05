@@ -353,7 +353,7 @@ gate/motion/demo/selection rules change.
   | Remote Control | Volume-key control | Volume-key control |
 
   **OWNER-PENDING:** these short titles are the rebuild's own wording, not
-  reviewed copy — they await Alec's sign-off like the long table already has.
+  reviewed copy — they await the owner's sign-off like the long table already has.
 - **There are THREE title tables now, and the HERO's is owner-verbatim.**
   `SetupCardContent.heroHeadline` + `whyLine` are the owner's copy deck (decision
   2026-08-12, VERBATIM — do not re-word), and `allowTitle` names the
@@ -769,9 +769,9 @@ gate/motion/demo/selection rules change.
         pane's system tile shows it white (matching the real Bluetooth dialog,
         owner screenshot 2026-08-11); the Bluetooth SETUP ROW's icon tile
         carries it tinted Bluetooth SIG brand blue
-        (`Tokens.Color.bluetoothBrand`, Alec 2026-08-23) — the one row whose
+        (`Tokens.Color.bluetoothBrand`, owner's call, 2026-08-23) — the one row whose
         tint is a fixed brand hex, not a `permission*` hue. Never hand-draw
-        this mark (Alec 2026-08-23: official glyph only).
+        this mark (Owner, 2026-08-23: official glyph only).
     - The one per-step hook left is `confirmTitle`; the ANATOMY is shared and
       nothing else in the card varies by step but its icon tile.
       `DemoPaneView.surfaceSize` is
@@ -1107,7 +1107,7 @@ gate/motion/demo/selection rules change.
     light: intended, not a side effect to chase out.
   **OWNER-PENDING:** the three authored colour values are the rebuild's own
   choices, measured against the floors but not yet through the palette owner —
-  they await Alec's sign-off.
+  they await the owner's sign-off.
 - **Rich text is the RIBBON's alone, and its bold runs are `captionEmphasized`.**
   `OnboardingViewController.ribbonBody(_:)` turns `**bold**` runs into attributed
   text for the one word that matters (the button that is the WRONG answer, the

@@ -7,7 +7,7 @@ import AudioutSharedUI
 /// the three screen tabs, the highlight drawn inside it for the current tab,
 /// and the same highlight worn by Pin, which stands outside the capsule.
 ///
-/// **The shape the owner asked for** (Alec, 2026-09-04, second pass). One
+/// **The shape the owner asked for** (2026-09-04, second pass). One
 /// continuous pill-shaped surface behind all three glyphs — a single drawn
 /// thing, not three. The current tab is marked by a soft rounded highlight
 /// INSIDE that pill; hover is the same highlight, weaker; an idle tab draws
@@ -27,10 +27,10 @@ import AudioutSharedUI
 /// no current screen at all.
 enum SurfaceToolbarSeat {
 
-    /// Pin's seat: a true CIRCLE, so equal on both sides (Alec, 2026-09-05 —
-    /// "make the pin button a circle instead of an oval"). This number is also
-    /// the strip's ONE height: `size` and `capsuleSize` are both derived from
-    /// it, so the pill and Pin cannot stand at different heights.
+    /// Pin's seat: a true CIRCLE, so equal on both sides (owner's call,
+    /// 2026-09-05 — "make the pin button a circle instead of an oval"). This
+    /// number is also the strip's ONE height: `size` and `capsuleSize` are both
+    /// derived from it, so the pill and Pin cannot stand at different heights.
     ///
     /// Pin being round while the tabs are stadiums reverses the one-shape rule
     /// the strip was built under; `SurfaceToolbarController`'s header carries
@@ -57,7 +57,7 @@ enum SurfaceToolbarSeat {
     /// one rule. Pin is square, so half its height rounds it to a circle. A tab
     /// is wider than it is tall, so the same rule gives a stadium — and that
     /// stadium is CONCENTRIC with the pill it sits in, which is the fix for
-    /// "the highlight does not perfectly conform with the border" (Alec,
+    /// "the highlight does not perfectly conform with the border" (owner's call,
     /// 2026-09-05): concentric rounded rectangles need
     /// `inner radius == outer radius − inset`, and here
     /// `size.height / 2 == capsuleCornerRadius − capsulePadding` by
@@ -626,7 +626,7 @@ final class SurfaceToolbarTabCapsule: NSView, FoldFollowing {
         needsDisplay = true
         // The SMALLEST subtree whose geometry depends on the seat's width: the
         // toolbar item's own container. Two other things used to happen here
-        // every frame and neither paid for itself (Alec, 2026-09-05, "the
+        // every frame and neither paid for itself (owner's call, 2026-09-05, "the
         // animation is a little jittery"):
         //
         // - `invalidateIntrinsicContentSize()` answered nothing. This view

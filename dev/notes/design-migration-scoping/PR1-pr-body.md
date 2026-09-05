@@ -50,7 +50,7 @@ PRs 3–8 do that on top of this foundation.
 
 ## Interim visible effects (between PR 1 merge and the owning surface PR)
 
-| alias | live surface (file:line) | what Alec will see until the surface PR |
+| alias | live surface (file:line) | what the owner will see until the surface PR |
 |---|---|---|
 | canvasHi→canvas | WarmCanvasView.swift:85 | Dark popover/window canvas is flat `#0A0A0C` with grain, no gradient. |
 | sidebarWarmTint→panel | SidebarWarmSurfaceView.swift:106 | Groups sidebar wash goes cool (panel at ~0.30 alpha); C6 deletes it later. |
@@ -91,9 +91,9 @@ PRs 3–8 do that on top of this foundation.
   (`api.fontshare.com/v2/fonts/download/clash-display`) is not a published contract: the two
   sha256 pins are the guard (a re-packaged zip is tolerated, a changed `.otf` fails the build), and
   when the URL dies `AUDIOUT_WORDMARK_FONT=/path/to/ClashDisplay-Semibold.otf` (still checksummed)
-  is the fallback. Alec to confirm (a)–(c): embed is permitted, public repo carries no font bytes,
+  is the fallback. The owner to confirm (a)–(c): embed is permitted, public repo carries no font bytes,
   About credit line lands with Settings.
-- The `emberText`/`goldText` Subtle light-IC coincidence (`#584C2E`) — Alec may want the
+- The `emberText`/`goldText` Subtle light-IC coincidence (`#584C2E`) — the owner may want the
   emberText one pushed a step deeper.
 - `inkOnFill` light-IC = white (D4) — a visible ink flip under Increase Contrast on paper.
 

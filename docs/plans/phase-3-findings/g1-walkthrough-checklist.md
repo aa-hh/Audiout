@@ -1,9 +1,9 @@
 # G1 — Live UX Walkthrough Session Script
 
-Facilitator-run, Alec-driven. ~40 minutes. Validates headless Phase 3 audit
-suspects against the real, running app. Alec is the owner, not deeply
-technical — read him the plain-language instruction verbatim, watch what he
-does without prompting, then note confirm/refute.
+Facilitator-run, owner-driven. ~40 minutes. Validates headless Phase 3 audit
+suspects against the real, running app. The owner is not deeply
+technical — read them the plain-language instruction verbatim, watch what they
+do without prompting, then note confirm/refute.
 
 **How to use this doc:** work top to bottom. Each item is `- [ ]ID — instruction. **Confirms bug if:** … **Refutes if:** … *Source: file — finding*`.
 Check the box, jot one line (confirmed / refuted / unclear) next to it during
@@ -31,7 +31,7 @@ Living Room TV, Bedroom HomePod, Office). This is deliberate: it's the right
 backend for a UX session — no PTP port conflicts with other worktrees, no
 real speakers needed, and every UI surface (popover, windows, onboarding)
 behaves identically to the real backend. **Real-AirPlay-device checks
-(actual connect/disconnect against Alec's Sonos/HomePod gear, real Wi-Fi-loss
+(actual connect/disconnect against the owner's Sonos/HomePod gear, real Wi-Fi-loss
 behavior, the true native-backend "unknown cause" diagnosis gap, a real
 downloaded-and-quarantined signed build's Gatekeeper/launch overhead) are
 deliberately deferred to the G2 signed-build session** — nothing here
@@ -110,7 +110,7 @@ separately, not a G1 or G2 item.
 - [ ] **P1-07** Try **Cmd+Q**. **Confirms bug if:** nothing happens. Then
   right-click the menu-bar icon. **Confirms bug if:** no menu appears. Only
   remaining path: the power-glyph button in the popover header — confirm
-  that's the only way Alec would know to quit. *Source: cold-user-ux.md
+  that's the only way the owner would know to quit. *Source: cold-user-ux.md
   Flow 8 (no Cmd+Q, no right-click menu).*
 
 - [ ] **P1-08** Turn Wi-Fi off (menu bar Wi-Fi icon) for ~15 seconds with the
@@ -145,9 +145,9 @@ separately, not a G1 or G2 item.
   (same underlying bug, same fix). One line is enough — don't re-litigate.
   *Source: window-panel.md C1.*
 
-- [ ] **P1-13** Before clicking, ask Alec what he thinks the Settings ▸
+- [ ] **P1-13** Before clicking, ask the owner what they think the Settings ▸
   General button **"Run Setup Again…"** does. Then click it together.
-  **Confirms bug if:** his guess doesn't match "re-check my permissions."
+  **Confirms bug if:** their guess doesn't match "re-check my permissions."
   *Source: copy.md Issue 4.*
 
 - [ ] **(if time allows) P1-14** In Settings ▸ Audio, exclude an app, then
@@ -290,7 +290,7 @@ launch mode works for it since the underlying bug is windows-generic).
 - [ ] **(if time allows) P3-04** With a second display connected, note which
   screen the Groups window and the onboarding window each center on when
   first opened. Low priority — only worth a note if it visibly surprises
-  Alec. *Source: window-panel.md T1.*
+  the owner. *Source: window-panel.md T1.*
 
 ---
 
@@ -331,7 +331,7 @@ VoiceOver isn't required for those two.
 
 ## New-issue capture (~3 min)
 
-Open-ended — ask Alec directly, don't lead him. Write down anything new
+Open-ended — ask the owner directly, don't lead them. Write down anything new
 verbatim, even if it doesn't map to an existing finding:
 
 - "What annoyed you just now that I didn't specifically ask about?"

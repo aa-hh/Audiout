@@ -16,7 +16,7 @@ REWRITE: PRODUCT.md:102 → point at new DESIGN.md + phone's; PLAN-BT-SYNC-DRAWE
 LEAVE: PRODUCT.md:94 (icon Figma, different file); BrandMark.swift:12 (frame 111:2, see Q3); Audiout-Hero-1024.svg data-figma-skip-parse; dev/notes boards; PLAN-BT-SYNC-DRAWER.md:152 task graph; AGENTS-HISTORY.md:40 (optional); ROADMAP 035/036.
 "design-record" grep: one hit in roadmap 059's what. No code references the discarded branch.
 Roadmap 034: close DROPPED not done. Command:
-echo '{"id":"034","status":"dropped","notes":"Superseded 2026-09-03 (Alec): the Figma design system and docs/FIGMA-DESIGN-SYSTEM.md are abandoned; the Mac design authority becomes DESIGN.md in the Impeccable format, mirroring the iPhone companion at aa-hh/audiout-remote. The Figma file aGvr1qZ3tbqGD2e3jmA1Ru is no longer mirrored and the AGENTS.md mirror rule is removed."}' | node /Users/alechenderson/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js update-status
+echo '{"id":"034","status":"dropped","notes":"Superseded 2026-09-03 (the owner): the Figma design system and docs/FIGMA-DESIGN-SYSTEM.md are abandoned; the Mac design authority becomes DESIGN.md in the Impeccable format, mirroring the iPhone companion at aa-hh/audiout-remote. The Figma file aGvr1qZ3tbqGD2e3jmA1Ru is no longer mirrored and the AGENTS.md mirror rule is removed."}' | node ~/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js update-status
 Roadmap 059 + 076 cite the discarded branch's rules → annotate when the new file lands.
 
 ## New Mac DESIGN.md — schema + outline
@@ -27,7 +27,7 @@ Roadmap 059 + 076 cite the discarded branch's rules → annotate when the new fi
 - Documenter agent: YES, AFTER the build (its doctrine: "ground truth is the shipped artifact"; input contract "existing DESIGN.md path means update"). Hand it PR #102's file as existing input; run per-surface into scratch to fit maxTurns 30.
 
 ## Light mode paperwork (if light flips)
-- PRODUCT.md:92 "Light mode is the Circuit theme" = BRAND COMMITMENT; needs Alec's explicit sign-off.
+- PRODUCT.md:92 "Light mode is the Circuit theme" = BRAND COMMITMENT; needs the owner's explicit sign-off.
 - Tokens.swift ~20 Circuit rationales: every ratio re-measured against new grounds (the real cost).
 - AppTetherColor.swift:475-480 pill alpha 0.28→0.40 BECAUSE Circuit fill #D0CDC3; AppTetherColorTests pins it.
 - AppearanceSettingsViewController.swift:336-337 swatches; AlignmentWizardViewController.swift:249 Circuit-banding tint.

@@ -54,7 +54,7 @@
 - Detail panes: bare fact rows follow iOS PanelRow (panel card, containerEdge, drawn as content background); identity header = iOS editor header (already matches minus glyph tint); EQ card has no iOS counterpart → keep .card, bound by containerEdge + no shadow.
 - Icon seat glow: iOS says yes; but Mac magenta already = wizard reference speaker ("names WHICH speaker") → two identity subjects. Not resolved.
 - Creation sheet + picker map cleanly; picker gold stops being "the one exception" (iOS blesses gold for selection).
-- window-snapshot: 14 PNGs in dev/notes/window-snapshots/ are REVIEW ARTEFACTS, no test reads them → visual change breaks NO test, silently stales images. Cannot regenerate on macOS 27 (NSVisualEffectView fills opaque under displayIgnoringOpacity; fix c985e661 on claude/snapshot-light-on-dark-host unmerged). Executor: state folder is stale in PR, don't run tool, Alec's eye = only verification.
+- window-snapshot: 14 PNGs in dev/notes/window-snapshots/ are REVIEW ARTEFACTS, no test reads them → visual change breaks NO test, silently stales images. Cannot regenerate on macOS 27 (NSVisualEffectView fills opaque under displayIgnoringOpacity; fix c985e661 on claude/snapshot-light-on-dark-host unmerged). Executor: state folder is stale in PR, don't run tool, the owner's eye = only verification.
 
 ## Open questions
 1. Magenta: group identity (iOS) vs wizard reference plate vs both ("which one, never what state") vs decline the glow?

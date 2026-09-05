@@ -2,7 +2,7 @@
 
 Two tracks, executed in parallel by two agents. The shared wire change is already done. Read `synthesis.md` beside this file first (sections 1 and 3), then your track. Every line number below was read on the exact base commit named for your track; verify each anchor with a grep before editing, because the file may have shifted by a few lines.
 
-Rulings from Alec (2026-09-04), binding for both tracks:
+Rulings from the owner (2026-09-04), binding for both tracks:
 1. A wrong stored number is worse than a wait. Measure-early is an escape that appears only once the Mac has seen the clock jump, never on the clean path.
 2. The sheet may start the metronome clicks once the user taps "I'm there". That tap is the consent.
 3. A first pairing and any speaker already connected when the Mac app launches get a settle window too.
@@ -12,13 +12,13 @@ One change from the published write-up: the phone shows **no number** while a sp
 
 ## The wire (done)
 
-`audiout-shared` branch `claude/alignment-clock-state`, commit `0377c3e8be42b205a2c92ed32ab41de9205a6b39`, pushed to origin. `DeviceState.AlignmentState.clockState: String?` with values `"unknown"`, `"settling"`, `"steady"`, nil = older Mac (treat as steady). `settleRemainingSeconds` stays in the struct; a Mac that publishes `clockState` publishes nil there. Both consumers pin to that revision (not a tag) in this order; the tag `0.7.0` and the re-pin to it happen at merge, by Alec.
+`audiout-shared` branch `claude/alignment-clock-state`, commit `0377c3e8be42b205a2c92ed32ab41de9205a6b39`, pushed to origin. `DeviceState.AlignmentState.clockState: String?` with values `"unknown"`, `"settling"`, `"steady"`, nil = older Mac (treat as steady). `settleRemainingSeconds` stays in the struct; a Mac that publishes `clockState` publishes nil there. Both consumers pin to that revision (not a tag) in this order; the tag `0.7.0` and the re-pin to it happen at merge, by the owner.
 
 ---
 
 ## Track M: Mac (agent 1)
 
-Worktree: `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/settle-clock-state`, branch `claude/settle-clock-state` (= `claude/settle-window-adaptive` merged with `main`, head `6125143a`, pushed to origin). Run every command from that directory. Never `cd` into the main checkout. Never build the `.dev` bundle id; no live-test slot is needed.
+Worktree: `~/Projects/AirPlay Controller/.claude/worktrees/settle-clock-state`, branch `claude/settle-clock-state` (= `claude/settle-window-adaptive` merged with `main`, head `6125143a`, pushed to origin). Run every command from that directory. Never `cd` into the main checkout. Never build the `.dev` bundle id; no live-test slot is needed.
 
 Files: `AudioutCore/Sources/AudioutCore/BTAlignmentFreshness.swift` (F), `AudioutCore/Sources/AudioutCore/NativeBackend.swift` (N), `AudioutCore/Sources/AudioutCore/CompanionSnapshotBuilder.swift` (B), `AudioutCore/Sources/AudioutApp/AppDelegate.swift` (A), `AudioutCore/Package.swift` + `Package.resolved`, tests under `AudioutCore/Tests/AudioutCoreTests/`.
 
@@ -54,7 +54,7 @@ In `applyBTSnapshots`, the new-device branch builds `Device(id: id, name: snapsh
 ```swift
 // The first time this process lists a connected Bluetooth device is the
 // only link-up it will ever see for it: a first pairing, or a speaker
-// already up when the app launched. Both start a settle window (Alec,
+// already up when the app launched. Both start a settle window (owner's call,
 // 2026-09-04); neither stales a stored tuning, because the store has no
 // alignment instant to be earlier than (`BTAlignmentFreshness.status`).
 if snapshot.isConnected { btAlignmentFreshness.noteConnected(uid: id) }
@@ -88,9 +88,9 @@ The Mac's own alignment wizard; the pacing/drift path in `BTSyncedSink`/`SyncCor
 
 ## Track P: phone (agent 2)
 
-Worktree: `/Users/alechenderson/Projects/audiout-remote/.claude/worktrees/sync-sheet-acts`, branch `claude/sync-sheet-acts` (= `claude/settle-window-phone`, head `65a1dbc`, pushed to origin; hooks path already set). Run every command from that directory. This app is proprietary: never paste code from the Mac repo.
+Worktree: `~/Projects/audiout-remote/.claude/worktrees/sync-sheet-acts`, branch `claude/sync-sheet-acts` (= `claude/settle-window-phone`, head `65a1dbc`, pushed to origin; hooks path already set). Run every command from that directory. This app is proprietary: never paste code from the Mac repo.
 
-Design authority: `DESIGN.md` in that worktree ("The sync surfaces" ~:1095-1141, "Do's and Don'ts" ~:1141-1204, Overview :120-175). The design skill is mandatory here (Alec, 2026-09-04): "ensure that the UI agents use /impeccable skill to help them shape and distill the point they are trying to get across." Concretely: before editing any view, invoke the Skill tool with `impeccable` and args `distill AudioutRemote/UI/Sync/SyncSheet.swift`; follow its setup (its context script, run once, with that target) and load its craft-floor reference before the first UI edit; when the screens are written, invoke it again with args `clarify AudioutRemote/UI/Sync/SyncSheet.swift` for the copy pass. The screens and copy below are the brief the skill works within; it may tighten wording and layout, it may not add screens, states, colours or a second gold pill.
+Design authority: `DESIGN.md` in that worktree ("The sync surfaces" ~:1095-1141, "Do's and Don'ts" ~:1141-1204, Overview :120-175). The design skill is mandatory here (owner's call, 2026-09-04): "ensure that the UI agents use /impeccable skill to help them shape and distill the point they are trying to get across." Concretely: before editing any view, invoke the Skill tool with `impeccable` and args `distill AudioutRemote/UI/Sync/SyncSheet.swift`; follow its setup (its context script, run once, with that target) and load its craft-floor reference before the first UI edit; when the screens are written, invoke it again with args `clarify AudioutRemote/UI/Sync/SyncSheet.swift` for the copy pass. The screens and copy below are the brief the skill works within; it may tighten wording and layout, it may not add screens, states, colours or a second gold pill.
 
 Base file: `AudioutRemote/UI/Sync/SyncSheet.swift` on `65a1dbc`. Anchors on that commit: `Page` enum :92-94, init seeding :82-90, body modifiers :128-186, `content` :202-220, `placementPage` :230-277, `footnote` :283-294, `macBlocker` :299-304, `waitingToSettle`/`ctaReady` :308-311, `recheckDue` :346-348, `keepAwake` :352-354, `reseedSettle`/`tickSettle` :356-370, `startRun` :384-394, `runDidFinish` :401-424, `measuredPage` :504-572, `followUpLine` :578-607, `verdictLine` :629-634, copy statics :662-724, `FineTunePage` :804-940, `GoldCTA` :947-978. Other files: `AudioutRemote/Model/DemoMacSession.swift` (settle :73-77, :134-139, :395-397, :441), `AudioutRemote/Model/ProbeCaptureSession.swift` (:77-97 permission API), `AudioutRemote/Model/MacSessionProtocol.swift` (:54 `setDeviceSelected`, :56 `setMainOut`, :86-93 alignment commands), `AudioutRemote/UI/Speakers/DeviceRowView.swift` (:768-776 `alignmentWord`), `AudioutRemoteTests/DemoMacSessionTests.swift` (settle tests ~:374-452), `AudioutRemote.xcodeproj/project.pbxproj` (~:605-612, the `audiout-shared` package reference).
 
@@ -163,14 +163,14 @@ When `runIsEarly` and the run produced a number, the headline uses a new `static
 
 ### P6. DESIGN.md
 
-In "The sync surfaces", replace the sheet's state list to describe the five pre-run screens (A only when a speaker is silent, B only when the microphone is undecided, C and D once per sheet, E always), the clock state phrases, the lockout, the early-reading verdict, and that no number is shown while settling and why. In the Decision Record add: "**Alec, 2026-09-04 — the wait is spent on real acts.** Four rulings: a wrong stored number is worse than a wait, so measuring early is an escape shown only once the Mac has seen the clock jump; the clicks may start on the user's own 'I'm there' tap; a first pairing and a launch-time connection get a settle window; the multi-speaker list waits for evidence." Keep both under 25 lines total. Fix the "Haptics" entry if its wording no longer matches.
+In "The sync surfaces", replace the sheet's state list to describe the five pre-run screens (A only when a speaker is silent, B only when the microphone is undecided, C and D once per sheet, E always), the clock state phrases, the lockout, the early-reading verdict, and that no number is shown while settling and why. In the Decision Record add: "**Owner, 2026-09-04 — the wait is spent on real acts.** Four rulings: a wrong stored number is worse than a wait, so measuring early is an escape shown only once the Mac has seen the clock jump; the clicks may start on the user's own 'I'm there' tap; a first pairing and a launch-time connection get a settle window; the multi-speaker list waits for evidence." Keep both under 25 lines total. Fix the "Haptics" entry if its wording no longer matches.
 
 ### P7. Tests and verification
 
 - `AudioutRemoteTests`: add tests for `firstPreRunPage`, the E footnote precedence (make it a static pure function taking the inputs), `earlyVerdictLine`, and `clockReady` for nil/"steady"/"unknown"/"settling". Update `DemoMacSessionTests` for `clockState`.
-- Compile: from the Mac worktree named at the top of Track M, `bash scripts/ios.sh build --root /Users/alechenderson/Projects/audiout-remote/.claude/worktrees/sync-sheet-acts`. Must succeed; the pin pulls the pushed branch.
+- Compile: from the Mac worktree named at the top of Track M, `bash scripts/ios.sh build --root ~/Projects/audiout-remote/.claude/worktrees/sync-sheet-acts`. Must succeed; the pin pulls the pushed branch.
 - Tests: `bash scripts/ios.sh test --root <same>`. If it reports no iOS Simulator runtime, report "compile-verified" and do NOT download a runtime (7.5 GB, deleted on purpose).
-- Device verification on Alec's iPhone is his, not yours; say it is owed.
+- Device verification on the owner's iPhone is theirs, not yours; say it is owed.
 
 ### P8. Commit and push
 

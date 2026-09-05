@@ -8,7 +8,7 @@ Feature is NOT started — this is the spec to implement. SPIKE FIRST (§5).
 # Implementation Plan — "Consistent Main Out: pin the whole-system capture rate"
 
 **Status:** READ-ONLY research complete. No code written. This document is the complete handoff — a fresh agent needs nothing else.
-**Worktree:** `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/audio-dropout-investigation-5c2a1f`
+**Worktree:** `~/Projects/AirPlay Controller/.claude/worktrees/audio-dropout-investigation-5c2a1f`
 **Branch:** `claude/audio-dropout-investigation-5c2a1f` (NOT merged to main; live test owed on prior pause-on-call work already on this branch).
 
 ---

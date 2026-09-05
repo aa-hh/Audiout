@@ -274,11 +274,11 @@ import AudioutCore
     }
 
     @Test func mutedRowKeepsItsTokenUnderMasterMute() {
-        // A muted row always says so (Alec, 2026-08-23) — master mute is
-        // realized by muting every member, and each member now labels its own
-        // mute instead of deferring to the Main Out pill (the old matrix §3.6
-        // suppression made the label vanish when the muted row was the only
-        // member).
+        // A muted row always says so (owner's call, 2026-08-23) — master mute
+        // is realized by muting every member, and each member now labels its
+        // own mute instead of deferring to the Main Out pill (the old matrix
+        // §3.6 suppression made the label vanish when the muted row was the
+        // only member).
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true, controllable: true, masterMuted: true)
         #expect(row.test_statusText == "Muted · System", "a muted row says Muted even under MASTER mute")

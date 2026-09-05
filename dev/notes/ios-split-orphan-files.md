@@ -2,7 +2,7 @@
 
 Two files touched by the iOS split have no counterpart in the repo they
 belong in. Both moves are into external repos — no agent may perform them;
-Alec does the moves.
+The owner does the moves.
 
 ## `ios/AudioutRemote/DESIGN.md` → `aa-hh/audiout-remote`
 

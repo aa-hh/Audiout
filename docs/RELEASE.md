@@ -89,7 +89,7 @@ skip those steps for fast iteration. It never touches the production bucket.
 
 ---
 
-## Alec's actions — credentials required
+## Owner's actions — credentials required
 
 Everything below needs credentials or accounts this pipeline cannot hold
 (nothing here belongs in the repo, in CI config, or in any script). One-time

@@ -5,7 +5,7 @@ Lens: external precedent only. Everything factual about other products carries a
 ## What I read first
 
 - The shared brief.
-- `/Users/alechenderson/Projects/audiout-remote/AudioutRemote/UI/Sync/SyncSheet.swift` — placement page at :149, the title "Go to where you listen." at :151, the disabled button text `"Ready in \(remaining)s"` at :196-198, the two preconditions the Mac publishes at :204-209, the local one-second tick at :213-220, the run page and its green field at :236-279, the verdict line at :365-371, and the single forward offer to the next untuned speaker at :338-352 and :374-383.
+- `~/Projects/audiout-remote/AudioutRemote/UI/Sync/SyncSheet.swift` — placement page at :149, the title "Go to where you listen." at :151, the disabled button text `"Ready in \(remaining)s"` at :196-198, the two preconditions the Mac publishes at :204-209, the local one-second tick at :213-220, the run page and its green field at :236-279, the verdict line at :365-371, and the single forward offer to the next untuned speaker at :338-352 and :374-383.
 - `AudioutRemote/Model/AlignmentRunController.swift:45-51` — the four phase words the run can show: "Hearing the room", "Chirping", "Letting it land", "Measuring". There is no fifth, and no percentage.
 - The unmerged phone branch, via `git show claude/settle-window-phone:AudioutRemote/UI/Sync/SyncSheet.swift` — the footnote that replaces the disabled button (:283-294), the settling sentence itself (:662-666), the "Measure it now" line (:255-259), and the automatic re-check machinery (:337 onward).
 - `dev/notes/handoff-2026-09-03-settle-window-adaptive.md` in the Mac worktree.
@@ -31,7 +31,7 @@ Replace a bare countdown with a plain reason for it.
 
 Mechanism: Maister's classic list has "unexplained waits are longer than explained waits" as one of its propositions. https://www.columbia.edu/~ww2040/4615S13/Psychology_of_Waiting_Lines.pdf (I could not extract the PDF text through the fetch tool; the proposition list is also summarised at https://uen.pressbooks.pub/opexintro/chapter/managing-the-psychology-of-waiting/)
 
-Fit: excellent, and already built on the unmerged phone branch — the settling sentence at `claude/settle-window-phone:AudioutRemote/UI/Sync/SyncSheet.swift:662-666`. It is the cheapest fix and it is not the thing Alec is complaining about. He has seen a version of it and still calls the screen text-heavy and empty. So this is a floor, not an answer.
+Fit: excellent, and already built on the unmerged phone branch — the settling sentence at `claude/settle-window-phone:AudioutRemote/UI/Sync/SyncSheet.swift:662-666`. It is the cheapest fix and it is not the thing the owner is complaining about. They have seen a version of it and still call the screen text-heavy and empty. So this is a floor, not an answer.
 
 ### 2. Fill the wait with a real task the user must do anyway
 
@@ -43,7 +43,7 @@ Give the user the setup work that has to happen regardless, so the clock runs be
 
 Mechanism: occupied time feels shorter, and once a person has started they feel served rather than queued.
 
-Fit: strong and directly what Alec proposed. Our real preparation work is genuine, not invented: get to the listening position, get music playing on both speakers, pick which speakers to do. Two of those are already preconditions the Mac publishes (`SyncSheet.swift:204-209`). Risk: on a Sony that settles instantly, a staged ritual would invent a wait that does not exist, and that is a lie by pacing even if every sentence is true.
+Fit: strong and directly what the owner proposed. Our real preparation work is genuine, not invented: get to the listening position, get music playing on both speakers, pick which speakers to do. Two of those are already preconditions the Mac publishes (`SyncSheet.swift:204-209`). Risk: on a Sony that settles instantly, a staged ritual would invent a wait that does not exist, and that is a lie by pacing even if every sentence is true.
 
 ### 3. Show the machine's own work, honestly, while it works
 
@@ -76,7 +76,7 @@ Ask which items to process, then work them in order with visible position.
 
 Mechanism: a known finite list beats an open-ended one. Maister: uncertain waits feel longer than known finite waits.
 
-Fit: strong for Alec's "define which speakers they want to set up". We only have a single forward link today (`SyncSheet.swift:338-352`). The catch is our own rule that nothing is app-initiated: a list may be built by the user and advanced by the user, but must not run itself.
+Fit: strong for the owner's "define which speakers they want to set up". We only have a single forward link today (`SyncSheet.swift:338-352`). The catch is our own rule that nothing is app-initiated: a list may be built by the user and advanced by the user, but must not run itself.
 
 ### 6. Stage the wait behind a physical instruction the user is executing
 
@@ -99,7 +99,7 @@ Offer a way through the gate with the consequence stated.
 
 Mechanism: control lowers the felt cost of a wait more than shortening it does.
 
-Fit: already built on the unmerged phone branch as the "Measure it now" line plus an automatic re-check (`claude/settle-window-phone:AudioutRemote/UI/Sync/SyncSheet.swift:255-259`, :662-668). It is exactly the "single CTA that gives you the option to pass through" that Alec is unhappy with. So the escape hatch is necessary and not sufficient. Note also the rule tension: a self-starting re-check is app-initiated behaviour and only survives as the one sanctioned announced, refusable exception.
+Fit: already built on the unmerged phone branch as the "Measure it now" line plus an automatic re-check (`claude/settle-window-phone:AudioutRemote/UI/Sync/SyncSheet.swift:255-259`, :662-668). It is exactly the "single CTA that gives you the option to pass through" that the owner is unhappy with. So the escape hatch is necessary and not sufficient. Note also the rule tension: a self-starting re-check is app-initiated behaviour and only survives as the one sanctioned announced, refusable exception.
 
 ### 8. Do the slow thing on the device instead of the person, and say so
 
@@ -143,7 +143,7 @@ Show something useful or interesting that is true whether or not the wait exists
 
 Mechanism: passive waiting is overestimated; occupied waiting is not.
 
-Fit: weak for us, and the failure mode is exactly Alec's complaint. Our current screen is already a wall of explanation with an empty middle. More reading material makes it worse. Tips only work if they are acted on, which folds them back into pattern 2 or 4.
+Fit: weak for us, and the failure mode is exactly the owner's complaint. Our current screen is already a wall of explanation with an empty middle. More reading material makes it worse. Tips only work if they are acted on, which folds them back into pattern 2 or 4.
 
 ### 12. Make the finish loud so the wait reads as a threshold rather than an interruption
 
@@ -210,11 +210,11 @@ Derived from patterns 6, 2 and 1: Sonos's flip-then-sample-then-teach sequence, 
 
 **State or commands we do not have.** None. This is copy, layout and one extra page transition. It works on `main` today and works better with the unmerged phone branch's footnote.
 
-**Biggest risk.** It does not solve the long case, which is the case Alec named. It also adds a tap to a flow that is already several screens deep, and the confirmation tap risks reading as busywork if the Mac already knows both speakers are sounding, which it does.
+**Biggest risk.** It does not solve the long case, which is the case the owner named. It also adds a tap to a flow that is already several screens deep, and the confirmation tap risks reading as busywork if the Mac already knows both speakers are sounding, which it does.
 
 ### Concept 2: the wait is spent choosing scope, and the sheet becomes a short list of speakers
 
-Derived from patterns 5 and 9: Dirac and Audyssey choosing the measurement arrangement before measuring, Sonos tuning rooms one at a time, and Alec's own proposal.
+Derived from patterns 5 and 9: Dirac and Audyssey choosing the measurement arrangement before measuring, Sonos tuning rooms one at a time, and the owner's own proposal.
 
 **Step by step.** Entering the sheet with more than one untuned or stale speaker opens on a list of them, each with a plain state word, and each tappable to include or exclude. The user picks. Then the placement instruction, then Measure for the first one. After each verdict, the next chosen speaker's placement page follows, with a plain "2 of 3" style position. A speaker still settling when its turn comes is shown as such and the list offers to take a ready one first, on a tap, never on its own.
 
@@ -230,7 +230,7 @@ Derived from patterns 5 and 9: Dirac and Audyssey choosing the measurement arran
 
 **State or commands we do not have.** Nothing new on the wire strictly: the snapshot already carries per-device alignment status, and `SyncSheet.swift:374-383` already filters for the speakers that need work. What we do not have is a per-speaker settle estimate for speakers other than the current target, which we would want in order to say "do the other one first". I could not verify from the phone repo alone whether `settleRemainingSeconds` is published for every Bluetooth device or only some; that needs checking in `CompanionSnapshotBuilder.swift` on the Mac side.
 
-**Biggest risk.** It is the most work and it helps the fewest users. It also risks reading as a chore list at the exact moment the user wanted to press play, which is Alec's stated objection turned inside out.
+**Biggest risk.** It is the most work and it helps the fewest users. It also risks reading as a chore list at the exact moment the user wanted to press play, which is the owner's stated objection turned inside out.
 
 ### Concept 3: the wait is spent listening to the problem
 
@@ -270,11 +270,11 @@ Right idea, wrong first move. It is the most build, it needs a per-device settle
 
 **Standing above all three:** the wait that gets removed beats every wait that gets decorated. The clock-delta compensation described in `dev/notes/handoff-2026-09-03-settle-window-adaptive.md` would make this whole design question smaller. None of these concepts should be built in a way that assumes the 60 s floor survives.
 
-**One warning from the precedent, against Alec's own framing.** He suggested "an almost artificial gate of introducing them to how the system works". Nothing in this precedent set supports an artificial gate, and our own rule against a lying interface forbids one. Sonos's steps are all load-bearing: the flip positions the microphone, the noise sample is a real check, the video teaches a technique the measurement depends on. What looks like ceremony is procedure. Fill the wait with real work or real sound. If the speaker has settled, show no gate at all.
+**One warning from the precedent, against the owner's own framing.** They suggested "an almost artificial gate of introducing them to how the system works". Nothing in this precedent set supports an artificial gate, and our own rule against a lying interface forbids one. Sonos's steps are all load-bearing: the flip positions the microphone, the noise sample is a real check, the video teaches a technique the measurement depends on. What looks like ceremony is procedure. Fill the wait with real work or real sound. If the speaker has settled, show no gate at all.
 
 ---
 
-## 5. Three open questions only Alec can answer
+## 5. Three open questions only the owner can answer
 
 1. **Will the Mac play the A/B demo for a speaker with no tuning stored, and does it need both speakers already sounding?** Concept 1 recommendation stands either way; Concept 3 depends on this answer, and it decides whether the wait can be filled with sound or only with words.
 

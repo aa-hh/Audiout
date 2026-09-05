@@ -116,11 +116,12 @@ extension SerializedSharedState {
     }
 
     /// The mark has to CLEAR ITS GROUND in both appearances — which replaces
-    /// the single-value rule (Alec, 2026-09-04, retired 2026-09-05: one value
-    /// left light mode "impossible to see"). One value only worked while the
-    /// hue was a filled square; as a 0.875 pt outline it measured 2.45:1 on
-    /// the light row. What matters is the ratio, so that is what this asserts,
-    /// in each appearance against the ground the row actually draws on.
+    /// the single-value rule (owner's call, 2026-09-04, retired 2026-09-05:
+    /// one value left light mode "impossible to see"). One value only worked
+    /// while the hue was a filled square; as a 0.875 pt outline it measured
+    /// 2.45:1 on the light row. What matters is the ratio, so that is what
+    /// this asserts, in each appearance against the ground the row actually
+    /// draws on.
     @Test func theEngagedMarkClearsItsGroundInBothAppearances() {
         defer { Tokens.test_increaseContrastOverride = nil }
         Tokens.test_increaseContrastOverride = false

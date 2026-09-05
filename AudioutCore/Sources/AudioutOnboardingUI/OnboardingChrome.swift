@@ -87,7 +87,7 @@ func bluetoothRuneImage(height: CGFloat) -> NSImage? {
 /// `label` glyph rather than a permission hue;
 /// the SYMBOL's tint is caller-supplied (`color`, one of the four
 /// `Tokens.Color.permission*` hues for the onboarding rows) and PERMANENT —
-/// granting never recolours it (Alec, 2026-08-11: the retired
+/// granting never recolours it (owner's call, 2026-08-11: the retired
 /// grant-goes-gold crossfade duplicated the "Allowed"/checkmark status the
 /// row already shows, which alone carries the state).
 ///

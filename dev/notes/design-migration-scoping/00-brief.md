@@ -2,17 +2,17 @@
 
 You are one of eight scoping agents. You research ONE slice of the Audiout Mac app and return migration OPTIONS. You do not write code, do not edit repo files, do not run builds or tests. Return your findings as plain text in your final message (a hook blocks writing `report-*.md` files, so do not try).
 
-## The decision already made (Alec, 2026-09-03)
+## The decision already made (owner's call, 2026-09-03)
 
-- The Mac app's design authority becomes the iOS companion's DESIGN.md at `/Users/alechenderson/Projects/audiout-remote/DESIGN.md` (1201 lines, Impeccable format: YAML frontmatter of tokens, then prose with Named Rules per section). READ IT FULLY FIRST. Its Overview, Colors, Typography, Layout, Elevation, Shapes, Components, Named Rules and Do's/Don'ts sections are the standard the Mac surfaces must be re-designed to meet.
+- The Mac app's design authority becomes the iOS companion's DESIGN.md at `~/Projects/audiout-remote/DESIGN.md` (1201 lines, Impeccable format: YAML frontmatter of tokens, then prose with Named Rules per section). READ IT FULLY FIRST. Its Overview, Colors, Typography, Layout, Elevation, Shapes, Components, Named Rules and Do's/Don'ts sections are the standard the Mac surfaces must be re-designed to meet.
 - `docs/FIGMA-DESIGN-SYSTEM.md` and the Figma file are being abandoned. Do not propose Figma work.
 - The unmerged Mac DESIGN.md on branch `origin/claude/design-record-refresh` (PR #102) is being discarded. You may read it (`git show origin/claude/design-record-refresh:DESIGN.md`) as a description of the Mac's CURRENT design, which is useful for "what exists today", but it is not the target.
-- Light mode: Alec prefers the iOS cool-neutral light chassis over the Mac's current warm light ("Circuit theme", PRODUCT.md:92), BUT "if it makes sense, we can keep certain elements from the existing design system." So for every Mac element you touch, say explicitly: adopt iOS, keep Mac, or hybrid, and why. Elements that earn keeping should be argued for, not assumed.
+- Light mode: the owner prefers the iOS cool-neutral light chassis over the Mac's current warm light ("Circuit theme", PRODUCT.md:92), BUT "if it makes sense, we can keep certain elements from the existing design system." So for every Mac element you touch, say explicitly: adopt iOS, keep Mac, or hybrid, and why. Elements that earn keeping should be argued for, not assumed.
 - The Mac app is native AppKit (not SwiftUI). The iOS file's rules are the target; the mechanisms (fonts, layers, drawing) will differ. Translate rules, not code.
 
 ## Repo facts
 
-- Working tree: `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/delay-trim-sync-wizard-b99148` (a git worktree; work from here, never cd to the main checkout).
+- Working tree: `~/Projects/AirPlay Controller/.claude/worktrees/delay-trim-sync-wizard-b99148` (a git worktree; work from here, never cd to the main checkout).
 - Read `AGENTS.md` at the repo root, then the `AGENTS.md` in every source folder you read. They record traps the code cannot tell you.
 - Mac tokens: `AudioutCore/Sources/AudioutSharedUI/Tokens.swift` (colours as `Tokens.Color` cases, fonts as `Tokens.Font`), layout constants in `AudioutCore/Sources/AudioutSharedUI/PopoverColumnGrid.swift` and `SurfaceLayout.swift`.
 - UI targets under `AudioutCore/Sources/`: `AudioutSharedUI` (tokens + shared components), `AudioutPopoverUI` (menu-bar popover and the sync wizard views), `AudioutWindowUI` (Groups/mixer window), `AudioutSettingsUI`, `AudioutOnboardingUI` (onboarding + licence gate), `AudioutApp` (menu bar status item, media keys, Touch Bar).
@@ -49,7 +49,7 @@ Two or three. For each:
 - Dependencies: which shared-token decisions this needs first (name the token or rule)
 - Recommendation: recommended / viable / not recommended, one sentence why
 
-## Open questions for Alec
+## Open questions for the owner
 Only real forks where two readings lead to materially different work. Zero is fine.
 
 ## Files touched (union across options)

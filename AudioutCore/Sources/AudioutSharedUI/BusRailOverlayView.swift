@@ -2,14 +2,15 @@
 
 import AppKit
 
-/// The **continuous membership-rail spine** (Warm Signal v4 §Call-1, Alec's
-/// continuity correction): a single panel-level overlay that draws the rail as
-/// ONE UNINTERRUPTED line down the left gutter, passing STRAIGHT THROUGH any
-/// section-header rows, subsection headers, and hairline dividers it crosses.
-/// Per-row bus segments left a gap wherever a non-device row (a header or a
-/// divider) sat in the span; drawing the rail as one continuous element here
-/// removes every such gap. The overlay sits ON TOP of the cards + dividers
-/// (added last), so where the rail crosses a hairline it reads unbroken. It is
+/// The **continuous membership-rail spine** (Warm Signal v4 §Call-1, the
+/// owner's continuity correction): a single panel-level overlay that draws
+/// the rail as ONE UNINTERRUPTED line down the left gutter, passing STRAIGHT
+/// THROUGH any section-header rows, subsection headers, and hairline dividers
+/// it crosses. Per-row bus segments left a gap wherever a non-device row (a
+/// header or a divider) sat in the span; drawing the rail as one continuous
+/// element here removes every such gap. The overlay sits ON TOP of the cards
+/// + dividers (added last), so where the rail crosses a hairline it reads
+/// unbroken. It is
 /// non-interactive (`hitTest` returns `nil`).
 ///
 /// **One wire, one tone.** The rail is a single stroked line — no channel, no
@@ -89,8 +90,8 @@ public final class BusRailOverlayView: NSView {
     private static let pulseKey = "busRail.connectPulse"
     /// The bead's length ON GLASS, in points — fixed, so it reads as a bead of
     /// light on any wire. (A fraction-of-the-wire window became a long STRIP
-    /// on a tall wire — Alec's live read of that cut.) Capped at 45% of a very
-    /// short wire so the bead never IS the wire.
+    /// on a tall wire — the owner's live read of that cut.) Capped at 45% of
+    /// a very short wire so the bead never IS the wire.
     private static let beadLength: CGFloat = 26
     /// How long the landed bubble takes to dissolve into the ring.
     private static let beadAbsorbDuration: CFTimeInterval = 0.12
@@ -579,12 +580,12 @@ public final class BusRailOverlayView: NSView {
     /// `departure` (the joining room's spot on the wire; 1 = terminus) up into
     /// the Main Audio ring, where an arrival bloom receives it.
     ///
-    /// The bead has BODY (Alec's live read of the flat cut: "too subtle and
-    /// invisible"): it strokes WIDER than the wire with a soft same-hue light
-    /// emission, so it reads as a bead of signal riding ON the line rather
-    /// than a recolored stretch of it — visibility comes from geometry and
-    /// light, not from shouting with a hotter color. Travel time scales with
-    /// the distance (constant speed — `railConnectPulseDuration` is the
+    /// The bead has BODY (the owner's live read of the flat cut: "too subtle
+    /// and invisible"): it strokes WIDER than the wire with a soft same-hue
+    /// light emission, so it reads as a bead of signal riding ON the line
+    /// rather than a recolored stretch of it — visibility comes from geometry
+    /// and light, not from shouting with a hotter color. Travel time scales
+    /// with the distance (constant speed — `railConnectPulseDuration` is the
     /// full-wire time), floored so a short hop still reads as motion.
     ///
     /// The bead's MODEL is fully absorbed (`strokeStart = strokeEnd = 0`,
@@ -635,7 +636,7 @@ public final class BusRailOverlayView: NSView {
         hostLayer.addSublayer(bead)
         pulseLayer = bead
 
-        // A self-contained bubble (Alec's brief): the window keeps its FULL
+        // A self-contained bubble (the owner's brief): the window keeps its FULL
         // length for the entire climb — both edges slide by the same delta on
         // one clock — landing ON the hook curve, then fading out as it slips
         // into the ring. (The first cut shrank the window across the whole
@@ -742,8 +743,8 @@ public final class BusRailOverlayView: NSView {
         hostLayer.addSublayer(bloom)
         arrivalLayer = bloom
 
-        // A received light, not an explosion (Alec's read of the 1.6x burst):
-        // modest swell, gentler peak.
+        // A received light, not an explosion (the owner's read of the 1.6x
+        // burst): modest swell, gentler peak.
         let fade = CABasicAnimation(keyPath: "opacity")
         fade.fromValue = 0.65
         fade.toValue = 0

@@ -23,7 +23,7 @@ the migration's scoping notes. Nothing else.
 ## Pre-flight
 
 ```bash
-cd "/Users/alechenderson/Projects/AirPlay Controller"
+cd ~/"Projects/AirPlay Controller"
 git fetch origin
 git worktree add .claude/worktrees/design-docs -b claude/design-docs origin/main
 cd .claude/worktrees/design-docs
@@ -85,13 +85,13 @@ Replace with:
 2a. Line 90 currently begins `- Visual identity: **Warm Signal** — warm near-black ground with gold signal accent in dark.` Replace the whole bullet with:
 
 ```
-- Visual identity: **Warm Signal** — a cool near-neutral chassis in both appearances (`#0A0A0C` dark, `#FAFAFB` light), with warmth reserved for wherever sound is going and gold for audio state and calls to action. Structure and controls stay native (stock AppKit / SF Symbols on Mac; HIG-conformant SwiftUI on iOS). The design authority is the iPhone companion's `DESIGN.md` (`aa-hh/audiout-remote`) for the shared rules and this repo's `DESIGN.md` for the Mac (written from shipped code at the end of the 2026-09-03 migration). Binding per Alec, 2026-09-03.
+- Visual identity: **Warm Signal** — a cool near-neutral chassis in both appearances (`#0A0A0C` dark, `#FAFAFB` light), with warmth reserved for wherever sound is going and gold for audio state and calls to action. Structure and controls stay native (stock AppKit / SF Symbols on Mac; HIG-conformant SwiftUI on iOS). The design authority is the iPhone companion's `DESIGN.md` (`aa-hh/audiout-remote`) for the shared rules and this repo's `DESIGN.md` for the Mac (written from shipped code at the end of the 2026-09-03 migration). Binding per the owner, 2026-09-03.
 ```
 
 2b. Line 92 currently begins `- **Light mode is the Circuit theme**`. Replace the whole bullet with:
 
 ```
-- **Both appearances are cool-neutral** (Alec, 2026-09-03; supersedes the Circuit light of 2026-08-07 and the warm near-black dark): the scaffolding tokens — canvas, panels, wells, edges — take the iPhone companion's values in light and dark; light is one flat ground and separation there is edge weight, not fill. The name "Circuit" is retired with it.
+- **Both appearances are cool-neutral** (owner's call, 2026-09-03; supersedes the Circuit light of 2026-08-07 and the warm near-black dark): the scaffolding tokens — canvas, panels, wells, edges — take the iPhone companion's values in light and dark; light is one flat ground and separation there is edge weight, not fill. The name "Circuit" is retired with it.
 ```
 
 2c. Line 93 currently begins `- **Instruments never theme.** The gold family, failure, caution, rings, meters, fader hardware and permission hues`. Change only the token list to `The gold family, failure, rings, meters, fader hardware and permission hues` (drop `caution`, retired 2026-09-03). Nothing else on the line changes.
@@ -158,7 +158,7 @@ Replace with:
 
 ```bash
 mkdir -p dev/notes/design-migration-scoping
-SRC="/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/delay-trim-sync-wizard-b99148/dev/notes/design-migration-scoping"
+SRC=~/"Projects/AirPlay Controller/.claude/worktrees/delay-trim-sync-wizard-b99148/dev/notes/design-migration-scoping"
 for f in 00-brief.md 01-decisions.md tokens.md rows.md popover.md groups.md settings.md onboarding.md wizard.md docs.md PR2-docs-work-order.md; do cp "$SRC/$f" dev/notes/design-migration-scoping/; done
 ls dev/notes/design-migration-scoping
 ```
@@ -168,7 +168,7 @@ Exactly those eleven files. Not `PR1-*.md`, not `PR3-*.md`.
 ## Step 9 — close roadmap item 034 as dropped
 
 ```bash
-echo '{"id":"034","status":"dropped","notes":"Superseded 2026-09-03 (Alec): the Figma design system and docs/FIGMA-DESIGN-SYSTEM.md are abandoned; the Mac design authority becomes DESIGN.md in the Impeccable format, mirroring the iPhone companion at aa-hh/audiout-remote. The Figma file aGvr1qZ3tbqGD2e3jmA1Ru is no longer mirrored and the AGENTS.md mirror rule is removed."}' | node /Users/alechenderson/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js update-status
+echo '{"id":"034","status":"dropped","notes":"Superseded 2026-09-03 (the owner): the Figma design system and docs/FIGMA-DESIGN-SYSTEM.md are abandoned; the Mac design authority becomes DESIGN.md in the Impeccable format, mirroring the iPhone companion at aa-hh/audiout-remote. The Figma file aGvr1qZ3tbqGD2e3jmA1Ru is no longer mirrored and the AGENTS.md mirror rule is removed."}' | node ~/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js update-status
 git diff --stat ROADMAP.jsonl
 ```
 

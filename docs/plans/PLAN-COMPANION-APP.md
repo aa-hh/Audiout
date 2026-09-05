@@ -1,9 +1,9 @@
 # PLAN — Companion iPhone App
 
-*2026-07-26. Planned on Fable at Alec's request; all ten open questions answered by
-Alec this session; model assignments cost-checked (four effort downgrades applied,
+*2026-07-26. Planned on Fable at the owner's request; all ten open questions answered by
+the owner this session; model assignments cost-checked (four effort downgrades applied,
 all Opus assignments upheld). Builds on dev/notes/companion-app-research.md.
-Status: awaiting Alec's approval to execute. Execution: /orchestrate picks this up.*
+Status: awaiting the owner's approval to execute. Execution: /orchestrate picks this up.*
 
 All paths relative to the repo root. Everything cited was verified in source during
 planning: `GroupController` publishes nothing and exposes every needed command
@@ -24,7 +24,7 @@ gap); connect volume needs no push — `NativeBackend.connectVolumeSeed` reads
 `docs/SPEC.md:30` still says "Mac only (no phone app)"; mock is explicit-opt-in-only
 (`OwnToneBackend.swift:783-826`).
 
-## Decisions (locked by Alec, 2026-07-26)
+## Decisions (locked by the owner, 2026-07-26)
 
 | # | Decision |
 |---|---|
@@ -47,8 +47,8 @@ CRUD, live shared state, multiple clients, no VU meters, phone-native tab UI.
 Adversarial security review surfaced information D2 was not decided against: the
 snapshot broadcasts the names of apps currently playing audio to every connected
 peer. Sonos exposes speakers, not your running apps — so "open like Sonos" understates
-what open-LAN means here. Alec's call: **add a one-time approval per phone.** The Mac
-asks once ("Allow 'Alec's iPhone' to control?"), remembers the answer, and only
+what open-LAN means here. The owner's call: **add a one-time approval per phone.** The Mac
+asks once ("Allow '<phone name>' to control?"), remembers the answer, and only
 approved phones are welcomed.
 
 Delivered as task T24 (below), after the review-fix wave. The wire already carries
@@ -143,7 +143,7 @@ explicit Apply & Reconnect button (D10).
 Model/effort final (cost-check applied: T3, T4, T12, T16 effort high→medium; all
 other assignments upheld, including the three Opus tasks).
 
-### Phase 1 — protocol + Mac server (mergeable unit: T1-T9 + T21, gate = T21 + Alec go-ahead)
+### Phase 1 — protocol + Mac server (mergeable unit: T1-T9 + T21, gate = T21 + owner go-ahead)
 
 **T1 — `AudioutProtocol` package** · new-code · deps: — · **sonnet 5, medium**
 Files: NEW `AudioutProtocol/{Package.swift, Sources/AudioutProtocol/{CompanionProto,CompanionMessage,CompanionSnapshot,CompanionCommand}.swift, Tests/AudioutProtocolTests/CompanionMessageTests.swift, AGENTS.md}`; EDIT `AudioutCore/Package.swift:120-126` (path dep) + `:137-146` (target dep).
@@ -251,12 +251,12 @@ Files: `docs/SPEC.md:30` (reverse "Mac only"; short companion subsection), root
 Map rows (server/builder/dispatcher) + Rules bullet for the two snapshot traps.
 Guard 2 verifies every named symbol.
 
-**T21 — Mac-only live gate (checklist doc, then Alec runs it)** · docs · deps: T7, T8 · **haiku 4.5, low**
+**T21 — Mac-only live gate (checklist doc, then the owner runs it)** · docs · deps: T7, T8 · **haiku 4.5, low**
 Files: NEW `dev/notes/companion-mac-live-gate.md`. Checkbox+env on/off behavior;
 websocat/loopback poke against the real app (mock backend); snapshot-vs-popover spot
 check; **macOS Application Firewall prompt check** (risk R4 — per-launch prompt =
 shipping blocker); `strings` binary-identity check (multiple-app-copies trap).
-**This gate + Alec's explicit go-ahead = the Phase-1 merge.** Main is merge-only.
+**This gate + the owner's explicit go-ahead = the Phase-1 merge.** Main is merge-only.
 
 ### Phase 2 — iPhone app (branch off merged main)
 
@@ -384,12 +384,12 @@ share a file.
 - **A1:** T1
 - **A2 (∥6):** T2, T3, T4, T5, T6, T10
 - **A3 (∥):** T7 (sole AppDelegate owner), T8, T21-doc, T11
-- **A4 — PHASE-1 MERGE GATE:** T9 → Alec runs T21 → merge T1-T9+T21 to main **only on
-  his explicit go-ahead**. iOS continues on a follow-up branch off merged main.
+- **A4 — PHASE-1 MERGE GATE:** T9 → the owner runs T21 → merge T1-T9+T21 to main **only on
+  their explicit go-ahead**. iOS continues on a follow-up branch off merged main.
 - **B (∥):** T12, T19
 - **C (∥, T13 first):** T13 → T14, T15, T16, T17a, T17b concurrently (shared UI files
   only from T12/T13)
-- **D:** T18 → T20 → Alec full live test → release branch adds T22 + T23 → merge on
+- **D:** T18 → T20 → owner full live test → release branch adds T22 + T23 → merge on
   go-ahead → ASC handoff (lance).
 - **Critical path:** T1 → T10 → T11 → T12 → T16 → T18 → T20. Mac track exits the
   critical path at A4.
@@ -400,9 +400,9 @@ share a file.
 ## recommended_execution
 
 **agents** — wave-by-wave watched parallel agents, with two hard human gates (A4:
-Alec's Mac-only live test + merge approval; end of D: full live test + merge
+the owner's Mac-only live test + merge approval; end of D: full live test + merge
 approval). Rationale: 4-6 heterogeneous judgment-heavy tasks per wave (T5/T7/T11/T16
-especially), mid-course corrections likely, and Alec's standing preference for
+especially), mid-course corrections likely, and the owner's standing preference for
 visibility over workflow ceremony; no wave is a uniform 8+-task mechanical fan-out.
 
 ## Test + guard impact

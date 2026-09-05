@@ -456,7 +456,7 @@ import AppKit
     // pick and a committed rename each write straight through, and the line
     // beside "Delete Group…" says so. Text typed into this field and not yet
     // committed is the only thing the editor can be holding, so it is the only
-    // thing that may turn the primary into "Save" (Alec, 2026-09-03).
+    // thing that may turn the primary into "Save" (owner's call, 2026-09-03).
 
     @Test func primaryReadsDoneUntilTheFieldHoldsAnUncommittedName() throws {
         let (window, _, _) = try makeWindow()

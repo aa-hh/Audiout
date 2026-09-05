@@ -26,7 +26,7 @@ When the watchdog wins, `fireSilenceWatchdog` sets `silenceCaptureOverride = tru
 
 **Consequence 1 — the PAUSED storm (Signature A: reached PLAYING, then PAUSED forever).** The ~1 s feed gap underruns the receiver's media element. The stock Default Media Receiver then pauses to rebuffer — and because our server paces at exactly real‑time rate (wall‑clock pacing, `CastLiveAudioServer.swift:227‑246`), the receiver can **never** rebuild its buffer ahead of playback (the pathological live‑source case the spike already documented). It sits PAUSED indefinitely. Nothing in our code sends PAUSE — `grep` confirms `CastClient.pause` is called only by `CastSpikeRun`, never by `CastOutputManager`, and `CastOutputManager.handle(_:)` reacts only to `PLAYING` and to `IDLE`‑after‑playing (`CastOutputManager.swift:380‑394`); a `PAUSED` status is logged and otherwise ignored.
 
-**Who paused, and when.** The receiver paused itself (buffer underrun → rebuffer stall). The PAUSED runs are **before** the deselect: attempt 1's PAUSED spans 40:44.763→41:47.898, and Alec's deselect (`removed [TV]`) is at 41:48.502, with the teardown `idle` at 41:48.579. So the PAUSED is not our teardown — it is the receiver reacting to the feed gap the watchdog created.
+**Who paused, and when.** The receiver paused itself (buffer underrun → rebuffer stall). The PAUSED runs are **before** the deselect: attempt 1's PAUSED spans 40:44.763→41:47.898, and the owner's deselect (`removed [TV]`) is at 41:48.502, with the teardown `idle` at 41:48.579. So the PAUSED is not our teardown — it is the receiver reacting to the feed gap the watchdog created.
 
 **Consequence 2 — the nondeterminism ("one success, two failures").** It is a genuine race. When Cast reaches PLAYING a beat before the 10 s mark (or the receiver's buffer happens to absorb the gap — attempt 2 at 41:53 recovered and played 16 s steady at 5.47 lead), it works. When the watchdog fires first, the session stalls or dies. Same code, different timing ⇒ intermittent.
 
@@ -63,7 +63,7 @@ This is the smallest correct fix: it reuses the existing `.connecting`/`.failed`
 
 ## SECONDARY — Signature B (IDLE → IDLE → failed, no BUFFERING) is a teardown/relaunch race the log cannot fully resolve
 
-**What the log shows.** The pure failures (attempt 5 at 43:05, and the fresh app session 340E at 47:11) go `connecting → IDLE, IDLE → failed`, never BUFFERING. Both immediately follow a prior teardown: attempt 5's `connecting` (43:05.761) lands ~0.8 s after attempt 4's deselect/`idle` (43:04.918). Alec saw the receiver launch and show "trying to stream," so LAUNCH succeeded; but the receiver never fetched (no BUFFERING, no PLAYING).
+**What the log shows.** The pure failures (attempt 5 at 43:05, and the fresh app session 340E at 47:11) go `connecting → IDLE, IDLE → failed`, never BUFFERING. Both immediately follow a prior teardown: attempt 5's `connecting` (43:05.761) lands ~0.8 s after attempt 4's deselect/`idle` (43:04.918). The owner saw the receiver launch and show "trying to stream," so LAUNCH succeeded; but the receiver never fetched (no BUFFERING, no PLAYING).
 
 **Why I can't pin it from these logs, and the two live hypotheses.** The manager logs neither the LOAD reply, the PLAY send, nor whether the HTTP GET arrived, so two causes are indistinguishable here:
 
@@ -96,7 +96,7 @@ This is the smallest correct fix: it reuses the existing `.connecting`/`.failed`
 **Fix spec.** Add one diagnostic and defer the visual change until it resolves the ambiguity:
 - **Diagnostic:** in `applyCastSnapshots` (`NativeBackend.swift:7067`) and `applyCastSessionState` (`NativeBackend.swift:2919`), emit `cast_row_state` (`.cast`) with `isAvailable` and `connectionState`. The next run shows whether the "TV" row was actually `!isAvailable` while it looked gray.
 - **If it is availability flapping (hypothesis 1):** don't drop a Cast device to unavailable on a single missed browse — a wired Cast device advertises intermittently. Debounce the `!present` → `isAvailable=false` transition in `applyCastSnapshots` (`NativeBackend.swift:7083‑7087`) behind a short grace (e.g. keep `isAvailable=true` until N consecutive browses omit it, or a few‑second timer), mirroring the "kept vanished" intent already there. Test: extend `NativeBackendCastTests.snapshotSurfacesCastRowsAndKeepsVanishedOnes` to assert one missed snapshot does **not** immediately flip `isAvailable`.
-- **If it is the missing halo (hypothesis 2):** that is a deliberate design (icon is always neutral; status reads from ring/dot) — not a bug; no code change, it's a design decision for Alec.
+- **If it is the missing halo (hypothesis 2):** that is a deliberate design (icon is always neutral; status reads from ring/dot) — not a bug; no code change, it's a design decision for the owner.
 
 **Verify:** `bash scripts/run-tests.sh --filter NativeBackendCastTests`
 
@@ -104,7 +104,7 @@ This is the smallest correct fix: it reuses the existing `.connecting`/`.failed`
 
 ## Volume on a `controlType: "fixed"` receiver — parse it, and apply fixed‑receiver gain in the feed instead of `SET_VOLUME`
 
-**Root cause.** We always send `SET_VOLUME` (`CastOutputManager.issueLevel → CastClient.setVolume`, `CastClient.swift:106‑108`), and `CastReceiverStatus.parse` does **not** read `controlType` at all (`CastClient.swift:34‑52` — only `level` and `muted`). The Streamer's RECEIVER_STATUS carries `volume.controlType` = `fixed` (HDMI/CEC‑dependent; the spike also saw `attenuation`). With `fixed`, `SET_VOLUME` is a no‑op and the TV shows the "use the remote to adjust the volume" notice — exactly Alec's symptom (5).
+**Root cause.** We always send `SET_VOLUME` (`CastOutputManager.issueLevel → CastClient.setVolume`, `CastClient.swift:106‑108`), and `CastReceiverStatus.parse` does **not** read `controlType` at all (`CastClient.swift:34‑52` — only `level` and `muted`). The Streamer's RECEIVER_STATUS carries `volume.controlType` = `fixed` (HDMI/CEC‑dependent; the spike also saw `attenuation`). With `fixed`, `SET_VOLUME` is a no‑op and the TV shows the "use the remote to adjust the volume" notice — exactly the owner's symptom (5).
 
 **Fix spec.**
 

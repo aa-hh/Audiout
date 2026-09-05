@@ -102,11 +102,11 @@ UGC, or unrestricted web access) — answer every questionnaire item "None."
 
 "Audiout Remote" (used throughout this doc, and as the current Xcode target name /
 bundle id `com.audiout.remote`) is a **working name only**. The real App Store name,
-subtitle, and bundle id are Alec's call and are executed by **T23 (pre-ASC rename)**
+subtitle, and bundle id are the owner's call and are executed by **T23 (pre-ASC rename)**
 before this kit can be submitted — folder, scheme, display name, and bundle id all move
 together in that one task.
 
-App Store name/subtitle — TODO, options for Alec to pick from:
+App Store name/subtitle — TODO, options for the owner to pick from:
 - **"Audiout Remote"** — leading candidate; matches the Mac app name directly, clear
   it's a companion, no invented branding.
 - "Audiout Controller" — more literal about function, slightly more generic.
@@ -123,7 +123,7 @@ builds and signs on its own Mac from source it can reach — it needs a **pushed
 branch/commit** (git URL + branch or SHA), not a local working tree. When ready:
 
 1. Merge the phone-app release branch (post T20 live test, post T22 checkbox-default
-   flip, post T23 rename) to `main` on Alec's go-ahead, then push.
+   flip, post T23 rename) to `main` on the owner's go-ahead, then push.
 2. Hand `lance` the pushed commit plus this document's contents (review notes, privacy
    answers, export-compliance answer, age rating, screenshot list, demo video link) to
    populate the ASC listing and screenshots.

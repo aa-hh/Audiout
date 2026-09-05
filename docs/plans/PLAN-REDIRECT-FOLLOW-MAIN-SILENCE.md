@@ -12,7 +12,7 @@ All file:line anchors are against `main` @ 2042de1.
 **Status:** READ-ONLY research complete. No code written. Root cause identified with a
 mechanism and a live-telemetry proof; ONE live A/B (§7 LT-1) separates the primary
 candidate from its runner-up before any code is written.
-**Worktree:** `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/redirect-follow-main-silence`
+**Worktree:** `~/Projects/AirPlay Controller/.claude/worktrees/redirect-follow-main-silence`
 **Branch:** `claude/redirect-follow-main-silence` (off `main` @ 2042de1, NOT merged).
 
 ---

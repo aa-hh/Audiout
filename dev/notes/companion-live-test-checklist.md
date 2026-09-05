@@ -57,7 +57,7 @@ No TestFlight build exists yet — Xcode direct-install is the only path today.
   **"Waiting for Approval…"** (yellow, spinner icon) — a real "check your Mac" holding
   state, not an error.
 - [ ] **A native alert appears on the Mac** naming the phone (its device name, e.g.
-  "Alec's iPhone"). Expected: this fires only once per unknown identity.
+  "the owner's iPhone"). Expected: this fires only once per unknown identity.
 - [ ] **Tap Allow on the Mac.** Expected: phone transitions straight to live (Speakers
   tab populates) within about a second — no re-tap needed on the phone.
 - [ ] **Check Settings › General on the Mac**: the phone now appears under
@@ -229,4 +229,4 @@ flaky in ways that don't reflect a real first-run (see caveat below).
   - Result of each review-fix verification in section 6, by name.
   - Whether the iOS 18 reboot caveat (section 8) was needed.
 - [ ] **Remember: `main` is merge-only.** Nothing from this branch merges to `main`
-  without Alec's explicit go-ahead, even if every box above is checked clean.
+  without the owner's explicit go-ahead, even if every box above is checked clean.

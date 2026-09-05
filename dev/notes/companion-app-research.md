@@ -4,7 +4,7 @@
 app's state/command surface, its existing network infrastructure, and iOS/App Store
 constraints (current as of mid-2026, sources cited in the constraints section).*
 
-## 1. What we're building (confirmed with Alec this session)
+## 1. What we're building (confirmed with the owner this session)
 
 - A **native iPhone app**, shipped **publicly on the App Store**, that remote-controls
   the Audiout Mac app.
@@ -189,14 +189,14 @@ Expect possibly one review round-trip regardless (recent precedent: a Pi-hole co
 resolved via notes + video). The `lance` App Store Connect operator is available for the
 ASC side when we get there.
 
-## 8. Open decisions for Alec
+## 8. Open decisions for the owner
 
 1. **Is phone control always-on, or a Mac-side toggle?** Recommendation: on by default
    with a Settings checkbox ("Allow control from iPhone on this network"), so it's
    discoverable but declinable.
 2. **Open-on-LAN vs first-connect approval.** Sonos is fully open on the network (the
-   model Alec referenced). Recommendation: ship open like Sonos — anyone on your Wi-Fi
-   can control playback, same as Sonos accepts. A one-time "Allow 'Alec's iPhone' to
+   model the owner referenced). Recommendation: ship open like Sonos — anyone on your Wi-Fi
+   can control playback, same as Sonos accepts. A one-time "Allow 'the owner's iPhone' to
    control?" prompt on the Mac is the easy upgrade later if wanted.
 3. **App name/branding** for the store ("Audiout Remote"?) — needed before ASC setup,
    not before building.

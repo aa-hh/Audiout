@@ -225,7 +225,7 @@ constant.
 
 **The Accent Dial Rule.** Two positions remain: Full gold and Subtle
 (`Tokens.accentStyle`, `AccentStyle.fullGold` / `.subtle`; Follow-System was
-deleted this migration, per Alec's decision F3). The dial remaps exactly ten
+deleted this migration, per the owner's decision F3). The dial remaps exactly ten
 tokens: the five accent instruments `gold`, `goldText`, `ember`, `emberText`,
 `glow` (via `accentDynamic`), and the five permission identity hues
 `permissionSystemAudio`, `permissionLocalNetwork`, `permissionRemoteControl`,
@@ -382,7 +382,7 @@ Because One Case leaves the header in the entries' own type register, the
 separation is structural instead: a rule above every section but the first,
 and every entry one indentation level in, so its header hangs to the left.
 That indentation is a deliberate departure from the HIG, which prefers a
-submenu to indenting menu items (Alec, 2026-09-05) — a submenu would put
+submenu to indenting menu items (owner's call, 2026-09-05) — a submenu would put
 every speaker an extra hop away, and reaching a speaker fast is what this
 menu is for. Do not "fix" it back.
 
@@ -599,7 +599,7 @@ at all. This mark is a dark border around a gold fill in every appearance.
 The border is a deliberate reversal of the rule this section used to state. It
 said: no border, because the mute button beside the door already says "engaged"
 with a filled pill, and a second shape for the same idea would give one row
-three vocabularies. Alec overruled it on 2026-09-04 knowing mute sits 6pt away.
+three vocabularies. The owner overruled it on 2026-09-04 knowing mute sits 6pt away.
 The two engaged marks are drawn to stay legibly apart by shape, hue and border
 at once: the door is an opaque gold rounded square with a dark border and an
 oversized, heavier glyph; mute is a borderless cool capsule at the at-rest
@@ -660,7 +660,7 @@ accessibility value, so they stay reachable by pointer and by screen reader.
 Words do not fit the narrowest slot the column has. "Couldn't connect" needs
 113.2pt of the Bluetooth row's 52pt feed slot and "Unavailable" needs 83.3pt of
 the same, with the triangle eating 19pt before the first character, so the pill
-clipped mid-word — to about "Unava". Alec chose the consistent version on
+clipped mid-word — to about "Unava". The owner chose the consistent version on
 2026-09-04 over fitting words where they fit, so an AirPlay row's wider slot
 draws the same bare glyph. This knowingly retires the Bluetooth-UI rule that
 "Connected elsewhere" and "Not paired" must read distinctly ON THE ROW; they

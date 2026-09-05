@@ -73,7 +73,7 @@ public struct Device: Identifiable, Equatable, Sendable {
             // recognised product, or a pairing that says it is headphones or
             // car audio, draws its own glyph — see ``Device/symbolName``.
             // Not "hifispeaker.2.fill": that is a stereo PAIR, which drew two
-            // cabinets for a set of earbuds (Alec, 2026-09-04).
+            // cabinets for a set of earbuds (owner's call, 2026-09-04).
             case .bluetooth:      return "radio.fill"
             // SF Symbols has no Cast rune (trademark); the TV-plus-speaker
             // glyph reads as "receiver attached to a screen", which is what a
@@ -183,7 +183,7 @@ public struct Device: Identifiable, Equatable, Sendable {
     ///
     /// Phrases are matched against the name with everything but letters and
     /// digits removed, because people rename their speakers: the pair this was
-    /// written for is called "Alec's AirPods Pro #2". Only the product phrase
+    /// written for is called "My AirPods Pro #2". Only the product phrase
     /// is ever matched — Apple does not translate these, while the words the
     /// owner puts around them can be any language.
     ///
@@ -219,7 +219,7 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// The SF Symbol for this device's row icon. Everything but Bluetooth is
     /// decided by ``Kind/symbolName`` alone; a Bluetooth pairing also states
     /// what it IS, and headphones drawn as a speaker cabinet was the defect
-    /// this exists to fix (Alec, 2026-09-04).
+    /// this exists to fix (owner's call, 2026-09-04).
     ///
     /// Three steps, and a wrong glyph is worse than a generic one, so each
     /// falls through to the next rather than guessing. First the name: when it

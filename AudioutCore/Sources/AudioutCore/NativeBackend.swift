@@ -312,6 +312,51 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// sink is internally synchronized).
     private let btSinkRefLock = NSLock()
 
+    /// One per-app mixed stream's Bluetooth delivery: the speakers it feeds, the
+    /// S16LE→Float bridge's resampler (streaming filter state, hence one per
+    /// stream and never shared), and whether that same stream still has an
+    /// engine-bound device, i.e. whether the AirPlay write stays.
+    ///
+    /// The manager is resolved per buffer rather than captured: the map is built
+    /// on `stateQueue`, and the manager may not exist until the transition that
+    /// build enqueues has run on `captureControlQueue`.
+    ///
+    /// razor: one adapter per stream, existing only because the sink manager
+    /// takes Float frames; it goes away if ``BTSyncedSink`` ever accepts S16LE.
+    private final class BTPerAppStreamFeed: SyncedLocalPCMSink, @unchecked Sendable {
+        let uids: [String]
+        let feedsEngine: Bool
+        let renderSampleRate: Double
+        let resampler: SyncedLocalBaseResampler
+        private let manager: @Sendable () -> BTSyncedSinkControlling?
+
+        init(uids: [String], feedsEngine: Bool, renderSampleRate: Double,
+             manager: @escaping @Sendable () -> BTSyncedSinkControlling?) {
+            self.uids = uids
+            self.feedsEngine = feedsEngine
+            self.renderSampleRate = renderSampleRate
+            self.resampler = SyncedLocalBaseResampler(
+                inputRate: Double(PCMFormat.airplay.sampleRate),
+                outputRate: renderSampleRate,
+                channelCount: PCMFormat.airplay.channels)
+            self.manager = manager
+        }
+
+        func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {
+            manager()?.enqueue(interleavedFrames: interleavedFrames, frameCount: frameCount,
+                               pts: pts, forDeviceUIDs: uids)
+        }
+    }
+
+    /// Where each per-app mixed stream is delivered, keyed by `streamID`.
+    /// Rebuilt whole by ``rebuildBTPerAppFeedsLocked(_:)`` and read on the
+    /// mixer's delivery thread, so it takes its own leaf lock rather than
+    /// `stateQueue` (the same posture as ``btSinkRefLock`` above). A stream with
+    /// no Bluetooth destination has NO entry, which is what leaves the
+    /// AirPlay-only path exactly as it was.
+    private var btPerAppFeeds: [Int: BTPerAppStreamFeed] = [:]
+    private let btPerAppFeedsLock = NSLock()
+
     // MARK: Bluetooth connect lifecycle (BT-LIFECYCLE)
 
     /// Every BT id currently held at `.connecting`, with the instant its hold
@@ -461,6 +506,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// tap start/stop or a synced-local transition).
     private var btSinkEnabled = false
     private var btSelectedUIDs: [String] = []
+    /// The Bluetooth UIDs the current PER-APP topology feeds, sorted. Held apart
+    /// from `btSelectedUIDs` on purpose: it arms the sink manager
+    /// (``btArmingLocked()``) but is deliberately absent from
+    /// ``btOnlyReferenceMs(latencies:uids:)`` and ``roomDelayLocked()``, so a
+    /// per-app destination READS the room's timing and never writes it — one
+    /// app's speaker cannot re-anchor every other sink in the house.
+    ///
+    /// razor: a per-app-only speaker measured slower than the reference then
+    /// hits `SyncTiming.totalDelayNanos`'s ≥ 0 clamp and plays late; the upgrade
+    /// is to fold these UIDs into the reference, at the cost of re-anchoring
+    /// every other BT sink, the Mac's own sink and the AirPlay pre-delay.
+    private var btPerAppClaimedUIDs: [String] = []
     private var btComposition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
     /// The BT-only reference timeline currently in force (ms) — the buffer
     /// every BT sink AND the Mac's own sink schedule against when no AirPlay
@@ -1213,6 +1270,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// app quit — PLAN §C — so nothing else re-drives `updateAppRoutes` for it).
     private var lastRoutes: [AppRoute] = []
 
+    /// The saved groups' resolved per-app-route memberships, as last handed to
+    /// `updateAppRoutes` — group id → eligible members and their levels inside
+    /// the group. This is what a `.group` route resolves against; it is a
+    /// SNAPSHOT of a live reference, replaced wholesale on every push (a group
+    /// edit re-pushes it), never merged. On `stateQueue`.
+    private var lastGroupTargets: [String: GroupRouteTarget] = [:]
+
     /// Bundle IDs currently known NOT to be producing audio despite an active
     /// `.device(id:)` route: quit mid-stream (`handleAppTerminated`) or a failed
     /// per-app capture (`handlePerAppCaptureHealthChange`). Excluded from
@@ -1370,7 +1434,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `everCapturedBundleIDs`. Asserted DIRECTLY (rather than via an
     /// engine-bind side effect) because `resetAirPlaySessionForRoutedApp` —
     /// the consumer of a stale entry here — is a guaranteed no-op via its own
-    /// `routeMixer.streamID(for:)` guard when triggered from
+    /// `routeMixer.streamIDs(for:)` guard when triggered from
     /// `handleAppLaunched`'s synchronous relaunch path (the topology republish
     /// that would bind a stream hasn't run yet), so a test built on engine
     /// binds alone cannot distinguish a fixed `handleAppTerminated` from a
@@ -1659,6 +1723,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self?.handleDestinationSetsChanged(sets)
         }
         routeMixer.onMixedBuffer = { [weak self] mixed in
+            guard let self else { return }
             // `engine.write` is nonisolated + fire-and-forget — safe from the
             // mixer's queue with no hop. streamID is ≥ 1 (0 is the legacy path).
             if AudioDiag.isEnabled {
@@ -1669,8 +1734,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 AudioDiag.tick("engineWrite:stream\(mixed.streamID)",
                                detail: "s16peak=\(Self.diagS16Peak(mixed.pcm)) frames=\(mixed.frameCount)")
             }
-            self?.engine.write(
-                pcm: mixed.pcm, streamId: UInt32(mixed.streamID), pts: mixed.pts)
+            // R-partition, per-app half: a stream can span an AirPlay receiver
+            // and a Bluetooth speaker, so the two deliveries are ADDITIVE. No
+            // entry at all means no Bluetooth on this stream — the engine write
+            // then stands alone, as it always has.
+            let feed = self.btPerAppFeedsLock.withLock { self.btPerAppFeeds[mixed.streamID] }
+            if feed?.feedsEngine ?? true {
+                self.engine.write(
+                    pcm: mixed.pcm, streamId: UInt32(mixed.streamID), pts: mixed.pts)
+            }
+            if let feed {
+                NativeCaptureCoordinator.fanOutToSyncedLocal(
+                    mixed.pcm, pts: mixed.pts, into: feed, resampler: feed.resampler)
+            }
             // BACKPRESSURE VISIBILITY (diagnostic): the engine's write guard can
             // silently DROP audio once a stream's un-drained backlog hits its cap
             // — audible as "dropped milliseconds" that the routing telemetry above
@@ -1680,7 +1756,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // `Telemetry` must never be called at buffer cadence. One cheap
             // counter increment per buffer; a snapshot read + possible log only
             // once every `backlogSampleInterval` buffers.
-            self?.sampleWriteBacklogIfDue()
+            self.sampleWriteBacklogIfDue()
             // CADENCE VISIBILITY (T-ENG-CADENCE-1, whole-system-dropout
             // investigation): same rationale and throttling as the backlog
             // sample above, for the engine's write-cadence deficit/overrun
@@ -1689,7 +1765,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // `NativeCaptureCoordinator.swift` mirrors this for stream 0
             // (`path: "wholeSystem"`), so this event now has full coverage
             // whether or not any per-app route is active.
-            self?.sampleWriteCadenceIfDue()
+            self.sampleWriteCadenceIfDue()
             // The per-device meter is driven by the apps' PRE-volume SOURCE levels
             // (see `emitAppLevel`), NOT this post-volume mixed buffer — so nothing
             // metering-related is read off the mix here.
@@ -2333,6 +2409,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // stop (same ordering argument as the coordinator stop).
             self.btSinkEnabled = false
             self.btSelectedUIDs = []
+            self.btPerAppClaimedUIDs = []
             self.btComposition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
             // CAST-OUT: same shape — reset the decisions here, enqueue the
             // teardown below so the FIFO's last Cast op is the disable.
@@ -3201,7 +3278,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
             // Roadmap 008 (selection-edge replay): a device flipping into or out of
             // the whole-system claim changes route-target ELIGIBILITY exactly like a
-            // reachability edge does. If any `.device` route targets a flipped id,
+            // reachability edge does. If any route targets a flipped id (directly,
+            // or through a group's membership — `routesTargetDeviceLocked`),
             // replay the (unedited) route table so `effectiveAppRoutesLocked`
             // re-resolves it — select demotes the route (the app audibly rejoins the
             // whole-system mix), deselect restores it, with no route-table edit in
@@ -3209,10 +3287,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // `rerunAppRoutesIfTargeted`: `rerunAppRoutesForReachabilityChange` is
             // documented safe to call with `stateQueue` held.
             let claimFlips = previouslySelected.symmetricDifference(ids)
-            if !claimFlips.isEmpty, self.lastRoutes.contains(where: {
-                if case .device(let deviceID) = $0.destination { return claimFlips.contains(deviceID) }
-                return false
-            }) {
+            if claimFlips.contains(where: { self.routesTargetDeviceLocked($0) }) {
                 self.rerunAppRoutesForReachabilityChange()
             }
 
@@ -3411,14 +3486,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.btSinkEnabled = wantBT
                 self.btSelectedUIDs = btUIDs
                 self.btComposition = composition
-                let gains = self.btSinkGains(forUIDs: btUIDs)
+                // The manager arms for BOTH domains, so the set it is handed is
+                // the union — while the reference below stays a function of the
+                // whole-system selection alone.
+                let (armed, armedUIDs) = self.btArmingLocked()
+                let gains = self.btSinkGains(forUIDs: armedUIDs)
                 // Derived AFTER the new selection is committed — the reference
                 // is a function of the selected devices' measured latencies.
                 let referenceMs = self.updateBTReferenceBufferLocked()
-                let eqs = self.btSinkEQs(forUIDs: btUIDs)
+                let eqs = self.btSinkEQs(forUIDs: armedUIDs)
                 self.captureControlQueue.async { [weak self] in
                     self?.applyBTSinkTransition(
-                        enable: wantBT, uids: btUIDs, composition: composition,
+                        enable: armed, uids: armedUIDs, composition: composition,
                         gains: gains, eqs: eqs, referenceBufferMs: referenceMs)
                 }
                 if localReferenceMoved, self.syncedLocalSinkApplied {
@@ -3932,6 +4011,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         return desired
     }
 
+    /// Whether the sink manager must be armed and for which UIDs: the two
+    /// domains that can claim a Bluetooth speaker — the whole-system selection
+    /// and the per-app topology — deduped and sorted. The single answer every
+    /// ``applyBTSinkTransition(enable:uids:composition:gains:eqs:referenceBufferMs:)``
+    /// call outside `stop()`'s explicit teardown asks.
+    ///
+    /// `btSinkEnabled` deliberately keeps its narrower whole-system-only
+    /// meaning: it is what ``roomDelayLocked()`` branches on, and widening it
+    /// would put a per-app destination in charge of the room's timing. On
+    /// `stateQueue`.
+    private func btArmingLocked() -> (enable: Bool, uids: [String]) {   // on stateQueue
+        (btSinkEnabled || !btPerAppClaimedUIDs.isEmpty,
+         Set(btSelectedUIDs).union(btPerAppClaimedUIDs).sorted())
+    }
+
     /// Wave-4 reconnect-reapply: re-run the CURRENT BT sink decision so a
     /// selected device that just (re)appeared resolves a live `AudioObjectID`
     /// and re-enters the per-device set (and one that vanished drops out). The
@@ -3939,8 +4033,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// which `applyBTSinkTransition` performs fresh on every apply. On
     /// `stateQueue`.
     private func reapplyBTSinkLocked() {
-        guard btSinkEnabled else { return }
-        let uids = btSelectedUIDs
+        let (armed, uids) = btArmingLocked()
+        guard armed else { return }
         let composition = btComposition
         let gains = btSinkGains(forUIDs: uids)
         let referenceMs = updateBTReferenceBufferLocked()
@@ -4305,8 +4399,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     /// Whether a `.device(id:)` route pointed at `id` can actually carry audio
     /// RIGHT NOW: the device is in our discovered snapshot, reports itself
-    /// reachable, and has an engine output handle to stream through. On
+    /// reachable, and has somewhere to stream through — an engine output handle,
+    /// or, for a Bluetooth speaker, its own delay-line sink, which the manager
+    /// feeds by UID and which therefore never holds an `outputIDs` entry. On
     /// `stateQueue`.
+    ///
+    /// The second arm tests the POSITIVE kind (`isBluetooth`), never `!isCast`
+    /// or `supportsAirPlay2`: Cast is the third R-partition arm with no per-app
+    /// delivery path at all, and AP1 receivers share `supportsAirPlay2: false`
+    /// with Bluetooth while being engine-driven.
     ///
     /// This is the whole basis of the effective route table below (R5). A route
     /// aimed at an unreachable receiver is intent, not a live redirect: honouring
@@ -4316,7 +4417,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// pushed in before discovery has found anything, and each one engages as its
     /// device shows up.
     private func isRouteTargetReachableLocked(_ id: String) -> Bool {   // on stateQueue
-        known[id]?.isAvailable == true && outputIDs[id] != nil
+        guard let device = known[id], device.isAvailable else { return false }
+        return outputIDs[id] != nil || device.isBluetooth
     }
 
     /// Whether whole-system routing (stream 0) CLAIMS `id` at the DECISION layer —
@@ -4348,6 +4450,25 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         isRouteTargetReachableLocked(id) && !isWholeSystemClaimedLocked(id)
     }
 
+    /// Whether any per-app route currently AIMS at `id` — a `.device` route
+    /// naming it, or a `.group` route whose resolved membership contains it.
+    /// The two eligibility replays below (R5's reachability edge, roadmap 008's
+    /// selection edge) both key on this, and both used to match `.device` only:
+    /// a group-routed app whose member went briefly unreachable — or was
+    /// released by Main Out — was then never re-resolved, so it stayed excluded
+    /// from the whole-system mix with its stream bound to a speaker that had
+    /// gone away. Routed in the UI, silent at every speaker, and unrecoverable
+    /// short of re-picking the destination by hand. On `stateQueue`.
+    private func routesTargetDeviceLocked(_ id: String) -> Bool {   // on stateQueue
+        lastRoutes.contains { route in
+            switch route.destination {
+            case .device(let deviceID):        return deviceID == id
+            case .group(let groupID):          return lastGroupTargets[groupID]?.memberVolumes[id] != nil
+            case .noRedirect, .currentDevice:  return false
+            }
+        }
+    }
+
     /// `routes` with every `.device` route whose target is unreachable right now
     /// demoted to `.noRedirect` — the EFFECTIVE table, which is what all of the
     /// per-app machinery keys off (R5). On `stateQueue`.
@@ -4365,25 +4486,60 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// reset-on-unavailable behavior, and it is what lets
     /// `rerunAppRoutesForReachabilityChange` restore the redirect with no
     /// route-table edit and no user action.
-    private func effectiveAppRoutesLocked(_ routes: [AppRoute]) -> [AppRoute] {   // on stateQueue
+    /// What one resolve produced: the effective route table (a route with no
+    /// eligible speaker left demoted to `.noRedirect`) and, for every route that
+    /// kept at least one, the speakers it actually feeds with the gain to feed
+    /// them at.
+    private struct EffectiveAppRoutes {
+        let routes: [AppRoute]
+        let routedApps: [AppRouteMixer.RoutedApp]
+    }
+
+    private func effectiveAppRoutesLocked(_ routes: [AppRoute]) -> EffectiveAppRoutes {   // on stateQueue
         // Roadmap 008: demotion now keys on ELIGIBILITY (reachable AND not
         // whole-system-claimed), not bare reachability — a route whose target is a
         // Selected Device is demoted exactly like an unreachable one, so the app
         // rejoins the whole-system mix (which includes the contested device)
         // instead of streaming into the void. Claim demotions additionally keep an
         // edge-triggered, queryable conflict record (loud loser).
+        //
+        // A GROUP route runs the same per-device test over each resolved member
+        // and keeps whatever survives — the app plays on the group's remaining
+        // speakers rather than losing the whole route to one contested member.
+        // Only an EMPTY survivor set demotes it, which is the same "nowhere to
+        // stream" condition a single unreachable target already means.
         var claimDemotions: [String: [String]] = [:]   // device id → demoted bundle ids
+        var routedApps: [AppRouteMixer.RoutedApp] = []
         let mapped = routes.map { route -> AppRoute in
-            guard case .device(let id) = route.destination else { return route }
-            let claimed = isWholeSystemClaimedLocked(id)
-            guard claimed || !isRouteTargetReachableLocked(id) else { return route }
-            if claimed { claimDemotions[id, default: []].append(route.bundleID) }
-            var demoted = route
-            demoted.destination = .noRedirect
-            return demoted
+            let candidates: [String: Int]
+            switch route.destination {
+            case .noRedirect, .currentDevice:
+                return route
+            case .device(let id):
+                candidates = [id: 100]
+            case .group(let id):
+                candidates = lastGroupTargets[id]?.memberVolumes ?? [:]
+            }
+            var gains: [String: Int] = [:]
+            for (deviceID, memberVolume) in candidates {
+                if isWholeSystemClaimedLocked(deviceID) {
+                    claimDemotions[deviceID, default: []].append(route.bundleID)
+                    continue
+                }
+                guard isRouteTargetReachableLocked(deviceID) else { continue }
+                gains[deviceID] = AppRouteMixer.composedGain(
+                    routeVolume: route.volume, memberVolume: memberVolume)
+            }
+            guard !gains.isEmpty else {
+                var demoted = route
+                demoted.destination = .noRedirect
+                return demoted
+            }
+            routedApps.append(AppRouteMixer.RoutedApp(bundleID: route.bundleID, deviceGains: gains))
+            return route
         }
         reconcileScopeConflictsLocked(claimDemotions)
-        return mapped
+        return EffectiveAppRoutes(routes: mapped, routedApps: routedApps)
     }
 
     /// Edge-triggered bookkeeping for demote-at-decision (roadmap 008): diff the
@@ -4428,11 +4584,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func rerunAppRoutesForReachabilityChange() {
         captureControlQueue.async { [weak self] in
             guard let self else { return }
-            let (routes, excluded) = self.stateQueue.sync {
-                (self.lastRoutes, self.lastExcludedBundleIDs)
+            let (routes, excluded, groupTargets) = self.stateQueue.sync {
+                (self.lastRoutes, self.lastExcludedBundleIDs, self.lastGroupTargets)
             }
             guard !routes.isEmpty else { return }
-            self.updateAppRoutes(routes, excludedBundleIDs: excluded)
+            self.updateAppRoutes(routes, excludedBundleIDs: excluded, groupTargets: groupTargets)
         }
     }
 
@@ -4474,12 +4630,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `localPlaybackEngine` graph mutations, and the mixer's own queue hop — runs
     /// OUTSIDE `stateQueue`, the same discipline the capture gate keeps for
     /// `captureControlQueue`.
-    public func updateAppRoutes(_ routes: [AppRoute], excludedBundleIDs: Set<String> = []) {
+    public func updateAppRoutes(
+        _ routes: [AppRoute], excludedBundleIDs: Set<String> = [],
+        groupTargets: [String: GroupRouteTarget] = [:]
+    ) {
         // T6-rev: the other routing-action permission chokepoint. Same placement
         // and same non-blocking contract as `setOutputSet`'s — see `onRoutingAction`.
         onRoutingAction?()
         let plan: UpdateRoutesPlan = stateQueue.sync {
             self.lastRoutes = routes
+            // A `.group` route is a live reference: this snapshot is what it
+            // resolves against, so a group edit re-pushing an unchanged route
+            // table still moves the audio.
+            self.lastGroupTargets = groupTargets
             // Retained so the metering-only target set can subtract it and so a
             // denylist change alone re-reconciles the metering taps (T3, PRIVACY).
             self.lastExcludedBundleIDs = excludedBundleIDs
@@ -4489,11 +4652,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // whose target is unreachable right now reads as `.noRedirect`, so the
             // app stays in the whole-system mix rather than being excluded in favour
             // of a stream that can't reach anything.
-            let effective = self.effectiveAppRoutesLocked(routes)
-            let newRouted = Set(effective.compactMap { route -> String? in
-                if case .device = route.destination { return route.bundleID }
-                return nil
-            })
+            let resolved = self.effectiveAppRoutesLocked(routes)
+            let effective = resolved.routes
+            let newRouted = Set(resolved.routedApps.map(\.bundleID))
             // Bug T2: apps deliberately pinned to the local Mac ("Current Device").
             let newLocal = Set(effective.compactMap { route -> String? in
                 route.destination == .currentDevice ? route.bundleID : nil
@@ -4582,7 +4743,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // capturing — a `deadBundleIDs` entry (quit mid-stream, or a per-app tap
             // that's `.failed`) is excluded here so `.routedApps` / the engine stream
             // binding never claim a silent app is streaming.
-            let mixerRoutes = effective.filter { !self.deadBundleIDs.contains($0.bundleID) }
+            let mixerRoutes = resolved.routedApps.filter { !self.deadBundleIDs.contains($0.bundleID) }
 
             // The per-app tap is destination-agnostic — one tap serves whichever
             // destination the app currently routes to — so its start/stop keys on
@@ -4733,7 +4894,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         /// `.noRedirect` (R5). This — not the raw table — is what the whole-system
         /// tap's exclusion set is computed from.
         let effectiveRoutes: [AppRoute]
-        let mixerRoutes: [AppRoute]
+        let mixerRoutes: [AppRouteMixer.RoutedApp]
         let captureToStart: Set<String>
         let captureToStop: Set<String>
         let localRemoved: Set<String>
@@ -4973,13 +5134,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// rebinding it (removeOutput → addOutput = a fresh RTSP/RTP session with a
     /// clean timeline anchor). Called when a routed app's per-app tap was rebuilt
     /// (a sample-rate/device change), which leaves the receiver desynced and
-    /// permanently silent even though real PCM keeps flowing. `streamID(for:)`
+    /// permanently silent even though real PCM keeps flowing. `streamIDs(for:)`
     /// reads the mixer's own queue, so it's fetched BEFORE taking `stateQueue`.
     private func resetAirPlaySessionForRoutedApp(bundleID: String) {
-        guard let stream = routeMixer.streamID(for: bundleID) else { return }
-        let streamU = UInt32(stream)
+        let streams = Set(routeMixer.streamIDs(for: bundleID).map(UInt32.init))
+        guard !streams.isEmpty else { return }
         stateQueue.sync {
-            for (deviceID, bound) in self.streamBindings where bound == streamU {
+            for (deviceID, bound) in self.streamBindings where streams.contains(bound) {
                 if let outputID = self.outputIDs[deviceID] {
                     // Fresh reset → bump the generation (supersedes + cancels any
                     // in-flight recovery for this device) and start attempt 1.
@@ -4995,12 +5156,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     Telemetry.log(.airplay, "session_reset", [
                         "device": deviceID,
                         "scope": bundleID,
-                        "stream": "\(stream)",
+                        "stream": "\(bound)",
                         "gen": "\(gen)",
                         "trigger": "recapture",
                     ])
                     self.enqueueRebindRecovery(
-                        deviceID: deviceID, outputID: outputID, scope: .perApp(stream: streamU),
+                        deviceID: deviceID, outputID: outputID, scope: .perApp(stream: bound),
                         gen: gen, attempt: 1)
                 }
             }
@@ -5425,9 +5586,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// from OUTSIDE any existing `stateQueue.sync` block (e.g. not from
     /// `updateAppRoutes`'s own critical section, which computes the equivalent
     /// inline to avoid a same-queue deadlock).
-    private func effectiveMixerRoutes() -> [AppRoute] {
+    private func effectiveMixerRoutes() -> [AppRouteMixer.RoutedApp] {
         stateQueue.sync {
-            self.effectiveAppRoutesLocked(self.lastRoutes)
+            self.effectiveAppRoutesLocked(self.lastRoutes).routedApps
                 .filter { !self.deadBundleIDs.contains($0.bundleID) }
         }
     }
@@ -5620,7 +5781,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // practice `resetAirPlaySessionForRoutedApp` is ALSO a guaranteed
             // no-op for this exact call path today — `handleAppLaunched` calls
             // `perAppCapture.start` synchronously-to-completion BEFORE its own
-            // `republishMixerTopology()` runs, so `routeMixer.streamID(for:)`
+            // `republishMixerTopology()` runs, so `routeMixer.streamIDs(for:)`
             // is still nil when `.capturing` lands — but this keeps the
             // invariant this field documents true regardless of that other
             // function's current implementation, and keeps it in sync with
@@ -5848,21 +6009,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.routedAppNames = newAppNames
 
             // --- stream binding diff (engine ops; only for discovered devices) ---
-            // T4b defensive guard: AirPlay-1 (RAOP) devices are never offered as a
-            // per-app routing target in the UI (`supportsAirPlay2 == false` is
-            // filtered out of `PopoverController.availableAirPlayDestinations`),
-            // but a stale/racing UI state could still hand one down here. Refuse it
-            // rather than proceed into `.bind`/`.rebind` — a rebind on an AP1 device
-            // re-anchors its clock (no shared timing protocol with AP2) and drifts
-            // it out of sync with the rest of a group, and some classic receivers
-            // briefly reject the RTSP reconnect. Skip silently (no-op): the device
-            // just doesn't get a per-app stream, same as if it were never offered.
-            let ap1DeviceIDs = Set(self.known.keys.filter { !(self.known[$0]?.supportsAirPlay2 ?? true) })
+            // `outputIDs[deviceID] != nil` is the guard that does the work here: it
+            // is populated in exactly one place, the AirPlay discovery path, so it
+            // structurally keeps Bluetooth and Cast ids out of this bind path
+            // (neither kind's rows ever receive an entry — they're routed through
+            // their own sink managers, never the engine) regardless of what the UI
+            // hands down. It also defers, rather than drops, a target this backend
+            // hasn't discovered YET: `addOrUpdate` re-drives this same binding pass
+            // once the device shows up, so a route picked slightly ahead of
+            // discovery still resolves once discovery catches up.
             var newBindings: [String: UInt32] = [:]
             for set in sets {
                 let stream = UInt32(set.streamID)
                 for deviceID in set.deviceIDs
-                where self.outputIDs[deviceID] != nil && !ap1DeviceIDs.contains(deviceID) {
+                where self.outputIDs[deviceID] != nil {
                     newBindings[deviceID] = stream
                 }
             }
@@ -5918,7 +6078,65 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // drops (`reconcileAggregateDefault`'s tail call is unreached with an
             // empty `expectedSelected`).
             self.reconcileHandoffWatcherLocked()
+
+            // BT-BACKEND (R-partition): the per-app half of what the binding
+            // loop above structurally skipped. A Bluetooth speaker a route names
+            // is fed by UID through the sink manager, so the manager has to be
+            // armed for it even with nothing selected whole-system — and armed
+            // WITHOUT joining `btSelectedUIDs`, which is the only input the
+            // room's timing has.
+            //
+            // razor: a per-app GROUP route spanning an AirPlay receiver and a BT
+            // speaker will not agree — `airPlayPresent` is computed from the
+            // whole-system selection alone, so the BT sink schedules against the
+            // Mac's own clock while the receiver plays on its presentation
+            // timeline. The upgrade is folding per-app AirPlay destinations into
+            // `BTGroupComposition`; not taken because it re-anchors every BT
+            // sink and the Mac's own sink for the sake of one app's route.
+            let perAppBTUIDs = Set(sets.flatMap(\.deviceIDs))
+                .filter { self.known[$0]?.isBluetooth == true }
+                .sorted()
+            if perAppBTUIDs != self.btPerAppClaimedUIDs {
+                self.btPerAppClaimedUIDs = perAppBTUIDs
+                let (armed, armedUIDs) = self.btArmingLocked()
+                let composition = self.btComposition
+                let gains = self.btSinkGains(forUIDs: armedUIDs)
+                let eqs = self.btSinkEQs(forUIDs: armedUIDs)
+                // The reference ALREADY IN FORCE, never a fresh derivation: a
+                // per-app claim reads the room's timeline and must not move it.
+                let referenceMs = self.btReferenceBufferMs
+                let claimed = Set(perAppBTUIDs)
+                self.captureControlQueue.async { [weak self] in
+                    self?.applyBTSinkTransition(
+                        enable: armed, uids: armedUIDs, composition: composition,
+                        gains: gains, eqs: eqs, referenceBufferMs: referenceMs)
+                    // What the whole-system fan-out must now skip, so a speaker
+                    // this topology feeds never also hears the system mix.
+                    self?.btSink?.setPerAppClaimedUIDs(claimed)
+                }
+            }
+            self.rebuildBTPerAppFeedsLocked(sets)
         }
+    }
+
+    /// Rebuild the per-app Bluetooth delivery map from the current topology —
+    /// one entry per stream that has at least one Bluetooth device on it, none
+    /// for a stream that has none. The adapter and its resampler are built HERE,
+    /// once per stream, never per buffer. On `stateQueue`.
+    private func rebuildBTPerAppFeedsLocked(_ sets: [AppRouteMixer.DestinationSet]) {   // on stateQueue
+        let renderSampleRate = btSinkRefLock.withLock { btSink }?.renderSampleRate
+            ?? Double(PCMFormat.airplay.sampleRate)
+        var feeds: [Int: BTPerAppStreamFeed] = [:]
+        for set in sets {
+            let uids = set.deviceIDs.filter { known[$0]?.isBluetooth == true }.sorted()
+            guard !uids.isEmpty else { continue }
+            feeds[set.streamID] = BTPerAppStreamFeed(
+                uids: uids,
+                feedsEngine: set.deviceIDs.contains { outputIDs[$0] != nil },
+                renderSampleRate: renderSampleRate,
+                manager: { [weak self] in self?.btSinkRefLock.withLock { self?.btSink } })
+        }
+        btPerAppFeedsLock.withLock { btPerAppFeeds = feeds }
     }
 
     /// Chain `ops` onto the `bindTail` FIFO in the given order (on `stateQueue`).
@@ -8270,9 +8488,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `stateQueue` (the replay itself hops off it).
     private func rerunAppRoutesIfTargeted(_ id: String, wasEligible: Bool) {   // on stateQueue
         let isEligible = isRouteTargetEligibleLocked(id)
-        guard isEligible != wasEligible,
-              lastRoutes.contains(where: { $0.destination == .device(id: id) })
-        else { return }
+        guard isEligible != wasEligible, routesTargetDeviceLocked(id) else { return }
         AudioDiag.log(
             "app routes: redirect target \(id) became \(isEligible ? "ELIGIBLE" : "INELIGIBLE")"
             + " — re-resolving effective routes (route table unchanged)")
@@ -11582,6 +11798,14 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// Per-device tone. A property swap on the running session — never a
     /// rebuild. Same default-no-op posture as `setTrimMs`.
     func setEQ(_ eq: DeviceEQ, forDeviceUID uid: String)
+    /// The UIDs per-app routing feeds directly, so the whole-system fan-out
+    /// skips them and no speaker hears both mixes. Same default-no-op posture as
+    /// `setTrimMs`.
+    func setPerAppClaimedUIDs(_ uids: Set<String>)
+    /// Feed one per-app mixed stream to exactly `uids`, ignoring the claim set
+    /// above. Same default-no-op posture as `setTrimMs`.
+    func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec,
+                 forDeviceUIDs uids: [String])
 }
 
 extension BTSyncedSinkControlling {
@@ -11595,6 +11819,9 @@ extension BTSyncedSinkControlling {
     }
     func setGain(_ gain: Float, forDeviceUID uid: String) {}
     func setEQ(_ eq: DeviceEQ, forDeviceUID uid: String) {}
+    func setPerAppClaimedUIDs(_ uids: Set<String>) {}
+    func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec,
+                 forDeviceUIDs uids: [String]) {}
 }
 
 extension BTSyncedSink: BTSyncedSinkControlling {}

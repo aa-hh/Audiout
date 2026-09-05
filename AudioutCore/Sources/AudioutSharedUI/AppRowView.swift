@@ -62,7 +62,8 @@ public final class AppRowView: NSView {
     }
 
     /// One entry in the destination popup: the standalone "No Redirect" entry,
-    /// a local "Current Device" row, or an AirPlay device. Plain values only
+    /// a local "Current Device" row, a saved output group, or an AirPlay device.
+    /// Plain values only
     /// (T-6 isolation requirement — no `AppRoute`/`AppRouteStore` dependency).
     public struct Destination {
         public let id: String
@@ -90,11 +91,32 @@ public final class AppRowView: NSView {
         /// copy; the HOST supplies it (a later task passes real strings for the
         /// standalone "No Redirect" and local "Current Device" entries).
         public let subtitle: String?
+        /// True for a SAVED OUTPUT GROUP entry — listed under its own header
+        /// between the standalone entries and "Current Device". `isLocal` is
+        /// `false` for these (a group's speakers are AirPlay), so this flag is
+        /// what keeps them out of the plain "AirPlay Devices" section.
+        public let isGroup: Bool
+        /// `false` renders the entry greyed out and unpickable, still naming
+        /// what it is and why it can't be picked in its `subtitle` — e.g. a
+        /// group with no usable speaker right now. Hiding it instead would make
+        /// a group the user saved look as though it had vanished.
+        public let isEnabled: Bool
+        /// What the COLLAPSED pop-up button reads while this entry is the
+        /// selected one, when that should differ from `title` (a group names
+        /// itself as "→ Kitchen" on the button, "Kitchen" in the open menu —
+        /// the same convention Main Out's own dropdown uses). `nil` keeps the
+        /// button showing `title`.
+        public let buttonTitle: String?
         public init(id: String, title: String, isLocal: Bool, symbolName: String? = nil,
-                   isStandalone: Bool = false, subtitle: String? = nil) {
+                   isStandalone: Bool = false, subtitle: String? = nil,
+                   isGroup: Bool = false, isEnabled: Bool = true,
+                   buttonTitle: String? = nil) {
             self.id = id; self.title = title; self.isLocal = isLocal; self.symbolName = symbolName
             self.isStandalone = isStandalone
             self.subtitle = subtitle
+            self.isGroup = isGroup
+            self.isEnabled = isEnabled
+            self.buttonTitle = buttonTitle
         }
     }
 
@@ -361,6 +383,19 @@ public final class AppRowView: NSView {
             allowsAttributedSubtitle: false)
         destinationPopUp.menu = menu
         if let currentItem { destinationPopUp.select(currentItem) }
+        // A distinct `buttonTitle` shows on the COLLAPSED button while the open
+        // menu keeps the full `title`. `usesItemFromMenu = false` + a
+        // display-only cell item is the documented way to make the two differ;
+        // re-set on every rebuild so a later pick without an override reverts.
+        if let cell = destinationPopUp.cell as? NSPopUpButtonCell {
+            let buttonTitle = destinations.first { $0.id == selectedID }?.buttonTitle
+            if let buttonTitle {
+                cell.usesItemFromMenu = false
+                cell.menuItem = NSMenuItem(title: buttonTitle, action: nil, keyEquivalent: "")
+            } else {
+                cell.usesItemFromMenu = true
+            }
+        }
     }
 
     /// Shared builder behind both the trailing destination popup and the
@@ -372,9 +407,8 @@ public final class AppRowView: NSView {
     /// host may prepend a "Resume → <device>" entry ahead of the fixed "No
     /// Redirect" entry) FIRST, with no header (the default/neutral choice and
     /// any "get back to this" shortcut, visually distinct from every named
-    /// section), then a separator, then the same two sections as before
-    /// (LOCKED DECISION 4 — no Groups): "Current Device", then "AirPlay
-    /// Devices".
+    /// section), then a separator, then three sections: "Output Groups",
+    /// "Current Device", "AirPlay Devices".
     ///
     /// - Parameter allowsAttributedSubtitle: whether an entry's `subtitle`
     ///   (A3) may render as a second attributed line under the title. Pass
@@ -386,6 +420,12 @@ public final class AppRowView: NSView {
         selecting selectedID: String, action: Selector, allowsAttributedSubtitle: Bool = true
     ) -> (menu: NSMenu, currentItem: NSMenuItem?) {
         let menu = NSMenu()
+        // Every item's `isEnabled` is decided HERE (headers, and an entry the
+        // host marked unpickable). Automatic enabling would hand that decision
+        // to the target's own validation and light those items back up — and an
+        // `NSPopUpButton` re-points every item's action at its own cell, so
+        // withholding the action isn't a way to grey one out either.
+        menu.autoenablesItems = false
         var currentItem: NSMenuItem?
 
         func addHeader(_ title: String) {
@@ -414,16 +454,23 @@ public final class AppRowView: NSView {
         // header of its own — it's the neutral default, not a member of
         // either named group.
         let standaloneEntries = destinations.filter(\.isStandalone)
+        let groupEntries = destinations.filter { $0.isGroup && !$0.isStandalone }
         let localEntries = destinations.filter { $0.isLocal && !$0.isStandalone }
         // `!isStandalone` mirrors `localEntries`'s own exclusion above — without
         // it, a standalone entry that also names a device (e.g. a "Resume →
         // <device>" entry, `isLocal: false`) would render TWICE: once at the
-        // top with the other standalone entries, once again down here.
-        let deviceEntries = destinations.filter { !$0.isLocal && !$0.isStandalone }
+        // top with the other standalone entries, once again down here. Groups
+        // are excluded for the same reason: they have their own section.
+        let deviceEntries = destinations.filter { !$0.isLocal && !$0.isStandalone && !$0.isGroup }
 
         addEntries(standaloneEntries)
-        if !standaloneEntries.isEmpty, !localEntries.isEmpty || !deviceEntries.isEmpty {
+        if !standaloneEntries.isEmpty,
+           !groupEntries.isEmpty || !localEntries.isEmpty || !deviceEntries.isEmpty {
             menu.addItem(.separator())
+        }
+        if !groupEntries.isEmpty {
+            addHeader("Output Groups")
+            addEntries(groupEntries)
         }
         if !localEntries.isEmpty {
             addHeader("Current Device")
@@ -454,6 +501,7 @@ public final class AppRowView: NSView {
         item.target = self
         item.state = isCurrent ? .on : .off
         item.representedObject = entry.id
+        item.isEnabled = entry.isEnabled
         if let symbolName = entry.symbolName {
             let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
             item.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
@@ -791,7 +839,14 @@ public final class AppRowView: NSView {
     /// The dropdown's collapsed title — must always name the destination:
     /// the bridge phrase "Follows main output" when unrouted (spec §5.1,
     /// decision 3) or the device name when routed.
-    public var test_collapsedDestinationTitle: String? { destinationPopUp.titleOfSelectedItem }
+    public var test_collapsedDestinationTitle: String? {
+        guard let cell = destinationPopUp.cell as? NSPopUpButtonCell else {
+            return destinationPopUp.titleOfSelectedItem
+        }
+        // With a `buttonTitle` override in force the button renders the
+        // display-only cell item, not the selected menu item.
+        return cell.usesItemFromMenu ? destinationPopUp.titleOfSelectedItem : cell.menuItem?.title
+    }
 
     /// The name label's full displayed text — includes the " (idle)" suffix
     /// when a routed app's process isn't running (spec §3.5 pattern).

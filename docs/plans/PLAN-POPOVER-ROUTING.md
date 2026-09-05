@@ -38,8 +38,27 @@ shrinks with expansion state.
    `RoutingStore`.
 3. **Per-app volume: always visible, dimmed/disabled while destination is
    "Current device"** (matches `DeviceRowView` dimming + shared column grid).
-4. **Per-app menu = Current device / AirPlay devices only — no Groups.** Main
-   Out's existing Output Groups entries stay as-is.
+4. ~~**Per-app menu = Current device / AirPlay devices only — no Groups.**~~
+   **REVERSED 2026-08-28 (owner's call).** An App Exception may target a SAVED
+   GROUP, listed under its own "Output Groups" header between the standalone
+   entries and "Current Device". Main Out's own dropdown is unchanged. The
+   approved semantics, in brief:
+   - A group route is a LIVE REFERENCE to the group's membership — editing the
+     group changes what the app plays on immediately; no member list is ever
+     persisted with the route (`destinationKind: "group"` +
+     `destinationGroupID`, still schema v1).
+   - **Main Out overlap is partial, and disclosed.** Members the whole-system
+     mix has claimed drop out and the app plays on the rest; the stored route is
+     never rewritten, so those speakers come back on their own. Only when NO
+     member is left does the route fall back to the main mix, exactly as an
+     unreachable single target does. A `.device` route pointed at a claimed
+     speaker still yields the route outright — that behaviour is unchanged.
+   - Eligibility per member is the same as for a single target: no local Mac,
+     no AirPlay-1, no Bluetooth, no Cast.
+   - **Volume**: what reaches a member is the app's own slider × that speaker's
+     level inside the group. The group's master volume does NOT apply — the
+     app's slider is the master for the app's own stream.
+   - Deleting the group falls its routes back to "Follows main output".
 5. **Collapse toggle target: chevron + section title** (rest of header inert).
 6. **Add affordance: in-card full-width "+ Add application…" row** (hover-action
    style), not a header "+" button.

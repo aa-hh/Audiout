@@ -5699,13 +5699,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             // Only when capture was actually wanted — the same test the note
             // above uses. A failure with nothing selected is bookkeeping, not
-            // a user hearing silence. Sent from outside `stateQueue.sync`
-            // because the sink is the app's, not this file's, to reason about.
+            // a user hearing silence. `kind` is the bare case name; the raw
+            // Core Audio `reason` string stays local.
             if noted {
-                Analytics.captureError("capture:whole_system_failed", [
-                    "kind": error.kind,
-                    "retrying": error.isRetryable ? "true" : "false",
-                ])
+                Telemetry.fail(.captureWS, "capture:whole_system_failed",
+                               local: ["reason": String(describing: error)],
+                               shared: [
+                                   "kind": error.kind,
+                                   "retrying": error.isRetryable ? "true" : "false",
+                               ])
             }
             if shouldRetry {
                 scheduleCaptureRetry(attempt: attempt)
@@ -6715,6 +6717,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                             self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
                             self.enterFailure(id, cause: .timingUnavailable)
                         }
+                        Telemetry.fail(.airplay, "airplay:connect_failed",
+                                       local: ["device": id],
+                                       shared: ["cause": "timingUnavailable"])
                         return
                     }
 
@@ -6823,6 +6828,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
                         self.enterFailure(id, cause: cause, detail: String(describing: error))
                     }
+                    // The engine error rides along locally only: its
+                    // description can name the receiver.
+                    Telemetry.fail(.airplay, "airplay:connect_failed",
+                                   local: ["device": id, "detail": String(describing: error)],
+                                   shared: ["cause": "\(cause)"])
                     return
                 }
             } else {
@@ -8933,15 +8943,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // telemetry until now, so a dropped session had to be inferred
                     // from the absence of other events (live debug 2026-08-29,
                     // where that inference cost an afternoon and still landed on
-                    // the wrong cause). Cleartext device id, same rationale as
-                    // `exclusion_changed`: this is what makes "why did it stop"
-                    // legible.
-                    Telemetry.log(.airplay, "engine_session_failed", [
-                        "device": id,
-                        "state": "\(state)",
-                        "cause": "\(cause)",
-                        "wasStreaming": wasStreaming ? "true" : "false",
-                    ])
+                    // the wrong cause). The device id stays local — same rationale
+                    // as `exclusion_changed`, it is what makes "why did it stop"
+                    // legible on this Mac — and only the cause shape goes out.
+                    Telemetry.fail(.airplay, "airplay:session_failed",
+                                   local: ["device": id],
+                                   shared: [
+                                       "state": "\(state)",
+                                       "cause": "\(cause)",
+                                       "wasStreaming": wasStreaming ? "true" : "false",
+                                   ])
                 }
             case .stopped:
                 device.isSelected = false

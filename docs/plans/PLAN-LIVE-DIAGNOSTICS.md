@@ -92,16 +92,23 @@ plan). Two field sets per call would be the honest shape:
 `fail(category, event, local: [...], shared: [...])`, where `shared` is the
 subset that may leave the Mac. Take that shape; the local set is the union.
 
-**Sites to convert** (all existing failure funnels, none new):
+**Sites converted in S1** (all existing failure funnels, none new). The
+event name is the PostHog exception type, so it takes the
+`category:object_action` form; the local line carries the same name.
 
-| Site | Event | Shared fields |
-|---|---|---|
-| `NativeBackend` engine session failure (line ~8929) | `engine_session_failed` | `cause`, `wasStreaming`, `state` |
-| `NativeBackend` connect timeout / `timingUnavailable` / `notResponding` / `refusedOrBusy` | `connect_failed` | `cause` |
-| `NativeCaptureCoordinator` `.failed` | `capture:whole_system_failed` (already on the branch) | `kind` |
-| `StoreRecovery` two modes | `settings:save_failed`, `settings:file_corrupt` (already on the branch) | Cocoa domain + code |
-| `BTConnectionManager` `.failed` | `bt_connect_failed` | `cause` |
-| PTP helper not approved / not bound at connect | `ptp_helper_unavailable` | `reason` |
+| Site | Event | Shared fields | Local only |
+|---|---|---|---|
+| `NativeBackend` engine session failure | `airplay:session_failed` | `cause`, `wasStreaming`, `state` | `device` |
+| `NativeBackend` converge catch (`timedOut`, `authRequired`, `unknown`) | `airplay:connect_failed` | `cause` | `device`, `detail` |
+| `NativeBackend` PTP takeover gate | `airplay:connect_failed` with `cause=timingUnavailable` | `cause` | `device` |
+| `NativeBackend` whole-system capture `.failed` | `capture:whole_system_failed` | `kind`, `retrying` | `reason` |
+| `StoreRecovery` two modes (wired in `AppDelegate`) | `settings:save_failed`, `settings:file_corrupt` | Cocoa domain + code; fixed file names | `detail` |
+| `BTConnectionManager` three exits | `bt:connect_failed` | `reason` | `address`, `elapsed` |
+
+The planned separate `ptp_helper_unavailable` event folded into
+`airplay:connect_failed`: the gate already produces `timingUnavailable` as the
+cause, and a second event for the same moment would split one failure across
+two PostHog issues.
 
 **Prerequisite.** Merge `claude/posthog-exceptions-bc04a3` and live-check that
 one `$exception` lands in PostHog from a notarised build. Nothing here works

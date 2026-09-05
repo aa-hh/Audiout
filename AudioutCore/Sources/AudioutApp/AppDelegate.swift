@@ -804,10 +804,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // description can carry a local file path, so only the domain and
             // the code (e.g. NSCocoaErrorDomain 640, "disk full") go out.
             let ns = error as NSError
-            Analytics.captureError("settings:save_failed", [
-                "domain": ns.domain,
-                "code": String(ns.code),
-            ])
+            Telemetry.fail(.settings, "settings:save_failed",
+                           local: ["detail": error.localizedDescription],
+                           shared: ["domain": ns.domain, "code": String(ns.code)])
             DispatchQueue.main.async {
                 // Never ship a raw Cocoa error description in the visible
                 // alert — it can carry a local file path. Log the detail,
@@ -834,9 +833,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The filenames are this app's own fixed names, not the user's
             // content, so they are safe to send and are the only thing that
             // says WHICH settings corruption is showing up in the field.
-            Analytics.captureError("settings:file_corrupt", [
-                "files": quarantined.sorted().joined(separator: ","),
-            ])
+            Telemetry.fail(.settings, "settings:file_corrupt",
+                           shared: ["files": quarantined.sorted().joined(separator: ",")])
             self?.presentStoreDataAlertOnce(
                 message: "Some of Audiout's saved settings couldn't be read",
                 info: "The unreadable settings were set aside so nothing is lost: \(Self.describeQuarantinedFiles(quarantined)). They're back to their defaults. Everything else is untouched.")

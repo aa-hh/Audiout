@@ -18,6 +18,7 @@ everything up to the `OutputBackend` seam and never imports AppKit.
 - A Bluetooth EQ change bakes a new processor on `graphQueue`, never re-parameterizing a live one.
 - The PTP activation wait must strictly exceed the helper's bind-retry budget, or a late success goes unseen.
 - The "Taking audio back" strip follows the helper's clock, not a macOS AirPlay session.
+- A failure the user felt goes through `Telemetry.fail(category, event, local:, shared:)`; only `shared` leaves the Mac, so device ids and error text go in `local`.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 
 ## Map

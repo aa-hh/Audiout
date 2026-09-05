@@ -32,6 +32,11 @@ import Foundation
 /// - **MUST NOT be called from the real-time IOProc/render path** — only
 ///   from the (non-realtime) decision points around it (serial-queue /
 ///   main-thread state machines).
+/// - **A failure the user felt goes through `fail(_:_:local:shared:)`**, never
+///   `log` plus `Analytics.captureError` as two calls. `fail` writes the line
+///   at `level:error` and forwards only the `shared` fields to PostHog error
+///   tracking, so the local line can carry a device id and the wire cannot
+///   (see `docs/plans/PLAN-LIVE-DIAGNOSTICS.md` C1).
 public enum Telemetry {
 
     /// One of the subsystems this instruments (PLAN-TELEMETRY-SYSTEM.md §A):
@@ -44,24 +49,49 @@ public enum Telemetry {
     /// anchor — `LocalPlaybackEngine`/`SyncedLocalSink`), `lifecycle`
     /// (process/session boundaries — currently just the launch banner
     /// emitted below), `surface` (the one-surface window's frame decisions),
-    /// and `cast` (Cast session lifecycle + 1 s media-status samples).
+    /// `cast` (Cast session lifecycle + 1 s media-status samples), and
+    /// `settings` (the on-disk stores' save/parse failures, `StoreRecovery`).
     public enum Category: String, Sendable {
-        case permission, captureWS, capturePA, airplay, localPlayback, lifecycle, surface, cast
+        case permission, captureWS, capturePA, airplay, localPlayback, lifecycle, surface, cast, settings
     }
 
     /// Non-blocking. Formats `{"ts":...,"sid":...,"cat":...,"evt":...,
-    /// ...fields}` on the caller's thread, then hands the finished line to
-    /// the writer's serial queue. A no-op when `isEnabled` is false. Emits a
-    /// one-line `lifecycle`/`session_start` banner ahead of the first line of
-    /// any new session (see the `sid` field), so a reader can find session
-    /// boundaries in the file.
+    /// "level":"info",...fields}` on the caller's thread, then hands the
+    /// finished line to the writer's serial queue. A no-op when `isEnabled`
+    /// is false. Emits a one-line `lifecycle`/`session_start` banner ahead of
+    /// the first line of any new session (see the `sid` field), so a reader
+    /// can find session boundaries in the file.
     public static func log(_ category: Category, _ event: StaticString, _ fields: [String: String] = [:]) {
+        write(category, event, fields, level: "info")
+    }
+
+    /// A failure the user felt — audio that stopped, a speaker that would not
+    /// connect, a settings file that would not save. Writes the line like
+    /// `log` but at `"level":"error"`, with `local` and `shared` merged, and
+    /// then forwards `event` + `shared` to `Analytics.captureError` from the
+    /// writer's queue (never on the caller's thread, so a `stateQueue` caller
+    /// never runs the analytics sink under its own lock).
+    ///
+    /// `shared` is what may leave the Mac: counts, enum-like strings,
+    /// booleans (PRODUCT.md "Data Collection"). `local` is the rest — a device
+    /// id, an error's description — legible on this Mac, never sent. Keeping
+    /// the two in the signature is what stops a device id reaching PostHog by
+    /// omission. `event` is the PostHog exception type and an external
+    /// contract: name it `category:object_action`, same as `Analytics.capture`.
+    public static func fail(_ category: Category, _ event: StaticString,
+                            local: [String: String] = [:], shared: [String: String] = [:]) {
+        write(category, event, local.merging(shared) { _, shared in shared }, level: "error")
+        Writer.shared.forward { Analytics.captureError(event, shared) }
+    }
+
+    private static func write(_ category: Category, _ event: StaticString, _ fields: [String: String], level: String) {
         let snapshot: (sessionID: String, directory: URL, sink: Sink?)? = state.withLock { s in
             guard s.enabled else { return nil }
             return (s.sessionID, s.directoryOverride ?? defaultDirectory, s.sink)
         }
         guard let snapshot else { return }
-        let line = formattedLine(sessionID: snapshot.sessionID, category: category, event: event, fields: fields)
+        let line = formattedLine(sessionID: snapshot.sessionID, category: category, event: event,
+                                 fields: fields, level: level)
         Writer.shared.write(line, sessionID: snapshot.sessionID, directory: snapshot.directory, sink: snapshot.sink)
     }
 
@@ -162,6 +192,13 @@ public enum Telemetry {
             }
         }
 
+        /// Runs `body` on `queue`, after every line enqueued before it. `fail`
+        /// uses it to hand the analytics forward off the caller's thread; the
+        /// same FIFO makes `barrier()` a flush for these too.
+        func forward(_ body: @escaping @Sendable () -> Void) {
+            queue.async(execute: body)
+        }
+
         /// A synchronous no-op round-trip through `queue`. Because `queue` is
         /// serial/FIFO, every write enqueued before this call is guaranteed
         /// complete by the time it returns — the mechanism behind both test
@@ -257,13 +294,15 @@ public enum Telemetry {
     /// `{"ts":"...","sid":"...","cat":"...","evt":"...", ...fields (sorted by
     /// key, for deterministic output)}` — the line schema fixed by
     /// PLAN-TELEMETRY-SYSTEM.md §C.
-    private static func formattedLine(sessionID: String, category: Category, event: StaticString, fields: [String: String]) -> String {
+    private static func formattedLine(sessionID: String, category: Category, event: StaticString,
+                                      fields: [String: String], level: String = "info") -> String {
         var parts: [String] = []
-        parts.reserveCapacity(4 + fields.count)
+        parts.reserveCapacity(5 + fields.count)
         parts.append("\"ts\":\"\(jsonEscaped(timestampFormatter.string(from: Date())))\"")
         parts.append("\"sid\":\"\(jsonEscaped(sessionID))\"")
         parts.append("\"cat\":\"\(category.rawValue)\"")
         parts.append("\"evt\":\"\(jsonEscaped(event.description))\"")
+        parts.append("\"level\":\"\(level)\"")
         for key in fields.keys.sorted() {
             parts.append("\"\(jsonEscaped(key))\":\"\(jsonEscaped(fields[key] ?? ""))\"")
         }
@@ -272,8 +311,8 @@ public enum Telemetry {
 
     /// Escapes `s` for embedding as a JSON string VALUE (quotes/backslashes/
     /// control characters). Hand-rolled rather than `JSONSerialization`
-    /// because the four required keys need a fixed leading order (`ts`,
-    /// `sid`, `cat`, `evt`) for a human/agent skimming the file — a plain
+    /// because the five required keys need a fixed leading order (`ts`,
+    /// `sid`, `cat`, `evt`, `level`) for a human/agent skimming the file — a plain
     /// dictionary has no guaranteed key order.
     private static func jsonEscaped(_ s: String) -> String {
         var out = ""

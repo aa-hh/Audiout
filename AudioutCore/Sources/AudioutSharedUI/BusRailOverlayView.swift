@@ -83,6 +83,11 @@ public final class BusRailOverlayView: NSView {
     /// a card collapse from growing a tail past its lowest member into the
     /// non-member rows it is still hiding.
     public var deviceSectionRowsDropped = false
+    /// The band above is a SUBSECTION's clip, not the device card's. It only
+    /// gates the scrolled-off-the-top drop in `gatherInput`: a subsection band
+    /// is a sub-range of an already-visible card, so every row above it is on
+    /// screen, where a row above the CARD's scroll clip is genuinely hidden.
+    public var deviceSectionIsSubsection = false
 
     /// The transient connect pulse currently mid-flight, if any (test-visible
     /// through ``test_isConnectPulsing``; nothing survives the pulse).
@@ -246,7 +251,10 @@ public final class BusRailOverlayView: NSView {
         // drop its stop too, or the detour arc the overlay would draw around it
         // lands on the fixed card header above the list. Nothing is dropped when
         // the list does not scroll: every row sits at or below the clip's top.
-        if let top = deviceBand?.upperBound {
+        // Only the CARD's band can scroll: a subsection's clip sits inside a card
+        // that is itself fully visible, so rows above it are on screen and dropping
+        // them erased every node from a cut plan (the wire drew as one bare line).
+        if !deviceSectionIsSubsection, let top = deviceBand?.upperBound {
             stops.removeAll { $0.y > top }
         }
 
@@ -297,6 +305,7 @@ public final class BusRailOverlayView: NSView {
     }
 
     private func drawPlan(_ plan: RailPlan) {
+        guard plan.carriesSignal else { return }
         let cx = PopoverColumnGrid.railGutterCenterX
         let originColor = Self.originColor(for: plan)
 
@@ -335,6 +344,7 @@ public final class BusRailOverlayView: NSView {
     /// STOP's OWN node radius so the rail meets a large member node and a small
     /// detoured non-member node cleanly at their true edges.
     func wireRuns(for plan: RailPlan) -> [WireRun] {
+        guard plan.carriesSignal else { return [] }
         let lw = PopoverColumnGrid.busLineWidth
         let cx = PopoverColumnGrid.railGutterCenterX
         let originColor = Self.originColor(for: plan)
@@ -879,6 +889,12 @@ public struct RailPlan: Equatable {
     /// node, the last place the wire reaches. `nil` when no on-spine node is
     /// visible, i.e. no line is drawn through the band at all.
     public var signalTerminusIndex: Int?
+    /// Whether the rail has anything to carry: a node on the spine, or a cut
+    /// saying the signal continues below a fold. With neither, the panel shows
+    /// no mix at all and the rail draws NOTHING — the origin included. Painting
+    /// the origin regardless left a hook curling off the Main Audio ring into an
+    /// empty gutter, the same dangling stub a stop-less, dot-less plan makes.
+    public var carriesSignal: Bool { signalTerminusIndex != nil || terminusDotY != nil }
     /// The dormant-divergent condition (spec §4.7), resolved ONCE for the whole
     /// rail so the wire takes one tone end to end instead of a per-stop patchwork.
     public var dormant: Bool

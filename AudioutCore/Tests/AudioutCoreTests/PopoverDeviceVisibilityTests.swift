@@ -415,10 +415,59 @@ import AppKit
         popover.test_fireSubsectionHeaderClick(title: bluetoothTitle)
         popover.test_applyExactFitSize()
 
-        #expect(try #require(popover.test_railPlan()).terminusDotY != nil,
+        let cut = try #require(popover.test_railPlan())
+        #expect(cut.terminusDotY != nil,
                 "…so the rail is cut at the collapsed subsection's header, with a dot")
+        // The overlay drops stops above its band's TOP edge, a rule written for
+        // rows scrolled out of the card's own list. Applying it to a SUBSECTION
+        // band deleted every row above that subsection — the whole visible list —
+        // and the cut wire drew as one bare line with no nodes and no detours.
+        #expect(cut.stops.count == 2,
+                "the two rows still on screen above the fold keep their stops")
         #expect(controller.selectedDeviceIDs.contains("bt-z:output"),
                 "collapse is display only — Zed Box is still in the mix")
+    }
+
+    /// The reported bug: collapsing Bluetooth with nothing selected inside it ran
+    /// the rail down to the bottom of the card and dotted there, well past the
+    /// last real speaker. The cut used to belong to whichever collapsed subsection
+    /// held the band's last DEVICE, and Bluetooth always sorts last — so any
+    /// Bluetooth speaker at all, selected or not, grew that tail.
+    @Test func collapsingASubsectionThatHidesNoSignalLeavesTheRailUncut() throws {
+        let fleet = [local(), airplay(), bt("bt-z:output", name: "Zed Box")]
+        let (popover, controller) = makePopover(fleet: fleet)
+        controller.setDeviceSelected("office", true)   // …and NOT the Bluetooth box
+        popover.update(devices: fleet)
+        popover.test_applyExactFitSize()
+        let before = try #require(popover.test_railPlan())
+
+        popover.test_fireSubsectionHeaderClick(title: bluetoothTitle)
+        popover.test_applyExactFitSize()
+
+        let after = try #require(popover.test_railPlan())
+        #expect(after.terminusDotY == nil,
+                "the fold hides no signal, so there is nothing below it to promise")
+        #expect(after.signalTerminusIndex == before.signalTerminusIndex,
+                "the wire still ends on Office's own node, exactly where it did")
+    }
+
+    /// The same rule read from the other side: signal hidden in a subsection that
+    /// is NOT the band's last cuts the rail all the same. Keying the cut on the
+    /// last device meant a collapsed Cast section holding the only selected
+    /// receiver went unnoticed, and the rail just stopped short with no dot.
+    @Test func collapsingAMiddleSubsectionThatHidesSignalCutsTheRail() throws {
+        let fleet = [local(), cast("cast-tv", name: "Living Room TV"),
+                     bt("bt-z:output", name: "Zed Box")]
+        let (popover, controller) = makePopover(fleet: fleet)
+        controller.setDeviceSelected("cast-tv", true)   // the LOWEST signal…
+        popover.update(devices: fleet)
+        popover.test_applyExactFitSize()
+
+        popover.test_fireSubsectionHeaderClick(title: castTitle)   // …now folded away
+        popover.test_applyExactFitSize()
+
+        #expect(try #require(popover.test_railPlan()).terminusDotY != nil,
+                "the Cast fold hides the only selected speaker — the rail cuts there")
     }
 
     /// The case that erased the rail outright: EVERY device inside the subsection

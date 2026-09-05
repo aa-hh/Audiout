@@ -419,7 +419,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// `cutSubsectionTitle` is the host's answer to "which collapse is actually
     /// hiding the rail's far end": a device-type SUBSECTION when its collapse
     /// took the lowest selected device off screen, so the cut lands at THAT
-    /// header's dot; `nil` leaves the whole device card as the far end.
+    /// header's dot; `nil` leaves the whole device card as the far end. The
+    /// CARD's own fold outranks it — a shut card hides the subsection's header
+    /// too, so its floor is the only cut point still on screen.
     func setRailRows(mainOut: RailHookProviding, deviceRows: [RailNodeProviding],
                      originCardTitle: String, deviceCardTitle: String,
                      cutSubsectionTitle: String? = nil, dormant: Bool = false) {
@@ -427,20 +429,28 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         railOverlay.deviceRows = deviceRows
         railOverlay.dormant = dormant
         railOverlay.originSection = cardsByHeader[originCardTitle]
-        if let cutSubsectionTitle, let subsection = subsectionBodies[cutSubsectionTitle]?.rail {
+        let deviceCard = cardsByHeader[deviceCardTitle]
+        let cutSubsection = cutSubsectionTitle.flatMap { subsectionBodies[$0]?.rail }
+        if let cutSubsection, deviceCard?.railSectionCollapsed != true {
             // A collapsed device SUBSECTION whose rows the controller has DROPPED
             // from the model — the hidden device is gone from `deviceRows`, so the
             // overlay can't judge the cut from the stops and is told to cut here.
-            railOverlay.deviceSection = subsection
-            railOverlay.deviceSectionRowsDropped = true
+            railOverlay.deviceSection = cutSubsection
+            railOverlay.deviceSectionIsSubsection = true
         } else {
             // The device CARD: its rows stay in `deviceRows` (clipped by the fold),
             // so the overlay judges the cut from the clipped rows themselves — that
             // is what keeps a card collapse from running the rail past its lowest
-            // member down through the non-member rows it is still hiding.
-            railOverlay.deviceSection = cardsByHeader[deviceCardTitle]
-            railOverlay.deviceSectionRowsDropped = false
+            // member down through the non-member rows it is still hiding. Once the
+            // card is shutting it takes this branch even with a subsection cut
+            // standing, because that subsection's header is folding away with
+            // everything else and only the card's floor is left to dot.
+            railOverlay.deviceSection = deviceCard
+            railOverlay.deviceSectionIsSubsection = false
         }
+        // A dropped subsection's member is missing from `deviceRows` either way, so
+        // the overlay is told the fold hides one whichever band it ends up cutting at.
+        railOverlay.deviceSectionRowsDropped = cutSubsection != nil
         railOverlay.needsDisplay = true
     }
 

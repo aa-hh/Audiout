@@ -3146,14 +3146,21 @@ public final class PopoverController: NSObject {
     /// the LOWEST member. What the host still owns is WHICH rows exist, WHERE the
     /// rail is cut, and whether the whole path is dormant.
     ///
-    /// The cut belongs to the subsection holding the band's LAST device — in the
-    /// FULL order (`deviceSections()`), whether or not a collapsed subsection is
-    /// currently hiding it — so a collapse cuts the rail at that subsection's
-    /// header with a dot, exactly as a collapsed CARD already cuts at its own.
-    /// Indexing the RENDERED order instead silently pulled the far end up to a
-    /// higher visible row with no dot, so the rail read as ending in mid-air. A
-    /// device the BT-LIST filter never listed is a different matter: it is not in
-    /// `deviceSections()` at all, so it can never be the band's end.
+    /// The cut belongs to the LOWEST subsection still holding a device on the
+    /// spine — in the FULL order (`deviceSections()`), whether or not a collapsed
+    /// subsection is currently hiding it. Shut, that subsection is hiding where the
+    /// signal really ends, so the rail runs past the rows above it and dots at its
+    /// header, exactly as a collapsed CARD already cuts at its own. Indexing the
+    /// RENDERED order instead silently pulled the far end up to a higher visible
+    /// row with no dot, so the rail read as ending in mid-air.
+    ///
+    /// Two things the rule deliberately does NOT key on. The band's last DEVICE:
+    /// Bluetooth sorts last, so collapsing it cut the rail whenever it held any
+    /// speaker at all, and the dot dropped to the bottom of the card with nothing
+    /// selected down there. And any collapsed subsection ABOVE the lowest one with
+    /// signal: what it hides is out of the mix or still visible further down, so
+    /// there is nothing below the fold to promise. A device the BT-LIST filter
+    /// never listed is a third matter — it is not in `deviceSections()` at all.
     private func updateRailRows() {
         let sections = deviceSections()
         let fullOrder = sections.flatMap(\.devices)
@@ -3161,12 +3168,10 @@ public final class PopoverController: NSObject {
         // already out of the model, which is what leaves them out of the overlay's
         // stop list while the cut below them still counts.
         let railRows = fullOrder.compactMap { deviceRowsByID[$0.id] }
-        let bandEndID = fullOrder.last?.id
-        let cutSubsectionTitle = bandEndID.flatMap { id in
-            sections.first {
-                isSubsectionCollapsed($0.title) && $0.devices.contains { $0.id == id }
-            }?.title
-        }
+        let lowestSignalSection = sections.last { $0.devices.contains(where: railNodeIsOnSpine) }
+        let cutSubsectionTitle = lowestSignalSection
+            .map(\.title)
+            .flatMap { isSubsectionCollapsed($0) ? $0 : nil }
         // Feed the continuous rail overlay the Main Audio row + device rows in
         // display order so it can draw the spine as one line through the gutter.
         panel.setRailRows(mainOut: mainOutRow, deviceRows: railRows,
@@ -3174,6 +3179,24 @@ public final class PopoverController: NSObject {
                           deviceCardTitle: Self.outputDevicesCardTitle,
                           cutSubsectionTitle: cutSubsectionTitle,
                           dormant: devicesCardDivergence() != nil)
+    }
+
+    /// Whether this device would draw an ON-SPINE node (`BusRailOverlayView.onSpine`)
+    /// if its row were mounted. The rail's cut turns on that question, and it has to
+    /// be asked of the MODEL rather than the row: a collapsed subsection's rows are
+    /// gone from `deviceRowsByID`, which is the whole reason the overlay cannot judge
+    /// the cut itself. It mirrors `DeviceRowView.updateBus`'s node arms — selected AND
+    /// present, plus the Bluetooth reconnect attempt that holds its node on the spine
+    /// while `isAvailable` is still false. Keep the two in step: drift shows up as a
+    /// rail that cuts with nothing hidden, or ends early with something hidden.
+    private func railNodeIsOnSpine(_ device: Device) -> Bool {
+        let connectingNow = device.connectionState == .connecting
+            || device.connectionState == .reconnecting
+        if device.isBluetooth, !device.isAvailable, connectingNow { return true }
+        // An unavailable device draws a hollow node the line detours, whatever its
+        // held checkbox says — it is not in the mix, so it hides no signal.
+        guard device.isAvailable else { return false }
+        return groupController?.isSpeakerSelected(device.id) == true
     }
 
     // MARK: Output Devices "+" menu (BT-UI / BT-LIST)

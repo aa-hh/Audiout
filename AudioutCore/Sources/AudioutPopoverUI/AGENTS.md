@@ -17,7 +17,7 @@ folder renders; routing arithmetic lives in Core.
 - `insertRow`/`removeRow` own the re-fit; never add your own height republish.
 - Two rebuild flavors: `rebuildForOpen()` discards manual toggles, `rebuild()` preserves them.
 - A subsection collapses by animating its own clip height, never rebuilding (2026-08-10).
-- A collapsed subsection cuts the rail exactly as a collapsed card does (2026-08-11).
+- A collapsed subsection cuts the rail as a collapsed card does (2026-08-11), but only when it hides an ON-SPINE device and is the lowest that does; the card's own fold outranks it. `railNodeIsOnSpine` asks the MODEL, since the rows are gone by then, so it must track `DeviceRowView.updateBus`.
 - Hidden means idle: ingest skips behind `isEffectivelyShown`, and every open rebuilds.
 - At most one sync drawer is open; `expandedSyncDeviceID` is the single owner.
 - A live scrub applies to audio but must not persist until committed.

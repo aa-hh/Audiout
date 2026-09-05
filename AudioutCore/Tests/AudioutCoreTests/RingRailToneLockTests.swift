@@ -61,9 +61,25 @@ extension SerializedSharedState {
         overlay.frame = container.bounds
         container.addSubview(overlay)
         overlay.mainOutRow = row
+        // One member below the ring, so the rail has signal to carry: a rail
+        // with nothing on its spine and no fold below it draws NOTHING, hook
+        // included, and this suite samples the hook's ink.
+        let member = StubNodeRow(frame: NSRect(x: 0, y: 10, width: 360, height: 20))
+        container.addSubview(member)
+        overlay.deviceRows = [member]
 
         container.layoutSubtreeIfNeeded()
         return (container, row, overlay)
+    }
+
+    /// A device row reduced to the one thing the rail reads: a `.member` node at
+    /// this view's own centre. The wire's member segments wear the same spine
+    /// tone the hook does, so adding it changes no colour this suite samples.
+    private final class StubNodeRow: NSView, RailNodeProviding {
+        var railNode: MembershipBusView.Node? { .member }
+        var railDeviceID: String? { "stub" }
+        var railNodeView: NSView { self }
+        var railNodeBounds: NSRect { bounds }
     }
 
     private func apply(_ row: MainOutRowView, armed: Bool) {
@@ -78,9 +94,10 @@ extension SerializedSharedState {
 
     /// The rail's ACTUAL drawn ink: render the overlay offscreen (the same
     /// `cacheDisplay` idiom `GroupsWindowTextColorLockTests` uses) and take the
-    /// most opaque pixel. With no device rows the only thing `drawPlan` paints
-    /// is the origin hook — the very curve that has to match the ring — so this
-    /// needs no geometry assumptions beyond "the hook is on screen".
+    /// most opaque pixel. What `drawPlan` paints here is the origin hook — the
+    /// very curve that has to match the ring — and the one member segment under
+    /// it, which wears the same tone, so this needs no geometry assumptions
+    /// beyond "the hook is on screen".
     private func sampledRailInk(of overlay: BusRailOverlayView) throws -> NSColor {
         guard let rep = overlay.bitmapImageRepForCachingDisplay(in: overlay.bounds) else {
             throw TestEnvironmentLimitation(description: "no bitmap rep available in this environment")

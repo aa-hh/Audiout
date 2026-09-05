@@ -68,6 +68,12 @@ import Testing
         let plan = RailPlan.resolve(input)
         #expect(plan.signalTerminusIndex == nil, "no member ⇒ no wire to draw")
         #expect(plan.stops.count == 4, "…but every node is still there to click")
+        // …and no HOOK either. The hook was appended before the run loop
+        // discovered nothing was below it, so a panel with no speaker selected
+        // drew a stub curling off the Main Audio ring into an empty gutter.
+        #expect(!plan.carriesSignal)
+        #expect(BusRailOverlayView().wireRuns(for: plan).isEmpty,
+                "nothing on the spine and no cut below it ⇒ nothing drawn at all")
     }
 
     // MARK: Dormancy is ONE flag for the whole path

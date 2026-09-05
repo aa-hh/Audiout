@@ -444,20 +444,36 @@ extension SurfaceToolbarController: NSToolbarDelegate {
     }
 }
 
-/// The header's centred brand lockup: the Audiout icon beside the wordmark
-/// (owner, 2026-09-05). Decorative — it carries no action and is not an
-/// accessibility element, because the window already names itself.
+/// The header's centred brand: the wordmark alone (owner, 2026-09-05).
 ///
-/// The wordmark is `Tokens.Font.wordmark` (ClashDisplay-Semibold), the one
-/// face reserved for setting "Audiout" and nothing else; it falls back to the
-/// bold system font when the `.otf` is not registered (every context but the
-/// assembled `.app`), so this never draws nothing.
+/// WHY NO MARK. The hero render is a portrait drawing — 504 x 796 of painted
+/// content in a 1024 square — and the strip is 34 pt tall, so anything that
+/// fits vertically paints about 17 pt wide, with its gold halo band at
+/// roughly 4 pt. At that size the tweeter, the dust caps and the halo are at
+/// or below one device pixel, and the cabinet's own gradient runs from
+/// `#3A3E47` to `#16181C`, which straddles both header grounds: whichever
+/// ground you pick, one end of the speaker merges into it. That is the
+/// "elements just disappear" the owner reported, and no plate fixes it —
+/// three were tried (a fixed dark circle, the selected tab's wash, a
+/// recessed `well`) and each only moved which half vanished. The mark still
+/// greets at 96 pt in `SurfaceSplashView`, which is the size it was drawn
+/// for.
+///
+/// The word does not have that problem: it is text in a semantic ink, so it
+/// inverts with the appearance by construction and cannot half-vanish.
+///
+/// `Tokens.Font.wordmark` is ClashDisplay-Semibold, the one face reserved for
+/// setting "Audiout" and nothing else; it falls back to the bold system font
+/// when the `.otf` is not registered (every context but the assembled
+/// `.app`), so this never draws nothing.
+///
+/// Decorative — not an accessibility element, because the window already
+/// names itself and the tabs speak the current screen.
 final class SurfaceBrandView: NSView {
-    static let iconSize: CGFloat = 20
-    static let iconGap: CGFloat = 6
-
-    /// The wordmark's own centre in this view's coordinates — the point
-    /// that must sit on the window's centre line. Read by the test.
+    /// The wordmark's own centre in this view's coordinates — the point that
+    /// must sit on the window's centre line. The label IS the view now, so
+    /// this is simply the middle; the trailing gutter that used to offset the
+    /// lockup went with the mark.
     var test_wordmarkCenterX: CGFloat { wordmarkLabel.frame.midX }
     private let wordmarkLabel = NSTextField(labelWithString: "Audiout")
 
@@ -465,40 +481,19 @@ final class SurfaceBrandView: NSView {
         super.init(frame: frameRect)
         translatesAutoresizingMaskIntoConstraints = false
 
-        let icon = NSImageView()
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.image = BrandMark.image?.copy() as? NSImage
-        icon.imageScaling = .scaleProportionallyUpOrDown
-        icon.setAccessibilityElement(false)
-
         let wordmark = wordmarkLabel
         wordmark.translatesAutoresizingMaskIntoConstraints = false
         wordmark.font = Tokens.Font.wordmark(size: 17)
-        wordmark.textColor = Tokens.Color.label
+        // `label2`, not `label`: the brand names the window, it does not
+        // compete with the tab that says which screen you are on.
+        wordmark.textColor = Tokens.Color.label2
         wordmark.setAccessibilityElement(false)
-
-        addSubview(icon)
         addSubview(wordmark)
 
-        // The WORDMARK is what has to land on the centre line, with the icon
-        // hanging off its left (owner, 2026-09-05) — centring the lockup as a
-        // whole pushes the word right of centre by half the icon. So the view
-        // carries a trailing gutter exactly as wide as the icon plus its gap:
-        // that makes the wordmark the view's own centre, and AppKit centring
-        // the view then puts the WORD on the window's centre line.
-        let gutter = Self.iconSize + Self.iconGap
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: Self.iconSize),
-            icon.heightAnchor.constraint(equalToConstant: Self.iconSize),
-
-            wordmark.leadingAnchor.constraint(equalTo: icon.trailingAnchor,
-                                              constant: Self.iconGap),
-            wordmark.trailingAnchor.constraint(equalTo: trailingAnchor,
-                                               constant: -gutter),
+            wordmark.leadingAnchor.constraint(equalTo: leadingAnchor),
+            wordmark.trailingAnchor.constraint(equalTo: trailingAnchor),
             wordmark.centerYAnchor.constraint(equalTo: centerYAnchor),
-
             heightAnchor.constraint(equalToConstant: SurfaceToolbarSeat.pinDiameter),
         ])
     }

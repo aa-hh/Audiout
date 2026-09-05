@@ -586,15 +586,13 @@ import AudioutSharedUI
         }
     }
 
-    /// The WORDMARK sits on the centre line, not the lockup (owner,
-    /// 2026-09-05: "the actual word mark itself needs to be completely dead
-    /// center, with the icon off the left of it").
+    /// The wordmark sits on the window's centre line (owner, 2026-09-05).
     ///
-    /// Centring the lockup as a whole is the defect this catches: it puts the
-    /// word half an icon right of centre, which is what shipped first. The
-    /// view answers by carrying a trailing gutter the width of the icon plus
-    /// its gap, so the word IS the view's centre — that is what is measured.
-    @Test func theWordmarkIsCentredAndTheIconHangsOffItsLeft() {
+    /// It is the whole brand now — the mark left the header because a portrait
+    /// drawing painting ~17 pt wide in a 34 pt strip loses its halo and half
+    /// its cabinet to whichever ground it lands on. What survives is text in a
+    /// semantic ink, which inverts with the appearance by construction.
+    @Test func theWordmarkIsCentredOnTheStrip() {
         let brand = SurfaceBrandView()
         brand.layoutSubtreeIfNeeded()
         let size = brand.fittingSize
@@ -603,6 +601,8 @@ import AudioutSharedUI
 
         #expect(abs(brand.test_wordmarkCenterX - size.width / 2) <= 1,
                 "the wordmark's centre is \(brand.test_wordmarkCenterX) in a \(size.width) pt view — it must be the middle")
+        #expect(brand.subviews.count == 1,
+                "the word is the only thing in the brand view — the mark and its seat are gone")
     }
 
     /// Pin is a TRUE CIRCLE, drawn by us in the same seat language as a tab

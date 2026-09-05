@@ -3652,7 +3652,7 @@ public final class PopoverController: NSObject {
             // can't ALSO carry a private per-app redirect. So it's simply not
             // offered as a redirect target; which other device kinds are
             // offered at all is decided by `availableAirPlayDestinations`
-            // (`Device.canBePerAppRouteTarget(allOutputs:)`). The reverse conflict —
+            // (`Device.canBePerAppRouteTarget()`). The reverse conflict —
             // selecting a speaker that already has a redirect — is resolved by
             // `AppRoutingController.clearRoutes(toDevices:)` (selection wins), so
             // by the time this renders, no kept route targets a Main Out member.
@@ -3763,7 +3763,7 @@ public final class PopoverController: NSObject {
 
     /// The members of `group` that could carry this app's own stream right now:
     /// discovered, reachable, and eligible per
-    /// `Device.canBePerAppRouteTarget(allOutputs:)` (`available` is already
+    /// `Device.canBePerAppRouteTarget()` (`available` is already
     /// filtered to that), and not already claimed by the main output (one role
     /// per speaker — the main mix is the senior claim, and the app plays on
     /// whatever is left).
@@ -3829,7 +3829,7 @@ public final class PopoverController: NSObject {
     /// The available per-app route targets: reachable (`isAvailable`) devices
     /// whose KIND may carry a per-app stream, in the same stable order as the
     /// Selected Devices card. The kind rule lives in
-    /// `Device.canBePerAppRouteTarget(allOutputs:)`, shared with
+    /// `Device.canBePerAppRouteTarget()`, shared with
     /// `AppRoutingController.resolveGroupTargets(_:devices:)` — this function
     /// adds the reachability filter on top, which the shared predicate
     /// deliberately omits (`resolveGroupTargets` needs an unreachable group
@@ -3846,7 +3846,7 @@ public final class PopoverController: NSObject {
     /// shared predicate therefore also widens which group members an app can
     /// play on, via `usableGroupMemberIDs`.
     private func availableAirPlayDestinations(devices: [Device]) -> [Device] {
-        devices.filter { $0.isAvailable && $0.canBePerAppRouteTarget(allOutputs: PerAppRouting.allOutputsEnabled) }
+        devices.filter { $0.isAvailable && $0.canBePerAppRouteTarget() }
     }
 
     /// Title for the "Current Device" entry — the local device's own name when the

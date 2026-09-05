@@ -26,38 +26,22 @@ folder renders; routing arithmetic lives in Core.
 - The Mixer carries an equalizer DOOR (the row button beside mute, and the row menu) and one mark (magenta border when the curve is not flat). No editor, no curve, no tone control on the Mixer (2026-08-22, amended 2026-09-03).
 - A never-aligned Bluetooth row's chip IS the wizard's door; a measured one opens the drawer.
 - A first-join alignment note is session state: ✕ hides it, nothing is written down.
-- The header strip draws its OWN chrome, and the three tabs are ONE capsule: a single
-  `NSToolbarItem` carries a `SurfaceToolbarTabCapsule` (a pill-shaped surface drawn
-  once) with the three `SurfaceToolbarSeatButton`s layered over it. Three separate
-  seats, one per tab, read as three islands and were rejected. The current tab is a
-  soft rounded highlight INSIDE the pill, hover the same highlight weaker, an idle tab
-  nothing — always painted ON the capsule, never instead of it, which is what keeps the
-  current screen lighter than its ground in dark mode. Pin stands outside the capsule and
-  is NOT one of these seats since 2026-09-05: it is a bordered `NSToolbarItem` with no
-  custom view, because that is the only configuration macOS 26 draws as a true circle —
-  a custom view gets our shape nested inside the system's rounded-square wrapper, which
-  is the "so close to a circle" defect. Its pinned state reads off the glyph
-  (`pin` / `pin.fill`), since the system owns that item's chrome. The seat button is the folder's one custom-drawn exception
-  (drawing only; tracking, keyboard and VoiceOver stay stock) because AppKit draws a
-  bordered item's hover as a CIRCLE and its selection as a rounded SQUARE. Never put a
-  cue behind `#available` — the package deploys to 14.2 (2026-09-04).
-- One shape per STATE, two shapes per kind of ITEM (2026-09-05, reversing the one-shape-
-  everywhere rule above). Every seat is cut at HALF ITS OWN HEIGHT
-  (`SurfaceToolbarSeat.seatCornerRadius`): Pin is square, so it draws a true circle; a tab
-  is wider than tall, so it draws a stadium. Hover, selection and press stay one shape at
-  three weights on both. Two things fall out of that one rule and must stay derived, never
-  retyped: the capsule is exactly `pinDiameter` tall, so the pill and Pin match in height;
-  and a tab's radius equals `capsuleCornerRadius - capsulePadding`, which is what makes the
-  highlight CONCENTRIC with the pill. Cutting the highlight at `Radius.control` (10) inside
-  a 16pt pill is the uneven gap Alec rejected — 3pt at mid-height, 6pt into the corner.
-- The CURRENT tab shows its name beside its glyph; the other two never do (2026-09-04).
-  One name on the strip at a time, clamped to `SurfaceToolbarSeat.maxNameWidth` and
-  truncated past it — that pair is what makes the 2026-09-03 failure impossible, where
-  three translated labels widened the strip until AppKit swept the tabs into the
-  overflow chevron. Never reveal a second name, never lift the clamp, and never widen
-  the strip on HOVER: the pointer must not reshape a control it is only passing over.
-  The reveal grows the seat itself and runs on `FoldAnimator`, the app's one reveal
-  clock, which is where Reduce Motion is already answered.
+- The header strip is BORDERED `NSToolbarItem`s — every tab and Pin alike — and the
+  current screen is AppKit's own `selectedItemIdentifier`, never an authored fill
+  (2026-09-05, replacing the custom-drawn capsule that stood here). Two defects killed
+  the drawn version: every cue sat behind `if #available(macOS 26.0, *)` while the
+  package deploys to 14.2, so macOS 14-25 showed three identical circles and no current
+  screen at all; and the authored fill had to clear the UNSELECTED capsule, which in dark
+  mode was already the same grey, so the current tab rendered as the darkest thing in the
+  strip. Never put a cue behind `#available`, and never re-author this chrome: a custom
+  view is nested INSIDE the system's own rounded-square wrapper, which is why a
+  hand-drawn Pin could never come out a circle. Pin's pinned state reads off the glyph
+  (`pin` / `pin.fill`) for the same reason — the system owns that item's chrome.
+- The animated tab-name reveal is GONE (2026-09-05), removed with the custom capsule it
+  was built on. Tabs now carry a plain `item.label` and AppKit decides what it shows. The
+  constraint that produced the reveal still stands if anyone rebuilds it: never let three
+  translated labels widen the strip, which on 2026-09-03 pushed the tabs into the overflow
+  chevron. One name at a time, clamped and truncated, was the shape that worked.
 - The Mixer tab does NOT draw `slider.horizontal.3`: that is the device row's equalizer
   door (`DeviceRowView.eqSymbolName`), and sliders are what an equalizer looks like. The
   tab draws `waveform` (2026-09-04).
@@ -78,4 +62,4 @@ folder renders; routing arithmetic lives in Core.
 - `PopoverController` → the Mixer brain: card stack, device ingest, controller calls.
 - `PopoverPanelViewController` → the panel view controller every host mounts.
 - `AppSurfaceController` → owns the shell, swaps the three screens.
-- `SurfaceToolbar` → the window's header strip; `SurfaceToolbarSeatButton` is what it draws.
+- `SurfaceToolbar` → the window's header strip, built from bordered `NSToolbarItem`s.

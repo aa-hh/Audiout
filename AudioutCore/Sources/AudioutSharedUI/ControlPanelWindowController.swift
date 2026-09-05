@@ -125,6 +125,14 @@ public final class ControlPanelWindowController: NSWindowController {
     /// unconsumed self-dismissal.
     private var lastResignDismissalTime: CFTimeInterval?
 
+    /// The `eventNumber` of the mouse-down being processed when the resign
+    /// dismissal fired, `nil` when no mouse event was in flight. AppKit gives
+    /// a click's mouse-down and mouse-up the same event number, so the status
+    /// button's action (which runs on the mouse-up) can recognise "this very
+    /// click is what dismissed me" no matter how long the button was held —
+    /// the wall-clock window below only bounds the cases this can't see.
+    private var lastResignDismissalMouseDownNumber: Int?
+
     /// How recently a resign-key self-dismissal has to have happened for the
     /// status-item click handler to treat it as "that click is what closed me".
     /// A whole mouse-down→mouse-up on a menu-bar item is milliseconds; this is
@@ -512,8 +520,40 @@ public final class ControlPanelWindowController: NSWindowController {
         within interval: TimeInterval = ControlPanelWindowController.recentResignDismissalInterval
     ) -> Bool {
         guard let stamp = lastResignDismissalTime else { return false }
+        let mouseDownNumber = lastResignDismissalMouseDownNumber
         lastResignDismissalTime = nil
+        lastResignDismissalMouseDownNumber = nil
+        // The click's own mouse-up carries the SAME event number as the
+        // mouse-down that caused the dismissal — a definitive match at any
+        // press speed. Without it, holding the status button longer than the
+        // freshness window made the stamp read stale and the very click that
+        // visibly closed the panel reopened it on release. The time window
+        // stays as the fallback for events this can't see (a VoiceOver press,
+        // no current event).
+        if let mouseDownNumber,
+           let upNumber = Self.eventNumber(of: NSApp?.currentEvent, in: Self.mouseUpTypes)
+               ?? test_clickMouseUpNumberOverride,
+           upNumber == mouseDownNumber {
+            return true
+        }
         return CACurrentMediaTime() - stamp <= interval
+    }
+
+    /// Mouse-down (and drag — same event number as its down) vs mouse-up
+    /// event types, for matching a dismissal to the click that caused it.
+    private static let mouseDownTypes: Set<NSEvent.EventType> = [
+        .leftMouseDown, .rightMouseDown, .otherMouseDown,
+        .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+    ]
+    private static let mouseUpTypes: Set<NSEvent.EventType> = [
+        .leftMouseUp, .rightMouseUp, .otherMouseUp,
+    ]
+
+    /// `event.eventNumber` when `event` is one of `types`, else `nil` — mouse
+    /// events only; `eventNumber` is meaningless on anything else.
+    private static func eventNumber(of event: NSEvent?, in types: Set<NSEvent.EventType>) -> Int? {
+        guard let event, types.contains(event.type) else { return nil }
+        return event.eventNumber
     }
 
     /// Bring the app forward so the panel can actually take key.
@@ -561,6 +601,13 @@ public final class ControlPanelWindowController: NSWindowController {
             }
             return
         }
+
+        // Whether this show is a REVEAL or a re-front of a panel the user is
+        // already looking at (the sheet-attached `.front` click, "Open
+        // Groups"/⌘, while the surface is open, a Finder reopen). Read before
+        // ordering, decides the fade below: replaying the 0→1 opacity fade
+        // over visible pixels reads as the panel blinking.
+        let wasOnScreen = isPanelVisible
 
         let size = panel.frame.size
 
@@ -637,7 +684,7 @@ public final class ControlPanelWindowController: NSWindowController {
         backingView.beakFraction = beakFraction
         backingWindow.invalidateShadow()
 
-        animateAppearance()
+        if !wasOnScreen { animateAppearance() }
     }
 
     // MARK: T11 — open/close animation
@@ -714,6 +761,13 @@ public final class ControlPanelWindowController: NSWindowController {
 
     /// `nil` = read the real `window.isKeyWindow`.
     public var test_isKeyWindowOverride: Bool?
+
+    /// Stand-ins for the mouse events a headless run never has: the number of
+    /// the mouse-down being processed when a resign dismissal fires, and of
+    /// the mouse-up the consuming click handler runs on. Only read when
+    /// `NSApp.currentEvent` yields no usable mouse event.
+    public var test_resignMouseDownNumberOverride: Int?
+    public var test_clickMouseUpNumberOverride: Int?
 
     /// Run the deferred half of a resign-key dismissal now — the runloop pass
     /// AppKit would have given it. Tests drive both halves explicitly because a
@@ -797,6 +851,13 @@ extension ControlPanelWindowController: NSWindowDelegate {
     private func dismissIfStillResigned() {
         guard shouldDismissOnResignKey, !isKeyNow else { return }
         lastResignDismissalTime = CACurrentMediaTime()
+        // The event being processed right now is the mouse-down of the click
+        // that made the panel resign (a status-button press, or a click on
+        // another of this app's windows) — remember its number so the
+        // matching mouse-up can be recognised in `consumeRecentResignDismissal`.
+        lastResignDismissalMouseDownNumber =
+            Self.eventNumber(of: NSApp?.currentEvent, in: Self.mouseDownTypes)
+            ?? test_resignMouseDownNumberOverride
         window?.performClose(nil)
     }
 

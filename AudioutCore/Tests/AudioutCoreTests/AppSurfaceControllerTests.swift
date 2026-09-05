@@ -601,6 +601,26 @@ import AppKit
         #expect(!surface.isShown)
     }
 
+    /// (b) A panel AppKit counts visible but the user cannot see — left on
+    /// another Space after a Space switch (the app deactivates but the panel
+    /// does not tuck away), or fully occluded — must be RE-SHOWN by a click,
+    /// never toggled shut. Dismissing it is the click that "does nothing":
+    /// live probe trace 2026-09-05, where every failed click was a `.dismiss`
+    /// of an off-Space panel and only the follow-up `.show` produced it.
+    @Test func aClickOnAPanelTheUserCannotSeeReshowsItInsteadOfDismissing() {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        surface.shell.test_isPanelVisibleOverride = true
+        surface.shell.test_isPanelSeenByUserOverride = false
+
+        let action = surface.clickAction(setupIsOpen: false)
+        #expect(action == .show, "an unseen panel is re-shown, never toggled shut")
+
+        // Seen again (same Space, unoccluded): the ordinary toggle returns.
+        surface.shell.test_isPanelSeenByUserOverride = true
+        #expect(surface.clickAction(setupIsOpen: false) == .dismiss)
+    }
+
     /// (b, R1) The status click IS the click that made the unpinned surface
     /// resign key, and AppKit delivers that resign — and the close it causes —
     /// BEFORE the button's action runs. Without the guard the handler sees a

@@ -3,6 +3,34 @@
 Handover, 2026-09-03. Written after losing ~90 minutes to the downstream
 symptoms. The bug is not in any product code.
 
+**UPDATE, same day, ~06:55: root cause found, already fixed by the time this
+was written.** Between 05:02 and 06:04:22 the mule's `xcode-select` link
+pointed at `/Applications/Xcode.app`, which had just been removed, so
+`/usr/bin/swift` silently fell back to the Command Line Tools (Swift 6.2.3).
+SwiftPM finds both `XCTest.framework` and `Testing.framework` through one
+`xcrun --show-sdk-platform-path` lookup; the CLT has no `XCTest.framework`
+there, so SwiftPM marks XCTest unsupported (`'--num-workers' is only
+supported when testing with XCTest`) and drops the `-F` framework search
+path Swift Testing needs (`no such module 'Testing'`). One fault, two
+messages — not two bugs. Alec repointed the link at 06:04:22
+(`sudo xcode-select -s /Applications/Xcode-beta.app/Contents/Developer`);
+reproduced by re-selecting the CLT (`DEVELOPER_DIR=/Library/Developer/CommandLineTools`)
+and confirmed gone with a cold build, a warm build, and a live wrapper run
+from another worktree afterwards. **Everything below this point describes
+the investigation that led there and is superseded** — do not re-apply the
+`--num-workers` removal or chase the "ruled out" table; both were dead ends
+this session found on a machine that was already broken for an unrelated
+reason. Two real, separate issues turned up alongside it:
+- The mule's login keychain is locked over ssh, so a fresh worktree's first
+  `swift build` exits 1 downloading the Sparkle artifact even though the
+  compile succeeds. Fix: pass `--disable-keychain`.
+- `audiout.remoteSlots` was 4 on a 24 GB machine; four concurrent runs swap
+  it to the edge (load 300+, most of RAM in the compressor) and the
+  `CompanionEndToEndTests` 5-second waits start failing there, which the
+  wrapper then reports as "remote FAILURES" and re-runs the whole suite
+  locally. Lowered to 2. See project memory `mule-overload-reroutes-tests-local.md`
+  and `mule-ios-build-setup.md` for the full record.
+
 ## What is actually happening
 
 `scripts/run-tests.sh` prefers the remote Mac (`alechamilton@SUMUP-M9Y197RFVG.local`).

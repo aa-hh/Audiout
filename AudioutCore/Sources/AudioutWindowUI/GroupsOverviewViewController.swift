@@ -35,6 +35,11 @@ public final class GroupsOverviewViewController: NSViewController {
 
     private let groupController: GroupController
 
+    /// The per-app routing table, so a card can disclose that apps are routed
+    /// to that group. Optional exactly like `deviceIconController` — a host
+    /// that doesn't set it simply shows no "Feeding" clause.
+    public var appRouting: AppRoutingController?
+
     /// Per-device icon overrides, so a card's member chips wear the same glyphs
     /// the sidebar and the editor draw. Optional exactly like the editor's.
     public var deviceIconController: DeviceIconController?
@@ -251,7 +256,8 @@ public final class GroupsOverviewViewController: NSViewController {
             memberCount: group.memberIDs.count,
             isLive: isLive,
             chipSymbolNames: shown.map(chipSymbolName(forMember:)),
-            overflowText: overflow > 0 ? "+\(overflow)" : nil)
+            overflowText: overflow > 0 ? "+\(overflow)" : nil,
+            feedingAppNames: appRouting?.appNamesRouted(toGroup: group.id) ?? [])
     }
 
     private func chipSymbolName(forMember deviceID: String) -> String {
@@ -341,6 +347,11 @@ public final class GroupsOverviewViewController: NSViewController {
         activate(index: index)
     }
 
+    /// The card's "Feeding …" meta clause, or `nil` when no app is routed here.
+    public func test_cardFeedingText(id: String) -> String? {
+        plans.first { $0.groupID == id }?.feedingText
+    }
+
     /// Whether the card draws the gold live treatment (border + wave marker).
     public func test_cardShowsLive(id: String) -> Bool {
         plans.first { $0.groupID == id }?.isLive ?? false
@@ -375,7 +386,8 @@ public final class GroupsOverviewViewController: NSViewController {
                              memberCount: 2,
                              isLive: isLive,
                              chipSymbolNames: chipSymbolNames,
-                             overflowText: overflowText)
+                             overflowText: overflowText,
+                             feedingAppNames: [])
         return card
     }
 
@@ -586,11 +598,30 @@ private struct CardPlan {
     let isLive: Bool
     let chipSymbolNames: [String]
     let overflowText: String?
+    /// Display names of the apps routed to this group, in route order.
+    let feedingAppNames: [String]
 
-    /// "5 speakers", or "5 speakers · Playing now" with the live half in gold.
+    /// "5 speakers", then " · Playing now" while the group is the live Main Out
+    /// target, then " · Playing Safari" (or "· Playing 3 apps") while apps are
+    /// routed to it — a group can be both at once, and each clause answers a
+    /// different question.
     var metaText: String {
         let speakers = memberCount == 1 ? "1 speaker" : "\(memberCount) speakers"
-        return isLive ? "\(speakers) · Playing now" : speakers
+        var parts = [speakers]
+        if isLive { parts.append("Playing now") }
+        if let feeding = feedingText { parts.append(feeding) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// "Playing Safari" for one routed app, "Playing 3 apps" for more, `nil`
+    /// for none. One name is worth spelling out; three names would crowd a card
+    /// this size and the count is the useful fact.
+    var feedingText: String? {
+        switch feedingAppNames.count {
+        case 0:  return nil
+        case 1:  return "Playing \(feedingAppNames[0])"
+        default: return "Playing \(feedingAppNames.count) apps"
+        }
     }
 }
 

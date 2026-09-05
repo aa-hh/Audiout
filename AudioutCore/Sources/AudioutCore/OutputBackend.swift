@@ -539,8 +539,14 @@ public protocol AppRouteConfiguring: AnyObject {
     /// Starts/stops per-app taps, binds engine sessions, and emits `.routedApps`.
     /// `excludedBundleIDs` is the Settings › Audio denylist, forwarded so the
     /// whole-system tap keeps excluding both individually-routed and user-excluded
-    /// apps. Must NOT be called while holding any backend-internal lock.
-    func updateAppRoutes(_ routes: [AppRoute], excludedBundleIDs: Set<String>)
+    /// apps. `groupTargets` is every saved group resolved into the speakers it can
+    /// currently feed (``AppRoutingController/resolveGroupTargets(_:devices:)``) —
+    /// what a `.group` route resolves against, re-sent on every push because a
+    /// group route follows the group's live membership. Must NOT be called while
+    /// holding any backend-internal lock.
+    func updateAppRoutes(
+        _ routes: [AppRoute], excludedBundleIDs: Set<String>,
+        groupTargets: [String: GroupRouteTarget])
 
     /// Forward an app-quit notification (T8). `bundleID`'s process just
     /// terminated — if it currently has an active `.device(id:)` route, its

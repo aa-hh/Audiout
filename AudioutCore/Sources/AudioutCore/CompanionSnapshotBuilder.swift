@@ -153,12 +153,13 @@ public enum CompanionSnapshotBuilder {
         let appRouteStates = appRouting.appRoutes
             .filter { !excludedBundleIDs.contains($0.bundleID) }
             .map { route -> AppRouteState in
-                let (kind, deviceID) = destination(route.destination)
+                let (kind, deviceID, groupID) = destination(route.destination)
                 return AppRouteState(
                     bundleID: route.bundleID,
                     displayName: route.displayName,
                     destinationKind: kind,
                     deviceID: deviceID,
+                    groupID: groupID,
                     volume: route.volume,
                     isRunning: runningRouted.contains(route.bundleID)
                 )
@@ -308,13 +309,19 @@ public enum CompanionSnapshotBuilder {
         }
     }
 
-    /// Flattens `AppRouteDestination` to the wire `(kind, deviceID)` pair —
-    /// same idiom `AppRouteStore.PersistedRoute` already uses on disk.
-    private static func destination(_ destination: AppRouteDestination) -> (kind: String, deviceID: String?) {
+    /// Flattens `AppRouteDestination` to the wire kind plus whichever id that
+    /// kind uses — same idiom `AppRouteStore.PersistedRoute` already uses on
+    /// disk, and the reason the two ids sit in separate slots: a group id read
+    /// as a device id resolves against the device list and renders as a
+    /// missing device.
+    private static func destination(
+        _ destination: AppRouteDestination
+    ) -> (kind: String, deviceID: String?, groupID: String?) {
         switch destination {
-        case .noRedirect:     return ("noRedirect", nil)
-        case .currentDevice:  return ("currentDevice", nil)
-        case .device(let id): return ("device", id)
+        case .noRedirect:     return ("noRedirect", nil, nil)
+        case .currentDevice:  return ("currentDevice", nil, nil)
+        case .device(let id): return ("device", id, nil)
+        case .group(let id):  return ("group", nil, id)
         }
     }
 }

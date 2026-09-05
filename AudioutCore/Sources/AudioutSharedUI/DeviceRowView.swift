@@ -262,6 +262,13 @@ public final class DeviceRowView: NSView {
     /// (`routedAppNames`), mirroring the retired sublabel's own T9 precedence.
     /// Recomputed every `apply`.
     private var feedAppNames: [String] = []
+
+    /// App display name → the saved group that app reaches this speaker
+    /// through, for the names in ``feedAppNames`` that arrive via a group route.
+    /// Spoken only (see ``feedNames(qualifiedByGroup:)``); the pills are
+    /// unchanged, so a group route and a direct one look identical on screen —
+    /// which is correct, the speaker is carrying that app either way.
+    private var feedAppGroupNames: [String: String] = [:]
     /// Whether the row's controls currently render the "muted-unconnected"
     /// treatment (v4 §Call-1 + v4.1 item 8): desaturated fader/readout AND —
     /// new in item 8 — dimmed FEED text. Stored (not just a local in
@@ -493,6 +500,7 @@ public final class DeviceRowView: NSView {
                       selectionDimmed: Bool = false,
                       routedAppNames: [String] = [],
                       liveAppNames: [String] = [],
+                      appRouteGroupNames: [String: String] = [:],
                       masterMuted: Bool = false,
                       inActiveTarget: Bool? = nil,
                       mainOutTargetsGroupName: String? = nil,
@@ -615,6 +623,7 @@ public final class DeviceRowView: NSView {
         // VoiceOver feed clause share one source of truth.
         self.mainMixSourceName = activeMember ? (mainOutTargetsGroupName ?? "System") : nil
         self.feedAppNames = liveAppNames.isEmpty ? routedAppNames : liveAppNames
+        self.feedAppGroupNames = appRouteGroupNames
         // The fader's engaged (gold) fill reuses the EXACT same predicate the
         // dot renders — one armed truth, two instruments (spec §3.3 / §5).
         faderCell.isRouteArmed = isRouteArmed
@@ -1238,16 +1247,31 @@ public final class DeviceRowView: NSView {
         // which unconditionally wipes `feedStack.toolTip` as part of tearing
         // down the old pills — setting it before that call had it silently
         // erased on every apply.
-        feedStack.toolTip = feedNames.isEmpty ? nil : "Playing " + feedNames.joined(separator: ", ")
+        let tooltipNames = feedNames(qualifiedByGroup: false)
+        feedStack.toolTip = tooltipNames.isEmpty
+            ? nil : "Playing " + tooltipNames.joined(separator: ", ")
     }
 
     /// The FEED column's spoken/tooltip names, in order: `mainMixSourceName`
     /// then `feedAppNames` — the single source both ``feedAccessibilityClause``
     /// and the feed-stack tooltip read, so the two can never diverge.
-    private var feedNames: [String] {
+    ///
+    /// - Parameter qualifiedByGroup: name the GROUP an app reaches this speaker
+    ///   through ("Safari, through Kitchen"). The spoken label says it, because
+    ///   otherwise a group route is indistinguishable from a direct one and the
+    ///   user has no way to hear why this speaker is carrying that app. The
+    ///   tooltip leaves it off — the pills are already a visual list, and the
+    ///   qualifier reads as another list item there.
+    private func feedNames(qualifiedByGroup: Bool) -> [String] {
         var names: [String] = []
         if let mainMixSourceName { names.append(mainMixSourceName) }
-        names.append(contentsOf: feedAppNames)
+        for name in feedAppNames {
+            if qualifiedByGroup, let group = feedAppGroupNames[name] {
+                names.append("\(name), through \(group)")
+            } else {
+                names.append(name)
+            }
+        }
         return names
     }
 
@@ -3372,8 +3396,9 @@ public final class DeviceRowView: NSView {
         guard busActive else { return nil }
         if case .failed = device.connectionState { return nil }
         if !device.isAvailable { return nil }
-        guard !feedNames.isEmpty else { return nil }
-        return "playing " + feedNames.joined(separator: ", ")
+        let names = feedNames(qualifiedByGroup: true)
+        guard !names.isEmpty else { return nil }
+        return "playing " + names.joined(separator: ", ")
     }
 
     /// The accessibility-label clause for the current connection state

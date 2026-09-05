@@ -741,6 +741,11 @@ private func route(_ bundleID: String, name: String, toDevice deviceID: String, 
     AppRoute(bundleID: bundleID, displayName: name, destination: .device(id: deviceID), volume: volume)
 }
 
+private func groupRoute(_ bundleID: String, name: String, toGroup groupID: String,
+                        volume: Int = 100) -> AppRoute {
+    AppRoute(bundleID: bundleID, displayName: name, destination: .group(id: groupID), volume: volume)
+}
+
 // MARK: T10 cross-component doubles
 //
 // The fakes below back the T10 full-chain tests: they let a test push
@@ -1067,6 +1072,19 @@ private func startSelectAndStream(
     } after: { discovery.fire(.appeared(device)) }
     backend.setOutputSet([device.id])
     await pollUntil { engine.addedIDs.contains(device.outputID) }
+}
+
+/// Discover TWO AP2 devices in one start — a group route needs several
+/// speakers known before it can be resolved against them.
+private func startAndDiscoverPair(
+    _ backend: NativeBackend, _ engine: SpyEngine, _ discovery: FakeDiscovery,
+    _ first: DiscoveredDevice, _ second: DiscoveredDevice
+) async {
+    await startAndDiscover(backend, engine, discovery, first)
+    _ = await collect(from: backend) { events in
+        events.contains { if case .deviceAdded(let d) = $0 { return d.id == second.id } else { return false } }
+    } after: { discovery.fire(.appeared(second)) }
+    await pollUntil { engine.fedIDs.contains(second.outputID) }
 }
 
 /// Discover an AP2 device and wait until the backend knows it (so `outputIDs`
@@ -5610,33 +5628,236 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "the redirect must re-establish itself once the takeover succeeds, with no user action")
     }
 
-    /// T4b defensive guard: a per-app route that targets an AirPlay-1-only
-    /// (RAOP) device must never reach the engine's `addOutput`/`removeOutput`
-    /// — the UI already refuses to offer one as a destination
-    /// (`PopoverController.availableAirPlayDestinations`), but if a stale/racing
-    /// route table hands one down anyway, `NativeBackend` must refuse it rather
-    /// than proceed into the `.bind`/`.rebind` path (a rebind re-anchors an AP1
-    /// device's clock — no shared timing protocol with AP2 — drifting it out of
-    /// sync with the rest of a group, and some classic receivers briefly reject
-    /// the RTSP reconnect).
-    @Test func appRouteToAirPlay1OnlyDeviceIsRefused() async {
-        let recorder = ResolveAttemptRecorder()
-        let (backend, engine, discovery) = makeBackend(processResolver: AudioProcessResolver(enumerator: recorder))
+    /// An AirPlay 1 (RAOP) device is a per-app route target: a `.device`
+    /// route naming a discovered AP1 device binds a per-app stream to it
+    /// exactly like any other engine-driven device. This is safe because the
+    /// vendored RAOP sender keys its master sessions on
+    /// `(stream_id, quality, encrypt)`
+    /// (`AirPlayEngine/Sources/CAirPlayEngine/sender/raop.c:1888-1899`), so
+    /// distinct stream ids never share a master session — there is no shared
+    /// clock for a per-app rebind to desync.
+    @Test func appRouteToAirPlay1OnlyDeviceIsBound() async {
+        let (backend, engine, discovery) = makeBackend()
         defer { backend.stop() }
         let device = ap1Device()
         await startAndDiscover(backend, engine, discovery, device)
 
         backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
 
-        // Give the async bind-tail a moment to run, then assert it never touched
-        // the engine for this device — no bind, no rebind, no removeOutput.
-        await pollUntil { recorder.callCount > 0 }
-        // No scheduled interval here — pure async-settle margin at the 100ms floor.
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        #expect(engine.streamAddCalls.filter { $0.0 == device.outputID }.isEmpty,
-                     "an AirPlay-1-only device must never be bound to a per-app stream")
-        #expect(!(engine.removedIDs.contains(device.outputID)),
-                       "an AirPlay-1-only device that was never bound should not be torn down either")
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        #expect(engine.streamAddCalls.contains { $0.0 == device.outputID },
+                     "an AirPlay-1 device must be bound to a per-app stream")
+    }
+
+    // MARK: Per-app routing to a saved GROUP
+
+    /// A group route reaches EVERY eligible member — one app, two receivers,
+    /// each bound to a per-app stream.
+    @Test func groupRouteBindsEveryEligibleMember() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let kitchen = ap2Device(id: "AA:BB:CC:DD:EE:01", name: "Kitchen")
+        let hall = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Hall")
+        await startAndDiscoverPair(backend, engine, discovery, kitchen, hall)
+
+        backend.updateAppRoutes(
+            [groupRoute("com.foo.player", name: "Foo", toGroup: "downstairs")],
+            groupTargets: ["downstairs": GroupRouteTarget(
+                memberVolumes: [kitchen.id: 100, hall.id: 100])])
+
+        await pollUntil {
+            engine.streamAddCalls.contains { $0.0 == kitchen.outputID && $0.1 >= 1 }
+                && engine.streamAddCalls.contains { $0.0 == hall.outputID && $0.1 >= 1 }
+        }
+        #expect(engine.streamAddCalls.filter { $0.0 == kitchen.outputID }.count == 1)
+        #expect(engine.streamAddCalls.filter { $0.0 == hall.outputID }.count == 1)
+    }
+
+    /// Main Out claiming ONE member does not kill the route — the app keeps
+    /// playing on the group's remaining speakers (partial subtraction).
+    @Test func groupRouteSurvivesMainOutClaimingOneMember() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let kitchen = ap2Device(id: "AA:BB:CC:DD:EE:01", name: "Kitchen")
+        let hall = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Hall")
+        await startAndDiscoverPair(backend, engine, discovery, kitchen, hall)
+        // Whole-system routing takes the kitchen: the senior claim.
+        backend.setOutputSet([kitchen.id])
+
+        backend.updateAppRoutes(
+            [groupRoute("com.foo.player", name: "Foo", toGroup: "downstairs")],
+            groupTargets: ["downstairs": GroupRouteTarget(
+                memberVolumes: [kitchen.id: 100, hall.id: 100])])
+
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == hall.outputID && $0.1 >= 1 } }
+        #expect(engine.streamAddCalls.contains { $0.0 == hall.outputID && $0.1 >= 1 },
+                "the free member still carries the app")
+        #expect(!engine.streamAddCalls.contains { $0.0 == kitchen.outputID && $0.1 >= 1 },
+                "the claimed member is never bound to a per-app stream")
+    }
+
+    /// A group whose every member is claimed leaves nothing to stream to, so
+    /// the route reads as effective-`.noRedirect` and the app goes back into
+    /// the whole-system mix — same landing an unreachable single target gets.
+    @Test func groupRouteWithEveryMemberClaimedBindsNothing() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let kitchen = ap2Device(id: "AA:BB:CC:DD:EE:01", name: "Kitchen")
+        await startAndDiscover(backend, engine, discovery, kitchen)
+        backend.setOutputSet([kitchen.id])
+
+        backend.updateAppRoutes(
+            [groupRoute("com.foo.player", name: "Foo", toGroup: "downstairs")],
+            groupTargets: ["downstairs": GroupRouteTarget(memberVolumes: [kitchen.id: 100])])
+
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        #expect(!engine.streamAddCalls.contains { $0.0 == kitchen.outputID && $0.1 >= 1 })
+    }
+
+    /// The other half of the same live bug: Main Out RELEASING the group's
+    /// speakers must re-engage the route by itself. The selection-edge replay
+    /// matched `.device` routes only, so a group-routed app demoted while its
+    /// speakers carried the main mix stayed demoted after they were let go —
+    /// the route reads as routed in the UI and plays nowhere.
+    @Test func groupRouteReEngagesWhenMainOutReleasesItsMembers() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let kitchen = ap2Device(id: "AA:BB:CC:DD:EE:96", name: "Kitchen")
+        await startAndDiscover(backend, engine, discovery, kitchen)
+        backend.setOutputSet([kitchen.id])
+
+        backend.updateAppRoutes(
+            [groupRoute("com.foo.player", name: "Foo", toGroup: "groupy")],
+            groupTargets: ["groupy": GroupRouteTarget(memberVolumes: [kitchen.id: 100])])
+        await pollUntil { backend.test_scopeConflict(deviceID: kitchen.id) != nil }
+
+        // Main Out lets the speaker go. Nothing edits the route table.
+        backend.setOutputSet([])
+
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == kitchen.outputID && $0.1 >= 1 } }
+        #expect(engine.streamAddCalls.contains { $0.0 == kitchen.outputID && $0.1 >= 1 },
+                "the released speaker must pick the group route back up with no user action")
+    }
+
+    /// Editing the group — here, dropping a member — re-runs the effective-route
+    /// pass with an UNCHANGED route table and unbinds the speaker that left.
+    @Test func editingTheGroupRedrivesTheRouteWithNoRouteTableChange() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let kitchen = ap2Device(id: "AA:BB:CC:DD:EE:01", name: "Kitchen")
+        let hall = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Hall")
+        await startAndDiscoverPair(backend, engine, discovery, kitchen, hall)
+        let routes = [groupRoute("com.foo.player", name: "Foo", toGroup: "downstairs")]
+
+        backend.updateAppRoutes(routes, groupTargets: ["downstairs": GroupRouteTarget(
+            memberVolumes: [kitchen.id: 100, hall.id: 100])])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == hall.outputID } }
+
+        // Same routes; the GROUP lost the hall.
+        backend.updateAppRoutes(routes, groupTargets: ["downstairs": GroupRouteTarget(
+            memberVolumes: [kitchen.id: 100])])
+
+        await pollUntil { engine.removedIDs.contains(hall.outputID) }
+        #expect(engine.removedIDs.contains(hall.outputID),
+                "a member leaving the group must release its per-app stream")
+        #expect(!engine.removedIDs.contains(kitchen.outputID),
+                "the remaining member keeps streaming")
+        #expect(engine.streamAddCalls.filter { $0.0 == kitchen.outputID }.count == 1,
+                "the surviving member must not be rebound for someone else's departure")
+    }
+
+    /// LIVE BUG (2026-08-29): a group route showed as routed in the popover —
+    /// the redirect popup read "→ Groupy", both members wore the app's FEED
+    /// pill — while no audio came out of either speaker. The topology tests
+    /// above stop at `addOutput(_:streamId:)`; nothing pushed real captured
+    /// buffers through a GROUP route the way
+    /// `crossStreamNoLeakageThroughFullBackendPipeline` does for a `.device`
+    /// route. This closes that: both members bound to ONE shared stream, and
+    /// the app's actual audio reaching `engine.write` on it.
+    @Test func groupRouteCarriesAudioToEveryMemberThroughFullPipeline() async {
+        let registry = TapRegistry()
+        let perAppCapture = registeringPerAppCapture(
+            muteBehavior: .mutedWhenTapped, bundleIDs: ["com.foo.player"], into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        let mixer = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Mixer")
+        let move = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Move 2")
+        await startAndDiscoverPair(backend, engine, discovery, mixer, move)
+
+        backend.updateAppRoutes(
+            [groupRoute("com.foo.player", name: "Foo", toGroup: "groupy")],
+            groupTargets: ["groupy": GroupRouteTarget(
+                memberVolumes: [mixer.id: 100, move.id: 100])])
+
+        await pollUntil {
+            engine.streamAddCalls.contains { $0.0 == mixer.outputID && $0.1 >= 1 }
+                && engine.streamAddCalls.contains { $0.0 == move.outputID && $0.1 >= 1 }
+        }
+        guard let streamOnMixer = engine.streamAddCalls.first(where: { $0.0 == mixer.outputID })?.1,
+              let streamOnMove = engine.streamAddCalls.first(where: { $0.0 == move.outputID })?.1
+        else {
+            Issue.record("both group members must be bound to a per-app stream")
+            return
+        }
+        #expect(streamOnMixer == streamOnMove,
+                "members fed the same app at the same level share ONE mixed stream")
+
+        // The route must also START the app's capture — no tap, no buffers, and
+        // the speakers stay silent however well-bound they are.
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.foo.player") { return true }
+            return false
+        }
+        guard let tap = registry.tap(for: "com.foo.player") else {
+            Issue.record("a group route must start the routed app's per-app capture")
+            return
+        }
+
+        tap.push(fingerprintedBuffer(fill: 0xAA, frames: 1000, atSecond: 1))
+        await pollUntil { engine.rawWriteCalls.contains { $0.streamId == streamOnMixer } }
+        #expect(engine.rawWriteCalls.contains { $0.streamId == streamOnMixer && !$0.pcm.isEmpty },
+                "the routed app's audio must reach the engine on the group's stream")
+    }
+
+    /// The same live bug, one layer UP: the group targets are resolved the way
+    /// the app itself resolves them (`AppRoutingController.resolveGroupTargets`
+    /// over the backend's OWN fleet — `AppDelegate.pushAppRoutesToBackend`'s
+    /// exact expression) rather than hand-written by the test. A saved group
+    /// whose members are real discovered devices must still reach both of them.
+    @Test func groupRouteResolvedFromTheRealFleetStillReachesBothMembers() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let mixerSpeaker = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Mixer")
+        let move = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Move 2")
+        await startAndDiscoverPair(backend, engine, discovery, mixerSpeaker, move)
+
+        let saved = Group(id: "groupy", name: "Groupy",
+                          memberIDs: [mixerSpeaker.id, move.id],
+                          memberVolumes: [mixerSpeaker.id: 100, move.id: 100])
+        let routing = AppRoutingController(
+            store: AppRouteStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)), loadPersisted: false)
+        routing.addRoute(bundleID: "com.foo.player", displayName: "Foo")
+        routing.setDestination(.group(id: saved.id), for: "com.foo.player")
+
+        backend.updateAppRoutes(
+            routing.appRoutes, excludedBundleIDs: [],
+            groupTargets: AppRoutingController.resolveGroupTargets(
+                [saved], devices: backend.devices))
+
+        await pollUntil {
+            engine.streamAddCalls.contains { $0.0 == mixerSpeaker.outputID && $0.1 >= 1 }
+                && engine.streamAddCalls.contains { $0.0 == move.outputID && $0.1 >= 1 }
+        }
+        #expect(engine.streamAddCalls.contains { $0.0 == mixerSpeaker.outputID && $0.1 >= 1 },
+                "a group route resolved against the real fleet must bind every member")
+        #expect(engine.streamAddCalls.contains { $0.0 == move.outputID && $0.1 >= 1 },
+                "a group route resolved against the real fleet must bind every member")
     }
 
     /// A route reverting to `.currentDevice` tears the capture bookkeeping down and
@@ -6830,6 +7051,55 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { engine.streamAddCalls.filter { $0.0 == target.outputID }.count > addsBefore }
         #expect(engine.streamAddCalls.filter { $0.0 == target.outputID }.count > addsBefore,
                 "the device is re-bound to its per-app stream, with no route-table mutation")
+    }
+
+    /// R5 for a GROUP route — the live bug (2026-08-29). The `.device` twin
+    /// above recovers because the replay guards match a `.device` destination;
+    /// a group route naming the same speaker through its membership matched
+    /// neither, so a member's reachability edge never re-resolved the route.
+    /// The app was left excluded from the whole-system mix with its stream
+    /// bound to a speaker that had gone away — routed in the UI, silent at
+    /// every speaker — and no user action short of re-picking the destination
+    /// brought it back.
+    ///
+    /// The route table is set ONCE; every later transition comes from
+    /// discovery alone, exactly like the `.device` control.
+    @Test func groupRouteMemberReachabilityEdgeReResolvesTheRoute() async {
+        let perApp = workingPerAppCapture(bundleIDs: ["com.foo.player"])
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perApp)
+        defer { backend.stop() }
+        let flaky = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Flaky Member")
+        let steady = ap2Device(id: "AA:BB:CC:DD:EE:95", name: "Steady Member")
+        await startAndDiscoverPair(backend, engine, discovery, flaky, steady)
+
+        backend.updateAppRoutes(
+            [groupRoute("com.foo.player", name: "Foo", toGroup: "groupy")],
+            groupTargets: ["groupy": GroupRouteTarget(
+                memberVolumes: [flaky.id: 100, steady.id: 100])])
+        await pollUntil {
+            engine.streamAddCalls.contains { $0.0 == flaky.outputID && $0.1 >= 1 }
+                && engine.streamAddCalls.contains { $0.0 == steady.outputID && $0.1 >= 1 }
+        }
+
+        // One member powers off but stays discovered (sticky AP2). Nothing calls
+        // `updateAppRoutes`; discovery is the only input.
+        discovery.fire(.updated(DiscoveredDevice(
+            id: flaky.id, descriptor: flaky.descriptor, outputID: flaky.outputID,
+            isAirPlay2Supported: true, isAvailable: false)))
+
+        await pollUntil { engine.removedIDs.contains(flaky.outputID) }
+        #expect(engine.removedIDs.contains(flaky.outputID),
+                "a group member going unreachable must release its per-app stream — a bound but absent speaker is where the audio disappeared")
+        #expect(!engine.removedIDs.contains(steady.outputID),
+                "the reachable member keeps carrying the app")
+
+        // Recovery, with no route-table edit.
+        let addsBefore = engine.streamAddCalls.filter { $0.0 == flaky.outputID }.count
+        discovery.fire(.updated(flaky))
+
+        await pollUntil { engine.streamAddCalls.filter { $0.0 == flaky.outputID }.count > addsBefore }
+        #expect(engine.streamAddCalls.filter { $0.0 == flaky.outputID }.count > addsBefore,
+                "the member coming back must re-engage the group route by itself, with no route-table mutation")
     }
 
     /// R5, the launch case that falls out of the same rule: persisted routes are
@@ -9425,8 +9695,9 @@ extension SerializedSharedState {
 /// Being over-inclusive here is not free: everything under the parent runs
 /// strictly one at a time.
 ///
-/// NOTE for the inner loop: `--filter NativeBackendTests` does NOT match this
-/// suite's runtime name. Use `--filter NativeBackend` to run both.
+/// NOTE for the inner loop: `--filter NativeBackendTests` reaches this suite
+/// too — it matches all three suites nested here: `NativeBackendGlobalStateTests`,
+/// `SerializedSharedState`, and `NativeBackendTests` itself, 227 tests total.
 @Suite struct NativeBackendGlobalStateTests {
 
     /// Selecting a device (the gate's false->true edge) must re-arm the poll —

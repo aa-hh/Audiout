@@ -29,6 +29,22 @@ import Testing
         return ramp
     }
 
+    /// Same ramp, delivered through the UID-scoped feed instead of the
+    /// whole-system fan-out.
+    @discardableResult
+    static func enqueueRamp(
+        into manager: BTSyncedSink, forDeviceUIDs uids: [String], atSec sec: Int = anchorSec
+    ) -> [Float] {
+        var ramp = [Float](repeating: 0, count: 30_000)
+        for i in 0..<ramp.count { ramp[i] = Float(i + 1) }
+        ramp.withUnsafeBufferPointer { buf in
+            manager.enqueue(
+                interleavedFrames: buf.baseAddress!, frameCount: ramp.count,
+                pts: timespec(tv_sec: sec, tv_nsec: 0), forDeviceUIDs: uids)
+        }
+        return ramp
+    }
+
     /// Drive the sink's render core from `startNanos` in 512-frame cycles until
     /// the first non-zero sample appears; returns its monotonic instant and
     /// value. Pre-release cycles must be entirely silent and drain nothing.
@@ -598,6 +614,71 @@ import Testing
     @Test func compositionChangeRebuildRederivesTheSessionDelay() throws {
         #expect(try Self.delayAfterRebuild(cause: "composition_change") == 300_000_000,
                 "a genuinely new reference timeline must re-derive from the provider")
+    }
+
+    // MARK: - Per-app claim: fan-out exclusion and the UID-scoped feed
+
+    /// A UID claimed for per-app routing must not double-receive the
+    /// whole-system mix — the fan-out `enqueue` has to skip it while still
+    /// reaching a sink nobody has claimed.
+    @Test func fanOutEnqueue_skipsClaimedUID_reachesUnclaimedUID() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1,
+            presentationDelayMs: { 100 })
+        manager.setDevices([
+            .init(deviceID: 0, uid: "dev-a"),
+            .init(deviceID: 0, uid: "dev-b"),
+        ])
+        manager.setPerAppClaimedUIDs(["dev-b"])
+
+        let sinkA = try #require(manager.sinkForTesting(uid: "dev-a"))
+        let sinkB = try #require(manager.sinkForTesting(uid: "dev-b"))
+
+        Self.enqueueRamp(into: manager)
+
+        _ = try #require(Self.firstNonSilence(of: sinkA, startNanos: Self.anchorNanos),
+                          "the whole-system fan-out must still reach an unclaimed UID")
+        #expect(Self.firstNonSilence(of: sinkB, startNanos: Self.anchorNanos) == nil,
+                "the whole-system fan-out must skip a per-app-claimed UID")
+    }
+
+    /// The UID-scoped feed is the per-app delivery path: it must reach only
+    /// the devices named in its list, not every live sink.
+    @Test func uidScopedEnqueue_reachesOnlyTheNamedUIDs() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1,
+            presentationDelayMs: { 100 })
+        manager.setDevices([
+            .init(deviceID: 0, uid: "dev-a"),
+            .init(deviceID: 0, uid: "dev-b"),
+        ])
+
+        let sinkA = try #require(manager.sinkForTesting(uid: "dev-a"))
+        let sinkB = try #require(manager.sinkForTesting(uid: "dev-b"))
+
+        Self.enqueueRamp(into: manager, forDeviceUIDs: ["dev-b"])
+
+        _ = try #require(Self.firstNonSilence(of: sinkB, startNanos: Self.anchorNanos),
+                          "the UID-scoped feed must reach the named device")
+        #expect(Self.firstNonSilence(of: sinkA, startNanos: Self.anchorNanos) == nil,
+                "the UID-scoped feed must not reach every live sink")
+    }
+
+    /// A UID the manager has no sink for is silently skipped — same posture
+    /// as `setGain(_:forDeviceUID:)` — never a crash, and it must not land on
+    /// an unrelated live sink instead.
+    @Test func uidScopedEnqueue_unknownUIDIsSilentlySkipped() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1,
+            presentationDelayMs: { 100 })
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+
+        let sinkA = try #require(manager.sinkForTesting(uid: "dev-a"))
+
+        Self.enqueueRamp(into: manager, forDeviceUIDs: ["dev-nonexistent"])
+
+        #expect(Self.firstNonSilence(of: sinkA, startNanos: Self.anchorNanos) == nil,
+                "an unknown UID must be a no-op: no crash, and no fall-through to an unrelated sink")
     }
 }
 

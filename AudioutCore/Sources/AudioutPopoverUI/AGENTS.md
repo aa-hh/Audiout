@@ -32,9 +32,12 @@ folder renders; routing arithmetic lives in Core.
   seats, one per tab, read as three islands and were rejected. The current tab is a
   soft rounded highlight INSIDE the pill, hover the same highlight weaker, an idle tab
   nothing — always painted ON the capsule, never instead of it, which is what keeps the
-  current screen lighter than its ground in dark mode. Pin is the standalone button
-  outside the capsule, wearing the same highlight; converting only half the strip failed
-  review on 2026-08-30. The seat button is the folder's one custom-drawn exception
+  current screen lighter than its ground in dark mode. Pin stands outside the capsule and
+  is NOT one of these seats since 2026-09-05: it is a bordered `NSToolbarItem` with no
+  custom view, because that is the only configuration macOS 26 draws as a true circle —
+  a custom view gets our shape nested inside the system's rounded-square wrapper, which
+  is the "so close to a circle" defect. Its pinned state reads off the glyph
+  (`pin` / `pin.fill`), since the system owns that item's chrome. The seat button is the folder's one custom-drawn exception
   (drawing only; tracking, keyboard and VoiceOver stay stock) because AppKit draws a
   bordered item's hover as a CIRCLE and its selection as a rounded SQUARE. Never put a
   cue behind `#available` — the package deploys to 14.2 (2026-09-04).
@@ -64,6 +67,9 @@ folder renders; routing arithmetic lives in Core.
   one reveal clock, which is also where Reduce Motion is answered. Opacity is the ONLY thing
   that travels, and every tick puts the session frame back, because showing the fade makes
   the window lay out and a freshly mounted split view takes that as its chance to widen it.
+- An App Routing row may target a saved GROUP. The one-role-per-speaker filter hides a Main Out member from the DEVICE list but never the group containing it — the group entry discloses how much of itself the app gets, and only greys out when no member is free.
+- A group's membership is read LIVE on every rebuild (`groupRouteTargets()`); never cache it.
+- A group edit reaches the surface ONLY through `groupsDidChange()`; no other trigger watches it.
 - Known stability findings in this target carry `STABILITY(id)` inline markers — details and fix sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 

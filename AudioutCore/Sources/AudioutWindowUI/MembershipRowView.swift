@@ -409,14 +409,24 @@ public final class MembershipRowView: NSView {
     /// On `.warmPane` the row body is the click target, so nothing inside it may
     /// swallow a click: a non-editable `NSTextField` and an `NSImageView` still
     /// hit-test to themselves and consume the mouse, which left the name, the
-    /// glyph and the "Unavailable" annotation dead. Collapsing every hit that
-    /// isn't the real checkbox onto the row is ONE fix instead of a click
-    /// recognizer per label. `.systemSheet` keeps stock hit-testing — its
-    /// checkbox is visible and the row is not an affordance.
+    /// glyph and the "Unavailable" annotation dead. Collapsing every hit onto
+    /// the row is ONE fix instead of a click recognizer per label.
+    /// `.systemSheet` keeps stock hit-testing — its checkbox is visible and the
+    /// row is not an affordance.
+    ///
+    /// The invisible checkbox under the NODE is collapsed onto the row too, so
+    /// the disc and the name reach `performToggle` by the identical path (live
+    /// report: the name toggled membership and the node appeared not to).
+    /// The button's own frame is its intrinsic switch size, several points
+    /// narrower than the drawn disc, so a click that LOOKED like it landed on
+    /// the node could land either side of that boundary — two code paths for
+    /// one visual target, and the mouse-up/drag-off rule differing between
+    /// them. The checkbox stays the keyboard and VoiceOver control; it just
+    /// stops being a separate mouse target.
     public override func hitTest(_ point: NSPoint) -> NSView? {
         let hit = super.hitTest(point)
-        guard surface == .warmPane, let hit else { return hit }
-        return hit === checkbox ? hit : self
+        guard surface == .warmPane, hit != nil else { return hit }
+        return self
     }
 
     /// Swallowed so the matching `mouseUp` is delivered here; the toggle itself

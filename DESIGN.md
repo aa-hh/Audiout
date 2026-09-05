@@ -439,12 +439,14 @@ one hero panel, gating Done until every check passes.
 
 Mostly flat, matching iOS: the dark ground ladder (canvas → panel → raised)
 and, in light, edge weight alone carry depth. `Tokens.Color.shadow` (an
-alias of `NSColor.black`) has three real consumers, every one of them a flat
+alias of `NSColor.black`) has four real consumers, every one of them a flat
 clipped band rather than a blurred `NSShadow`: `AlignmentPlateCell` (the
 wizard's answer-plate lip shading, rim shadow blend, and chip shadow fill),
-`WarmFaderCell` (the fader trough's inset shade, 0.18 alpha), and
+`WarmFaderCell` (the fader trough's inset shade, 0.18 alpha),
 `GroupedSectionView`'s `.well` style (a 1pt band at that same 0.18, clipped
-inside the shape's top edge). `.well` is the page card recessed: the
+inside the shape's top edge), and `SetupPreviewFrameView` (the onboarding demo
+frame, which blends the same 0.18 lip and a 0.06 darkening of its own `well`
+fill, because it is layer-backed rather than hand-drawn). `.well` is the page card recessed: the
 `Tokens.Color.well` fill in place of `.card`'s `raised`, the same
 `containerEdge` stroke and the same `panel` radius. Both Equalizers wear it —
 `DeviceDetailViewController`'s `eqWell` and `MainOutDetailViewController`'s —

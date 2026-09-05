@@ -360,6 +360,34 @@ extension SerializedSharedState {
             }
         }
     }
+
+    /// The demo frame must stay a visible recess on the hero pane.
+    ///
+    /// Turns red if `SetupPreviewFrameView` goes back to filling its well with
+    /// bare `Tokens.Color.well` and rimming it with `Tokens.Color.hairline`:
+    /// since the tokens were re-valued to cool neutrals, that pair measures
+    /// 1.154:1 against the pane's `panel` — the same hue at nearly the same
+    /// lightness — and the frame reads as flat.
+    ///
+    /// The ratio floor is LIGHT only. Dark's own `well`-on-`panel` step is
+    /// 1.134:1 and always was; there the rim and the top lip carry the recess,
+    /// so holding dark to a light-mode number would assert a redesign nobody
+    /// asked for.
+    @Test func thePreviewFrameStaysDistinctFromTheHeroPanel() {
+        let floor: CGFloat = 1.25
+        let frame = SetupPreviewFrameView()
+
+        let lightRatio = contrastRatio(resolved(frame.test_wellFill, appearanceName: .aqua),
+                                       resolved(Tokens.Color.panel, appearanceName: .aqua))
+        #expect(lightRatio >= floor,
+                "frame well vs panel in light: \(lightRatio):1 under the \(floor):1 floor")
+
+        for appearance: NSAppearance.Name in [.aqua, .darkAqua] {
+            assertSameRGB(resolved(frame.test_wellRim, appearanceName: appearance),
+                          resolved(Tokens.Color.containerEdge, appearanceName: appearance),
+                          "the frame's rim must be containerEdge under \(appearance.rawValue)")
+        }
+    }
 }
 
 } // extension SerializedSharedState

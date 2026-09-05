@@ -1026,6 +1026,22 @@ for diag in AUDIOUT_STATUS_LABEL AIRPLAYENGINE_LOG_FILE AIRPLAYENGINE_LOG_LEVEL 
   fi
 done
 
+# --- Bundle content gate ----------------------------------------------------
+# Every file that belongs in the .app is now in place and NOTHING has been
+# signed yet — the last moment where a bundle can still be refused without
+# having handed it this build's Developer ID identity. A signature is the point
+# of no return: an unwanted file inside a signed bundle is a trusted,
+# distributable artifact, so the gate runs here rather than after the codesign
+# block below.
+#
+# WHY IT EXISTS (2026-09-05): a dev performance watchdog — a `perfwatch.sh` and
+# a `com.audiouter.perfwatch` LaunchAgent — was found running on the owner's
+# Mac for 6 days 22 hours, written there directly by some earlier dev session
+# and never present in this repo. Nothing at build time would have stopped that
+# same session from putting it inside the shipped bundle instead. Now something
+# does. The checks and the reasoning are in scripts/verify-bundle.sh.
+"$SCRIPT_DIR/verify-bundle.sh" "$APP_BUNDLE" "$HELPER_LABEL"
+
 # --- Strip extended attributes ---------------------------------------------
 # codesign refuses to sign anything carrying AppleDouble/resource-fork-style
 # metadata ("resource fork, Finder information, or similar detritus not

@@ -7,15 +7,21 @@ import Testing
 /// The guard on the package's FIRST asset catalogue.
 ///
 /// A custom symbol that does not resolve is not a build error and not a crash
-/// — `Bundle.module.image(forResource:)` returns `nil`, the button's image is
-/// set to `nil`, and the control ships as a blank 24 pt hole. Three separate
-/// mistakes produce exactly that and nothing else: dropping the `resources:`
-/// entry from `Package.swift`, changing it from `.process` to `.copy` (which
-/// skips `actool` and copies the `.xcassets` folder in verbatim), or renaming
-/// a `.symbolset` directory without renaming the constant. This suite fails
-/// loudly on all three.
+/// — the lookup returns `nil` and the control ships as a blank 24 pt hole.
+/// The SHIPPING half of that guarantee lives in `make-app.sh`, which compiles
+/// the catalogue and FAILS the build when a symbol is missing from the final
+/// `Assets.car` (that check has already refused two broken builds). This
+/// suite guards the SOURCE half through ``CompiledSymbolFixture``: a renamed
+/// `.symbolset`, a malformed template SVG, or a constant that no longer names
+/// a real symbolset fails here, in the suite, not at assembly time.
 @MainActor
 @Suite struct RowAccessorySymbolTests {
+
+    init() {
+        if CompiledSymbolFixture.install() == nil {
+            Issue.record("the symbol fixture failed to compile — actool or the source catalogue is broken")
+        }
+    }
 
     @Test func everySymbolResolvesFromTheCatalogue() {
         for name in RowAccessorySymbol.allNames {
@@ -28,10 +34,10 @@ import Testing
     /// SVG resolves fine and draws the wrong control.
     @Test func theFourSymbolsAreFourDifferentImages() {
         let rasters = RowAccessorySymbol.allNames.compactMap {
-            RowAccessorySymbol.image(named: $0, palette: [.black, .white])?.tiffRepresentation
+            RowAccessorySymbol.image(named: $0, ink: .black)?.tiffRepresentation
         }
         #expect(rasters.count == RowAccessorySymbol.allNames.count,
-                "at least one symbol failed to render under palette rendering")
+                "at least one symbol failed to render")
         for (i, a) in rasters.enumerated() {
             for b in rasters[(i + 1)...] {
                 #expect(a != b, "two of the four symbols rasterise identically")
@@ -39,88 +45,82 @@ import Testing
         }
     }
 
-    /// Palette layer 0 is the enclosing square in all four templates, and
-    /// every layer above it is the mark inside. A two-colour palette therefore
-    /// has to paint MORE square than mark — the assertion that catches a
-    /// reversed palette, which draws a white square with coloured marks and
-    /// passes every configuration read-back.
-    @Test func paletteLayerZeroIsTheEnclosingSquare() throws {
+    /// The engaged treatment is ONE ink with the marks punched through as
+    /// transparency (owner, 2026-09-05). Two defects it catches, both of which
+    /// shipped: a symbol re-export that loses the erase action, and a drawing
+    /// configuration that PAINTS the marks instead of cutting them — a palette
+    /// or hierarchical configuration does exactly that, and the result is a
+    /// solid square with no glyph in it, no nil and no crash.
+    @Test func engagedFillPunchesTheMarksThrough() throws {
         for name in [RowAccessorySymbol.muteEngaged, RowAccessorySymbol.equalizerEngaged] {
-            let image = try #require(
-                RowAccessorySymbol.image(named: name, palette: [.red, .green]))
-            let counts = opaqueCounts(image)
-            let red = counts[hex(.red)] ?? 0
-            let green = counts[hex(.green)] ?? 0
-            #expect(red > 0 && green > 0, "\(name): a two-colour palette painted one colour")
-            #expect(red > green, Comment(rawValue:
-                "\(name): palette[0] must be the enclosing square, not the mark " +
-                "(square \(red) px, mark \(green) px)"))
+            let image = try #require(RowAccessorySymbol.image(named: name, ink: .red))
+            let rep = try #require(image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)))
+            var opaque = 0, holes = 0
+            // The middle band of the square, where every mark lives. The
+            // square's own corners are outside it, so a hole counted here is
+            // a mark and not the rounding at the enclosure's edge.
+            for y in (rep.pixelsHigh / 3)...(2 * rep.pixelsHigh / 3) {
+                for x in (rep.pixelsWide / 4)...(3 * rep.pixelsWide / 4) {
+                    let a = rep.colorAt(x: x, y: y)?.alphaComponent ?? 0
+                    if a > 0.9 { opaque += 1 } else if a < 0.1 { holes += 1 }
+                }
+            }
+            #expect(opaque > 0, "\(name): the fill never painted")
+            #expect(holes > 0, Comment(rawValue:
+                "\(name): no transparent marks inside the square — the punch-through is gone " +
+                "(\(opaque) opaque px, \(holes) holes in the mark band)"))
         }
     }
 
-    /// A one-colour palette covers every layer, which is what the at-rest
-    /// outline squares want. The slider pair carries SEVEN layers, so this is
-    /// also the check that the last colour really does repeat.
-    @Test func aSingleColourPaletteCoversEveryLayer() throws {
-        for name in RowAccessorySymbol.allNames {
-            let image = try #require(RowAccessorySymbol.image(named: name, palette: [.red]))
-            let counts = opaqueCounts(image)
-            #expect(counts.keys.contains(hex(.red)), "\(name): the single palette colour never landed")
-            let strays = counts.filter { $0.key != hex(.red) && $0.value > 1 }
-            #expect(strays.isEmpty, Comment(rawValue:
-                "\(name): a one-colour palette left \(strays.count) other ink(s) — " +
-                "the last colour is not repeating over the remaining layers"))
-        }
-    }
-
-    /// The symbol is the control's whole mark now, so it has to land near the
-    /// 22 pt seat it replaced without outgrowing the 24 pt column the row's
-    /// layout reserves (``PopoverColumnGrid/eqButtonWidth``) — an overspilling
-    /// glyph would eat the 6 pt gap to its neighbour.
-    @Test func theDrawnSquareFitsItsColumnAtTheSharedPointSize() throws {
+    /// The symbol is the control's whole mark now, so the drawn square has to
+    /// sit inside the 24 pt column the row's layout reserves
+    /// (``PopoverColumnGrid/eqButtonWidth``) with room to spare — a mark meant
+    /// to read as quiet chrome rather than a centerpiece (owner, 2026-09-05)
+    /// should sit well clear of that column, not fill it.
+    ///
+    /// Measured on the INK, not on `image.size`: a symbol's image box carries
+    /// empty side bearings, so the box is wider than the square inside it, and
+    /// asserting on the box misses how big the mark actually reads (that gap
+    /// is what let an earlier tune ship 3 pt smaller than intended). The
+    /// buttons clip that bearing rather than scale it.
+    @Test func theDrawnSquareFillsItsColumnWithoutOutgrowingIt() throws {
         let image = try #require(
-            RowAccessorySymbol.image(named: RowAccessorySymbol.muteEngaged,
-                                     palette: [.black, .white]))
-        let size = image.size
-        #expect(size.width <= PopoverColumnGrid.eqButtonWidth
-                    && size.height <= PopoverColumnGrid.eqButtonWidth,
-                "the symbol draws \(size), wider than its \(PopoverColumnGrid.eqButtonWidth) pt column")
-        #expect(size.height >= 16,
-                "the symbol draws \(size) — smaller than the 22 pt seat it replaces")
+            RowAccessorySymbol.image(named: RowAccessorySymbol.muteEngaged, ink: .black))
+        let ink = try #require(inkBounds(image))
+        let column = PopoverColumnGrid.eqButtonWidth
+        #expect(ink.width <= column && ink.height <= column,
+                "the square draws \(ink.size), past its \(column) pt column")
+        #expect(ink.width >= 15 && ink.height >= 15,
+                "the square draws \(ink.size) — too small to read as the control's mark")
+    }
+
+    /// The bounding box of everything `image` actually paints.
+    private func inkBounds(_ image: NSImage) -> NSRect? {
+        guard let rep = image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:))
+        else { return nil }
+        let scale = CGFloat(rep.pixelsWide) / image.size.width
+        var minX = rep.pixelsWide, maxX = -1, minY = rep.pixelsHigh, maxY = -1
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05 {
+                minX = min(minX, x); maxX = max(maxX, x)
+                minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= 0 else { return nil }
+        return NSRect(x: CGFloat(minX) / scale, y: CGFloat(minY) / scale,
+                      width: CGFloat(maxX - minX + 1) / scale,
+                      height: CGFloat(maxY - minY + 1) / scale)
     }
 
     /// Both controls draw at ONE point size, so mute and the Equalizer door
     /// cannot drift apart.
     @Test func bothControlsDrawAtTheSameSize() throws {
         let mute = try #require(
-            RowAccessorySymbol.image(named: RowAccessorySymbol.muteEngaged, palette: [.black]))
+            RowAccessorySymbol.image(named: RowAccessorySymbol.muteEngaged, ink: .black))
         let equalizer = try #require(
-            RowAccessorySymbol.image(named: RowAccessorySymbol.equalizerEngaged, palette: [.black]))
+            RowAccessorySymbol.image(named: RowAccessorySymbol.equalizerEngaged, ink: .black))
         #expect(abs(mute.size.height - equalizer.size.height) <= 1,
                 "mute draws \(mute.size), the door \(equalizer.size)")
     }
 
-    // MARK: Helpers
-
-    private func hex(_ color: NSColor) -> Int {
-        guard let c = color.usingColorSpace(.sRGB) else { return -1 }
-        return (Int(c.redComponent * 255 + 0.5) << 16)
-            | (Int(c.greenComponent * 255 + 0.5) << 8)
-            | Int(c.blueComponent * 255 + 0.5)
-    }
-
-    /// Every fully opaque pixel in `image`, counted by 8-bit sRGB value.
-    private func opaqueCounts(_ image: NSImage) -> [Int: Int] {
-        guard let data = image.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: data) else { return [:] }
-        var counts: [Int: Int] = [:]
-        for y in 0..<rep.pixelsHigh {
-            for x in 0..<rep.pixelsWide {
-                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
-                      c.alphaComponent > 0.99 else { continue }
-                counts[hex(c), default: 0] += 1
-            }
-        }
-        return counts
-    }
 }

@@ -24,6 +24,9 @@ backend.
 - Ink carries temperature (C5, 2026-09-03): `labelCool` on idle names and glyphs, `label` on the live one; chrome and the sidebar stay stock. `GroupsInkTemperatureTests` pins it.
 - `GroupedSectionView`'s `.well` style is this folder's custom-drawn piece: the `Tokens.Color.shadow` inset-shade band, flat and clipped at 0.18, along the box's top edge. Both Equalizer pages wear it — `DeviceDetailViewController` and `MainOutDetailViewController` — because `raised` resolves to the pane's own ground in light, so a `.card` there is an outline around nothing (2026-09-04).
 - `DeviceIcon` is the single resolution point for a device or group symbol.
+- The three swapped panes are built and laid out in `MixerWindowController.init`, not on the
+  first swap that shows one: this controller is itself built off the click path, so its panes
+  ride along and the Equalizer door stops paying for a view tree inside the click.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 
 ## Map

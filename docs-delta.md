@@ -961,3 +961,123 @@ all.
 Re-exporting the four symbols with the enclosure on its own layer would make
 this prose true as written. Until then the engaged square can only be one
 colour, with the marks punched through it as transparency.
+
+---
+
+## from bf4-transitions
+# DESIGN.md addition — the screen swap
+
+One addition from `claude/bf4-transitions` (2026-09-05). DESIGN.md has no
+passage on what happens between two surface screens; add this near the Surface
+Header Strip section, which describes the control that triggers it.
+
+> ### Screen Swap (surface, Mac-only)
+>
+> Clicking a tab dissolves the incoming screen in: its opacity travels 0 → 1 at
+> `Tokens.Motion.collapseRevealDuration` (0.15s) on `FoldAnimator`, the same
+> clock and the same length every card body, inserted row and tab name in the
+> app runs on. Nothing else moves. There is no slide, no push and no direction,
+> because the three screens are siblings rather than a stack — a horizontal
+> travel would claim an order they do not have. Reduce Motion is answered where
+> that driver already answers it: the opacity settles synchronously, so the new
+> screen is simply there.
+>
+> The window FRAME does not participate and cannot. It is fixed for the whole
+> open session, and the dissolve actually defends that: showing a fade makes the
+> window lay out, and a freshly mounted split view takes any layout pass as its
+> chance to widen the window toward its own minimum (probed at a one-point widen
+> on the Settings mount, and at 560 → 707pt in the earlier mid-mount case the
+> chrome inset is written against). So every tick of the dissolve puts the
+> session frame back. The value never changes, so this is not a second clock —
+> it is the one clock holding the frame still while the content changes behind
+> it.
+>
+> Motion is the second half of the answer, and the smaller half. Alec's report
+> was that Groups and the Equalizer door "load very juddery" (2026-09-04), and
+> measured headless against the seven-speaker demo fleet the first Groups
+> selection blocked the main thread for 56 ms — 50 of them constructing
+> `MixerWindowController` and its panes — where every later visit cost 8 ms; the
+> Equalizer door paid a further 31 ms for the device page. Three to four dropped
+> frames inside one click is not something a transition can cover, so the screens
+> are now built a turn after the surface opens, behind the launch hold, and the
+> click only mounts what already exists. First Groups selection measures 17 ms
+> after that, and the Equalizer door 38 ms against 86.
+
+---
+
+## from bf4-capsule
+
+# DESIGN.md replacement prose — the header strip's two shapes and its one height
+
+One edit from `claude/bf4-capsule` (2026-09-05), from the owner's live-build
+review. DESIGN.md is not edited directly; paste this over the passage named.
+
+Note for whoever lands this: the surrounding **Surface Header Strip** section
+also still describes the tabs as fixed-width and icon-only, which a sibling
+track changed when it added the name reveal. Only the shape-and-size paragraph
+is mine; leave the rest to that track's own delta.
+
+---
+
+## Replace the second paragraph of **Surface Header Strip (popover shell, Mac-only)**
+
+DESIGN.md lines 504-515 today describe one rounded rectangle at
+`Radius.control` (10pt) on a fixed 30 × 26pt seat, shared by all four items.
+The radius, both sizes and the one-shape claim all changed. Replace from
+"One shape carries every state" through "a header seat is navigation." with:
+
+> One shape carries every STATE, and each kind of item has its own: every seat
+> is cut at HALF ITS OWN HEIGHT (`SurfaceToolbarSeat.seatCornerRadius`). Pin is
+> square at 34 × 34pt, so it draws a true CIRCLE; a screen tab is 30 × 28pt
+> collapsed and wider once its name opens, so the same rule draws a stadium.
+> Hover, selection and press stay one outline at three weights on both.
+>
+> Two things are derived from that and must never be retyped. The capsule is
+> exactly `pinDiameter` tall, so the pill and Pin stand at the same 34pt — they
+> were 32 and 26 until 2026-09-05, and Alec read the mismatch immediately. And
+> a tab's height is the capsule minus its 3pt padding, which puts the tab's
+> radius at `capsuleCornerRadius - capsulePadding` (17 − 3 = 14): the arithmetic
+> concentric rounded rectangles require. Cutting the highlight at 10pt inside a
+> 17pt pill left a gap that measured 3pt at the tab's mid-height and 6pt into
+> its corner, and against the pill's rounded end that unevenness is what Alec
+> rejected as "the highlight does not perfectly conform with the border".
+>
+> Four states, three drawn weights, in `engagedChrome` at the ladder the mixer's
+> rows already use: rest draws no seat at all, hover takes
+> `PopoverColumnGrid.rowHoverWashAlpha` (0.10), the current screen and a pinned
+> Pin take `rowSelectionWashAlpha` (0.18), and a press takes `mutePillFillAlpha`
+> (0.22). Increase Contrast multiplies all three by 1.5, capped at 1, read live
+> at draw time. The glyph is 15pt and its ink steps with the seat rather than
+> against it — `label` engaged, `label2` idle — so the current screen is marked
+> twice. Neutral, never gold: gold means audio in the mix and a header seat is
+> navigation.
+
+### One line to amend in the paragraph after it
+
+That paragraph opens "The seat exists because AppKit draws a bordered
+`NSToolbarItem`'s hover state as a circle and its selected state as a rounded
+square, two shapes for two states of one control". That reason still stands and
+should stay — but it is about two shapes for two STATES, and since 2026-09-05
+the strip deliberately does draw two shapes for its two kinds of ITEM. Add
+after that sentence:
+
+> Two shapes for two states of one control is still the defect; two shapes for
+> two kinds of item is the intent, and one rule produces both.
+
+---
+
+## from bf5-ring
+## The Main Audio resting ring covers the mixed set
+
+Reported live 2026-09-05: "the circle is missing around the main audio". The
+ring's own drawing is correct in every state that specifies one — the host was
+handing it `.off` with `restingArmed` false.
+
+The resting ring's condition is now **the local device is AMONG the Main Audio
+target's members**, not "every member is the local device". The mixed set
+{This Mac, an AirPlay speaker} is reachable — `setDeviceSelected` auto-swaps
+the Mac out only when it is the sole member — and the Mac keeps rendering
+audio in it, so a speaker sitting selected-but-not-connected beside the Mac
+used to blank the ring and leave the rail curving up into nothing. A member
+that does connect still wins: `mainOutConnectionState` reports `.connected`
+and the connected form overrides the resting one.

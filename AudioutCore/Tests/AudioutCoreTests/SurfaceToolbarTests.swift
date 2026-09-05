@@ -135,11 +135,8 @@ import AudioutSharedUI
             #expect(item.visibilityPriority == .high,
                     Comment(rawValue: "\(item.itemIdentifier.rawValue) must not be sweepable into the chevron"))
         }
-        // `fittingSize`, not `frame`: the frame is the size the item was
-        // CONSTRUCTED with, so reading it back would survive the view's own
-        // constraints being deleted. `fittingSize` is computed from those.
-        #expect(controller.test_pinButton?.fittingSize == SurfaceToolbarSeat.size,
-                "Pin is fixed — nothing about it expands")
+        #expect(controller.test_pinItem?.visibilityPriority == .high,
+                "Pin must not be sweepable into the chevron either")
         guard let mixer = controller.test_tabButton(.mixer) else {
             Issue.record("Mixer has no seat button")
             return
@@ -163,9 +160,9 @@ import AudioutSharedUI
     /// Asserted with a name no translator could produce, so the result does not
     /// depend on how long "Einstellungen" happens to be.
     @Test func theStripCannotOutgrowTheSurfaceInAnyLanguage() {
-        #expect(SurfaceToolbarSeat.widestCapsuleWidth + SurfaceToolbarSeat.size.width
+        #expect(SurfaceToolbarSeat.widestCapsuleWidth + SurfaceToolbarSeat.pinSize.width
                     < SurfaceLayout.width,
-                "the widest the capsule can ever be, plus Pin, still fits the fixed surface — \(SurfaceToolbarSeat.widestCapsuleWidth) + \(SurfaceToolbarSeat.size.width) against \(SurfaceLayout.width)")
+                "the widest the capsule can ever be, plus Pin, still fits the fixed surface — \(SurfaceToolbarSeat.widestCapsuleWidth) + \(SurfaceToolbarSeat.pinSize.width) against \(SurfaceLayout.width)")
 
         let absurd = String(repeating: "Lautsprechergruppen ", count: 20)
         let tab = SurfaceToolbarSeatButton(
@@ -200,14 +197,14 @@ import AudioutSharedUI
     @Test func everyItemInTheStripWearsTheSameSeat() {
         let (controller, _) = makeAttached()
         #expect(controller.test_everyItemWearsTheSeat,
-                "the three tabs inside the capsule AND Pin outside it are all SurfaceToolbarSeatButtons — half a conversion is the 2026-08-30 failure")
+                "the three tabs live in the one capsule — three sibling islands is the 2026-08-30 failure")
         // AppKit's circle and rounded square come from the stock button
-        // cell's bezel. Every seat installs `SurfaceToolbarSeatCell`, whose
+        // cell's bezel. Every TAB installs `SurfaceToolbarSeatCell`, whose
         // `drawBezel` never calls `super`, so that bezel is replaced outright
-        // rather than drawn under ours.
-        var seats = SurfaceScreen.allCases.compactMap { controller.test_tabButton($0) }
-        if let pin = controller.test_pinButton { seats.append(pin) }
-        #expect(seats.count == SurfaceScreen.allCases.count + 1)
+        // rather than drawn under ours. Pin is exempt since 2026-09-05: it is
+        // a bordered item precisely so the system draws its circle.
+        let seats = SurfaceScreen.allCases.compactMap { controller.test_tabButton($0) }
+        #expect(seats.count == SurfaceScreen.allCases.count)
         let everySeatOwnsItsBezel = seats.allSatisfy { $0.cell is SurfaceToolbarSeatCell }
         #expect(everySeatOwnsItsBezel,
                 "no item hands its drawing back to AppKit; the authored highlight is the only chrome in the strip")
@@ -248,12 +245,8 @@ import AudioutSharedUI
             #expect(tab.isDescendant(of: capsule),
                     "every tab lives INSIDE the one capsule — three siblings in the strip is the three-islands failure")
         }
-        guard let pin = controller.test_pinButton else {
-            Issue.record("Pin has no seat button")
-            return
-        }
-        #expect(!pin.isDescendant(of: capsule),
-                "Pin is the standalone button BESIDE the group, never a fourth thing inside it")
+        #expect(controller.test_pinItem?.view == nil,
+                "Pin is the standalone bordered item BESIDE the group, never a fourth thing inside it")
     }
 
     /// The selection has to be visible on exactly one tab.
@@ -543,20 +536,25 @@ import AudioutSharedUI
                        alpha: 1)
     }
 
-    /// One shape language: hover, selection and press are the SAME rounded
-    /// rectangle at different weights. AppKit's bordered item drew a circle on
-    /// hover and a rounded square when selected — two shapes for two states of
-    /// one control, which is the defect.
+    /// One shape per STATE: hover, selection and press are the SAME outline at
+    /// three weights. AppKit's bordered item drew a circle on hover and a
+    /// rounded square when selected — two shapes for two states of one
+    /// control, which is the defect the authored seat exists to fix.
     ///
-    /// The probes are chosen to pin the radius, not just the outline:
-    /// `insideCorner` sits inside a 10 pt corner but OUTSIDE the 13 pt one a
-    /// capsule on this 26 pt-tall seat would have, and `outsideCorner` is
-    /// clear of any rounded corner at all — so a square, a capsule and a
-    /// circle each fail a probe that the drawn shape passes.
+    /// What is NOT one shape any more is the two kinds of item: Pin is a
+    /// circle and a tab is a stadium (Alec, 2026-09-05). Both come out of one
+    /// rule — every seat is cut at half its own height — so this asserts the
+    /// rule and the two tests below assert each shape's real pixels.
+    ///
+    /// The probes pin the tab's radius rather than just its outline. On a
+    /// 28 pt-tall seat, `(3, 3)` lies inside a 10 pt corner but outside a
+    /// 14 pt one, so the previous radius fails here; `outsideCorner` is clear
+    /// of any rounded corner at all, so a square seat fails too.
     @Test func hoverSelectionAndPressAreOneShapeAtThreeWeights() {
-        #expect(SurfaceToolbarSeat.cornerRadius == Tokens.Layout.Radius.control,
-                "the seat is the control radius, and the same one in every state")
-        let insideCorner = NSPoint(x: 3, y: 3)
+        #expect(SurfaceToolbarSeat.seatCornerRadius(forHeight: SurfaceToolbarSeat.size.height)
+                    == SurfaceToolbarSeat.size.height / 2,
+                "a seat is cut at half its own height, whatever that height is")
+        let insideOldCorner = NSPoint(x: 3, y: 3)
         let outsideCorner = NSPoint(x: 0.5, y: 0.5)
         let states: [(name: String, seat: SurfaceToolbarSeatButton)] = [
             ("hover", makeSeat(isHovered: true)),
@@ -565,7 +563,7 @@ import AudioutSharedUI
         ]
         for state in states {
             guard let rep = render(state.seat, appearanceName: .darkAqua),
-                  let inside = color(rep, atPoint: insideCorner, in: state.seat.bounds),
+                  let oldCorner = color(rep, atPoint: insideOldCorner, in: state.seat.bounds),
                   let outside = color(rep, atPoint: outsideCorner, in: state.seat.bounds),
                   let middle = color(rep, atPoint: seatProbe, in: state.seat.bounds) else {
                 Issue.record("\(state.name) rendered nothing to sample")
@@ -573,11 +571,49 @@ import AudioutSharedUI
             }
             #expect(middle.alphaComponent > 0.05,
                     Comment(rawValue: "\(state.name) draws a seat at all"))
-            #expect(inside.alphaComponent > 0.05,
-                    Comment(rawValue: "\(state.name)'s corner is cut at the control radius, not the capsule radius a circle would need"))
+            #expect(oldCorner.alphaComponent < 0.05,
+                    Comment(rawValue: "\(state.name)'s corner is cut at half the seat's height (14 pt), not at the 10 pt that left an uneven gap against the pill"))
             #expect(outside.alphaComponent < 0.05,
                     Comment(rawValue: "\(state.name)'s corner really is rounded — a square seat would paint here"))
         }
+    }
+
+    /// Pin is a TRUE CIRCLE (Alec, 2026-09-05: "make the pin button a circle
+    /// instead of an oval", then "so so so close" against the rounded square
+    /// still on screen). The shape is the SYSTEM'S, and the only way to ask
+    /// for it is a bordered item with no custom view: macOS 26 draws exactly
+    /// that as a glass circle, and `NSToolbarItem` exposes no shape, corner
+    /// radius or bezel to set on anything else.
+    ///
+    /// So this asserts the configuration rather than pixels. Drawing our own
+    /// seat inside the item is what produced the oval — the system's wrapper
+    /// sat around it, and no probe of our bitmap could ever have seen that.
+    /// A custom view returning here is that regression.
+    @Test func pinIsTheBorderedItemMacOSDrawsAsACircle() {
+        let (controller, _) = makeAttached()
+        guard let pin = controller.test_pinItem else {
+            Issue.record("the strip carries no Pin item")
+            return
+        }
+        #expect(pin.view == nil,
+                "a custom view puts our own seat inside the system's wrapper — the oval")
+        #expect(pin.isBordered,
+                "bordered is the one configuration macOS draws as a circle")
+        #expect(pin.image != nil, "and the glyph is the item's, not a subview's")
+    }
+
+    /// Pinned state reads off the SYMBOL, because a bordered item's chrome
+    /// belongs to the system and cannot carry our engaged wash.
+    @Test func pinShowsItsStateThroughTheGlyph() {
+        let (controller, _) = makeAttached()
+        // Compared as PIXELS: a symbol image loaded by name reports no `name()`
+        // to read back, so anything less would pass on two nils.
+        let unpinned = controller.test_pinItem?.image?.tiffRepresentation
+        controller.setPinned(true)
+        let pinned = controller.test_pinItem?.image?.tiffRepresentation
+        #expect(unpinned != nil && pinned != nil, "both states must resolve a glyph")
+        #expect(pinned != unpinned, "the glyph has to change between the two states")
+        #expect(controller.test_pinItem?.label == "Unpin")
     }
 
     // MARK: The capsule's real pixels
@@ -707,6 +743,86 @@ import AudioutSharedUI
         }
     }
 
+    /// The strip is ONE height: the capsule is exactly as tall as Pin (Alec,
+    /// 2026-09-05, "make the component slightly bigger to meet the same height
+    /// as the pin button"). It was 32 pt against a 26 pt Pin before.
+    ///
+    /// A tab's height is DERIVED from that, and the arithmetic below is the
+    /// whole reason the highlight can be concentric: a seat cut at half its own
+    /// height lands on `capsuleCornerRadius - capsulePadding` only while the
+    /// tab is the capsule minus its padding.
+    @Test func theCapsuleAndPinAreTheSameHeightAndTheTabRadiusFollowsFromIt() {
+        #expect(SurfaceToolbarSeat.capsuleSize.height == SurfaceToolbarSeat.pinSize.height,
+                "the pill and Pin stand the same height — \(SurfaceToolbarSeat.capsuleSize.height) against \(SurfaceToolbarSeat.pinSize.height)")
+        #expect(SurfaceToolbarSeat.size.height
+                    == SurfaceToolbarSeat.capsuleSize.height - SurfaceToolbarSeat.capsulePadding * 2,
+                "a tab is the capsule minus the padding above and below it")
+        #expect(SurfaceToolbarSeat.seatCornerRadius(forHeight: SurfaceToolbarSeat.size.height)
+                    == SurfaceToolbarSeat.capsuleCornerRadius - SurfaceToolbarSeat.capsulePadding,
+                "which is what makes a tab's radius concentric with the pill — \(SurfaceToolbarSeat.seatCornerRadius(forHeight: SurfaceToolbarSeat.size.height)) against \(SurfaceToolbarSeat.capsuleCornerRadius) - \(SurfaceToolbarSeat.capsulePadding)")
+    }
+
+    /// "The highlight does not perfectly conform with the border" (Alec,
+    /// 2026-09-05). Measured, not eyeballed: concentric rounded rectangles put
+    /// the inner boundary the SAME distance from the outer one at every angle,
+    /// so this walks the capsule's left end cap and requires exactly that.
+    ///
+    /// The leftmost tab is the one selected, so its highlight sits against the
+    /// pill's rounded end — the place the uneven gap showed. Both arcs are
+    /// struck from the same centre when the geometry is right: the capsule's
+    /// is `(capsuleCornerRadius, height/2)` and the highlight's is
+    /// `(capsulePadding + tabHeight/2, height/2)`, which are the same point
+    /// once `tabHeight/2 == capsuleCornerRadius - capsulePadding`.
+    ///
+    /// The outer ring is what fails on the old geometry. With the highlight cut
+    /// at 10 pt instead of 14, its corner bulged toward the pill: the probe at
+    /// 135° lands 9.3 pt from that corner's centre, inside a 10 pt round, so
+    /// the highlight still painted where it must now be clear.
+    ///
+    /// The tabs are collapsed here. The selected tab is expanded in the running
+    /// strip, but only its RIGHT end moves — the left end cap this measures is
+    /// the same arc either way.
+    @Test func theSelectedHighlightIsConcentricWithTheCapsulesBorder() {
+        let capsule = makeCapsule(engaged: .mixer)
+        let radius = SurfaceToolbarSeat.seatCornerRadius(
+            forHeight: SurfaceToolbarSeat.size.height)
+        let centre = NSPoint(x: SurfaceToolbarSeat.capsuleCornerRadius,
+                             y: SurfaceToolbarSeat.capsuleSize.height / 2)
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            guard let rep = render(capsule, appearanceName: appearanceName),
+                  // The bare pill, sampled under an idle tab: what a point
+                  // OUTSIDE the highlight but inside the capsule must match.
+                  let bare = color(rep, atPoint: tabProbe(2), in: capsule.bounds) else {
+                Issue.record("nothing sampled under \(appearanceName.rawValue)")
+                return
+            }
+            var insides: [CGFloat] = []
+            // The left-facing half of the cap, clear of the seams top and
+            // bottom where the highlight's two end caps meet.
+            for degrees in stride(from: 100, through: 260, by: 20) {
+                let radians = CGFloat(degrees) * .pi / 180
+                func probe(_ distance: CGFloat) -> NSColor? {
+                    color(rep,
+                          atPoint: NSPoint(x: centre.x + cos(radians) * distance,
+                                           y: centre.y + sin(radians) * distance),
+                          in: capsule.bounds)
+                }
+                guard let inside = probe(radius - 2), let outside = probe(radius + 1) else {
+                    Issue.record("nothing sampled at \(degrees)° under \(appearanceName.rawValue)")
+                    return
+                }
+                #expect(inside.alphaComponent > bare.alphaComponent + 0.05,
+                        Comment(rawValue: "the highlight paints 2 pt inside its edge at \(degrees)° under \(appearanceName.rawValue) — \(inside.alphaComponent) against the bare pill's \(bare.alphaComponent)"))
+                #expect(abs(outside.alphaComponent - bare.alphaComponent) < 0.02,
+                        Comment(rawValue: "and 1 pt outside it there is only the bare pill at \(degrees)° under \(appearanceName.rawValue) — \(outside.alphaComponent) against \(bare.alphaComponent); a 10 pt corner would still paint here"))
+                insides.append(inside.alphaComponent)
+            }
+            let spread = (insides.max() ?? 0) - (insides.min() ?? 0)
+            #expect(spread < 0.02,
+                    Comment(rawValue: "and the highlight sits at one constant distance from the pill's own arc all the way round under \(appearanceName.rawValue) — \(insides)"))
+        }
+    }
+
     /// The capsule's own wash stays under the hover rung, in every
     /// accessibility setting — otherwise a hovered tab would stop separating
     /// from the surface it sits on. Increase Contrast lifts the capsule by the
@@ -731,20 +847,6 @@ import AudioutSharedUI
         #expect(SurfaceToolbarSeat.capsuleEdgeColor(reduceTransparency: true)
                     != SurfaceToolbarSeat.capsuleEdgeColor(reduceTransparency: false),
                 "Reduce Transparency swaps the capsule's edge for the heavier one — the strip's material goes flat, so the pill has to carry itself")
-    }
-
-    /// Pin wears the same seat, and its "on" reads as selected.
-    @Test func pinnedPinDrawsTheSameSeatAsASelectedTab() {
-        let (controller, _) = makeAttached()
-        guard let pin = controller.test_pinButton else {
-            Issue.record("Pin has no seat button")
-            return
-        }
-        #expect(!pin.isEngaged, "unpinned draws no seat, exactly like an idle tab")
-        controller.setPinned(true)
-        #expect(pin.isEngaged, "pinned wears the selected weight")
-        controller.setPinned(false)
-        #expect(!pin.isEngaged)
     }
 
     // MARK: The spoken selection

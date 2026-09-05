@@ -2574,20 +2574,28 @@ public final class PopoverController: NSObject {
 
     /// The Main Audio ring's RESTING form predicate (ring-resting-state task,
     /// separate from `mainOutConnectionState` above — which stays untouched):
-    /// true iff the active target's members are ALL the local device (the set
-    /// non-empty) and the master is unmuted. This is exactly the case where
-    /// audio is genuinely playing (locally, through the Mac) but there's no
-    /// remote AirPlay handshake for `mainOutConnectionState` to report, so it
-    /// correctly falls through to `.off` — leaving the rail's curve into the
-    /// ring with nothing to land on unless the ring renders its resting form.
+    /// true iff the local device is AMONG the active target's members and the
+    /// master is unmuted. This is exactly the case where audio is genuinely
+    /// playing (locally, through the Mac) but there's no remote AirPlay
+    /// handshake for `mainOutConnectionState` to report, so it correctly falls
+    /// through to `.off` — leaving the rail's curve into the ring with nothing
+    /// to land on unless the ring renders its resting form.
+    ///
+    /// AMONG, not "all of": the mixed set {local, AirPlay…} is reachable
+    /// (`GroupController.setDeviceSelected` auto-swaps the Mac out only when it
+    /// is the SOLE member), and the Mac keeps rendering audio in it. Requiring
+    /// every member to be local hid the ring for the whole time a speaker sat
+    /// selected-but-not-connected beside the Mac — the rail curved up into
+    /// nothing, which is the exact failure this form exists to prevent. When a
+    /// member does connect, `mainOutConnectionState` reports `.connected` and
+    /// the connected form wins regardless of what this returns.
     private func mainOutIsLocalOnlyArmed(_ controller: GroupController) -> Bool {
         let memberIDs: [String]
         switch controller.mainOut {
         case .selectedDevices: memberIDs = Array(controller.selectedDeviceIDs)
         case .group(let id):   memberIDs = controller.groups.first { $0.id == id }?.memberIDs ?? []
         }
-        guard !memberIDs.isEmpty,
-              memberIDs.allSatisfy({ devicesByID[$0]?.isLocalDevice == true })
+        guard memberIDs.contains(where: { devicesByID[$0]?.isLocalDevice == true })
         else { return false }
         return !controller.isMainOutMuted
     }
@@ -3850,16 +3858,18 @@ public final class PopoverController: NSObject {
         // A deselect may have taken the alignment wizard's target out of the
         // user's audio intent — tear it down now, not on the next snapshot.
         reconcileBTAlignmentNotes(animated: true)
-
-        // A4: an auto-swap toggled the LOCAL row's membership for the user (not a
-        // direct click on that row), so flash it once to draw the eye. Must run
-        // AFTER the repaint above so it targets the currently-mounted row instance
-        // (this path does no rebuild, so `deviceRowsByID`'s local row is live);
-        // `flashRow()` is a no-op under Reduce Motion and when no row exists.
-        if result.autoSwappedCurrentDevice,
-           let localID = devicesByID.values.first(where: \.isLocalDevice)?.id {
-            deviceRowsByID[localID]?.flashRow()
-        }
+        // An auto-swap does NOT flash the Mac's row (Alec, live, 2026-09-05:
+        // "it quickly flashes on the MacBook before going to the device I just
+        // clicked on … same thing when it goes backwards"). The A4 attention
+        // pulse is `Tokens.Color.gold`, which everywhere else on this panel
+        // means signal — in the mix, carrying audio — so a half-second gold
+        // wash over the whole Mac row at the exact moment its membership
+        // changes reads as "the Mac just took the audio", the opposite of what
+        // happened, in BOTH directions of the swap (`setDeviceSelected` raises
+        // `autoSwappedCurrentDevice` for the AirPlay-takes-over case and for
+        // the current-device floor that hands the audio back). The checkbox,
+        // the node dot and the row's own wash all moved synchronously in the
+        // repaint above, so nothing is left unsaid without it.
     }
 
     private func presentRefusal(_ reason: String) {

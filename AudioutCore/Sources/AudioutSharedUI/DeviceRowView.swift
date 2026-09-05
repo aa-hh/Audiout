@@ -897,8 +897,8 @@ public final class DeviceRowView: NSView {
     ///
     /// Called from `apply` (model refresh) AND `muteToggled` (a live click) so
     /// both paths land the treatment instantly, and from
-    /// `viewDidChangeEffectiveAppearance` — the palette bakes resolved colours
-    /// into the image, so a light/dark switch has to re-make it.
+    /// `viewDidChangeEffectiveAppearance` — the ink is baked into the image,
+    /// so a light/dark switch has to re-make it.
     ///
     /// WHAT IT MAY NOT GO BACK TO. Two treatments are retired here, and
     /// neither may return. The first was an `engagedChrome` capsule at
@@ -912,17 +912,22 @@ public final class DeviceRowView: NSView {
     /// symbol now.
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
+        // ONE shape in two inks (owner, 2026-09-05). The filled square is
+        // retired: it drew the marks as holes, so the mark's own glyph read
+        // white on a light row and near-black on a dark one. Colour carries
+        // the state now and the shape never changes.
         muteButton.image = RowAccessorySymbol.image(
-            named: engaged ? Self.muteEngagedSymbolName : Self.muteRestSymbolName,
-            palette: engaged ? Self.engagedPalette(fill: Tokens.Color.muted, in: effectiveAppearance)
-                             : Self.restPalette(in: effectiveAppearance))
+            named: Self.muteRestSymbolName,
+            ink: engaged ? Self.engagedInk(fill: Tokens.Color.muted, in: effectiveAppearance)
+                         : Self.restInk(in: effectiveAppearance))
         muteButton.setAccessibilityLabel(engaged ? "Unmute \(device.name)" : "Mute \(device.name)")
     }
 
     /// The Equalizer door's active MARK: a shaped curve draws
     /// ``RowAccessorySymbol/equalizerEngaged`` — the FILLED square, its
-    /// enclosure in an opaque ``Tokens/Color/equalizer`` and the two band
-    /// sliders inside it in white. A flat curve draws
+    /// enclosure in an opaque ``Tokens/Color/equalizer``, the two band
+    /// sliders punched through it as transparency — the row shows through
+    /// the marks, the treatment the owner approved (2026-09-05). A flat curve draws
     /// ``RowAccessorySymbol/equalizerRest``, the outline square in the same
     /// neutral ink mute wears at rest. Mute sits 6 pt trailing wearing the
     /// same square: the two engaged marks are one object in two colours
@@ -941,40 +946,38 @@ public final class DeviceRowView: NSView {
         guard supportsEqualizer else { return }
         eqButton.setAccessibilityLabel("Equalizer for \(device.name)")
         eqButton.setAccessibilityValue(isEQShaped ? "Shaped" : "Flat")
+        // One shape, two inks — see `updateMuteTint()`.
         eqButton.image = RowAccessorySymbol.image(
-            named: isEQShaped ? Self.eqEngagedSymbolName : Self.eqRestSymbolName,
-            palette: isEQShaped
-                ? Self.engagedPalette(fill: Tokens.Color.equalizer, in: effectiveAppearance)
-                : Self.restPalette(in: effectiveAppearance))
+            named: Self.eqRestSymbolName,
+            ink: isEQShaped
+                ? Self.engagedInk(fill: Tokens.Color.equalizer, in: effectiveAppearance)
+                : Self.restInk(in: effectiveAppearance))
     }
 
-    /// The engaged palette: `fill` on the symbol's enclosing square, WHITE on
-    /// the marks inside it. Both are resolved in the row's own appearance
-    /// before they reach the palette — a `SymbolConfiguration` keeps the
-    /// `NSColor` it is handed, and a dynamic one would resolve against
-    /// whatever appearance happens to be current when the image is drawn.
+    /// The engaged ink: `fill` on the symbol's enclosing square, with the
+    /// marks left as the holes the template cuts in it — the row shows
+    /// through them, so the state needs no second colour.
     ///
-    /// White rather than ``Tokens/Color/inkOnFill``: that token is authored as
-    /// dark ink for the gold family and turns white only under light +
-    /// Increase Contrast, so it would flip the marks' polarity on a fill that
-    /// is now the SAME value in both appearances.
-    private static func engagedPalette(fill: NSColor, in appearance: NSAppearance) -> [NSColor] {
+    /// Resolved in the row's own appearance before it reaches the drawing: a
+    /// dynamic `NSColor` would otherwise resolve against whatever appearance
+    /// happens to be current when the image is composited.
+    private static func engagedInk(fill: NSColor, in appearance: NSAppearance) -> NSColor {
         var resolved = fill
         appearance.performAsCurrentDrawingAppearance { resolved = fill.usingColorSpace(.sRGB) ?? fill }
-        return [resolved, .white]
+        return resolved
     }
 
-    /// The at-rest palette: ONE ink over every layer, so the outline square
-    /// and the mark inside it read as a single drawn line. `label2` is the
-    /// row's accessory ink — light warm grey in dark, dark warm brown in
-    /// light — and the contrast suites already hold it to the body floor on
-    /// every ground this row puts behind it.
-    private static func restPalette(in appearance: NSAppearance) -> [NSColor] {
-        var resolved = Tokens.Color.label2
+    /// The at-rest ink, so the outline square and the mark inside it read as
+    /// a single drawn line. `label` is the row's accessory ink — light warm
+    /// grey in dark, dark warm brown in light — and the contrast suites
+    /// already hold it to the body floor on every ground this row puts
+    /// behind it.
+    private static func restInk(in appearance: NSAppearance) -> NSColor {
+        var resolved = Tokens.Color.label
         appearance.performAsCurrentDrawingAppearance {
-            resolved = Tokens.Color.label2.usingColorSpace(.sRGB) ?? Tokens.Color.label2
+            resolved = Tokens.Color.label.usingColorSpace(.sRGB) ?? Tokens.Color.label
         }
-        return [resolved]
+        return resolved
     }
 
     /// The configuration every accessory glyph on this row that is NOT one of
@@ -1844,13 +1847,19 @@ public final class DeviceRowView: NSView {
         button.bezelStyle = .accessoryBar        // SPEC §9 device-row mute
         button.setButtonType(.pushOnPushOff)
         button.isBordered = false
-        // `symbol` is only the SEEDED glyph. The mute button swaps its own in
+        // `symbol` is only the SEEDED glyph, and it is one of the four custom
+        // symbols — `NSImage(systemSymbolName:)` finds Apple's own and would
+        // return nil for it. The mute button swaps its own in
         // `updateMuteTint()` (slashed while engaged) and the Equalizer door
-        // re-makes its own in `updateEQButton()`, both from the same
-        // `accessoryGlyphConfig` this line uses.
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(Self.accessoryGlyphConfig)
+        // re-makes its own in `updateEQButton()`.
+        button.image = RowAccessorySymbol.image(named: symbol,
+                                                ink: Self.restInk(in: effectiveAppearance))
         button.imagePosition = .imageOnly
+        // Unscaled: the symbol's image box is wider than the 24 pt column by
+        // its empty side bearings, and the default `.scaleProportionallyDown`
+        // would shrink the whole mark to fit them in. See
+        // ``RowAccessorySymbol/pointSize``.
+        button.imageScaling = .scaleNone
         button.contentTintColor = Tokens.Color.label2
         button.target = self
         button.action = action
@@ -2504,15 +2513,15 @@ public final class DeviceRowView: NSView {
     /// from the on-icon dot). Retained for the T-U8 reset test.
     public var test_iconTint: NSColor? { iconView.contentTintColor }
 
-    /// The opaque inks the MUTE button actually paints, most-used first —
-    /// the button rendered to a bitmap and its fully opaque pixels bucketed by
-    /// 8-bit sRGB value. Engaged, that is the enclosing square's fill and the
-    /// white marks inside it; at rest, one neutral ink.
+    /// The inks the MUTE button actually paints, most-used first — the button
+    /// rendered to a bitmap and the pixels its mark covers bucketed by 8-bit
+    /// sRGB value. Engaged that is the enclosing square's fill alone —
+    /// the marks are holes, and a hole has no ink. At rest, one neutral ink.
     ///
-    /// Colours the drawing code applied are no evidence on their own: the
-    /// palette is baked into the image, the button re-tints nothing, and a
-    /// palette handed to the wrong layer still reads back correctly from the
-    /// configuration. This reads pixels.
+    /// Colours the drawing code applied are no evidence on their own: the ink
+    /// is baked into the image and the button re-tints nothing, so a symbol
+    /// that renders as a blank square still reports the colour it was asked
+    /// for. This reads pixels.
     public var test_muteDrawnInks: [NSColor] { drawnInks(of: muteButton) }
 
     /// The same, for the Equalizer door.
@@ -2531,8 +2540,14 @@ public final class DeviceRowView: NSView {
         var opaque = 0
         for y in 0..<rep.pixelsHigh {
             for x in 0..<rep.pixelsWide {
+                // 0.75, not 1: the mark is an unscaled image centred in a
+                // narrower button, so it lands on a fractional offset and
+                // every edge is antialiased — an outline square's thin stroke
+                // has almost no fully opaque pixel in it. `colorAt`
+                // un-premultiplies, so a partly covered pixel still reports
+                // the ink itself and the reading stays exact.
                 guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
-                      c.alphaComponent > 0.99 else { continue }
+                      c.alphaComponent >= 0.75 else { continue }
                 opaque += 1
                 let key = (Int(c.redComponent * 255 + 0.5) << 16)
                     | (Int(c.greenComponent * 255 + 0.5) << 8)
@@ -2556,20 +2571,21 @@ public final class DeviceRowView: NSView {
     public var test_eqButtonFrame: NSRect { eqButton.frame }
     public var test_eqButtonHasTitle: Bool { !eqButton.title.isEmpty }
     /// Whether the door CURRENTLY draws its ENGAGED symbol — the filled
-    /// square with a ``Tokens/Color/equalizer`` enclosure and white marks.
-    /// A pixel comparison against the same symbol built from the same
-    /// palette, so the hook reads the drawn image rather than a flag.
+    /// square: a ``Tokens/Color/equalizer`` enclosure with the marks
+    /// punched out of it.
+    /// A pixel comparison against the same symbol built from the same ink,
+    /// so the hook reads the drawn image rather than a flag.
     public var test_eqDrawsEngagedSymbol: Bool {
-        matchesSymbol(eqButton.image, RowAccessorySymbol.equalizerEngaged,
-                      palette: Self.engagedPalette(fill: Tokens.Color.equalizer,
-                                                   in: effectiveAppearance))
+        matchesSymbol(eqButton.image, RowAccessorySymbol.equalizerRest,
+                      ink: Self.engagedInk(fill: Tokens.Color.equalizer,
+                                           in: effectiveAppearance))
     }
 
     /// Whether the door CURRENTLY draws its AT-REST symbol — the outline
     /// square in one neutral ink.
     public var test_eqDrawsRestSymbol: Bool {
         matchesSymbol(eqButton.image, RowAccessorySymbol.equalizerRest,
-                      palette: Self.restPalette(in: effectiveAppearance))
+                      ink: Self.restInk(in: effectiveAppearance))
     }
 
     /// The door glyph's frame in the row's own coordinates, after a layout
@@ -2661,28 +2677,28 @@ public final class DeviceRowView: NSView {
     }
 
     /// Whether the drawn mute image IS the engaged symbol built from the
-    /// ``Tokens/Color/muted`` palette resolved in this row's own appearance —
+    /// ``Tokens/Color/muted`` ink resolved in this row's own appearance —
     /// a raster comparison, so the test reads pixels rather than intent.
     public var test_mutePillIsMutedHue: Bool {
-        matchesSymbol(muteButton.image, RowAccessorySymbol.muteEngaged,
-                      palette: Self.engagedPalette(fill: Tokens.Color.muted,
-                                                   in: effectiveAppearance))
+        matchesSymbol(muteButton.image, RowAccessorySymbol.muteRest,
+                      ink: Self.engagedInk(fill: Tokens.Color.muted,
+                                           in: effectiveAppearance))
     }
 
     /// Whether the mute button is drawing its AT-REST symbol.
     public var test_muteDrawsRestSymbol: Bool {
         matchesSymbol(muteButton.image, RowAccessorySymbol.muteRest,
-                      palette: Self.restPalette(in: effectiveAppearance))
+                      ink: Self.restInk(in: effectiveAppearance))
     }
 
-    /// Whether `drawn` rasterises identically to `name` built with `palette`.
+    /// Whether `drawn` rasterises identically to `name` built with `ink`.
     /// A pixel comparison rather than a name lookup: an `NSImage` reconfigured
     /// with a `SymbolConfiguration` reports no name to read back, and
-    /// comparing rasters pins the palette, the point size and the weight in
-    /// one assertion.
-    private func matchesSymbol(_ drawn: NSImage?, _ name: String, palette: [NSColor]) -> Bool {
+    /// comparing rasters pins the ink, the point size and the weight in one
+    /// assertion.
+    private func matchesSymbol(_ drawn: NSImage?, _ name: String, ink: NSColor) -> Bool {
         guard let drawn = drawn?.tiffRepresentation,
-              let reference = RowAccessorySymbol.image(named: name, palette: palette)?
+              let reference = RowAccessorySymbol.image(named: name, ink: ink)?
                   .tiffRepresentation
         else { return false }
         return drawn == reference

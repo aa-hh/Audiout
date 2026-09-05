@@ -8,12 +8,12 @@ PUBLIC "-//W3C//DTD SVG 1.1//EN"
  <style>.defaults {-sfsymbols-variable-value-mode:color;-sfsymbols-draw-reverses-motion-groups:false}
 
 .monochrome-0 {-sfsymbols-motion-group:1;-sfsymbols-layer-tags:slider.horizontal.2.square}
-.monochrome-1 {-sfsymbols-motion-group:0;-sfsymbols-layer-tags:slider.horizontal.2.square}
+.monochrome-1 {opacity:0.0;-sfsymbols-clear-behind:true;-sfsymbols-motion-group:0;-sfsymbols-layer-tags:slider.horizontal.2.square}
 .monochrome-2 {opacity:0.0;-sfsymbols-clear-behind:true;-sfsymbols-motion-group:0;-sfsymbols-layer-tags:slider.horizontal.2.square}
-.monochrome-3 {-sfsymbols-motion-group:0;-sfsymbols-layer-tags:slider.horizontal.2.square}
-.monochrome-4 {-sfsymbols-motion-group:0;-sfsymbols-layer-tags:slider.horizontal.2.square}
+.monochrome-3 {opacity:0.0;-sfsymbols-clear-behind:true;-sfsymbols-motion-group:0;-sfsymbols-layer-tags:slider.horizontal.2.square}
+.monochrome-4 {opacity:0.0;-sfsymbols-clear-behind:true;-sfsymbols-motion-group:0;-sfsymbols-layer-tags:slider.horizontal.2.square}
 .monochrome-5 {opacity:0.0;-sfsymbols-clear-behind:true;-sfsymbols-motion-group:0;-sfsymbols-layer-tags:slider.horizontal.2.square}
-.monochrome-6 {-sfsymbols-motion-group:0;-sfsymbols-layer-tags:slider.horizontal.2.square}
+.monochrome-6 {opacity:0.0;-sfsymbols-clear-behind:true;-sfsymbols-motion-group:0;-sfsymbols-layer-tags:slider.horizontal.2.square}
 
 .multicolor-0:tintColor {-sfsymbols-motion-group:1;-sfsymbols-layer-tags:slider.horizontal.2.square}
 .multicolor-1:tintColor {-sfsymbols-motion-group:0;-sfsymbols-layer-tags:slider.horizontal.2.square}

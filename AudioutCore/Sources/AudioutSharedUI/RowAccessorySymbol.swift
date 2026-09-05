@@ -30,20 +30,20 @@ import AppKit
 /// enclosing square is part of the symbol now, so the mark is ONE image: the
 /// `.fill` variant when engaged, the outline variant at rest.
 ///
-/// KNOWN DEFECT — the four templates carry NO USABLE LAYERS. Every rendition
-/// in the built `Assets.car` reports `"ColorModel": "Monochrome"`, and a
-/// two-colour palette paints the whole mark in the SECOND colour (a
-/// three-colour palette paints it all in the third). The same palette code
-/// splits an Apple two-layer symbol correctly, so the configuration is right
-/// and the assets are the limitation: `speaker.slash.square.fill.svg`'s
-/// `LayerTree` has an empty layer 0 with the whole glyph in layer 1, and the
-/// slider pair carries no `LayerTree` at all.
+/// HOW THE ENGAGED STATES PUNCH THROUGH, and why this draws MONOCHROME.
+/// In each `.fill` template the marks are not paint — they are erase actions
+/// (`-sfsymbols-clear-behind`), so the speaker, the slash and the two sliders
+/// cut holes in the enclosing square and the row's own background shows
+/// through them. That is the approved look, and it survives only under
+/// monochrome rendering.
 ///
-/// The intended engaged treatment — the enclosing square in the state's hue
-/// with the marks inside it in white — therefore does not render. It needs
-/// the four symbols re-exported from the SF Symbols app with the enclosure on
-/// its own layer. `RowAccessorySymbolTests.paletteLayerZeroIsTheEnclosingSquare`
-/// is the check that goes green when that lands.
+/// A palette configuration destroys it, which is what shipped on 2026-09-04
+/// and what the owner saw: palette rendering treats every layer as paintable,
+/// so the erase never happens and the marks are PAINTED — in the same ink as
+/// the square when the palette holds one colour, which is a blank square.
+/// Passing a second colour does not help; it paints the marks in that colour
+/// instead of cutting them. So: one ink, monochrome, and the tint is applied
+/// through the alpha channel below rather than by a configuration.
 public enum RowAccessorySymbol {
     /// Mute at rest — the outline square.
     public static let muteRest = "custom.speaker.slash.square"
@@ -64,40 +64,77 @@ public enum RowAccessorySymbol {
     /// ``PopoverColumnGrid/eqToMuteGap`` between them, and a glyph that
     /// outgrew its column would eat that gap.
     ///
-    /// 18, not the 13 pt the row's other accessory glyphs use: the enclosing
-    /// square is now the control's whole mark, so it has to land near the
-    /// 22 pt seat it replaces rather than at glyph scale.
-    /// `RowAccessorySymbolTests` measures the drawn ink and holds it inside
-    /// the 24 pt column.
-    public static let pointSize: CGFloat = 18
+    /// 20 pt at `.thin` weight (owner, 2026-09-05: too big and too heavy —
+    /// "I don't want these to be the centerpiece"). Measured against the same
+    /// two references the row already draws: the stroke lands at 0.875 pt,
+    /// under the 1 pt `FeedPillView` border, and the drawn square is 17.25 pt
+    /// on a side, smaller than the 22 pt seat these symbols replaced. Both are
+    /// intentional this time — the mark should read as quiet chrome, not a
+    /// focal point.
+    ///
+    /// `.thin`, not `.regular`: at `.regular` the same square's stroke
+    /// measures 1.75 pt, well past any hairline border in the row, which is
+    /// what read as "heavy" against the row's own type. `RowAccessorySymbol`
+    /// carries no font, so weight is stated directly rather than borrowed —
+    /// `.thin` is the SF Symbols weight nearest `NSFont.systemFont`'s own
+    /// hairline strokes at small sizes.
+    ///
+    /// `RowAccessorySymbolTests` measures the drawn INK, not `image.size` —
+    /// the image box carries empty side bearings wider than the square itself,
+    /// which is why both buttons draw it unscaled (`imageScaling = .scaleNone`)
+    /// and clip the bearing rather than let `NSButton` scale the box down.
+    public static let pointSize: CGFloat = 20
+    /// See ``pointSize``.
+    public static let weight: NSFont.Weight = .thin
 
     /// The raw symbol image, or `nil` when the catalogue did not make it into
-    /// the bundle. Callers use ``image(named:palette:)``; this is separate so
+    /// the bundle. Callers use ``image(named:ink:)``; this is separate so
     /// the load test can prove the resource resolves without also asserting a
     /// rendering configuration.
+    /// Test seam: the suite runs with no `.app`, so `NSImage(named:)` has no
+    /// catalogue to find — `swift test` cannot exercise these symbols at all
+    /// without it. A pixel test compiles the repo's own `Symbols.xcassets`
+    /// into a temporary bundle once (see `CompiledSymbolFixture` in the test
+    /// target) and points this here. Never set outside tests.
+    nonisolated(unsafe) public static var test_catalogueBundle: Bundle?
+
     public static func rawImage(named name: String) -> NSImage? {
+        if let bundle = test_catalogueBundle {
+            return bundle.image(forResource: name)
+        }
         // `Bundle.main`, via `NSImage(named:)`: `Bundle.module` does NOT
         // resolve inside an assembled `.app` — SwiftPM's generated accessor
         // looks beside the executable and then at an absolute build path baked
         // in at compile time. `BrandMark` hand-resolves its bundle for the
         // same reason (see `make-app.sh`, the resource-bundle step).
-        NSImage(named: name)
+        return NSImage(named: name)
     }
 
-    /// The symbol drawn under palette rendering: `palette[0]` on the enclosing
-    /// square, `palette[1]` on the marks inside it.
+    /// The symbol in one ink, with the `.fill` variants' erased marks left as
+    /// transparent holes.
     ///
-    /// Pass ONE colour for the at-rest states — a single ink over every layer,
-    /// which is what an outline square with no fill wants.
-    public static func image(named name: String, palette: [NSColor]) -> NSImage? {
-        let configured = rawImage(named: name)?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
-                .applying(NSImage.SymbolConfiguration(paletteColors: palette)))
-        // A symbol image loaded from a catalogue arrives as a TEMPLATE, and a
-        // template is re-tinted by whatever draws it — which throws the palette
-        // away and paints the whole mark in one ink. The palette is the state
-        // here, so the image has to stop being a template.
-        configured?.isTemplate = false
-        return configured
+    /// The tint is painted through the rendered symbol's alpha channel — fill
+    /// the bounds with `ink`, then keep only the pixels the symbol covers. A
+    /// symbol configuration cannot do this: every colour-carrying
+    /// configuration is a palette or hierarchical one, and both paint the
+    /// erased marks instead of cutting them (see the type's doc comment).
+    public static func image(named name: String, ink: NSColor) -> NSImage? {
+        guard let symbol = rawImage(named: name)?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight))
+        else { return nil }
+        symbol.isTemplate = true
+
+        let tinted = NSImage(size: symbol.size)
+        let bounds = NSRect(origin: .zero, size: symbol.size)
+        tinted.lockFocus()
+        ink.setFill()
+        bounds.fill()
+        symbol.draw(in: bounds, from: .zero, operation: .destinationIn, fraction: 1)
+        tinted.unlockFocus()
+        // The ink IS the state here, so the result must not be re-tinted by
+        // whatever draws it — an `NSButton` would otherwise repaint a template
+        // in the control colour and throw the state away.
+        tinted.isTemplate = false
+        return tinted
     }
 }

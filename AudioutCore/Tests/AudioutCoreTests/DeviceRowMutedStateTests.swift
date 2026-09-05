@@ -26,6 +26,16 @@ extension SerializedSharedState {
 
 @Suite final class DeviceRowMutedStateTests: IsolatedSuite {
 
+    /// `swift test` builds no `.app`, so the shipping symbol lookup has
+    /// nothing to find — every pixel assertion below would measure a nil
+    /// image. Fails loudly here rather than 50 times below.
+    override init() {
+        super.init()
+        if CompiledSymbolFixture.install() == nil {
+            Issue.record("the symbol fixture failed to compile — actool or the source catalogue is broken")
+        }
+    }
+
     deinit { Tokens.test_increaseContrastOverride = nil }
 
     private func makeDevice(isMuted: Bool) -> Device {
@@ -87,9 +97,12 @@ extension SerializedSharedState {
         }
     }
 
-    /// The engaged square is `muted` with WHITE marks knocked out of it, and
-    /// both have to come back out of the rendered pixels.
-    @Test func mutedRowPaintsTheReservedHueAndWhiteMarksInEveryAppearance() {
+    /// The engaged square is `muted` with the marks PUNCHED THROUGH it as
+    /// transparency — the row shows through them (owner, 2026-09-05, from the
+    /// approved mock). Defect caught: a symbol re-export that paints the marks
+    /// instead of erasing them, or a second palette colour sneaking back into
+    /// the engaged draw, puts a solid ink where the hole belongs.
+    @Test func mutedRowPaintsTheReservedHueWithMarksPunchedThrough() {
         defer { Tokens.test_increaseContrastOverride = nil }
         for (appearanceName, ic) in cells {
             let row = makeRow(muted: true, appearanceName: appearanceName, increaseContrast: ic)
@@ -97,20 +110,44 @@ extension SerializedSharedState {
             let inks = row.test_muteDrawnInks
             #expect(contains(inks, resolved(Tokens.Color.muted, appearanceName)),
                     "\(describe(appearanceName, ic)): the square is not the muted hue — drew \(inks)")
-            #expect(contains(inks, .white),
-                    "\(describe(appearanceName, ic)): the marks are not white — drew \(inks)")
+            #expect(!contains(inks, .white),
+                    "\(describe(appearanceName, ic)): the marks must be punched through, not painted white — drew \(inks)")
         }
     }
 
-    /// The single-value rule (Alec, 2026-09-04): an engaged control wears the
-    /// SAME fill in light and dark. A future re-tune that splits the hue by
-    /// appearance fails here rather than shipping.
-    @Test func theEngagedFillIsOneValueInBothAppearances() {
+    /// The mark has to CLEAR ITS GROUND in both appearances — which replaces
+    /// the single-value rule (Alec, 2026-09-04, retired 2026-09-05: one value
+    /// left light mode "impossible to see"). One value only worked while the
+    /// hue was a filled square; as a 0.875 pt outline it measured 2.45:1 on
+    /// the light row. What matters is the ratio, so that is what this asserts,
+    /// in each appearance against the ground the row actually draws on.
+    @Test func theEngagedMarkClearsItsGroundInBothAppearances() {
         defer { Tokens.test_increaseContrastOverride = nil }
         Tokens.test_increaseContrastOverride = false
-        #expect(contains([resolved(Tokens.Color.muted, .aqua)],
-                         resolved(Tokens.Color.muted, .darkAqua)),
-                "muted must resolve to one value in both appearances")
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            let mark = resolved(Tokens.Color.muted, appearanceName)
+            let ground = resolved(Tokens.Color.panel, appearanceName)
+            let ratio = contrastRatio(mark, ground)
+            #expect(ratio >= 3,
+                    "muted draws \(ratio) on \(appearanceName.rawValue) — under the 3:1 floor")
+        }
+    }
+
+    /// WCAG relative-luminance contrast, so the assertion above reads the same
+    /// number the design record quotes.
+    private func contrastRatio(_ a: NSColor, _ b: NSColor) -> Double {
+        func luminance(_ color: NSColor) -> Double {
+            guard let c = color.usingColorSpace(.sRGB) else { return 0 }
+            func channel(_ v: CGFloat) -> Double {
+                let v = Double(v)
+                return v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * channel(c.redComponent)
+                + 0.7152 * channel(c.greenComponent)
+                + 0.0722 * channel(c.blueComponent)
+        }
+        let (x, y) = (luminance(a), luminance(b))
+        return (max(x, y) + 0.05) / (min(x, y) + 0.05)
     }
 
     // MARK: The unmuted row
@@ -127,7 +164,7 @@ extension SerializedSharedState {
             let inks = row.test_muteDrawnInks
             #expect(!contains(inks, resolved(Tokens.Color.muted, appearanceName)),
                     "\(describe(appearanceName, ic)): the muted hue reached the at-rest mark — drew \(inks)")
-            #expect(contains(inks, resolved(Tokens.Color.label2, appearanceName)),
+            #expect(contains(inks, resolved(Tokens.Color.label, appearanceName)),
                     "\(describe(appearanceName, ic)): at rest must be one neutral ink — drew \(inks)")
         }
     }

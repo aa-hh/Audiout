@@ -415,21 +415,18 @@ public enum Tokens {
         /// square clears the floor with room to spare and the marks read as a
         /// knock-out.
         ///
-        /// CONTRAST RATIONALE (measured; floor 3:1 for the fill against every
-        /// ground it sits on — the row at rest on `panel`, the gold-washed
-        /// live row, the hover wash — and 4.5:1 for the WHITE marks on the
-        /// fill). `#4A50C7` on the DARK row = fill 3.07:1, marks 6.44:1; on
-        /// the LIGHT row = fill 6.17:1, marks 6.44:1.
-        ///
-        /// NO INCREASE CONTRAST VARIANT, and it is the single value that
-        /// forces that. One value serving both appearances sits between two
-        /// opposite grounds: darkening it lifts the white marks and the light
-        /// row but drops the dark row, lightening it does the reverse. Every
-        /// candidate lowers one of the two, and the contrast suites assert
-        /// that Increase Contrast never lowers a ratio. Equal is the only
-        /// direction left.
+        /// TWO VALUES NOW, and the single-value rule above is retired for
+        /// this token (Alec, 2026-09-05: light mode was "impossible to see").
+        /// The rule assumed the hue was a FILL, where one value reads on both
+        /// grounds. It is a thin outline since the marks stopped being filled
+        /// — 0.875 pt of stroke — and a stroke that thin has no area to carry
+        /// a marginal ratio. Measured on `panel`: `#8E93F0` is 5.18:1 on the
+        /// dark row and 2.45:1 on the light one, which is what he was looking
+        /// at. Deepened for light only, the same move `goldText` makes for the
+        /// same reason: `#585EC7` measures 5.24:1 on light and the dark half
+        /// does not move a pixel.
         public static var muted: NSColor {
-            warmDynamic(name: "muted", dark: 0x8E93F0, light: 0x8E93F0)
+            warmDynamic(name: "muted", dark: 0x8E93F0, light: 0x585EC7)
         }
 
         /// **Equalizer** — the counterpart to ``muted``: the one hue that
@@ -446,10 +443,11 @@ public enum Tokens {
         /// engaged. A door that is dark for some other reason — unavailable,
         /// unsupported — keeps its at-rest ink.
         ///
-        /// ONE VALUE IN BOTH APPEARANCES, the same rule ``muted`` follows: an
-        /// engaged control wears the same fill in light and dark (Alec,
-        /// 2026-09-04) — and no Increase Contrast variant, for the reason
-        /// spelled out on ``muted``.
+        /// TWO VALUES, deepened for light, the same reversal ``muted`` took
+        /// on 2026-09-05 and for the same reason: the mark is a 0.875 pt
+        /// outline now, not a filled square, and a stroke that thin does not
+        /// carry a mid-range ratio. Owner's call from the live build ("the
+        /// emerald is invisible as well"), picked from a rendered ladder.
         ///
         /// WHY THIS GREEN. The door used to wear ``goldText``, and gold means
         /// "audio is flowing here" everywhere else in the app — one hue
@@ -460,12 +458,13 @@ public enum Tokens {
         /// ``permissionUsageStats``, which is fenced to onboarding and never
         /// shares a screen with a device row.
         ///
-        /// CONTRAST RATIONALE (measured; same floors as ``muted`` — 3:1 for
-        /// the fill on every row ground, 4.5:1 for the white marks on the
-        /// fill). `#227950` on the DARK row = fill 3.70:1, marks 5.35:1; on
-        /// the LIGHT row = fill 5.13:1, marks 5.35:1.
+        /// CONTRAST RATIONALE (measured on `panel`, floor 3:1). Dark keeps
+        /// `#227950` at 3.70:1 and does not move. Light goes to `#1C6543`,
+        /// 6.73:1 against the 5.14:1 it replaced — one step down the ladder,
+        /// which was as far as the hue could deepen before it stops reading
+        /// as green at all and starts reading as near-black.
         public static var equalizer: NSColor {
-            warmDynamic(name: "equalizer", dark: 0x227950, light: 0x227950)
+            warmDynamic(name: "equalizer", dark: 0x227950, light: 0x1C6543)
         }
 
         /// The COOL body ink — the same second-rung job as ``label2`` on a

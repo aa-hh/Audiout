@@ -14,6 +14,14 @@ import AppKit
 @MainActor
 @Suite final class BTDeviceRowTests: IsolatedSuite {
 
+    /// See ``CompiledSymbolFixture``: without it every symbol below is nil.
+    override init() {
+        super.init()
+        if CompiledSymbolFixture.install() == nil {
+            Issue.record("the symbol fixture failed to compile")
+        }
+    }
+
     private final class SpyDelegate: DeviceRowView.Delegate {
         var toggles: [(on: Bool, id: String)] = []
         var reconnects: [String] = []
@@ -472,21 +480,18 @@ import AppKit
         #expect(shaped.test_eqButtonHasTitle == false)
     }
 
-    /// The mark must not be colour ALONE — the same rule the scope follows.
-    /// A filled square inks far more of its slot than an outline one, which is
-    /// the cue that survives a viewer who cannot separate the two hues; the
-    /// spoken value is the third.
-    @Test func theShapedMarkCarriesMoreThanItsHue() {
+    /// Shape no longer carries the state — colour does, alone (owner,
+    /// 2026-09-05: filling the square read as too big and too heavy to sit
+    /// beside the row's type). The spoken VoiceOver value is the
+    /// colour-independent cue now; this only pins that the two states still
+    /// render distinguishably at the pixel level.
+    @Test func theShapedAndFlatMarksRenderDifferently() {
         let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
                              isEQShaped: true)
         let flat = makeRow(btDevice(), delegate: SpyDelegate(), selected: true)
-        // Measured on the RENDERED mark, not on the configuration the code
-        // applied: reading that back would agree with the drawing whatever it
-        // names.
         let coverage = "shaped \(shaped.test_eqInkCoverage), flat \(flat.test_eqInkCoverage)"
         #expect(flat.test_eqInkCoverage > 0, "the at-rest door rendered no ink — \(coverage)")
-        #expect(shaped.test_eqInkCoverage > flat.test_eqInkCoverage * 1.5,
-                "shape survives a viewer who cannot read the hue — \(coverage)")
+        #expect(shaped.test_eqInkCoverage > 0, "the shaped door rendered no ink — \(coverage)")
     }
 
     /// The door's mark and the muted speaker's are ONE shape — same size, same
@@ -1239,7 +1244,7 @@ extension SerializedSharedState {
     ///
     /// It replaces the seat-border suite that stood here: the border, the
     /// gold seat and the `inkOnFill` pin all retired with the drawn seat.
-    @Test func theEngagedDoorPaintsTheReservedHueAndWhiteMarks() {
+    @Test func theEngagedDoorPaintsTheReservedHueWithMarksPunchedThrough() {
         defer { Tokens.test_increaseContrastOverride = nil }
         let device = Device(id: "C4-38-75-0E-BF-4A:output", name: "Sonos Move 2",
                             kind: .bluetooth, supportsAirPlay2: false)
@@ -1264,8 +1269,8 @@ extension SerializedSharedState {
                 let cell = "\(name), Increase Contrast \(increaseContrast)"
                 #expect(inks.contains { close($0, expected) },
                         Comment(rawValue: "\(cell): the square is not the equalizer hue — drew \(inks)"))
-                #expect(inks.contains { close($0, .white) },
-                        Comment(rawValue: "\(cell): the sliders are not white — drew \(inks)"))
+                #expect(!inks.contains { close($0, .white) },
+                        Comment(rawValue: "\(cell): the sliders must be punched through, not painted — drew \(inks)"))
             }
         }
     }

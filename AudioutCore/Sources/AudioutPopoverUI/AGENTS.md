@@ -38,6 +38,15 @@ folder renders; routing arithmetic lives in Core.
   (drawing only; tracking, keyboard and VoiceOver stay stock) because AppKit draws a
   bordered item's hover as a CIRCLE and its selection as a rounded SQUARE. Never put a
   cue behind `#available` — the package deploys to 14.2 (2026-09-04).
+- One shape per STATE, two shapes per kind of ITEM (2026-09-05, reversing the one-shape-
+  everywhere rule above). Every seat is cut at HALF ITS OWN HEIGHT
+  (`SurfaceToolbarSeat.seatCornerRadius`): Pin is square, so it draws a true circle; a tab
+  is wider than tall, so it draws a stadium. Hover, selection and press stay one shape at
+  three weights on both. Two things fall out of that one rule and must stay derived, never
+  retyped: the capsule is exactly `pinDiameter` tall, so the pill and Pin match in height;
+  and a tab's radius equals `capsuleCornerRadius - capsulePadding`, which is what makes the
+  highlight CONCENTRIC with the pill. Cutting the highlight at `Radius.control` (10) inside
+  a 16pt pill is the uneven gap Alec rejected — 3pt at mid-height, 6pt into the corner.
 - The CURRENT tab shows its name beside its glyph; the other two never do (2026-09-04).
   One name on the strip at a time, clamped to `SurfaceToolbarSeat.maxNameWidth` and
   truncated past it — that pair is what makes the 2026-09-03 failure impossible, where
@@ -49,6 +58,12 @@ folder renders; routing arithmetic lives in Core.
 - The Mixer tab does NOT draw `slider.horizontal.3`: that is the device row's equalizer
   door (`DeviceRowView.eqSymbolName`), and sliders are what an equalizer looks like. The
   tab draws `waveform` (2026-09-04).
+- Groups and Settings are BUILT a turn after the surface opens, never on the click that
+  selects them (`prewarmScreens`). Building is not mounting — neither reaches `setContent`.
+- A screen swap dissolves the incoming screen in: opacity 0 → 1 on `FoldAnimator`, the app's
+  one reveal clock, which is also where Reduce Motion is answered. Opacity is the ONLY thing
+  that travels, and every tick puts the session frame back, because showing the fade makes
+  the window lay out and a freshly mounted split view takes that as its chance to widen it.
 - Known stability findings in this target carry `STABILITY(id)` inline markers — details and fix sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 

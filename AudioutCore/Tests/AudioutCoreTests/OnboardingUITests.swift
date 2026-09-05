@@ -79,6 +79,14 @@ import Testing
         private let lock = NSLock()
         private var resumeGate: (() -> Void)?
         private var parkedWaiter: (() -> Void)?
+        /// A `resume()` that arrived before anything was parked. Without it
+        /// the signal is DROPPED and the next `park()` waits forever: the
+        /// caller only reaches `park()` after an `await`, so a test that
+        /// resumes first loses the race. That is the hang — it needs no
+        /// hardware and no permission, only the scheduler ordering the two
+        /// the wrong way round, which is why it surfaced in a full serial run
+        /// and not in this suite on its own (2026-09-05).
+        private var pendingResume = false
 
         func probe() async -> Bool { found > 0 }
 
@@ -92,13 +100,21 @@ import Testing
 
         private func park() async {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                let waiter: (() -> Void)? = lock.withLock {
+                enum Next { case resumeNow, wait(( () -> Void)?) }
+                let next: Next = lock.withLock {
+                    if pendingResume {
+                        pendingResume = false
+                        return .resumeNow
+                    }
                     resumeGate = { continuation.resume() }
                     let waiter = parkedWaiter
                     parkedWaiter = nil
-                    return waiter
+                    return .wait(waiter)
                 }
-                waiter?()
+                switch next {
+                case .resumeNow: continuation.resume()
+                case .wait(let waiter): waiter?()
+                }
             }
         }
 
@@ -117,6 +133,7 @@ import Testing
             let gate: (() -> Void)? = lock.withLock {
                 let gate = resumeGate
                 resumeGate = nil
+                if gate == nil { pendingResume = true }
                 return gate
             }
             gate?()
@@ -133,6 +150,9 @@ import Testing
         private var parkNext = false
         private var parkedResume: (() -> Void)?
         private var parkedWaiter: (() -> Void)?
+        /// Same lost-wakeup guard as `SteppedLocalNetwork.pendingResume`, for
+        /// the same reason — see the comment there.
+        private var pendingResume = false
         private(set) var primeCount = 0
 
         func probe() async -> Bool { true }
@@ -155,13 +175,21 @@ import Testing
             case .instant: return .granted(foundSpeakers: 2)
             case .parked:
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    let waiter: (() -> Void)? = lock.withLock {
+                    enum Next { case resumeNow, wait(( () -> Void)?) }
+                    let next: Next = lock.withLock {
+                        if pendingResume {
+                            pendingResume = false
+                            return .resumeNow
+                        }
                         parkedResume = { continuation.resume() }
                         let waiter = parkedWaiter
                         parkedWaiter = nil
-                        return waiter
+                        return .wait(waiter)
                     }
-                    waiter?()
+                    switch next {
+                    case .resumeNow: continuation.resume()
+                    case .wait(let waiter): waiter?()
+                    }
                 }
                 onReachable()
                 return .granted(foundSpeakers: 2)
@@ -183,6 +211,7 @@ import Testing
             let gate: (() -> Void)? = lock.withLock {
                 let gate = parkedResume
                 parkedResume = nil
+                if gate == nil { pendingResume = true }
                 return gate
             }
             gate?()
@@ -1625,6 +1654,9 @@ import Testing
         private var mode: Mode = .grant
         private var parkedResume: (() -> Void)?
         private var parkedWaiter: (() -> Void)?
+        /// Same lost-wakeup guard as `SteppedLocalNetwork.pendingResume` —
+        /// see the comment there.
+        private var pendingResume = false
         private var primeCount = 0
 
         func probe() async -> Bool { true }
@@ -1642,13 +1674,21 @@ import Testing
                 return .denied
             case .park:
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    let waiter: (() -> Void)? = lock.withLock {
+                    enum Next { case resumeNow, wait(( () -> Void)?) }
+                    let next: Next = lock.withLock {
+                        if pendingResume {
+                            pendingResume = false
+                            return .resumeNow
+                        }
                         parkedResume = { continuation.resume() }
                         let waiter = parkedWaiter
                         parkedWaiter = nil
-                        return waiter
+                        return .wait(waiter)
                     }
-                    waiter?()
+                    switch next {
+                    case .resumeNow: continuation.resume()
+                    case .wait(let waiter): waiter?()
+                    }
                 }
                 return .denied
             }
@@ -1669,6 +1709,7 @@ import Testing
             let gate: (() -> Void)? = lock.withLock {
                 let gate = parkedResume
                 parkedResume = nil
+                if gate == nil { pendingResume = true }
                 return gate
             }
             gate?()

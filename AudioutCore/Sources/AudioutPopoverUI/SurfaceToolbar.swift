@@ -25,7 +25,7 @@ import AudioutSharedUI
 /// carries ONE name however many languages it is read in; and that name is
 /// clamped to `SurfaceToolbarSeat.maxNameWidth` and truncates past it, so no
 /// word in any language can push the strip wider than
-/// `widestCapsuleWidth` + Pin = 256 pt of the fixed 653 pt surface.
+/// `widestCapsuleWidth` + Pin = 260 pt of the fixed 653 pt surface.
 /// `SurfaceToolbarTests.theStripCannotOutgrowTheSurfaceInAnyLanguage` asserts
 /// it against a name no translator could produce.
 ///
@@ -51,13 +51,26 @@ import AudioutSharedUI
 /// so a divider would sit orphaned in the middle of that gap and none is
 /// drawn.
 ///
-/// Underneath both passes is the same reason for drawing the strip at all:
+/// Underneath every pass is the same reason for drawing the strip at all:
 /// AppKit draws a BORDERED item's hover state as a circle and its selected
-/// state as a rounded square, two shapes for two states of one control, and
+/// state as a rounded square, two shapes for two STATES of one control, and
 /// neither shape is settable. Pin wears the same authored highlight as a tab,
 /// because half a conversion — bare glyphs beside bordered circles — is what
 /// failed live review on 2026-08-30. `SurfaceToolbarSeat` holds every shape,
 /// size and wash strength in the strip.
+///
+/// **REVERSED 2026-09-05: one shape for every STATE, two shapes for the two
+/// kinds of ITEM.** Until this review the strip drew one rounded rectangle
+/// everywhere, tabs and Pin alike. Alec asked for Pin to be "a circle instead
+/// of an oval", so Pin's seat is now square and cut at half its height, while
+/// the three tabs keep the stadium they wear inside their shared pill. The
+/// 2026-08-30 rule is NOT what changed: every item is still the same authored
+/// control drawn by the same cell at the same three weights, which is what
+/// "convert the whole strip or none of it" was about. What is no longer true
+/// is that one radius fits every item — `SurfaceToolbarSeat.seatCornerRadius`
+/// derives it from each seat's own height, so the shapes cannot drift apart.
+/// The same review made the capsule as tall as Pin and made the tab highlight
+/// concentric with the pill; both fall out of that one rule.
 ///
 /// The `NSToolbar` itself stays: it is the window's one unified title-bar
 /// strip, and it supplies the system material and the Reduce Transparency
@@ -134,9 +147,7 @@ final class SurfaceToolbarController: NSObject {
         tabButtons[screen]
     }
 
-    private var pinButton: SurfaceToolbarSeatButton? {
-        pinItem?.view as? SurfaceToolbarSeatButton
-    }
+
 
     override init() {
         toolbar = NSToolbar(identifier: "SurfaceToolbar")
@@ -197,18 +208,17 @@ final class SurfaceToolbarController: NSObject {
     }
 
     private func applyPinAppearance() {
-        guard let pinItem, let pinButton else { return }
+        guard let pinItem else { return }
         let label = isPinned ? "Unpin" : "Pin"
-        pinButton.configure(symbol: Self.resolveSymbol(isPinned ? "pin.fill" : "pin",
-                                                       fallbacks: ["pin"],
-                                                       accessibilityDescription: label),
-                            label: label,
-                            toolTip: isPinned ? "Unpin — return to the menu bar" : "Pin as a window",
-                            isTab: false)
-        // Pin's "on" reads as a selected seat — the same weight the current
-        // screen wears, because it is the same statement about the same strip.
-        pinButton.isEngaged = isPinned
+        // Pinned state is the SYMBOL: `pin.fill` while pinned, the outline
+        // otherwise. The engaged wash Pin used to wear cannot exist on a
+        // bordered item — the system owns its chrome — and the filled glyph
+        // is the same statement in the system's own vocabulary.
+        pinItem.image = Self.resolveSymbol(isPinned ? "pin.fill" : "pin",
+                                           fallbacks: ["pin"],
+                                           accessibilityDescription: label)
         pinItem.label = label
+        pinItem.toolTip = isPinned ? "Unpin — return to the menu bar" : "Pin as a window"
     }
 
     // MARK: Actions
@@ -276,7 +286,7 @@ final class SurfaceToolbarController: NSObject {
     }
     /// The seat button behind an item, for tests that render real pixels.
     func test_tabButton(_ screen: SurfaceScreen) -> SurfaceToolbarSeatButton? { tabButton(screen) }
-    var test_pinButton: SurfaceToolbarSeatButton? { pinButton }
+    var test_pinItem: NSToolbarItem? { pinItem }
     /// The index of the tab DRAWING the engaged seat, `nil` if none is, more
     /// than one if the strip ever marked two (which `test_engagedTabCount`
     /// catches).
@@ -301,24 +311,28 @@ final class SurfaceToolbarController: NSObject {
     /// wears the one authored control. The 2026-08-30 failure was half the
     /// strip converted.
     var test_everyItemWearsTheSeat: Bool {
+        // Exactly ONE custom view — the capsule, with every tab inside it.
+        // Pin is deliberately not here: it is the bordered item the system
+        // draws as its glass circle (2026-09-05), so a second custom view in
+        // the strip means someone un-converted one or the other.
         let views = toolbar.items.compactMap(\.view)
-        guard views.count == 2,
-              let capsule = views.first as? SurfaceToolbarTabCapsule,
-              views.last is SurfaceToolbarSeatButton else { return false }
+        guard views.count == 1,
+              let capsule = views.first as? SurfaceToolbarTabCapsule else { return false }
         let tabs = SurfaceScreen.allCases.compactMap(tabButton)
         return tabs.count == SurfaceScreen.allCases.count
             && tabs.allSatisfy { $0.isDescendant(of: capsule) }
     }
     /// Whether the pin item resolved a symbol image.
-    var test_pinItemHasImage: Bool { pinButton?.image != nil }
+    var test_pinItemHasImage: Bool { pinItem?.image != nil }
     var test_pinItemLabel: String? { pinItem?.label }
     /// Fire a tab exactly as a click on it would — a REAL click through the
     /// button's own target/action, not a hand-run selector.
     func test_selectTab(_ screen: SurfaceScreen) {
         tabButton(screen)?.performClick(nil)
     }
-    /// Simulate clicking Pin.
-    func test_tapPin() { pinButton?.performClick(nil) }
+    /// Simulate clicking Pin. A bordered item has no view to click, so this
+    /// sends the item's own action the way the toolbar would.
+    func test_tapPin() { pinTapped(nil) }
 }
 
 // MARK: - NSToolbarDelegate
@@ -384,11 +398,20 @@ extension SurfaceToolbarController: NSToolbarDelegate {
 
         case Self.pinItemIdentifier:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            let button = SurfaceToolbarSeatButton(
-                frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.size))
-            button.target = self
-            button.action = #selector(pinTapped(_:))
-            item.view = button
+            // BORDERED, deliberately — the one configuration macOS 26 draws
+            // as its own glass CIRCLE, the shape the owner asked Pin to be
+            // (2026-09-05). A custom-view item cannot get there: the system
+            // wraps every toolbar item in its own chrome, that wrapper is a
+            // rounded square whose shape no API controls (`NSToolbarItem`
+            // gained only `style` and `backgroundTintColor` in 26), and the
+            // seat we drew inside it was never the outline on screen. This
+            // reverses the 2026-08-30 "every item wears our seat" rule FOR
+            // PIN ONLY: the defect that rule fixed was hover-circle versus
+            // selected-rounded-square on one control, and Pin is never the
+            // toolbar's selected item, so only the circle exists for it.
+            item.isBordered = true
+            item.target = self
+            item.action = #selector(pinTapped(_:))
             item.visibilityPriority = .high
             pinItem = item
             applyPinAppearance()

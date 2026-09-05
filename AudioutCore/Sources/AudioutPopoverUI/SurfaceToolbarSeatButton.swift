@@ -27,17 +27,46 @@ import AudioutSharedUI
 /// no current screen at all.
 enum SurfaceToolbarSeat {
 
-    /// The one rounded rectangle every HIGHLIGHT is, in every state — the
-    /// current tab's, a hovered tab's, a pressed tab's, and Pin's while
-    /// pinned. 10 pt on a 26 pt-tall highlight leaves 6 pt of straight edge
-    /// top and bottom, so it reads as a soft rounded highlight sitting inside
-    /// the pill rather than as a second pill or a separate seat.
-    static let cornerRadius: CGFloat = Tokens.Layout.Radius.control
+    /// Pin's seat: a true CIRCLE, so equal on both sides (Alec, 2026-09-05 —
+    /// "make the pin button a circle instead of an oval"). This number is also
+    /// the strip's ONE height: `size` and `capsuleSize` are both derived from
+    /// it, so the pill and Pin cannot stand at different heights.
+    ///
+    /// Pin being round while the tabs are stadiums reverses the one-shape rule
+    /// the strip was built under; `SurfaceToolbarController`'s header carries
+    /// what changed and what did not.
+    static let pinDiameter: CGFloat = 34
+
+    /// Pin's seat, square so `seatCornerRadius` rounds it to a circle.
+    static var pinSize: NSSize { NSSize(width: pinDiameter, height: pinDiameter) }
 
     /// One COLLAPSED tab's hit area, and the size of the highlight drawn
     /// behind it. Two of the three tabs are always this size; the current one
     /// grows to the right of it to show its name (`tabWidth`).
-    static let size = NSSize(width: 30, height: 26)
+    ///
+    /// The HEIGHT is derived, never typed: a tab is the capsule minus the
+    /// padding above and below it, so the concentric arithmetic in
+    /// `seatCornerRadius` cannot drift out of step with the pill.
+    static var size: NSSize { NSSize(width: 30, height: pinDiameter - capsulePadding * 2) }
+
+    /// The corner every HIGHLIGHT is cut at, in every state — the current
+    /// tab's, a hovered tab's, a pressed tab's, and Pin's while pinned: HALF
+    /// the seat's own height.
+    ///
+    /// Half-height is what makes the two shapes the owner asked for fall out of
+    /// one rule. Pin is square, so half its height rounds it to a circle. A tab
+    /// is wider than it is tall, so the same rule gives a stadium — and that
+    /// stadium is CONCENTRIC with the pill it sits in, which is the fix for
+    /// "the highlight does not perfectly conform with the border" (Alec,
+    /// 2026-09-05): concentric rounded rectangles need
+    /// `inner radius == outer radius − inset`, and here
+    /// `size.height / 2 == capsuleCornerRadius − capsulePadding` by
+    /// construction (17 − 3 == 14). The version this replaces cut every
+    /// highlight at `Radius.control` (10) while the capsule's own radius was
+    /// 16 and the inset 3, so the gap between highlight and pill measured 3 pt
+    /// at the tab's mid-height and 6 pt into its corner — the unevenness the
+    /// owner saw against the capsule's rounded end.
+    static func seatCornerRadius(forHeight height: CGFloat) -> CGFloat { height / 2 }
 
     /// The gap after a revealed name, between the last letter and the end of
     /// the highlight it sits in. Mirrors the ~7.5 pt the glyph already has on
@@ -57,7 +86,7 @@ enum SurfaceToolbarSeat {
     /// as "Settings" before it even reached the ceiling — and reaching it
     /// costs nothing, because the arithmetic does not depend on any of those
     /// numbers: only ONE tab is ever expanded, so the widest the strip can be
-    /// is `widestCapsuleWidth` plus Pin, 226 + 30 = 256 pt against a fixed
+    /// is `widestCapsuleWidth` plus Pin, 226 + 34 = 260 pt against a fixed
     /// 653 pt surface.
     /// `SurfaceToolbarTests.theStripCannotOutgrowTheSurfaceInAnyLanguage`
     /// asserts that with a name no language could produce.
@@ -82,6 +111,11 @@ enum SurfaceToolbarSeat {
 
     /// The capsule holding all three tabs with every one of them COLLAPSED —
     /// the floor its width can never go below, and its height in every state.
+    ///
+    /// That height is `pinDiameter`, because `size.height` is derived from it:
+    /// the capsule and Pin are the SAME height, which is what the owner asked
+    /// for on 2026-09-05 ("make the component slightly bigger to meet the same
+    /// height as the pin button"). It was 32 pt against a 26 pt Pin before.
     static var capsuleSize: NSSize {
         NSSize(width: size.width * 3 + capsulePadding * 2,
                height: size.height + capsulePadding * 2)
@@ -129,6 +163,13 @@ enum SurfaceToolbarSeat {
 
     /// The glyph size inside a tab.
     static let glyphPointSize: CGFloat = 15
+
+    /// Pin's glyph only. Two points under the tabs' 15: the pushpin glyph is
+    /// markedly taller than it is wide, so at 15 it left less air above and
+    /// below than beside it and the circle read as an oval (owner,
+    /// 2026-09-05: "make the glyph slightly smaller"). 13 restores an even
+    /// ring of padding.
+    static let pinGlyphPointSize: CGFloat = 13
 
     /// How much stronger every seat draws while Increase Contrast is on. One
     /// factor over the whole ladder, so the three strengths keep their
@@ -202,6 +243,24 @@ final class SurfaceToolbarSeatCell: NSButtonCell {
         didSet { if isHovered != oldValue { controlView?.needsDisplay = true } }
     }
 
+    /// Pin sets this. The constraints make Pin square, but the frame AppKit
+    /// hands the cell is not guaranteed to stay one — a toolbar item can pad
+    /// a point onto either axis — and `seatPath` rounds by HEIGHT alone, so
+    /// any extra width comes out a stadium, visibly not a circle at this
+    /// size (owner, 2026-09-05). When set, the seat is a centred circle of
+    /// the frame's smaller side, whatever the frame says.
+    var drawsCircle = false
+
+    /// The seat's shape for THIS cell: `seatPath` for a tab, the centred
+    /// circle for Pin.
+    func shapePath(in frame: NSRect) -> NSBezierPath {
+        guard drawsCircle else { return Self.seatPath(in: frame) }
+        let side = min(frame.width, frame.height)
+        let square = NSRect(x: frame.midX - side / 2, y: frame.midY - side / 2,
+                            width: side, height: side)
+        return NSBezierPath(ovalIn: square)
+    }
+
     override func drawBezel(withFrame frame: NSRect, in controlView: NSView) {
         // Read live, every draw — the app never snapshots this flag.
         let increaseContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
@@ -214,32 +273,41 @@ final class SurfaceToolbarSeatCell: NSButtonCell {
         // variant of the token are both current (Tokens' governance rule:
         // never cache a resolved colour outside a live draw).
         Tokens.Color.engagedChrome.withAlphaComponent(alpha).setFill()
-        Self.seatPath(in: frame).fill()
+        shapePath(in: frame).fill()
     }
 
-    /// The glyph stays in the tab's COLLAPSED slot however wide the seat grows,
-    /// so revealing a name opens space to the right of the icon instead of
-    /// sliding the icon along with it. Stock `.imageOnly` centres the image in
-    /// the whole cell, which would drift every glyph as its own name appeared.
+    /// The width the glyph is centred in, or `nil` to centre it in the whole
+    /// cell. A tab sets it to the COLLAPSED width so revealing a name opens
+    /// space to the RIGHT of the icon instead of sliding the icon along with
+    /// it; Pin leaves it nil, because Pin never grows and its glyph belongs in
+    /// the middle of its circle.
+    var glyphSlotWidth: CGFloat?
+
     override func drawImage(_ image: NSImage, withFrame frame: NSRect, in controlView: NSView) {
+        guard let glyphSlotWidth else {
+            super.drawImage(image, withFrame: frame, in: controlView)
+            return
+        }
         let slot = NSRect(x: controlView.bounds.minX, y: frame.minY,
-                          width: SurfaceToolbarSeat.size.width, height: frame.height)
+                          width: glyphSlotWidth, height: frame.height)
         super.drawImage(image, withFrame: slot, in: controlView)
     }
 
     override func drawFocusRingMask(withFrame cellFrame: NSRect, in controlView: NSView) {
-        Self.seatPath(in: cellFrame).fill()
+        shapePath(in: cellFrame).fill()
     }
 
     override func focusRingMaskBounds(forFrame cellFrame: NSRect, in controlView: NSView) -> NSRect {
         cellFrame
     }
 
-    /// The one shape, for the fill and for the focus ring alike.
+    /// The one shape, for the fill and for the focus ring alike. Cut at half
+    /// the frame's own height, so a square Pin comes out a circle and a tab
+    /// comes out a stadium concentric with the pill around it — see
+    /// `SurfaceToolbarSeat.seatCornerRadius`.
     static func seatPath(in frame: NSRect) -> NSBezierPath {
-        NSBezierPath(roundedRect: frame,
-                     xRadius: SurfaceToolbarSeat.cornerRadius,
-                     yRadius: SurfaceToolbarSeat.cornerRadius)
+        let radius = SurfaceToolbarSeat.seatCornerRadius(forHeight: frame.height)
+        return NSBezierPath(roundedRect: frame, xRadius: radius, yRadius: radius)
     }
 }
 
@@ -267,6 +335,11 @@ final class SurfaceToolbarSeatButton: NSButton {
     /// The seat's own width — the ONE value the reveal animates. Held so
     /// `SurfaceToolbarSeat.tabWidth` can be written into it.
     private var widthConstraint: NSLayoutConstraint!
+
+    /// The seat's height. Held because Pin is taller than a tab: it is a
+    /// circle the full height of the capsule, while a tab is the capsule minus
+    /// its padding.
+    private var heightConstraint: NSLayoutConstraint!
 
     /// The name's own width, pinned to the clamped measurement so the letters
     /// keep their shape while the seat slides open past them.
@@ -320,9 +393,10 @@ final class SurfaceToolbarSeatButton: NSButton {
         addSubview(nameLabel)
 
         widthConstraint = widthAnchor.constraint(equalToConstant: SurfaceToolbarSeat.size.width)
+        heightConstraint = heightAnchor.constraint(equalToConstant: SurfaceToolbarSeat.size.height)
         NSLayoutConstraint.activate([
             widthConstraint,
-            heightAnchor.constraint(equalToConstant: SurfaceToolbarSeat.size.height),
+            heightConstraint,
             // Pinned to the seat's leading edge past the glyph's own slot, and
             // never to its trailing edge: a trailing pin would let Auto Layout
             // compress the name as the seat grows, so the reveal would read as
@@ -353,15 +427,29 @@ final class SurfaceToolbarSeatButton: NSButton {
     func configure(symbol: NSImage?, label: String, toolTip: String?, isTab: Bool) {
         self.isTab = isTab
         image = symbol?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: SurfaceToolbarSeat.glyphPointSize,
-                                        weight: .regular)) ?? symbol
+            NSImage.SymbolConfiguration(
+                pointSize: isTab ? SurfaceToolbarSeat.glyphPointSize
+                                 : SurfaceToolbarSeat.pinGlyphPointSize,
+                weight: .regular)) ?? symbol
         self.toolTip = toolTip
         setAccessibilityLabel(label)
         if isTab { setAccessibilityRole(.radioButton) }
+        // A tab's glyph is pinned in its collapsed slot so a name opens to the
+        // right of it; Pin's belongs in the middle of its circle.
+        seatCell.glyphSlotWidth = isTab ? SurfaceToolbarSeat.size.width : nil
+        seatCell.drawsCircle = !isTab
         // Only a tab has a name to reveal. Pin's own label already flips
         // between "Pin" and "Unpin" to say what it is, and it stands outside
         // the capsule, so nothing about it expands.
         setName(isTab ? label : "")
+        if !isTab {
+            // Pin is the circle: square, and `seatPath` cuts it at half its
+            // height. `setName("")` has just written the collapsed TAB width
+            // into the constraint, so both sides are set here rather than
+            // left to it.
+            widthConstraint.constant = SurfaceToolbarSeat.pinSize.width
+            heightConstraint.constant = SurfaceToolbarSeat.pinSize.height
+        }
         refreshEngagedAppearance()
     }
 
@@ -535,10 +623,26 @@ final class SurfaceToolbarTabCapsule: NSView, FoldFollowing {
     /// `FoldAnimator`'s standing rule that a reveal has exactly one animated
     /// value and everything else is laid out FROM it.
     func foldAnimatorDidTick() {
-        invalidateIntrinsicContentSize()
         needsDisplay = true
-        superview?.needsLayout = true
-        window?.layoutIfNeeded()
+        // The SMALLEST subtree whose geometry depends on the seat's width: the
+        // toolbar item's own container. Two other things used to happen here
+        // every frame and neither paid for itself (Alec, 2026-09-05, "the
+        // animation is a little jittery"):
+        //
+        // - `invalidateIntrinsicContentSize()` answered nothing. This view
+        //   overrides no `intrinsicContentSize` — its width comes from the tab
+        //   row's constraints — so the call only marked a value nobody reads.
+        // - `window?.layoutIfNeeded()` laid out the ENTIRE window on every
+        //   tick: the title bar, the toolbar, and the whole mounted screen
+        //   below it (the Mixer's card stack is the expensive one). None of
+        //   that geometry depends on this seat, and Pin does not move either —
+        //   a `.flexibleSpace` holds it at the trailing edge and absorbs the
+        //   capsule's growth. Paying a full-window layout pass per frame is
+        //   what made the reveal drop frames.
+        //
+        // What remains is the same shape the app's two other `FoldFollowing`
+        // conformers have: one narrow re-layout per tick, nothing else.
+        superview?.layoutSubtreeIfNeeded()
     }
 
     override func draw(_ dirtyRect: NSRect) {

@@ -411,39 +411,6 @@ chmod +x "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 mkdir -p "$RESOURCES_DIR"
 cp -R "$BUILT_RESOURCE_BUNDLE" "$RESOURCES_DIR/$RESOURCE_BUNDLE_NAME"
 
-
-# Symbols when NO icon tier compiled a catalogue (classic .icns mode writes a
-# .icns file, not an Assets.car) — and the final verification either way.
-if [ -d "$SYMBOL_CATALOGUE" ]; then
-  if [ ! -f "$RESOURCES_DIR/Assets.car" ]; then
-    echo "==> Compiling custom SF Symbols (icns icon mode: symbols-only catalogue)"
-    # ONLY the `platforms:` line — a naive `.macOS(` match reads the comment
-    # above it about AirPlayEngine's floor and yields the wrong number
-    # (caught 2026-09-04: 14.0 against the real 14.2).
-    symbol_min_macos="$(grep -m1 'platforms:' "$REPO_ROOT/AudioutCore/Package.swift" \
-      | sed -n 's/.*\.macOS("\([0-9.]*\)").*/\1/p;s/.*\.macOS(\.v\([0-9]*\)).*/\1.0/p')"
-    [ -n "$symbol_min_macos" ] || { echo "FATAL: no macOS floor in Package.swift" >&2; exit 1; }
-    xcrun actool "$SYMBOL_CATALOGUE" \
-      --compile "$RESOURCES_DIR" \
-      --platform macosx \
-      --minimum-deployment-target "$symbol_min_macos" \
-      --output-format human-readable-text >/dev/null
-  fi
-  [ -f "$RESOURCES_DIR/Assets.car" ] || {
-    echo "FATAL: no Assets.car produced, custom symbols cannot ship" >&2; exit 1; }
-  # Verify against the FINAL file — the bug this section exists to prevent was
-  # a check that passed against an intermediate Assets.car a later tier replaced.
-  for symbolset in "$SYMBOL_CATALOGUE"/*.symbolset; do
-    [ -e "$symbolset" ] || continue
-    name="$(basename "$symbolset" .symbolset)"
-    if ! xcrun assetutil --info "$RESOURCES_DIR/Assets.car" 2>/dev/null | grep -q "$name"; then
-      echo "FATAL: symbol '$name' missing from the final Assets.car" >&2
-      exit 1
-    fi
-  done
-  echo "    custom SF Symbols verified in the final Assets.car"
-fi
-
 # --- Wordmark font (ClashDisplay-Semibold) ---------------------------------
 # NOT in git and NOT in the SwiftPM resource bundle: the ITF Free Font License
 # forbids redistributing the file through a public repository, so
@@ -580,6 +547,10 @@ mkdir -p "$RESOURCES_DIR"
 # Assets.car) gets a symbols-only compile afterwards, and the names are
 # verified against the FINAL Assets.car, never an intermediate one.
 SYMBOL_CATALOGUE="$REPO_ROOT/AudioutCore/Sources/AudioutSharedUI/Resources/Symbols.xcassets"
+# Expanded at the call sites as ${SYMBOL_CATALOGUE_ARG:+"$SYMBOL_CATALOGUE_ARG"} —
+# quoted-when-set, absent-when-empty. A bare $SYMBOL_CATALOGUE_ARG split this
+# repo's space-carrying path into two arguments actool silently ignored, and
+# only the final-file verification caught it (2026-09-05).
 SYMBOL_CATALOGUE_ARG=""
 [ -d "$SYMBOL_CATALOGUE" ] && SYMBOL_CATALOGUE_ARG="$SYMBOL_CATALOGUE"
 ICON_MODE="icns"
@@ -596,7 +567,7 @@ if [ -n "$XCODE_MAJOR" ] && [ "$XCODE_MAJOR" -ge 26 ] && [ -d "$ICON_BUNDLE_SRC"
       --output-partial-info-plist "$ACTOOL_TMP/partial-info.plist" \
       --output-format human-readable-text \
       --notices --warnings \
-      "$ICON_BUNDLE_SRC" $SYMBOL_CATALOGUE_ARG >"$ACTOOL_TMP/actool.log" 2>&1 \
+      "$ICON_BUNDLE_SRC" ${SYMBOL_CATALOGUE_ARG:+"$SYMBOL_CATALOGUE_ARG"} >"$ACTOOL_TMP/actool.log" 2>&1 \
     && [ -f "$RESOURCES_DIR/Assets.car" ]; then
     echo "    actool compiled Assets.car — using Liquid Glass icon"
     ICON_MODE="liquidglass"
@@ -676,7 +647,7 @@ PYEOF
       --output-partial-info-plist "$ACTOOL_LD_TMP/partial-info.plist" \
       --output-format human-readable-text \
       --notices --warnings \
-      "$XCASSETS_DIR" $SYMBOL_CATALOGUE_ARG >"$ACTOOL_LD_TMP/actool.log" 2>&1 \
+      "$XCASSETS_DIR" ${SYMBOL_CATALOGUE_ARG:+"$SYMBOL_CATALOGUE_ARG"} >"$ACTOOL_LD_TMP/actool.log" 2>&1 \
     && [ -f "$RESOURCES_DIR/Assets.car" ]; then
     echo "    actool compiled Assets.car — verifying light and dark actually render differently"
     VERIFY_SWIFT="$(mktemp -d)/verify_appearance.swift"
@@ -759,6 +730,46 @@ elif [ "$ICON_MODE" = "lightdark" ]; then
 else
   /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$PLIST"
 fi
+
+# Symbols when NO icon tier compiled a catalogue (classic .icns mode writes a
+# .icns file, not an Assets.car) — and the final verification either way.
+if [ -d "$SYMBOL_CATALOGUE" ]; then
+  if [ ! -f "$RESOURCES_DIR/Assets.car" ]; then
+    echo "==> Compiling custom SF Symbols (icns icon mode: symbols-only catalogue)"
+    # ONLY the `platforms:` line — a naive `.macOS(` match reads the comment
+    # above it about AirPlayEngine's floor and yields the wrong number
+    # (caught 2026-09-04: 14.0 against the real 14.2).
+    symbol_min_macos="$(grep -m1 'platforms:' "$REPO_ROOT/AudioutCore/Package.swift" \
+      | sed -n 's/.*\.macOS("\([0-9.]*\)").*/\1/p;s/.*\.macOS(\.v\([0-9]*\)).*/\1.0/p')"
+    [ -n "$symbol_min_macos" ] || { echo "FATAL: no macOS floor in Package.swift" >&2; exit 1; }
+    xcrun actool "$SYMBOL_CATALOGUE" \
+      --compile "$RESOURCES_DIR" \
+      --platform macosx \
+      --minimum-deployment-target "$symbol_min_macos" \
+      --output-format human-readable-text >/dev/null
+  fi
+  [ -f "$RESOURCES_DIR/Assets.car" ] || {
+    echo "FATAL: no Assets.car produced, custom symbols cannot ship" >&2; exit 1; }
+  # Verify against the FINAL file — the bug this section exists to prevent was
+  # a check that passed against an intermediate Assets.car a later tier replaced.
+  # Read the catalogue ONCE, then match in the shell. Piping assetutil into
+  # `grep -q` makes this check fail at random: grep exits on its first hit,
+  # assetutil dies of SIGPIPE, and `set -o pipefail` reports the pipeline as
+  # failed — so a symbol that IS present is declared missing, depending only
+  # on whether assetutil had finished writing. It refused two good builds
+  # before the cause was found (2026-09-05).
+  ASSET_INFO="$(xcrun assetutil --info "$RESOURCES_DIR/Assets.car" 2>/dev/null || true)"
+  for symbolset in "$SYMBOL_CATALOGUE"/*.symbolset; do
+    [ -e "$symbolset" ] || continue
+    name="$(basename "$symbolset" .symbolset)"
+    case "$ASSET_INFO" in
+      *"$name"*) ;;
+      *) echo "FATAL: symbol '$name' missing from the final Assets.car" >&2; exit 1 ;;
+    esac
+  done
+  echo "    custom SF Symbols verified in the final Assets.car"
+fi
+
 # The text macOS shows INSIDE the system-audio permission dialog. Without this
 # key the prompt is a bare "wants to record" ask with no reason attached — and
 # the permission lives in the "Screen & System Audio Recording" bucket, so the

@@ -409,9 +409,11 @@ public final class MainOutRowView: NSView {
         muteButton.setButtonType(.pushOnPushOff)
         muteButton.isBordered = false
         muteButton.imagePosition = .imageOnly
+        // Unscaled — see ``RowAccessorySymbol/pointSize``.
+        muteButton.imageScaling = .scaleNone
         muteButton.image = RowAccessorySymbol.image(
             named: RowAccessorySymbol.muteRest,
-            palette: [Tokens.Color.label2])
+            ink: Tokens.Color.label2)
         muteButton.target = self
         muteButton.action = #selector(muteToggled(_:))
         muteButton.setContentHuggingPriority(.required, for: .horizontal)
@@ -590,40 +592,41 @@ public final class MainOutRowView: NSView {
 
     /// Updates the mute button for the current state: `.on` draws
     /// ``RowAccessorySymbol/muteEngaged``, the filled square with a
-    /// ``Tokens/Color/muted`` enclosure and white marks; `.off` draws
+    /// ``Tokens/Color/muted`` enclosure and the marks punched out of it;
+    /// `.off` draws
     /// ``RowAccessorySymbol/muteRest``, the outline square in one neutral ink.
     /// Drawing only — behavior, keyboard and VoiceOver untouched. The SAME two
     /// symbols every device row below wears, so the two rows cannot present
     /// one state as two different objects.
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
+        // One shape, two inks — see `DeviceRowView.updateMuteTint()`.
         muteButton.image = RowAccessorySymbol.image(
-            named: engaged ? RowAccessorySymbol.muteEngaged : RowAccessorySymbol.muteRest,
-            palette: engaged ? Self.engagedPalette(in: effectiveAppearance)
-                             : Self.restPalette(in: effectiveAppearance))
+            named: RowAccessorySymbol.muteRest,
+            ink: engaged ? Self.engagedInk(in: effectiveAppearance)
+                         : Self.restInk(in: effectiveAppearance))
         configureAccessibility()
     }
 
-    /// ``Tokens/Color/muted`` on the enclosing square, WHITE on the marks —
-    /// both resolved in this row's own appearance, because a
-    /// `SymbolConfiguration` keeps whatever `NSColor` it is handed and a
-    /// dynamic one would resolve against whichever appearance is current when
-    /// the image is drawn.
-    private static func engagedPalette(in appearance: NSAppearance) -> [NSColor] {
+    /// ``Tokens/Color/muted`` on the enclosing square, the marks punched
+    /// through it as transparency. Resolved in this row's own appearance,
+    /// because a dynamic `NSColor` would otherwise resolve against whichever
+    /// appearance is current when the image is composited.
+    private static func engagedInk(in appearance: NSAppearance) -> NSColor {
         var fill = Tokens.Color.muted
         appearance.performAsCurrentDrawingAppearance {
             fill = Tokens.Color.muted.usingColorSpace(.sRGB) ?? fill
         }
-        return [fill, .white]
+        return fill
     }
 
-    /// One neutral ink over every layer of the outline square.
-    private static func restPalette(in appearance: NSAppearance) -> [NSColor] {
-        var ink = Tokens.Color.label2
+    /// One neutral ink over the whole outline square.
+    private static func restInk(in appearance: NSAppearance) -> NSColor {
+        var ink = Tokens.Color.label
         appearance.performAsCurrentDrawingAppearance {
-            ink = Tokens.Color.label2.usingColorSpace(.sRGB) ?? ink
+            ink = Tokens.Color.label.usingColorSpace(.sRGB) ?? ink
         }
-        return [ink]
+        return ink
     }
 
     /// The pill's engaged fill is a static `CGColor` — re-stamp on a live
@@ -769,14 +772,14 @@ public final class MainOutRowView: NSView {
     /// The dot's current fill color (resolved) — gold armed / socket dark.
     public var test_dotFillColor: NSColor? { armedDotView.test_fillColor }
     /// Whether the master-mute button is drawing its ENGAGED symbol — a
-    /// raster comparison against the same symbol built from the same palette,
+    /// raster comparison against the same symbol built from the same ink,
     /// so the hook reads the drawn image rather than a flag.
     public var test_isMutePillEngaged: Bool {
         guard muteButton.state == .on,
               let drawn = muteButton.image?.tiffRepresentation,
               let reference = RowAccessorySymbol.image(
-                named: RowAccessorySymbol.muteEngaged,
-                palette: Self.engagedPalette(in: effectiveAppearance))?.tiffRepresentation
+                named: RowAccessorySymbol.muteRest,
+                ink: Self.engagedInk(in: effectiveAppearance))?.tiffRepresentation
         else { return false }
         return drawn == reference
     }

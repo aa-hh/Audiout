@@ -882,8 +882,8 @@ import AudioutProtocol
     }
 
     /// An idle NON-local target (a selected AirPlay device that hasn't connected
-    /// yet) must still show `.none`, never `.resting` — the resting form is
-    /// reserved for a target whose members are ALL the local device.
+    /// yet) must still show `.none`, never `.resting` — with the Mac out of the
+    /// set nothing is playing, so there is nothing for the ring to rest on.
     @Test func mainOutRingStaysNoneForIdleNonLocalTarget() async throws {
         let (popover, _, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
@@ -893,6 +893,30 @@ import AudioutProtocol
         }
         popover.update(devices: devices)
         #expect(popover.test_mainOutRow.test_ringForm == .none, "an idle non-local target shows no ring, not the local-only resting form")
+    }
+
+    /// The Mac mixed with a speaker that is selected but not yet connected: the
+    /// Mac is still rendering audio, so the ring rests rather than vanishing.
+    /// Red if `mainOutIsLocalOnlyArmed` goes back to requiring EVERY member to
+    /// be the local device — the mixed set {local, AirPlay…} is reachable
+    /// (`setDeviceSelected` auto-swaps the Mac out only when it is the sole
+    /// member) and used to leave the rail curving up into a hidden ring.
+    @Test func mainOutRingRestsWhenTheMacIsMixedWithAnIdleSpeaker() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        let localID = try #require(backend.devices.first(where: \.isLocalDevice)?.id)
+        // Selecting an AirPlay device auto-swaps the sole local member out;
+        // putting it back is what builds the mixed set.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        _ = controller.setDeviceSelected(localID, true)
+        var devices = backend.devices
+        if let i = devices.firstIndex(where: { $0.id == "office" }) {
+            devices[i].connectionState = .off
+        }
+        popover.update(devices: devices)
+        #expect(controller.selectedDeviceIDs == [localID, "office"],
+                "the fixture must actually be the mixed set this test is about")
+        #expect(popover.test_mainOutRow.test_ringForm == .resting,
+                "the Mac still plays beside an unconnected speaker — the ring rests, it does not disappear")
     }
 
     // MARK: Membership bus — popover-level wiring (spec §4, S-BUS)
@@ -1638,8 +1662,11 @@ import AudioutProtocol
         appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
         let (popover, _, backend) = try await makePopover(appRouting: appRouting,
                                                           runningAppsProvider: routedApps)
-        // 0x06 is the Audio/Video minor class for headphones.
-        let headphones = Device(id: "airpods:output", name: "AirPods Pro",
+        // 0x06 is the Audio/Video minor class for headphones. The NAME is
+        // deliberately not a recognised product: a name the product layer
+        // matches (an "AirPods Pro") resolves to that product's own glyph
+        // and would never reach the class routing this case is about.
+        let headphones = Device(id: "generic:output", name: "Studio Cans",
                                 kind: .bluetooth, supportsAirPlay2: true,
                                 bluetoothDeviceClassMinor: 0x06)
         popover.update(devices: backend.devices + [headphones])
@@ -2473,19 +2500,31 @@ import AudioutProtocol
                 "the collapsed button names the group itself, not 'office'")
     }
 
-    // MARK: A4 — auto-swap flashes the local row
+    // MARK: An auto-swap must not flash the Mac's row
 
-    /// Turning an AirPlay device ON while the Mac is the sole selected member
-    /// auto-unchecks the Mac; the local row flashes once (a no-op under Reduce
-    /// Motion, per the same mapping `DeviceRowConnectionStateTests` uses).
-    @Test func autoSwapFlashesLocalRow() async throws {
-        let (popover, _, _) = try await makePopover()
+    /// Alec, live, 2026-09-05: "whenever I select a device and it goes from the
+    /// MacBook to the new device, it quickly flashes on the MacBook before going
+    /// to the device I just clicked on … Same thing when it goes backwards."
+    /// The flash was the A4 attention pulse, which paints `Tokens.Color.gold` —
+    /// the panel's word for "carrying audio" — across the whole Mac row for half
+    /// a second at the moment the Mac's membership changes. Both directions of
+    /// the auto-swap raise `autoSwappedCurrentDevice`, so both fired it.
+    @Test func macRowNeverFlashesWhenAudioSwitchesToASpeakerOrBack() async throws {
+        let (popover, controller, _) = try await makePopover()
         #expect(popover.test_deviceRowFlashing(id: "local-mac") == false, "no flash before the swap")
 
-        let result = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        #expect(result.autoSwappedCurrentDevice, "the toggle auto-swapped the local device")
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        #expect(popover.test_deviceRowFlashing(id: "local-mac") == !reduceMotion, "the auto-unchecked local row flashes (unless Reduce Motion)")
+        // Forward: the Mac is the sole member, so turning a speaker on drops it.
+        let away = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        #expect(away.autoSwappedCurrentDevice, "precondition: the toggle auto-swapped the Mac out")
+        #expect(popover.test_deviceRowFlashing(id: "local-mac") == false,
+                "the Mac row must not light gold as the audio leaves it")
+
+        // Backward: the current-device floor hands the audio back to the Mac.
+        let back = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
+        #expect(back.autoSwappedCurrentDevice, "precondition: the floor re-selected the Mac")
+        #expect(controller.isSpeakerSelected("local-mac"))
+        #expect(popover.test_deviceRowFlashing(id: "local-mac") == false,
+                "…and must not flash on the way back either")
     }
 
     // MARK: Surplus container height must not deform the content

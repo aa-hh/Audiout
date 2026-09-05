@@ -1590,7 +1590,7 @@ import AudioutProtocol
 
     /// A row's destination menu leads with the standalone "No Redirect" entry
     /// (no header — the new default/neutral choice), then splits into a
-    /// "Current Device" section (the local device) and an "AirPlay Devices"
+    /// "This Mac" section (the local device) and an "AirPlay Speakers"
     /// section (the available non-local fleet). A freshly-added route selects
     /// the "No Redirect" sentinel; every destination — that one included — keeps
     /// the slider LIVE, since an un-redirected app below 100 is levelled inside
@@ -1651,14 +1651,14 @@ import AudioutProtocol
                                                      runningAppsProvider: routedApps)
         popover.test_applyContentHeightLimit(.greatestFiniteMagnitude)
 
-        let before = try #require(popover.test_cardBodyClipHeight(title: "Output Devices"))
+        let before = try #require(popover.test_cardBodyClipHeight(title: "Output Speakers"))
         try #require(before > 0, "precondition: the list is standing before the pick")
 
         let row = try #require(popover.test_appRow(for: "com.example.music"))
         row.test_selectDestination(PopoverController.currentDeviceDestinationID)
         popover.test_panelView.layoutSubtreeIfNeeded()
 
-        let after = try #require(popover.test_cardBodyClipHeight(title: "Output Devices"))
+        let after = try #require(popover.test_cardBodyClipHeight(title: "Output Speakers"))
         #expect(after > 0,
                 Comment(rawValue: "the device list survives a destination pick — "
                         + "drew \(after)pt, was \(before)pt"))
@@ -3195,7 +3195,7 @@ import AudioutProtocol
 
     // MARK: A3 — destination microcopy subtitles
 
-    /// The "No Redirect" and "Current Device" destination entries carry tooltip
+    /// The "Follows main output" and "This Mac" destination entries carry tooltip
     /// subtitles; AirPlay device entries get none.
     @Test func destinationEntriesCarrySubtitleTooltips() async throws {
         let appRouting = tempAppRoutingController()

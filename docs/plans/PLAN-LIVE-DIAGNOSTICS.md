@@ -121,12 +121,18 @@ opened from `AIRPLAYENGINE_LOG_FILE`. Today that env var is unset in release,
 so every RTSP `E_LOG` and `E_WARN` line (TEARDOWN failed, SET_PARAMETER
 failed, dropped packet, receiver closed) goes to the unified log and is lost.
 
-**Change.** When the env var is unset, default the sink to
-`~/Library/Logs/Audiout/engine.log`, at the existing default threshold
-`E_LOG`. Add the same two-file rotation the decision log uses (5 MB active +
-one rotated). Keep os_log and the stderr mirror as they are. Prefix each line
-with the ISO timestamp the decision log uses so the two files interleave by
-eye.
+**Change (built in S2).** The shim gains `engine_logger_set_file(path, cap)`
+and the Swift wrapper `AirPlayEngine.setLogFile(path:capBytes:)`. The app
+calls it once where it builds the engine, with `engine.log` beside
+`telemetry.jsonl`, unless `HeadlessRuntime.isActive`. The shim itself has no
+default path: the package knows no app, so it cannot know the app's log
+directory, and a host that never calls it (tests, `engine-probe`) writes no
+file. The env var still wins when set. Threshold stays the existing default
+`E_LOG`. Same two-file rotation as the decision log (5 MB active + one
+rotated), one mutex around all file state because `DPRINTF` runs on the
+engine, ptpd and event threads. Each line is prefixed with the ISO timestamp
+the decision log uses so the two files interleave by eye. os_log and the
+stderr mirror are unchanged.
 
 **Why not route it into the decision log.** The C shim would need a callback
 into Swift, a serialisation choice per line, and the JSON writer's queue on

@@ -289,6 +289,18 @@ public actor AirPlayEngine {
 
     // MARK: Init
 
+    /// Where the vendored sender's own log lines (RTSP failures, dropped
+    /// packets, receiver teardowns — everything `DPRINTF` emits at or below
+    /// `AIRPLAYENGINE_LOG_LEVEL`) are appended, rotating to `<path>.1` at
+    /// `capBytes`. `nil` writes no file. Process-wide, not per engine: the C
+    /// shim has one sink. The package has no notion of where an app keeps its
+    /// logs, so the host calls this once at launch with its own directory;
+    /// tests and `engine-probe` never call it and write nothing.
+    /// `AIRPLAYENGINE_LOG_FILE`, when set, still wins (dev tooling).
+    public nonisolated static func setLogFile(path: String?, capBytes: Int = 5 * 1024 * 1024) {
+        engine_logger_set_file(path, capBytes)
+    }
+
     public init(config: EngineConfig = EngineConfig()) {
         self.config = config
         self.latencyProbe = WriteLatencyProbe(startBufferMs: config.startBufferMs)

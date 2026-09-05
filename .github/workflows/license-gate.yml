@@ -33,3 +33,50 @@ jobs:
           echo "ok - release script refuses to build without a licence URL"
       - name: Run the licence-guard tests (plist cases skip on Linux)
         run: bash scripts/test-license-guards.sh
+
+  build-invariants:
+    # This repo is public, so macOS runners cost nothing — this job ran
+    # ON DEMAND ONLY while the repo was private (macOS billed at 10x). It is
+    # the home of the licence build invariants now: make-release.sh asserts
+    # only the cheap artifact-plist check, and the unlicensed probe build
+    # happens here, on every PR that touches the build. The clean runner also
+    # installs the brew dependencies from scratch, so it catches a build that
+    # has come to depend on something missing from the list below.
+    # macos-26 (Xcode 26.x): matches the Swift toolchains on both of Alec's
+    # Macs; macos-15's Xcode 16.4 is older than anything this repo is built
+    # with locally.
+    runs-on: macos-26
+    env:
+      # The runner has neither of this project's Macs to route a compile to.
+      AUDIOUT_BUILD_LOCAL: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the licence-guard tests (macOS, includes the plist cases)
+        run: bash scripts/test-license-guards.sh
+      - name: Install build dependencies
+        run: brew install libevent libsodium libgcrypt libgpg-error libplist ffmpeg
+      - name: Build without a licence URL (source build)
+        env:
+          POSTHOG_PROJECT_TOKEN: ci-dummy
+          POSTHOG_HOST: https://example.invalid
+        run: bash scripts/make-app.sh
+      - name: Unlicensed build must carry no gate key
+        run: |
+          if plutil -extract AudioutLicenseServerURL raw -o - build/Audiout.app/Contents/Info.plist 2>/dev/null; then
+            echo "ERROR: unlicensed build carries AudioutLicenseServerURL" >&2
+            exit 1
+          fi
+          echo "ok - unlicensed build has no gate key"
+      - name: Build with a licence URL (licensed build)
+        env:
+          POSTHOG_PROJECT_TOKEN: ci-dummy
+          POSTHOG_HOST: https://example.invalid
+          AUDIOUT_LICENSE_URL: https://example.invalid
+          SPARKLE_ED_PUBLIC_KEY: ci-dummy-key
+          BUILD_NUMBER: 999
+        run: bash scripts/make-app.sh
+      - name: Licensed build must carry the gate key
+        run: |
+          VALUE="$(plutil -extract AudioutLicenseServerURL raw -o - build/Audiout.app/Contents/Info.plist)"
+          [ "$VALUE" = "https://example.invalid" ] || { echo "ERROR: expected https://example.invalid, got '$VALUE'" >&2; exit 1; }
+          echo "ok - licensed build carries $VALUE"

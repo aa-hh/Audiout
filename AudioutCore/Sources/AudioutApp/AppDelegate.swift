@@ -117,6 +117,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         PostHogSDK.shared.register([Self.geoipDisableKey: true])
         Analytics.install(Analytics.Sink(
             capture: { PostHogSDK.shared.capture($0, properties: $1) },
+            captureError: { name, properties in
+                // A plain `NSError` reaches PostHog's error tracking with its
+                // DOMAIN as the exception type and its localized description
+                // as the value, so the domain is what groups these in the
+                // issue list — hence the literal name straight from
+                // `Analytics.captureError`, and a fixed description rather
+                // than a Cocoa one (those carry local file paths).
+                let error = NSError(domain: name, code: 0, userInfo: [
+                    NSLocalizedDescriptionKey: name,
+                ])
+                PostHogSDK.shared.captureException(error, properties: properties)
+            },
             consentChanged: { granted in
                 guard granted else { PostHogSDK.shared.optOut(); return }
                 PostHogSDK.shared.optIn()
@@ -788,6 +800,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `StoreRecovery` deliberately knows no UI, and this target is the only
         // place that has any.
         StoreRecovery.onWriteFailure = { [weak self] error in
+            // The same reason the alert below is generic: the Cocoa
+            // description can carry a local file path, so only the domain and
+            // the code (e.g. NSCocoaErrorDomain 640, "disk full") go out.
+            let ns = error as NSError
+            Analytics.captureError("settings:save_failed", [
+                "domain": ns.domain,
+                "code": String(ns.code),
+            ])
             DispatchQueue.main.async {
                 // Never ship a raw Cocoa error description in the visible
                 // alert — it can carry a local file path. Log the detail,
@@ -811,6 +831,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async { [weak self] in
             let quarantined = StoreRecovery.quarantinedFileNames
             guard !quarantined.isEmpty else { return }
+            // The filenames are this app's own fixed names, not the user's
+            // content, so they are safe to send and are the only thing that
+            // says WHICH settings corruption is showing up in the field.
+            Analytics.captureError("settings:file_corrupt", [
+                "files": quarantined.sorted().joined(separator: ","),
+            ])
             self?.presentStoreDataAlertOnce(
                 message: "Some of Audiout's saved settings couldn't be read",
                 info: "The unreadable settings were set aside so nothing is lost: \(Self.describeQuarantinedFiles(quarantined)). They're back to their defaults. Everything else is untouched.")

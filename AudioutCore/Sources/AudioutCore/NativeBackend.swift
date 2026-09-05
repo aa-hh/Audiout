@@ -5671,7 +5671,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
 
         case .failed(let error):
-            let (shouldRetry, attempt): (Bool, Int) = stateQueue.sync {
+            let (shouldRetry, attempt, noted): (Bool, Int, Bool) = stateQueue.sync {
                 let running = self.captureRunning
                 let retryable = error.isRetryable
                 if running {
@@ -5691,11 +5691,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // `DispatchWorkItem` reference.
                     self.pendingCaptureRetry?.cancel()
                     self.pendingCaptureRetry = nil
-                    return (false, 0)
+                    return (false, 0, running)
                 }
                 let attempt = self.captureRetryCount + 1
                 self.captureRetryCount = attempt
-                return (true, attempt)
+                return (true, attempt, running)
+            }
+            // Only when capture was actually wanted — the same test the note
+            // above uses. A failure with nothing selected is bookkeeping, not
+            // a user hearing silence. Sent from outside `stateQueue.sync`
+            // because the sink is the app's, not this file's, to reason about.
+            if noted {
+                Analytics.captureError("capture:whole_system_failed", [
+                    "kind": error.kind,
+                    "retrying": error.isRetryable ? "true" : "false",
+                ])
             }
             if shouldRetry {
                 scheduleCaptureRetry(attempt: attempt)

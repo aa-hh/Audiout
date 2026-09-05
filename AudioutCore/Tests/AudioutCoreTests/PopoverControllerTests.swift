@@ -1629,6 +1629,43 @@ import AudioutProtocol
         #expect(popover.test_appRowSliderDimmed(for: "com.example.music") == false, "Bug T2 — the slider is live for the explicit Current Device pick (its own stream)")
     }
 
+    /// Picking a routing destination must not collapse the Output Devices list.
+    ///
+    /// Reported live 2026-09-05: choosing a destination for an app took the
+    /// whole device section down to nothing, leaving its header and footer
+    /// stranded. The destination callbacks end in a bare `rebuild()`, which
+    /// mounts a FRESH scrolling card whose height constraint starts at 0
+    /// (`CardView.mountScrollingBody`) — and a scroll view has no natural
+    /// height to fall back on. Paths that publish a size reconcile that height
+    /// inside `fittingSizeSettled`; these don't publish, so the list stayed at
+    /// zero until the next device event happened to rebuild it again.
+    ///
+    /// The clip height is the assertion because it is what the user sees: the
+    /// card's own body FITTING height stayed correct throughout the bug (the
+    /// rows were mounted all along), so measuring that alone would have read
+    /// green against a visibly empty section.
+    @Test func pickingAnAppDestinationLeavesTheDeviceListStanding() async throws {
+        let appRouting = tempAppRoutingController()
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: routedApps)
+        popover.test_applyContentHeightLimit(.greatestFiniteMagnitude)
+
+        let before = try #require(popover.test_cardBodyClipHeight(title: "Output Devices"))
+        try #require(before > 0, "precondition: the list is standing before the pick")
+
+        let row = try #require(popover.test_appRow(for: "com.example.music"))
+        row.test_selectDestination(PopoverController.currentDeviceDestinationID)
+        popover.test_panelView.layoutSubtreeIfNeeded()
+
+        let after = try #require(popover.test_cardBodyClipHeight(title: "Output Devices"))
+        #expect(after > 0,
+                Comment(rawValue: "the device list survives a destination pick — "
+                        + "drew \(after)pt, was \(before)pt"))
+        #expect(abs(after - before) < 1,
+                Comment(rawValue: "and at the same height: \(before)pt → \(after)pt"))
+    }
+
     /// An AirPlay-1-only (RAOP) device IS a per-app routing target. This
     /// reverses T4b, which excluded it on the theory that a per-app rebind
     /// (`NativeBackend.performBindOp`'s `.rebind`) would re-anchor the

@@ -493,6 +493,29 @@ public final class ControlPanelWindowController: NSWindowController {
     /// `MixerWindowController.test_isVisibleOverride`.
     public var isPanelVisible: Bool { test_isPanelVisibleOverride ?? (window?.isVisible ?? false) }
 
+    /// Whether the panel is somewhere the user can actually SEE it: visible to
+    /// AppKit, on the ACTIVE Space, and not fully occluded.
+    ///
+    /// The two can disagree, and the gap was a live bug (2026-09-05, probe
+    /// trace): open the panel, switch Space — the app deactivates but the
+    /// panel does NOT tuck away, so it sits "visible" on the old Space. The
+    /// status-item click policy then read `isPanelVisible == true` and
+    /// DISMISSED a panel the user could not see: the click looked like it did
+    /// nothing, and only the follow-up click (now `.show`; the panel's
+    /// `.moveToActiveSpace` behavior carries it over on ordering) produced the
+    /// panel — "it always works on the second click".
+    ///
+    /// Headless tests drive this through `test_isPanelSeenByUserOverride`,
+    /// falling back to the visibility override (a test that says "the panel is
+    /// visible" means visible in front of the user, Space and occlusion being
+    /// window-server concepts a test run never has).
+    public var isPanelSeenByUser: Bool {
+        if let test_isPanelSeenByUserOverride { return test_isPanelSeenByUserOverride }
+        if let test_isPanelVisibleOverride { return test_isPanelVisibleOverride }
+        guard let window, window.isVisible else { return false }
+        return window.isOnActiveSpace && window.occlusionState.contains(.visible)
+    }
+
     /// Close the panel exactly as the ✕ button or Escape would: routed through
     /// `performClose(_:)` so `windowWillClose` → `onClose` fires and the app
     /// lands home on the popover. The status-item toggle-close uses this rather
@@ -530,7 +553,11 @@ public final class ControlPanelWindowController: NSWindowController {
         // visibly closed the panel reopened it on release. The time window
         // stays as the fallback for events this can't see (a VoiceOver press,
         // no current event).
-        if let mouseDownNumber,
+        // `mouseDownNumber != 0`: status-item clicks carry eventNumber 0 (probe
+        // trace, 2026-09-05), so 0 == 0 would "definitively" match EVERY later
+        // click against a stale stamp and swallow it. Zero means unknown —
+        // only a real, nonzero number identifies a click.
+        if let mouseDownNumber, mouseDownNumber != 0,
            let upNumber = Self.eventNumber(of: NSApp?.currentEvent, in: Self.mouseUpTypes)
                ?? test_clickMouseUpNumberOverride,
            upNumber == mouseDownNumber {
@@ -750,6 +777,10 @@ public final class ControlPanelWindowController: NSWindowController {
     /// window on screen, so the on-screen-only paths (close-on-resign, the
     /// un-pin re-anchor) are unreachable without this.
     public var test_isPanelVisibleOverride: Bool?
+    /// Overrides `isPanelSeenByUser` alone, for pinning the visible-but-on-
+    /// another-Space click policy headlessly. Leave `nil` to follow the
+    /// visibility override.
+    public var test_isPanelSeenByUserOverride: Bool?
 
     /// `nil` = read the real `window.attachedSheet`. A real sheet cannot be
     /// begun headlessly without putting a window on the developer's screen.

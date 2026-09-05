@@ -105,6 +105,13 @@ final class StatusItemController {
         button.action = #selector(buttonClicked(_:))
         // Fire on right-mouse too so a secondary click can raise the context menu
         // instead of toggling the popover.
+        //
+        // Both stay on mouse-UP deliberately. Firing the primary on mouse-DOWN
+        // was tried against the "a fast click does nothing" report (2026-09-05)
+        // and did NOT fix it — the cause was the surface fronting inside this
+        // click's event dispatch, not a lost event (see
+        // `AppSurfaceController.frontAfterClickDispatch`). Acting on down only
+        // widens the window of focus churn the fresh panel has to survive.
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 

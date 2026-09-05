@@ -214,12 +214,29 @@ repo. `AudioutCore` pins it by version.
   `~/Library/Preferences`). Dry-run by default; `--apply` to act. The shipping
   id is a hardcoded literal it refuses to touch, and
   `~/Library/Application Support/Audiout/` (the real saved groups and routes)
-  is never in scope. Two traps it already handles, both learned the hard way:
+  is never in scope — bar one exception, a loose `*.sh` or `perfwatch*` entry
+  sitting directly in it, which the app never writes and which is therefore
+  somebody's dev script. The pre-rename `Audiouter/` data directory is listed
+  with a warning and never deleted: nothing migrated it, so it can still be the
+  only copy of an older Mac's saved groups. Two traps it already handles, both learned the hard way:
   CoreAudio silently refuses to destroy an aggregate that is the current system
   output — it returns `noErr` and the device is still there — so the script
   switches the system back to the built-in speakers first; and `cfprefsd`
   rewrites deleted plists from its in-memory cache, so `defaults delete`
   precedes every file removal and the daemon is restarted at the end.
+
+- **Dev tooling that outlives its session must be labelled, parked outside the
+  app's data, and purgeable (Alec, 2026-09-05).** A dev performance watchdog —
+  `~/Library/Application Support/Audiouter/perfwatch.sh`, kept alive by
+  `~/Library/LaunchAgents/com.audiouter.perfwatch.plist` — ran unnoticed for 6
+  days 22 hours: never committed, written straight onto the machine, dropped
+  into the app's own live data folder, and hidden by the product rename. So
+  anything that keeps running after the session that made it — a launchd agent
+  or daemon, a login item, a cron entry, a file watcher, a watchdog — must
+  (a) carry a label starting `com.audiout.dev.`, (b) live in
+  `~/Library/Application Support/AudioutDev/` or in the repo's `dev/`, never
+  inside the app's own Application Support directory, and (c) be added to
+  `scripts/purge-dev-installs.sh` in the same change that introduces it.
 
 ## `main` is MERGE-ONLY (HARD RULE)
 

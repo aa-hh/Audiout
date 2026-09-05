@@ -17,6 +17,11 @@
 #   - an always-on ROOT PTP-helper launchd daemon
 #   - possibly its own Application Support / Caches / saved-state directories
 #
+# It also removes two things that are nobody's build residue but everybody's
+# problem: USER LAUNCH AGENTS under either product name (the shipping app
+# installs none — see section 5), and dev tooling that an earlier session
+# wrote into the app's own data directories.
+#
 # None of that is removed by dragging the .app to the Trash. This script is the
 # uninstaller for all of it.
 #
@@ -43,7 +48,13 @@
 #     touched. Neither is ~/Library/Logs/Audiout/ — every build writes
 #     telemetry to that one shared path, so no line in it can be attributed to
 #     a dev build and none of it is safe to attribute away from the shipping
-#     one.
+#     one. ONE exception each, added 2026-09-05: a loose `*.sh` or a
+#     `perfwatch*` entry directly inside either is dev tooling by
+#     construction, because the app writes only `.json` files and an
+#     `app-icons/` directory of `.png`s into the first and only
+#     `telemetry.jsonl` into the second.
+#   - The PRE-RENAME data directory (~/Library/Application Support/Audiouter/)
+#     is LISTED BUT NEVER DELETED, however dead it looks. See section 9.
 #
 # Usage:
 #   scripts/purge-dev-installs.sh            # list everything it would remove
@@ -65,6 +76,16 @@ NAMESPACE="com.audiout."
 # the PRE-RENAME `com.audiouter.…` ids, which discovery then hands to
 # `assert_not_prod`, which correctly refuses them and aborts the whole run.
 NAMESPACE_RE="com\\.audiout\\."
+
+# The pre-rename product name. Nothing in the shipping app reads or writes
+# anything under it — GroupStore.defaultDirectory derives the folder name
+# "Audiout" (AudioutCore/Sources/AudioutCore/GroupStore.swift:110) and no
+# source outside a comment mentions the old name at all — so its residue is
+# dead. That does NOT make it deletable: on a Mac that predates the rename the
+# old data directory can still hold the only copy of the user's saved groups,
+# which nothing ever migrated. Section 9 lists it and refuses to remove it.
+OLD_NAMESPACE="com.audiouter."
+OLD_APP_SUPPORT="Audiouter"
 
 # Preference-domain prefixes leaked by the test suites — one plist per suite
 # per test per run, forever. Historical target names are included because the
@@ -101,10 +122,13 @@ Removes every trace of every NON-SHIPPING Audiout build from this Mac:
 preference domains, TCC privacy grants, persistent aggregate audio devices,
 root PTP-helper daemons, per-build support/cache/saved-state directories, and
 stray .app bundles. Also clears the preference-domain files leaked by the test
-suites.
+suites, any user launch agent under either product name, and dev tooling left
+inside the app's data directories.
 
 The shipping build (com.audiout.Audiout) and its saved settings in
-~/Library/Application Support/Audiout/ are never touched.
+~/Library/Application Support/Audiout/ are never touched, and neither is the
+pre-rename data directory ~/Library/Application Support/Audiouter/ — that one
+is listed with a warning and left for you to check by hand.
 
   (no flags)   Dry run (default). List everything that would be removed.
                Mutates nothing.
@@ -405,7 +429,55 @@ fi
 echo
 
 # ============================================================================
-# 5. Test-suite preference residue
+# 5. User launchd agents
+# ============================================================================
+# The shipping app installs NO launch agent. Its only launchd job is the root
+# PTP-helper LaunchDaemon that SMAppService registers from inside the .app
+# bundle (make-app.sh, "Installing LaunchDaemons plist"), and that lands in the
+# system domain, not here. So there is no shipping identity to spare in this
+# directory: EVERY plist under ~/Library/LaunchAgents carrying either product
+# name is dev residue, unconditionally.
+#
+# Why this section exists (Alec, 2026-09-05): com.audiouter.perfwatch, a dev
+# performance watchdog no session ever committed, was found still running after
+# 6 days 22 hours. It was installed under the OLD product name, so the rename
+# hid it, and nothing had ever looked in this directory.
+echo "==> User launchd agents (${NAMESPACE}* / ${OLD_NAMESPACE}*)"
+LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+agent_plists=()
+while IFS= read -r plist; do
+  [ -n "$plist" ] && agent_plists+=("$plist")
+done <<< "$(find "$LAUNCH_AGENTS" -maxdepth 1 \
+  \( -name "${NAMESPACE}*.plist" -o -name "${OLD_NAMESPACE}*.plist" \) 2>/dev/null | sort)"
+
+if [ "${#agent_plists[@]}" -eq 0 ]; then
+  echo "    none found"
+else
+  for plist in "${agent_plists[@]}"; do
+    label="$(basename "$plist" .plist)"
+    # Defense in depth, same reasoning as assert_not_prod: the find pattern
+    # already constrained this, and a step that boots out launchd jobs should
+    # not trust one filter.
+    case "$label" in
+      "$NAMESPACE"*|"$OLD_NAMESPACE"*) : ;;
+      *) echo "    internal error: '$label' is outside both namespaces — refusing" >&2; exit 1 ;;
+    esac
+    echo "    $label"
+    echo "        $plist"
+    if [ "$APPLY" -eq 1 ]; then
+      # `|| true`: bootout exits non-zero whenever the label is not currently
+      # loaded — an orphaned plist, or one already unloaded by hand. That is
+      # the normal case here, not a failure, and the plist still has to go.
+      launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+      rm -f "$plist"
+      removed_anything=1
+    fi
+  done
+fi
+echo
+
+# ============================================================================
+# 6. Test-suite preference residue
 # ============================================================================
 echo "==> Leaked test-suite preference domains"
 leaked_total=0
@@ -443,7 +515,7 @@ done
 echo
 
 # ============================================================================
-# 6. Dev harness preference domains
+# 7. Dev harness preference domains
 # ============================================================================
 echo "==> Dev harness / snapshot-tool preference domains"
 harness_found=0
@@ -462,7 +534,7 @@ done
 echo
 
 # ============================================================================
-# 7. Stray .app bundles
+# 8. Stray .app bundles
 # ============================================================================
 # Identified by the bundle id inside each one, never by filename — a dev build
 # can be called anything, and the shipping build must be spared even if it has
@@ -482,6 +554,106 @@ else
     fi
   done
 fi
+echo
+
+# ============================================================================
+# 9. Pre-rename residue, and dev tooling inside the data directories
+# ============================================================================
+# The app was called Audiouter before it was called Audiout. Preference domains
+# and log directories under the old name are dead weight and go. The old DATA
+# directory does NOT go: nothing migrated it, so on a Mac that predates the
+# rename it can still be the only copy of the user's saved groups. Losing
+# someone's groups to a tidy-up would be a far worse bug than leaving a stale
+# folder on disk, so this section lists it, says why, and stops.
+#
+# What it does remove from a data directory — either name — is a loose `*.sh`
+# or a `perfwatch*` entry sitting directly inside it. The app writes only
+# `.json` files and an `app-icons/` directory there, so nothing of that shape
+# can be the app's; it is a dev script somebody dropped into the live data
+# folder. Same for the watchdog's stack dumps under ~/Library/Logs/*/perfwatch.
+echo "==> Pre-rename residue and dev tooling in the data directories"
+old_found=0
+
+# --- Old-name preference domains -------------------------------------------
+while IFS= read -r plist; do
+  [ -n "$plist" ] || continue
+  domain="$(basename "$plist" .plist)"
+  case "$domain" in
+    "$OLD_NAMESPACE"*) : ;;
+    *) echo "    internal error: '$domain' is not an old-name domain — refusing" >&2; exit 1 ;;
+  esac
+  echo "    prefs domain $domain"
+  old_found=1
+  if [ "$APPLY" -eq 1 ]; then
+    defaults delete "$domain" >/dev/null 2>&1 || true
+    rm -f "$plist"
+    find "$PREFS/ByHost" -maxdepth 1 -name "$domain.*.plist" -delete 2>/dev/null || true
+    removed_anything=1
+  fi
+done <<< "$(find "$PREFS" -maxdepth 1 -name "${OLD_NAMESPACE}*.plist" 2>/dev/null | sort)"
+
+# --- Watchdog stack-capture directories under the live log paths ------------
+for wd in "$HOME/Library/Logs/$PROD_APP_SUPPORT/perfwatch" \
+          "$HOME/Library/Logs/$OLD_APP_SUPPORT/perfwatch"
+do
+  if [ -e "$wd" ]; then
+    echo "    $wd"
+    old_found=1
+    if [ "$APPLY" -eq 1 ]; then
+      rm -rf "$wd"
+      removed_anything=1
+    fi
+  fi
+done
+
+# --- Old-name log directory -------------------------------------------------
+# Unlike ~/Library/Logs/Audiout/, this one cannot be shared with the shipping
+# build: the shipping build writes the new name. Telemetry only, so it goes
+# whole.
+OLD_LOGS="$HOME/Library/Logs/$OLD_APP_SUPPORT"
+if [ -e "$OLD_LOGS" ]; then
+  echo "    $OLD_LOGS"
+  old_found=1
+  if [ "$APPLY" -eq 1 ]; then
+    rm -rf "$OLD_LOGS"
+    removed_anything=1
+  fi
+fi
+
+# --- Loose dev scripts inside either data directory -------------------------
+for support in "$HOME/Library/Application Support/$OLD_APP_SUPPORT" \
+               "$HOME/Library/Application Support/$PROD_APP_SUPPORT"
+do
+  [ -d "$support" ] || continue
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    echo "    $entry"
+    old_found=1
+    if [ "$APPLY" -eq 1 ]; then
+      rm -rf "$entry"
+      removed_anything=1
+    fi
+  done <<< "$(find "$support" -mindepth 1 -maxdepth 1 \
+    \( -name "*.sh" -o -name "perfwatch*" \) 2>/dev/null | sort)"
+done
+
+# --- The old data directory itself: listed, warned about, never removed -----
+OLD_SUPPORT="$HOME/Library/Application Support/$OLD_APP_SUPPORT"
+if [ -d "$OLD_SUPPORT" ]; then
+  keepers="$(find "$OLD_SUPPORT" -mindepth 1 -maxdepth 1 \
+    ! -name "*.sh" ! -name "perfwatch*" 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$keepers" -gt 0 ]; then
+    old_found=1
+    echo "    $OLD_SUPPORT"
+    echo "        !! LEFT ALONE — $keepers item(s) in it are not dev tooling."
+    echo "        !! Nothing migrated this directory when the app was renamed, so on an"
+    echo "        !! older Mac it can hold the ONLY copy of groups.json / app-routes.json"
+    echo "        !! / device-eq.json. This script will never delete it. Look inside,"
+    echo "        !! then move or remove it by hand."
+  fi
+fi
+
+[ "$old_found" -eq 0 ] && echo "    none found"
 echo
 
 # ============================================================================

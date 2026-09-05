@@ -723,6 +723,22 @@ struct ControlPanelWindowControllerTests {
                 "a different click is not the one that dismissed the panel")
     }
 
+    /// Event number 0 means UNKNOWN, not "a click": status-item clicks carry
+    /// eventNumber 0 (live probe trace, 2026-09-05), so a 0-stamped dismissal
+    /// would "definitively" match every later status click forever and swallow
+    /// it. Zero must fall back to the time window like any unidentifiable
+    /// click.
+    @Test func aZeroEventNumberNeverMatchesTheDismissalStamp() {
+        let controller = makeDismissableController()
+        controller.test_resignMouseDownNumberOverride = 0
+
+        resignKey(controller)
+
+        controller.test_clickMouseUpNumberOverride = 0
+        #expect(!controller.consumeRecentResignDismissal(within: 0),
+                "0 == 0 identifies nothing — only the time window may consume")
+    }
+
     /// Re-fronting an already-visible unpinned panel (the sheet-attached
     /// `.front` click, "Open Groups"/⌘, while the surface is open, a Finder
     /// reopen) used to replay the 0→1 open fade over pixels the user was

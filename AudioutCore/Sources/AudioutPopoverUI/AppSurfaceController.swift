@@ -715,7 +715,12 @@ public final class AppSurfaceController {
         // only ever "front it" or "reopen it".
         if shell.isPinned { return shell.isPanelVisible ? .front : .show }
         if dismissedByThisClick { return .ignore }
-        return shell.isPanelVisible ? .dismiss : .show
+        // `isPanelSeenByUser`, not `isPanelVisible`: a panel left "visible" on
+        // another Space (or fully occluded) must be RE-SHOWN by a click, never
+        // toggled shut — dismissing a panel the user cannot see is the click
+        // that "does nothing" (2026-09-05). The show path orders the panel
+        // front, and its `.moveToActiveSpace` behavior brings it to the user.
+        return shell.isPanelSeenByUser ? .dismiss : .show
     }
 
     /// Carry out a `clickAction(setupIsOpen:)` result. `refrontSetup` is the

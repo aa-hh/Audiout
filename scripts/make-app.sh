@@ -38,12 +38,20 @@ EXECUTABLE="AudioutApp"
 BUNDLE_ID="${BUNDLE_ID:-com.audiout.Audiout}"
 # The oldest macOS the app supports. 14.2, NOT 13.x: the native backend's
 # whole-system audio capture uses Core Audio process taps
-# (AudioHardwareCreateProcessTap / CATapDescription), a macOS 14.2 API — on 13.x
-# the app launches and then crashes/misbehaves the moment it tries to capture.
-# Advertising 14.2 here stops a 13.x user installing a build that can't work
+# (AudioHardwareCreateProcessTap / CATapDescription) — on 13.x the app launches
+# and then crashes/misbehaves the moment it tries to capture. Advertising a
+# floor here stops such a user installing a build that can't work
 # (crash-hang.md M2). Feeds BOTH LSMinimumSystemVersion and actool's
-# --minimum-deployment-target below. Env-overridable, but don't drop below 14.2.
-MIN_MACOS="${MIN_MACOS:-14.2}"
+# --minimum-deployment-target below.
+#
+# The floor is 14.4, not the tap API's own 14.2: the tap calls exist from 14.2,
+# but consent for them is read through the private TCC framework, and 14.2/14.3
+# file audio capture under different categories than the
+# `kTCCServiceAudioCapture` bucket this app preflights — where an absent bucket
+# reads back as a hard denial. AudioutCore/Package.swift carries the full
+# reasoning and must hold the same number. Env-overridable, but don't drop
+# below 14.4.
+MIN_MACOS="${MIN_MACOS:-14.4}"
 # Human-readable marketing version (CFBundleShortVersionString) and monotonic
 # build number (CFBundleVersion). Env-overridable so a release can bump them
 # without editing this script:
@@ -1025,6 +1033,22 @@ for diag in AUDIOUT_STATUS_LABEL AIRPLAYENGINE_LOG_FILE AIRPLAYENGINE_LOG_LEVEL 
     echo "==> LSEnvironment.$diag = $val (dev diagnostic)"
   fi
 done
+
+# --- Bundle content gate ----------------------------------------------------
+# Every file that belongs in the .app is now in place and NOTHING has been
+# signed yet — the last moment where a bundle can still be refused without
+# having handed it this build's Developer ID identity. A signature is the point
+# of no return: an unwanted file inside a signed bundle is a trusted,
+# distributable artifact, so the gate runs here rather than after the codesign
+# block below.
+#
+# WHY IT EXISTS (2026-09-05): a dev performance watchdog — a `perfwatch.sh` and
+# a `com.audiouter.perfwatch` LaunchAgent — was found running on the owner's
+# Mac for 6 days 22 hours, written there directly by some earlier dev session
+# and never present in this repo. Nothing at build time would have stopped that
+# same session from putting it inside the shipped bundle instead. Now something
+# does. The checks and the reasoning are in scripts/verify-bundle.sh.
+"$SCRIPT_DIR/verify-bundle.sh" "$APP_BUNDLE" "$HELPER_LABEL"
 
 # --- Strip extended attributes ---------------------------------------------
 # codesign refuses to sign anything carrying AppleDouble/resource-fork-style

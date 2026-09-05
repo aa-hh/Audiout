@@ -100,8 +100,9 @@ The house doesn't have a keyboard in it. **Audiout Remote** is a free iPhone app
 that mirrors the Mac fader for fader — per-speaker volume, per-app routing, and
 mute one room or all of them, from wherever you're standing.
 
-Sign in once and your phone talks to your Mac over your own Wi-Fi. There's no
-per-seat limit: put it on every phone in the house.
+There's no account and no sign-in. The phone finds your Mac on your own Wi-Fi,
+and the Mac asks you once whether to allow that phone; after that it stays
+allowed. There's no per-seat limit: put it on every phone in the house.
 
 Free on the App Store, included with Audiout for Mac. → **[audiout.app/remote](https://audiout.app/remote)**
 
@@ -114,7 +115,7 @@ Free on the App Store, included with Audiout for Mac. → **[audiout.app/remote]
 | | |
 |---|---|
 | **Mac** | Apple Silicon, macOS 14.4 or later |
-| **Speakers** | Any AirPlay 2 speaker — HomePod, Sonos, Apple TV, AV receivers, smart TVs. AirPlay 1 works too, but can't be used as a per-app destination. |
+| **Speakers** | Any AirPlay 2 speaker — HomePod, Sonos, Apple TV, AV receivers, smart TVs. AirPlay 1, Bluetooth and Chromecast work too. Chromecast plays the whole mix only: it can't be a per-app destination. |
 | **Network** | Everything on the same Wi-Fi. Audiout asks for Local Network and system-audio recording permission on first run, and explains why. |
 
 ## Documentation

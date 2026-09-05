@@ -1781,6 +1781,13 @@ public final class PopoverController: NSObject {
         // `applyNoteSlot()` uses, so a rebuild mid-condition restores the right one.
         let note = resolvedSystemAirPlayNote
         panel.setSystemAirPlayNote(note.text, action: note.action, severity: note.severity)
+        // The device list this rebuild just re-mounted is a fresh scrolling card,
+        // and a fresh one starts at height 0. Callers that publish a size get the
+        // reconcile from `fittingSizeSettled`; the app-routing callbacks don't
+        // publish, so without this the list stays collapsed to nothing under its
+        // own header until the next device event. Reconciling here covers every
+        // rebuild path at once, and changes no publish policy.
+        panel.reconcileScrollingBodyHeight()
     }
 
     private func orderedDevices() -> [Device] {

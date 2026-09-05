@@ -371,6 +371,21 @@ replaced an SF Mono bold UPPERCASE + kern treatment in 2026-08-23 for the
 same reason iOS states it — a token now stands out from body text sharing
 its line by weight alone, not by shouting.
 
+**Menu Section Headers Indent Their Entries.** A dropdown's section header
+("Output Groups", "AirPlay Devices") is an `NSMenuItem.sectionHeader` — the
+only item AppKit documents as non-interactive, so it cannot be highlighted,
+hovered or picked. A hand-disabled plain item does not substitute: an
+`NSPopUpButton` re-points every item's action at its own cell, and while
+`autoenablesItems` is on AppKit ignores `isEnabled` outright, so the header
+lights back up. Its appearance is owned by `NSMenu` and is not customised.
+Because One Case leaves the header in the entries' own type register, the
+separation is structural instead: a rule above every section but the first,
+and every entry one indentation level in, so its header hangs to the left.
+That indentation is a deliberate departure from the HIG, which prefers a
+submenu to indenting menu items (Alec, 2026-09-05) — a submenu would put
+every speaker an extra hop away, and reaching a speaker fast is what this
+menu is for. Do not "fix" it back.
+
 **Off-Scale Sizes Are Ledgered, Not Silently Tokenized.** `Tokens.swift`'s
 own header records that its Font aliases mirror shipped call sites as of the
 audit pass that created them, not a claim every size in the five UI packages

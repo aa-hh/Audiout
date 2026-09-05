@@ -83,12 +83,15 @@ import AppKit
 
     @Test func outputGroupsHeaderIsDisabledAndInert() {
         let (row, _) = makeRow()
-        // The header renders via a sentence-case `attributedTitle` (One Case
-        // rule), which is what `NSMenuItem.title` reports back.
+        // A section header keeps its plain `title`, which is what this lookup
+        // matches on.
         let header = row.test_menuItem(titled: "Scenes")
         #expect(header != nil, "the 'Scenes' section header must exist")
-        #expect(!(header?.isEnabled ?? true),
-                "the header must be disabled so it can't be clicked like a real choice")
+        // `isSectionHeader`, not `isEnabled`: AppKit reports a section header as
+        // enabled while still refusing to highlight or pick it, and `isEnabled`
+        // is ignored outright while the menu autoenables its items.
+        #expect(header?.isSectionHeader == true,
+                "the header must be a real section header so it can't be highlighted or picked")
         #expect(header?.representedObject == nil,
                 "the header carries no target — clicking it must route nowhere")
     }

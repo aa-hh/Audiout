@@ -767,10 +767,10 @@ import CoreAudio
         #expect(slow.cause == .unknown, #""Couldn't connect", matching AirPlay's generic failure"#)
     }
 
-    /// Availability-loss handling moved UPSTREAM (Alec's deselect-on-power-off
-    /// decision: the popover deselects on the loss edge via
-    /// `GroupController.setDeviceSelected` — see `BTPopoverRowsTests`). The
-    /// backend contract that remains: a loss reads `.off` and, once the
+    /// Availability-loss handling moved UPSTREAM (the owner's
+    /// deselect-on-power-off decision: the popover deselects on the loss edge
+    /// via `GroupController.setDeviceSelected` — see `BTPopoverRowsTests`).
+    /// The backend contract that remains: a loss reads `.off` and, once the
     /// routing brain's deselect lands as a plain `setOutputSet` drop, the sink
     /// set empties — while a return with the selection STILL intact resumes,
     /// because intact selection is deliberate intent (the greyed-row "play

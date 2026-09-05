@@ -6,7 +6,7 @@ uncommitted files · design locked in
 are simulation-backed and NOT to be re-litigated. This document turns that
 design into file-by-file instructions. Where this document and the handoff
 disagree on a mechanism, this document wins (it is grounded against the
-actual code); where it flags an OPEN item, ask Alec, don't guess.
+actual code); where it flags an OPEN item, ask the owner, don't guess.
 
 ## What is being replaced, in one paragraph
 
@@ -299,17 +299,17 @@ Pure diagnostics; no behavior change; no store.
 - Full suite green via `bash scripts/run-tests.sh` (never bare swift test);
   compile via `bash scripts/build.sh`.
 
-## OPEN items — Alec's call, do not decide silently
+## OPEN items — the owner's call, do not decide silently
 
 1. **"Play again" on the proposal screen is dropped** in this work order:
    the tick keeps running through `.proposal`, so there is nothing to
    replay — and re-firing the tick gate costs a full re-anchor of every
    sink (documented in the session's `ended` comment). The handoff's locked
-   button row said Sounds right / Still off / Play again. If Alec wants the
+   button row said Sounds right / Still off / Play again. If the owner wants the
    button anyway, the honest implementation is a finite tick burst, which
    means new injector surface — currently fenced off.
 2. **Kept-screen copy for the Mac row** is drafted here (the handoff only
-   locked the BT wording). One sentence, needs his eye, not his time.
+   locked the BT wording). One sentence, needs their eye, not their time.
 3. **`.gracefulExit` is absorbed** by the proposal flow (converge near 0 →
    "Sounds right?"). Its copy dies. Flagging because it was once locked UX.
 

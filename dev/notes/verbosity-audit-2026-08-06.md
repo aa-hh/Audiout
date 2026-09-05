@@ -78,7 +78,7 @@ detector write-up).
    params they never use (XCTest residue); removing params is beyond comment
    cleanup.
 9. `SPEC.md:425,499` — retired product term "Selected Speakers" survives in two
-   prose spots vs §1's authoritative "Selected Devices". Spec is Alec's to edit.
+   prose spots vs §1's authoritative "Selected Devices". Spec is the owner's to edit.
 
 ## Naming/vocabulary recommendations (ranked, from the vocab audit)
 

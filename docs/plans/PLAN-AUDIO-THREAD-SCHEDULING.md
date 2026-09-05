@@ -2,8 +2,8 @@
 
 **Worktree:** `.claude/worktrees/warm-signal-full` · **Branch:** `claude/warm-signal-full`
 **Status: NOT EXECUTED. Rev 2 — supersedes rev 1's "just add QoS + workgroup" framing.**
-**All decisions resolved (§D). Ready to execute Stage 1 on Alec's go-ahead; Stage 2 is gated on T10.**
-**Merge gate:** Alec's explicit go-ahead only. Live verification is Alec-only, on a quiet machine.
+**All decisions resolved (§D). Ready to execute Stage 1 on the owner's go-ahead; Stage 2 is gated on T10.**
+**Merge gate:** the owner's explicit go-ahead only. Live verification is owner-only, on a quiet machine.
 
 Produced via `/plan` (planner agent, opus/high, two rounds). Every finding marked **[measured]** was
 produced by a throwaway probe binary run on this M1 / macOS 27.0 machine during planning — not read
@@ -13,12 +13,12 @@ off a doc page.
 
 ## 0. Why this plan exists
 
-**Alec's observation (2026-07-25, live):** playing audio normally on macOS — including Apple's own
+**The owner's observation (2026-07-25, live):** playing audio normally on macOS — including Apple's own
 AirPlay — never stutters under heavy CPU load, but Audiout's output stutters when the machine is
 loaded. Measured at the time: load average 16 on 8 cores, Audiout itself using **2.1% CPU**, and
 **zero** error events in its telemetry (no tap failures, no rebuild storm, no capture errors).
 
-So the stutter is a **scheduling** problem, not a logic problem. And Alec's framing of the goal is
+So the stutter is a **scheduling** problem, not a logic problem. And the owner's framing of the goal is
 the requirement this plan is written against, verbatim:
 
 > *"All I want is that the audio coming out of our system is treated with the exact same priority and
@@ -166,7 +166,7 @@ encryption-scratch change — small, local, ledgerable.
 
 - **Stage 1** — probe + load-gen + QoS + workgroup + non-blocking sockets + F12 lock fix. Cheap,
   safe, no architectural change. **Plausibly the entire fix if H1 dominates.**
-- **GATE** — Alec's baseline measurement decides whether Stage 2 is needed at all.
+- **GATE** — the owner's baseline measurement decides whether Stage 2 is needed at all.
 - **Stage 2** — the RT send thread. Scheduled only if the numbers justify it.
 
 ### Time-constraint parameters, with arithmetic
@@ -218,14 +218,14 @@ is worse than not being RT at all. Recorded so the constraint isn't rediscovered
 
 ---
 
-## D. Decisions — ALL RESOLVED (Alec, 2026-07-25)
+## D. Decisions — ALL RESOLVED (owner's call, 2026-07-25)
 
-Nothing in this plan is awaiting an answer. Every question below was put to Alec with the trade-offs
-stated both ways; these are his rulings, not assumptions.
+Nothing in this plan is awaiting an answer. Every question below was put to the owner with the trade-offs
+stated both ways; these are their rulings, not assumptions.
 
-**The framing decision (supersedes an earlier answer).** Alec first chose "one send thread per routed
+**The framing decision (supersedes an earlier answer).** The owner first chose "one send thread per routed
 app". That was chosen *before* §B.1 existed — the vendored sender's shared `raop_aes_ctx` and global
-session lists were not yet known. Re-put to him with that evidence, he chose the shared RT thread.
+session lists were not yet known. Re-put to them with that evidence, they chose the shared RT thread.
 Recording the reversal deliberately: the original instinct was right about *where* the split belongs
 being important; the evidence moved it from per-stream to per-role.
 
@@ -335,7 +335,7 @@ a converter pointer mid-teardown, i.e. a crash on the audio thread. · **verify:
 **T9 · Combined-tree verification** — `swift build` + full suite in both packages after every wave.
 Parallel agents in one worktree have clobbered each other here before.
 
-**T10 · Alec baseline + Stage-1 live measurement (human gate)** — results into
+**T10 · Owner baseline + Stage-1 live measurement (human gate)** — results into
 `dev/notes/audio-scheduling-measurement.md`. Quiet machine, no test suite, real receiver. Idle and
 loaded readings, before and after Stage 1, recording all three hypothesis columns.
 **Decision output:** does H1 dominate? yes → Stage 2 proceeds. H2 dominates → T8 was the fix, Stage 2
@@ -388,7 +388,7 @@ provider; shim NULL contracts; ring fill/drain/wrap/overflow; time-constraint ar
 mach timebases; the self-demotion state machine under injected overruns.
 **Cannot test — say so in the file header, do not fake it:** that QoS/workgroup/RT actually reduce
 jitter (scheduler behaviour under load → T17 only); that the HAL publishes `'oswg'` for a
-*tap-bearing* aggregate on Alec's machine (only a synthetic one was verified); any real
+*tap-bearing* aggregate on the owner's machine (only a synthetic one was verified); any real
 `os_workgroup_join` or `thread_policy_set` effect. **Do not write a `jitter < N ms` assertion** —
 flaky under `--parallel`, vacuous when idle.
 *sonnet 5 · medium · depends: all implementation tasks* — the judgement is in what to leave untested.
@@ -405,7 +405,7 @@ output, with the `EALREADY` evidence — same class of fact as the already-docum
 *haiku 4.5 · low · depends: all implementation tasks* · **verify:** every backticked symbol resolves
 via `git grep` at the same commit (Guard 2); ≤~300 words per folder file — trim, don't append.
 
-**T17 · Alec final live A/B (human)** — same protocol as T10, full stack. Success criterion agreed in
+**T17 · Owner final live A/B (human)** — same protocol as T10, full stack. Success criterion agreed in
 advance: loaded p95/max wake latency materially closer to the idle baseline, zero demotion faults, no
 audible stutter under `load-gen.sh 16`.
 
@@ -422,11 +422,11 @@ T1,T7,T12,T13 · `NativeCaptureCoordinator.swift` → T7,T8 · `NativeBackend.sw
 | 1 | T1 ‖ T3 | Engine Swift vs `scripts/`+`dev/` — disjoint |
 | 2 | T2 ‖ T4 ‖ T5 ‖ T6 | `NativeBackend` / `EngineThread` / new shim / `misc.c`+`sender/` — disjoint |
 | 3 | T7, then T8 — **serialized, same file** | Both opus/high |
-| **GATE** | **T10 (Alec)** | **Stop. Stage 2 is not dispatched until this reports (NQ2).** |
+| **GATE** | **T10 (the owner)** | **Stop. Stage 2 is not dispatched until this reports (NQ2).** |
 | 4 | T11 | Alone — vendored `sender/` + new ring shim |
 | 5 | T12, then T13 — serialized | Both touch `AirPlayEngine.swift` |
 | 6 | T14 ‖ T15 ‖ T16 | One constant / tests / docs |
-| 7 | T17 (Alec) | |
+| 7 | T17 (the owner) | |
 
 **Critical path:** T1 → T2 → T7 → T8 → **T10** → T11 → T12 → T13 → T15/T16 → T17.
 **Stage 1 alone is waves 1–3 plus the gate — four steps to a testable improvement**, which matters
@@ -480,7 +480,7 @@ steerability, wave 6 is a reasonable workflow candidate. Everything before it is
 8. **Measurement hygiene.** `swift test --parallel` is itself a known load source on this Mac;
    running it during T10/T17 invalidates the result. Both human gates must honour this.
 9. **Live testing is single-instance** (PTP 319/320 exclusive) — T10 and T17 each need one combined
-   session on a quiet machine. Nothing merges without Alec's go-ahead.
+   session on a quiet machine. Nothing merges without the owner's go-ahead.
 
 ---
 

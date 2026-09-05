@@ -15,7 +15,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 
 ## Rules
 
-- **This Mac's own AirPlay receiver is never surfaced as a device** (Alec's
+- **This Mac's own AirPlay receiver is never surfaced as a device** (the owner's
   call, 2026-08-07). macOS's AirPlay Receiver announces `_airplay._tcp` under
   the machine's own mDNS hostname, so undiscriminating discovery offers the Mac
   the app runs on as a speaker — a self-loop that mostly can't work (the live
@@ -108,7 +108,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   device (`setOutputSet` dropping it from `desiredOn` well after the contest
   settled) does not re-drive the demoted per-app route — confirmed via
   telemetry, no `scope_conflict`/`unbind_redrive`/re-capture fired at that
-  deselect. Read this as accepted current behavior (Alec: turning a speaker
+  deselect. Read this as accepted current behavior (the owner: turning a speaker
   off shouldn't necessarily hand it back to a stale per-app assignment), not
   as "the reverse never happens" — it currently does, on this path. TWO
   TRAPS: (1) a

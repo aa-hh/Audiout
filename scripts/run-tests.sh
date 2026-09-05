@@ -103,16 +103,16 @@ lock_timeout=${AUDIOUT_TEST_LOCK_TIMEOUT:-1800}
 # affects its own commands, and Guard 4's git hook runs as its own subprocess
 # that does not inherit that export.
 #
-# Lowered 4 -> 3 (Alec, 2026-08-30): 4 was sized purely for this machine's CPU
-# headroom (the suite is WAIT-bound, not CPU-bound — a serial run burns only
-# ~0.56 of 8 cores). What it did not account for is that EVERY concurrent run,
-# however small — a single `--filter` invocation, not just a full-suite Guard 4
-# run — occupies one full permit the same as any other. On a night with several
-# agents each running many small filtered checks, four full permits let through
-# more simultaneous test processes than the machine's wait-bound-but-still-real
-# scheduler contention could absorb without starving the fixed-deadline waits
-# elsewhere in the suite (the roadmap-023 class). Lower for stricter, raise for
-# a beefier box or a quieter night.
+# Lowered 4 -> 3 (owner's call, 2026-08-30): 4 was sized purely for this
+# machine's CPU headroom (the suite is WAIT-bound, not CPU-bound — a serial run
+# burns only ~0.56 of 8 cores). What it did not account for is that EVERY
+# concurrent run, however small — a single `--filter` invocation, not just a
+# full-suite Guard 4 run — occupies one full permit the same as any other. On a
+# night with several agents each running many small filtered checks, four full
+# permits let through more simultaneous test processes than the machine's
+# wait-bound-but-still-real scheduler contention could absorb without starving
+# the fixed-deadline waits elsewhere in the suite (the roadmap-023 class). Lower
+# for stricter, raise for a beefier box or a quieter night.
 slots=${AUDIOUT_TEST_SLOTS:-$(git config --get audiout.localSlots 2>/dev/null || echo 3)}
 
 # --- remote machine ---------------------------------------------------------

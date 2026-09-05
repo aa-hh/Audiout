@@ -149,7 +149,7 @@ import AppKit
         func setEnabled(_ newValue: Bool) throws { isEnabled = newValue }
     }
 
-    private static let alecID = "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A"
+    private static let ownerID = "2B5E5A2B-58D8-4979-9F41-92E668FD9C0A"
     private static let guestID = "7C1D93F0-1111-4A2A-B3C4-D5E6F7A8B9C0"
 
     private func makeController(records: [CompanionApproval]) throws -> CompanionApprovalController {
@@ -172,14 +172,14 @@ import AppKit
 
     @Test func rememberedPhonesRenderWithTheirDecisions() throws {
         let controller = try makeController(records: [
-            record(Self.alecID, name: "Alec's iPhone", decision: .approved),
+            record(Self.ownerID, name: "Owner's iPhone", decision: .approved),
             record(Self.guestID, name: "Guest's iPhone", decision: .denied),
         ])
         let pane = makePane(approvals: controller)
 
         #expect(pane.test_phoneListIsVisible)
         #expect(pane.test_phoneRowCount == 2)
-        #expect(pane.test_rememberedPhones.map(\.name) == ["Alec's iPhone", "Guest's iPhone"])
+        #expect(pane.test_rememberedPhones.map(\.name) == ["Owner's iPhone", "Guest's iPhone"])
         #expect(pane.test_rememberedPhones.map(\.decision) == ["Allowed", "Denied"])
         #expect(pane.test_phoneRowDecisionTextColor(at: 1) == Tokens.Color.label2,
                 "a recorded \"Denied\" is a fact about a past decision, not a failure — it never takes the red")
@@ -198,18 +198,18 @@ import AppKit
 
     @Test func revokeRemovesTheRowPersistsAndDropsTheLiveClient() throws {
         let controller = try makeController(records: [
-            record(Self.alecID, name: "Alec's iPhone", decision: .approved),
+            record(Self.ownerID, name: "Owner's iPhone", decision: .approved),
             record(Self.guestID, name: "Guest's iPhone", decision: .denied),
         ])
         var dropped: [String] = []
         controller.dropClient = { dropped.append($0) }
         let pane = makePane(approvals: controller)
 
-        pane.test_revokePhone(clientID: Self.alecID)
+        pane.test_revokePhone(clientID: Self.ownerID)
 
         #expect(pane.test_phoneRowCount == 1, "the revoked row must leave the VIEW, not just the model")
         #expect(pane.test_rememberedPhones.map(\.name) == ["Guest's iPhone"])
-        #expect(dropped == [Self.alecID], "revoking from Settings must drop the live client")
+        #expect(dropped == [Self.ownerID], "revoking from Settings must drop the live client")
         // Persisted: a fresh load over the same directory no longer has it.
         #expect(try CompanionApprovalStore(directory: scratchDir).load()?.map(\.clientID) == [Self.guestID])
     }
@@ -222,9 +222,9 @@ import AppKit
         let pane = makePane(approvals: controller)
         #expect(!pane.test_phoneListIsVisible)
 
-        controller.handleRequest(clientID: Self.alecID, clientName: "Alec's iPhone") { _ in }
+        controller.handleRequest(clientID: Self.ownerID, clientName: "Owner's iPhone") { _ in }
 
         #expect(pane.test_phoneListIsVisible)
-        #expect(pane.test_rememberedPhones.map(\.name) == ["Alec's iPhone"])
+        #expect(pane.test_rememberedPhones.map(\.name) == ["Owner's iPhone"])
     }
 }

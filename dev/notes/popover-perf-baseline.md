@@ -1,7 +1,7 @@
 # Popover (Mixer) performance baseline
 
 Measured against the real `PopoverController` + `MockBackend`, headless, on
-Alecs-MacBook-Pro-2. **No code was changed as a result — nothing on the hot path
+the owner's MacBook Pro. **No code was changed as a result — nothing on the hot path
 is slow.** This note exists so the next person doesn't re-derive it.
 
 Reproduce with a throwaway `@Suite` in the test target driving

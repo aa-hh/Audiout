@@ -14,12 +14,12 @@ Status: **APPROVED, not yet executed** · Branch: `claude/firefox-audio-routing-
    - the per-app capture (`PerAppCaptureCoordinator.swift:735-801`) taps the silent main process → the redirect target hears nothing.
 2. **Bluetooth gap.** `.currentDevice` redirect is *labeled* from the real default output (`kAudioHardwarePropertyDefaultOutputDevice`, house rule) but `LocalPlaybackEngine` hard-pins the **built-in speakers** (`LocalPlaybackEngine.swift:103-116,631-648`). A Bluetooth/AirPods/USB current device plays out the wrong hardware.
 
-## Decisions (confirmed with Alec)
+## Decisions (confirmed with the owner)
 - **Q1 — app matching:** match **all** of a bundle's audio child processes (enumerate live audio-process list, keep any whose owning/responsible app resolves to the target bundle). One rule for both capture and exclusion.
 - **Q2 — current device:** local playback **follows the real default output device**, with an **anti-feedback guard** that refuses to follow when that default is itself an AirPlay/virtual Selected Device we're streaming to.
 - **Q3 — sequencing:** **fix everything in one batch** (leak fix + Bluetooth/local-playback fix together, one live test). Note: T3's leak fix must remain shippable independently if the AVAudioEngine local-playback path stalls.
 - **Q4 — scope:** **native backend only** (OwnTone out of scope).
-- **Q5 — diagnostic first:** yes — silent no-audio process-object dump (T7) so Alec confirms the child-process theory on his macOS before T1 commits.
+- **Q5 — diagnostic first:** yes — silent no-audio process-object dump (T7) so the owner confirms the child-process theory on their macOS before T1 commits.
 
 ## Tasks
 
@@ -49,8 +49,8 @@ Watched **agents** (not a workflow) — judgment-heavy, correctness/privacy-sens
 - `.currentDevice` AVAudioEngine local playback is historically flaky (dies "through the mic"); batching verifies it live this round — T3 leak fix must stand alone if it stalls.
 - Feedback-loop hazard in T5 if the default output *is* the AirPlay target — guard essential.
 - Check `.mutedWhenTapped`: once capture targets the real child, confirm the child is muted at its normal output (no double-play).
-- **Live audio is Alec-only** — build silently (`swift build`), no tones/selftests; Alec runs all heard/not-heard tests on real Firefox + real BT hardware.
-- **No merge without Alec's explicit go-ahead** (standing rule). Docs/AGENTS.md land in the worktree as a merge, never ahead of code on main.
+- **Live audio is owner-only** — build silently (`swift build`), no tones/selftests; the owner runs all heard/not-heard tests on real Firefox + real BT hardware.
+- **No merge without the owner's explicit go-ahead** (standing rule). Docs/AGENTS.md land in the worktree as a merge, never ahead of code on main.
 
 ## Key files
 `AudioutApp/AppDelegate.swift` · `AudioutCore/PerAppCaptureCoordinator.swift` · `AudioutCore/NativeCaptureCoordinator.swift` · `AudioutCore/NativeBackend.swift` · `AudioutCore/LocalPlaybackEngine.swift` · `AudioutCore/AppRouteMixer.swift` · `AudioutPopoverUI/PopoverController.swift`

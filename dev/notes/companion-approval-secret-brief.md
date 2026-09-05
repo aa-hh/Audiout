@@ -129,7 +129,7 @@ case is added rather than an existing encoding changed.
 - Phones already approved when the Mac update lands have records with no secret,
   so they prompt once more; on Allow the new record carries a secret. Denied
   phones stay denied. Nothing has shipped yet (`PRODUCT.md:39`), so this costs
-  Alec's own phone one tap.
+  the owner's own phone one tap.
 
 ## Phone side (audiout-remote)
 
@@ -204,7 +204,7 @@ Hermetic, phone `NetworkingStateTests`: `approvalSecret` is stored and sent in
 the next hello; `secretMismatch` deletes the secret, regenerates the ID,
 reconnects once and then settles.
 
-Phone in hand (Alec, one Mac and one iPhone on the same Wi-Fi): fresh install,
+Phone in hand (the owner, one Mac and one iPhone on the same Wi-Fi): fresh install,
 prompt on the Mac, Allow, connected; kill and relaunch the phone app, connected
 with no prompt; revoke in Settings > General "Remembered iPhones", the phone
 reconnects and prompts again; replay check, with the phone disconnected, send a
@@ -235,7 +235,7 @@ partial gain. It is the follow-up if TLS is not done.
 Keychain on the Mac: rejected above. Bumping `CompanionProto.version`: rejected
 above.
 
-## Owed to Alec after the build
+## Owed to the owner after the build
 
 The phone-in-hand list above. Plus a decision on whether the sentence about
 speaker and app names stays on the website privacy page after this fix ships; it

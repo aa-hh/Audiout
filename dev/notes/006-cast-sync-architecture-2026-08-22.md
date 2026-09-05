@@ -307,7 +307,7 @@ Run via `bash scripts/run-tests.sh --filter <Suite>`.
 6. *Room policy* (pure): synthetic lead series from the spike (1.4 → 5.5 with stalls) → R
    changes exactly once; a +2 s stall with `D_cast ≥ 2` → Cast skip, R unchanged.
 
-**Live checklist (Alec + Streamer + `cast-spike`):** AP-only before/after the branch sounds
+**Live checklist (the owner + Streamer + `cast-spike`):** AP-only before/after the branch sounds
 and measures the same (`AIRPLAY_DEBUG_LATENCY=1` pts-age unchanged); Cast join → one gap on
 AirPlay, Cast silent ~13 s then aligned by ear (ticks via the wizard); Cast leave → AirPlay
 jumps, no silence, no reconnect; pull the Streamer's Ethernet mid-song → Cast fails, AirPlay
@@ -331,5 +331,5 @@ that is the one gate the invariant actually depends on.
 `SyncCore.swift:1-8`; never copy from `SyncedLocalSink.swift`); zero new dependencies;
 tests through `run-tests.sh --filter`; `dev/notes/` owns the briefs; `main` untouched.
 
-**Decision (Alec, 2026-08-22):** design approved. Cast-join gap on AirPlay = **silence**
+**Decision (owner's call, 2026-08-22):** design approved. Cast-join gap on AirPlay = **silence**
 (not replay), as specified in §5. Phase (i) may run as three parallel worktrees.

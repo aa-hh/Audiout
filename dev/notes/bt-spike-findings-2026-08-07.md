@@ -1,10 +1,10 @@
 # BT Wave-0 spike findings — live run 2026-08-07
 
-Hardware: Alec's Mac (macOS 27.0), Sonos Move 2 (powered, on WiFi, BT-paired), JBL Flip 5
+Hardware: the owner's Mac (macOS 27.0), Sonos Move 2 (powered, on WiFi, BT-paired), JBL Flip 5
 (paired, powered OFF). Harness: `claude/bt-multi-spike` @ c40e2cce, run via the ad-hoc
 `.app` wrapper (`make-spike-app.sh`), launched with `open`. Raw logs in the session
 scratchpad; numbers below are the durable record. BT-SPIKE-OFFSET was CUT (mic
-auto-offset dropped from the product by Alec earlier the same day — see
+auto-offset dropped from the product by the owner earlier the same day — see
 PLAN-UNIVERSAL-SYNC Decision 4 amendment).
 
 ## BT-SPIKE-CONNECT — **GO**

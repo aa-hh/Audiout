@@ -1,4 +1,4 @@
-# Decisions (Alec, 2026-09-03)
+# Decisions (owner's call, 2026-09-03)
 
 F1 cool dark (adopt iOS hexes) · F2 cool-neutral light, retire "Circuit" + PRODUCT.md:92 · F3 dial Full/Subtle, delete follow-system · F4 CTA = iOS gold fill + #171104 ink (goldCTA retires) · F5 keep four variants, author ~40 IC hexes · F6 bundle ClashDisplay; adopt on gate + About + splash
 C1 magenta = group identity; wizard reference moves to another instrument · C2 keep all six permission hues (Mac-only exception) · C3 keep meter, ramp ends in gold (drop caution) · C4 delete AppTetherColor + FeedChip; pills text only · C5 Groups text-colour lock superseded; ink carries temperature · C6 delete sidebar warm wash on both screens

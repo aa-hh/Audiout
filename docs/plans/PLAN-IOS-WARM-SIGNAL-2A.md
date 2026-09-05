@@ -3,7 +3,7 @@
 > **SUPERSEDED ON ONE POINT (2026-08-12): ignore every simulator destination in
 > this plan.** It instructs pinning `-destination 'platform=iOS Simulator,name=iPhone 17 Pro Max'`
 > into `ios/AGENTS.md`. That device no longer exists, and the standing rule is
-> that the companion app is **verified on Alec's physical iPhone 15 Pro, always** —
+> that the companion app is **verified on the owner's physical iPhone 15 Pro, always** —
 > never on a simulator, and never with a hard-coded model name. See
 > `ios/AGENTS.md` › Build / test, and `scripts/ios.sh`, which resolves the
 > destination by asking the machine. The recorded commands and test output below
@@ -43,7 +43,7 @@ Two files in the design project are deliberately **not** copied here and are not
 
 ## Scope decisions already made — do not re-open
 
-Answered by Alec on 2026-08-08. These are settled; the work order is written to them.
+Answered by the owner on 2026-08-08. These are settled; the work order is written to them.
 
 | Decision | Answer |
 |---|---|
@@ -118,7 +118,7 @@ Other asserted symbols at base: `MainOutRow.thumbValue(local:server:)` at `:106-
 
 **Model available** (`AudioutProtocol/Sources/AudioutProtocol/CompanionSnapshot.swift:39-52`): `DeviceState` carries `id, name, kind, iconSymbolName, isAvailable, supportsAirPlay2, isLocalDevice, volume, isMuted, isSelected, isMainOutMember, connection`. `ConnectionInfo` is `state: String`, `failureHeadline: String?`, `failureSuggestion: String?` (`:28-31`). `kind` is a plain `String` (`:42`). No `isPinned`, no meter level. `MacSessionProtocol.swift:21-23` forbids phone-side persistence of routing state. `DemoMacSession.swift:121` seeds `DeviceRecord(id: "local-mac", name: "This Mac", kind: "localMac", ...)`.
 
-**Roadmap tooling** — `/Users/alechenderson/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js`:
+**Roadmap tooling** — `~/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js`:
 - `:8-10` `projectDir()` returns `path.resolve(process.env.CLAUDE_PROJECT_DIR || process.cwd())`. **`CLAUDE_PROJECT_DIR` wins over the working directory** — `cd`-ing into the worktree is not sufficient.
 - `:54-60` `nextId()` returns `max(existing ids) + 1`, zero-padded to 3.
 - `add` takes stdin JSON `{title, why, what, source, depends_on?, touches?, notes?, status?, doc?}` and prints one `{"ok":true,...}` line.
@@ -134,7 +134,7 @@ Other asserted symbols at base: `MainOutRow.thumbValue(local:server:)` at `:106-
 
 ### Step 0 — Fresh worktree (precondition for every track)
 
-From the main checkout `/Users/alechenderson/Projects/AirPlay Controller`:
+From the main checkout `~/Projects/AirPlay Controller`:
 ```bash
 git worktree add ".claude/worktrees/ios-warm-signal-2a" -b claude/ios-warm-signal-2a claude/companion-app-phase2-ios
 git -C ".claude/worktrees/ios-warm-signal-2a" rev-parse --short HEAD    # must print 381a0f63
@@ -143,7 +143,7 @@ All work happens there. Never `git commit`, `git push`, or `git add`. Never writ
 
 Export this once per shell in every later step:
 ```bash
-export WT="/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/ios-warm-signal-2a"
+export WT="$HOME/Projects/AirPlay Controller/.claude/worktrees/ios-warm-signal-2a"
 ```
 
 ### Step 1 — New file: `AudioutRemote/UI/Shared/WarmSignal.swift`
@@ -548,12 +548,12 @@ The rest of this step is kept only as the record of how they were filed and what
 ```bash
 export CLAUDE_PROJECT_DIR="$WT"
 cd "$WT"
-echo '{...}' | node /Users/alechenderson/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js add
+echo '{...}' | node ~/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js add
 ```
 
 **Stop-check — count lines, do not read `git status`.** The main checkout's `ROADMAP.jsonl` is *already* modified by another session, so ` M` there proves nothing either way. Take a count before the first add and compare after:
 ```bash
-MAIN="/Users/alechenderson/Projects/AirPlay Controller"
+MAIN="$HOME/Projects/AirPlay Controller"
 BEFORE_MAIN=$(grep -c '' "$MAIN/ROADMAP.jsonl")
 BEFORE_WT=$(grep -c '' "$WT/ROADMAP.jsonl")     # expect 23
 # ... run the first add ...

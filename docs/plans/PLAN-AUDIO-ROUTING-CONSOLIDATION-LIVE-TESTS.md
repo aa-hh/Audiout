@@ -1,9 +1,9 @@
-# Plan — Audio-routing consolidation: live test checklist (Alec-only)
+# Plan — Audio-routing consolidation: live test checklist (owner-only)
 
 Status: **NOT YET RUN.** Branch `claude/audio-routing-consolidation-92be71`
 (worktree `.claude/worktrees/audio-routing-consolidation-92be71`), tasks T0–T9 of the
 12-task consolidation plan (roadmap item 007). All code committed, hermetic suites green.
-These are the LIVE gates that only Alec can run — Claude never plays or captures audio.
+These are the LIVE gates that only the owner can run — Claude never plays or captures audio.
 Nothing merges to `main` until these pass. See `docs/notes/architecture-review-audio-routing-2026-07-26.md`
 for the four defects (A–D) this branch fixes and `git log --oneline main..HEAD` for the
 full commit list.
@@ -33,7 +33,7 @@ regression there could otherwise be misattributed to this branch's new changes.
    that's `/Applications/Xcode-beta.app/Contents/Developer` — that's correct, not a bug.
 3. **Build + launch this worktree's app:**
    ```
-   cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/audio-routing-consolidation-92be71" && scripts/make-app.sh ./build && open ./build/Audiout.app
+   cd "$HOME/Projects/AirPlay Controller/.claude/worktrees/audio-routing-consolidation-92be71" && scripts/make-app.sh ./build && open ./build/Audiout.app
    ```
    Always launch via `open`, **never** a raw shell/Terminal command — a shell-launched
    binary inherits the *terminal's* TCC grants instead of getting its own, which makes
@@ -233,5 +233,5 @@ having gotten this far).
 ## After all pass
 
 Report results per test above (pass/fail, plus anything flagged as "known risk, watch
-for"). Only then discuss merging this branch to `main` — Alec's explicit go-ahead
+for"). Only then discuss merging this branch to `main` — the owner's explicit go-ahead
 required, passing tests is not itself sufficient.

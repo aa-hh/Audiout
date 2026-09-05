@@ -25,7 +25,7 @@
 - Radius sprawl: 7, 9, 10, 12, 13 vs iOS 10/16/26.
 
 ## Worth keeping
-- Gold-on-one-button as implemented (Alec 2026-08-12) — nothing to migrate.
+- Gold-on-one-button as implemented (owner's call, 2026-08-12) — nothing to migrate.
 - raised as live-row fill + the light raised step that makes it possible (flat light would force the retired ember bar back).
 - Neutral IconTileView fill + hairline rim (= iOS AppGlyph construction).
 - Buy / Lost-key / Quit on the gate (App Store 3.1.3(f) ban doesn't port; Mac sells direct).
@@ -40,12 +40,12 @@
 - Deps: gold/success decision; raised light step.
 ### B: A + reduce hue family — viable, NEEDS RULING, Effort M
 - Four permission glyph tints → secondaryLabel; keep bluetoothBrand only (official mark). Delete permission* cases + permissionDynamic (~200 lines).
-- RE-LITIGATES Alec's decision: commit 85c2052 retired hues to grey and the colour-return pass restored them on purpose (Tokens.swift:950-963). ~7 tests in OnboardingPermissionColorTests die.
+- RE-LITIGATES the owner's decision: commit 85c2052 retired hues to grey and the colour-return pass restored them on purpose (Tokens.swift:950-963). ~7 tests in OnboardingPermissionColorTests die.
 ### C: Rebuild setup as one junction at a time — NOT recommended, Effort XL
 - Spine goes; each step full-window; ~4000 view lines + most of OnboardingUITests (2660) turn over. Spine browse path has no junction equivalent. A product change wearing a restyle's clothes.
 
 ## Open questions
-1. Permission hues: keep all six (A) / bluetoothBrand only (B) / retire all? Mac arrived here by Alec reversing a grey pass.
+1. Permission hues: keep all six (A) / bluetoothBrand only (B) / retire all? Mac arrived here by the owner reversing a grey pass.
 2. Six-step checklist → one junction at a time (hide the sequence) or keep visible sequence with one live action (Mac already holds)? iOS junctions are alternatives; Mac steps are a sequence.
 3. Buy a display face (ClashDisplay)? Recommendation HOLD — no Mac surface where the name stands alone; font licensing + Package.swift resource + ATSApplicationFontsPath for one label.
 4. Gate field keeps its seven-scene engine? Code docs (LicenseGateViewController.swift:11-17): the field is the ONLY verdict channel beyond one gutter line. Keeping = Mac gate field is explicitly a different component.

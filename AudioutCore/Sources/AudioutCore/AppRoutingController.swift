@@ -323,7 +323,7 @@ public final class AppRoutingController {
     /// alike — back to `.noRedirect`. Called once at Audiout's own launch, so
     /// NO redirect of any kind survives a full app restart: every fresh launch
     /// starts with every application on "Follows main output" (product
-    /// decision, Alec 2026-07-26 — superseding the earlier device-routes-only
+    /// decision, 2026-07-26 — superseding the earlier device-routes-only
     /// launch clear: live testing showed restored `.currentDevice` routes going
     /// live at launch, silently pre-polluting every session with active
     /// captures/exclusions the user never asked for that day). Mirrors the

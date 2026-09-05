@@ -448,9 +448,9 @@ extension SerializedSharedState {
     /// A first pairing, and any speaker already connected when the app
     /// launched, are the only link-up this process will ever see for that
     /// device — so the first listing of a CONNECTED speaker opens a settle
-    /// window too (Alec, 2026-09-04). It stales nothing: with no alignment
-    /// instant recorded there is nothing for the connect to be after. A
-    /// speaker listed disconnected gets no window; its link-up comes later.
+    /// window too (owner's call, 2026-09-04). It stales nothing: with no
+    /// alignment instant recorded there is nothing for the connect to be after.
+    /// A speaker listed disconnected gets no window; its link-up comes later.
     @Test func theFirstListingOfAConnectedSpeakerOpensASettleWindow() throws {
         let dir = scratchDir
         try BTTrimStore(directory: dir).save([btMove.id: 40])

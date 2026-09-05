@@ -1,6 +1,6 @@
 # Phase 3 — Polish: Execution Report
 
-**Branch:** `claude/dev-plan-progress-assessment-88f195` (NOT merged to main — Alec's call)
+**Branch:** `claude/dev-plan-progress-assessment-88f195` (NOT merged to main — the owner's call)
 **Status at writing:** all functional work done; 868 tests / 0 failures; Developer-ID-signed build produced.
 
 This is the consolidated record of the Phase 3 polish effort: the pre-release
@@ -15,7 +15,7 @@ Ten independent headless audits fanned out over the codebase (window mechanics,
 cold-user UX, crash/hang surface, visual consistency, copy, accessibility,
 performance, branch hygiene, payments research, commercial-wrapper gap
 analysis), each writing an evidence-backed findings file in this directory.
-Then Alec drove a live walkthrough of the running app (`gated-ux-walkthrough.md`)
+Then the owner drove a live walkthrough of the running app (`gated-ux-walkthrough.md`)
 which **confirmed, refined, or refuted** the headless findings against real
 behavior and surfaced ~24 issues no static audit caught.
 
@@ -81,7 +81,7 @@ Every item below is committed and headless-verified unless marked otherwise.
   app*).
 - **About/Credits panel** built (Settings › General): version, GPL notice,
   three-license attribution from `NOTICE`, support link. **TODO placeholders for
-  Alec: source-code URL + support contact.**
+  the owner: source-code URL + support contact.**
 
 ### Release readiness
 - **RELEASE-CONFIG** (`scripts/make-app.sh`): real **Developer-ID signing**
@@ -161,7 +161,7 @@ functional batch**, unique to this branch:
 
 This branch is also **~8 commits behind main** (the icon work + other session
 merges it doesn't yet have). So landing the remaining 6 is a small, deliberate
-step (merge main in here then land, or cherry-pick the 6 onto main) — Alec's
+step (merge main in here then land, or cherry-pick the 6 onto main) — the owner's
 call, and worth coordinating given how many sessions have been cross-merging.
 
 - Build/test: `cd AudioutCore && swift build && swift test` (868 tests).
@@ -174,7 +174,7 @@ call, and worth coordinating given how many sessions have been cross-merging.
 
 ## 6. Open decisions / owed
 
-1. **Merge to main** — when Alec's ready (coordinate with the icon session's
+1. **Merge to main** — when the owner's ready (coordinate with the icon session's
    overlapping onboarding-icon change).
 2. **About panel placeholders** — real source-code URL + support contact.
 3. **Repo visibility** — currently private; GPL obliges source availability

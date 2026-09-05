@@ -1,6 +1,6 @@
 # EQ "Advanced" fold — where the toggle belongs (2026-08-22)
 
-Planning only. Answers Alec: "the Advanced button disappears … maybe a toggle".
+Planning only. Answers the owner: "the Advanced button disappears … maybe a toggle".
 
 ## Recommendation: keep the disclosure, make the row a section (Option A) + a "bands set" readout
 

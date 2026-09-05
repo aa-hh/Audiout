@@ -1,4 +1,4 @@
-# Plan — Dropout-investigation merge candidate: live test checklist (Alec-only)
+# Plan — Dropout-investigation merge candidate: live test checklist (owner-only)
 
 Status: **NOT YET RUN.** Branch `claude/dropout-merge-5c2a1f`, tip `6da525f` (worktree
 `.claude/worktrees/dropout-merge-5c2a1f`). This branch reconciles
@@ -6,7 +6,7 @@ Status: **NOT YET RUN.** Branch `claude/dropout-merge-5c2a1f`, tip `6da525f` (wo
 make-before-break tap rebuild, `DefaultOutputDeviceMonitor` consolidation, new send-scheduling/
 write-cadence/aggregate telemetry) with `main` at `866a8e0` (catch-all process attribution,
 generalized echo guard, one-role-per-speaker, the per-app takeover gate, launch-reset). All code
-committed, hermetic suites green. These are the LIVE gates that only Alec can run — Claude never
+committed, hermetic suites green. These are the LIVE gates that only the owner can run — Claude never
 plays or captures audio. **This doc does not instruct anyone to merge.** After all steps pass,
 report results and give the merge go-ahead separately.
 
@@ -17,7 +17,7 @@ report results and give the merge go-ahead separately.
    ```
    find .claude/worktrees -name Audiout.app
    ```
-   `/Applications/Audiout.app` is Alec's live build — **do not overwrite it.** If you need to
+   `/Applications/Audiout.app` is the owner's live build — **do not overwrite it.** If you need to
    run this worktree's build side-by-side with an installed copy, give it its own identity so
    the two don't collide on bundle id or PTP daemon registration:
    ```
@@ -40,7 +40,7 @@ report results and give the merge go-ahead separately.
    points at full Xcode, not CommandLineTools.
 4. **Build + launch:**
    ```
-   cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/dropout-merge-5c2a1f" && scripts/make-app.sh ./build && open ./build/Audiout.app
+   cd "$HOME/Projects/AirPlay Controller/.claude/worktrees/dropout-merge-5c2a1f" && scripts/make-app.sh ./build && open ./build/Audiout.app
    ```
    Launch via `open` **only** — a shell-launched binary inherits the terminal's TCC grants
    instead of getting its own, which breaks the system-audio capture tap. It's a menu-bar app —

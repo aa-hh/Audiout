@@ -1,6 +1,6 @@
 # One frame, three screens — design brief (shape, 2026-08-22)
 
-Confirmed with Alec 2026-08-22 ("perfect"). Plan only; no code written under this brief.
+Confirmed with the owner 2026-08-22 ("perfect"). Plan only; no code written under this brief.
 Full discovery + research: https://claude.ai/code/artifact/be7614a9-b197-4a70-b690-3865760194cc
 
 ## Problem

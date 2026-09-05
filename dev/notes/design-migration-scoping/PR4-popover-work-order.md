@@ -34,7 +34,7 @@ every geometry constant stay as they are.
 - `MainOutRowView.swift`: no geometry (row height 44, column anchors, ring/dot boxes, pop-up
   width 140). No frosted deck, no material, no stroke, no shadow (R2: "no frosted deck").
 - `Tokens.swift`: only (a) delete the `info`, `canvasHi` aliases and `Layout.bannerCornerRadius`,
-  (b) the doc-comment edits Step 9 names. `Font.microLabel` stays 10 pt (Alec's no-reflow ruling).
+  (b) the doc-comment edits Step 9 names. `Font.microLabel` stays 10 pt (the owner's no-reflow ruling).
   No new token. `warning`, `partySignal`, `partySignalDeep`, `iconSeatFill`, `accent`, `success`,
   `warningText`, `goldCTA`, `inkOnGold`, `plateRim`, `syncSignal`, `sidebarWarmTint`,
   `secondaryLabel`, `tertiaryLabel`, `inkSecondary`, `inkTertiary` aliases stay (other PRs own them).
@@ -42,7 +42,7 @@ every geometry constant stay as they are.
   `BTAlignmentWizardView`) keep reading `partySignal`/`partySignalDeep` — the wizard PR's.
 - No regeneration of `dev/notes/window-snapshots`, `onboarding-snapshots`, `settings-snapshots`,
   `wizard-snapshots`. `dev/notes/popover-snapshots/*.png` ARE regenerated (Step 12).
-- No `make-app.sh`, no live-test slot, no dev build. The wordmark face is live-verified by Alec
+- No `make-app.sh`, no live-test slot, no dev build. The wordmark face is live-verified by the owner
   in a dev build later (Owed checks); under `swift test`/snapshots it is the system bold fallback.
 - No `DESIGN.md`, `PRODUCT.md`, `docs/FIGMA-DESIGN-SYSTEM.md`, `docs/SPEC.md`, `docs/PROGRESS.md`,
   `ROADMAP.jsonl`, any `AGENTS-HISTORY.md` (archived), any other file in
@@ -122,7 +122,7 @@ every geometry constant stay as they are.
   appearances (Tokens.swift:1011-1014) and measures 1.93:1 on the light ground — under the 3.0
   graphic floor; `partyRampDeep` is the same `#FF90E9` in dark (8.91:1 on `panel`) and `#752C68`
   in light (8.69:1 on the ground, PR 1's table) — how iOS puts magenta on paper. A magenta TITLE
-  would break iOS's "never text" rule (`/Users/alechenderson/Projects/audiout-remote/DESIGN.md:339-341`),
+  would break iOS's "never text" rule (`~/Projects/audiout-remote/DESIGN.md:339-341`),
   which is why the attributed title exists.
 - **D7 The seat glow is one shared view, `GroupIdentityGlowView`, in `AudioutSharedUI`** (new
   file), the Mac mirror of iOS `GroupIdentityGlow` (audiout-remote GroupsView.swift:205-228):
@@ -148,7 +148,7 @@ every geometry constant stay as they are.
   string, not the colour). `goldText` Full dark on `panel` 9.74:1, light on the ground 5.66:1;
   `emberText` from PR 1's table.
 - **D9 Splash wordmark size 31 pt.** iOS sets the wordmark at 32 pt beside a 100 pt mark
-  (`/Users/alechenderson/Projects/audiout-remote/AudioutRemote/UI/Connect/ConnectGateView.swift:669/:712` — ratio 0.32); the Mac mark is 96 pt (`markSide`,
+  (`~/Projects/audiout-remote/AudioutRemote/UI/Connect/ConnectGateView.swift:669/:712` — ratio 0.32); the Mac mark is 96 pt (`markSide`,
   SurfaceSplashView.swift:45) → 30.72, rounded to a whole point. Colour stays `label`; stack
   spacing 10 stays. `Tokens.Font.wordmark(size:)` already falls back to system bold outside a
   `.app` (Tokens.swift:1221-1231) — no guard in the view.
@@ -158,7 +158,7 @@ every geometry constant stay as they are.
   consumer). The doc comment stops describing a gradient.
 - **D11 The card divider class is renamed `CardDividerView`** and stamps `containerEdge`: it
   crosses bare canvas and is the section's own boundary (iOS Section Header,
-  `/Users/alechenderson/Projects/audiout-remote/DESIGN.md:666-671`; Rule 5). `containerEdge` on dark `canvas` 1.95:1, light 2.02:1 (PR 1 table). Name changes because
+  `~/Projects/audiout-remote/DESIGN.md:666-671`; Rule 5). `containerEdge` on dark `canvas` 1.95:1, light 2.02:1 (PR 1 table). Name changes because
   "HairlineView" would lie about the token. Private class, 3 references in one file.
 - **D12 `GroupRowView` deletion is a `git rm`** of `AudioutPopoverUI/GroupRowView.swift` (421
   lines, in PopoverUI — NOT SharedUI as the scoping report's "Files touched" line implies) and
@@ -536,12 +536,12 @@ Sources/Tests files named in Steps 1-12, the two deletions, the new
 Guard 4 runs the full suite on commit; Guard 7 needs `bash scripts/self-review.sh` on the
 staged bytes — run it, do not surface its chatter.
 
-## Owed checks (Alec, dev build; do not block the PR)
+## Owed checks (the owner, dev build; do not block the PR)
 
 - Wordmark: "Audiout" on the splash renders in Clash Display at 31 pt under `make-app.sh`
   (`APP_NAME="Audiout Dev" BUNDLE_ID="com.audiout.Audiout.dev"`); size against the 96 pt mark.
 - The borderless picker: does the Main Out row still read as a control without the bezel?
-  (D6 is the only AppKit way to a tinted arrow; the tint is `partyRampDeep`, magenta in dark and deep plum in light; if Alec wants the bezel back, R2's chevron needs
+  (D6 is the only AppKit way to a tinted arrow; the tint is `partyRampDeep`, magenta in dark and deep plum in light; if the owner wants the bezel back, R2's chevron needs
   a drawn arrow instead.)
 - The magenta glow behind the bare Main Out glyph (no opaque seat on the Mac, D7): too much
   core behind the icon, or right?

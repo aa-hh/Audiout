@@ -76,7 +76,7 @@ remove the block in `GroupController`.
 
 **Upside.** This is the feature exactly as originally envisioned — the Mac's
 speakers become a full member of a mixed set, with no restriction and no
-workaround needed. It removes a rough edge a real user (Alec, in the live
+workaround needed. It removes a rough edge a real user (the owner, in the live
 walkthrough) already noticed and called out as worth fixing before release,
 and it's one of the differentiators the native engine was built to unlock in
 the first place.
@@ -105,7 +105,7 @@ it, not a quick follow-up.
 Keep the block exactly as it is today, but improve how the reason is
 surfaced. Right now the explanation only appears as a tooltip on a greyed-out
 checkbox — something you only see if you hover over a control that looks
-disabled, which is easy to miss entirely (this is very likely why Alec still
+disabled, which is easy to miss entirely (this is very likely why the owner still
 flagged it as a rough edge during the walkthrough, even though a reason
 already exists under the hood). Make the "why" visible without hovering —
 for example, a small inline note near the device row, or copy in the row's
@@ -117,7 +117,7 @@ logic that decides when to show it already exist (`GroupController.
 localMixRefusalReason`); this is purely a matter of showing that message more
 prominently in the UI, which is a UI-only change with no engine work and no
 new hardware testing required. It ships fast and directly answers the
-confusion Alec ran into.
+confusion the owner ran into.
 
 **Downside.** It doesn't give the user the feature they might actually want
 — someone who genuinely wants their Mac and their AirPlay speakers playing

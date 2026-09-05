@@ -28,7 +28,7 @@ truth if the two ever disagree.
   - `data-paddle-price` — the price id above.
 - On success Paddle redirects to `/thanks?_ptxn=<transaction id>`.
 - Before live checkout works, Paddle must approve the domain: dashboard →
-  Checkout → Website approval (Alec).
+  Checkout → Website approval (the owner).
 
 ### /thanks — key handover
 
@@ -80,10 +80,10 @@ truth if the two ever disagree.
 | `data-license-server` | `https://license.audiout.app` | done |
 | `data-paddle-env` | `sandbox` (→ `production` at go-live) | website |
 | `data-paddle-token` | `test_92006632f7790eba19aa4c6a1b7` ("Purchase Page") | done (→ live token at go-live) |
-| `data-paddle-price` | `pri_01m0pkeeq1hw4wg7055aekgev6` (→ live id at go-live) | done / Alec |
+| `data-paddle-price` | `pri_01m0pkeeq1hw4wg7055aekgev6` (→ live id at go-live) | done / the owner |
 | `DOWNLOAD` | `https://license.audiout.app/download` (+ `?key=` via JS) | done |
-| `SUPPORT` | `support@audiout.app` | value done; **Alec** sets up receiving (Cloudflare Email Routing) |
-| `GITHUB` | public repo URL | **Alec** (when the repo goes public) |
+| `SUPPORT` | `support@audiout.app` | value done; **the owner** sets up receiving (Cloudflare Email Routing) |
+| `GITHUB` | public repo URL | **The owner** (when the repo goes public) |
 
 ## Current state of the branch (2026-08-23)
 
@@ -100,8 +100,8 @@ into the website `main` FIRST, then run the rename on main — the other order
 is a 400-file conflict:
 
 ```bash
-python3 "/Users/alechenderson/Projects/AirPlay Controller/scripts/rename-app.py" Audiout          # dry run
-python3 "/Users/alechenderson/Projects/AirPlay Controller/scripts/rename-app.py" Audiout --apply
+python3 ~/"Projects/AirPlay Controller/scripts/rename-app.py" Audiout          # dry run
+python3 ~/"Projects/AirPlay Controller/scripts/rename-app.py" Audiout --apply
 ```
 
 Check the display-name sites it lists (wordmark, `<title>`, copy), rebuild,
@@ -109,7 +109,7 @@ eyeball both pages.
 
 ## Go-live switch list (website side)
 
-In order, after Alec's live-Paddle setup:
+In order, after the owner's live-Paddle setup:
 
 1. `data-paddle-env` → `production`.
 2. `data-paddle-token` → the live client-side token.

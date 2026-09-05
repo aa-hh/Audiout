@@ -240,8 +240,8 @@ delete_caches() {  # $1 = unit, $2 = reason
 # in_use stopped counting "some shell mentioned this path" as in use.
 skippable() {
     [ "$1" = "$current" ] && return 1
-    # The primary checkout is Alec's live workspace, and every worktree path
-    # sits under it — so the cwd test below would call it "in use" for the
+    # The primary checkout is the owner's live workspace, and every worktree
+    # path sits under it — so the cwd test below would call it "in use" for the
     # wrong reason. Protect it deliberately and say why.
     if [ "$1" = "$primary" ]; then
         say "keeping cache in the primary checkout (live workspace)."
@@ -347,8 +347,8 @@ done
 #
 # Deliberately NOT touched: the simulator RUNTIME image (~7.5 GB, in
 # ~/Library/Developer/CoreSimulator) and DVTDownloads. Those are downloads,
-# not caches — re-fetching them is a long job, and Alec has said keep them.
-# Simulator DEVICES are left alone too: erasing one is a decision about
+# not caches — re-fetching them is a long job, and the owner has said keep
+# them. Simulator DEVICES are left alone too: erasing one is a decision about
 # someone's test state, not disk hygiene.
 #
 # Skipped wholesale while Xcode is running: it may be mid-attach or mid-build.

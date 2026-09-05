@@ -156,7 +156,7 @@ House rules apply to every task: work on `claude/foreman-roadmap-004-bt`, never
 on `main`; Guard 4 runs the full suite on any Swift commit
 (`bash scripts/run-tests.sh`); Guard 7 requires `scripts/self-review.sh` on the
 staged diff before commit. Push to `origin/claude/foreman-roadmap-004-bt`.
-**Do not merge to `main`** — Alec live-tests first and merges on his own say-so.
+**Do not merge to `main`** — the owner live-tests first and merges on their own say-so.
 
 ---
 
@@ -311,7 +311,7 @@ engine, which is the seam to reuse)
 - Pre-release shift path recomputes the target instead of seeking.
 - No `bt_sink_rebuild` telemetry is emitted for a trim change.
 
-**Acceptance:** full suite green. Live check (Alec): drag the ruler while music
+**Acceptance:** full suite green. Live check (the owner): drag the ruler while music
 plays — audio must stay continuous, no dropout, no click, and the change must
 be audible immediately.
 
@@ -649,4 +649,4 @@ run them and do not modify their expectations.
   revert.
 - AirPlay rows are visually and behaviourally unchanged.
 - Full suite green (`bash scripts/run-tests.sh`).
-- Live verification by Alec on real hardware before any merge to `main`.
+- Live verification by the owner on real hardware before any merge to `main`.

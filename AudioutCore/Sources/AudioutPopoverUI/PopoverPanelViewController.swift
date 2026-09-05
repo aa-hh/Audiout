@@ -224,7 +224,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// and its collapse are exact mirrors and the three read as a single motion
     /// language; a second constant kept in step by hand would silently drift
     /// (the card's own 0.2s was exactly that, live report 2026-08-10 — the cards
-    /// "don't follow the same system"). 0.15s: Alec's live call on the previous
+    /// "don't follow the same system"). 0.15s: the owner's live call on the previous
     /// 0.22s ("it's also not that snappy"). Short enough to feel immediate, long
     /// enough that the rows below still read as being PUSHED apart rather than
     /// jumping to a new position.
@@ -339,7 +339,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             contentTop,
             stackView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             stackView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            // The bottom pin, SPLIT (Alec's call, 2026-08-06). It used to be a
+            // The bottom pin, SPLIT (the owner's call, 2026-08-06). It used to be a
             // single required `==`, which made a container taller than its content
             // unsatisfiable — so Auto Layout deformed the content instead, dumping
             // the surplus into whatever had nothing pinning its height. In practice
@@ -356,7 +356,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             railOverlay.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             railOverlay.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
-        // SURPLUS SHIELD (Alec's resilience call, 2026-08-06). The content keeps
+        // SURPLUS SHIELD (the owner's resilience call, 2026-08-06). The content keeps
         // its original, fully-REQUIRED constraint chain — that rigidity is what
         // makes its fitting height exact — and the popover sizes this WRAPPER
         // instead. The container hangs from the wrapper's top; the required `<=`
@@ -739,7 +739,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         headerWrap.translatesAutoresizingMaskIntoConstraints = false
         headerWrap.autoresizingMask = [.width]
 
-        // Leading disclosure chevron (decision 5). Warm Signal v4 §Call-1 (Alec's
+        // Leading disclosure chevron (decision 5). Warm Signal v4 §Call-1 (the owner's
         // continuity correction): the whole header group starts at the DEVICE
         // ICON column (`firstElementLeading`), NOT the plain leading inset — so
         // the section title sits to the RIGHT of the rail's left-gutter lane,

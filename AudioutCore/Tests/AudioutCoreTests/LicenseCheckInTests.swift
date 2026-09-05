@@ -8,10 +8,10 @@ import Testing
 /// 054) — telemetry recording licence device spread, never a gate, and never
 /// user-toggleable: this is abuse detection (a licence appearing on far more
 /// devices than one buyer plausibly owns), so it cannot be something an
-/// abuser opts out of (Alec, 2026-08-24). Covers the two-gate no-op paths (no
-/// URL configured; no key on file) and the one path that actually sends,
-/// asserting the JSON body carries exactly the three documented fields. A
-/// recording `send` closure + a throwaway `UserDefaults` suite (the
+/// abuser opts out of (owner's call, 2026-08-24). Covers the two-gate no-op
+/// paths (no URL configured; no key on file) and the one path that actually
+/// sends, asserting the JSON body carries exactly the three documented fields.
+/// A recording `send` closure + a throwaway `UserDefaults` suite (the
 /// `AppSettingsTests` pattern) keep this off both the network and `.standard`.
 @Suite struct LicenseCheckInTests {
 

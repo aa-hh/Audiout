@@ -112,7 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // a postal code and a lat/long on every feature count. Registering the
         // opt-out as a super property turns it off for everything, and
         // `captureCoarseLocationOnce()` is then the ONE event per launch that
-        // allows it (Alec, 2026-08-29: "get the geoip on load or something,
+        // allows it (owner's call, 2026-08-29: "get the geoip on load or something,
         // not with every event").
         PostHogSDK.shared.register([Self.geoipDisableKey: true])
         Analytics.install(Analytics.Sink(
@@ -1207,7 +1207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pruneRoutesForExcludedApps()
         // NO persisted redirect of any kind survives a full Audiout restart —
         // every launch starts with every application on "Follows main output"
-        // (product decision, Alec 2026-07-26: live testing showed restored
+        // (product decision, 2026-07-26: live testing showed restored
         // `.currentDevice` routes going live at launch, silently starting
         // captures/exclusions the user never asked for that session). Mirrors
         // the existing "the live routing set is not auto-resumed at launch"

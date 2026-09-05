@@ -31,7 +31,7 @@ observation at all (branch `BTClockStability.swift:196-204` in the poller's
 `tick()`). A silent speaker therefore never accumulates quiet seconds. The
 sheet's existing precondition already demands playback ("Play it first. The
 room has to hear both speakers.",
-`/Users/alechenderson/Projects/audiout-remote/AudioutRemote/UI/Sync/SyncSheet.swift:207`),
+`~/Projects/audiout-remote/AudioutRemote/UI/Sync/SyncSheet.swift:207`),
 so the two agree, but it means any waiting screen must not tell someone they can
 put the phone down and come back.
 
@@ -55,7 +55,7 @@ phone-only change: no Mac work, no wire field. It is what makes an honest
 ProbeKit says so in its own contract: "Held beside one speaker it is a confident
 wrong answer, and nothing in the signal can tell the two apart. Placement is the
 caller's problem to state plainly to the user; this package cannot detect it."
-(`/Users/alechenderson/Projects/audiout-shared/Sources/ProbeKit/ProbeAnalyzer.swift:45-48`).
+(`~/Projects/audiout-shared/Sources/ProbeKit/ProbeAnalyzer.swift:45-48`).
 What it can tell you is whether both sweeps were found: that is the difference
 between a result and `probeNotFound` (`ProbeAnalyzer.swift:26-28`), which the
 run controller already turns into "Couldn't hear both speakers from there"
@@ -64,7 +64,7 @@ run controller already turns into "Couldn't hear both speakers from there"
 **6. There is a per-speaker confidence number, but it is not a loudness.**
 `SyncProbeCorrelator.Measurement` carries `arrivalA` and `arrivalB`, each with a
 `peakToSidelobe`
-(`/Users/alechenderson/Projects/audiout-shared/Sources/ProbeKit/SyncProbeCorrelator.swift:196-223`),
+(`~/Projects/audiout-shared/Sources/ProbeKit/SyncProbeCorrelator.swift:196-223`),
 and `ProbeAnalysis` collapses them to the weaker of the two
 (`ProbeAnalyzer.swift:16-19`). Surfacing both would be an additive change in
 `audiout-shared`. But peak over background is a cleanliness ratio, not a level:
@@ -101,7 +101,7 @@ local tick-down re-seeded from every snapshot (branch `SyncSheet.swift:305-311`,
 `297-301`). None of the concepts below need to invent these.
 
 **10. Gold text is not a gold button.** The rule is one gold action per decision
-screen (`/Users/alechenderson/Projects/audiout-remote/DESIGN.md:1181-1183`). The
+screen (`~/Projects/audiout-remote/DESIGN.md:1181-1183`). The
 placement page today already carries one filled gold button plus one gold text
 link (`SyncSheet.swift:170-178`), and the branch adds a second gold text line
 (branch `SyncSheet.swift:254`). So gold text lines are allowed to stack; a
@@ -235,7 +235,7 @@ gold button, which is fine under the one-gold-action rule; if the chips were
 gold fills that would be two gold actions on one screen, so they should be the
 neutral `pill` treatment (`WarmSignal.swift:334`). The bigger tension: this adds
 two screens before a button that used to be one tap away, which is literally the
-artificial gate Alec asked for and also the thing he called overly complex. It
+artificial gate the owner asked for and also the thing they called overly complex. It
 lives or dies on whether screens 1 and 2 feel like being helped or being
 delayed, which is a device call, not a code call.
 
@@ -310,7 +310,7 @@ copy swaps with no travel.
 **Instant.** No wait means no reason to hold anyone: the sheet opens on the
 existing placement page with a live button and no ticks at all. The ear check
 does not appear. That is a deliberate asymmetry, and it means the screen the
-user sees depends on their speaker, which is worth Alec's eye.
+user sees depends on their speaker, which is worth the owner's eye.
 
 **15 s.** The question and one answer fill it. The button is live by the time
 they have finished answering.
@@ -343,7 +343,7 @@ initiated" (`DESIGN.md:1128-1131`) is worth checking: the tick starts because
 the user opened the sheet, which is their own action, and the by-ear page
 already starts ticks on appear (`SyncSheet.swift:535-538`), so the precedent is
 set. But the sheet opening now makes noise in the room, which it did not before.
-That is a real change in behaviour and Alec should rule on it.
+That is a real change in behaviour and the owner should rule on it.
 
 **Effort: S to M.** Phone only. One screen's worth of copy and one existing
 command, plus the by-ear slider lockout, which is small but is a behaviour
@@ -448,7 +448,7 @@ next speaker in the chain redraws with a new pair and no new state.
 - Framed field box with the chassis' own edge: EXISTS as a pattern,
   `ConnectGateView.swift:645-651`.
 - `settleRemainingSeconds`: EXISTS, wire,
-  `/Users/alechenderson/Projects/audiout-shared/Sources/AudioutProtocol/CompanionSnapshot.swift:53`.
+  `~/Projects/audiout-shared/Sources/AudioutProtocol/CompanionSnapshot.swift:53`.
 - Per-jump events: NEW on the Mac (a hook where `noteClockOutcome` already
   handles `.jumped`, branch `BTAlignmentFreshness.swift:201-204`) and NEW on the
   wire.
@@ -467,7 +467,7 @@ new view in the sheet and no Mac work at all.
 
 ## Concept 4: name the speakers first, then work down the list
 
-This is Alec's own second idea. The wait is per connection, not per device
+This is the owner's own second idea. The wait is per connection, not per device
 (`handoff-2026-09-03-settle-window-adaptive.md`, "Why the gate exists"), so with
 several speakers the waits can overlap: while speaker two settles, speaker one
 is being measured. The user walks once.
@@ -556,7 +556,7 @@ ordering, its own failure handling per speaker, and its own way out mid-queue.
   that. The Mac's number is an estimate that can go back up when the clock jumps
   after the floor (branch `BTAlignmentFreshness.swift:274-277`), so a bar would
   have to run backwards.
-- **No countdown presented as a promise.** "Ready in 47s" is what Alec hit, and
+- **No countdown presented as a promise.** "Ready in 47s" is what the owner hit, and
   the number is the Mac's estimate, not a deadline. The branch's "About 25 s to
   go", rounded up to the next multiple of 5 (branch `SyncSheet.swift:724`), is
   the right shape: it reads as an estimate because it is written as one.
@@ -588,7 +588,7 @@ screen 2 is Concept 2, so picking 1 gets the ear check for free, and it gets it
 at the moment it is useful rather than as the whole design. Concept 3's cheap
 tier costs one new view and no Mac work, and it puts an honest picture behind
 the one screen that has to hold for 45 seconds. Together they answer both halves
-of what Alec asked for: something to do with the seconds, and a reason the
+of what the owner asked for: something to do with the seconds, and a reason the
 seconds exist. They also fix an accuracy problem that has nothing to do with
 waiting, which is that placement is what decides the measurement and the current
 sheet states it in one paragraph nobody reads.
@@ -599,7 +599,7 @@ and it forces the by-ear lockout to be fixed, which needs fixing anyway.
 
 **3. Concept 3 alone.** Beautiful and honest, and it answers "why" without
 answering "what do I do". On a 45 second settle it is a picture the user watches
-while doing nothing, which is the state Alec is complaining about, prettier.
+while doing nothing, which is the state the owner is complaining about, prettier.
 
 **4. Concept 4.** Right idea for the person with four Bluetooth speakers, wrong
 first move for the person with one. It belongs behind the invite card, after a
@@ -608,12 +608,12 @@ get through one speaker.
 
 ---
 
-## Three questions only Alec can answer
+## Three questions only the owner can answer
 
 1. **Is the compensation scheme still live?** The handoff note's experiment,
    measuring early and correcting by the observed clock shift, would remove the
    wait entirely if the clock delta matches the acoustic delta
-   (`handoff-2026-09-03-settle-window-adaptive.md`, "Alec's proposal"). If that
+   (`handoff-2026-09-03-settle-window-adaptive.md`, "the owner's proposal"). If that
    experiment is going to happen soon and might pass, every concept here is
    designing a screen that would then have nothing to wait for. Is this work
    sized as permanent, or as the thing that carries the product until the

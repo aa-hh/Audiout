@@ -1,7 +1,7 @@
 # Pricing & licensing model — research and recommendation
 
 Status: research + recommendation, not yet a decision. Owner sign-off pending.
-Date: 2026-08-12. Related roadmap item: 051. Grounds the question Alec raised:
+Date: 2026-08-12. Related roadmap item: 051. Grounds the question the owner raised:
 how to charge for Audiout given the GPL-2.0-or-later constraint the vendored
 OwnTone sender forces on the whole work.
 
@@ -42,7 +42,7 @@ never for "the right to use the software," which the GPL already grants.
 
 ## Competitor survey
 
-Prices in USD, captured 2026-08-12. The two axes Alec asked about — trial
+Prices in USD, captured 2026-08-12. The two axes the owner asked about — trial
 duration/mechanics, and what they charge — plus a licensing column because the
 free open-source options set our real price floor.
 

@@ -56,9 +56,9 @@ import Testing
     }
 
     /// Both branch glyphs have to resolve on the deployment floor (macOS 14.2),
-    /// and neither may be an Apple-product glyph or a stereo pair (Alec's two
-    /// stated exclusions). `everyKindSymbolResolvesInAppKit` covers the kind
-    /// defaults; these two are reachable only through the class branch.
+    /// and neither may be an Apple-product glyph or a stereo pair (the owner's
+    /// two stated exclusions). `everyKindSymbolResolvesInAppKit` covers the
+    /// kind defaults; these two are reachable only through the class branch.
     @Test func deviceClassGlyphsResolveInAppKit() {
         for symbol in ["headphones", "car.fill"] {
             #expect(NSImage(systemSymbolName: symbol, accessibilityDescription: nil) != nil,
@@ -66,13 +66,13 @@ import Testing
         }
     }
 
-    /// The name branch, on the string this layer exists for. Alec's own pair is
-    /// called "Alec's AirPods Pro #2": an exact-name table would miss it, and a
-    /// table that checked "AirPods" before "AirPods Pro" would draw the wrong
-    /// product. The class routing under it never gets a say — 0x06 would
+    /// The name branch, on the string this layer exists for. The owner's own
+    /// pair is called "My AirPods Pro #2": an exact-name table would miss it,
+    /// and a table that checked "AirPods" before "AirPods Pro" would draw the
+    /// wrong product. The class routing under it never gets a say — 0x06 would
     /// otherwise draw plain headphones.
     @Test func productNameBeatsTheDeviceClass() {
-        let device = Device(id: "x", name: "Alec's AirPods Pro #2", kind: .bluetooth,
+        let device = Device(id: "x", name: "My AirPods Pro #2", kind: .bluetooth,
                             bluetoothDeviceClassMinor: 0x06)
         #expect(device.symbolName == "airpodspro")
     }
@@ -98,7 +98,7 @@ import Testing
     /// names by hand, and the words AROUND the product may be any language,
     /// which is why only the product phrase itself is ever matched.
     @Test func productMatchingIgnoresCaseAndPunctuation() {
-        #expect(Device.bluetoothProductSymbol(forName: "alec's airpods pro") == "airpodspro")
+        #expect(Device.bluetoothProductSymbol(forName: "my airpods pro") == "airpodspro")
         #expect(Device.bluetoothProductSymbol(forName: "AIRPODS-MAX") == "airpodsmax")
         #expect(Device.bluetoothProductSymbol(forName: "Küchen AirPods") == "airpods")
     }

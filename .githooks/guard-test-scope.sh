@@ -1,11 +1,11 @@
 #!/bin/sh
 # GUARD 4 scope: decide WHICH suites a commit has to run.
 #
-# Decision: Alec, 2026-09-04. The full ~3,500-test run on every branch commit
-# was the main cost of committing (and hung twice that day). Branch commits now
-# run only the suites that plausibly cover the staged Swift; the full suite runs
-# when a merge lands on main — the one commit shape Guard 1 permits there, and
-# the last gate before main.
+# Decision: the owner, 2026-09-04. The full ~3,500-test run on every branch
+# commit was the main cost of committing (and hung twice that day). Branch
+# commits now run only the suites that plausibly cover the staged Swift; the
+# full suite runs when a merge lands on main — the one commit shape Guard 1
+# permits there, and the last gate before main.
 #
 # Prints ONE line on stdout:
 #   FULL      — run the whole suite

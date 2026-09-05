@@ -1,6 +1,6 @@
 # Bluetooth output (roadmap 004) — pre-build research, 2026-08-07
 
-Fresh outside research requested by Alec before starting roadmap 004, layered on top of
+Fresh outside research requested by the owner before starting roadmap 004, layered on top of
 `docs/plans/PLAN-UNIVERSAL-SYNC.md` (2026-07-24, 6 decisions locked) and the July
 multi-BT feasibility research. Three web-research agents: Airfoil/PairPods prior art,
 per-device delay UX survey, BT+AirPlay sync techniques. Local state re-verified same day.
@@ -133,7 +133,7 @@ verdict and what the industry does. The fresh findings sharpen v1:
   coarse + let the loop absorb warm-up drift. (Extends BT-DRIFT.)
 - **Spike list gains one item**: verify the BT pacing-clock behavior empirically
   (alongside BT-SPIKE-CONNECT and BT-SPIKE-OFFSET, both still owed, both
-  hardware/Alec-present).
+  hardware/owner-present).
 - **Set expectations in-product**: constant offsets can't fix fluctuating links
   (Airfoil says it publicly; so should we), same-room BT+BT stays marginal, video
   lip-sync is out of scope.

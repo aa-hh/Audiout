@@ -19,7 +19,7 @@ approvals file. No phone required — dev/notes/wspoke.py (pure-stdlib Python) s
   produces an app with no Bonjour service and no checkbox, and every later step
   fails for the wrong reason.
   ```bash
-  cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/companion-app-research-e89998"
+  cd "~/Projects/AirPlay Controller/.claude/worktrees/companion-app-research-e89998"
   ./scripts/make-app.sh
   ```
   Every command below assumes this directory.
@@ -48,7 +48,7 @@ approvals file. No phone required — dev/notes/wspoke.py (pure-stdlib Python) s
 
 ## 2. Default state: companion server ON (advertising)
 
-T22 (`e5f0b7c6`, Alec 2026-08-06) flipped an UNSET setting from OFF to ON, so a
+T22 (`e5f0b7c6`, owner's call, 2026-08-06) flipped an UNSET setting from OFF to ON, so a
 fresh profile advertises at launch without being asked. The Local Network grant
 is the consent; asking twice for the same thing was the reason.
 
@@ -84,7 +84,7 @@ is the consent; asking twice for the same thing was the reason.
   ```bash
   dns-sd -B _audiout._tcp
   ```
-  Expected: one entry `_audiout._tcp.local.` with `Audiout` or `Alec's Mac` (the host
+  Expected: one entry `_audiout._tcp.local.` with `Audiout` or `the owner's Mac` (the host
   name). Note the full advertised name for the protocol poke below. Kill with Ctrl+C.
 
 - [ ] **Disable the checkbox** in Settings › General
@@ -236,7 +236,7 @@ CompanionSnapshotBuilder logs.
 
 - [ ] **Run the full test suite**
   ```bash
-  cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/companion-app-research-e89998"
+  cd "~/Projects/AirPlay Controller/.claude/worktrees/companion-app-research-e89998"
   scripts/run-tests.sh
   ```
   Expected: all tests pass, including CompanionMessageTests, CompanionSnapshotBuilderTests,
@@ -265,7 +265,7 @@ CompanionSnapshotBuilder logs.
 - [ ] **Quit Audiout** (Cmd+Q)
 
 - [ ] **Report results to the session** before any merge attempt. Main is merge-only;
-  no merge without Alec's explicit go-ahead. Include:
+  no merge without the owner's explicit go-ahead. Include:
   - R4 firewall result (expected: no per-launch prompt on Developer-ID build)
   - Any protocol anomalies from the poke
   - Test suite pass/fail

@@ -136,7 +136,7 @@ NOT, default `SPARKLE_FEED_URL` to `"$AUDIOUT_LICENSE_URL/appcast.xml"`
 (the key check on `SPARKLE_ED_PUBLIC_KEY` still applies). Echo what was
 written, like the neighbouring blocks.
 
-Update `docs/RELEASE.md`'s env-var table / "Alec's actions" for the two new
+Update `docs/RELEASE.md`'s env-var table / "the owner's actions" for the two new
 vars and the R2 upload step described in the server README (`releases/...zip`,
 `releases/latest-vN.json`, `appcast-vN.xml`) — replace the "appcast lives on
 the website" step if present.

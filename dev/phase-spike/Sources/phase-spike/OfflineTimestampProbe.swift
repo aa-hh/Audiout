@@ -70,7 +70,7 @@ final class OfflineTimestampProbe {
         if !anyHostValid {
             print("  → HostTimeValid bit is NEVER set offline: mHostTime is INVALID here (sampleTime-only).")
             print("    Real per-cycle hostTime + its jitter can ONLY be measured against a real")
-            print("    device clock — see the 'realdevice' probe / Alec's live run.")
+            print("    device clock — see the 'realdevice' probe / the owner's live run.")
         } else {
             var hd = [Double]()
             for i in 1..<hostTimes.count { hd.append(Double(MachTime.hostTicksToNanos(hostTimes[i]) - MachTime.hostTicksToNanos(hostTimes[i-1]))) }

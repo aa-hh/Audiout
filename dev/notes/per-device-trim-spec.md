@@ -1,6 +1,6 @@
 # Per-device delay trim — spec
 
-2026-08-22 · shaped and decided with Alec · grounded against main @ 469282ab
+2026-08-22 · shaped and decided with the owner · grounded against main @ 469282ab
 
 ## Goal
 
@@ -57,7 +57,7 @@ it (Airfoil's advanced sliders).
 - Trim semantics stay signed-nudge-on-top-of-computed-delay everywhere;
   positive/negative direction must read the same on both device kinds.
 - Settings → Audio → Advanced loses its sync-offset row (Decision 2).
-- Value readout stays bare numeric ms (no presets — per Alec's standing
+- Value readout stays bare numeric ms (no presets — per the owner's standing
   localization/numeric preference).
 
 ## Part 2 — wizard: method of constant stimuli
@@ -66,7 +66,7 @@ Why replace the bisection: it is unforgiving. Two-reversal convergence means
 one mistaken judgment freezes the ticks and converges early; there is no
 undo; "can't tell" is a dead end instead of data.
 
-New method (Alec's design, 2026-08-12):
+New method (the owner's design, 2026-08-12):
 
 - Each trial adds a KNOWN deliberate offset δ on top of the current
   estimate, drawn from a fixed stimulus set (e.g. {−24, −16, −8, −4, 0, +4,
@@ -79,7 +79,7 @@ New method (Alec's design, 2026-08-12):
   flips + can't-tell centroid). 2–3 repetitions per level, ~20–30 fast
   trials. A single wrong answer nudges the fit instead of derailing it; a
   Back button just re-queues the trial.
-- Perceptual constraints to honor (probe-validated live on Alec):
+- Perceptual constraints to honor (probe-validated live on the owner):
   lateralization reads clearly at 7–15 ms even on a broken baseline; below
   ~4 ms two clicks fuse and the offset is heard as image POSITION
   (resolution 0.1–0.5 ms). Stimulus spacing reflects that: coarse wings,
@@ -122,9 +122,9 @@ known holes, one measurement:
 ## Out of scope
 
 - AirPlay per-device trim (Decision 1; revisit trigger recorded there).
-- ~~Mic-based auto-offset — CUT by Alec 2026-08-07 (mic position
+- ~~Mic-based auto-offset — CUT by the owner 2026-08-07 (mic position
   uncontrollable; different-rooms is the good case). Do not revive.~~
-  **REVERSED by Alec 2026-08-27** on the strength of the "Beyond the Tick"
+  **REVERSED by the owner 2026-08-27** on the strength of the "Beyond the Tick"
   research brief: mic position only contributes distance asymmetry
   (~2.9 ms/m), well inside the ±6 ms blend bar unless the Mac sits far
   off-centre — a UX-copy problem, not a blocker. The mic measurement feeds

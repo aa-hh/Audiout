@@ -113,7 +113,7 @@ Evidence:
   branch tip. `SetupModel.swift`, `AudioCapturePermissionProbe.swift`,
   `LocalNetworkPrimer.swift`, and `PermissionRowView.swift` differ by exactly
   **one line each** — and that line is purely cosmetic: the branch still says
-  "the case Alec hit" / "the bug this exists to fix (Alec, ..." in a code
+  "the case the owner hit" / "the bug this exists to fix (owner, ..." in a code
   comment, where `main`'s later personal-name-scrub commit (`3b35d64`,
   already merged separately) changed those same comments to say "ahh" instead.
   `AppDelegate.swift` differs by more (146 lines), but that's `main` having

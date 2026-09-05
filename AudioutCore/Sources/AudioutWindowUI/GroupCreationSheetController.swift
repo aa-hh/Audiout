@@ -15,11 +15,12 @@ import AudioutSharedUI
 /// - an "Add scene" title line, so the sheet is never an anonymous form;
 /// - a `Name` `NSTextField`, prefilled by the caller via ``configure``;
 /// - a "Speakers" label + a scrollable checklist of `MembershipRowView` rows.
-///   EVERY device is a candidate, unavailable ones included (Alec,
-///   2026-08-28 — reverses the earlier available-only rule): a sleeping
-///   HomePod can be put in "Whole House" now and simply plays when it is
-///   back. Unavailable rows render dimmed with the row's own "Unavailable"
-///   annotation; the caller passes devices already sorted available-first;
+///   EVERY device is a candidate, unavailable ones included (owner's
+///   call, 2026-08-28 — reverses the earlier available-only rule): a
+///   sleeping HomePod can be put in "Whole House" now and simply plays when
+///   it is back. Unavailable rows render dimmed with the row's own
+///   "Unavailable" annotation; the caller passes devices already sorted
+///   available-first;
 /// - a live "N speaker(s) selected" count label in secondary color;
 /// - bottom-trailing Cancel (Escape) / Create (Return, the default button) —
 ///   Create is enabled only once at least one row is checked, recomputed on
@@ -273,11 +274,11 @@ public final class GroupCreationSheetController: NSViewController {
 
     /// Configure the sheet before presenting it: prefill the name field with
     /// `defaultName`, and build the membership checklist from `devices` —
-    /// EVERY device, unavailable ones included (Alec, 2026-08-28: an offline
-    /// speaker may join a group and plays when it returns; this is also what
-    /// keeps the add bar's "Add scene from N speakers…" count honest when the
-    /// selection includes a sleeping speaker). `preselected` checks any
-    /// candidate whose id is a member.
+    /// EVERY device, unavailable ones included (owner's call, 2026-08-28: an
+    /// offline speaker may join a group and plays when it returns; this is
+    /// also what keeps the add bar's "Add scene from N speakers…" count honest
+    /// when the selection includes a sleeping speaker). `preselected` checks
+    /// any candidate whose id is a member.
     public func configure(defaultName: String, devices: [Device], preselected: Set<String> = []) {
         nameField.stringValue = defaultName
         candidateDevices = devices
@@ -313,10 +314,11 @@ public final class GroupCreationSheetController: NSViewController {
             return
         }
         for device in candidateDevices {
-            // `.systemSheet` (Alec, Q6): this is a STOCK AppKit sheet on the
-            // system's own white/grey, where `ember` measures ~2.34–2.48:1 and
-            // a gold node would be near-invisible. The rail/node language is
-            // warm-pane-only — plain stock rows here, no node, no gold.
+            // `.systemSheet` (owner's call, Q6): this is a STOCK AppKit sheet
+            // on the system's own white/grey, where `ember` measures
+            // ~2.34–2.48:1 and a gold node would be near-invisible. The
+            // rail/node language is warm-pane-only — plain stock rows here, no
+            // node, no gold.
             let row = MembershipRowView(
                 device: device, checked: checkedIDs.contains(device.id),
                 iconSymbolName: deviceIconController?.symbolName(for: device),
@@ -351,8 +353,8 @@ public final class GroupCreationSheetController: NSViewController {
     /// Create needs at least one speaker, and a set that isn't already a saved
     /// group. Saying so on the checklist — Create dimmed, the count line naming
     /// the group — is what keeps the user OUT of the refusal that used to be
-    /// the only way to learn it (Alec, 2026-09-03: "I just don't want to get to
-    /// that strange error state").
+    /// the only way to learn it (owner's call, 2026-09-03: "I just don't want
+    /// to get to that strange error state").
     private var isCreateEnabled: Bool { !checkedIDs.isEmpty && groupMatchingChecked == nil }
 
     private func updateCreateEnabled() {

@@ -1,7 +1,7 @@
 # Mic-probe sync calibration — direction + build plan
 
 2026-08-27. Distilled from the "Beyond the Tick" research brief (artifact
-prepared for Alec, August 2026); this file is the in-repo record. It REVERSES
+prepared for the owner, August 2026); this file is the in-repo record. It REVERSES
 the 2026-08-07 "mic-based auto-offset — do not revive" cut in
 `per-device-trim-spec.md` (amendment recorded there).
 
@@ -70,7 +70,7 @@ unless the Mac sits far off-centre; one sentence of UX copy).
 
 ## Build state (2026-08-27)
 
-All four steps are BUILT, none live-tested (Alec's call — live checks later):
+All four steps are BUILT, none live-tested (the owner's call — live checks later):
 
 1. DSP core — `SyncProbeCorrelator.swift` + tests.
 2. `mic-probe-spike` CLI (HFP survival check on hardware still OWED).

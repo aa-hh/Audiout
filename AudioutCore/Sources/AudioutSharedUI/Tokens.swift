@@ -177,7 +177,7 @@ public enum Tokens {
 
         // MARK: Warm Signal custom palette
         //
-        // THE LADDER IS THE IPHONE COMPANION'S (Alec, 2026-08-30 /
+        // THE LADDER IS THE IPHONE COMPANION'S (owner's call, 2026-08-30 /
         // 2026-09-03): the surface, edge and ink hexes below are the same
         // values `audiout-remote`'s `AudioutRemote/UI/Shared/WarmSignal.swift`
         // authors, so the two apps read as one product. BOTH APPEARANCES ARE
@@ -385,7 +385,7 @@ public enum Tokens {
         /// measurement: white marks on the old bright dark value `#8E93F0`
         /// measure 2.77:1, under the 4.5:1 mark floor — the dark half had to
         /// come down anyway once the marks stopped being knocked out in
-        /// ``panel``. Second, Alec's rule (2026-09-04): an engaged control
+        /// ``panel``. Second, the owner's rule (2026-09-04): an engaged control
         /// wears the SAME fill in light and dark, so a muted row looks like a
         /// muted row wherever you meet it.
         ///
@@ -415,16 +415,16 @@ public enum Tokens {
         /// square clears the floor with room to spare and the marks read as a
         /// knock-out.
         ///
-        /// TWO VALUES NOW, and the single-value rule above is retired for
-        /// this token (Alec, 2026-09-05: light mode was "impossible to see").
-        /// The rule assumed the hue was a FILL, where one value reads on both
-        /// grounds. It is a thin outline since the marks stopped being filled
-        /// — 0.875 pt of stroke — and a stroke that thin has no area to carry
-        /// a marginal ratio. Measured on `panel`: `#8E93F0` is 5.18:1 on the
-        /// dark row and 2.45:1 on the light one, which is what he was looking
-        /// at. Deepened for light only, the same move `goldText` makes for the
-        /// same reason: `#585EC7` measures 5.24:1 on light and the dark half
-        /// does not move a pixel.
+        /// TWO VALUES NOW, and the single-value rule above is retired for this
+        /// token (owner's call, 2026-09-05: light mode was "impossible to
+        /// see"). The rule assumed the hue was a FILL, where one value reads on
+        /// both grounds. It is a thin outline since the marks stopped being
+        /// filled — 0.875 pt of stroke — and a stroke that thin has no area to
+        /// carry a marginal ratio. Measured on `panel`: `#8E93F0` is 5.18:1 on
+        /// the dark row and 2.45:1 on the light one, which is what they were
+        /// looking at. Deepened for light only, the same move `goldText` makes
+        /// for the same reason: `#585EC7` measures 5.24:1 on light and the dark
+        /// half does not move a pixel.
         public static var muted: NSColor {
             warmDynamic(name: "muted", dark: 0x8E93F0, light: 0x585EC7)
         }
@@ -851,11 +851,12 @@ public enum Tokens {
         // Per Q3 the colour lands on the SF SYMBOL GLYPH ONLY — `IconTileView`
         // keeps its neutral `Tokens.Color.raised` fill and hairline rim
         // untouched, exactly like every other tile. Q2 (grant crossfades the
-        // glyph to gold) is REVERSED (Alec, 2026-08-11): the identity hue is
-        // PERMANENT in every status — the row's "Allowed" status chip alone
-        // carries the granted state. Because the hue is a standing identity
-        // rather than a resting state, the Full columns carry real saturation
-        // (46-79 depending on family); the Subtle column stays muted, since
+        // glyph to gold) is REVERSED (owner's call, 2026-08-11): the identity
+        // hue is PERMANENT in every status — the row's "Allowed" status chip
+        // alone carries the granted state. Because the hue is a standing
+        // identity rather than a resting state, the Full columns carry real
+        // saturation (46-79 depending on family); the Subtle column stays
+        // muted, since
         // muting is that dial position's whole job.
         //
         // DIAL RESOLUTION (Q5) deliberately does NOT reuse `accentDynamic`
@@ -1017,8 +1018,8 @@ public enum Tokens {
         }
 
         /// Bluetooth SIG brand blue `#0082FC` — the Bluetooth setup row's
-        /// glyph tint (Alec, 2026-08-23: the rune wears its official colour).
-        /// A BRAND MARK, so one fixed hex in every appearance/contrast
+        /// glyph tint (owner's call, 2026-08-23: the rune wears its official
+        /// colour). A BRAND MARK, so one fixed hex in every appearance/contrast
         /// variant, deliberately outside the warmed `permission*` family and
         /// its dial-aware resolver. CONTRAST RATIONALE (measured, same WCAG
         /// relative-luminance formula as the `permission*` hues above): dark
@@ -1380,7 +1381,7 @@ public enum Tokens {
         /// mirror of its collapse and every clip in the app reads as the same
         /// gesture — a second constant kept in step by hand silently drifts
         /// (live report 2026-08-10: the cards' own 0.2 s "don't follow the
-        /// same system"). 0.15 s is Alec's live call on the previous 0.22 s
+        /// same system"). 0.15 s is the owner's live call on the previous 0.22 s
         /// ("it's also not that snappy") — short enough to feel immediate,
         /// long enough that neighbouring content still reads as being PUSHED
         /// rather than jumping.

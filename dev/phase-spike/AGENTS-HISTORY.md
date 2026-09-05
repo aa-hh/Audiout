@@ -29,7 +29,7 @@ boundary" target, ≤ ½-frame initial release phase, and recommends a custom
 fractional resampler (see `ResamplerProbe.swift`) over `AVAudioUnitVarispeed`/
 `AVAudioUnitTimePitch` for T-CORRECTION. The `realdevice` real-hostTime-jitter
 probe has **not** been run unattended (see Notable Patterns) — that number is
-still owed. The findings doc is a CHECKPOINT awaiting Alec's confirmation
+still owed. The findings doc is a CHECKPOINT awaiting the owner's confirmation
 before T-CORRECTION starts.
 
 **Keep this file up to date** when probes are added/removed/renamed, when

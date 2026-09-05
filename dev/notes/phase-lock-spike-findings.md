@@ -1,6 +1,6 @@
 # Phase-lock feasibility spike — findings (T-SPIKE-PHASE)
 
-Status: **CHECKPOINT — Alec must confirm/renegotiate the target below before
+Status: **CHECKPOINT — the owner must confirm/renegotiate the target below before
 T-CORRECTION starts.** This is not a pass-through rubber stamp (plan §T-SPIKE-PHASE,
 Risk R7).
 
@@ -40,7 +40,7 @@ Public `AVAudioEngine` is sufficient; **no raw HAL IOProc is required.**
 jitter the HAL hands the render block against a live output device — offline manual
 rendering does not provide a valid `hostTime` (see §3). My principled prediction is
 sub-µs to low-µs because `mHostTime` is a clock-anchored presentation anchor, not
-"wall time when the callback woke," but **Alec should confirm it** with the silent
+"wall time when the callback woke," but **the owner should confirm it** with the silent
 `realdevice` probe (§6) or fold it into the T-DOCS-LIVE by-ear run.
 
 ---
@@ -59,7 +59,7 @@ I ran **`offline` only** (repeatedly, deterministic). I deliberately did **not**
 `realdevice` unattended: it is silent, but starting the audio subsystem can produce a
 physical speaker-relay click on some Macs, which is exactly the class of surprise the
 standing "don't touch his audio during a session" rule guards against. It is safe for
-Alec to run himself anytime (it makes no sound); it is *not* the by-ear T-DOCS-LIVE
+the owner to run themselves anytime (it makes no sound); it is *not* the by-ear T-DOCS-LIVE
 test.
 
 ---
@@ -82,7 +82,7 @@ Monte-Carlo'd over random target/cycle phasing:
 magnitude below the ~10 ms "buffer granularity" ceiling R7 feared. This is the number
 `latestPhaseErrorNanos` reports at release, and it is already sub-frame by construction.
 
-### The real-thread part (NOT measurable headlessly — needs Alec)
+### The real-thread part (NOT measurable headlessly — needs the owner)
 
 The floor above assumes the render block is handed an *exact* per-cycle `hostTime`. The
 open empirical question is how accurate that `hostTime` actually is on real hardware.
@@ -176,7 +176,7 @@ convergence/hold — the `PlanMath` + resampler code here is a starting referenc
 
 ---
 
-## 6. What still needs Alec (do NOT skip before declaring victory)
+## 6. What still needs the owner (do NOT skip before declaring victory)
 
 1. **Real per-cycle `hostTime` jitter.** Run (silent — zeros only):
    ```
@@ -191,7 +191,7 @@ convergence/hold — the `PlanMath` + resampler code here is a starting referenc
 
 ---
 
-## 7. Target renegotiation ask (the CHECKPOINT decision for Alec)
+## 7. Target renegotiation ask (the CHECKPOINT decision for the owner)
 
 R7 flags, and I confirm, that **"phase-perfect at the listener's ear" is physically
 unattainable**: acoustic propagation is ~2.9 ms per metre, so a Mac speaker and a

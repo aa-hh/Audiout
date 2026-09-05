@@ -1,9 +1,9 @@
 # License-key backend — discovery brief (2026-08-23)
 
-Question from Alec: sell pre-built binaries behind a license key (source stays
+Question from the owner: sell pre-built binaries behind a license key (source stays
 free per GPL), generate/validate/track keys, see sharing, reduce sharing risk.
 Posture chosen up front: **monitor + manual revoke** (no automatic caps).
-Alec also asked to **revisit the runtime-lock ruling** in PRODUCT.md and to see
+The owner also asked to **revisit the runtime-lock ruling** in PRODUCT.md and to see
 the **range of backend tiers** with a growth path.
 
 Three research tracks ran 2026-08-23 (GPL legality, Paddle fulfillment, backend
@@ -86,7 +86,7 @@ and keys survive any future backend migration without reissue.
    to a ~15-min presigned R2 URL. R2 egress is free. The keyed link is the
    durable one (emailed + on the thank-you page; works as long as the key is
    active, dies on revoke) — only the final presigned hop is short-lived, so
-   no long-expiry file URLs ever exist (Alec's 2026-08-23 requirement that
+   no long-expiry file URLs ever exist (the owner's 2026-08-23 requirement that
    the emailed link keep working for months is met by construction).
 3. **Update gate.** Sparkle: set `SPUUpdater.httpHeaders` with a bearer token
    derived from the key — applies to both appcast fetch and update download,
@@ -119,7 +119,7 @@ self-host templates (Keygen CE, LicenseGate, keygate) were evaluated and all
 lose to a hand-rolled Worker at this volume (ops weight, immaturity, or no
 Paddle support).
 
-## 4. Decision points for Alec
+## 4. Decision points for the owner
 
 **Decided 2026-08-23:** runtime behavior = **(b) soft check** (PRODUCT.md
 amended on this branch); trademark = name not settled yet, roadmap entry 063
@@ -137,7 +137,7 @@ same day (see companion notes). Original options kept below for the record.
    isn't inside a GPL-covered target.
 3. **Free demo build** (Ardour-style limited build) — orthogonal, legal,
    deferrable; a future funnel decision, not needed for v1.
-4. **Cloudflare account** — backend lands on Alec's CF account; needs a
+4. **Cloudflare account** — backend lands on the owner's CF account; needs a
    credential handoff like the RELEASE.md list from 054.
 
 ## 5. Source highlights

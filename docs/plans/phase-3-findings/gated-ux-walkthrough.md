@@ -1,6 +1,6 @@
 # G1 — Live UX Walkthrough Findings (session in progress)
 
-**Method:** Alec drove a genuine first-run session (user prefs/Application
+**Method:** The owner drove a genuine first-run session (user prefs/Application
 Support backed up and cleared to force true first-launch state — see backup
 path note at end) against a freshly built mock-backend `Audiout.app`.
 Session ran as free-form narrated reactions rather than strictly walking the
@@ -22,7 +22,7 @@ session is complete.
   already at. Computer speakers are typically played much louder than a
   home AirPlay system needs; a user connecting at high Mac volume could be
   startled/hurt by sudden loud output. No safety default exists today.
-  Alec's suggested direction: default to a lower volume on connect (user
+  the owner's suggested direction: default to a lower volume on connect (user
   raises it themselves), and/or expose "default connect volume" as a
   Settings option. Needs a product decision, not just a copy fix.
 - **G1-N2 — Dead "+" button in the Devices card header.** A "+" button sits
@@ -37,13 +37,13 @@ session is complete.
   "Selected" checkbox affects live system audio routing; the Applications
   card below can independently redirect a specific app to a *different*
   device regardless of the Selected set. Two different routing mechanisms,
-  visually stacked as if they were one flow. Alec explicitly asked for a
+  visually stacked as if they were one flow. The owner explicitly asked for a
   **design discovery pass** here — flagged as "messy no matter what," not a
   quick copy/spacing fix. Recommend this become its own scoped sub-phase
   task, not a punch-list item.
 - **G1-N4 — Groups has no discoverable "create one" path for new users.**
   The only way to create a group is one small, unlabeled icon in the
-  popover header. Alec's proposed fix: even the *empty* Groups section
+  popover header. The owner's proposed fix: even the *empty* Groups section
   should visibly say "No groups — click here to create one," teaching the
   feature rather than hiding it behind an icon a new user is unlikely to
   ever click.
@@ -57,7 +57,7 @@ session is complete.
     visually register as something requiring attention — easy to skim
     past entirely.
   - "System audio" and similar internal terms are used without explaining
-    what they mean in outcome terms. Alec's proposed direction: state each
+    what they mean in outcome terms. The owner's proposed direction: state each
     permission as a plain first-person outcome — "I need to send your
     Mac's sound to your speakers," "I need to find AirPlay devices on your
     network," "I want to hear your speaker's buttons" — rather than
@@ -67,7 +67,7 @@ session is complete.
 - **G1-N6 — Current Device and an AirPlay device cannot be selected
   together.** (Note: this is the documented Phase-1 "local-mix block" from
   `docs/SPEC.md` §9, deferred pending synced local output — not a new bug,
-  but Alec is flagging it fresh as a real rough edge worth reconsidering
+  but the owner is flagging it fresh as a real rough edge worth reconsidering
   for release, either by building the deferred synced-local-output
   capability or by being more deliberate about how the restriction is
   communicated.) Cross-reference: this is squarely the AP-local/multi-room
@@ -81,14 +81,14 @@ session is complete.
   for — they're dropped straight into the UI with zero guided
   introduction. G1-N4 (no discoverable "create a group" path) and G1-N5
   (permission-only onboarding) are both **symptoms of this one root gap**,
-  not separate problems. Alec's framing: the app needs an actual feature
+  not separate problems. The owner's framing: the app needs an actual feature
   tour/introduction step, not just clearer permission copy. Recommend the
   master plan treat this as one root-cause item feeding both symptoms,
   rather than fixing each symptom in isolation.
 - **G1-N7 — Switching outputs via macOS's own Sound menu is untested and
   has no cross-surface indication.** If a user picks an AirPlay device
   directly from the system output picker (bypassing Audiout) that
-  Audiout already has active, behavior is unknown/untested. Alec wants
+  Audiout already has active, behavior is unknown/untested. The owner wants
   the system's own output picker to show that a device is "in use by
   Audiout" so switching away from there doesn't silently break routing.
   Needs both a live behavior test (candidate for G2) and a design answer.
@@ -126,11 +126,11 @@ session is complete.
   clickable/purposeful to a first-time user.
 - **G1-N15 — Settings doesn't feel comprehensive.** General impression
   that the current Settings surface is thin relative to what a paid
-  product should offer; Alec wants a dedicated brainstorm of what settings
+  product should offer; the owner wants a dedicated brainstorm of what settings
   *should* exist, not just fixes to what's there.
 - **G1-N16 — "Restore Mac audio after wake if speakers don't ___" setting
   is unclear even to its own team.** Title text gets visually cut off, the
-  title itself is too long, and Alec wasn't fully sure what the feature
+  title itself is too long, and the owner wasn't fully sure what the feature
   does on reading it live. Needs a copy pass and possibly a conceptual
   rework, not just a truncation fix.
 
@@ -138,7 +138,7 @@ session is complete.
 
 - **G1-N17 — No Dock icon at first launch reads as slightly odd** to a
   brand-new user, even though the app is intentionally dockless
-  thereafter. Low priority per Alec — not asking for a permanent Dock
+  thereafter. Low priority per the owner — not asking for a permanent Dock
   icon, just noting the first-moment impression.
 - **G1-N18 — Volume-percentage label sits too far from the slider,**
   asymmetric with how close the speaker icon sits on the opposite side.
@@ -150,7 +150,7 @@ session is complete.
   mental model (config happens in this window, playback control happens
   from the menu bar) established clearly, not as a small aside.
 - **G1-N21 — General aesthetic reads as bland** ("the gray is a bit
-  bland... not a very pretty app to look at"). Alec explicitly flagged this
+  bland... not a very pretty app to look at"). The owner explicitly flagged this
   as low priority relative to everything else and in tension with the
   house rule of sticking to stock AppKit/system colors — noted for the
   synthesis to weigh, not to action reflexively.
@@ -161,21 +161,21 @@ session is complete.
 
 - **P1-07a — CONFIRMED.** Cmd+Q does not quit the app. Matches
   `cold-user-ux.md` Flow 8 (no Cmd+Q). Second half (right-click the
-  menu-bar icon) pending Alec's next check.
-- **P1-08 — "works as expected" (Alec's words).** Reading against the
+  menu-bar icon) pending the owner's next check.
+- **P1-08 — "works as expected" (the owner's words).** Reading against the
   checklist's own stated criterion ("confirms bug if nothing about the
   card changes to indicate a network problem"): this means the Devices
   card showed no change during the Wi-Fi off/on cycle, which CONFIRMS
   `cold-user-ux.md` Flow 6 (no network-awareness code path) — "expected"
   here means "matched the audit's prediction," not "good behavior." Worth
-  a quick re-confirm with Alec at synthesis time if this reading is wrong.
-- **P1-09 — REFINED, not a clean confirm/refute.** Alec: "not as bad as
+  a quick re-confirm with the owner at synthesis time if this reading is wrong.
+- **P1-09 — REFINED, not a clean confirm/refute.** The owner: "not as bad as
   described, but it is bad." Two distinct observations:
   1. Clicking anywhere else makes the Groups window disappear entirely —
      frustrating on its own, independent of recoverability.
   2. Clicking the menu-bar icon opens the popover ON TOP of Groups, and in
      this instance Groups happened to visually "poke out" slightly from
-     behind the popover, so it WAS clickable back into focus — but Alec
+     behind the popover, so it WAS clickable back into focus — but the owner
      explicitly caveats this only works "if the group's window does
      happen to be positioned there." This is positional luck (window
      location relative to the popover), not a real/designed recovery
@@ -187,20 +187,20 @@ session is complete.
      stuck" as originally worded** — arguably still Critical (a paying
      customer shouldn't need to get lucky to find a window again) but the
      master plan should describe it accurately rather than overstate it.
-- **P1-10 — REFUTED.** "P1-10 passes" — Alec confirms the Groups window
-  DOES reopen in the position/size he left it, contradicting
+- **P1-10 — REFUTED.** "P1-10 passes" — the owner confirms the Groups window
+  DOES reopen in the position/size they left it, contradicting
   `window-panel.md` M2 (which claimed `setFrameAutosaveName` was dead code
   silently overridden by `center()`). **Needs reconciliation**: either the
-  M2 finding was wrong, or Alec's specific test conditions didn't trigger
+  M2 finding was wrong, or the owner's specific test conditions didn't trigger
   the code path the audit found — flag for a source re-check before the
   master plan cites M2 as confirmed.
 - **P1-11 — CONFIRMED, milder than audit severity.** Dark-mode empty-state
-  text contrast is a real issue ("could be improved") but Alec's framing
+  text contrast is a real issue ("could be improved") but the owner's framing
   is less severe than `visual.md` C3a's "unreadable, near-black on dark
   gray" — log as confirmed-but-recalibrate-severity (Major, not Critical).
 
 - **P1-20 — INVALID AS RUN, checklist scoping error, MUST re-run in G2.**
-  Alec astutely questioned why changing the real Mac's output device would
+  The owner astutely questioned why changing the real Mac's output device would
   affect a mock-backend app at all. Verified in code: `LocalPlaybackEngine`
   — the exact class the crash (`crash-hang.md` C1, the unwired exception
   shim) lives in — is only ever constructed inside `makeBackend()`'s
@@ -242,7 +242,7 @@ session is complete.
   and doesn't apply here (unlike P1-20).** CPU rises during interaction
   and returns to idle; memory stays flat across repeated popover/window
   open-close cycles — matches `performance.md`'s headless numbers (0.0%
-  idle CPU, stable ~17MB). Alec again asked whether mock invalidates this;
+  idle CPU, stable ~17MB). The owner again asked whether mock invalidates this;
   verified this time it does NOT: the metering on/off gate that produces
   this behavior lives in `PopoverController` and is wired identically
   regardless of which backend is active, so this result should generalize
@@ -278,7 +278,7 @@ session is complete.
   confirms `visual.md` C3b (half-dark-mode look) in real use.
 - **VO-01 — CONFIRMED, and WORSE than the original finding's scope.**
   `accessibility.md` C1 specifically flagged the device/group icon well as
-  keyboard-unreachable. Alec's live test: Tab does **nothing at all**
+  keyboard-unreachable. The owner's live test: Tab does **nothing at all**
   anywhere in the Groups view — not scoped to just the icon, the whole
   window may have no keyboard focus traversal. This generalizes C1 from
   "one feature is mouse-only" to "this entire window may be
@@ -289,10 +289,10 @@ session is complete.
 ## Naming/terminology feedback (P1-02/P1-03 area, design opinion not a bug)
 
 - **G1-N23 — Question the "(n)" count suffix on "Selected Devices (n)"
-  entirely.** Alec doesn't think the live count needs to be spelled out in
+  entirely.** The owner doesn't think the live count needs to be spelled out in
   the label — the checkbox column already shows at a glance how many are
   selected. If the count was originally added/abbreviated ("Selected (n)"
-  on the collapsed button) because of truncation/space pressure, his
+  on the collapsed button) because of truncation/space pressure, their
   preference is to just make the control wider rather than sacrifice a
   clearer label for a few pixels. Revisit whether "Selected Devices (n)"
   vs. plain "Selected Devices" is worth the space cost at all.
@@ -305,7 +305,7 @@ session is complete.
   read as unrelated lists. If "Output" gets used there, rename "Audio Out"
   (the Main Out row) to something like "Main Audio" so "out"/"output"
   doesn't appear in two different UI spots with two different meanings.
-- **P1-04 (auto-swap silent un-toggle) — downgraded.** Alec doesn't
+- **P1-04 (auto-swap silent un-toggle) — downgraded.** The owner doesn't
   consider this a significant issue; deprioritize relative to other
   findings.
 
@@ -324,7 +324,7 @@ session is complete.
     GROUPS" and "DESTINATION" header rows in this dropdown are meant to be
     inert section labels (`NSMenuItem.isEnabled = false` in
     `MainOutRowView.apply`, `AudioutPopoverUI/MainOutRowView.swift`) but
-    visibly highlight and are clickable in the real running app (Alec
+    visibly highlight and are clickable in the real running app (owner
     screenshot, confirmed live). Because `Option.init`'s `target` parameter
     defaults to `.selectedDevices` when omitted (`MainOutRowView.swift`
     line ~56) and both header options never set it explicitly, clicking a
@@ -356,7 +356,7 @@ session is complete.
 ## Reconciliation needed against headless audit findings
 
 - **VU meter "sliver at rest" (visual.md Critical C2) — LIVE REFUTED.**
-  Alec explicitly did not observe the fake-signal sliver the offscreen
+  The owner explicitly did not observe the fake-signal sliver the offscreen
   snapshot audit reported as present on every device row, every theme,
   every open. The visual auditor itself flagged a risk that its capture
   method (`cacheDisplay` layer capture, inactive-window rendering) could be

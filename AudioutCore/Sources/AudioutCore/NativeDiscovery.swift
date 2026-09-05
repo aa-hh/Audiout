@@ -240,13 +240,14 @@ public final class NativeDiscovery: @unchecked Sendable {
     private var started = false
 
     /// This machine's own mDNS hostname ("<LocalHostName>.local", normalized),
-    /// used to drop THIS MAC'S OWN AirPlay receiver from discovery (Alec's call,
-    /// 2026-08-07). macOS's AirPlay Receiver announces under the machine's own
-    /// hostname, so without this filter the app offers the Mac it is running on
-    /// as a speaker — a self-loop that mostly can't work (the live 2026-08-06
-    /// "Couldn't connect" storm was exactly this row: same name as the Mac, so
-    /// it even READS like a remote device) and that the separate "This Mac"
-    /// local-device row already covers for the legitimate local-playback intent.
+    /// used to drop THIS MAC'S OWN AirPlay receiver from discovery (the
+    /// owner's call, 2026-08-07). macOS's AirPlay Receiver announces under the
+    /// machine's own hostname, so without this filter the app offers the Mac it
+    /// is running on as a speaker — a self-loop that mostly can't work (the
+    /// live 2026-08-06 "Couldn't connect" storm was exactly this row: same name
+    /// as the Mac, so it even READS like a remote device) and that the separate
+    /// "This Mac" local-device row already covers for the legitimate
+    /// local-playback intent.
     /// `nil` disables the filter (hostname unavailable — fail open: a phantom
     /// self row is annoying, a silently missing REAL speaker is a support case).
     private let localHostname: String?
@@ -330,7 +331,7 @@ public final class NativeDiscovery: @unchecked Sendable {
     }
 
     /// Bonjour hostnames compare loosely: announcements carry a trailing dot
-    /// ("Alecs-MacBook-Pro-2.local.") and mDNS names are case-insensitive.
+    /// ("Some-MacBook-Pro-2.local.") and mDNS names are case-insensitive.
     static func normalizedHostname(_ hostname: String) -> String {
         let lowered = hostname.lowercased()
         return lowered.hasSuffix(".") ? String(lowered.dropLast()) : lowered
@@ -339,12 +340,12 @@ public final class NativeDiscovery: @unchecked Sendable {
     // MARK: Resolve / remove handling (all on `queue`)
 
     private func handleResolve(_ service: ResolvedService) {
-        // Self-receiver filter (Alec's call, 2026-08-07): this Mac's own AirPlay
-        // receiver announces under the machine's own mDNS hostname — drop it
-        // BEFORE identity extraction so it never becomes an entry, an event, or a
-        // popover row. Both service types funnel through here, so one check
-        // covers `_airplay._tcp` and `_raop._tcp`. Logged once per instance name
-        // (D6: no silent drops), then quiet across re-announces.
+        // Self-receiver filter (the owner's call, 2026-08-07): this Mac's own
+        // AirPlay receiver announces under the machine's own mDNS hostname —
+        // drop it BEFORE identity extraction so it never becomes an entry, an
+        // event, or a popover row. Both service types funnel through here, so
+        // one check covers `_airplay._tcp` and `_raop._tcp`. Logged once per
+        // instance name (D6: no silent drops), then quiet across re-announces.
         if let localHostname, Self.normalizedHostname(service.hostname) == localHostname {
             if loggedSelfDrops.insert(service.name).inserted {
                 let message = "[Audiout] NativeDiscovery: dropping " +

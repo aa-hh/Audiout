@@ -10,7 +10,7 @@ import AppKit
 /// Warm Signal v4 §Call-1 applied to the Groups window's membership checklist
 /// (T6): `MembershipRowView` wears the rail/node language on the WARM pane (the
 /// group editor) and stays a plain stock checkbox row on the SYSTEM sheet ("New
-/// Group") — Alec's Q6 call, because `ember` measures ~2.34–2.48:1 on the
+/// Group") — the owner's Q6 call, because `ember` measures ~2.34–2.48:1 on the
 /// sheet's white and the node would be near-invisible there.
 ///
 /// These are structural/geometric assertions against real laid-out frames — no

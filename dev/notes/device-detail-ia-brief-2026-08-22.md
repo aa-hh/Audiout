@@ -121,7 +121,7 @@ Closest to Sonos / iOS 27 AirPods. Clearest mini-IA, most future room
 (an "About" can take a sync-trim or AirPlay-1 warning later). Always scrolls
 at default height. Most new layout and the most test churn.
 
-## Cross-cutting decisions (Alec's call)
+## Cross-cutting decisions (the owner's call)
 
 - **Volume read-only row:** drop (all proposals). It is the one fact that looks
   like it should be adjustable on a page that deliberately can't.

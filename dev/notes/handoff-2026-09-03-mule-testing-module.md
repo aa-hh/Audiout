@@ -12,7 +12,7 @@ SwiftPM finds both `XCTest.framework` and `Testing.framework` through one
 there, so SwiftPM marks XCTest unsupported (`'--num-workers' is only
 supported when testing with XCTest`) and drops the `-F` framework search
 path Swift Testing needs (`no such module 'Testing'`). One fault, two
-messages — not two bugs. Alec repointed the link at 06:04:22
+messages — not two bugs. The owner repointed the link at 06:04:22
 (`sudo xcode-select -s /Applications/Xcode-beta.app/Contents/Developer`);
 reproduced by re-selecting the CLT (`DEVELOPER_DIR=/Library/Developer/CommandLineTools`)
 and confirmed gone with a cold build, a warm build, and a live wrapper run

@@ -449,7 +449,7 @@
         "evidence": "support.google.com/googlecast/answer/6318642 (official Group delay correction slider), androidcentral.com 'Chromecast Audio devices playing out of sync? Here's your fix!'",
         "demand_signal": "shipped-table-stakes",
         "audiout_status_guess": "partial",
-        "notes": "Google ships a user-facing per-speaker latency nudge because real rooms drift. Audiout has a global numeric buffer setting; a per-device trim (esp. for the synced-local + future Bluetooth path, where BT latency varies wildly) is the analogous control. Fits Alec's bare-numbers-over-presets preference."
+        "notes": "Google ships a user-facing per-speaker latency nudge because real rooms drift. Audiout has a global numeric buffer setting; a per-device trim (esp. for the synced-local + future Bluetooth path, where BT latency varies wildly) is the analogous control. Fits the owner's bare-numbers-over-presets preference."
       },
       {
         "feature": "OS-level 'cast phone/system audio to speaker group' (Android baseline)",

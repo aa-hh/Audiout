@@ -2,21 +2,21 @@
 
 Written for someone with no access to the conversation that produced this.
 Everything described below is **uncommitted** in this worktree:
-`/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/device-detail-view-redesign-bf9547`
+`~/Projects/AirPlay Controller/.claude/worktrees/device-detail-view-redesign-bf9547`
 (branch `claude/device-detail-view-redesign-bf9547`). Nothing has been
-committed at any point in this effort — that is deliberate; commit is Alec's
+committed at any point in this effort — that is deliberate; commit is the owner's
 call, not the pipeline's.
 
 ## The big picture
 
-Alec asked for the Groups screen's "device detail" pane (and its two sibling
+The owner asked for the Groups screen's "device detail" pane (and its two sibling
 pages — Main Audio, and the group editor) to be redesigned. That redesign
-went through several rounds, each reviewed and approved, then Alec gave four
+went through several rounds, each reviewed and approved, then the owner gave four
 more pieces of feedback on the result. **All four are now done: the fourth
 (EQ scope into the Advanced fold) finished 2026-08-22 — AGENTS.md trimmed
 back under its cap (6239/6264), 264 tests in 10 suites green, build green,
 all four snapshot renders eyeballed correct, full diff Fable-reviewed.
-Remaining: Alec's own review + commit + live check.**
+Remaining: the owner's own review + commit + live check.**
 
 Read these two files for full context and rationale — they are the actual
 specs this work followed:
@@ -31,12 +31,12 @@ specs this work followed:
 - `dev/notes/eq-advanced-toggle-evaluation-2026-08-22.md` — research behind
   the "Advanced" row redesign (already done, see below).
 
-## Status of Alec's four feedback points
+## Status of the owner's four feedback points
 
-Alec's original four points, verbatim from the conversation:
+The owner's original four points, verbatim from the conversation:
 1. "Not enough padding at the top of the equalizer section." **DONE, reviewed, approved.**
 2. "Room for improvement in how we render this feature... look up best practices." **DONE 2026-08-22, verified and reviewed — see below.**
-3. "Inside the section the buttons Loudness and Reset are semantically at the same level but not aligned vertically." **DONE, reviewed, approved.** (Investigation found they were already correctly aligned — see caveat below — but Alec separately asked for Reset to move to the "Equalizer" title line, which is now done.)
+3. "Inside the section the buttons Loudness and Reset are semantically at the same level but not aligned vertically." **DONE, reviewed, approved.** (Investigation found they were already correctly aligned — see caveat below — but the owner separately asked for Reset to move to the "Equalizer" title line, which is now done.)
 4. "The Advanced button disappears — make clear there's a whole other section hidden. Maybe a toggle." **DONE, reviewed, approved.**
 
 ### Points 1, 3, 4 — confirmed complete and approved
@@ -58,7 +58,7 @@ run and pasted in the session:
   impression was actually the "Loudness" title text starting 22pt right of
   the Bass/Treble/Balance caption column (because of the checkbox glyph) and
   being drawn in full-strength text vs the other rows' secondary colour. Once
-  that was reported, Alec separately asked for Reset to move onto the
+  that was reported, the owner separately asked for Reset to move onto the
   "Equalizer" title line (a corollary of point 4's redesign — Reset is a
   card-level action, not a tone control). That is what actually shipped:
   - `EQEditorView.resetButton` removed entirely; the editor now exposes
@@ -117,7 +117,7 @@ non-interactive scope over three sliders whose axis meant something
 different — which is exactly why it read as "a black bar with a line
 through it."
 
-**Chosen direction (Alec approved "B, with A's dressing"):** move the scope
+**Chosen direction (the owner approved "B, with A's dressing"):** move the scope
 out of the resting card entirely. At rest the Equalizer card is just
 Bass / Treble / Balance / Loudness / hairline / Advanced row (the Sonos
 shape). Opening "Advanced" reveals the scope directly above the ten band
@@ -304,8 +304,8 @@ Once the word count is back at or under 6264:
    re-review cycle each before passing; expect this one might too).
 4. `git status --short` should show changes confined to exactly the files
    listed under "confirmed present" above, plus the doc file. Nothing here
-   has been committed — that is intentional; leave it for Alec to review
-   and commit himself once satisfied, per how this whole session has
+   has been committed — that is intentional; leave it for the owner to
+   review and commit themselves once satisfied, per how this whole session has
    operated throughout (nobody in this pipeline ever runs `git commit`).
 
 ## Files touched by this whole effort so far (points 1–4, all uncommitted)
@@ -353,7 +353,7 @@ same effort, both already read/used above:
 
 ## Constraints that applied throughout (still apply)
 
-- Nobody in this pipeline commits or pushes. That's Alec's decision to make.
+- Nobody in this pipeline commits or pushes. That's the owner's decision to make.
 - Never use `UserDefaults(suiteName:)` for test isolation — use each test
   suite's `TestIsolation` helper. This was a real bug caught in review once
   already this session (host constructors defaulting to real `.standard`

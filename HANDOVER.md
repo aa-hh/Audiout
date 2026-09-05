@@ -6,13 +6,13 @@ Written 2026-08-29. Single session, no prior handover exists for this branch.
 
 ## 0. Status — LIVE-VERIFIED 2026-08-29
 
-Alec tested the finished branch on Move 2 and confirmed it: "amazing its
+The owner tested the finished branch on Move 2 and confirmed it: "amazing its
 perfect". Turning an app down keeps it playing on the speaker, quieter;
 dragging across 100 is smooth; returning to 100 is silent. What follows
 records how it got there, because the first design did not work at all and
 the reasons are not obvious from the code.
 
-**Awaiting Alec's go-ahead to merge.** Nothing has been merged to `main`, and
+**Awaiting the owner's go-ahead to merge.** Nothing has been merged to `main`, and
 no PR is open.
 
 ### What the original commit got wrong
@@ -93,7 +93,7 @@ Do that for anything you add here.
   uncommitted.
 - `main` is **merge-only**. This branch has NOT been merged and has NO PR
   open. It reaches `main` as both a local `git merge` and a GitHub PR, on
-  Alec's go-ahead only.
+  the owner's go-ahead only.
 - Build & test through the wrappers ONLY: `bash scripts/build.sh`,
   `bash scripts/run-tests.sh --filter <Suite>` (or `AUDIOUT_FULL_SUITE=1` for
   the full run). Never bare `swift build`/`swift test`. Never pipe their
@@ -111,7 +111,7 @@ just plays in the whole-system mix, unlevelable.
 
 This branch makes that slider live for EVERY app, including "No Redirect."
 
-**Product decisions (settled with Alec, don't re-litigate):**
+**Product decisions (settled with the owner, don't re-litigate):**
 1. Volume 100 = the app is completely untouched — no tap, no mute, no
    exclusion, byte-identical to today's behavior.
 2. Below 100, the app is intercepted (`.mutedWhenTapped`, same as
@@ -265,7 +265,7 @@ spy converters). Before this merges:
 
 ## 9. Next steps, in order
 
-1. Alec runs the live-verification checklist in §7.
+1. The owner runs the live-verification checklist in §7.
 2. If it holds up by ear, this merges via the normal branch → `main` +
    GitHub PR flow — not before.
 3. `touch .claude/worktrees/per-app-intercept-volume-aba1ad/.prunable` once

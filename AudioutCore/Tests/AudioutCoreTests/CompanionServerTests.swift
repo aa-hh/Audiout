@@ -734,13 +734,13 @@ import AudioutProtocol
 
         let (client, log) = try connectClient(via: hub, to: server)
         defer { client.cancel() }
-        try sendHello(over: client, name: "Alec's iPhone")
+        try sendHello(over: client, name: "Owner's iPhone")
 
         #expect(waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
                 "the approved client was never welcomed")
         let request = try #require(asked.value)
         #expect(request.id == Self.validClientID, "the gate must see the (canonicalized) clientID")
-        #expect(request.name == "Alec's iPhone")
+        #expect(request.name == "Owner's iPhone")
         // No awaitingApproval frame on the fast path: an already-approved
         // phone must never flash "check your Mac".
         #expect(!log.contains(.awaitingApproval),

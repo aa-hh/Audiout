@@ -83,7 +83,7 @@ A Q-SYS support tip is quoted in search results as saying to let the system sett
 
 **Why it works:** it converts an invisible internal condition into a thing you look at. Nobody has to understand what a clock lock is to understand that four rows are green and one is not. It also makes the wait finite by making it visible per item.
 
-**In our sheet:** the waiting state stops being one paragraph plus a disabled button, and becomes a short list of the user's Bluetooth speakers with one word of state each. The Mac already publishes `settleRemainingSeconds` inside each device's alignment block, so the phone can render the whole list today with no new wire field (brief section "What the phone can see and do"). Warm Signal allows exactly one gold action per decision screen, so the list rows are plain and the single gold button stays at the bottom. The list is the answer to Alec's "have them define which speakers they want to set up": it is the same screen, doing scope-setting and status at once. No fake progress is involved because every row shows only what the Mac said.
+**In our sheet:** the waiting state stops being one paragraph plus a disabled button, and becomes a short list of the user's Bluetooth speakers with one word of state each. The Mac already publishes `settleRemainingSeconds` inside each device's alignment block, so the phone can render the whole list today with no new wire field (brief section "What the phone can see and do"). Warm Signal allows exactly one gold action per decision screen, so the list rows are plain and the single gold button stays at the bottom. The list is the answer to the owner's "have them define which speakers they want to set up": it is the same screen, doing scope-setting and status at once. No fake progress is involved because every row shows only what the Mac said.
 
 ### Move 2. Connect them one at a time, with the pause attached to each speaker
 
@@ -99,7 +99,7 @@ A Q-SYS support tip is quoted in search results as saying to let the system sett
 
 **Why it works:** the reason a user resents a gate is that they think the thing behind it is one shot. Once a measurement is framed as repeatable, waiting becomes optional rather than compulsory, and the escape hatch stops feeling like a trap.
 
-**In our sheet:** the phone branch's "Measure it now" line already offers the early measurement, and it is the line Alec calls a pass-through with no meaning. The change is what sits beside it: not a warning about variance, but the plain fact that a measurement takes about twenty seconds and can be run again whenever. Nothing here is invented state; the Mac already tracks staleness and already re-checks. Keep the announced, refusable re-check as the one app-initiated exception it already is.
+**In our sheet:** the phone branch's "Measure it now" line already offers the early measurement, and it is the line the owner calls a pass-through with no meaning. The change is what sits beside it: not a warning about variance, but the plain fact that a measurement takes about twenty seconds and can be run again whenever. Nothing here is invented state; the Mac already tracks staleness and already re-checks. Keep the announced, refusable re-check as the one app-initiated exception it already is.
 
 ### Move 4. Name the speaker that is late, and give the by-ear page a direction to try first
 
@@ -187,7 +187,7 @@ Read against our own measurement (Sonos Move 2 chaotic for 0 to 42 s, Sony WH-10
 
 ---
 
-## 5. Three questions only Alec can answer
+## 5. Three questions only the owner can answer
 
 1. **Does the Mac's settle clock run from link-up whether or not anyone is watching?** Move 2 only banks the wait if connecting three speakers up front means speakers one and two have finished settling by the time the user reaches speaker three. If the countdown only starts when the sheet opens, the whole one-at-a-time idea collapses into three sequential 60 s waits, which is worse than today.
 

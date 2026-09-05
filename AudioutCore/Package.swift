@@ -140,7 +140,7 @@ let package = Package(
         // T7 (PLAN-FIREFOX-ROUTING-LEAK.md): silent, no-audio diagnostic —
         // dumps every live Core Audio process object (pid, command, parent,
         // whether it independently resolves as an NSRunningApplication) so
-        // Alec can confirm on his own machine whether a multi-process
+        // the owner can confirm on their own machine whether a multi-process
         // browser's actual audio producer is a child process our single-PID
         // resolver can never find. Run: `swift run process-audio-dump`.
         .executable(name: "process-audio-dump", targets: ["process-audio-dump"]),

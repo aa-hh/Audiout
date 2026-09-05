@@ -10,7 +10,7 @@ current as of the merge of `claude/license-key-backend-cb2e78` into `main`.
 |---|---|---|
 | Product name | **Audiout** (decided 2026-08-23, roadmap 063). Bundle id `com.audiout.Audiout`, Bonjour `_audiout-pf._tcp`, env prefix `AUDIOUT_*`, key prefix `AUDT-` | this repo, renamed in one commit (a359aab8) |
 | License server | **Live and verified** at `https://license.audiout.app` — simulated purchase → key → email received → validate/refund/revoke all proven | `~/Projects/Audiout License Server` = github.com/aa-hh/audiout-license-server (private). README = endpoint contract + setup log |
-| Cloudflare | Worker + D1 + R2 + Email Sending on `audiout.app`, all secrets set. Resource names keep the old spelling (`audiouter-license`, `audiouter-releases`) — immutable, invisible | Alec's CF account |
+| Cloudflare | Worker + D1 + R2 + Email Sending on `audiout.app`, all secrets set. Resource names keep the old spelling (`audiouter-license`, `audiouter-releases`) — immutable, invisible | the owner's CF account |
 | Paddle | **Sandbox only.** Product "Audiout", price `pri_01m0pkeeq1hw4wg7055aekgev6` (€30 one-time), webhook destination → the Worker | sandbox-vendors.paddle.com |
 | App: soft license check | Built + tested: Settings › General key field with status line, "Buy Audiout…" button, lowest-priority "unregistered" note in the popover, Sparkle sends the key as a bearer header, check-in client live. All switched on by one Info.plist key (`AudioutLicenseServerURL`) that only a release build carries | `AudioutCore/Sources/AudioutCore/LicenseValidator.swift`, `LicenseCheckIn.swift`, `GeneralSettingsViewController.swift`, `PopoverController.swift`, `AppDelegate.swift` |
 | Release pipeline | `scripts/make-release.sh` + `docs/RELEASE.md` exist, **never run end-to-end** (needs Apple credentials) | this repo |
@@ -20,16 +20,16 @@ current as of the merge of `claude/license-key-backend-cb2e78` into `main`.
 ## Next steps, in order
 
 Each step names who does it. "Agent" steps are safe to hand to a fresh
-session with this file; "Alec" steps need credentials or a decision.
+session with this file; "Owner" steps need credentials or a decision.
 
 ### 1. Rename the other two codebases (Agent, ~1 h)
 
 1. **Website** (`~/Projects/Audiouter Website`): first merge
-   `claude/buy-page-paddle-c3b002` into its `main` (Alec go-ahead), THEN run
+   `claude/buy-page-paddle-c3b002` into its `main` (owner go-ahead), THEN run
    the rename on main — doing it the other way round means a 400-file merge
    conflict. The rename script lives in this repo and works on any git
    checkout: `cd` into the website repo and run
-   `python3 "/Users/alechenderson/Projects/AirPlay Controller/scripts/rename-app.py" Audiout`
+   `python3 ~/"Projects/AirPlay Controller/scripts/rename-app.py" Audiout`
    (dry run), check the display-name sites it lists (marketing copy — the
    wordmark, `<title>`, package name), then `--apply`, `npm run build`,
    verify both pages in the browser. Rename the folder to `Audiout Website`.
@@ -42,7 +42,7 @@ session with this file; "Alec" steps need credentials or a decision.
 3. Update the website's `thanks.js` `razor:` comment: the lookup contract is
    real now (`GET /v1/license/by-transaction/<txn>` on the license server).
 
-### 2. Website goes live-ready (Agent + Alec)
+### 2. Website goes live-ready (Agent + Owner)
 
 Placeholders in the website's `buy.astro` / `thanks.astro` / `index.astro`
 (all marked `data-placeholder`):
@@ -50,11 +50,11 @@ Placeholders in the website's `buy.astro` / `thanks.astro` / `index.astro`
 | Placeholder | Value |
 |---|---|
 | `data-paddle-env` | `sandbox` until step 6 |
-| `data-paddle-token` | Paddle client-side token (`test_…`) — Paddle dashboard → Developer tools → Authentication → client-side tokens (Alec creates; it's public-safe, fine to commit) |
+| `data-paddle-token` | Paddle client-side token (`test_…`) — Paddle dashboard → Developer tools → Authentication → client-side tokens (the owner creates; it's public-safe, fine to commit) |
 | `data-paddle-price` | `pri_01m0pkeeq1hw4wg7055aekgev6` |
 | `data-license-server` | `https://license.audiout.app` |
 | `DOWNLOAD` | `https://license.audiout.app/download?key=` — the thanks page should append the key; or simply tell the buyer the link is in the email |
-| `SUPPORT` | `support@audiout.app` — **Alec must set up receiving** for it: `npx wrangler email routing enable audiout.app` + a routing rule to his real inbox (Cloudflare Email Routing, free) |
+| `SUPPORT` | `support@audiout.app` — **The owner must set up receiving** for it: `npx wrangler email routing enable audiout.app` + a routing rule to their real inbox (Cloudflare Email Routing, free) |
 | `GITHUB` | the public source repo URL once the repo is public (GPL obligation — the buy page links to it) |
 
 Plus one new page: **"Resend my key"** — a one-field form that POSTs
@@ -67,11 +67,11 @@ a license for that address, it's on its way" regardless of the answer
 Pages on the same account is the obvious home (`audiout.app` is already a
 Cloudflare zone — one `wrangler pages deploy dist` or a Git-connected Pages
 project). Paddle needs the live domain approved before live checkout works
-(dashboard → Checkout → Website approval) — Alec.
+(dashboard → Checkout → Website approval) — the owner.
 
-### 3. First release build (Alec credentials, then Agent)
+### 3. First release build (Owner credentials, then Agent)
 
-`docs/RELEASE.md` § "Alec's actions" a–c: Developer ID Application
+`docs/RELEASE.md` § "Owner's actions" a–c: Developer ID Application
 certificate, `notarytool store-credentials audiout-notary`, Sparkle
 `generate_keys` (keep the private key in the Keychain, put the public key in
 `SPARKLE_ED_PUBLIC_KEY`). Then:
@@ -91,7 +91,7 @@ download path: `curl -I "https://license.audiout.app/download?key=<a key>"`
 → 200 with the zip. Expect first-run fallout in `make-release.sh` — it has
 never executed past the build step.
 
-### 4. Live check of the app surface (Alec + Agent, one session)
+### 4. Live check of the app surface (Owner + Agent, one session)
 
 Install the release zip (fresh bundle id → permissions prompt once; settings
 start empty). Check: General pane shows the key field + "Unregistered…" +
@@ -101,14 +101,14 @@ Updates… talks to the feed (no update yet → "up to date"). Then ship a
 `1.0.1` to prove an update actually installs through Sparkle — that's the
 one path no test covers.
 
-### 5. Sandbox end-to-end with a real checkout (Alec)
+### 5. Sandbox end-to-end with a real checkout (Owner)
 
 On the deployed site: Buy → Paddle test card `4242 4242 4242 4242` → lands on
 `/thanks?_ptxn=…` → key appears (polls the server) → email arrives → key
 works in the app → download link in the email serves the zip. This is the
 first time all three repos meet; budget an hour for small fixes.
 
-### 6. Go live (Alec decisions + Agent config)
+### 6. Go live (Owner decisions + Agent config)
 
 - ~~Final price + currency~~ SETTLED 2026-08-24: **€30 one-time**, applied to
   the sandbox price, PRODUCT.md, docs/PRICING.md and docs/RELEASE.md.
@@ -129,7 +129,7 @@ first time all three repos meet; budget an hour for small fixes.
   054 work uncommitted; it is now on `main` via this branch — `git checkout .`
   there and `touch .prunable` (or just delete the worktree).
 - `scripts/purge-dev-installs.sh` and the TCC notes still talk about
-  `com.audiouter.*` ids for OLD dev builds on Alec's Mac — leave them; they
+  `com.audiouter.*` ids for OLD dev builds on the owner's Mac — leave them; they
   purge what was installed, which was the old id.
 - Memory index (`~/.claude/projects/…/memory/MEMORY.md`) has the traps from
   the rename (`app-renamed-to-audiout.md`): guards were half-blind on the

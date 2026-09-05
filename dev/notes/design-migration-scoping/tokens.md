@@ -32,7 +32,7 @@
 - Three radii: Mac has 12.
 - One Case "no monospaced design": keycap font.
 - Words Scale: 10 bare size literals set words.
-- Micro Label 11pt floor: Mac 10pt (Alec §3.5 no-reflow ruling).
+- Micro Label 11pt floor: Mac 10pt (the owner's §3.5 no-reflow ruling).
 - Rule 2: Follow-system dial paints audio state in macOS accent (blue can own "carrying audio").
 
 ## Worth keeping
@@ -48,7 +48,7 @@
 ## Options
 ### A: Full adoption — viable, NOT recommended, Effort XL
 - Re-author to iOS name set; retire ~19 tokens (~210 call sites); delete dial entirely (14 files, 8 suites ≈90 tests) + Appearance accent section + AppSettings.accentStyle; WarmCanvasView flat; radii → 3 (proposed Mac 6/10/12 + capsules); remove blooms.
-- Spends a lot deleting dial + goldCTA before Alec has ruled.
+- Spends a lot deleting dial + goldCTA before the owner has ruled.
 ### B: iOS base + Mac extension block, dial kept whole — viable, Effort L
 - Same base; "Mac extension" MARK block keeps permission hues, engagedChrome, scope/stage/badge, spineTone, 3-column dial untouched.
 - Ships a known breach: Follow-system paints audio in controlAccentColor.
@@ -59,7 +59,7 @@
 - Measured: Mac light gold #9E761D on iOS well 3.45:1 ok; ringConnected 2.71 FAIL; faderRim 2.69 FAIL; dark faderRim on iOS raised 2.53 FAIL; dark goldCTA on raised 2.66 FAIL. iOS well vs light ground 1.154 clears Mac's 1.15 control floor by 0.004.
 
 ## Open questions
-1. Gold CTA ink: adopt iOS gold + #171104, or keep goldCTA deep-gold + white (Alec rejected mid-gold+black live 2026-08-11, Tokens.swift:766)?
+1. Gold CTA ink: adopt iOS gold + #171104, or keep goldCTA deep-gold + white (the owner rejected mid-gold+black live 2026-08-11, Tokens.swift:766)?
 2. Does DARK go cool too (#0A0A0C)? Rule 1 needs it or warm live row means nothing. PRODUCT.md:90 commits "warm near-black ground".
 3. Accent dial: Full/Subtle (C), whole (B), gone (A).
 4. ClashDisplay on Mac for "Welcome to Audiout" on gate?

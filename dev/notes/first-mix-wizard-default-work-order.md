@@ -1,6 +1,6 @@
 # Work order — the wizard is the default; the first-mix card goes; the row shows its tools
 
-Date 2026-09-03. Approved by Alec across three mock rounds
+Date 2026-09-03. Approved by the owner across three mock rounds
 (claude.ai/code/artifact/11ed7cb2-fa33-447d-b11c-370c11337f49). Direction:
 "the intelligent wizard should be the default way someone aligns a speaker;
 the card (align with your music / align with ticks / not now) should not be
@@ -35,7 +35,7 @@ Decisions already taken — do not reopen them:
 7. **The surface widens by 30 pt** (`SurfaceLayout.width` 623 → 653) so
    the name column keeps every pixel it has today. The trailing columns
    are anchored from the trailing edge and do not move.
-8. **The wizard stays a sheet** (Alec live-approved it across v7–v14).
+8. **The wizard stays a sheet** (the owner live-approved it across v7–v14).
 9. **Main Audio's row gets no equalizer button in this pass** (follow-up).
 
 ## Track A — backend: delete the hold and the dismissal record
@@ -308,7 +308,7 @@ bash scripts/run-tests.sh --filter MembershipRailTests
 ## Track C — docs (same change as the code; AGENTS.md docs-first rule)
 
 - `docs/plans/PLAN-UNIVERSAL-SYNC.md:199-221` — add under the 2026-08-08
-  lock: "**AMENDED 2026-09-03 (Alec):** the first-mix card, the hold-silent
+  lock: "**AMENDED 2026-09-03 (owner's call):** the first-mix card, the hold-silent
   join and the final 'Not now' are removed. A never-aligned Bluetooth
   speaker joining a mix plays as-is; a one-sentence note under its row
   offers the wizard until the speaker is measured (✕ hides it for the
@@ -330,7 +330,7 @@ bash scripts/run-tests.sh --filter MembershipRailTests
 - `AudioutCore/Sources/AudioutSharedUI/AGENTS.md` — add the EQ button and
   the fork chip to the row's element list if it has one.
 - `ROADMAP.jsonl` — mark `065` dropped through the foreman script (never
-  hand-edit): `echo '{"id":"065","status":"dropped","notes":"Superseded 2026-09-03: the untuned chip opens the wizard directly; the first-join note replaces the alert state; no guided-vs-manual choice (Alec)."}' | node /Users/alechenderson/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js update-status`
+  hand-edit): `echo '{"id":"065","status":"dropped","notes":"Superseded 2026-09-03: the untuned chip opens the wizard directly; the first-join note replaces the alert state; no guided-vs-manual choice (the owner)."}' | node ~/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js update-status`
 
 ## Out of scope — do not touch
 

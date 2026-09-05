@@ -51,13 +51,13 @@ Three real bugs found via live testing on real hardware, fixed and verified
    now coalesces — a gain arriving while a bead is already in flight is
    skipped, not restarted (`guard pulseLayer == nil`).
 
-These three fixes are good and live-verified by Alec on real hardware (test
+These three fixes are good and live-verified by the owner on real hardware (test
 builds "Audiout Rail Fix v1/v2/v3"). **Do not touch or revert them** while
 doing the refactor below — the refactor builds ON TOP of this state.
 
 ## Why we're refactoring instead of patching further
 
-After fix #3, Alec hit a **fourth** false-positive: collapsing then expanding a
+After fix #3, the owner hit a **fourth** false-positive: collapsing then expanding a
 device *subsection* triggered a pulse, with no actual connection happening.
 Root cause: subsection collapse drops the subsection's rows out of
 `deviceRows` entirely, then re-adds them on expand — and the pulse-firing
@@ -66,7 +66,7 @@ between draws**. To that diff, "rows disappeared and reappeared" looks
 identical to "a device joined." This is the same root cause as bug #2 above,
 just a different trigger path we hadn't hit yet.
 
-**The conclusion (Alec agreed): stop patching the diff.** The diff-based
+**The conclusion (the owner agreed): stop patching the diff.** The diff-based
 approach is fundamentally unfixable by enumeration — there will always be
 another layout event that looks like a membership change to a view-layer
 diff. The fix is architectural: **fire the pulse from the actual model event
@@ -81,7 +81,7 @@ bug." That's the refactor documented here.
 ## The two documents in this folder
 
 - **`01-design-brief.md`** — the architecture I (the orchestrating session)
-  wrote and Alec approved. Read this for the *why* and the target shape.
+  wrote and the owner approved. Read this for the *why* and the target shape.
 - **`02-work-order.md`** — a Fable-run scoping pass that read the actual
   current code and turned the brief into a paint-by-numbers, line-anchored
   execution plan: exact symbols to delete, exact line numbers (as of when it
@@ -182,12 +182,12 @@ above.
    - `bash scripts/run-tests.sh` — full suite, all green (baseline was 2543)
    - **Never** run bare `swift build`/`swift test` — always the `scripts/` wrappers (they route through the project's remote build mule and its concurrency/cache rules).
 5. I'd recommend an independent review pass (a fresh reviewer, not the
-   executor) before this gets built into a test app for Alec to live-verify —
+   executor) before this gets built into a test app for the owner to live-verify —
    this is exactly the kind of "spec said do X, did the diff actually do X and
    nothing more" check that catches subtle drift.
 6. Build a fresh-bundle-id test app (`APP_NAME=...`, `BUNDLE_ID=...`, see repo
    root `CLAUDE.md` / `AGENTS.md` for the exact pattern — every test build
-   needs its own bundle id, never reuse one) and have Alec live-verify:
+   needs its own bundle id, never reuse one) and have the owner live-verify:
    - A real connect still plays exactly one clean pulse, arriving in Main
      Audio.
    - Opening the popover fresh (first-ever connect on a brand new bundle id,
@@ -196,7 +196,7 @@ above.
    - Rapidly collapsing/expanding both a **card** (e.g. Output Devices) and a
      **subsection** (e.g. AirPlay Devices / Bluetooth Devices) fires **no**
      pulse either way.
-7. Once Alec confirms clean, this branch (`claude/rail-animation-bugs-89dd1a`)
+7. Once the owner confirms clean, this branch (`claude/rail-animation-bugs-89dd1a`)
    is ready to merge to `main` per the repo's normal merge-only-via-merge-commit
    rule — never commit directly to `main`.
 
@@ -210,6 +210,6 @@ above.
 - Don't add an event bus / new protocol / extra abstraction beyond what the
   work order specifies — it was scoped to the minimum shape that ends the bug
   class, not a general-purpose event system.
-- Don't merge to `main` without a live hardware check from Alec — animation
+- Don't merge to `main` without a live hardware check from the owner — animation
   timing bugs like these don't show up in the test suite the same way they
   show up to a human watching the actual motion.

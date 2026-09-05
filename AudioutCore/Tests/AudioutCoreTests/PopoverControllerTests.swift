@@ -2787,13 +2787,14 @@ import AudioutProtocol
 
     // MARK: An auto-swap must not flash the Mac's row
 
-    /// Alec, live, 2026-09-05: "whenever I select a device and it goes from the
-    /// MacBook to the new device, it quickly flashes on the MacBook before going
-    /// to the device I just clicked on … Same thing when it goes backwards."
-    /// The flash was the A4 attention pulse, which paints `Tokens.Color.gold` —
-    /// the panel's word for "carrying audio" — across the whole Mac row for half
-    /// a second at the moment the Mac's membership changes. Both directions of
-    /// the auto-swap raise `autoSwappedCurrentDevice`, so both fired it.
+    /// The owner, live, 2026-09-05: "whenever I select a device and it goes from
+    /// the MacBook to the new device, it quickly flashes on the MacBook before
+    /// going to the device I just clicked on … Same thing when it goes
+    /// backwards." The flash was the A4 attention pulse, which paints
+    /// `Tokens.Color.gold` — the panel's word for "carrying audio" — across the
+    /// whole Mac row for half a second at the moment the Mac's membership
+    /// changes. Both directions of the auto-swap raise
+    /// `autoSwappedCurrentDevice`, so both fired it.
     @Test func macRowNeverFlashesWhenAudioSwitchesToASpeakerOrBack() async throws {
         let (popover, controller, _) = try await makePopover()
         #expect(popover.test_deviceRowFlashing(id: "local-mac") == false, "no flash before the swap")
@@ -2814,14 +2815,14 @@ import AudioutProtocol
 
     // MARK: Surplus container height must not deform the content
 
-    /// Alec's call, 2026-08-06 — resilience, not a root fix. The live report's
-    /// banner ballooned into a tall empty box because the card stack's bottom pin
-    /// was a single REQUIRED `==`: a container taller than its content was
-    /// unsatisfiable, so Auto Layout deformed the content instead and the surplus
-    /// landed in the one view with nothing pinning its height. The pin is now
-    /// `<=` required (anti-collapse) plus `==` at 999 (hug), so surplus falls to
-    /// blank space at the bottom and every row keeps its geometry — which is also
-    /// what keeps the rail anchored to its rows through such a mismatch.
+    /// The owner's call, 2026-08-06 — resilience, not a root fix. The live
+    /// report's banner ballooned into a tall empty box because the card stack's
+    /// bottom pin was a single REQUIRED `==`: a container taller than its content
+    /// was unsatisfiable, so Auto Layout deformed the content instead and the
+    /// surplus landed in the one view with nothing pinning its height. The pin is
+    /// now `<=` required (anti-collapse) plus `==` at 999 (hug), so surplus falls
+    /// to blank space at the bottom and every row keeps its geometry — which is
+    /// also what keeps the rail anchored to its rows through such a mismatch.
     @Test func aContainerTallerThanItsContentLeavesRowGeometryUntouched() async throws {
         let (popover, _, _) = try await makePopover()
         popover.test_simulateOpen()

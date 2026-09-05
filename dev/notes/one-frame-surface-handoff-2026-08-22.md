@@ -21,7 +21,7 @@ no agent can do from a terminal. That's the actual "what remains."
 ## What this branch does
 
 Implements `dev/notes/one-frame-surface-brief.md` (the design brief, confirmed
-by Alec, committed at `4c0dd0ae`). Summary: the one-surface window
+by the owner, committed at `4c0dd0ae`). Summary: the one-surface window
 (`AppSurfaceController`) used to resize its width on every screen switch
 (Mixer/Groups/Settings), which visibly slid the toolbar tab strip out from
 under the cursor. Owner ruled that "reads as the surface twitching." Fix: one
@@ -78,7 +78,7 @@ inert; safe to delete on GitHub whenever.
    be running depending on whether the machine has restarted since. If not,
    rebuild:
    ```bash
-   cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/one-frame-surface"
+   cd ~/"Projects/AirPlay Controller/.claude/worktrees/one-frame-surface"
    APP_NAME="Audiout OneFrame v2" BUNDLE_ID="com.audiout.Audiout.oneframev2" bash scripts/make-app.sh
    open "build/Audiout OneFrame v2.app"
    ```
@@ -95,7 +95,7 @@ inert; safe to delete on GitHub whenever.
      background).
 
 2. **Merge decision.** PR #29 is open and green but not merged — that's
-   Alec's call per this repo's "no merge without explicit go-ahead" rule.
+   the owner's call per this repo's "no merge without explicit go-ahead" rule.
    Merge only after the live check above passes.
 
 3. **Nothing else is known to be broken or incomplete.** The brief's two
@@ -115,7 +115,7 @@ environment drift (stale `.build` cache, disk pressure, a hung remote test
 mule; see the `remote-test-mule`/`build-stalls` memories in this project):
 
 ```bash
-cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/one-frame-surface"
+cd ~/"Projects/AirPlay Controller/.claude/worktrees/one-frame-surface"
 bash scripts/build.sh
 AUDIOUT_TEST_NO_CACHE=1 bash scripts/run-tests.sh
 ```

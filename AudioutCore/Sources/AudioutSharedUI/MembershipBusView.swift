@@ -15,11 +15,11 @@ import QuartzCore
 /// behind it, and a rail click falls through to the row.
 ///
 /// **Cross-row continuity is achieved by the panel-level ``BusRailOverlayView``**
-/// (Alec's continuity correction): the overlay draws the rail line, detour
-/// arcs, and origin hook as ONE continuous spine down a clear gutter; each row
-/// hosts one `MembershipBusView` centred on `railGutterCenterX` that draws
-/// ONLY its node disc/ring. The overlay reads each node's kind (via the host
-/// row) to place the rail's gap (on-spine) or detour arc (off-spine).
+/// (the owner's continuity correction): the overlay draws the rail line,
+/// detour arcs, and origin hook as ONE continuous spine down a clear gutter;
+/// each row hosts one `MembershipBusView` centred on `railGutterCenterX` that
+/// draws ONLY its node disc/ring. The overlay reads each node's kind (via the
+/// host row) to place the rail's gap (on-spine) or detour arc (off-spine).
 ///
 /// **Node vocabulary (v4 §Call-1, the static states the energize agent drives):**
 /// `.member` (filled gold — connected member), `.connecting` (gold dashed
@@ -254,13 +254,14 @@ public final class MembershipBusView: NSView {
         let r = drawnRadius
 
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            // NODE ONLY (Warm Signal v4 §Call-1, Alec's continuity correction):
-            // the RAIL LINE + detour ARCS + origin HOOK are drawn by the
-            // panel-level ``BusRailOverlayView`` so the spine is one continuous
-            // line down a clear gutter. This view draws just the node disc/ring,
-            // centred on the row's real checkbox so it aligns with the click
-            // target. The overlay reads this node's kind (via the host row) to
-            // place the rail's gap (on-spine) or detour arc (off-spine).
+            // NODE ONLY (Warm Signal v4 §Call-1, the owner's continuity
+            // correction): the RAIL LINE + detour ARCS + origin HOOK are drawn
+            // by the panel-level ``BusRailOverlayView`` so the spine is one
+            // continuous line down a clear gutter. This view draws just the
+            // node disc/ring, centred on the row's real checkbox so it aligns
+            // with the click target. The overlay reads this node's kind (via
+            // the host row) to place the rail's gap (on-spine) or detour arc
+            // (off-spine).
             let cx = bounds.midX
             let cy = bounds.midY
             let rect = NSRect(x: cx - r, y: cy - r, width: 2 * r, height: 2 * r)
@@ -335,13 +336,14 @@ public final class MembershipBusView: NSView {
     }
 
     /// The radius this node would REST at once its checkbox's click has landed
-    /// — the hover's whole target (Alec 2026-08-28: "it should only grow to the
-    /// size it would eventually be if it's clicked"). The checkbox toggles
-    /// membership, so the click moves an off-spine node ON to the spine and an
-    /// on-spine one OFF it: this is exactly ``nodeRadius(for:)`` with the spine
-    /// test inverted, reusing `onSpine` for the same reason that one does. A
-    /// non-member therefore GROWS 5.5 → 7.5 and a member SHRINKS 7.5 → 5.5 —
-    /// the direction of travel is what tells the user which way the click goes.
+    /// — the hover's whole target (per the owner, 2026-08-28: "it should only
+    /// grow to the size it would eventually be if it's clicked"). The checkbox
+    /// toggles membership, so the click moves an off-spine node ON to the
+    /// spine and an on-spine one OFF it: this is exactly ``nodeRadius(for:)``
+    /// with the spine test inverted, reusing `onSpine` for the same reason
+    /// that one does. A non-member therefore GROWS 5.5 → 7.5 and a member
+    /// SHRINKS 7.5 → 5.5 — the direction of travel is what tells the user
+    /// which way the click goes.
     /// The earlier fixed 10 pt hover radius was REJECTED: it was bigger than any
     /// size a node legitimately rests at, so the hover promised a state that
     /// does not exist.

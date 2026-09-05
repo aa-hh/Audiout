@@ -87,12 +87,12 @@ import AirPlayEngine
 
     // MARK: appear -> update -> disappear (AP2)
 
-    /// Self-receiver filter (Alec's call, 2026-08-07): a service announced under
-    /// THIS machine's own mDNS hostname — macOS's AirPlay Receiver on the Mac the
-    /// app runs on — is dropped before it ever becomes an event, for both service
-    /// types, with hostname matching that survives Bonjour's trailing dot and
-    /// mDNS case-insensitivity. A same-named service from a DIFFERENT host (the
-    /// real second-Mac case) still surfaces. Ordering on the discovery queue
+    /// Self-receiver filter (the owner's call, 2026-08-07): a service announced
+    /// under THIS machine's own mDNS hostname — macOS's AirPlay Receiver on the
+    /// Mac the app runs on — is dropped before it ever becomes an event, for both
+    /// service types, with hostname matching that survives Bonjour's trailing dot
+    /// and mDNS case-insensitivity. A same-named service from a DIFFERENT host
+    /// (the real second-Mac case) still surfaces. Ordering on the discovery queue
     /// makes the assertion airtight: the self resolves are processed before the
     /// real one, so a single .appeared event proves they produced nothing.
     @Test func selfHostnameServicesAreNeverSurfaced() {

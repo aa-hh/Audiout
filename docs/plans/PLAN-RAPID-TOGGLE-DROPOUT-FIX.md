@@ -3,10 +3,10 @@
 Status: **T1+T2 (`32a632d`), T3 (`60ddf63`) and T4 EXECUTED AND COMMITTED, 2026-07-25. The §E adversarial
 review gate HAS now run — verdict SAFE on the primary regression question, but it produced 7 findings, one of
 which (H-1, §H below) questions whether this fix actually closes the reported bug at slower click cadences.
-T5 (Alec's live test) is NOT started and is gated on the H-1 decision. NOT MERGED anywhere —
+T5 (the owner's live test) is NOT started and is gated on the H-1 decision. NOT MERGED anywhere —
 `claude/warm-signal-full` only.**
 Ported by hand onto today's `AudioutCore` on branch `claude/rapid-toggle-detector-2` (2026-09-02): detector #2, the T3 seam and tests, the `stop()` sink teardown and the H-6 metering fix. T5 is still owed.
-Produced via `/orchestrate`. Root-cause evidence: live-tested by Alec on `claude/warm-signal-full`, diagnosed from `~/Library/Logs/Audiout/telemetry.jsonl` (19 whole-system tap rebuilds in 2.5s of rapid clicking, `desiredOn` unchanged across all of them). Distinct from, but related to, `docs/plans/PLAN-SYNCED-LOCAL-DROPOUT-FIX.md` (T1–T9, already merged to main) — that plan fixed AirPlay going silent on a single Mac-add caused by a *device sample-rate renegotiation*; this plan fixes a *different* trigger: the whole-system tap rebuild that `setSyncedLocalSink` itself forces on every attach/detach, which storms under rapid repeated clicking.
+Produced via `/orchestrate`. Root-cause evidence: live-tested by the owner on `claude/warm-signal-full`, diagnosed from `~/Library/Logs/Audiout/telemetry.jsonl` (19 whole-system tap rebuilds in 2.5s of rapid clicking, `desiredOn` unchanged across all of them). Distinct from, but related to, `docs/plans/PLAN-SYNCED-LOCAL-DROPOUT-FIX.md` (T1–T9, already merged to main) — that plan fixed AirPlay going silent on a single Mac-add caused by a *device sample-rate renegotiation*; this plan fixes a *different* trigger: the whole-system tap rebuild that `setSyncedLocalSink` itself forces on every attach/detach, which storms under rapid repeated clicking.
 
 ---
 
@@ -16,7 +16,7 @@ Rapidly selecting/deselecting the Mac as a local output while an AirPlay device 
 
 ---
 
-## B. Decisions (Alec, 2026-07-25) — all questions resolved
+## B. Decisions (owner's call, 2026-07-25) — all questions resolved
 
 **Q1 — Where does the fix live?**
 **Decided: in `NativeBackend.swift` (recommended option).** This is the file that actually drives BOTH the tap rebuild and the sink re-anchor, so one fix there addresses both symptoms (silence and out-of-sync). A narrower fix inside `NativeCaptureCoordinator.setSyncedLocalSink` was considered and rejected — it would only address the tap-rebuild half, not the sink-anchor-reset half.
@@ -42,7 +42,7 @@ Rapidly selecting/deselecting the Mac as a local output while an AirPlay device 
 - **what:** Record the desired synced-local state and (re)schedule a 250ms trailing-edge settle instead of executing each transition immediately, mirroring the existing `armWakeWatchdog` debounce idiom. On fire, run the real transition only if desired differs from applied, so a burst collapses to at most one `applySyncedLocalSinkTransition` call.
 - **kind:** backend
 - **depends_on:** — (start of the chain)
-- **model / effort used:** opus 4.8 / high (kept at planner's original assignment — a cost-check flagged this as a possible sonnet/medium downgrade, but Alec confirmed keeping the stronger model given this edits the app's most concurrency-sensitive audio file).
+- **model / effort used:** opus 4.8 / high (kept at planner's original assignment — a cost-check flagged this as a possible sonnet/medium downgrade, but the owner confirmed keeping the stronger model given this edits the app's most concurrency-sensitive audio file).
 - **status: DONE, committed `32a632d`.**
 - **verify:** `swift build --build-system native` clean ✓. Full suite (`swift test --build-system native --parallel`, 1264 tests) green ✓ (via the repo's own pre-commit Guard 4, run independently at commit time). Existing `NativeBackendSyncedLocalSelectionTests` (6 cases) pass with the debounce in place ✓. **New regression tests specific to the debounce/churn behavior are NOT yet written — that's T3 below.**
 
@@ -91,7 +91,7 @@ Rapidly selecting/deselecting the Mac as a local output while an AirPlay device 
   concurrently with the writeup, so §8 could not yet mention them).
 - **verify:** file extended ✓, backticked symbols `git grep`-verified ✓.
 
-### T5 — Gated by-ear live test (Alec only)
+### T5 — Gated by-ear live test (owner only)
 - **files:** none (manual).
 - **what:** With an AirPlay device playing, rapidly toggle the Mac's "Current Device" checkbox many times, leave it deselected → audio must keep playing (no permanent silence, matching the original confirmed repro). Then a single, unhurried select of the Mac while AirPlay plays → Mac and AirPlay audibly in sync (or, if not, that is new evidence Q5's "leave `SyncedLocalSink` alone" decision needs revisiting). Native single-instance only (PTP 319/320 exclusive to one worktree).
 - **kind:** test (manual/live)
@@ -117,7 +117,7 @@ Single hot file (`NativeBackend.swift`) for T1/T2 — serialized on one agent, w
 - **Wave 1 (done):** T1 → T2, serial, same agent, same commit.
 - **Wave 2 (not started):** T3.
 - **Wave 3 (not started):** T4 (docs, after T1–T3).
-- **Wave 4 (not started):** T5 (Alec, live) — gated on T3 green.
+- **Wave 4 (not started):** T5 (the owner, live) — gated on T3 green.
 - **Critical path:** T1 → T2 → T3 → T5.
 
 ---
@@ -175,7 +175,7 @@ least path-scoped, so T4's concurrent edits were not swept. Serialize or isolate
 ### Remediation pass (H-1 / H-2 / H-3 / H-6)
 
 Serialized onto one agent (all four touch `NativeBackend.swift` + its two test files). H-1 took both
-halves Alec decided on — structural first, then the window — mirroring the memory-leak plan's
+halves the owner decided on — structural first, then the window — mirroring the memory-leak plan's
 T8-before-T9/T10 sequencing: churn is now armed by EITHER ≥2 coalesced decisions in one settle OR ≥2
 REAL applied transitions inside a rolling 2s horizon (monotonic `uptimeNanoseconds`), and the window
 moved 0.25s → 0.5s. The zero-reset-on-a-single-toggle invariant is unchanged and still guarded;

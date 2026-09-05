@@ -1,6 +1,6 @@
 # Warm Signal — screens follow-up (onboarding / groups / settings)
 
-**Status: LOCKED by Alec 2026-07-22, sequenced AFTER the v4.1 popover build.** Captured from
+**Status: LOCKED by the owner 2026-07-22, sequenced AFTER the v4.1 popover build.** Captured from
 the screen review so it isn't lost. These surfaces are file-disjoint from the popover spine.
 
 ## Onboarding / Setup

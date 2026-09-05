@@ -156,7 +156,7 @@ import CoreAudio
     private let spotify = "com.spotify.client"
     private let spotifyHelper = "com.spotify.client.helper"
 
-    // THE live regression, reproduced exactly (2026-07-26, Alec's machine):
+    // THE live regression, reproduced exactly (2026-07-26, the owner's machine):
     // pid 953 "Spotify Helper", ppid 1 (macOS reparented it to launchd, so the
     // parent walk is dead) and reporting a bundle id OF ITS OWN that is not the
     // target — the two conditions that together let the helper's audio escape

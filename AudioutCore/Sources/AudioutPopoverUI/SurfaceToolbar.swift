@@ -15,7 +15,7 @@ import AudioutSharedUI
 ///   always did;
 /// - Pin as a trailing item, standing OUTSIDE the tabs' capsule.
 ///
-/// **One name at a time, and a capped one** (Alec, 2026-09-04, third pass:
+/// **One name at a time, and a capped one** (owner's call, 2026-09-04, third pass:
 /// "if I were to click on groups or speakers, then it would expand out to show
 /// the name"). Names were on all three items' `title` once (#95, #97) and were
 /// removed on 2026-09-03 because three translated labels widened the strip
@@ -37,7 +37,7 @@ import AudioutSharedUI
 /// that driver already answers it: the width settles synchronously, with no
 /// frame of travel.
 ///
-/// **The three tabs are ONE capsule** (Alec, 2026-09-04, second pass). A
+/// **The three tabs are ONE capsule** (owner's call, 2026-09-04, second pass). A
 /// single `NSToolbarItem` carries a `SurfaceToolbarTabCapsule`: one
 /// pill-shaped surface drawn once, with the three tabs as buttons layered over
 /// it. The current tab is marked by a soft rounded highlight INSIDE that pill,
@@ -61,7 +61,7 @@ import AudioutSharedUI
 ///
 /// **REVERSED 2026-09-05: one shape for every STATE, two shapes for the two
 /// kinds of ITEM.** Until this review the strip drew one rounded rectangle
-/// everywhere, tabs and Pin alike. Alec asked for Pin to be "a circle instead
+/// everywhere, tabs and Pin alike. The owner asked for Pin to be "a circle instead
 /// of an oval", so Pin's seat is now square and cut at half its height, while
 /// the three tabs keep the stadium they wear inside their shared pill. The
 /// 2026-08-30 rule is NOT what changed: every item is still the same authored

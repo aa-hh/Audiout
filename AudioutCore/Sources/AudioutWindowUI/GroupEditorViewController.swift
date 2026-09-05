@@ -110,10 +110,11 @@ public final class GroupEditorViewController: NSViewController {
     /// single spare point of height to put it in.
     ///
     /// A stock `NSButton` the same height as the primary beside it, so the two
-    /// read as a matched secondary/primary pair on one band (Alec, 2026-09-03).
-    /// The quiet `.accessoryBar` bezel is what keeps it SECONDARY next to the
-    /// primary's `.rounded` one; being a real control, the focus ring,
-    /// Space, the pressed state and `accessibilityPerformPress()` are AppKit's.
+    /// read as a matched secondary/primary pair on one band (owner's call,
+    /// 2026-09-03). The quiet `.accessoryBar` bezel is what keeps it SECONDARY
+    /// next to the primary's `.rounded` one; being a real control, the focus
+    /// ring, Space, the pressed state and `accessibilityPerformPress()` are
+    /// AppKit's.
     private let backButton = BackButton()
     private let iconWell = DeviceIconWellView()
     /// The group's identity light, mounted behind the well.
@@ -135,14 +136,14 @@ public final class GroupEditorViewController: NSViewController {
     private let headerWell = GroupedSectionView()
     private let deleteButton = NSButton()
     /// The pane's PRIMARY action, at the TOP RIGHT of the form, level with the
-    /// "‹ Groups" control it pairs with (Alec, 2026-09-03). It carries two
-    /// titles: "Done" whenever the editor holds nothing uncommitted — which is
-    /// almost always, since membership, the icon and a committed rename each
-    /// write through immediately — and "Save" while the name field holds text
-    /// that has not been committed yet (``hasPendingRename``). Pressing it on
-    /// "Save" commits that rename first and then leaves, exactly as Done does,
-    /// so no typed name is ever abandoned. No Return key equivalent — Return
-    /// belongs to the rename field.
+    /// "‹ Groups" control it pairs with (owner's call, 2026-09-03). It carries
+    /// two titles: "Done" whenever the editor holds nothing uncommitted —
+    /// which is almost always, since membership, the icon and a committed
+    /// rename each write through immediately — and "Save" while the name field
+    /// holds text that has not been committed yet (``hasPendingRename``).
+    /// Pressing it on "Save" commits that rename first and then leaves,
+    /// exactly as Done does, so no typed name is ever abandoned. No Return key
+    /// equivalent — Return belongs to the rename field.
     private let doneButton = NSButton()
 
     /// The pane's scroll view (roadmap 039) — see the note in ``loadView()``.
@@ -223,12 +224,12 @@ public final class GroupEditorViewController: NSViewController {
 
     /// The top action band's inset from the document's top. The band holds the
     /// two controls that leave this pane, and it needs its own margin from the
-    /// toolbar chrome above it (Alec, 2026-09-03) while still clearing the
-    /// icon well below by at least `topBandControlGap`-worth of room — the
-    /// back button overlaps the icon well horizontally, so if the band drops
-    /// low enough the icon tile draws on top of it. There is no room to buy
-    /// that clearance from this constant alone: raising `topBandTopInset` on
-    /// its own eats straight into the gap and lands the tile on the button.
+    /// toolbar chrome above it (owner's call, 2026-09-03) while still clearing
+    /// the icon well below by at least `topBandControlGap`-worth of room —
+    /// the back button overlaps the icon well horizontally, so if the band
+    /// drops low enough the icon tile draws on top of it. There is no room to
+    /// buy that clearance from this constant alone: raising `topBandTopInset`
+    /// on its own eats straight into the gap and lands the tile on the button.
     /// So this constant and `GroupsPaneLayout.columnTopInset` move TOGETHER,
     /// by the same amount, whenever the band's margin changes — that keeps the
     /// 8 pt of clearance below the band constant while giving the band more
@@ -533,9 +534,9 @@ public final class GroupEditorViewController: NSViewController {
             backButton.topAnchor.constraint(equalTo: document.topAnchor,
                                             constant: Self.topBandTopInset),
             backButton.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-            // SAME SIZE as the primary (Alec, 2026-09-03) — read off the
-            // primary's own control metrics rather than a copied number, so a
-            // future bezel or control-size change moves both together.
+            // SAME SIZE as the primary (owner's call, 2026-09-03) — read off
+            // the primary's own control metrics rather than a copied number,
+            // so a future bezel or control-size change moves both together.
             backButton.heightAnchor.constraint(equalTo: doneButton.heightAnchor),
             backButton.trailingAnchor.constraint(lessThanOrEqualTo: doneButton.leadingAnchor,
                                                  constant: -Self.topBandControlGap),
@@ -819,9 +820,9 @@ public final class GroupEditorViewController: NSViewController {
     private func editorProjection(for group: Group, devices: [Device]) -> EditorProjection {
         let memberSet = Set(group.memberIDs)
         let isActive = groupController.activeGroupID == group.id
-        // Every device is a candidate, unavailable ones included (Alec,
-        // 2026-08-28) — same rule as `rebuildCandidates(memberSet:)` and the
-        // creation sheet. Rows for unavailable devices render dimmed.
+        // Every device is a candidate, unavailable ones included (owner's
+        // call, 2026-08-28) — same rule as `rebuildCandidates(memberSet:)` and
+        // the creation sheet. Rows for unavailable devices render dimmed.
         let candidates = devices
         return EditorProjection(
             groupID: group.id,
@@ -881,7 +882,7 @@ public final class GroupEditorViewController: NSViewController {
     /// focus and any in-flight click are attached to. A changed sequence (a
     /// device appeared or vanished) still falls through to the full rebuild.
     private func rebuildCandidates(memberSet: Set<String>) {
-        // Every device, unavailable ones included (Alec, 2026-08-28).
+        // Every device, unavailable ones included (owner's call, 2026-08-28).
         let newCandidates = allDevices
         guard newCandidates.map(\.id) == candidateDevices.map(\.id), !rowsByID.isEmpty else {
             candidateDevices = newCandidates

@@ -2,8 +2,8 @@
 // Copyright (C) 2026 ahh and contributors.
 
 // T7 (PLAN-FIREFOX-ROUTING-LEAK.md, Q5): a SILENT, NO-AUDIO diagnostic that
-// dumps every live Core Audio process object on the system, so Alec can
-// visually confirm — on his own Mac, with a real multi-process browser
+// dumps every live Core Audio process object on the system, so the owner can
+// visually confirm — on their own Mac, with a real multi-process browser
 // actually playing audio — whether that browser's audio comes from a
 // process distinct from the one `NSRunningApplication` resolves for its
 // bundle ID. This tool plays NOTHING and captures NOTHING; it only reads

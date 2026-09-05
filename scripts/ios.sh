@@ -6,13 +6,13 @@
 #   scripts/ios.sh test   [--root DIR] [extra xcodebuild args]
 #   scripts/ios.sh shot   [--root DIR] [--out DIR] [--appearance dark|light|both]
 #
-# `device` is the one that puts the app on Alec's actual iPhone, which is the
-# only way the companion app is ever verified (audiout-remote's AGENTS.md). Prefer it over
-# `test`/`shot`: those drive a Simulator, and simulator DEVICES are disk the
-# machine does not have to spare -- the runtime image alone is ~7.5G and the
-# devices were deleted on purpose. `build` is safe either way; it targets
-# `generic/platform=iOS Simulator`, which needs the platform but creates no
-# device.
+# `device` is the one that puts the app on the owner's actual iPhone, which is
+# the only way the companion app is ever verified (audiout-remote's AGENTS.md).
+# Prefer it over `test`/`shot`: those drive a Simulator, and simulator DEVICES
+# are disk the machine does not have to spare -- the runtime image alone is
+# ~7.5G and the devices were deleted on purpose. `build` is safe either way; it
+# targets `generic/platform=iOS Simulator`, which needs the platform but creates
+# no device.
 #
 # WHY THIS EXISTS: run-tests.sh and build.sh route SwiftPM work to the other Mac
 # and know nothing about xcodebuild, so every iOS build and every iOS test ran
@@ -34,13 +34,13 @@
 # next Xcode update. audiout-remote's AGENTS.md already documented a device that stopped
 # existing. Ask the machine instead.
 #
-# AND NOTE WHAT THIS SCRIPT IS NOT. The companion app is VERIFIED on Alec's
-# physical iPhone 15 Pro, always — see audiout-remote's AGENTS.md. `test` and `shot` below
-# drive a resolved simulator, which makes them a compile-and-smoke signal and
-# nothing more: device and Simulator builds are separate paths, and the
-# Simulator cannot discover a real Mac over Bonjour, raise the local-network
-# prompt, or make a speaker play. Never report an iOS change as verified on
-# the strength of this script.
+# AND NOTE WHAT THIS SCRIPT IS NOT. The companion app is VERIFIED on the owner's
+# physical iPhone 15 Pro, always — see audiout-remote's AGENTS.md. `test` and
+# `shot` below drive a resolved simulator, which makes them a compile-and-smoke
+# signal and nothing more: device and Simulator builds are separate paths, and
+# the Simulator cannot discover a real Mac over Bonjour, raise the local-network
+# prompt, or make a speaker play. Never report an iOS change as verified on the
+# strength of this script.
 
 set -eu
 
@@ -95,9 +95,9 @@ project="AudioutRemote.xcodeproj"
 }
 
 # --- device ----------------------------------------------------------------
-# Builds for Alec's physical iPhone, signs it, and installs it. This is the only
-# mode that produces a verifiable build: the Simulator cannot discover a Mac over
-# Bonjour, raise the local-network prompt, or make a speaker play.
+# Builds for the owner's physical iPhone, signs it, and installs it. This is the
+# only mode that produces a verifiable build: the Simulator cannot discover a
+# Mac over Bonjour, raise the local-network prompt, or make a speaker play.
 #
 # IT NEVER ROUTES TO THE REMOTE, and that is not an oversight. A device build
 # needs an "Apple Development" certificate plus a provisioning profile for the

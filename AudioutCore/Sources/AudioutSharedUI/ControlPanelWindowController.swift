@@ -592,8 +592,9 @@ public final class ControlPanelWindowController: NSWindowController {
     /// `makeKeyAndOrderFront`, the panel still reported
     /// `key=false appActive=false`. The panel then renders its whole header in
     /// the unfocused appearance forever — every control at ~1.2:1 instead of
-    /// ~3.3:1, and the brand mark's gold washed to grey. Alec reported it as
-    /// "the header is always in a dismissed state", in the notarised build too.
+    /// ~3.3:1, and the brand mark's gold washed to grey. The owner reported it
+    /// as "the header is always in a dismissed state", in the notarised build
+    /// too.
     ///
     /// `activate(ignoringOtherApps:)` is deprecated but is NOT refusable, and
     /// is the only form that reliably fronts an `.accessory` app from its own

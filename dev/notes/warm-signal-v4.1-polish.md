@@ -1,8 +1,8 @@
 # Warm Signal v4.1 — Polish batch + tether wiring + energize
 
-## CORRECTIONS from Alec's review (2026-07-22) — supersede the items below where they conflict
+## CORRECTIONS from the owner's review (2026-07-22) — supersede the items below where they conflict
 Reference mock (the corrected look, verified): scratchpad `v41-fixes.html`.
-- **Master out meter (item 1) — FINAL placement (Alec, 2026-07-22):** it lives UNDER the
+- **Master out meter (item 1) — FINAL placement (owner's call, 2026-07-22):** it lives UNDER the
   "Main Audio" title, EXACTLY like device meters sit under their device names — same position,
   same geometry — but THICKER (`masterMeterThickness` ~6pt vs device 3pt) to denote the master
   bus. NOT floating below the row, NOT below the icon, NOT under the fader.
@@ -26,7 +26,7 @@ Reference mock (the corrected look, verified): scratchpad `v41-fixes.html`.
   no residue at rest. Reduce Motion still removes the animation entirely (snap to resolved).
 
 
-**Status: LOCKED by Alec in the 2026-07-22 design session.** Extends
+**Status: LOCKED by the owner in the 2026-07-22 design session.** Extends
 `warm-signal-v4-rail-and-tether.md` (Calls 1–3). Call 1 is already implemented + committed
 (2c3c836): left-gutter continuous rail, spine-to-lowest-selected with detours + node
 clearance, current-device floor, meter-under-name, muted-unconnected controls, SYSTEM

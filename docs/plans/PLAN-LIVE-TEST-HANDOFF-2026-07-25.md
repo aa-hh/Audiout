@@ -8,7 +8,7 @@ in — see `PLAN-MEMORY-LEAK-AUDIT.md` / `PLAN-MEMORY-LEAK-LIVE-TESTS.md` for th
 ## TL;DR
 
 - **4 real bugs found and fixed tonight**, all committed, hermetic suites green. One is
-  **live-confirmed by Alec**; the others are telemetry-confirmed but not fully ear-confirmed.
+  **live-confirmed by the owner**; the others are telemetry-confirmed but not fully ear-confirmed.
 - **1 serious, unresolved mystery remains**: a per-app capture's own state machine appears to
   diverge from reality — it logs `idle` for extended periods while audio keeps audibly playing.
   This is now precisely evidenced (see below) but NOT diagnosed. This is the most important
@@ -36,9 +36,9 @@ in — see `PLAN-MEMORY-LEAK-AUDIT.md` / `PLAN-MEMORY-LEAK-LIVE-TESTS.md` for th
   second `Audiout.app` while one is running live. There were 5 stale build artifacts across
   worktrees tonight from parallel sessions; I deleted 4, kept this one. Check
   `find .claude/worktrees -name Audiout.app` before assuming you're the only one.
-- **Live audio testing is Alec-only.** Claude never plays/captures audio itself. Diagnosis must
-  go through Telemetry, `process-audio-dump`, `ps`/`system_profiler`, and asking Alec what he
-  hears — not by trying to drive audio directly.
+- **Live audio testing is owner-only.** Claude never plays/captures audio itself. Diagnosis must
+  go through Telemetry, `process-audio-dump`, `ps`/`system_profiler`, and asking the owner what they
+  hear — not by trying to drive audio directly.
 - A parallel session titled **"Reliability plan execution"** (worktree `competent-kare-f71af6`,
   branch `claude/reliability-audit-0defe7`) was told to stand down on live-testing and on the
   pitch-up/judder bugs specifically, with the root cause hand-delivered so it wouldn't re-derive
@@ -49,7 +49,7 @@ in — see `PLAN-MEMORY-LEAK-AUDIT.md` / `PLAN-MEMORY-LEAK-LIVE-TESTS.md` for th
 | Commit | Fix | Live status |
 |---|---|---|
 | `d415381` | Per-app capture rebuild storm: `PerAppCaptureCoordinator`'s sample-rate listener rebuilt on EVERY HAL notification, including set-to-same-value re-announcements (no compare-before-rebuild guard, unlike the whole-system tap's `TapRebuildDecision`). | Superseded/completed by `196e5b7` below — the guard alone didn't work because the rate it compared against was itself wrong (see next row). Not independently re-verified after the fix below landed. |
-| `196e5b7` | **Per-app pitch-up/judder** (~8.8% sharp + fast + juddery + cut out after a couple seconds): `PerAppCaptureCoordinator.createTapAndReadFormat` reads `kAudioTapPropertyFormat` off the bare tap BEFORE it joins the aggregate; the aggregate resamples onto its own clock, so a tap reading 44100 pre-aggregate can deliver 48000 post-aggregate. Main already fixed this for the whole-system tap (`0a9d00e`) but never for the per-app path. Ported `reconcileFormatWithAggregate` from `CoreAudioSystemTap` to `PerAppCaptureCoordinator`. | **✅ Live-confirmed by Alec**: "sound is at the right speed and does not get cut off and no judder." This also fixed the storm guard above, since the guard now compares against the *correct* reconciled rate instead of the stale one. |
+| `196e5b7` | **Per-app pitch-up/judder** (~8.8% sharp + fast + juddery + cut out after a couple seconds): `PerAppCaptureCoordinator.createTapAndReadFormat` reads `kAudioTapPropertyFormat` off the bare tap BEFORE it joins the aggregate; the aggregate resamples onto its own clock, so a tap reading 44100 pre-aggregate can deliver 48000 post-aggregate. Main already fixed this for the whole-system tap (`0a9d00e`) but never for the per-app path. Ported `reconcileFormatWithAggregate` from `CoreAudioSystemTap` to `PerAppCaptureCoordinator`. | **✅ Live-confirmed by the owner**: "sound is at the right speed and does not get cut off and no judder." This also fixed the storm guard above, since the guard now compares against the *correct* reconciled rate instead of the stale one. |
 | `22a25f7` | **Silent redirect at launch**: a per-app route restored at launch (~tens of ms in) is applied before Bonjour discovers the AirPlay target (~hundreds of ms to ~1s later), and `handleDestinationSetsChanged` only binds "discovered devices" with no recovery path (the whole-system `desiredOn` re-kick doesn't cover per-app targets — they're deliberately excluded from that set, per T7). Cached the last destination-set topology and re-drive the binding pass when a still-unbound target is discovered. | Telemetry-confirmed firing correctly (`app_route_rebind_on_discovery` event at the right moment, ~900ms after launch). Not independently re-verified by ear since — folded into the general confusion below. |
 | `ef4ffa2` | **Diagnostic only, no behavior change.** The engine's write-backpressure guard (T14, prior memory-leak wave) already tracked `droppedWrites`/`maxInFlightSeconds` but nothing read it — invisible. Wired `EngineControlling.writeBacklogSnapshot()` through to `NativeBackend`, sampled (rate-limited, emit-on-change-only) from the mixer's `onMixedBuffer` callback, logged as `airplay write_backlog_drop`. | Working as designed — used during tonight's CPU-load correlation test (see below), though that test's results are now in question (see mystery). |
 
@@ -78,7 +78,7 @@ popover diagnostic counter that doesn't exist; pointed at Telemetry instead of t
 >   tell for which instance a line belongs to.
 > - `00:21:33.3` Firefox **and** Music go `idle→…→capturing` = the **metering** instance arming
 >   both listed apps' `.unmuted` meter taps on popover open.
-> - `00:21:48` Move 2 deselected → `captureWS` stops. Alec then sets Music's redirect → Move 2.
+> - `00:21:48` Move 2 deselected → `captureWS` stops. The owner then sets Music's redirect → Move 2.
 > - `00:21:51.118→.151` Music `idle→resolvingProcess→creatingTap→capturing` = the **ROUTING**
 >   instance starting Music's redirect capture.
 > - `00:21:51.151→.160` Music `capturing→stopping→idle` = the **METERING** instance stopping
@@ -90,7 +90,7 @@ popover diagnostic counter that doesn't exist; pointed at Telemetry instead of t
 >   `captureWS exclusion_changed excluded=[com.apple.Music]` at `00:21:51.161` independently
 >   confirms Music was routed (and therefore capturing) for the whole window. Firefox lines at
 >   `00:25`, `00:31`, `00:46` are each preceded by a popover-open probe — metering churn only.
-> - `00:46:24.998` Music `capturing→stopping→idle` = the **ROUTING** instance, Alec un-redirecting
+> - `00:46:24.998` Music `capturing→stopping→idle` = the **ROUTING** instance, the owner un-redirecting
 >   Music; `00:46:25.019→.048` `idle→…→capturing` = the **METERING** instance immediately
 >   re-arming Music's meter tap now that it is un-routed, corroborated by
 >   `captureWS exclusion_changed excluded=[]` in the same millisecond. `00:46:34` both stop =
@@ -137,7 +137,7 @@ popover diagnostic counter that doesn't exist; pointed at Telemetry instead of t
 > judder/dropped-milliseconds claim is still open and still needs a live session.
 
 ### The claim being tested
-Alec reported: after playing a while, audio develops **judder and dropped milliseconds**
+The owner reported: after playing a while, audio develops **judder and dropped milliseconds**
 (distinct from the pitch-up bug, which is fixed). Hypothesis under test: CPU contention starving
 the engine thread, causing the write-backpressure guard to drop audio.
 
@@ -154,7 +154,7 @@ audio is actually flowing.**
 00:21:33.378Z  Music: capturePA -> capturing (rate-reconciled 48000->44100, correct)
 00:21:48.337Z  captureWS: capturing -> stopping        [whole-system tap]
 00:21:48.337Z  airplay set_output_set removed:[Move 2]  [Move 2 deselected from Selected Devices —
-                                                          Alec confirmed he switched it from
+                                                          The owner confirmed they switched it from
                                                           "Selected Device" to per-app "bypass"
                                                           redirect at roughly this moment]
 00:21:51.151Z  Music: capturePA creatingTap -> capturing, THEN capturing -> stopping
@@ -166,7 +166,7 @@ audio is actually flowing.**
 
   >>> 25-MINUTE GAP: ZERO capturePA events for Music between 00:21:51 and 00:46:24 <<<
 
-  During this gap: Alec reported ~15 minutes of continuous, audible Sonos Move 2 playback.
+  During this gap: the owner reported ~15 minutes of continuous, audible Sonos Move 2 playback.
   The popover UI showed a GREEN "live" indicator on both the Music row and the Move 2 row,
   with "Move 2" selected in Music's Redirect dropdown.
   `swift run process-audio-dump` independently confirmed Audiout's process (PID 70940) was a

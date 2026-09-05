@@ -251,7 +251,7 @@ All tasks completed and merged to `claude/dropout-fix-integration`:
 - [ ] **T4** — Tests for Part A (nominal-rate listener + rebind) ✓
 - [ ] **T5** — Tests for Part B (native-rate rendering + sync) ✓
 - [ ] **T6** — Dev-notes writeup (this file) ✓
-- [ ] **T7** — Gated by-ear live test (pending: Alec manual verification)
+- [ ] **T7** — Gated by-ear live test (pending: owner manual verification)
 - [ ] **T8** — Health signal emission (streamHealth event) ✓
 - [ ] **T9** — Health signal test ✓
 
@@ -261,7 +261,7 @@ All tasks completed and merged to `claude/dropout-fix-integration`:
 
 ## 7. Follow-up fix — T2 latency regression: reset only on a device/rate rebuild
 
-**Symptom (Alec, live by-ear):** music already playing on the Mac; adding an
+**Symptom (owner, live by-ear):** music already playing on the Mac; adding an
 AirPlay device connects fast, then a **long silence** before audio comes out of
 the AirPlay device — on **every** connect (first or Nth), while everything after
 the connect (switching, play/pause, volume) stays snappy.
@@ -318,7 +318,7 @@ untouched.
 
 ## 8. Follow-up fix — T3 rapid-toggle storm: coalesce bursts + guarded RTP re-sync
 
-**Symptom (Alec, live by-ear on `claude/warm-signal-full`):** after the §7 fix landed,
+**Symptom (owner, live by-ear on `claude/warm-signal-full`):** after the §7 fix landed,
 the single-toggle connect latency was cured. But rapidly clicking the Mac's "Current
 Device" checkbox (toggling on/off/on/off rapidly over 2–3 seconds) permanently silences
 AirPlay audio — the exact same symptom as §0's nominal-sample-rate bug, but triggered

@@ -6,12 +6,12 @@
 # binds UDP 319/320 exclusively), and the dev loop deliberately REUSES one
 # bundle id so its TCC grants and its Login Items approval survive every
 # rebuild (CLAUDE.md, "Build & run"). Those two facts together mean a second
-# agent that builds or launches the dev id while Alec is mid-test does damage
-# twice over: it overwrites the .app on disk under him, and its copy fights the
-# running one for the same daemon identity — the loser's SMAppService
-# .register() silently no-ops, so the symptom is "the PTP helper is broken"
-# rather than "two copies are running". Neither failure names its cause, which
-# is what makes them expensive.
+# agent that builds or launches the dev id while the owner is mid-test does
+# damage twice over: it overwrites the .app on disk under them, and its copy
+# fights the running one for the same daemon identity — the loser's
+# SMAppService .register() silently no-ops, so the symptom is "the PTP helper
+# is broken" rather than "two copies are running". Neither failure names its
+# cause, which is what makes them expensive.
 #
 # Agents work in separate worktrees, in separate Claude sessions, with no
 # shared memory. The only place they can agree on anything is the filesystem —
@@ -30,7 +30,7 @@
 # ACQUISITION NEVER BLOCKS. A queued agent is told who holds the slot, for how
 # long, and where it stands in line — then it is expected to go do other work
 # and retry. An agent asleep in a `sleep` loop is an agent doing nothing for
-# half an hour, and Alec cannot see from the outside why it went quiet.
+# half an hour, and the owner cannot see from the outside why it went quiet.
 #
 # Usage:
 #   scripts/livetest.sh acquire --label <who> [--pid <n>]
@@ -66,7 +66,7 @@ TAB=$(printf '\t')
 # Who is asking. The worktree root, not a PID: the slot outlives every process
 # that touches it, so identity has to be something an agent still has when it
 # comes back in a fresh shell ten minutes later. A `--label` match works too,
-# which is what lets Alec release a slot from anywhere.
+# which is what lets the owner release a slot from anywhere.
 me=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
 # --- arguments --------------------------------------------------------------
@@ -132,8 +132,8 @@ read_holder() {
 }
 
 # Does the caller own the current hold? Either identity is enough — the
-# worktree so an agent needs no argument, the label so Alec can free a slot
-# from the main checkout without --force.
+# worktree so an agent needs no argument, the label so the owner can free a
+# slot from the main checkout without --force.
 holder_is_me() {
     [ "$m_tree" = "$me" ] && return 0
     [ -n "$label" ] && [ "$label" = "$m_label" ]
@@ -215,13 +215,13 @@ acquire)
             echo "  Go do other work and retry; 'scripts/livetest.sh status' is cheap." >&2
             exit 2
         fi
-        # Expired. Take it over — but LOUDLY. Alec may still be at the speakers
-        # with a build from this slot; nothing about a stale lock proves he is
-        # finished, only that nobody said so.
+        # Expired. Take it over — but LOUDLY. The owner may still be at the
+        # speakers with a build from this slot; nothing about a stale lock
+        # proves they are finished, only that nobody said so.
         echo "live-test slot: WARNING — taking over an EXPIRED slot." >&2
         echo "  \"$m_label\" held it $(human "$m_age"), past the $(human "$ttl") limit, and never released it." >&2
         echo "  worktree: $m_tree" >&2
-        echo "  If Alec is still testing that build, STOP and ask before you build or launch." >&2
+        echo "  If the owner is still testing that build, STOP and ask before you build or launch." >&2
         release
     elif [ -f "$lock_file" ]; then
         read_holder

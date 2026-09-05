@@ -525,7 +525,7 @@ import AppKit
         let firstID = controller.groups[0].id
 
         // Same member set again (order swapped). The sheet REFUSES TO ARM
-        // rather than letting the user press Create into a refusal (Alec,
+        // rather than letting the user press Create into a refusal (owner's call,
         // 2026-09-03) — the count line names the group that already holds them.
         window.test_presentCreateSheet(preselected: ["appletv-lr", "office"])
         await drain()
@@ -545,10 +545,10 @@ import AppKit
         #expect(completedResult == nil, "a disarmed Create reports nothing at all")
     }
 
-    /// Reversed 2026-08-28 (Alec): an offline speaker MAY join a brand-new
-    /// group — it simply plays when it is back — and listing it is also what
-    /// keeps the add bar's "New Group from N Speakers…" count honest when the
-    /// selection includes a sleeping speaker. Unavailable candidates sort to
+    /// Reversed 2026-08-28 (owner's call): an offline speaker MAY join a
+    /// brand-new group — it simply plays when it is back — and listing it is also
+    /// what keeps the add bar's "New Group from N Speakers…" count honest when
+    /// the selection includes a sleeping speaker. Unavailable candidates sort to
     /// the bottom, matching every other list on the screen.
     @Test func createSheetOffersUnavailableDevicesLast() async throws {
         let (window, _, backend) = try await makeWindow()
@@ -592,9 +592,9 @@ import AppKit
 
     // MARK: Editor candidates: every device, unavailable ones last
 
-    /// Reversed 2026-08-28 (Alec): the editor offers EVERY device — an
-    /// unavailable non-member can be checked into the group and plays when it
-    /// returns. Unavailable rows sort to the bottom (the shared
+    /// Reversed 2026-08-28 (owner's call): the editor offers EVERY device —
+    /// an unavailable non-member can be checked into the group and plays when
+    /// it returns. Unavailable rows sort to the bottom (the shared
     /// `orderedDevices()` rule), rendered dimmed by the row itself.
     @Test func editorOffersUnavailableDevicesLast() async throws {
         let (window, controller, backend) = try await makeWindow()
@@ -1012,7 +1012,8 @@ import AppKit
 
     /// The dedup outcome is now unreachable from the sheet at all — Create is
     /// disarmed for a set that is already a group, window or not, so nobody
-    /// arrives at the announcement by pressing a live button (Alec, 2026-09-03).
+    /// arrives at the announcement by pressing a live button (owner's call,
+    /// 2026-09-03).
     @Test func aSetThatIsAlreadyAGroupNeverArmsCreate() async throws {
         let (window, controller, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: ["office", "homepod-bed"])
@@ -1123,7 +1124,7 @@ import AppKit
     }
 
     /// Unavailable speakers sink to the bottom of the Speakers section, kept
-    /// alphabetical within each half (Alec, 2026-08-28 — chosen over
+    /// alphabetical within each half (owner's call, 2026-08-28 — chosen over
     /// keep-in-place; the accepted trade is that a row moves when its
     /// availability flips).
     @Test func unavailableSpeakersSortToTheBottomOfTheSidebar() async throws {

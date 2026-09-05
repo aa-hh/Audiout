@@ -27,7 +27,7 @@ owed list and verification output.
 | [#93](https://github.com/aa-hh/Audiout/pull/93) | copy-label-drift | One name per thing across app, tests and docs |
 | [#95](https://github.com/aa-hh/Audiout/pull/95) | header-tab-labels | Each tab's name beside its icon; Quit says the word |
 | [#94](https://github.com/aa-hh/Audiout/pull/94) | agents-md-orientation-trim | AGENTS.md back to orientation size, history relocated |
-| [#98](https://github.com/aa-hh/Audiout/pull/98) | foreman-roadmap-071 | Stops the full suite wandering (Alec's branch, pulled in mid-merge) |
+| [#98](https://github.com/aa-hh/Audiout/pull/98) | foreman-roadmap-071 | Stops the full suite wandering (the owner's branch, pulled in mid-merge) |
 
 `#94` rewrites 37 AGENTS.md files, so it landed last and absorbed every other
 branch's appended lines. All 29 additions were re-applied into the matching
@@ -37,7 +37,7 @@ is deliberately outside that cap.
 
 ## The two rulings that unblocked the merge
 
-Both were left open by the original handoff and decided by Alec on 2026-09-03.
+Both were left open by the original handoff and decided by the owner on 2026-09-03.
 
 **Header tabs draw at 13 pt system, not an 11 pt token.** `item.view = button`
 re-stamps the cell's font before the first layout pass, so a font set at init
@@ -57,7 +57,7 @@ rebuilds rather than one, against the four the raw notifications buy. The
 branch's own test pinned the old behaviour and is inverted; it fails on the
 unforced code.
 
-## Owed to Alec
+## Owed to the owner
 
 Hardware and judgment only. Nothing below has been checked on a real machine —
 the code is on main, none of it is live-verified. Full lists are in each PR body.

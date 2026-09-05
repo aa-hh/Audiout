@@ -33,7 +33,7 @@ distinction mattered in practice).
 | T8, T9 (Wave 6, R16) | Popover states the real Audio Out destination; menu-bar icon distinguishes idle/streaming | `PopoverController.swift`, `Package.swift`, `AppDelegate.swift`, `StatusItemController.swift` + new `MenuBarStatus.swift` | `7ad75e6` |
 
 R5's actual shape ended up broader than the plan's one-line "keep the route,
-badge it offline" sketch, resolved live with Alec before implementation: the
+badge it offline" sketch, resolved live with the owner before implementation: the
 app rejoins normal system audio while its target is unreachable (not silence,
 not forced local-only), the route clears only on TRUE device disappearance or
 an Audiout relaunch (not the old "isAvailable == false" trigger — that now
@@ -153,7 +153,7 @@ missing test, the exclusion-rebuild clock window) are CLOSED — see the
 gap-closing commits at the top of the table above. What's actually left:
 
 1. **Live testing — not yet done, not this session's job right now.** Per
-   Alec's 2026-07-24 decision, all live audio testing is consolidated into
+   the owner's 2026-07-24 decision, all live audio testing is consolidated into
    the `claude/memory-leak-live-testing` session (bundle-id / PTP-port
    collision risk from running two Audiout instances). The full live
    checklist per wave is unchanged and listed under each wave below, now
@@ -252,7 +252,7 @@ lock-inversion fix is present in this tree (live smoke test still owed).
 ## The program
 
 Ordered by user pain, not by code area. Each wave ends with a silent
-verification I do (build + hermetic tests) and a short **live checklist Alec
+verification I do (build + hermetic tests) and a short **live checklist the owner
 runs** — per the standing rule, no audio is ever played by an agent.
 
 ### Wave 1 — Multi-process capture core *(fixes R1, R2, R9, R14 + dead browser meters)*
@@ -330,14 +330,14 @@ Zoom call mid-stream → speakers keep playing.
   default output while we stream, surface a note (double-path audio /
   echo risk) rather than silently capturing an AirPlay-bound mix.
 
-*Live checklist (Alec, with BT headphones):* passthrough with BT — all normal;
+*Live checklist (the owner, with BT headphones):* passthrough with BT — all normal;
 route an app to Current Device while wearing BT — audio in the headphones, not
 the room; start a stream, then plug/unplug headphones — speakers keep playing.
 
 ### Wave 4 — Per-app route durability *(fixes R5, R8; revisits R6)* — EXECUTED
 
 - **Grace period instead of silent reset — DONE, shape resolved live with
-  Alec.** Rather than "keep + badge 'speaker offline'", the app REJOINS
+  the owner.** Rather than "keep + badge 'speaker offline'", the app REJOINS
   normal system audio while the target is unreachable (the smallest, safest
   option of three considered — a forced local-only mode was rejected as
   higher-risk, silence-with-a-badge was rejected as violating invariant 2)
@@ -366,7 +366,7 @@ well-scoped integration work (the hard DSP primitives already exist in this
 codebase for an unrelated problem), worth doing as a near-term follow-up
 rather than leaving the label as the permanent answer.
 
-### Wave 6 — "We are the output" visibility *(R16 + Alec's Sound-panel idea)* — EXECUTED (cheap half; driver half spiked, not built)
+### Wave 6 — "We are the output" visibility *(R16 + the owner's Sound-panel idea)* — EXECUTED (cheap half; driver half spiked, not built)
 
 - **The cheap half — DONE** (`7ad75e6`, T8/T9): the popover's Audio Out row
   states the real destination ("→ Kitchen + Move 2" / "→ This Mac" / "→
@@ -434,6 +434,6 @@ rather than leaving the label as the permanent answer.
 fixes the headline feature, Wave 2 makes silence impossible, Wave 3 fixes the
 wrong-physical-device class. **4** rides on 1's infrastructure. **5–7** are
 quality/insurance and can interleave. Each wave is a separate branch off main,
-merged only after Alec's live checklist passes (standing rules: staff review
+merged only after the owner's live checklist passes (standing rules: staff review
 before surfacing, no merge without explicit go-ahead, one live-test session at
 a time).

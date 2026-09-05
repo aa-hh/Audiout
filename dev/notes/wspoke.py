@@ -75,7 +75,7 @@ def remaining(): return max(0.5, DEADLINE - time.time())
 
 hello = json.dumps({"v": 1, "type": "hello",
                     "payload": {"clientID": client_id,
-                                "clientName": "Gate Poke (Alec's iPhone)",
+                                "clientName": "Gate Poke (dev iPhone)",
                                 "protoVersion": 1}})
 send_text(hello)
 print("SENT hello  clientID=", client_id)

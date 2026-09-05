@@ -1,6 +1,6 @@
 # The sync sheet's wait, from the journey in
 
-Product-flow lens. Everything below is read off the code in the two checkouts named in the brief, on `main` unless a branch is named. Paths are relative to `/Users/alechenderson/Projects/audiout-remote/` (phone), `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/sync-wizard-waiting-ux-b93148/` (Mac) and `/Users/alechenderson/Projects/audiout-shared/` (wire).
+Product-flow lens. Everything below is read off the code in the two checkouts named in the brief, on `main` unless a branch is named. Paths are relative to `~/Projects/audiout-remote/` (phone), `~/Projects/AirPlay Controller/.claude/worktrees/sync-wizard-waiting-ux-b93148/` (Mac) and `~/Projects/audiout-shared/` (wire).
 
 ---
 
@@ -16,7 +16,7 @@ So: **a first pairing has no wait, and the first speaker after a Mac app launch 
 **(b) The number on the phone can be far larger than the seconds actually left.**
 The Mac broadcasts only on an event, coalesced 50 ms, with no timer at all (`AudioutCore/Sources/AudioutApp/AppDelegate.swift:2535-2544`). `noteConnected` fires one change (`BTAlignmentFreshness.swift:75-82`), which reaches the broadcast through `AppDelegate.swift:2295-2300`. During a quiet minute nothing else fires. The phone seeds its count from whatever snapshot it is holding (`AudioutRemote/UI/Sync/SyncSheet.swift:187-191`) and ticks that down locally (`SyncSheet.swift:213-219`). There is no "send me a fresh snapshot" command in the protocol (`Sources/AudioutProtocol/CompanionCommand.swift:36-86`).
 
-Worked through: link up at t=0, sink renders and broadcasts at about t=5 with 55 s published, then silence. User opens the sheet at t=45. The sheet reads 55, counts 55 down, and the user waits until t=100. **The Mac's window closed at t=60 and the user waited 40 s past it.** The longer someone takes to reach the sheet, the more extra wait they get. This alone may be most of what Alec felt.
+Worked through: link up at t=0, sink renders and broadcasts at about t=5 with 55 s published, then silence. User opens the sheet at t=45. The sheet reads 55, counts 55 down, and the user waits until t=100. **The Mac's window closed at t=60 and the user waited 40 s past it.** The longer someone takes to reach the sheet, the more extra wait they get. This alone may be most of what the owner felt.
 
 **(c) A speaker that power-cycles comes back unselected, so the user's own actions eat the window.**
 `PopoverController.swift:880-886` deselects any selected Bluetooth device that loses availability. When it returns the user has to select it again, and only then is it a Main Out member. Group membership is separate and is not deselected, so a group member resumes on its own (read off the same lines: the loop tests `isSpeakerSelected`, not group membership; I did not verify the group resume end to end).
@@ -27,7 +27,7 @@ Worked through: link up at t=0, sink renders and broadcasts at about t=5 with 55
 **(e) Two speakers do not need each other.** Because the reference defaults to the Mac's own output, tuning speaker A is independent of speaker B. Only one run at a time per Mac (`BTAlignmentFreshness.swift:149-152`).
 
 **(f) The phone cannot connect a disconnected speaker.**
-An unavailable row is inert on the phone by design (`DeviceRowView.swift:274`, `:289`). The only reconnect affordance is "Try again" on a failure card (`DeviceRowView.swift:726-727`). And `retryConnection` for a device that is neither in the active group nor selected falls through to `setDeviceSelected(id, true)` and never reaches the backend's reconnect (`AudioutCore/Sources/AudioutCore/GroupController.swift:460-472`); only `requestReconnect` (`GroupController.swift:481-483`) is a membership-free connect, and no companion command reaches it. This is the wall Alec's multi-speaker idea hits.
+An unavailable row is inert on the phone by design (`DeviceRowView.swift:274`, `:289`). The only reconnect affordance is "Try again" on a failure card (`DeviceRowView.swift:726-727`). And `retryConnection` for a device that is neither in the active group nor selected falls through to `setDeviceSelected(id, true)` and never reaches the backend's reconnect (`AudioutCore/Sources/AudioutCore/GroupController.swift:460-472`); only `requestReconnect` (`GroupController.swift:481-483`) is a membership-free connect, and no companion command reaches it. This is the wall the owner's multi-speaker idea hits.
 
 **On the adaptive Mac branch**, the brief's warning is slightly too pessimistic. `report(...)` checks stable first and returns `nil` even inside the 60 s floor (`git show claude/settle-window-adaptive:AudioutCore/Sources/AudioutCore/BTAlignmentFreshness.swift`, the `if stable` arm of `report`). A Sony clears in about 10 s of running audio (`BTClockStability.stableAfterSeconds = 10`). But the detector only samples while the device's sink is doing audio, so a **connected but not playing** speaker accrues no evidence and serves the full 60 s floor.
 
@@ -42,12 +42,12 @@ An unavailable row is inert on the phone by design (`DeviceRowView.swift:274`, `
 | First pairing of a speaker, Mac app already running | Never opens | **0 s** | Once per speaker per install | `NativeBackend.swift:8434-8449` takes the new-device branch and calls no `noteConnected` |
 | Any speaker, first tune after a Mac app launch or restart | Never opens | **0 s** | Every launch, for every speaker already connected at launch | Same branch; `BTAlignmentFreshness.swift:15-22` (in-memory) |
 | Speaker powered on, OS relinks it, app running and listing it | About 20 to 60 s before the user reaches the sheet: they must notice, re-select it (it was deselected), and wait up to 6 s for the sink to render | **10 to 45 s**, plus the over-count from fact (b) | The common case | `NativeBackend.swift:8414`; `PopoverController.swift:880-886`; `btRenderStartTimeout = 6` at `NativeBackend.swift:336` |
-| User taps reconnect on the Mac, then goes to the phone | 2 to 10 s before | **50 to 58 s** | The case Alec hit | `NativeBackend.swift:3846` |
+| User taps reconnect on the Mac, then goes to the phone | 2 to 10 s before | **50 to 58 s** | The case the owner hit | `NativeBackend.swift:3846` |
 | Phone's "Try again" on a failure card, then tune | 2 to 10 s before | **50 to 58 s** | Uncommon; the card only shows after a failure | `DeviceRowView.swift:726-727` into `GroupController.swift:460-472` |
 | Group saved that includes a just-connected speaker | 15 to 60 s before, depending on how long naming and picking members took | **0 to 45 s** | Common on the phone; the invite card is the second door | `AudioutRemote/UI/Groups/GroupEditorView.swift:258` into `SyncInviteCard.swift:49-63` |
 | Main Out pointed at a group containing a just-connected speaker | 5 to 20 s before | **35 to 55 s** | Common | `AudioutRemote/UI/Speakers/MainOutPicker.swift:136-142` |
 | User opens the sheet minutes after connecting | Long closed | **0 s if a snapshot has landed since; otherwise the stale published number, up to 60 s of pure phantom wait** | Common, and the worst experience of the lot | Fact (b): `AppDelegate.swift:2535-2544`, `SyncSheet.swift:187-191` |
-| Two to four Bluetooth speakers all powered on together | All windows open within a second or two of each other and run in parallel | First speaker: 30 to 50 s. Second onward: **0 s**, because measuring the first took 60 to 90 s of wall time | The multi-speaker case Alec is asking about | Windows are per device and independent (`BTAlignmentFreshness.swift:59`, `:141-146`); a run takes roughly 10 to 20 s plus the walk |
+| Two to four Bluetooth speakers all powered on together | All windows open within a second or two of each other and run in parallel | First speaker: 30 to 50 s. Second onward: **0 s**, because measuring the first took 60 to 90 s of wall time | The multi-speaker case the owner is asking about | Windows are per device and independent (`BTAlignmentFreshness.swift:59`, `:141-146`); a run takes roughly 10 to 20 s plus the walk |
 
 The last row is the whole answer to the multi-speaker question and I come back to it in Concept 3.
 
@@ -118,17 +118,17 @@ This is most of what `claude/settle-window-phone` already builds, moved from a s
 
 **Multi-speaker:** poor. Each speaker gets a first measurement fast, but each also arms a re-check that only runs while its own sheet page is showing. Tuning three speakers leaves two marked and unrechecked. The chain line moves the sheet to the next speaker, which cancels the previous one's re-check.
 
-**States and commands:** all EXISTS on the two branches. `staleReason` is already a wire string (`CompanionSnapshot.swift:47`), the two new values are additive strings, not a new field. Mac needs the clock detector (`git show claude/settle-window-adaptive:AudioutCore/Sources/AudioutCore/BTClockStability.swift`). Alec's compensation idea (correct the early number by the observed clock delta) rests on an assumption the handoff itself says is untested, and is not counted here.
+**States and commands:** all EXISTS on the two branches. `staleReason` is already a wire string (`CompanionSnapshot.swift:47`), the two new values are additive strings, not a new field. Mac needs the clock detector (`git show claude/settle-window-adaptive:AudioutCore/Sources/AudioutCore/BTClockStability.swift`). The owner's compensation idea (correct the early number by the observed clock delta) rests on an assumption the handoff itself says is untested, and is not counted here.
 
 **Conflicts:** the "nothing app-initiated" rule. The re-check is the one sanctioned exception, and it is already written to stay inside it (announced first, refusable, only while the page is showing). Making it the default rather than an edge path raises the stakes on that exception. Second: "the UI never lies" cuts both ways here. Showing a confident verdict the Mac has already marked as possibly wrong is the closest any of these concepts comes to breaking that rule.
 
 **Effort:** phone S (written). Mac M (written on a branch, unmerged, never live-tested against a Sonos). Shared none.
 
-### Concept 3 — Alec's multi-speaker session, and why the connect order should be inverted
+### Concept 3 — The owner's multi-speaker session, and why the connect order should be inverted
 
-Alec's shape: a returning user says which speakers they want set up, those get connected one at a time so the delays can be managed, and then the phone walks them through the speakers.
+The owner's shape: a returning user says which speakers they want set up, those get connected one at a time so the delays can be managed, and then the phone walks them through the speakers.
 
-**The staggering does not work, and it is worth saying plainly.** Every connect starts its own 60 s window from its own link-up (`BTAlignmentFreshness.swift:75-82`, `:141-146`), and every reconnect re-rolls that speaker's latency, so connecting one at a time serialises three windows end to end: speaker 1 measurable at 60 s, speaker 2 connected at 90 s and measurable at 150 s, speaker 3 at 240 s. Connecting all three at once overlaps the windows: all three are measurable at 60 s, and by the time the user has walked and measured speaker 1 (60 to 90 s) speakers 2 and 3 are already clear. **Connect together, measure in sequence.** The sequencing Alec wants belongs on the measurement, not the connection.
+**The staggering does not work, and it is worth saying plainly.** Every connect starts its own 60 s window from its own link-up (`BTAlignmentFreshness.swift:75-82`, `:141-146`), and every reconnect re-rolls that speaker's latency, so connecting one at a time serialises three windows end to end: speaker 1 measurable at 60 s, speaker 2 connected at 90 s and measurable at 150 s, speaker 3 at 240 s. Connecting all three at once overlaps the windows: all three are measurable at 60 s, and by the time the user has walked and measured speaker 1 (60 to 90 s) speakers 2 and 3 are already clear. **Connect together, measure in sequence.** The sequencing the owner wants belongs on the measurement, not the connection.
 
 There is one real argument for staggering that I could not test: whether several Bluetooth links coming up at once make each other's settling worse. Nothing in `dev/notes/bt-spike-findings-2026-08-07.md` covers two speakers connecting together. Not verified.
 
@@ -203,11 +203,11 @@ Not a wait-filler; a re-sequencing. The cheapest way to make a 60 s window invis
 
 **Fix A before anything.** A user who waits 40 s past the end of the Mac's own window is being lied to by a number, and no amount of screen design fixes that. It is a small Mac change and it makes every concept below honest. **Fix B is the ruling that decides whether the feature protects anyone at all**: today the very first tune of a newly paired speaker, which is the most chaotic clock in the product, has no gate.
 
-**Concept 1 is the pick.** It answers Alec's actual complaint — an empty screen with one CTA — with steps that are all real work, so it does not break "the UI never lies" or invent state. It needs no Mac change beyond the chirp preview and no wire change beyond one command. It survives whatever happens to the settle number: if the adaptive detector or the compensation later kills the wait entirely, the steps are still worth having, because two of them (microphone ahead of the run, both speakers confirmed playing) remove real failure modes that exist today. And it fixes the mid-run microphone prompt, which is a first-run bug in its own right.
+**Concept 1 is the pick.** It answers the owner's actual complaint — an empty screen with one CTA — with steps that are all real work, so it does not break "the UI never lies" or invent state. It needs no Mac change beyond the chirp preview and no wire change beyond one command. It survives whatever happens to the settle number: if the adaptive detector or the compensation later kills the wait entirely, the steps are still worth having, because two of them (microphone ahead of the run, both speakers confirmed playing) remove real failure modes that exist today. And it fixes the mid-run microphone prompt, which is a first-run bug in its own right.
 
 **Concept 4 ships with it** because it is small, phone-only, and it is the only thing on the list that reduces the wait rather than dressing it.
 
-**Concept 3 second, with the connect order inverted.** It is the right answer for the returning user Alec described, but it is the largest piece of work, it needs a new wire command, and it is only worth building once single-speaker tuning feels good. Build it as a second door, never as the door.
+**Concept 3 second, with the connect order inverted.** It is the right answer for the returning user the owner described, but it is the largest piece of work, it needs a new wire command, and it is only worth building once single-speaker tuning feels good. Build it as a second door, never as the door.
 
 **Concept 2 last, not because it is wrong but because it is furthest from proven.** Its Mac half is unmerged and has never met a real Sonos; its best version depends on an assumption the handoff explicitly says is untested. Its "measure now, fix later" instinct is right and is already partly built on the phone branch — keep that as the escape hatch inside Concept 1's last step, which is exactly where the phone branch already puts it.
 
@@ -217,7 +217,7 @@ Not a wait-filler; a re-sequencing. The cheapest way to make a 60 s window invis
 
 ---
 
-## 4. Three questions only Alec can answer
+## 4. Three questions only the owner can answer
 
 **1. First pairing and post-launch first tune have no settle window at all today (fact (a)). Bug or intended?**
 Fixing it adds a wait where there is none, including to the very first speaker a new customer ever tunes, which is the worst possible place to put one. Leaving it means the feature does not protect the case the spike measured. Either answer is defensible and the concepts above branch on it.

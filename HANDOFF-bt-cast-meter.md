@@ -17,7 +17,7 @@ roadmap 038 correction are still outstanding.
 
 ## 2. The task
 
-Alec asked for an investigation into extending the per-device live level
+The owner asked for an investigation into extending the per-device live level
 meter (the little bar under a device row, `LevelMeterView`) to Bluetooth and
 Cast output devices — it only worked for AirPlay. Two parallel discovery
 subagents investigated BT and Cast independently; both converged on the
@@ -75,7 +75,7 @@ NativeBackendTests 223/223.
 
 ## 4. Two traps this fix documents — READ before touching `isMeterable` again
 
-1. **The meter does NOT follow a BT sync trim.** Alec asked this directly.
+1. **The meter does NOT follow a BT sync trim.** The owner asked this directly.
    One system-wide RMS feeds every device's bar, measured at capture time,
    *before* any per-device delay is applied. A trim changes `BTSyncedSink`'s
    delay line, which is downstream of that measurement. So dialling in
@@ -83,7 +83,7 @@ NativeBackendTests 223/223.
    and every device's bar is identical regardless of its own delay. Most
    visible on Cast, which plays ~5.5s behind. This is consistent with the
    existing house rule (meter = PRE-volume SOURCE level, never the delayed/
-   attenuated output) but nobody has separately decided whether Alec wants a
+   attenuated output) but nobody has separately decided whether the owner wants a
    delay-aware meter later. Don't build one without asking — it would need a
    per-device delay line for metering, which doesn't exist today.
 
@@ -118,7 +118,7 @@ NativeBackendTests 223/223.
    `.connected`.
 4. **Correct roadmap 038** once live-verified — wrong touch list (§4.2),
    update status/notes, cite the actual commit.
-5. **Ask Alec** about the wizard hold-silent case: a BT speaker held at zero
+5. **Ask the owner** about the wizard hold-silent case: a BT speaker held at zero
    gain by the alignment intercept is still `.connected`, so its meter will
    move while the speaker makes no sound. Consistent with the source-meter
    rule but a visible judgment call nobody has confirmed with him.

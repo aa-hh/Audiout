@@ -1,7 +1,7 @@
 # Plan — Universal Sync: Bluetooth speakers as a first-class output
 
-Status: **PLAN ONLY — no code written.** All 6 planning decisions locked by Alec 2026-07-24 (see "Decisions locked").
-Author in a dedicated worktree/branch off `main`; `main` is merge-only (never `git commit` on main). Merge only after Alec live-tests and explicitly says go (standing rule — especially here: real-time-audio correctness + a new Bluetooth permission).
+Status: **PLAN ONLY — no code written.** All 6 planning decisions locked by the owner 2026-07-24 (see "Decisions locked").
+Author in a dedicated worktree/branch off `main`; `main` is merge-only (never `git commit` on main). Merge only after the owner live-tests and explicitly says go (standing rule — especially here: real-time-audio correctness + a new Bluetooth permission).
 
 Goal: make a **Bluetooth speaker feel as natural to add, group, and sync as an AirPlay device** — analyzed critically/antagonistically so every Bluetooth inconvenience is designed around, not hand-waved.
 
@@ -13,8 +13,8 @@ Goal: make a **Bluetooth speaker feel as natural to add, group, and sync as an A
 2. **v1 scope = both BT-only and BT-mixed-with-AirPlay.** BT-only (Mac → BT speaker(s) on the Mac's own clock) is the simpler sync case and users expect it; BT-mixed is the harder/more valuable case. Ship both; treat BT-mixed as the primary tested path.
 3. **Reconnect = auto-connect, then fall back.** Attempt `IOBluetoothDevice.openConnection()` for an already-paired-but-disconnected speaker; if it doesn't return as an audio device within a few seconds, one-tap deep-link into Bluetooth Settings. (Pairing itself is an unavoidable one-time Settings trip — Apple owns it.)
 4. **Magic-pair auto-offset = fast-follow.** v1 ships a genuinely good MANUAL offset flow (per-device ms + A/B "nudge until it blends", seeded by a per-brand table). Add mic-loopback auto-offset only after `BT-SPIKE-OFFSET` proves it survives on real hardware.
-   **AMENDED 2026-08-07 (Alec): auto-offset is CUT, not fast-follow.** The Mac's mic position is uncontrollable — it may not hear all speakers (different rooms is our GOOD case) and can't identify which speaker is which. Revisit only if Alec raises it. Consequences: `BT-SPIKE-OFFSET` and `BT-OFFSET-AUTO` are removed from the task list; the R-A2DP/HFP risk shrinks to runtime HFP *detection* (BT-RECONNECT) only; manual offset (BT-OFFSET-UI) is the shipping story, sharpened by the 2026-08-07 research (`dev/notes/bt-output-research-2026-08-07.md`): signed numeric ms, ±500 ms, 10 ms coarse / 1 ms fine, tuned live while music plays, persisted per device UID, per-brand seeds, plus the A/B alternating-click aid (no competitor ships one). Research also notes every product that automated calibration still kept manual as the fallback — manual-only is a complete product, not a stopgap.
-5. **License = extract a clean shared `SyncCore`.** Pull the pure timing + drift-control (PI) math into a new clean-room file (no GPL header) consumed by BOTH the Mac-local sink and the BT sink; each sink's `AVAudioEngine` wiring stays in its own file. (Note: the shipping binary is already GPL via OwnTone/RAOP — this is about keeping the individual BT sender FILE relicensable/clean, per Alec's discipline.)
+   **AMENDED 2026-08-07 (owner's call): auto-offset is CUT, not fast-follow.** The Mac's mic position is uncontrollable — it may not hear all speakers (different rooms is our GOOD case) and can't identify which speaker is which. Revisit only if the owner raises it. Consequences: `BT-SPIKE-OFFSET` and `BT-OFFSET-AUTO` are removed from the task list; the R-A2DP/HFP risk shrinks to runtime HFP *detection* (BT-RECONNECT) only; manual offset (BT-OFFSET-UI) is the shipping story, sharpened by the 2026-08-07 research (`dev/notes/bt-output-research-2026-08-07.md`): signed numeric ms, ±500 ms, 10 ms coarse / 1 ms fine, tuned live while music plays, persisted per device UID, per-brand seeds, plus the A/B alternating-click aid (no competitor ships one). Research also notes every product that automated calibration still kept manual as the fallback — manual-only is a complete product, not a stopgap.
+5. **License = extract a clean shared `SyncCore`.** Pull the pure timing + drift-control (PI) math into a new clean-room file (no GPL header) consumed by BOTH the Mac-local sink and the BT sink; each sink's `AVAudioEngine` wiring stays in its own file. (Note: the shipping binary is already GPL via OwnTone/RAOP — this is about keeping the individual BT sender FILE relicensable/clean, per the owner's discipline.)
 6. **Sequencing = land Mac-sync (synced-local-airplay) to `main` first,** then build BT on top of its proven delayed-sink + continuous drift-correction machinery. Avoids re-inventing the grandmaster/hostTime/PI loop and avoids two unmerged real-time-audio branches editing the same hot files.
 
 ---
@@ -93,13 +93,13 @@ Verify: `git show` lists the 5 spike files + README.
 Files: throwaway harness under `dev/` (extend `bt-multi-spike`) + notes in `dev/notes/`.
 What: on real paired hardware, prove whether `IOBluetoothDevice.openConnection()` reliably restores A2DP + a Core Audio output; measure timeout/success across ≥2 brands; confirm the entitlement + `NSBluetoothAlwaysUsageDescription` + TCC-prompt behavior and which macOS version gates it; validate the `com.apple.BluetoothSettings` deep-link + connect-notification round-trip.
 Kind: investigation · Depends on: — · **Model: opus 4.8 · Effort: high.**
-Verify: written finding + go/no-go; **Alec checkpoint before BT-CONNECT is built.**
+Verify: written finding + go/no-go; **Owner checkpoint before BT-CONNECT is built.**
 
 **BT-SPIKE-OFFSET — mic-loopback auto-offset feasibility (hardware gate)**
 Files: throwaway harness under `dev/` + notes.
 What: prove A2DP output **survives while the built-in mic records** (the HFP trap); implement a click/chirp cross-correlation round-trip probe; measure accuracy vs by-ear manual offset across ≥2 brands; characterize failure modes (room reflections, AGC, HFP flip).
 Kind: investigation · Depends on: — · **Model: opus 4.8 · Effort: high.**
-Verify: finding + go/no-go; **Alec checkpoint before BT-OFFSET-AUTO.**
+Verify: finding + go/no-go; **Owner checkpoint before BT-OFFSET-AUTO.**
 
 **BT-DEVICE — `Device.Kind.bluetooth` + UID identity**
 Files: `Device.swift` (Kind enum `:14-34`, symbol `:24`, init).
@@ -161,7 +161,7 @@ What: implement the Section-D table; map to `isAvailable` greying + `connectionS
 Kind: backend · Depends on: BT-CONNECT, BT-BACKEND · **Model: sonnet 5 · Effort: medium.**
 Verify: state-transition unit tests + hardware.
 
-**UI SPEC LOCKED 2026-08-07 (Alec, via mockup review — binding for BT-OFFSET-UI and BT-UI):**
+**UI SPEC LOCKED 2026-08-07 (owner's call, via mockup review — binding for BT-OFFSET-UI and BT-UI):**
 Bluetooth devices are their own "Bluetooth Devices" subsection in OUTPUT DEVICES, rows
 identical to AirPlay rows (rail/tether select on the left, meter under the name, VOLUME
 slider + %, FEED pill far right). **SYNC is a column title in the Bluetooth subsection
@@ -169,7 +169,7 @@ only**, sitting between VOLUME and FEED: compact − / bare-ms-value / + stepper
 10 ms steps; value field allows 1 ms typing) plus an align-by-ear icon button —
 **`metronome.fill`** SF Symbol (fall back to outline `metronome` if the fill clots at
 final size) with a hover TOOLTIP explaining its purpose. Disconnected rows keep their
-saved value read-only. **AMENDED same day (Alec): no instructional sublabels** —
+saved value read-only. **AMENDED same day (owner's call): no instructional sublabels** —
 BT rows express connection state through the SAME rail/node + ring vocabulary
 AirPlay rows already use (greyed row + dimmed hollow node = paired-but-
 disconnected; the node's connecting state during a reconnect attempt; failure-
@@ -177,7 +177,7 @@ hue ring + failure headline sublabel on `.failed`). "Click to connect" is the
 row's ordinary click behavior, never a printed instruction; sublabels stay
 reserved for failure headlines ("Connected elsewhere", "Couldn't connect") and
 feed info, exactly as AirPlay rows use them.
-**Device-tier handling (Alec, 2026-08-07, locked):** (1) remembered/paired but
+**Device-tier handling (owner's call, 2026-08-07, locked):** (1) remembered/paired but
 disconnected → normal greyed row, click connects (the macOS-Bluetooth-menu
 behavior; already built + live-tested); selecting a greyed row = "play when
 up", auto-starts on connect. (2) pairing record genuinely deleted while app
@@ -196,7 +196,7 @@ single tick. Beat spacing must dodge offset aliasing: at 120 BPM (500 ms) a full
 device sounds aligned one beat late — use ~70–80 BPM (750–850 ms) or a slightly
 irregular interval.
 
-**ALIGNMENT WIZARD UX LOCKED 2026-08-08 (Alec — binding for the wizard track):**
+**ALIGNMENT WIZARD UX LOCKED 2026-08-08 (owner's call — binding for the wizard track):**
 Two-tier tuning: the WIZARD is the setup-time path; everyday touch-up is a live
 scrubber (separate track, popover surface). Wizard = lateralization bisection —
 probe-validated live (clear which-side signal at 7–15 ms even on a broken
@@ -223,7 +223,7 @@ again. SYNC stepper column placement (popover vs window-only) is deliberately
 left to reconcile with the touch-up track's scrubber design — don't move it
 until that lands.
 
-**AMENDED 2026-09-03 (Alec):** the first-mix card, the hold-silent join and the
+**AMENDED 2026-09-03 (owner's call):** the first-mix card, the hold-silent join and the
 final "Not now" are removed. A never-aligned Bluetooth speaker joining a mix
 plays as-is; a one-sentence note under its row offers the wizard until the
 speaker is measured (✕ hides it for the session). The untuned chip reads Align
@@ -257,14 +257,14 @@ Verify: `swift test --parallel` green; new tests subclass `IsolatedTestCase`.
 **BT-DOCS-LIVE — docs + gated by-ear hardware test**
 Files: `PROGRESS.md`, `AudioutCore/AGENTS.md`, `dev/notes/`, this plan.
 What: document the shipped design + limitations (same-room BT+BT marginal, no video); run the user-present, PTP-port-gated by-ear test: BT+AirPlay blend, BT-only, reconnect flow, HFP badge, offset effect, sleep/wake.
-Kind: docs + manual test · Depends on: all above · **Model: haiku 4.5 (docs); the live test is Alec-run · Effort: low.**
-Verify: Alec confirms by ear against the Decision-1 bar; findings recorded.
+Kind: docs + manual test · Depends on: all above · **Model: haiku 4.5 (docs); the live test is owner-run · Effort: low.**
+Verify: the owner confirms by ear against the Decision-1 bar; findings recorded.
 
 ## H. Parallelization
 
 **Hot files (never edit concurrently):** `Device.swift` (BT-DEVICE); `GroupController.swift` (BT-GROUPCTL); `NativeCaptureCoordinator.swift` write path + `NativeBackend.swift` (BT-FANOUT, BT-BACKEND — keep in different waves); `BTSyncedSink.swift`/`SyncCore` (BT-SINK, BT-REFSEL, BT-DRIFT, BT-OFFSET-UI wiring — serialize); `AppSettings.swift`/Settings (BT-OFFSET-UI); row views (BT-UI).
 
-- **Wave 0 (parallel, gates):** BT-SPIKE-COMMIT ∥ BT-SPIKE-CONNECT ∥ BT-SPIKE-OFFSET. Two Alec checkpoints. **Prereq for all production waves: synced-local-airplay landed on `main` (Decision 6).**
+- **Wave 0 (parallel, gates):** BT-SPIKE-COMMIT ∥ BT-SPIKE-CONNECT ∥ BT-SPIKE-OFFSET. Two owner checkpoints. **Prereq for all production waves: synced-local-airplay landed on `main` (Decision 6).**
 - **Wave 1 (parallel):** BT-DEVICE → BT-ENUM ∥ BT-GROUPCTL — different files.
 - **Wave 2 (serial foundation):** BT-SINK → BT-REFSEL → BT-DRIFT (same file, serialize).
 - **Wave 3:** BT-FANOUT → BT-BACKEND (both touch `NativeBackend`, serialize). BT-CONNECT ∥ here (different file, gated by spike).
@@ -275,7 +275,7 @@ Verify: Alec confirms by ear against the Decision-1 bar; findings recorded.
 
 ## I. Execution recommendation — **watched agents** (matches the sibling)
 
-Judgment-heavy real-time-audio work with a hard serial audio chain, two built-in hardware go/no-go checkpoints (BT-SPIKE-CONNECT, BT-SPIKE-OFFSET), a dependency on another branch landing first, and a final by-ear gate — not a uniform mechanical fan-out, so a workflow's determinism/barriers aren't earned and mid-flight visibility is valuable. Launch Wave 0's spikes first and **stop for Alec at each checkpoint** (they decide whether BT-CONNECT / BT-OFFSET-AUTO exist at all). Run the mechanical cluster (BT-DEVICE, BT-ENUM, BT-OFFSET-UI, BT-UI, docs) as ordinary agents in their waves. (If Alec later wants that mechanical cluster run with enforced per-task effort/barriers, split it into a small `hybrid` workflow sub-batch — but the real-time chain + gates keep the primary recommendation at watched agents.)
+Judgment-heavy real-time-audio work with a hard serial audio chain, two built-in hardware go/no-go checkpoints (BT-SPIKE-CONNECT, BT-SPIKE-OFFSET), a dependency on another branch landing first, and a final by-ear gate — not a uniform mechanical fan-out, so a workflow's determinism/barriers aren't earned and mid-flight visibility is valuable. Launch Wave 0's spikes first and **stop for the owner at each checkpoint** (they decide whether BT-CONNECT / BT-OFFSET-AUTO exist at all). Run the mechanical cluster (BT-DEVICE, BT-ENUM, BT-OFFSET-UI, BT-UI, docs) as ordinary agents in their waves. (If the owner later wants that mechanical cluster run with enforced per-task effort/barriers, split it into a small `hybrid` workflow sub-batch — but the real-time chain + gates keep the primary recommendation at watched agents.)
 
 ## J. Composition with the two in-flight branches
 
@@ -290,7 +290,7 @@ Judgment-heavy real-time-audio work with a hard serial audio chain, two built-in
 - New persisted `AppSettings` per-device offset keys — cover load/default/persist.
 - Entitlements + `Info.plist` (`NSBluetoothAlwaysUsageDescription`, `com.apple.security.device.bluetooth`) added — note in the signing/notarization checklist.
 - Docs: `PROGRESS.md`, `AudioutCore/AGENTS.md`, `dev/notes/`, this plan; record the stated quality-bar limitations. Read the nearest `AGENTS.md` before editing any subsystem; verify every backticked symbol via `git grep`.
-- **Merge to `main` only after Alec's live by-ear test + explicit go-ahead** (standing rule; especially here — real-time-audio correctness + a new BT permission).
+- **Merge to `main` only after the owner's live by-ear test + explicit go-ahead** (standing rule; especially here — real-time-audio correctness + a new BT permission).
 
 ## L. Open risks to confirm during execution
 
@@ -311,4 +311,4 @@ Judgment-heavy real-time-audio work with a hard serial audio chain, two built-in
 - Prior art: PairPods (MIT — multi-BT on macOS, Apple-only), Airfoil (commercial).
 
 ---
-*Produced 2026-07-24 via the `planner` sub-agent (opus/high), code-verified against `main`, with 6 decisions locked by Alec. Companion to `docs/plans/synced-local-airplay-plan.md` (its sync engine is the prerequisite foundation).*
+*Produced 2026-07-24 via the `planner` sub-agent (opus/high), code-verified against `main`, with 6 decisions locked by the owner. Companion to `docs/plans/synced-local-airplay-plan.md` (its sync engine is the prerequisite foundation).*

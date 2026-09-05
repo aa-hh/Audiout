@@ -3944,8 +3944,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // a powered-off speaker holds the OS attempt ~15.4 s (both
                 // brands) or hits our 20 s ceiling; a speaker another host
                 // holds refuses fast. The slow case reads `.unknown` — headline
-                // "Couldn't connect", matching AirPlay's generic failure (Alec,
-                // 2026-08-07) — rather than the AirPlay-flavored `.timedOut`.
+                // "Couldn't connect", matching AirPlay's generic failure
+                // (owner's call, 2026-08-07) — rather than the
+                // AirPlay-flavored `.timedOut`.
                 let cause: ConnectionFailure.Cause =
                     (reason == "timeout" || elapsed >= 10) ? .unknown : .connectedElsewhere
                 self.setConnectionState(.failed(ConnectionFailure(
@@ -8620,8 +8621,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     commitKnownDevice(id, updated)
                     // BT-RECONNECT: the row's lifecycle follows the baseband
                     // fact. A loss while SELECTED is DESELECTED — off =
-                    // unselected, truthfully (Alec's call, replacing the old
-                    // power-off park): the popover reacts to this exact
+                    // unselected, truthfully (the owner's call, replacing the
+                    // old power-off park): the popover reacts to this exact
                     // availability edge (`PopoverController.update(devices:)`)
                     // and routes it through `GroupController.setDeviceSelected`,
                     // the one selection owner. A return while STILL selected
@@ -8675,9 +8676,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // The first time this process lists a connected Bluetooth
                 // device is the only link-up it will ever see for it: a first
                 // pairing, or a speaker already up when the app launched. Both
-                // start a settle window (Alec, 2026-09-04); neither stales a
-                // stored tuning, because the store has no alignment instant to
-                // be earlier than (`BTAlignmentFreshness.status`).
+                // start a settle window (owner's call, 2026-09-04); neither
+                // stales a stored tuning, because the store has no alignment
+                // instant to be earlier than (`BTAlignmentFreshness.status`).
                 if snapshot.isConnected { btAlignmentFreshness.noteConnected(uid: id) }
                 known[id] = device
                 order.append(id)

@@ -293,7 +293,7 @@ import Testing
     // MARK: clearAllRedirectsAtLaunch — EVERY redirect reverts to `.noRedirect` at launch
 
     /// Every redirected app — `.device` AND `.currentDevice` alike — reverts to
-    /// `.noRedirect` (product decision, Alec 2026-07-26: live testing showed
+    /// `.noRedirect` (product decision, 2026-07-26: live testing showed
     /// restored `.currentDevice` routes going live at launch, silently starting
     /// captures the user never asked for that session); rows themselves stay,
     /// and the reset persists so a reloaded controller (the NEXT launch) sees it.

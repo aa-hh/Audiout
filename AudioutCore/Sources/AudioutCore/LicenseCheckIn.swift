@@ -4,7 +4,7 @@ import Foundation
 
 /// Telemetry recording licence device spread — **never a gate**: the app runs
 /// identically whether this ever fires. Ties a licence key to an install so
-/// Alec can *see* how widely a licence travels (PRODUCT.md Business Model,
+/// the owner can *see* how widely a licence travels (PRODUCT.md Business Model,
 /// 2026-08-12 — "a licence check-in may record how many devices a licence
 /// appears on... it is telemetry, not a gate"; Data Collection stream 2 —
 /// "License activation check-ins — identified by purchase... not anonymous").

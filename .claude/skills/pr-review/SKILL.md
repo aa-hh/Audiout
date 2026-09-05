@@ -11,11 +11,11 @@ ask if one is wanted) in `aa-hh/Audiout` and publish findings as PR comments.
 Two jobs:
 
 1. Give the author concrete, actionable findings.
-2. Help Alec focus his own review: surface implicit decisions, uncertainty,
+2. Help the owner focus their own review: surface implicit decisions, uncertainty,
    and — this repo's real verification split — what is test-covered versus
-   what still needs his live hardware test.
+   what still needs their live hardware test.
 
-Never approve, request changes, or merge. Alec owns every merge decision
+Never approve, request changes, or merge. The owner owns every merge decision
 (house rule, enforced by the merge-approval hook).
 
 ## Boundaries
@@ -101,7 +101,7 @@ merge) / `important` (concrete issue worth fixing in this PR) / `optional`
   (`swift test --package-path AudioutCore --filter <Suite>` — NEVER a bare
   full `swift test`; the full run is `scripts/run-tests.sh` and rarely needed
   for review). Record exact commands + outcomes in the summary. Separate
-  clearly: covered by tests here / needs Alec's live hardware test (TCC,
+  clearly: covered by tests here / needs the owner's live hardware test (TCC,
   real receivers, PTP, sleep-wake — say which and why).
 
 ## Publish in one idempotent sweep
@@ -118,7 +118,7 @@ observed behavior, the exact open decision, and a material consequence).
 - Post inline comments first (`gh pr comment` / review API), then exactly one
   summary: marker, intent, risk, recommendation, compatibility verdict,
   cross-cutting findings, what was inspected, verification commands + results,
-  verification gaps, and the live-test list for Alec.
+  verification gaps, and the live-test list for the owner.
 - Recommendation, first match wins: `needs discussion` (unresolved
   product/compat/architecture decision) → `needs attention` (supported
   findings, or claimed verification absent for this head SHA) → `ready`.

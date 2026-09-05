@@ -124,12 +124,12 @@ public struct AggregateOutputDevice: Sendable {
     }
 
     /// The spike tool's own aggregate UID (`dev/spikes/aggregate-device/aggtool.swift`).
-    /// Alec ran that tool directly on his machines during the spike, so a
-    /// lingering `com.audiout.spike.aggregate` entry is a real, not
+    /// The owner ran that tool directly on their machines during the spike, so
+    /// a lingering `com.audiout.spike.aggregate` entry is a real, not
     /// hypothetical, orphan risk — `sweepOrphans()` destroys it too.
     /// razor: drop this line once the first shipped build has cycled through
-    /// Alec's machines (it can only ever match a leftover from the spike, not
-    /// anything this app itself creates).
+    /// the owner's machines (it can only ever match a leftover from the spike,
+    /// not anything this app itself creates).
     static let priorSpikeUID = "com.audiout.spike.aggregate"
 
     private let control: AggregateDeviceControlling

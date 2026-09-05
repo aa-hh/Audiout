@@ -250,7 +250,7 @@ import AppKit
 
         // It has to LOOK actionable, not like a greyed-out placeholder line:
         // a leading "+" glyph is the half a headless run can see (the pointing
-        // hand cursor is Alec's to check live).
+        // hand cursor is the owner's to check live).
         #expect(popover.test_bluetoothConnectRowHasGlyph,
                 "the Connect row carries its leading glyph")
 

@@ -389,12 +389,12 @@ import Testing
             devices: backend.devices, groupController: controller, appRouting: appRouting,
             excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
             runningRouted: noRunningRouted, liveRoutedAppNames: ["speaker-b": ["Some App"]],
-            localFallbackActive: true, takeoverStatus: "taking over", serverName: "Alec's Mac",
+            localFallbackActive: true, takeoverStatus: "taking over", serverName: "Owner's Mac",
             connectVolume: 42, connectVolumeMin: 5, connectVolumeMax: 100,
             startBufferMs: 1500, startBufferOptionsMs: [1000, 1500, 2250]
         )
 
-        #expect(snapshot.serverName == "Alec's Mac")
+        #expect(snapshot.serverName == "Owner's Mac")
         #expect(snapshot.liveRoutedAppNames == ["speaker-b": ["Some App"]])
         #expect(snapshot.localFallbackActive == true)
         #expect(snapshot.takeoverStatus == "taking over")

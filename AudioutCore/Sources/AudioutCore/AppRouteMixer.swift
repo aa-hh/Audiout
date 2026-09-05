@@ -16,11 +16,18 @@ import AudioToolbox
 /// AppRoutingController.appRoutes ──updateRoutes──▶ ┌──────────────┐
 ///                                                  │              │──onDestinationSetsChanged──▶ T6
 /// PerAppCaptureCoordinator.onStateChange ─────────▶│ AppRouteMixer│
-/// PerAppCaptureCoordinator.onBuffer ──────────────▶│              │──onMixedBuffer──▶ T6 ──engine.write(pcm:streamId:pts:)
+/// PerAppCaptureCoordinator.onBuffer ──────────────▶│              │──onMixedBuffer──▶ T6
 ///                                                  └──────────────┘
 /// ```
-/// The mixer consumes ONLY apps that have an active `.device(id:)` route (the
-/// only apps ``PerAppCaptureCoordinator`` ever taps). Apps on `.noRedirect` OR
+/// T6 delivers each mixed buffer to whichever destinations that stream actually
+/// has: the AirPlay engine (`engine.write(pcm:streamId:pts:)`) for its
+/// engine-bound devices, and the Bluetooth sink manager for the speakers on it
+/// that render through their own delay lines. One stream can have both, and gets
+/// both.
+///
+/// The mixer consumes only apps the backend resolved to at least one live
+/// speaker — a `.device(id:)` route, or a `.group(id:)` route's surviving
+/// members. Apps on `.noRedirect` OR
 /// `.currentDevice` (both "plays locally" — see `AppRouteDestination`'s doc)
 /// never appear in its input and never appear in its output. The whole-system
 /// "Selected Devices" mix (stream_id 0, produced by the existing
@@ -29,12 +36,13 @@ import AudioToolbox
 ///
 /// ## Two responsibilities, both pure computation
 /// 1. **Destination-set topology.** From the current routes it derives which
-///    devices share a mixed stream: devices with the *exact same* set of routed
-///    apps are fed one stream (saves redundant encoding), and each distinct
-///    non-empty app-set gets a stable `stream_id`. See ``updateRoutes(_:)``.
+///    devices share a mixed stream: devices fed the *exact same* apps at the
+///    *exact same* gains are fed one stream (saves redundant encoding), and
+///    each distinct non-empty signature gets a stable `stream_id`. See
+///    ``updateRoutes(_:)``.
 /// 2. **Buffer mixing.** Per-app captured buffers are converted to the engine's
 ///    one accepted PCM format (S16LE / 44100 / 2ch), scaled by the app's own
-///    volume, summed onto a shared frame-indexed timeline per stream (so
+///    gain on that stream, summed onto a shared frame-indexed timeline per stream (so
 ///    independently-clocked taps line up by presentation time, not arrival
 ///    order), clipped, and emitted. See ``handleBuffer(bundleID:buffer:)``.
 ///
@@ -48,25 +56,68 @@ public final class AppRouteMixer: @unchecked Sendable {
 
     // MARK: Output types
 
+    /// One app summed into a stream, at the gain its audio is mixed at there.
+    /// The gain is part of the identity because two speakers fed the same apps
+    /// at DIFFERENT levels (a group whose members carry different per-speaker
+    /// levels) cannot share one mixed buffer.
+    public struct Contributor: Hashable, Sendable {
+        public let bundleID: String
+        /// 0–100 — see ``AppRouteMixer/composedGain(routeVolume:memberVolume:)``.
+        public let gain: Int
+
+        public init(bundleID: String, gain: Int) {
+            self.bundleID = bundleID
+            self.gain = gain
+        }
+    }
+
     /// One mixed stream and everything the backend coordinator (T6) needs to
-    /// route it: its `streamID`, the set of app bundle IDs summed into it (the
+    /// route it: its `streamID`, the apps summed into it with their gains (the
     /// membership signature), and the device IDs it must be sent to (one stream,
-    /// possibly several identically-routed devices).
+    /// possibly several devices fed identically).
     public struct DestinationSet: Equatable, Sendable {
         /// Stable per-signature stream id, ≥ 1 (0 is reserved for the legacy
         /// whole-system path). Stays constant while this exact app-set persists.
         public let streamID: Int
-        /// The bundle IDs whose audio is summed into this stream. This set is
-        /// the signature that keys ``streamID`` stability.
-        public let bundleIDs: Set<String>
-        /// Every device that receives this stream (all share the same routed
-        /// app-set, so they get one encode instead of one each).
+        /// The apps whose audio is summed into this stream, each with the gain
+        /// it is mixed at. This set is the signature that keys ``streamID``
+        /// stability.
+        public let contributors: Set<Contributor>
+        /// Every device that receives this stream (all fed the same apps at the
+        /// same gains, so they get one encode instead of one each).
         public let deviceIDs: Set<String>
 
-        public init(streamID: Int, bundleIDs: Set<String>, deviceIDs: Set<String>) {
+        /// The bundle IDs summed into this stream, gains dropped — what the
+        /// `.routedApps` UI signal names.
+        public var bundleIDs: Set<String> { Set(contributors.map(\.bundleID)) }
+
+        public init(streamID: Int, contributors: Set<Contributor>, deviceIDs: Set<String>) {
             self.streamID = streamID
-            self.bundleIDs = bundleIDs
+            self.contributors = contributors
             self.deviceIDs = deviceIDs
+        }
+
+        /// Convenience for the plain full-volume case: every app mixed at 100.
+        public init(streamID: Int, bundleIDs: Set<String>, deviceIDs: Set<String>) {
+            self.init(streamID: streamID,
+                      contributors: Set(bundleIDs.map { Contributor(bundleID: $0, gain: 100) }),
+                      deviceIDs: deviceIDs)
+        }
+    }
+
+    /// One app's routing as the mixer consumes it: which devices its audio goes
+    /// to, and at what gain on each. Built by the backend, which is the layer
+    /// that knows whether a route names one device or a whole saved group and
+    /// which of those speakers are actually available right now.
+    public struct RoutedApp: Equatable, Sendable {
+        public let bundleID: String
+        /// device id → 0–100 gain. Empty means "not routed anywhere" and is
+        /// simply ignored.
+        public let deviceGains: [String: Int]
+
+        public init(bundleID: String, deviceGains: [String: Int]) {
+            self.bundleID = bundleID
+            self.deviceGains = deviceGains
         }
     }
 
@@ -135,10 +186,6 @@ public final class AppRouteMixer: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "AppRouteMixer.state")
 
-    /// Signature (set of bundle IDs) → assigned stream id. Persists across
-    /// ``updateRoutes(_:)`` calls so an unchanged app-set keeps its id.
-    private var streamIDForSignature: [Set<String>: Int] = [:]
-
     /// Monotonic stream-id allocator. IDs are never reused: a signature that
     /// vanishes doesn't free its id, so a genuinely-different app-set can never
     /// silently inherit a prior set's id (which would hide a membership change
@@ -147,15 +194,14 @@ public final class AppRouteMixer: @unchecked Sendable {
     /// growth is safe. Starts at 1 (0 is the reserved legacy whole-system id).
     private var nextStreamID = 1
 
-    /// Current published topology.
+    /// Current published topology. Also the id-reuse table
+    /// (``assignStreamIDs(_:)`` matches new sets against it).
     private var currentSets: [DestinationSet] = []
 
-    /// bundleID → the stream it feeds (derived from `currentSets`; a routed app
-    /// belongs to exactly one stream).
-    private var streamForBundle: [String: Int] = [:]
-
-    /// bundleID → its route volume, 0…100. Absent = 100.
-    private var volumeForBundle: [String: Int] = [:]
+    /// bundleID → (stream it feeds → the gain it is mixed at there). One app can
+    /// feed SEVERAL streams: a group route whose members carry different levels
+    /// splits into one stream per distinct gain.
+    private var streamGainsForBundle: [String: [Int: Int]] = [:]
 
     /// bundleID → converter built from that app's captured `TapFormat` (learned
     /// via ``handleStateChange(bundleID:state:)``). A buffer for a bundle with
@@ -198,46 +244,56 @@ public final class AppRouteMixer: @unchecked Sendable {
         queue.sync { currentSets }
     }
 
-    /// The stream id a bundle currently feeds, or `nil` if it isn't routed to a
-    /// device (i.e. it's on `.noRedirect`/`.currentDevice`, or unknown).
-    public func streamID(for bundleID: String) -> Int? {
-        queue.sync { streamForBundle[bundleID] }
+    /// The streams a bundle currently feeds — empty if it isn't routed to any
+    /// device (i.e. it's on `.noRedirect`/`.currentDevice`, or unknown). More
+    /// than one when a routed group's members carry different levels.
+    public func streamIDs(for bundleID: String) -> [Int] {
+        queue.sync { streamGainsForBundle[bundleID].map { $0.keys.sorted() } ?? [] }
     }
 
-    /// Recompute the destination-set topology from the current routes. Only
-    /// `.device(id:)` routes participate; `.noRedirect` and `.currentDevice`
-    /// routes are both ignored entirely. Fires ``onDestinationSetsChanged`` iff the published topology
-    /// actually changed. Always refreshes stored per-app volumes (a volume-only
-    /// edit updates mixing without re-firing the topology callback).
-    public func updateRoutes(_ routes: [AppRoute]) {
-        let changed: [DestinationSet]? = queue.sync {
-            // Per-app volume is always refreshed (cheap, and a pure volume edit
-            // must take effect even when the topology is unchanged).
-            volumeForBundle = Dictionary(
-                routes.map { ($0.bundleID, $0.volume) }, uniquingKeysWith: { _, new in new })
+    /// The gain one app's audio is mixed at on ONE speaker: the app's own route
+    /// slider scaled by that speaker's level inside the group the app is routed
+    /// to (100 — no change — for a plain single-device route). THE one place the
+    /// two levels compose; the group's own master volume deliberately does not
+    /// apply, because the app's slider is the master for the app's own stream.
+    public static func composedGain(routeVolume: Int, memberVolume: Int) -> Int {
+        let route = routeVolume.clampedToVolume
+        let member = memberVolume.clampedToVolume
+        return member == 100 ? route : (route * member + 50) / 100
+    }
 
-            // deviceID -> set of bundle IDs routed to it (device routes only).
-            var appsByDevice: [String: Set<String>] = [:]
-            for route in routes {
-                if case .device(let id) = route.destination {
-                    appsByDevice[id, default: []].insert(route.bundleID)
+    /// Recompute the destination-set topology from the apps' resolved targets.
+    /// Fires ``onDestinationSetsChanged`` iff the published topology actually
+    /// changed — which now includes a gain-only change, since the gain is what
+    /// each stream is mixed at.
+    public func updateRoutes(_ routed: [RoutedApp]) {
+        let changed: [DestinationSet]? = queue.sync {
+            // deviceID -> the apps it is fed, each with its gain on THIS device.
+            var appsByDevice: [String: Set<Contributor>] = [:]
+            for app in routed {
+                for (deviceID, gain) in app.deviceGains {
+                    appsByDevice[deviceID, default: []]
+                        .insert(Contributor(bundleID: app.bundleID, gain: gain))
                 }
             }
 
-            // Group devices by identical app-set (the membership signature).
-            var devicesBySignature: [Set<String>: Set<String>] = [:]
+            // Group devices by identical app-set AND gains (the signature):
+            // anything short of identical can't share one mixed buffer.
+            var devicesBySignature: [Set<Contributor>: Set<String>] = [:]
             for (deviceID, apps) in appsByDevice where !apps.isEmpty {
                 devicesBySignature[apps, default: []].insert(deviceID)
             }
 
             let newSets = assignStreamIDs(devicesBySignature)
 
-            // Rebuild bundle -> stream map from the fresh topology.
-            var newStreamForBundle: [String: Int] = [:]
+            // Rebuild bundle -> (stream, gain) map from the fresh topology.
+            var newStreamGains: [String: [Int: Int]] = [:]
             for set in newSets {
-                for bundle in set.bundleIDs { newStreamForBundle[bundle] = set.streamID }
+                for contributor in set.contributors {
+                    newStreamGains[contributor.bundleID, default: [:]][set.streamID] = contributor.gain
+                }
             }
-            streamForBundle = newStreamForBundle
+            streamGainsForBundle = newStreamGains
 
             // Drop timelines for streams that no longer exist.
             let liveStreamIDs = Set(newSets.map { $0.streamID })
@@ -252,38 +308,50 @@ public final class AppRouteMixer: @unchecked Sendable {
         if let changed { onDestinationSetsChanged?(changed) }
     }
 
-    /// Assign a stable stream id to each membership signature: reuse the id an
-    /// already-known signature holds; give each genuinely new signature the next
-    /// monotonic id. Signatures that vanished are dropped from the map but their
-    /// ids are NOT recycled (see ``nextStreamID``), so a persisting set always
-    /// keeps its id and a changed set always gets a fresh one. Deterministic (new
-    /// signatures are ordered by their sorted contents) so a given route set
-    /// always yields the same assignment. MUST hold `queue`.
-    private func assignStreamIDs(_ devicesBySignature: [Set<String>: Set<String>]) -> [DestinationSet] {
-        let signatures = Array(devicesBySignature.keys)
+    /// Assign a stream id to each signature, reusing the published id wherever
+    /// the stream is recognisably the same one so the backend's binding diff
+    /// stays empty and no receiver is needlessly rebound. A signature matches a
+    /// published set when it holds the same apps AND either the same gains (the
+    /// ordinary case, including a device joining or leaving the stream) or an
+    /// overlapping device set (a pure gain edit — a group member's level moved,
+    /// which is a mixer change, not a topology change). Anything else is a
+    /// genuinely different stream and takes the next monotonic id; vanished ids
+    /// are never recycled (see ``nextStreamID``), so a changed app-set can never
+    /// silently inherit a prior set's id and hide the reconnect it must trigger.
+    /// Deterministic (signatures ordered by their sorted contents) so a given
+    /// topology always yields the same assignment. MUST hold `queue`.
+    private func assignStreamIDs(_ devicesBySignature: [Set<Contributor>: Set<String>]) -> [DestinationSet] {
+        let signatures = devicesBySignature.keys.sorted { Self.sortKey($0) < Self.sortKey($1) }
+        var reusable = currentSets
+        var assigned: [DestinationSet] = []
 
-        // Drop ids of signatures that are gone (they won't be reused).
-        streamIDForSignature = streamIDForSignature.filter { devicesBySignature[$0.key] != nil }
-
-        // Assign new signatures the next monotonic id, in a deterministic order
-        // (sorted contents) so the assignment is reproducible.
-        let unassigned = signatures
-            .filter { streamIDForSignature[$0] == nil }
-            .sorted { $0.sorted().joined(separator: "\u{0}") < $1.sorted().joined(separator: "\u{0}") }
-        for signature in unassigned {
-            streamIDForSignature[signature] = nextStreamID
-            nextStreamID += 1
+        func take(_ index: Int) -> Int {
+            reusable.remove(at: index).streamID   // one published id, claimed once
         }
 
-        // Build the published sets, ordered by stream id for a stable snapshot.
-        return signatures
-            .map { signature in
-                DestinationSet(
-                    streamID: streamIDForSignature[signature]!,
-                    bundleIDs: signature,
-                    deviceIDs: devicesBySignature[signature]!)
+        for signature in signatures {
+            let devices = devicesBySignature[signature]!
+            let bundleIDs = Set(signature.map(\.bundleID))
+            let streamID: Int
+            if let i = reusable.firstIndex(where: { $0.contributors == signature }) {
+                streamID = take(i)
+            } else if let i = reusable.firstIndex(where: {
+                $0.bundleIDs == bundleIDs && !$0.deviceIDs.isDisjoint(with: devices)
+            }) {
+                streamID = take(i)
+            } else {
+                streamID = nextStreamID
+                nextStreamID += 1
             }
-            .sorted { $0.streamID < $1.streamID }
+            assigned.append(DestinationSet(
+                streamID: streamID, contributors: signature, deviceIDs: devices))
+        }
+        return assigned.sorted { $0.streamID < $1.streamID }
+    }
+
+    /// A signature's deterministic ordering key — sorted `bundle@gain` pairs.
+    private static func sortKey(_ signature: Set<Contributor>) -> String {
+        signature.map { "\($0.bundleID)@\($0.gain)" }.sorted().joined(separator: "\u{0}")
     }
 
     /// Gate per-app RMS computation/emission on or off (T2). Independent of
@@ -320,13 +388,12 @@ public final class AppRouteMixer: @unchecked Sendable {
     /// final. Safe to call concurrently from several taps' IOProc threads.
     public func handleBuffer(bundleID: String, buffer: CapturedBuffer) {
         let (emissions, level): ([MixedBuffer], Float?) = queue.sync {
-            guard let streamID = streamForBundle[bundleID],
+            guard let streamGains = streamGainsForBundle[bundleID], !streamGains.isEmpty,
                   let converter = converterForBundle[bundleID],
                   let pcm = converter.convertToAirPlayPCM(buffer),
                   !pcm.isEmpty
             else { return ([], nil) }
 
-            let volume = volumeForBundle[bundleID] ?? 100
             // The per-app meter is a SOURCE/program level: RMS the PRE-volume
             // converted buffer (`pcm`), so the bar reflects how loud the app is
             // actually playing, independent of its routing-volume slider — the
@@ -334,55 +401,72 @@ public final class AppRouteMixer: @unchecked Sendable {
             // feedback: a low slider used to leave the bar stuck near-empty even
             // when the source was loud). Skipped entirely unless a meter listens.
             let level: Float? = meteringActive ? NativeCaptureCoordinator.rmsOfS16LE(pcm) : nil
-            let contributorCount = currentSets.first(where: { $0.streamID == streamID })?.bundleIDs.count ?? 1
 
-            // SINGLE-contributor stream: pass the converted buffer STRAIGHT
-            // through with its own capture pts — identical to the shipping
-            // whole-system path (`NativeCaptureCoordinator.handleBuffer` →
-            // `engine.write(pcm:pts:)`). Deliberately NO frame-index timeline:
-            // audio must stay clocked by its own capture clock, not re-quantized
-            // onto a wall-clock-derived grid. That re-gridding (the timeline path
-            // below) turns the drift/jitter between the audio clock and the
-            // system clock into periodic gaps/overlaps — the "slowed / warbling"
-            // artifact — and it degrades badly the moment the output device
-            // changes sample rate (e.g. the mic engaging voice-processing mode),
-            // which is why it bit even a single redirected app. The engine's PTP
-            // timing and the tap aggregate's drift compensation own sync.
-            if contributorCount <= 1 {
-                // A stream that just dropped from 2 contributors back to 1 may
-                // have a stale accumulator — clear it so no held frames leak out.
-                timelines.removeValue(forKey: streamID)
-                let out = volume == 100
-                    ? pcm
-                    : Self.packClipped(Self.scaledStereoSamples(pcm, volumePercent: volume)[...])
-                guard !out.isEmpty else { return ([], nil) }
-                // S16LE stereo == 4 bytes per frame. (`level` above is the app's
-                // pre-volume source RMS, shared by both stream shapes.)
-                return ([MixedBuffer(streamID: streamID, pcm: out,
-                                     frameCount: out.count / 4, pts: buffer.pts)], level)
+            // One converted buffer, mixed into every stream this app feeds — a
+            // routed group whose members carry different levels is several
+            // streams, at one gain each.
+            var emissions: [MixedBuffer] = []
+            for streamID in streamGains.keys.sorted() {
+                let gain = streamGains[streamID]!
+                emissions.append(contentsOf: mixLocked(
+                    pcm: pcm, gain: gain, streamID: streamID, pts: buffer.pts))
             }
-
-            // MULTI-contributor stream (2+ apps summed onto ONE device): the
-            // frame-indexed accumulator aligns independently-clocked taps by
-            // presentation time before summing. Known-imperfect and gated to the
-            // genuinely-shared case only; dual-stream mixing is a tracked
-            // follow-up (single-stream routing is the shipping priority).
-            let scaled = Self.scaledStereoSamples(pcm, volumePercent: volume)
-            guard !scaled.isEmpty else { return ([], nil) }
-            let firstFrame = Self.frameIndex(of: buffer.pts)
-            let timeline = timelines[streamID] ?? {
-                let t = MixTimeline()
-                timelines[streamID] = t
-                return t
-            }()
-            timeline.add(firstFrame: firstFrame, stereo: scaled)
-            return (timeline.drainReady(
-                streamID: streamID,
-                holdFrames: Self.holdFrames,
-                maxPendingFrames: Self.maxPendingFrames), level)
+            return (emissions, level)
         }
         for emission in emissions { onMixedBuffer?(emission) }
         if let level { onAppLevel?(bundleID, level) }
+    }
+
+    /// Mix one app's already-converted buffer into ONE stream at `gain`, and
+    /// return whatever that stream is now ready to emit. MUST hold `queue`.
+    private func mixLocked(
+        pcm: Data, gain: Int, streamID: Int, pts: timespec
+    ) -> [MixedBuffer] {
+        let contributorCount = currentSets.first(where: { $0.streamID == streamID })?
+            .contributors.count ?? 1
+
+        // SINGLE-contributor stream: pass the converted buffer STRAIGHT
+        // through with its own capture pts — identical to the shipping
+        // whole-system path (`NativeCaptureCoordinator.handleBuffer` →
+        // `engine.write(pcm:pts:)`). Deliberately NO frame-index timeline:
+        // audio must stay clocked by its own capture clock, not re-quantized
+        // onto a wall-clock-derived grid. That re-gridding (the timeline path
+        // below) turns the drift/jitter between the audio clock and the
+        // system clock into periodic gaps/overlaps — the "slowed / warbling"
+        // artifact — and it degrades badly the moment the output device
+        // changes sample rate (e.g. the mic engaging voice-processing mode),
+        // which is why it bit even a single redirected app. The engine's PTP
+        // timing and the tap aggregate's drift compensation own sync.
+        if contributorCount <= 1 {
+            // A stream that just dropped from 2 contributors back to 1 may
+            // have a stale accumulator — clear it so no held frames leak out.
+            timelines.removeValue(forKey: streamID)
+            let out = gain == 100
+                ? pcm
+                : Self.packClipped(Self.scaledStereoSamples(pcm, volumePercent: gain)[...])
+            guard !out.isEmpty else { return [] }
+            // S16LE stereo == 4 bytes per frame.
+            return [MixedBuffer(streamID: streamID, pcm: out,
+                                frameCount: out.count / 4, pts: pts)]
+        }
+
+        // MULTI-contributor stream (2+ apps summed onto ONE device): the
+        // frame-indexed accumulator aligns independently-clocked taps by
+        // presentation time before summing. Known-imperfect and gated to the
+        // genuinely-shared case only; dual-stream mixing is a tracked
+        // follow-up (single-stream routing is the shipping priority).
+        let scaled = Self.scaledStereoSamples(pcm, volumePercent: gain)
+        guard !scaled.isEmpty else { return [] }
+        let timeline = timelines[streamID] ?? {
+            let t = MixTimeline()
+            timelines[streamID] = t
+            return t
+        }()
+        timeline.add(firstFrame: Self.frameIndex(of: pts), stereo: scaled)
+        return timeline.drainReady(
+            streamID: streamID,
+            holdFrames: Self.holdFrames,
+            maxPendingFrames: Self.maxPendingFrames)
     }
 
     /// Emit every stream's still-pending mixed audio immediately (end-of-run,
@@ -401,7 +485,7 @@ public final class AppRouteMixer: @unchecked Sendable {
     public func removeApp(bundleID: String) {
         queue.sync {
             converterForBundle.removeValue(forKey: bundleID)
-            volumeForBundle.removeValue(forKey: bundleID)
+            streamGainsForBundle.removeValue(forKey: bundleID)
         }
     }
 

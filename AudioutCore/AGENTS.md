@@ -16,7 +16,8 @@ the model, never the reverse.
 - `Device.isSelected` means "in the backend's output set", not UI membership.
 - Scope arbiter: whole-system routing always wins a contested device, per-app yields.
 - Bundle-ID resolution must reach every Core Audio process, never a single pid.
-- `AppRouteDestination` is three cases; never read `.currentDevice` as redirected.
+- `AppRouteDestination` is four cases; `isDeviceRoute` is `.device` only, `isRoutedAway` adds `.group`.
+- A per-app Bluetooth destination is fed by UID and reads the room's timing, never sets it.
 - Every real (re)connect reseeds the engine volume, or the stream is inaudible.
 - Never touch IOBluetooth outside `BTDeviceEnumerator`'s gate; an ungated call kills the process.
 - `TCCAccessPreflight` is cached for the process lifetime; read grants through `TCCProbeRunner`.

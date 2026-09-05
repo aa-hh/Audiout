@@ -189,7 +189,7 @@ import Testing
 
         controller.resetDeviceRoute(bundleID: "org.mozilla.firefox")
 
-        #expect(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox") == "living-room",
+        #expect(controller.clearedRouteDestination(for: "org.mozilla.firefox") == .device(id: "living-room"),
                 "the cleared target must be remembered so a relaunch can offer to resume it")
     }
 
@@ -206,9 +206,9 @@ import Testing
         controller.resetDeviceRoute(bundleID: "com.apple.Safari")
         controller.resetDeviceRoute(bundleID: "com.unknown.app")
 
-        #expect(controller.clearedDeviceRouteTarget(for: "com.apple.Music") == nil)
-        #expect(controller.clearedDeviceRouteTarget(for: "com.apple.Safari") == nil)
-        #expect(controller.clearedDeviceRouteTarget(for: "com.unknown.app") == nil)
+        #expect(controller.clearedRouteDestination(for: "com.apple.Music") == nil)
+        #expect(controller.clearedRouteDestination(for: "com.apple.Safari") == nil)
+        #expect(controller.clearedRouteDestination(for: "com.unknown.app") == nil)
     }
 
     /// Any `setDestination` call for a bundle ID with a remembered cleared
@@ -221,21 +221,21 @@ import Testing
         controller.addRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox")
         controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
         controller.resetDeviceRoute(bundleID: "org.mozilla.firefox")
-        #expect(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox") == "living-room")
+        #expect(controller.clearedRouteDestination(for: "org.mozilla.firefox") == .device(id: "living-room"))
 
         // Picking the SAME device the memory names (the "Resume" pick in
         // production) still consumes the memory — it's now been acted on.
         controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
-        #expect(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox") == nil,
+        #expect(controller.clearedRouteDestination(for: "org.mozilla.firefox") == nil,
                 "picking the resume target consumes the memory")
 
         // Re-arm, then pick a DIFFERENT destination entirely.
         controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
         controller.resetDeviceRoute(bundleID: "org.mozilla.firefox")
-        #expect(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox") == "living-room")
+        #expect(controller.clearedRouteDestination(for: "org.mozilla.firefox") == .device(id: "living-room"))
 
         controller.setDestination(.device(id: "kitchen"), for: "org.mozilla.firefox")
-        #expect(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox") == nil,
+        #expect(controller.clearedRouteDestination(for: "org.mozilla.firefox") == nil,
                 "picking a different destination also consumes the now-stale memory")
     }
 
@@ -246,11 +246,11 @@ import Testing
         controller.addRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox")
         controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
         controller.resetDeviceRoute(bundleID: "org.mozilla.firefox")
-        #expect(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox") == "living-room")
+        #expect(controller.clearedRouteDestination(for: "org.mozilla.firefox") == .device(id: "living-room"))
 
         controller.removeRoute(bundleID: "org.mozilla.firefox")
 
-        #expect(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox") == nil)
+        #expect(controller.clearedRouteDestination(for: "org.mozilla.firefox") == nil)
     }
 
     /// The memory is in-memory ONLY — a reloaded controller (simulating
@@ -262,10 +262,10 @@ import Testing
         controller.addRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox")
         controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
         controller.resetDeviceRoute(bundleID: "org.mozilla.firefox")
-        #expect(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox") == "living-room")
+        #expect(controller.clearedRouteDestination(for: "org.mozilla.firefox") == .device(id: "living-room"))
 
         let reloaded = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: true)
-        #expect(reloaded.clearedDeviceRouteTarget(for: "org.mozilla.firefox") == nil,
+        #expect(reloaded.clearedRouteDestination(for: "org.mozilla.firefox") == nil,
                 "the memory must not survive a reload — it is forgotten for free on quit")
         // And the persisted route itself is exactly what resetDeviceRoute left it as.
         #expect(reloaded.appRoutes.first?.destination == .noRedirect)
@@ -373,7 +373,7 @@ import Testing
         controller.addRoute(bundleID: "org.mozilla.firefox", displayName: "Firefox")
         controller.setDestination(.device(id: "living-room"), for: "org.mozilla.firefox")
         controller.resetDeviceRoute(bundleID: "org.mozilla.firefox")
-        #expect(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox") == "living-room")
+        #expect(controller.clearedRouteDestination(for: "org.mozilla.firefox") == .device(id: "living-room"))
 
         // A second, unrelated device route exists at the time of the launch-time clear.
         controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
@@ -382,9 +382,9 @@ import Testing
         controller.clearAllRedirectsAtLaunch()
 
         #expect(controller.appRoutes.first { $0.bundleID == "com.apple.Music" }?.destination == .noRedirect)
-        #expect(controller.clearedDeviceRouteTarget(for: "com.apple.Music") == nil,
+        #expect(controller.clearedRouteDestination(for: "com.apple.Music") == nil,
                "clearAllRedirectsAtLaunch must not populate clearedDeviceRouteMemory for routes it clears")
-        #expect(controller.clearedDeviceRouteTarget(for: "org.mozilla.firefox") == "living-room",
+        #expect(controller.clearedRouteDestination(for: "org.mozilla.firefox") == .device(id: "living-room"),
                 "an existing memory entry from an earlier resetDeviceRoute must be left untouched")
     }
 
@@ -457,6 +457,157 @@ import Testing
         controller.removeRoute(bundleID: "unknown.bundle.id")
 
         #expect(controller.appRoutes == before)
+    }
+
+    // MARK: Group routes
+
+    private func airPlayDevice(_ id: String) -> Device {
+        Device(id: id, name: id, kind: .homePod)
+    }
+
+    private func group(_ id: String, members: [String],
+                       volumes: [String: Int] = [:]) -> Group {
+        Group(id: id, name: id, memberIDs: members, memberVolumes: volumes)
+    }
+
+    /// Selecting a speaker into Main Out clears a `.device` route pointed at it,
+    /// but must NOT clear a `.group` route that merely contains it — the app
+    /// keeps the rest of the group, and gets that speaker back when Main Out
+    /// lets go of it.
+    @Test func clearRoutesToDevicesLeavesGroupRoutesIntact() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.setDestination(.device(id: "kitchen"), for: "com.apple.Music")
+        controller.setDestination(.group(id: "downstairs"), for: "com.apple.Safari")
+
+        controller.clearRoutes(toDevices: ["kitchen"])
+
+        #expect(controller.appRoutes[0].destination == .noRedirect)
+        #expect(controller.appRoutes[1].destination == .group(id: "downstairs"))
+    }
+
+    @Test func deletingAGroupFallsItsRoutesBackToNoRedirectAndPersists() throws {
+        let dir = tempDirectory()
+        let controller = AppRoutingController(store: AppRouteStore(directory: dir), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.setDestination(.group(id: "downstairs"), for: "com.apple.Safari")
+        var fired = 0
+        controller.onRoutesDidChange = { fired += 1 }
+
+        controller.handleGroupDeleted(id: "downstairs")
+
+        #expect(controller.appRoutes[0].destination == .noRedirect)
+        #expect(fired == 1)
+        let reloaded = AppRoutingController(store: AppRouteStore(directory: dir))
+        #expect(reloaded.appRoutes[0].destination == .noRedirect)
+    }
+
+    @Test func deletingAnUnrelatedGroupIsANoOp() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.setDestination(.group(id: "downstairs"), for: "com.apple.Safari")
+        var fired = 0
+        controller.onRoutesDidChange = { fired += 1 }
+
+        controller.handleGroupDeleted(id: "upstairs")
+
+        #expect(fired == 0)
+        #expect(controller.appRoutes[0].destination == .group(id: "downstairs"))
+    }
+
+    @Test func appQuitRemembersAGroupRouteSoItCanBeResumed() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.setDestination(.group(id: "downstairs"), for: "com.apple.Safari")
+
+        controller.resetDeviceRoute(bundleID: "com.apple.Safari")
+
+        #expect(controller.appRoutes[0].destination == .noRedirect)
+        #expect(controller.clearedRouteDestination(for: "com.apple.Safari") == .group(id: "downstairs"))
+    }
+
+    @Test func launchResetClearsGroupRoutesToo() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.setDestination(.group(id: "downstairs"), for: "com.apple.Safari")
+
+        controller.clearAllRedirectsAtLaunch()
+
+        #expect(controller.appRoutes[0].destination == .noRedirect)
+    }
+
+    @Test func routedAppCountCountsGroupRoutes() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
+        controller.setDestination(.group(id: "downstairs"), for: "com.apple.Safari")
+        controller.setDestination(.currentDevice, for: "com.apple.Music")
+
+        #expect(controller.routedAppCount == 1)
+    }
+
+    // MARK: resolveGroupTargets — the one group → speakers rule
+
+    @Test func resolveGroupTargetsKeepsOnlyAirPlay2NonLocalMembers() {
+        let devices = [
+            airPlayDevice("kitchen"),
+            Device(id: "mac", name: "This Mac", kind: .localMac, isLocalDevice: true),
+            Device(id: "old", name: "Old Speaker", kind: .homePod, supportsAirPlay2: false),
+            Device(id: "bt", name: "Headphones", kind: .bluetooth, supportsAirPlay2: false),
+            Device(id: "cast", name: "TV", kind: .cast, supportsAirPlay2: false),
+        ]
+        let targets = AppRoutingController.resolveGroupTargets(
+            [group("g", members: ["kitchen", "mac", "old", "bt", "cast", "never-seen"])],
+            devices: devices)
+
+        #expect(targets["g"]?.memberVolumes.keys.sorted() == ["kitchen"])
+    }
+
+    /// Reachability is NOT this function's business — the backend subtracts an
+    /// unreachable member per device, which is what lets the route survive.
+    @Test func resolveGroupTargetsKeepsAnUnreachableMember() {
+        let devices = [Device(id: "kitchen", name: "Kitchen", kind: .homePod, isAvailable: false)]
+        let targets = AppRoutingController.resolveGroupTargets(
+            [group("g", members: ["kitchen"])], devices: devices)
+
+        #expect(targets["g"]?.memberVolumes["kitchen"] == 100)
+    }
+
+    @Test func resolveGroupTargetsCarriesEachMembersOwnLevel() {
+        let devices = [airPlayDevice("kitchen"), airPlayDevice("hall")]
+        let targets = AppRoutingController.resolveGroupTargets(
+            [group("g", members: ["kitchen", "hall"], volumes: ["kitchen": 40, "hall": 500])],
+            devices: devices)
+
+        #expect(targets["g"]?.memberVolumes["kitchen"] == 40)
+        #expect(targets["g"]?.memberVolumes["hall"] == 100, "an out-of-range level is clamped")
+    }
+
+    @Test func routedAppNamesFansAGroupRouteOutAcrossItsMembers() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.setDestination(.group(id: "g"), for: "com.apple.Safari")
+        let targets = AppRoutingController.resolveGroupTargets(
+            [group("g", members: ["kitchen", "hall"])],
+            devices: [airPlayDevice("kitchen"), airPlayDevice("hall")])
+
+        #expect(controller.routedAppNames(for: "kitchen", groupTargets: targets) == ["Safari"])
+        #expect(controller.routedAppNames(for: "hall", groupTargets: targets) == ["Safari"])
+        #expect(controller.routedAppNames(for: "office", groupTargets: targets) == [])
+        #expect(controller.routedAppNames(for: "kitchen") == [],
+                "with nothing resolved, a group route names no speaker")
+    }
+
+    @Test func appNamesRoutedToGroupListsOnlyThatGroupsApps() {
+        let controller = AppRoutingController(store: AppRouteStore(directory: tempDirectory()), loadPersisted: false)
+        controller.addRoute(bundleID: "com.apple.Safari", displayName: "Safari")
+        controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
+        controller.setDestination(.group(id: "downstairs"), for: "com.apple.Safari")
+        controller.setDestination(.group(id: "upstairs"), for: "com.apple.Music")
+
+        #expect(controller.appNamesRouted(toGroup: "downstairs") == ["Safari"])
+        #expect(controller.appNamesRouted(toGroup: "nowhere") == [])
     }
 
     // MARK: routedAppNames(for:) — feeds the DeviceRowView routing sublabel
@@ -551,7 +702,8 @@ import Testing
         let backend = SpyAppRouteBackend()
         let excluded: Set<String> = ["com.example.excluded"]
         controller.onRoutesDidChange = {
-            backend.updateAppRoutes(controller.appRoutes, excludedBundleIDs: excluded)
+            backend.updateAppRoutes(controller.appRoutes, excludedBundleIDs: excluded,
+                                    groupTargets: [:])
         }
 
         controller.addRoute(bundleID: "com.apple.Music", displayName: "Music")
@@ -569,10 +721,12 @@ import Testing
 /// A test double capturing every `updateAppRoutes` call, standing in for
 /// `NativeBackend` (the only production `AppRouteConfiguring`).
 private final class SpyAppRouteBackend: AppRouteConfiguring {
-    private(set) var calls: [(routes: [AppRoute], excluded: Set<String>)] = []
+    private(set) var calls: [(routes: [AppRoute], excluded: Set<String>,
+                              groupTargets: [String: GroupRouteTarget])] = []
     private(set) var terminatedBundleIDs: [String] = []
-    func updateAppRoutes(_ routes: [AppRoute], excludedBundleIDs: Set<String>) {
-        calls.append((routes, excludedBundleIDs))
+    func updateAppRoutes(_ routes: [AppRoute], excludedBundleIDs: Set<String>,
+                         groupTargets: [String: GroupRouteTarget]) {
+        calls.append((routes, excludedBundleIDs, groupTargets))
     }
     func handleAppTerminated(bundleID: String) {
         terminatedBundleIDs.append(bundleID)

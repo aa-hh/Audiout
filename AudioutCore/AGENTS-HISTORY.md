@@ -159,14 +159,25 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   which concrete processes a bundle id resolved to, nor how — a bundle
   resolving to ZERO processes is exactly that leak's signature and is now
   visible in the log alone, no repro needed.
-- **`AppRouteDestination` is three cases, not two: `.noRedirect` (new default,
-  unset) / `.currentDevice` (explicit "play here" pick) / `.device(id:)`.**
-  `.noRedirect` and `.currentDevice` are capture/engine-equivalent — both mean
-  "plays locally, stays in the whole-system mix" — they differ only in popover
-  UI state (unset vs. a deliberate choice). Don't pattern-match negatively on
-  `.currentDevice` to mean "is redirected"; use `AppRouteDestination.isDeviceRoute`
-  (true only for `.device`), the single source of truth for "actually routed
-  away."
+- **`AppRouteDestination` is four cases: `.noRedirect` (default, unset) /
+  `.currentDevice` (explicit "play here" pick) / `.device(id:)` /
+  `.group(id:)`.** `.noRedirect` and `.currentDevice` are
+  capture/engine-equivalent — both mean "plays locally, stays in the
+  whole-system mix" — they differ only in popover UI state (unset vs. a
+  deliberate choice). Don't pattern-match negatively on `.currentDevice` to
+  mean "is redirected". TWO predicates, and picking the wrong one is the trap:
+  `isDeviceRoute` is true ONLY for `.device` — use it where a single
+  `Device.id` is the question (the one-role-per-speaker clear, the app-quit
+  resume of a speaker); `isRoutedAway` is true for `.device` AND `.group` —
+  use it for "is this app out of the whole-system mix", which is what the
+  tap's exclusion set and the routed-app count ask.
+- **A per-app destination READS the room's timing and never SETS it.** A
+  Bluetooth speaker a route names joins `btPerAppClaimedUIDs`, which arms the
+  sink manager (`btArmingLocked`) but is deliberately absent from
+  `btSelectedUIDs` — the only input to the shared BT reference. So routing one
+  app to one speaker cannot re-anchor every other sink in the house. The
+  accepted cost: a per-app-only speaker measured slower than the reference
+  hits `SyncTiming.totalDelayNanos`'s zero clamp and plays late.
 - **`.currentDevice` local playback follows the Mac's real default output device
   (Bluetooth, USB, HDMI, built-in, etc.), re-resolved on each cold start.**
   ANTI-FEEDBACK GUARD: it refuses to follow a default whose transport is AirPlay
@@ -362,8 +373,12 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   reads a BT id's audible fact from `isAvailable`, never `.connected`
   (`desiredDeviceAudibleLocked`): that signal lands a whole reference delay
   late, so the `.connected` read would brand a healthy BT-only selection
-  stranded and un-mute the Mac mid-playback. BT devices
-  remain ineligible per-app route targets. `BTDeviceEnumerator.swift` and
+  stranded and un-mute the Mac mid-playback. A BT device MAY be a per-app
+  route target (behind `AUDIOUT_PER_APP_ALL_OUTPUTS`, which ships off): the
+  route reaches it by UID through the sink manager, never through the engine,
+  so the converge loop's `!device.isBluetooth` guard is untouched — see the
+  per-app arm in `handleDestinationSetsChanged`.
+  `BTDeviceEnumerator.swift` and
   `BTSyncedSink.swift` are LICENSE-CLEAN
   like `SyncCore.swift` (no GPL header — see the header note in each file);
   never copy code into them from the GPL-headered `SyncedLocalSink.swift`.

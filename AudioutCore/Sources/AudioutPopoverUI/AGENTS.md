@@ -26,6 +26,9 @@ folder renders; routing arithmetic lives in Core.
 - The Mixer carries an equalizer DOOR (the row button beside mute, and the row menu) and one mark (magenta border when the curve is not flat). No editor, no curve, no tone control on the Mixer (2026-08-22, amended 2026-09-03).
 - A never-aligned Bluetooth row's chip IS the wizard's door; a measured one opens the drawer.
 - A first-join alignment note is session state: ✕ hides it, nothing is written down.
+- An App Routing row may target a saved GROUP. The one-role-per-speaker filter hides a Main Out member from the DEVICE list but never the group containing it — the group entry discloses how much of itself the app gets, and only greys out when no member is free.
+- A group's membership is read LIVE on every rebuild (`groupRouteTargets()`); never cache it.
+- A group edit reaches the surface ONLY through `groupsDidChange()`; no other trigger watches it.
 - Known stability findings in this target carry `STABILITY(id)` inline markers — details and fix sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 

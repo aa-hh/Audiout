@@ -520,6 +520,12 @@ final class AlignmentStageView: NSView {
     }
     private let targetNameLabel = NSTextField(labelWithString: "")
     private let referenceNameLabel = NSTextField(labelWithString: "")
+    /// What one tick mark is worth. The ruler RE-GEARS on every rung change
+    /// (`Look.tickStepMs`, and the window it spans with it), so the same
+    /// spacing means different amounts at different points in a run — a gauge
+    /// whose scale changes under the reader and never states itself. One
+    /// quiet legend, the way a real instrument face carries its units.
+    private let scaleLabel = NSTextField(labelWithString: "")
 
     init() {
         super.init(frame: .zero)
@@ -557,7 +563,7 @@ final class AlignmentStageView: NSView {
         for sub in [plateLayer, wireLeft, wireRight, fieldLayer] {
             layer?.addSublayer(sub)
         }
-        for label in [targetNameLabel, referenceNameLabel] {
+        for label in [targetNameLabel, referenceNameLabel, scaleLabel] {
             label.alignment = .center
             label.lineBreakMode = .byTruncatingTail
             addSubview(label)
@@ -776,7 +782,44 @@ final class AlignmentStageView: NSView {
         super.layout()
         applyGeometry(Self.instantScript)
         layoutNameStamps()
+        layoutScaleStamp()
     }
+
+    /// The scale legend, bottom-trailing on the plate.
+    ///
+    /// It yields the bottom band to the NAME STAMPS. Both sit on the same
+    /// baseline in the same two corners, so on the armed screen the legend
+    /// printed straight through the reference speaker's name (live, 2026-09-05
+    /// — "250 ms per mark" over "MacBook Pro Speakers"). The names are the
+    /// armed screen's whole job (which light is which speaker) and the ruler
+    /// is not being read yet; once the questions start the names are gone and
+    /// the band is the legend's. Dormant shows neither.
+    private func layoutScaleStamp() {
+        let showsNamesOrNothing: Bool
+        switch state {
+        case .armed, .dormant: showsNamesOrNothing = true
+        case .question, .listening, .locked: showsNamesOrNothing = false
+        }
+        scaleLabel.isHidden = showsNamesOrNothing
+        guard !showsNamesOrNothing else { return }
+        let step = Int(Self.look(for: rung).tickStepMs.rounded())
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .right
+        scaleLabel.attributedStringValue = NSAttributedString(
+            string: "\(step) ms per mark",
+            attributes: [.font: Tokens.Font.microLabel,
+                         .foregroundColor: Tokens.Color.stageInk.withAlphaComponent(0.45),
+                         .paragraphStyle: paragraph])
+        let size = scaleLabel.intrinsicContentSize
+        scaleLabel.frame = NSRect(
+            x: (bounds.width - Self.plateCornerRadius - size.width).rounded(),
+            y: Self.scaleStampInset.rounded(),
+            width: size.width, height: size.height)
+    }
+
+    /// How far the legend sits off the plate's bottom edge — the same gap the
+    /// name stamps keep off their rings.
+    private static let scaleStampInset: CGFloat = nameStampGap
 
     /// The armed rung's two name stamps, centred under their lights in the
     /// micro-label voice on `stageInk`.
@@ -1788,6 +1831,10 @@ final class AlignmentStageView: NSView {
 
     var test_reduceMotionOverride: Bool?
     var test_state: State { state }
+    /// The ruler's scale legend — `nil` while the instrument is dark.
+    var test_scaleStampText: String? {
+        scaleLabel.isHidden ? nil : scaleLabel.stringValue
+    }
     var test_rung: Rung { rung }
     var test_lastTransition: Transition { lastTransition }
     var test_displayRange: ClosedRange<Double> { displayRange }

@@ -90,6 +90,22 @@ public final class BTAlignmentWizardView: NSView {
     static let stopTitle = "Stop"
     static let soundsRightTitle = "Sounds right"
     static let stillOffTitle = "Still off"
+    /// The nudge band's two steps. SIGNED NUMBERS, no direction words — the
+    /// SYNC drawer's own steppers are a bare −/+ for the same reason
+    /// (`BTSyncDrawerView`: the amounts live on the buttons, the direction
+    /// lives in the value), and a wizard that said "later"/"earlier" here
+    /// would be teaching a second vocabulary for the control the user is
+    /// about to meet on the row.
+    static let nudgeDownTitle = "\u{2212}\(Int(nudgeStepMs)) ms"
+    static let nudgeUpTitle = "+\(Int(nudgeStepMs)) ms"
+    /// One press, in milliseconds. Coarse enough to hear on a first press —
+    /// 1 ms, the drawer's own step, is under the ear's resolution here and
+    /// would read as a dead button.
+    static let nudgeStepMs: Double = 5
+    static let backToQuestionsTitle = "More questions"
+    /// The nudge band's instruction. The number is the readout's, as
+    /// everywhere else on this sheet.
+    private static let nudgeBody = "Nudge it until the clicks land together."
     /// The manual path — typing a number or tapping the paddles in the SYNC
     /// control. Offered beside a proposal the listener doesn't like and on the
     /// unsettled bow-out, never as the default.
@@ -108,7 +124,7 @@ public final class BTAlignmentWizardView: NSView {
     /// these three screens uses.
     static let unreachableCopy =
         "Couldn’t find the alignment. Try moving closer to the speakers, "
-        + "or set the delay manually from the SYNC control."
+        + "or set the delay manually from this speaker\u{2019}s row."
     /// The third failure, and the one the run has to say out loud rather than
     /// round away: the answers put the speaker AHEAD of the Mac, which the Mac
     /// being the zero makes impossible. Nothing is stored. The screen now
@@ -120,12 +136,41 @@ public final class BTAlignmentWizardView: NSView {
     /// The question, on the question screen — the one decision the run
     /// hangs on, asked ~15 times, so it stays in front of the user.
     static let questionPrompt = "Which clicked first?"
+    /// That sound is leaving the Mac, said in words. The stage is deliberately
+    /// NOT beat-synced (a 1–2 s AirPlay buffer makes a pulse on the screen a
+    /// lie about the room), and at search tempo a click comes only every 3 s,
+    /// so between the first two the sheet has no other way to say the run is
+    /// under way. Words are the one channel here that cannot be out of time.
+    static let clicksPlayingCopy = "Clicks are playing on both speakers."
+    /// The escape beside it, for the silence the estimator cannot see. A muted
+    /// target, a Bluetooth speaker asleep or a volume at zero otherwise walks
+    /// the whole run on guessed answers to an `unsettled` bow-out — the sheet
+    /// blaming the ESTIMATE for a fault that is in the room.
+    static let noSoundTitle = "I don\u{2019}t hear them"
+    /// What to check, and the fact that makes it worth checking: the tick
+    /// keeps running behind this screen, so a speaker switched on now starts
+    /// clicking without restarting the run.
+    static let noSoundCopy =
+        "Check the speaker is switched on, turned up, and not muted. "
+        + "The clicks keep playing while you look."
+    static let keepListeningTitle = "Keep listening"
     /// How sure the run is, in the units the user is actually judging — the
     /// stage's tooltip, where the number is available without being the
     /// headline.
     static func confidenceCopy(_ intervalMs: ClosedRange<Double>) -> String {
-        "Somewhere between \(signedMs(intervalMs.lowerBound)) "
-        + "and \(signedMs(intervalMs.upperBound)) ms"
+        // An interval with zero INSIDE it is a magnitude, not a span: while
+        // the run cannot yet tell which speaker is late, "somewhere between
+        // −550 and 550 ms" asks the reader to notice the two bounds are the
+        // same number wearing two signs and to do the subtraction themselves.
+        // "Within 550 ms" is that same fact already read out — and it is the
+        // whole opening stretch of every run, since a flat prior straddles
+        // zero by construction.
+        if intervalMs.lowerBound < 0 && intervalMs.upperBound > 0 {
+            let magnitude = Swift.max(-intervalMs.lowerBound, intervalMs.upperBound)
+            return "Within \(Int(magnitude.rounded())) ms"
+        }
+        return "Somewhere between \(signedMs(intervalMs.lowerBound)) "
+            + "and \(signedMs(intervalMs.upperBound)) ms"
     }
     /// A real minus sign (U+2212), not a hyphen — "-8" reads as a bug.
     private static func signedMs(_ ms: Double) -> String {
@@ -135,7 +180,19 @@ public final class BTAlignmentWizardView: NSView {
     /// run has no fixed length, so the total is "about". Sentence case, plain
     /// system caption: it is an aside to the title beside it, not a second
     /// piece of instrument chrome (owner ruling 2026-08-24).
-    static func clickCountCopy(_ click: Int) -> String { "Click \(click) of about 15" }
+    static func clickCountCopy(_ click: Int) -> String {
+        click <= expectedClicks
+            ? "Click \(click) of about \(expectedClicks)"
+            : "Click \(click) — a few extra to be sure"
+    }
+    /// What a run is ADVERTISED to cost, on the intro and in the count beside
+    /// the title. It is a typical run, not a bound: `BTAlignmentPosterior`
+    /// will ask up to `maxAnswers` (40) before it bows out unsettled, so past
+    /// this number ``clickCountCopy(_:)`` drops the total rather than printing
+    /// "Click 27 of about 15" — a denominator the run has already passed is
+    /// the UI contradicting itself, and the count is the one thing on the
+    /// question screen the user can check us on.
+    static let expectedClicks = 15
     /// Shown in the reference line's place while no second speaker can be
     /// established — Start stays disabled until one is.
     static let noReferenceCopy = "Select another speaker to compare against"
@@ -159,19 +216,31 @@ public final class BTAlignmentWizardView: NSView {
     static func keptReadyCopy(target: String) -> String {
         "\(target) is ready to play with everything."
     }
+    /// The finale for a LATENCY run — the win and what the number meant, in
+    /// one sentence. It replaces ``keptReadyCopy(target:)`` rather than
+    /// sitting under it: as two lines the screen named the speaker twice and
+    /// the measurement three times over (the readout, then "was 220 ms late",
+    /// then the ready line saying the same outcome again). The Mac's own row
+    /// is the zero everything else is measured against, so it has no lag to
+    /// report and keeps the plain ready line.
+    static func keptLagCopy(target: String, valueMs: Int) -> String {
+        "\(target) was \(valueMs) ms late. It plays with everything now."
+    }
     /// A Bluetooth run wrote a MEASURED LATENCY; the number is the stage's
     /// caption, and this quiet line says where to change it later.
-    private static let keptLatencyCaption = "Change it anytime from the SYNC control."
+    private static let keptLatencyCaption = "Change it anytime from this speaker\u{2019}s row."
     /// The Mac's own row has no second store: its trim IS the kept value.
-    /// Both captions point at the SYNC control because both values are edited
-    /// there — the Mac's row carries the identical chip and drawer. "the
-    /// popover" named nothing the user can see on screen (it is our word for
-    /// the window, not theirs), and it was the app's only user-facing use of
-    /// it.
-    private static let keptLocalCaption = "Fine-tune anytime from the SYNC control."
+    /// Both captions point at the SAME PLACE because both values are edited
+    /// there — the Mac's row carries the identical chip and drawer. They name
+    /// what is on screen (a value on a row, which is clickable) rather than
+    /// "the SYNC control": that nameplate is instrument chrome the sheet does
+    /// not show and the mixer never prints, so a sentence the user has to ACT
+    /// on may not spend it. Same reason "the popover" was dropped before it —
+    /// it is our word for the window, not theirs.
+    private static let keptLocalCaption = "Fine-tune anytime from this Mac\u{2019}s row."
     /// What the run costs, before it starts — the title line's right slot on
     /// the intro, where the click count lives once the run is under way.
-    private static let introSlotText = "About 15 clicks"
+    private static let introSlotText = "About \(expectedClicks) clicks"
     /// The sheet's TITLE, on every screen — the plain sentence-form heading a
     /// sheet gets everywhere else in the app (`GroupCreationSheetController`'s
     /// "New Group", `Tokens.Font.bodyEmphasized` at full `label`). It replaced
@@ -231,6 +300,16 @@ public final class BTAlignmentWizardView: NSView {
     /// The unsettled screen's best guess, held for the "Set it by hand"
     /// button — a target/action selector carries no payload.
     private var pendingBestGuessMs: Double?
+    /// The question screen is showing "what to check" instead of the plates.
+    /// VIEW state, never the session's: the run is untouched underneath —
+    /// tick still running, belief intact — so "Keep listening" puts the same
+    /// question back rather than restarting anything.
+    private var isShowingSoundHelp = false
+    /// The proposal is showing its two nudge steps instead of the
+    /// accept/reject pair. VIEW state for the same reason
+    /// ``isShowingSoundHelp`` is: the RUN has not changed its mind about
+    /// anything — the user is hand-tuning a value it already proposed.
+    private var isShowingNudge = false
 
     // MARK: Geometry (spec §3)
 
@@ -273,6 +352,7 @@ public final class BTAlignmentWizardView: NSView {
     private static let chassisHeight: CGFloat =
         titleRowHeight + spacingGroup + AlignmentStageView.stageHeight + spacingRow
         + readoutHeight + spacingBand + answerPlateHeight + spacingRow + togetherBarHeight
+        + spacingRow + cornerButtonHeight
         + spacingGroup + cornerButtonHeight
     /// Body copy wraps at the together bar's width, so a long line becomes
     /// two centred lines rather than one 470 pt run.
@@ -567,8 +647,7 @@ public final class BTAlignmentWizardView: NSView {
         // a key press visibly depresses the plate it names.
         switch event.keyCode {
         case Self.escapeKeyCode:
-            session.cancel()
-            onFinished?()
+            requestStop()
             return true
         case Self.leftArrowKeyCode where isAnswering:
             targetPlate?.performClick(nil)
@@ -620,6 +699,13 @@ public final class BTAlignmentWizardView: NSView {
 
     private func render(_ screen: BTAlignmentWizardSession.Screen) {
         clearContent()
+        // The help band belongs to the QUESTIONS. A proposal, a bow-out or a
+        // host-driven reference swap has moved past it, so it never survives
+        // into a screen that has its own things to say.
+        if case .question = screen {} else { isShowingSoundHelp = false }
+        // Same fence for the nudge band: a rejection, a restart or a bow-out
+        // has moved off this proposal, and the next one opens un-nudged.
+        if case .proposal = screen {} else { isShowingNudge = false }
 
         styleReadout(hero: false)
         updateTitleRow(for: screen)
@@ -679,6 +765,18 @@ public final class BTAlignmentWizardView: NSView {
             // The interval itself is the stage's tooltip.
             readout.attributedStringValue = Self.readoutCopy(word: stage.rung.word)
             stage.toolTip = Self.confidenceCopy(intervalMs)
+            guard !isShowingSoundHelp else {
+                addBody(Self.noSoundCopy)
+                contentStack.setCustomSpacing(Self.spacingBand,
+                                              after: contentStack.arrangedSubviews[0])
+                addCentredPlate(makePlate(Self.keepListeningTitle, keycap: "⏎",
+                                          isPrimary: true,
+                                          action: #selector(keepListeningClicked(_:)),
+                                          isDefault: true))
+                addCornerRow(trailing: (Self.stopTitle, #selector(stopClicked(_:)), "ESC"))
+                setAccessibilityLabel(Self.noSoundCopy)
+                break
+            }
             let target = makePlate(session.targetName, keycap: "←", tint: targetTint,
                                    action: #selector(targetClicked(_:)),
                                    width: Self.answerPlateWidth, height: Self.answerPlateHeight)
@@ -698,14 +796,20 @@ public final class BTAlignmentWizardView: NSView {
                                      chipPlacement: .inline)
             togetherPlate = together
             addCentredPlate(together)
+            addSoundCheckRow()
             addCornerRow(backEnabled: answersSoFar > 0)
             // Spoken from the SAME strings the screen prints: the question
             // verbatim, then the three plates in reading order. The old label
             // asked with a different verb ("ticked") and offered only two of
             // the three answers.
+            // The interval rides the LABEL, not the announcement: a mouse can
+            // hover the stage for it and a keyboard cannot, so the one place
+            // it was reachable from excluded exactly the users who cannot see
+            // the ring narrow. Explored on demand, so it costs no verbosity
+            // per answer.
             setAccessibilityLabel(
                 "\(Self.questionPrompt) \(session.targetName), \(referenceName), "
-                + "or \(Self.togetherTitle)?")
+                + "or \(Self.togetherTitle)? \(Self.confidenceCopy(intervalMs))")
 
         case .proposal(let valueMs):
             // Rounded, NOT `BTSyncTrim.quantise`: a Bluetooth run's result is
@@ -714,24 +818,53 @@ public final class BTAlignmentWizardView: NSView {
             let wholeMs = Int(valueMs.rounded())
             styleReadout(hero: true)
             readout.stringValue = "\(wholeMs) ms"
+            pendingBestGuessMs = valueMs
+            guard !isShowingNudge else {
+                // Hand-tuning, with the tick still running: each press moves
+                // the live value, so the next click is already at it.
+                addBody(Self.nudgeBody)
+                addEdgePlateRow(
+                    makePlate(Self.nudgeDownTitle, action: #selector(nudgeDownClicked(_:))),
+                    makePlate(Self.nudgeUpTitle, action: #selector(nudgeUpClicked(_:))))
+                contentStack.setCustomSpacing(Self.spacingRow,
+                                              after: contentStack.arrangedSubviews[1])
+                addCentredPlate(makePlate(Self.soundsRightTitle, keycap: "⏎",
+                                          isPrimary: true,
+                                          action: #selector(acceptClicked(_:)),
+                                          isDefault: true))
+                // The estimator's own path stays open behind the hand-tune: a
+                // proposal that is 200 ms out is a wrong READING, and nudging
+                // it 5 ms at a time is the wrong tool for that.
+                addCornerRow(leading: (Self.backToQuestionsTitle,
+                                       #selector(rejectClicked(_:)), nil),
+                             trailing: (Self.stopTitle, #selector(stopClicked(_:)), "ESC"))
+                setAccessibilityLabel(
+                    "\(wholeMs) milliseconds. \(Self.nudgeBody)")
+                break
+            }
             addBody(Self.proposalBody)
             addEdgePlateRow(
                 makePlate(Self.soundsRightTitle, keycap: "⏎", isPrimary: true,
                           action: #selector(acceptClicked(_:)), isDefault: true),
-                makePlate(Self.stillOffTitle, action: #selector(rejectClicked(_:))))
+                makePlate(Self.stillOffTitle, action: #selector(stillOffClicked(_:))))
             // The manual path sits beside a proposal the listener doesn't
             // like — quiet, never a plate; Stop stays the way out.
             addCornerRow(leading: (Self.setByHandTitle, #selector(setByHandClicked(_:)), nil),
                          trailing: (Self.stopTitle, #selector(stopClicked(_:)), "ESC"))
-            pendingBestGuessMs = valueMs
             setAccessibilityLabel(
                 "Aligned at \(wholeMs) milliseconds. Does it sound right?")
 
-        case .kept:
+        case .kept(let valueMs):
             // The readout keeps the proposal's number until the stage's lock
             // settles — `armKeptReadout` crossfades "· kept" over it there.
             // The winning message is the hero line: the speaker is ready.
-            let ready = Self.keptReadyCopy(target: session.targetName)
+            // One hero line, one quiet line, Done. A latency run's headline
+            // carries the measurement's MEANING; a run with nothing to wait
+            // for (a floored 0) has no lag to report and keeps the plain one.
+            let lagMs = Int(valueMs.rounded())
+            let ready = session.measuresLatency && lagMs > 0
+                ? Self.keptLagCopy(target: session.targetName, valueMs: lagMs)
+                : Self.keptReadyCopy(target: session.targetName)
             let caption = session.measuresLatency ? Self.keptLatencyCaption : Self.keptLocalCaption
             addBody(ready, hero: true)
             addCaption(caption)
@@ -777,9 +910,37 @@ public final class BTAlignmentWizardView: NSView {
                 makeDonePlate(action: #selector(doneClicked(_:))))
             setAccessibilityLabel(Self.macIsLateCopy)
         }
+        announceScreen(screen)
         needsLayout = true
         ensureKeyboardFocus()
         onContentSizeChange?()
+    }
+
+    /// What VoiceOver hears when the screen changes under it. The labels below
+    /// are rewritten on every render, but a label is only spoken when the user
+    /// goes LOOKING for it — so without an announcement an answer landing, the
+    /// run reaching "nearly there" and the proposal arriving all pass without
+    /// a word, and a whole run is silent.
+    ///
+    /// The questions get the SHORT form on purpose — the full question is
+    /// re-asked identically ~15 times, and speaking all of it after every
+    /// answer would bury the two things that actually changed (which click
+    /// this is, and where the run has got to).
+    private func announceScreen(_ screen: BTAlignmentWizardSession.Screen) {
+        guard !HeadlessRuntime.isActive else { return }
+        let text: String
+        switch screen {
+        case .question(_, _, let answersSoFar) where !isShowingSoundHelp:
+            let progress = Self.clickCountCopy(answersSoFar + 1)
+            text = stage.rung.word.map { "\(progress). \($0)." } ?? progress
+        default:
+            text = accessibilityLabel() ?? ""
+        }
+        guard !text.isEmpty else { return }
+        NSAccessibility.post(
+            element: self, notification: .announcementRequested,
+            userInfo: [.announcement: text,
+                       .priority: NSAccessibilityPriorityLevel.medium.rawValue])
     }
 
     /// The intro's sentence, with the two sounds named only when the pair
@@ -1114,6 +1275,20 @@ public final class BTAlignmentWizardView: NSView {
         contentStack.addArrangedSubview(holder)
     }
 
+    /// The quiet line under the answers: what the room is doing, and the way
+    /// out if it isn't doing it. Caption voice, centred, one row — it sits
+    /// BELOW the together bar so it can never compete with the three answers,
+    /// and above the corner row so the two exits stay in their corners.
+    private func addSoundCheckRow() {
+        let caption = makeCaption(Self.clicksPlayingCopy)
+        let escape = makeCornerButton(Self.noSoundTitle, #selector(noSoundClicked(_:)))
+        let row = NSStackView(views: [caption, escape])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = Self.spacingRow
+        contentStack.addArrangedSubview(row)
+    }
+
     /// `Undo ⌘Z` left, `Stop ESC` right: REAL buttons, each with its key
     /// printed BESIDE it in the micro-label voice rather than inside the
     /// title — the title is the word a test clicks and VoiceOver speaks.
@@ -1260,12 +1435,73 @@ public final class BTAlignmentWizardView: NSView {
     @objc private func referenceClicked(_ sender: NSButton) { session.answer(.reference) }
     @objc private func togetherClicked(_ sender: NSButton) { session.answer(.together) }
     @objc private func backClicked(_ sender: NSButton) { session.back() }
-    @objc private func stopClicked(_ sender: NSButton) {
+    @objc private func stopClicked(_ sender: NSButton) { requestStop() }
+    /// The question screen's escape when the room is silent — see
+    /// ``noSoundCopy``. The SESSION is untouched: the tick keeps running and
+    /// the belief keeps standing, so a speaker switched on now rejoins the run
+    /// already in progress.
+    @objc private func noSoundClicked(_ sender: NSButton) {
+        isShowingSoundHelp = true
+        render(session.screen)
+    }
+    @objc private func keepListeningClicked(_ sender: NSButton) {
+        isShowingSoundHelp = false
+        render(session.screen)
+    }
+    /// Stop, from either door (the corner button and Esc), with ONE gate in
+    /// front of both. Esc is the reflex key on any sheet, and a run is made of
+    /// answers that cost real listening time — fourteen of them is about three
+    /// quarters of a minute — so past ``confirmStopAfterAnswers`` an exit asks
+    /// before discarding them. Below it there is nothing to lose and the exit
+    /// stays instant.
+    private func requestStop() {
+        guard test_stopNeedsConfirm, let window, !HeadlessRuntime.isActive
+        else { return stopNow() }
+        let alert = NSAlert()
+        alert.messageText = "Stop aligning \(session.targetName)?"
+        alert.informativeText =
+            "The \(answersAtRisk) answers you have given so far will be discarded."
+        alert.addButton(withTitle: Self.stopTitle)
+        alert.addButton(withTitle: Self.keepListeningTitle)
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.stopNow()
+        }
+    }
+
+    private func stopNow() {
         session.cancel()
         onFinished?()
     }
+
+    /// How much listening a Stop would throw away — answers only, since every
+    /// other screen either has its result or has already bowed out.
+    private var answersAtRisk: Int {
+        guard case .question(_, _, let answersSoFar) = session.screen else { return 0 }
+        return answersSoFar
+    }
+
+    /// Below this, a Stop costs the user nothing worth a dialog. Set at a
+    /// third of an advertised run: enough answers that redoing them is a real
+    /// cost, few enough that the confirm never shows up on an early change of
+    /// mind.
+    private static let confirmStopAfterAnswers = 5
+
     @objc private func acceptClicked(_ sender: NSButton) { session.acceptProposal() }
     @objc private func rejectClicked(_ sender: NSButton) { session.rejectProposal() }
+    /// "Still off" opens the hand-tune rather than spending a rejection: the
+    /// common case is a proposal that is nearly right, and three rejections is
+    /// the whole budget before the run bows out unsettled.
+    @objc private func stillOffClicked(_ sender: NSButton) {
+        isShowingNudge = true
+        render(session.screen)
+    }
+    @objc private func nudgeDownClicked(_ sender: NSButton) {
+        session.nudgeProposal(byMs: -Self.nudgeStepMs)
+    }
+    @objc private func nudgeUpClicked(_ sender: NSButton) {
+        session.nudgeProposal(byMs: Self.nudgeStepMs)
+    }
     @objc private func tryAgainClicked(_ sender: NSButton) { session.tryAgain() }
     /// The kept screen's Done. The run committed on Accept, so this is a close
     /// and nothing else — `cancel()` would be inert here anyway, but saying
@@ -1295,7 +1531,17 @@ public final class BTAlignmentWizardView: NSView {
     // MARK: Test-support hooks (performClick = real dispatch)
 
     var test_screen: BTAlignmentWizardSession.Screen { session.screen }
+    /// Whether a Stop right now would ask before discarding the run — the
+    /// gate's own arithmetic, without the window and the live-runtime check a
+    /// headless test has neither of.
+    var test_stopNeedsConfirm: Bool { answersAtRisk >= Self.confirmStopAfterAnswers }
     var test_stage: AlignmentStageView { stage }
+    /// Every line of text the content band is printing, top to bottom — the
+    /// body plus any captions under it.
+    var test_contentLines: [String] {
+        contentStack.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue }
+            .filter { !$0.isEmpty }
+    }
     var test_bodyText: String? {
         (contentStack.arrangedSubviews.first as? NSTextField)?.stringValue
     }

@@ -368,7 +368,13 @@ import AppKit
                 wizard?.test_clickButton(titled: title)
                 asked += 1
             case .proposal:
+                // Rejecting is TWO clicks now: "Still off" opens the hand-tune,
+                // and the estimator's own path is the band's corner link.
+                // `asked` counts answers, so this arm has to make progress on
+                // its own or the loop spins here forever.
                 wizard?.test_clickButton(titled: BTAlignmentWizardView.stillOffTitle)
+                wizard?.test_clickButton(titled: BTAlignmentWizardView.backToQuestionsTitle)
+                if case .proposal? = wizard?.test_screen { return asked }
             default:
                 return asked
             }
@@ -399,10 +405,13 @@ import AppKit
         // tooltip and the composed AX label keeps the long form.
         #expect(wizard?.test_readoutText?.hasPrefix(BTAlignmentWizardView.questionPrompt) == true,
                 "got \(String(describing: wizard?.test_readoutText))")
-        #expect(wizard?.test_stage.toolTip?.hasPrefix("Somewhere between") == true,
+        // A flat prior straddles zero, so the opening interval is a MAGNITUDE
+        // ("Within 500 ms"), not a two-signed span — see `confidenceCopy`.
+        #expect(wizard?.test_stage.toolTip?.hasPrefix("Within ") == true,
                 "the interval is on the stage's tooltip, got \(String(describing: wizard?.test_stage.toolTip))")
         #expect(wizard?.test_buttonTitles
                 == ["Move 2", "This Mac", BTAlignmentWizardView.togetherTitle,
+                    BTAlignmentWizardView.noSoundTitle,
                     BTAlignmentWizardView.backTitle, BTAlignmentWizardView.stopTitle],
                 "the which-side buttons carry the ACTUAL device names, and there is a way out")
         #expect(wizard?.test_buttonIsEnabled(BTAlignmentWizardView.backTitle) == false,
@@ -424,6 +433,130 @@ import AppKit
     /// Identity colour names WHICH speaker: green for the target, steel blue
     /// for the reference. Magenta is group identity now, and never appears on
     /// this sheet.
+    /// The count used to print a denominator the run is allowed to walk
+    /// straight past: `BTAlignmentPosterior.maxAnswers` is 40, so a long run
+    /// reached "Click 27 of about 15" — the sheet contradicting itself in the
+    /// one slot whose arithmetic the user can check.
+    @Test func theClickCountDropsItsTotalOnceTheRunPassesIt() {
+        let expected = BTAlignmentWizardView.expectedClicks
+        #expect(BTAlignmentWizardView.clickCountCopy(1) == "Click 1 of about \(expected)")
+        #expect(BTAlignmentWizardView.clickCountCopy(expected)
+                == "Click \(expected) of about \(expected)",
+                "the advertised run still names its total right up to the end of it")
+        #expect(BTAlignmentWizardView.clickCountCopy(expected + 1)
+                .contains("of about") == false,
+                "past the advertised total the denominator goes, not the count")
+        #expect(BTAlignmentWizardView.clickCountCopy(27) == "Click 27 — a few extra to be sure")
+    }
+
+    /// A muted target, an asleep speaker or a volume at zero used to have no
+    /// screen at all: the run asked forty questions the user was guessing at
+    /// and blamed the ESTIMATE ("your answers aren't settling"). The escape
+    /// leaves the session running — the tick is the whole point of coming
+    /// back — so the questions are still there afterwards.
+    @Test func theSilentSpeakerEscapeSwapsTheAnswersForWhatToCheck() {
+        let (popover, _) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.noSoundTitle)
+        #expect(wizard?.test_bodyText == BTAlignmentWizardView.noSoundCopy)
+        #expect(wizard?.test_buttonTitles
+                == [BTAlignmentWizardView.keepListeningTitle,
+                    BTAlignmentWizardView.stopTitle],
+                "the three answers are gone while the user is not listening to them")
+        guard case .question? = wizard?.test_screen else {
+            Issue.record("the RUN is untouched — only the band changed")
+            return
+        }
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.keepListeningTitle)
+        #expect(wizard?.test_buttonTitles.first == "Move 2",
+                "…and the same question comes straight back")
+    }
+
+    /// Esc is the reflex key on any sheet, and it used to discard a run in
+    /// silence — fourteen answers of careful listening gone to a keystroke
+    /// nobody aimed. Past the threshold the exit asks first; below it there is
+    /// nothing to lose and it stays instant.
+    @Test func stopAsksBeforeDiscardingARunWithAnswersInIt() {
+        let (popover, _) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        #expect(wizard?.test_stopNeedsConfirm == false, "nothing to lose yet")
+        for _ in 0..<5 {
+            guard case .question? = wizard?.test_screen else { break }
+            wizard?.test_clickButton(titled: "Move 2")
+        }
+        #expect(wizard?.test_stopNeedsConfirm == true,
+                "five answers in, a stray Esc is worth a question first")
+    }
+
+    /// An interval with zero inside it names the same number twice wearing
+    /// two signs, and asks the reader to do the subtraction. It is also the
+    /// whole opening stretch of every run, since a flat prior straddles zero.
+    @Test func aStraddlingIntervalReadsAsAMagnitudeNotATwoSignedSpan() {
+        #expect(BTAlignmentWizardView.confidenceCopy(-40...40) == "Within 40 ms")
+        #expect(BTAlignmentWizardView.confidenceCopy(-12...40) == "Within 40 ms",
+                "the magnitude is the WIDER end — the run cannot promise the narrow one")
+        #expect(BTAlignmentWizardView.confidenceCopy(120...180)
+                == "Somewhere between 120 and 180 ms",
+                "an interval that has picked a side keeps its two ends")
+    }
+
+    /// The proposal used to answer "Still off" by spending one of three
+    /// rejections and asking more questions — the wrong tool for a reading
+    /// that is 5 ms out, which is the common case at the end of a run.
+    @Test func stillOffOpensTheHandTuneAndKeepsTheNudgedValue() {
+        let (popover, recorder) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        driveWizard(wizard, recorder, targetTitle: "Move 2", referenceTitle: "This Mac",
+                    trueOffsetMs: 200)
+        guard case .proposal(let proposed)? = wizard?.test_screen else {
+            Issue.record("expected a proposal, got \(screenName(wizard))")
+            return
+        }
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.stillOffTitle)
+        #expect(wizard?.test_buttonTitles
+                == [BTAlignmentWizardView.nudgeDownTitle,
+                    BTAlignmentWizardView.nudgeUpTitle,
+                    BTAlignmentWizardView.soundsRightTitle,
+                    BTAlignmentWizardView.backToQuestionsTitle,
+                    BTAlignmentWizardView.stopTitle],
+                "the estimator's own path stays open behind the hand-tune")
+        guard case .proposal? = wizard?.test_screen else {
+            Issue.record("the hand-tune is a BAND on the proposal, not a new run state")
+            return
+        }
+        let previewsBefore = recorder.previews.count
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.nudgeUpTitle)
+        #expect(recorder.previews.count == previewsBefore + 1,
+                "a step you cannot hear until you commit is not a step")
+        guard case .proposal(let nudged)? = wizard?.test_screen else {
+            Issue.record("expected the nudged proposal")
+            return
+        }
+        #expect(nudged == proposed + BTAlignmentWizardView.nudgeStepMs)
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.soundsRightTitle)
+        #expect(recorder.ends.last?.keep == nudged,
+                "what the screen showed is what is kept")
+    }
+
+    /// "More questions" is the recovery path for a reading that is plain
+    /// wrong, and nudging must not have eaten it.
+    @Test func theHandTuneStillOffersTheEstimatorsOwnPath() {
+        let (popover, recorder) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        driveWizard(wizard, recorder, targetTitle: "Move 2", referenceTitle: "This Mac",
+                    trueOffsetMs: 200)
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.stillOffTitle)
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.backToQuestionsTitle)
+        guard case .question? = wizard?.test_screen else {
+            Issue.record("expected the questions back, got \(screenName(wizard))")
+            return
+        }
+    }
+
     @Test func theAnswerPlatesWearGreenAndSteelBlueNeverMagenta() throws {
         let (popover, _) = makePopover()
         let wizard = openWizard(popover)
@@ -537,9 +670,33 @@ import AppKit
                 "…and the measurement after it: \(popover.test_lastEnergizeAnnouncement ?? "-")")
     }
 
-    /// "Still off" sends the run back to the questions with the tick never
-    /// interrupted.
-    @Test func stillOffResumesTheQuestions() {
+    /// A run ends on a bare "220 ms · kept" — a quantity with no statement of
+    /// whose lag it is or which way it ran, which is the one thing the whole
+    /// run was spent measuring. It rides the HEADLINE, and the screen stays
+    /// three elements: a name said twice and a measurement said three times
+    /// was the version this replaced.
+    @Test func theKeptScreenSaysWhatTheNumberMeant() {
+        let (popover, recorder) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        driveWizard(wizard, recorder, targetTitle: "Move 2", referenceTitle: "This Mac",
+                    trueOffsetMs: 200)
+        guard let kept = proposedValue(wizard) else {
+            Issue.record("expected a proposal, got \(screenName(wizard))")
+            return
+        }
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.soundsRightTitle)
+        let lag = BTAlignmentWizardView.keptLagCopy(target: "Move 2",
+                                                    valueMs: Int(kept.rounded()))
+        #expect(wizard?.test_contentLines.first == lag,
+                "got \(String(describing: wizard?.test_contentLines))")
+        #expect(wizard?.test_contentLines.count == 2,
+                "the headline and one quiet line — the number is not said a third time")
+    }
+
+    /// "Still off" opens the hand-tune, and its "More questions" sends the run
+    /// back to the estimator with the tick never interrupted.
+    @Test func stillOffThenMoreQuestionsResumesTheRun() {
         let (popover, recorder) = makePopover()
         let wizard = openWizard(popover)
         wizard?.test_clickButton(titled: "Start")
@@ -550,6 +707,7 @@ import AppKit
             return
         }
         wizard?.test_clickButton(titled: BTAlignmentWizardView.stillOffTitle)
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.backToQuestionsTitle)
         guard case .question? = wizard?.test_screen else {
             Issue.record("expected the questions back, got \(String(describing: wizard?.test_screen))")
             return
@@ -1048,6 +1206,7 @@ import AppKit
         #expect(recorder.previews.count == 3, "a fresh run's first candidate is applied")
         #expect(wizard?.test_buttonTitles
                 == ["Move 2", "Office", BTAlignmentWizardView.togetherTitle,
+                    BTAlignmentWizardView.noSoundTitle,
                     BTAlignmentWizardView.backTitle, BTAlignmentWizardView.stopTitle])
     }
 
@@ -1187,6 +1346,7 @@ import AppKit
         #expect(recorder.ticks == [true])
 
         wizard?.test_clickButton(titled: BTAlignmentWizardView.stillOffTitle)
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.backToQuestionsTitle)
         guard case .question? = wizard?.test_screen else {
             Issue.record("Still off falls into the ordinary flow, got \(screenName(wizard))")
             return

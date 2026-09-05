@@ -7,7 +7,7 @@
 **Your speakers, synced at last.**
 
 Send every sound your Mac makes to all your AirPlay speakers at once — with a
-volume fader for each room, saved groups, and a phone remote.
+volume fader for each room, saved scenes, and a phone remote.
 
 [About](#what-it-does) · [Get Audiout](#get-audiout) · [Build from source](#or-build-it-yourself) · [iPhone remote](#audiout-remote-for-iphone) · [Docs](#documentation)
 
@@ -37,7 +37,7 @@ Spotify, or a browser tab, or a game, and you get one speaker.
 
 Audiout takes the sound leaving your Mac — all of it, whatever made it — and
 sends it to as many AirPlay 2 speakers as you own, playing together in sync. Each
-room gets its own fader and its own mute. You can save a set of rooms as a group
+room gets its own fader and its own mute. You can save a set of rooms as a scene
 and switch to it in two clicks, and you can send one app somewhere different from
 everything else: Chrome in the kitchen while the call stays on your laptop.
 
@@ -78,16 +78,16 @@ build it — that path is supported and it always will be.
 
 **Sound**
 - Multi-room AirPlay 2 playback, in sync, from any app on the Mac
-- Bluetooth speakers join the same synced group as AirPlay ones
+- Bluetooth speakers play in sync with the AirPlay ones
 - Your Mac's own speakers stay in sync with the rest of the house
 - Per-device EQ and delay trim for rooms that need shaping
 
 **Control**
 - A volume fader and a mute for every speaker, live while audio plays
-- Main Audio sits over everything as a ceiling — sent level is Main × Group × Device
-- Groups: save a set of speakers, switch to it in two clicks
+- Main Audio sits over everything as a ceiling — sent level is Main × Scene × Speaker
+- Scenes: save a set of speakers, switch to it in two clicks
 - Per-app routing — send one app to one room, leave the rest alone
-- Menu-bar popover you can pin open, plus a full window for groups and settings
+- Menu-bar popover you can pin open, plus a full window for scenes and settings
 
 **The rest**
 - Native AppKit, Apple Silicon, light and dark

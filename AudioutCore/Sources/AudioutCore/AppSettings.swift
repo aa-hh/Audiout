@@ -99,6 +99,11 @@ public struct AppSettings {
         static let licenseStatus = "license.status"
         static let licenseMaxMajor = "license.maxMajor"
         static let companionToken = "license.companionToken"
+        static let trialStartedAt = "trial.startedAt"
+        static let trialExpiresAt = "trial.expiresAt"
+        static let trialRegistered = "trial.registered"
+        static let trialBannerThreeDaysShown = "trial.bannerThreeDaysShown"
+        static let trialBannerLastDayShown = "trial.bannerLastDayShown"
         static let telemetryOptIn = "telemetry.optIn"
         static let telemetryAsked = "telemetry.asked"
         static let touchBarControls = "general.touchBarControls"
@@ -469,7 +474,9 @@ public struct AppSettings {
     /// without one (the Ardour model: the binary is what's sold, never a
     /// software lock — GPL forbids one). Setting `nil` removes the stored value
     /// AND clears ``licenseStatus``: a verdict about a key the user has deleted
-    /// is not a verdict about anything.
+    /// is not a verdict about anything. It clears the trial fields for the same
+    /// reason — a trial IS a licence key, so a deleted key leaves no trial
+    /// behind to be on day 9 of.
     public var licenseKey: String? {
         get { defaults.string(forKey: Keys.licenseKey) }
         nonmutating set {
@@ -477,6 +484,7 @@ public struct AppSettings {
             if newValue == nil {
                 licenseStatus = nil
                 companionToken = nil
+                clearTrial()
             }
         }
     }
@@ -524,6 +532,69 @@ public struct AppSettings {
     public var companionToken: String? {
         get { defaults.string(forKey: Keys.companionToken) }
         nonmutating set { defaults.set(newValue, forKey: Keys.companionToken) }
+    }
+
+    /// The two trial dates are stored as ISO 8601 text. No other setting here
+    /// keeps a date, so this sets the convention rather than following one:
+    /// the licence server sends these same two values as ISO 8601 strings, and
+    /// text stays readable under `defaults read` where a stored `Date` is an
+    /// opaque blob. Fractional seconds are on so a `Date` round-trips exactly.
+    private static let trialDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
+
+    /// When this Mac's 14-day trial began, or `nil` if it never started one.
+    /// Written by ``TrialClock`` — locally at the start, then replaced by the
+    /// licence server's own record once the trial registers.
+    public var trialStartedAt: Date? {
+        get { defaults.string(forKey: Keys.trialStartedAt).flatMap(Self.trialDateFormatter.date(from:)) }
+        nonmutating set {
+            defaults.set(newValue.map(Self.trialDateFormatter.string(from:)), forKey: Keys.trialStartedAt)
+        }
+    }
+
+    /// When the trial ends. Set once when the trial starts and moved only by
+    /// the licence server's own record; nothing else may extend it.
+    public var trialExpiresAt: Date? {
+        get { defaults.string(forKey: Keys.trialExpiresAt).flatMap(Self.trialDateFormatter.date(from:)) }
+        nonmutating set {
+            defaults.set(newValue.map(Self.trialDateFormatter.string(from:)), forKey: Keys.trialExpiresAt)
+        }
+    }
+
+    /// Whether the licence server has answered about this trial. `false` is
+    /// ordinary, not a failure: a trial may start with no network at all and
+    /// registers on the first connection.
+    public var trialRegistered: Bool {
+        get { defaults.bool(forKey: Keys.trialRegistered) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.trialRegistered) }
+    }
+
+    /// Set once the "three days left" trial banner has been shown, so it is
+    /// shown once and never again.
+    public var trialBannerThreeDaysShown: Bool {
+        get { defaults.bool(forKey: Keys.trialBannerThreeDaysShown) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.trialBannerThreeDaysShown) }
+    }
+
+    /// Set once the last-day trial banner has been shown. Same one-shot rule as
+    /// ``trialBannerThreeDaysShown``.
+    public var trialBannerLastDayShown: Bool {
+        get { defaults.bool(forKey: Keys.trialBannerLastDayShown) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.trialBannerLastDayShown) }
+    }
+
+    /// Forgets every trial field. Called only from ``licenseKey``'s setter, so
+    /// the trial and the key it issued are removed together.
+    private func clearTrial() {
+        defaults.removeObject(forKey: Keys.trialStartedAt)
+        defaults.removeObject(forKey: Keys.trialExpiresAt)
+        defaults.removeObject(forKey: Keys.trialRegistered)
+        defaults.removeObject(forKey: Keys.trialBannerThreeDaysShown)
+        defaults.removeObject(forKey: Keys.trialBannerLastDayShown)
     }
 
     /// The license server this build talks to, from the bundle's

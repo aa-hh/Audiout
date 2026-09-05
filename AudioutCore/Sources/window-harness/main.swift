@@ -241,7 +241,7 @@ func run() -> Int32 {
                   "the Groups row stays selected throughout the push")
     window.test_editor.test_goBack()
     drain()
-    checks.expect(window.test_isShowingOverview, "'‹ Groups' pops back to the card field")
+    checks.expect(window.test_isShowingOverview, "'‹ Scenes' pops back to the card field")
 
     // --- 8. Cancelling a presented create sheet clears it.
     print("\n[8] Cancelling the create sheet clears it")

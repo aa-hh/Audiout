@@ -36,7 +36,7 @@ import AudioutSharedUI
 ///   themselves beside it.
 ///
 /// The two controls that LEAVE the pane share one band above all of that: the
-/// quiet "‹ Groups" button on the left and the primary Done/Save on the right.
+/// quiet "‹ Scenes" button on the left and the primary Done/Save on the right.
 ///
 /// Edits write straight through the injected `GroupController`
 /// (`saveGroup`/`deleteGroup`): renaming and membership toggles call
@@ -80,7 +80,7 @@ public final class GroupEditorViewController: NSViewController {
     /// Called after the group was deleted (pop back to the mixer).
     public var onDidDeleteGroup: (() -> Void)?
     /// Called when the user leaves this editor for the group overview — the
-    /// "‹ Groups" band, Escape, or ⌘[. The host owns the pane swap; this pane
+    /// "‹ Scenes" band, Escape, or ⌘[. The host owns the pane swap; this pane
     /// only reports the request (direction C's in-pane push).
     public var onBack: (() -> Void)?
     /// Called when Escape abandoned a rename, so the host can put keyboard
@@ -104,7 +104,7 @@ public final class GroupEditorViewController: NSViewController {
     /// but not in the backend's output set fills ember, not gold.
     private var isActiveGroup = false
 
-    /// The "‹ Groups" control at the top of the scrolled document — the way
+    /// The "‹ Scenes" control at the top of the scrolled document — the way
     /// back to the card overview this editor was pushed from. It rides on the
     /// scroll view roadmap 039 gave the pane: before that there was not a
     /// single spare point of height to put it in.
@@ -136,7 +136,7 @@ public final class GroupEditorViewController: NSViewController {
     private let headerWell = GroupedSectionView()
     private let deleteButton = NSButton()
     /// The pane's PRIMARY action, at the TOP RIGHT of the form, level with the
-    /// "‹ Groups" control it pairs with (owner's call, 2026-09-03). It carries
+    /// "‹ Scenes" control it pairs with (owner's call, 2026-09-03). It carries
     /// two titles: "Done" whenever the editor holds nothing uncommitted —
     /// which is almost always, since membership, the icon and a committed
     /// rename each write through immediately — and "Save" while the name field
@@ -1473,7 +1473,7 @@ public final class GroupEditorViewController: NSViewController {
         return doneButton.convert(doneButton.bounds, to: view)
     }
 
-    /// The "‹ Groups" control's laid-out frame in the pane's own coordinates —
+    /// The "‹ Scenes" control's laid-out frame in the pane's own coordinates —
     /// same height as the primary, at the other end of the same band.
     public var test_backControlFrame: NSRect {
         view.layoutSubtreeIfNeeded()
@@ -1624,7 +1624,7 @@ public final class GroupEditorViewController: NSViewController {
         return wellIndex < stackIndex
     }
 
-    /// Click "‹ Groups" — the real button action, not `onBack` behind its back.
+    /// Click "‹ Scenes" — the real button action, not `onBack` behind its back.
     public func test_goBack() { backButton.performClick(nil) }
 
     /// Press ⌘[ in the editor — a real `NSEvent` through the real
@@ -1750,7 +1750,7 @@ private final class RailRepaintingView: NSView {
 
 // MARK: - Back control
 
-/// The "‹ Groups" control above the identity card. A stock `NSButton`, so the
+/// The "‹ Scenes" control above the identity card. A stock `NSButton`, so the
 /// focus ring, the pressed state, `accessibilityPerformPress()` and
 /// VoiceOver's button role are AppKit's rather than hand-rolled.
 ///

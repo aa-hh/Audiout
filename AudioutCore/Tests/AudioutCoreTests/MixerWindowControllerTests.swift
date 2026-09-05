@@ -269,7 +269,7 @@ import AppKit
         window.test_editor.test_goBack()
         await drain()
 
-        #expect(window.test_isShowingOverview, "'‹ Groups' pops the editor back to the card field")
+        #expect(window.test_isShowingOverview, "'‹ Scenes' pops the editor back to the card field")
         #expect(window.test_sidebar.test_groupsRowIsSelected)
     }
 

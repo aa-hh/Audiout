@@ -42,8 +42,8 @@ and switch to it in two clicks, and you can send one app somewhere different fro
 everything else: Chrome in the kitchen while the call stays on your laptop.
 
 It runs in the menu bar. Nothing about it touches the internet — discovery,
-routing, volume and playback all stay on your own network, and it keeps working
-with the machine offline.
+routing, volume and playback all stay on your own Wi-Fi network, and it keeps
+working with the machine offline.
 
 ## Get Audiout
 
@@ -80,7 +80,7 @@ build it — that path is supported and it always will be.
 - Multi-room AirPlay 2 playback, in sync, from any app on the Mac
 - Bluetooth speakers play in sync with the AirPlay ones
 - Your Mac's own speakers stay in sync with the rest of the house
-- Per-device EQ and delay trim for rooms that need shaping
+- Per-speaker EQ and delay trim for rooms that need shaping
 
 **Control**
 - A volume fader and a mute for every speaker, live while audio plays
@@ -100,15 +100,15 @@ The house doesn't have a keyboard in it. **Audiout Remote** is a free iPhone app
 that mirrors the Mac fader for fader — per-speaker volume, per-app routing, and
 mute one room or all of them, from wherever you're standing.
 
-There's no account and no sign-in. The phone finds your Mac on your own Wi-Fi,
-and the Mac asks you once whether to allow that phone; after that it stays
-allowed. There's no per-seat limit: put it on every phone in the house.
+There's no account and no sign-in. The phone finds your Mac on your own Wi-Fi
+network, and the Mac asks you once whether to allow that phone; after that it
+stays allowed. There's no per-seat limit: put it on every phone in the house.
 
 Free on the App Store, included with Audiout for Mac. → **[audiout.app/remote](https://audiout.app/remote)**
 
 > [!NOTE]
 > Audiout Remote is a separate app and is not part of this repository. It has no
-> audio path of its own — it is a remote control for a Mac running Audiout.
+> audio path of its own — it is a remote control for Audiout on your Mac.
 
 ## Requirements
 
@@ -116,7 +116,7 @@ Free on the App Store, included with Audiout for Mac. → **[audiout.app/remote]
 |---|---|
 | **Mac** | Apple Silicon, macOS 14.4 or later |
 | **Speakers** | Any AirPlay 2 speaker — HomePod, Sonos, Apple TV, AV receivers, smart TVs. AirPlay 1, Bluetooth and Chromecast work too. Chromecast plays the whole mix only: it can't be a per-app destination. |
-| **Network** | Everything on the same Wi-Fi. Audiout asks for Local Network and system-audio recording permission on first run, and explains why. |
+| **Network** | Everything on the same Wi-Fi network. Audiout asks for Local Network and system-audio recording permission on first run, and explains why. |
 
 ## Documentation
 
@@ -128,11 +128,11 @@ Free on the App Store, included with Audiout for Mac. → **[audiout.app/remote]
 
 ## Privacy
 
-Audio never leaves your network. Two things do, and both are described in full in
-[PRODUCT.md](PRODUCT.md#data-collection): anonymous usage statistics, which are
-**off unless you turn them on**, and a licence check-in that counts how many
-machines a key is used on. Neither ever carries what you're playing, your speaker
-names, or anything you type.
+Audio never leaves your Wi-Fi network. Two things do, and both are described in
+full in [PRODUCT.md](PRODUCT.md#data-collection): anonymous usage statistics,
+which are **off unless you turn them on**, and a licence check-in that counts
+how many machines a key is used on. Neither ever carries what you're playing,
+your speaker names, or anything you type.
 
 ## License
 

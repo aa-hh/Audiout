@@ -672,7 +672,9 @@ import AppKit
 
     /// A run ends on a bare "220 ms · kept" — a quantity with no statement of
     /// whose lag it is or which way it ran, which is the one thing the whole
-    /// run was spent measuring.
+    /// run was spent measuring. It rides the HEADLINE, and the screen stays
+    /// three elements: a name said twice and a measurement said three times
+    /// was the version this replaced.
     @Test func theKeptScreenSaysWhatTheNumberMeant() {
         let (popover, recorder) = makePopover()
         let wizard = openWizard(popover)
@@ -686,8 +688,10 @@ import AppKit
         wizard?.test_clickButton(titled: BTAlignmentWizardView.soundsRightTitle)
         let lag = BTAlignmentWizardView.keptLagCopy(target: "Move 2",
                                                     valueMs: Int(kept.rounded()))
-        #expect(wizard?.test_contentLines.contains(lag) == true,
+        #expect(wizard?.test_contentLines.first == lag,
                 "got \(String(describing: wizard?.test_contentLines))")
+        #expect(wizard?.test_contentLines.count == 2,
+                "the headline and one quiet line — the number is not said a third time")
     }
 
     /// "Still off" opens the hand-tune, and its "More questions" sends the run

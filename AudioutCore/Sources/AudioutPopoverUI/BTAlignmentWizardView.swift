@@ -216,18 +216,19 @@ public final class BTAlignmentWizardView: NSView {
     static func keptReadyCopy(target: String) -> String {
         "\(target) is ready to play with everything."
     }
-    /// What the kept number MEANS, under the headline. A run ends on a bare
-    /// "220 ms · kept", which names a quantity without saying whose lag it is
-    /// or which way it ran — the one fact the whole run was spent measuring.
-    /// Latency runs only: the Mac's own row is the zero everything else is
-    /// measured against, so it has no lag of its own to report.
+    /// The finale for a LATENCY run — the win and what the number meant, in
+    /// one sentence. It replaces ``keptReadyCopy(target:)`` rather than
+    /// sitting under it: as two lines the screen named the speaker twice and
+    /// the measurement three times over (the readout, then "was 220 ms late",
+    /// then the ready line saying the same outcome again). The Mac's own row
+    /// is the zero everything else is measured against, so it has no lag to
+    /// report and keeps the plain ready line.
     static func keptLagCopy(target: String, valueMs: Int) -> String {
-        "\(target) was arriving \(valueMs) ms late. Audiout waits for it now."
+        "\(target) was \(valueMs) ms late. It plays with everything now."
     }
     /// A Bluetooth run wrote a MEASURED LATENCY; the number is the stage's
     /// caption, and this quiet line says where to change it later.
-    private static let keptLatencyCaption =
-        "Change it anytime \u{2014} click the sync value on this speaker\u{2019}s row."
+    private static let keptLatencyCaption = "Change it anytime from this speaker\u{2019}s row."
     /// The Mac's own row has no second store: its trim IS the kept value.
     /// Both captions point at the SAME PLACE because both values are edited
     /// there — the Mac's row carries the identical chip and drawer. They name
@@ -236,8 +237,7 @@ public final class BTAlignmentWizardView: NSView {
     /// not show and the mixer never prints, so a sentence the user has to ACT
     /// on may not spend it. Same reason "the popover" was dropped before it —
     /// it is our word for the window, not theirs.
-    private static let keptLocalCaption =
-        "Fine-tune anytime \u{2014} click the sync value on this Mac\u{2019}s row."
+    private static let keptLocalCaption = "Fine-tune anytime from this Mac\u{2019}s row."
     /// What the run costs, before it starts — the title line's right slot on
     /// the intro, where the click count lives once the run is under way.
     private static let introSlotText = "About \(expectedClicks) clicks"
@@ -858,23 +858,22 @@ public final class BTAlignmentWizardView: NSView {
             // The readout keeps the proposal's number until the stage's lock
             // settles — `armKeptReadout` crossfades "· kept" over it there.
             // The winning message is the hero line: the speaker is ready.
-            let ready = Self.keptReadyCopy(target: session.targetName)
+            // One hero line, one quiet line, Done. A latency run's headline
+            // carries the measurement's MEANING; a run with nothing to wait
+            // for (a floored 0) has no lag to report and keeps the plain one.
+            let lagMs = Int(valueMs.rounded())
+            let ready = session.measuresLatency && lagMs > 0
+                ? Self.keptLagCopy(target: session.targetName, valueMs: lagMs)
+                : Self.keptReadyCopy(target: session.targetName)
             let caption = session.measuresLatency ? Self.keptLatencyCaption : Self.keptLocalCaption
             addBody(ready, hero: true)
-            // What that number was, in words. A run that measured nothing to
-            // wait for (a floored 0) has no lag to report and says nothing.
-            let lagMs = Int(valueMs.rounded())
-            let lag = session.measuresLatency && lagMs > 0
-                ? Self.keptLagCopy(target: session.targetName, valueMs: lagMs)
-                : nil
-            if let lag { addCaption(lag) }
             addCaption(caption)
             contentStack.setCustomSpacing(Self.spacingTight,
                                           after: contentStack.arrangedSubviews[0])
             addCentredPlate(makeDonePlate(isPrimary: true, keycap: "⏎",
                                           action: #selector(keptDoneClicked(_:)),
                                           isDefault: true))
-            setAccessibilityLabel([ready, lag, caption].compactMap { $0 }.joined(separator: " "))
+            setAccessibilityLabel(ready + " " + caption)
 
         case .unsettled(let bestGuessMs):
             readout.stringValue = ""

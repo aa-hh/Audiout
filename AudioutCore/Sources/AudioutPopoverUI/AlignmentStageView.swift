@@ -785,13 +785,23 @@ final class AlignmentStageView: NSView {
         layoutScaleStamp()
     }
 
-    /// The scale legend, bottom-trailing on the plate: present whenever the
-    /// ruler is actually lit, gone with it on the bow-outs.
+    /// The scale legend, bottom-trailing on the plate.
+    ///
+    /// It yields the bottom band to the NAME STAMPS. Both sit on the same
+    /// baseline in the same two corners, so on the armed screen the legend
+    /// printed straight through the reference speaker's name (live, 2026-09-05
+    /// — "250 ms per mark" over "MacBook Pro Speakers"). The names are the
+    /// armed screen's whole job (which light is which speaker) and the ruler
+    /// is not being read yet; once the questions start the names are gone and
+    /// the band is the legend's. Dormant shows neither.
     private func layoutScaleStamp() {
-        let dormant: Bool
-        if case .dormant = state { dormant = true } else { dormant = false }
-        scaleLabel.isHidden = dormant
-        guard !dormant else { return }
+        let showsNamesOrNothing: Bool
+        switch state {
+        case .armed, .dormant: showsNamesOrNothing = true
+        case .question, .listening, .locked: showsNamesOrNothing = false
+        }
+        scaleLabel.isHidden = showsNamesOrNothing
+        guard !showsNamesOrNothing else { return }
         let step = Int(Self.look(for: rung).tickStepMs.rounded())
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .right

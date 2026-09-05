@@ -1,9 +1,18 @@
 #!/bin/bash
-# make-staging.sh — full release rehearsal against the STAGING license server.
-# build → sign → notarize → staple → DMG → notarize DMG → staple DMG →
-# sign_update → latest-vN.json + appcast-vN.xml → upload to the staging R2
-# bucket. Production (make-release.sh) is untouched by anything here: this
-# script only ever writes to audiout-releases-staging.
+# make-staging.sh — the full publish pipeline: build → sign → notarize →
+# staple → DMG → notarize DMG → staple DMG → sign_update → latest-vN.json +
+# appcast-vN.xml → upload to R2.
+#
+# It defaults to STAGING in every respect (staging license server, staging
+# bucket), which is what an unadorned run does. It is also the ONLY publish
+# path there is: a production release is the same pipeline pointed at the
+# live server and bucket, so launch day overrides both —
+#
+#   AUDIOUT_LICENSE_URL=https://license.audiout.app \
+#   R2_BUCKET=audiout-releases-live scripts/make-staging.sh
+#
+# The appcast channel title follows R2_BUCKET, so the feed cannot claim to be
+# staging while the bytes land in the live bucket.
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
@@ -38,6 +47,10 @@ export AUDIOUT_LICENSE_URL="${AUDIOUT_LICENSE_URL:-https://license-staging.audio
 # must not ship.
 export AUDIOUT_BUY_URL="${AUDIOUT_BUY_URL:-https://audiout.app/buy}"
 R2_BUCKET="${R2_BUCKET:-audiout-releases-staging}"
+# The staging feed must announce itself as staging; the live feed must not
+# carry the word at all. Derived from the bucket rather than set separately,
+# so the title cannot disagree with where the release actually lands.
+case "$R2_BUCKET" in *-staging) CHANNEL_SUFFIX=" (STAGING)";; *) CHANNEL_SUFFIX="";; esac
 # Both release buckets live in the EU jurisdiction. Without -J the uploads
 # land in a different (default-jurisdiction) bucket the Worker cannot read.
 R2_JURISDICTION="${R2_JURISDICTION:-eu}"
@@ -179,7 +192,7 @@ elif ! SIG_ATTRS="$("$SIGN_UPDATE" "$DIST_FILE" 2>&1)"; then
 else
   # sign_update signs the FINAL bytes (post-staple) and prints the exact
   # attribute pair the enclosure needs: sparkle:edSignature="..." length="..."
-  { printf '<?xml version="1.0" encoding="utf-8"?>\n'; printf '<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">\n'; printf '<channel><title>Audiout v%s updates (STAGING)</title>\n' "$MAJOR"; printf '<item><title>%s</title>\n' "$APP_VERSION"; printf '<sparkle:version>%s</sparkle:version>\n' "$BUILD_NUMBER"; printf '<sparkle:shortVersionString>%s</sparkle:shortVersionString>\n' "$APP_VERSION"; printf '<sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>\n'; printf '<enclosure url="%s/download" %s type="%s"/>\n' "$AUDIOUT_LICENSE_URL" "$SIG_ATTRS" "$ENCLOSURE_TYPE"; printf '</item></channel></rss>\n'; } > "$APPCAST"
+  { printf '<?xml version="1.0" encoding="utf-8"?>\n'; printf '<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">\n'; printf '<channel><title>Audiout v%s updates%s</title>\n' "$MAJOR" "$CHANNEL_SUFFIX"; printf '<item><title>%s</title>\n' "$APP_VERSION"; printf '<sparkle:version>%s</sparkle:version>\n' "$BUILD_NUMBER"; printf '<sparkle:shortVersionString>%s</sparkle:shortVersionString>\n' "$APP_VERSION"; printf '<sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>\n'; printf '<enclosure url="%s/download" %s type="%s"/>\n' "$AUDIOUT_LICENSE_URL" "$SIG_ATTRS" "$ENCLOSURE_TYPE"; printf '</item></channel></rss>\n'; } > "$APPCAST"
 fi
 
 # --- Upload -------------------------------------------------------------------

@@ -373,11 +373,10 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   reads a BT id's audible fact from `isAvailable`, never `.connected`
   (`desiredDeviceAudibleLocked`): that signal lands a whole reference delay
   late, so the `.connected` read would brand a healthy BT-only selection
-  stranded and un-mute the Mac mid-playback. A BT device MAY be a per-app
-  route target (behind `AUDIOUT_PER_APP_ALL_OUTPUTS`, which ships off): the
-  route reaches it by UID through the sink manager, never through the engine,
-  so the converge loop's `!device.isBluetooth` guard is untouched — see the
-  per-app arm in `handleDestinationSetsChanged`.
+  stranded and un-mute the Mac mid-playback. A BT device IS a per-app
+  route target: the route reaches it by UID through the sink manager, never
+  through the engine, so the converge loop's `!device.isBluetooth` guard is
+  untouched — see the per-app arm in `handleDestinationSetsChanged`.
   `BTDeviceEnumerator.swift` and
   `BTSyncedSink.swift` are LICENSE-CLEAN
   like `SyncCore.swift` (no GPL header — see the header note in each file);

@@ -224,7 +224,7 @@ public final class AppRoutingController {
 
     /// The ONE resolver from saved groups to the speakers they can currently
     /// feed as per-app route targets: each group's member devices, filtered by
-    /// the shared kind rule, `Device.canBePerAppRouteTarget(allOutputs:)` —
+    /// the shared kind rule, `Device.canBePerAppRouteTarget()` —
     /// exactly the eligibility an individually-picked target already has
     /// (`PopoverController.availableAirPlayDestinations`). A member the fleet
     /// snapshot doesn't hold at all is dropped here too: nothing is known
@@ -239,7 +239,7 @@ public final class AppRoutingController {
         _ groups: [Group], devices: [Device]
     ) -> [String: GroupRouteTarget] {
         let eligible = Dictionary(
-            devices.filter { $0.canBePerAppRouteTarget(allOutputs: PerAppRouting.allOutputsEnabled) }
+            devices.filter { $0.canBePerAppRouteTarget() }
                 .map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first })
         var targets: [String: GroupRouteTarget] = [:]

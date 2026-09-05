@@ -549,7 +549,11 @@ import Testing
 
     // MARK: resolveGroupTargets — the one group → speakers rule
 
-    @Test func resolveGroupTargetsKeepsOnlyAirPlay2NonLocalMembers() {
+    /// The kinds with a per-app delivery path survive the resolve; the three
+    /// without one do not. Cast is refused outright (`CastFanOut` has no
+    /// per-destination addressing), the local Mac is never a redirect target,
+    /// and a member the fleet has never seen cannot be resolved at all.
+    @Test func resolveGroupTargetsKeepsEveryDeliverableMemberAndDropsTheRest() {
         let devices = [
             airPlayDevice("kitchen"),
             Device(id: "mac", name: "This Mac", kind: .localMac, isLocalDevice: true),
@@ -561,7 +565,11 @@ import Testing
             [group("g", members: ["kitchen", "mac", "old", "bt", "cast", "never-seen"])],
             devices: devices)
 
-        #expect(targets["g"]?.memberVolumes.keys.sorted() == ["kitchen"])
+        #expect(targets["g"]?.memberVolumes.keys.sorted() == ["bt", "kitchen", "old"],
+                "AirPlay 2, AirPlay 1 and Bluetooth members all carry a per-app stream")
+        #expect(targets["g"]?.memberVolumes["cast"] == nil, "Cast has no per-app delivery path")
+        #expect(targets["g"]?.memberVolumes["mac"] == nil, "the local Mac is never a redirect target")
+        #expect(targets["g"]?.memberVolumes["never-seen"] == nil, "an undiscovered member cannot resolve")
     }
 
     /// Reachability is NOT this function's business — the backend subtracts an

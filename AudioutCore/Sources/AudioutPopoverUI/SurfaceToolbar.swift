@@ -10,7 +10,7 @@ import AudioutSharedUI
 /// material below, and Reduce Transparency handling on its own):
 ///
 /// - the three screens as three separate BORDERED items — the same control
-///   Pin and Quit are, so the header carries ONE button style. ICON-ONLY, and
+///   Pin is, so the header carries ONE button style. ICON-ONLY, and
 ///   deliberately so: names were tried on the items' `title` (#95, #97) and
 ///   removed again (Alec, 2026-09-03) because three translated labels would
 ///   widen the strip until AppKit swept the tabs into the overflow menu, and
@@ -18,7 +18,7 @@ import AudioutSharedUI
 ///   reader: the tooltips ("Mixer (⌘1)"), the items' `label`s (VoiceOver and
 ///   the overflow menu) and ⌘1/⌘2/⌘3 all still carry the names, and none of
 ///   them costs strip width in any language;
-/// - Pin and Quit as trailing bordered items.
+/// - Pin as a trailing bordered item (Quit left the strip for the menus).
 ///
 /// **Why the tabs are bordered items and not custom views** (live review
 /// 2026-08-30). Killing the `NSToolbarItemGroup` killed the wandering
@@ -64,7 +64,6 @@ final class SurfaceToolbarController: NSObject {
     var onSelectScreen: ((SurfaceScreen) -> Void)?
     /// The Pin item was clicked.
     var onTogglePin: (() -> Void)?
-    /// The Quit item was clicked.
 
     // MARK: State (pushed by the host)
 
@@ -83,8 +82,6 @@ final class SurfaceToolbarController: NSObject {
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         toolbar.autosavesConfiguration = false
-        if #available(macOS 13.0, *) {
-        }
     }
 
     /// Attach to the shell window: the toolbar becomes the window's one header
@@ -107,7 +104,7 @@ final class SurfaceToolbarController: NSObject {
         applyPinAppearance()
     }
 
-    /// The tabs wear the SAME control as Pin and Quit — a bordered toolbar
+    /// The tabs wear the SAME control as Pin — a bordered toolbar
     /// item — so the header carries one button style rather than three (Alec,
     /// live review 2026-08-30: the custom-view tabs drew no chrome at all,
     /// leaving bare glyphs beside bordered circles and a glass lockup).
@@ -138,11 +135,6 @@ final class SurfaceToolbarController: NSObject {
     /// selection AppKit itself exposes.
     private func applySelectionToTabs() {
         toolbar.selectedItemIdentifier = Self.tabItemIdentifier(for: selectedScreen)
-        for (screen, item) in tabItems {
-            item.image = Self.resolveSymbol(screen.symbolName,
-                                            fallbacks: screen.fallbackSymbolNames,
-                                            accessibilityDescription: screen.label)
-        }
     }
 
     private func applyPinAppearance() {
@@ -225,14 +217,14 @@ final class SurfaceToolbarController: NSObject {
         let items = SurfaceScreen.allCases.compactMap { tabItems[$0] }
         return items.count == SurfaceScreen.allCases.count && items.allSatisfy(\.isBordered)
     }
-    /// Whether every tab is bordered — the same control as Pin and Quit.
+    /// Whether every tab is bordered — the same control as Pin.
     var test_allTabsAreBordered: Bool {
         let items = SurfaceScreen.allCases.compactMap { tabItems[$0] }
         return items.count == SurfaceScreen.allCases.count && items.allSatisfy(\.isBordered)
     }
-    /// Whether Pin and Quit are bordered — the control the tabs now match.
+    /// Whether Pin is bordered — the control the tabs match.
     var test_pinItemIsBordered: Bool { pinItem?.isBordered == true }
-    /// Whether the pin/quit items resolved symbol images.
+    /// Whether the pin item resolved a symbol image.
     var test_pinItemHasImage: Bool { pinItem?.image != nil }
     var test_pinItemLabel: String? { pinItem?.label }
     /// Fire a tab exactly as a click on it would — a REAL click through the
@@ -241,7 +233,7 @@ final class SurfaceToolbarController: NSObject {
         guard let item = tabItems[screen] else { return }
         tabTapped(item)
     }
-    /// Simulate clicking Pin / Quit.
+    /// Simulate clicking Pin.
     func test_tapPin() { pinTapped(nil) }
 }
 
@@ -250,11 +242,7 @@ final class SurfaceToolbarController: NSObject {
 extension SurfaceToolbarController: NSToolbarDelegate {
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        // A fixed `.space` between Pin and Quit: they sat one pixel apart, so a
-        // click aimed at Pin could quit the app instead. Least-destructive
-        // separation — Quit stays in the toolbar, it just stops being Pin's
-        // neighbour.
-        // A `.space` BETWEEN the tabs, the same separator Pin and Quit use.
+        // A `.space` BETWEEN the tabs.
         // Load-bearing, not cosmetic (live review 2026-08-30): adjacent
         // bordered items MERGE into one shared capsule on macOS 26+, and
         // `.prominent` then pulls the selected item out of that capsule to
@@ -263,7 +251,7 @@ extension SurfaceToolbarController: NSToolbarDelegate {
         // Groups gave three circles, Settings gave capsule(2) + circle. That is
         // the wandering-geometry bug the segmented divider was, wearing a
         // different hat. Spaced items never merge, so every tab is a discrete
-        // circle in every state, matching Pin and Quit exactly.
+        // circle in every state, matching Pin exactly.
         Array(SurfaceScreen.allCases.map(Self.tabItemIdentifier(for:))
                 .flatMap { [$0, NSToolbarItem.Identifier.space] }.dropLast())
             + [.flexibleSpace,
@@ -287,18 +275,20 @@ extension SurfaceToolbarController: NSToolbarDelegate {
         if let screen = SurfaceScreen.allCases
             .first(where: { Self.tabItemIdentifier(for: $0) == itemIdentifier }) {
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            // Bordered: the same control Pin and Quit are, so the header has
-            // one button style.
+            // Bordered: the same control Pin is, so the header has one button
+            // style.
             item.isBordered = true
             item.target = self
             item.action = #selector(tabTapped(_:))
+            item.image = Self.resolveSymbol(screen.symbolName,
+                                            fallbacks: screen.fallbackSymbolNames,
+                                            accessibilityDescription: screen.label)
             // The item's own NAME, for the overflow menu and VoiceOver.
             item.label = screen.label
             // No `title`: the tabs are icon-only, so the name reaches the
             // reader through the tooltip (which also carries ⌘1/⌘2/⌘3, riding
             // the shell panel's key-equivalent seam), the `label` above, and
-            // the shortcut itself. Quit keeps its word — one short string that
-            // no tab strip has to make room for.
+            // the shortcut itself.
             item.toolTip = "\(screen.label) (⌘\(screen.keyEquivalent))"
             tabItems[screen] = item
             applySelectionToTabs()

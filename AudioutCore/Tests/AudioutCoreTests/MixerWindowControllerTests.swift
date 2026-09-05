@@ -333,9 +333,9 @@ import AppKit
         _ = try makeGroup1(controller)
         window.update(devices: backend.devices)
 
-        #expect(window.test_sidebar.test_contextMenuItems(for: .groupsOverview) == ["New Group…"],
+        #expect(window.test_sidebar.test_contextMenuItems(for: .groupsOverview) == ["Add scene"],
                 "Rename…/Delete Group… moved to the cards with the groups")
-        window.test_sidebar.test_clickContextMenuItem("New Group…", for: .groupsOverview)
+        window.test_sidebar.test_clickContextMenuItem("Add scene", for: .groupsOverview)
         #expect(window.test_isPresentingCreateSheet)
         window.test_createSheet?.test_cancel()
     }
@@ -349,7 +349,7 @@ import AppKit
         await drain()
 
         #expect(window.test_overview.test_contextMenuItems(forCard: saved.id)
-                == ["Rename…", "Delete Group…"])
+                == ["Rename…", "Delete scene…"])
         window.test_overview.test_clickContextMenuItem("Rename…", forCard: saved.id)
         await drain()
 
@@ -364,7 +364,7 @@ import AppKit
         window.update(devices: backend.devices)
         await drain()
 
-        window.test_overview.test_clickContextMenuItem("Delete Group…", forCard: saved.id)
+        window.test_overview.test_clickContextMenuItem("Delete scene…", forCard: saved.id)
         await drain()
         // The card's Delete lands in the editor's confirm flow. Headless there
         // is no window to host the confirmation sheet, and deleting without
@@ -434,7 +434,7 @@ import AppKit
         await drain()
         let sheet = try #require(window.test_createSheet)
 
-        #expect(sheet.test_titleText == "New Group", "the sheet names itself instead of opening as a bare form")
+        #expect(sheet.test_titleText == "Add scene", "the sheet names itself instead of opening as a bare form")
         #expect(sheet.test_iconWellShowsPencil, "bordered + pencil = editable — the icon well is editable, so it wears the same cue DeviceIconWellView does")
     }
 
@@ -726,7 +726,7 @@ import AppKit
         let alert = try #require(window.test_editor.test_makeDeleteAlert())
         #expect(alert.messageText == "Delete \u{201C}Group 1\u{201D}?",
                 "the sheet names the group being deleted, not \"this group\"")
-        #expect(alert.informativeText == "Deleting a group doesn't change which speakers are playing.",
+        #expect(alert.informativeText == "Deleting a scene doesn't change which speakers are playing.",
                 "an inactive group really is pure configuration")
         #expect(alert.buttons[0].title == "Delete")
         #expect(alert.buttons[0].hasDestructiveAction)
@@ -752,8 +752,8 @@ import AppKit
 
         let alert = try #require(window.test_editor.test_makeDeleteAlert())
         #expect(alert.informativeText
-                == "This group is playing now. Deleting it switches playback to Selected Devices; "
-                   + "speakers that are only in this group will stop.")
+                == "This scene is playing. Deleting it switches playback to Selected Speakers; "
+                   + "speakers that are only in this scene will stop.")
     }
 
     /// With no window there is no confirmation, so the sidebar's "Delete
@@ -1049,7 +1049,7 @@ import AppKit
 
         #expect(sheet.test_candidateDeviceIDs.isEmpty)
         #expect(sheet.test_emptyChecklistText
-                == "No speakers found yet. Speakers appear here once they\u{2019}re reachable on your network.")
+                == "No speakers found yet. Speakers appear here once they\u{2019}re reachable on your Wi-Fi network.")
         #expect(!sheet.test_isCreateEnabled)
 
         let allOffline = backend.devices.map { device -> Device in
@@ -1220,7 +1220,7 @@ import AppKit
         window.update(devices: updated)
 
         #expect(window.test_isShowingDetail, "still showing the detail pane, just re-rendered")
-        #expect(window.test_detail.test_metadataStrings["status"] == "Not on the network", "refreshAll() re-renders the visible detail pane from the fresher snapshot")
+        #expect(window.test_detail.test_metadataStrings["status"] == "Not on Wi-Fi", "refreshAll() re-renders the visible detail pane from the fresher snapshot")
     }
 
     @Test func refreshAllFallsBackWhenShownDeviceDisappears() async throws {
@@ -1362,14 +1362,14 @@ import AppKit
 
     @Test func addButtonRetitlesWhileSpeakersAreMultiSelected() async throws {
         let (window, _, _) = try await makeWindow()
-        #expect(window.test_sidebar.test_addButtonTitle == "New Group…")
+        #expect(window.test_sidebar.test_addButtonTitle == "Add scene")
 
         window.test_sidebar.test_selectDevices(["office", "sonos-move", "sonos-move-2"])
-        #expect(window.test_sidebar.test_addButtonTitle == "New Group from 3 Speakers…",
+        #expect(window.test_sidebar.test_addButtonTitle == "Add scene from 3 speakers…",
                 "the button says what + will actually do while speakers are multi-selected")
 
         window.test_sidebar.test_selectDevices([])
-        #expect(window.test_sidebar.test_addButtonTitle == "New Group…")
+        #expect(window.test_sidebar.test_addButtonTitle == "Add scene")
     }
 
     // MARK: Selection-seeded create-sheet name

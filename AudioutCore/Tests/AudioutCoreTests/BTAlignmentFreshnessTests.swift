@@ -437,8 +437,8 @@ import Testing
 
     @Test func aDeviceThatIsNotBluetoothIsNotAMeasurableTarget() {
         #expect(CompanionAlignmentPreconditions.evaluate(
-            targetID: "local", among: room(), isAudible: { _ in true }) == .refused("Unknown device."))
+            targetID: "local", among: room(), isAudible: { _ in true }) == .refused("Unknown speaker."))
         #expect(CompanionAlignmentPreconditions.evaluate(
-            targetID: "nobody", among: room(), isAudible: { _ in true }) == .refused("Unknown device."))
+            targetID: "nobody", among: room(), isAudible: { _ in true }) == .refused("Unknown speaker."))
     }
 }

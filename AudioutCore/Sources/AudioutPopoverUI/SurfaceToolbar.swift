@@ -143,7 +143,7 @@ final class SurfaceToolbarController: NSObject {
         pinItem.image = Self.resolveSymbol(isPinned ? "pin.fill" : "pin", fallbacks: ["pin"],
                                            accessibilityDescription: label)
         pinItem.label = label
-        pinItem.toolTip = isPinned ? "Unpin — return to the menu bar" : "Pin as a window"
+        pinItem.toolTip = isPinned ? "Return to the menu bar" : "Pin as a window"
     }
 
     // MARK: Actions

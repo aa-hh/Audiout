@@ -46,7 +46,7 @@ import AudioutSharedUI
 
     @Test func tabsCarryAllThreeScreensWithResolvedGlyphs() {
         let (controller, _) = makeAttached()
-        #expect(controller.test_tabLabels == ["Mixer", "Groups", "Settings"])
+        #expect(controller.test_tabLabels == ["Mixer", "Scenes", "Settings"])
         #expect(controller.test_allTabImagesResolved,
                 "every tab resolved a system SF Symbol")
     }

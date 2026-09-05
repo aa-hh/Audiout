@@ -13,7 +13,7 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
     var label: String {
         switch self {
         case .mixer: return "Mixer"
-        case .groups: return "Groups"
+        case .groups: return "Scenes"
         case .settings: return "Settings"
         }
     }
@@ -63,7 +63,7 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
 ///   host-agnostic seams: `surfaceDidShow()`/`surfaceDidHide()` on window
 ///   show/hide/switch, and a `surfaceResizer` that listens to the panel's
 ///   published size only to notice content the fixed frame cannot show.
-/// - **Groups** — the caller-provided content controller
+/// - **Scenes** — the caller-provided content controller
 ///   (`MixerWindowController.contentController` in the app), seated below the
 ///   toolbar strip in a `SurfaceScreenViewController`.
 /// - **Settings** — a caller-provided `SettingsRootViewController` (a section
@@ -704,7 +704,7 @@ public final class AppSurfaceController {
     public func clickAction(setupIsOpen: Bool) -> ClickAction {
         if setupIsOpen { return .refrontSetup }
         let dismissedByThisClick = shell.consumeRecentResignDismissal()
-        // A sheet-bearing surface (e.g. the New Group sheet) can't be
+        // A sheet-bearing surface (e.g. the Add scene sheet) can't be
         // dismissed — `performClose` refuses and beeps while the sheet
         // survives untouched (R7 already stops the window from
         // self-dismissing for this reason; this is the same call for a

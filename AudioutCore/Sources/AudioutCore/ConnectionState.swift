@@ -112,11 +112,11 @@ extension ConnectionFailure {
     public var suggestion: String {
         switch cause {
         case .notResponding:
-            return "The speaker is visible on the network but isn't answering AirPlay requests — it may be stuck or held by another app. Power-cycle it, then try again."
+            return "The speaker is visible on the network but isn't answering AirPlay requests. It may be stuck or held by another app. Power-cycle it, then try again."
         case .vanished:
             return "The speaker is no longer visible on the network. Check that it's powered on and on the same Wi-Fi, then try again."
         case .refusedOrBusy:
-            return "The speaker refused the connection — another device may hold an exclusive session. Stop playback from other apps or restart the speaker, then try again."
+            return "The speaker refused the connection. Another device may hold an exclusive session. Stop playback from other apps or restart the speaker, then try again."
         case .authRequired:
             // A Mac receiver in "Current User" access-control mode is by far the
             // most common way to hit this (live 2026-08-06: act=2 in the TXT
@@ -126,15 +126,15 @@ extension ConnectionFailure {
         case .droppedMidStream:
             return "The speaker dropped the stream and reconnecting failed. Check the speaker, then try again."
         case .timedOut:
-            return "The connection attempt didn't complete. The speaker or network may be busy — try again."
+            return "The connection attempt didn't complete. The speaker or network may be busy. Try again."
         case .timingUnavailable:
             return "This speaker needs the Speaker Sync helper to stay in time, and it isn't ready. Approve it in Login Items & Extensions if prompted, then try again."
         case .connectedElsewhere:
-            return "The speaker is connected to another device. Disconnect it there — or from this Mac's Bluetooth Settings — then try again."
+            return "The speaker is connected to another device. Disconnect it there, or from this Mac's Bluetooth Settings, then try again."
         case .notPaired:
             return "This speaker's pairing was removed. Pair it again in Bluetooth Settings, then try again."
         case .castAppUnavailable:
-            return "This receiver can't play a stream from Audiout — some software receivers don't support it. Try a different Cast device."
+            return "This receiver can't play a stream from Audiout. Some software receivers don't support it. Try a different Cast device."
         case .castConnectionFailed:
             return "The Cast receiver didn't accept the connection. Check that it's powered on and on the same network, then try again."
         case .unknown:

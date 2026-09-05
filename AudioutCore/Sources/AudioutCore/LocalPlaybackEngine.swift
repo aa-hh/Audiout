@@ -103,7 +103,7 @@ public enum LocalPlaybackError: Error, Equatable, Sendable {
 /// unsafe.
 ///
 /// ## Follow the default output — UNLESS following it would loop (R13)
-/// A "Current Device" pick means "play here, on the Mac itself." The naive read
+/// A "This Mac" pick means "play here, on the Mac itself." The naive read
 /// of that is "the built-in speakers," but that's WRONG when the user is
 /// listening on Bluetooth headphones (or a USB DAC, or wired output): pinning to
 /// built-in then blasts the app out loud from the speakers while the user hears
@@ -128,7 +128,7 @@ public enum LocalPlaybackError: Error, Equatable, Sendable {
 /// This is now consistent with the per-app CAPTURE selector rule (the tap
 /// follows `kAudioHardwarePropertyDefaultOutputDevice`, house rule / AGENTS.md):
 /// capture follows the real output because that's where the app is playing, and
-/// playback follows it too because that's where "Current Device" must be heard —
+/// playback follows it too because that's where "This Mac" must be heard —
 /// the loop guard is what keeps playback from chasing the default into an AirPlay
 /// feedback loop.
 ///

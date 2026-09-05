@@ -6,7 +6,7 @@ import Foundation
 /// SoundSource-inspired, two-section selector). This is THE routing decision:
 /// one place answers "where is my audio going?".
 ///
-/// - `.selectedDevices` — the ad-hoc "Selected Devices" set composed by the
+/// - `.selectedDevices` — the ad-hoc "Selected Speakers" set composed by the
 ///   per-device toggles below. The Mac's own output is just one more device in
 ///   that set; there is NO separate local-speakers target. **Passthrough is
 ///   derived**: when the set is exactly {the local device}, the app streams
@@ -18,7 +18,7 @@ public enum MainOutTarget: Equatable, Sendable {
 }
 
 /// Codable, versioned JSON persistence for the routing state that lives
-/// alongside groups (SPEC.md §9 2026-07-14): the persistent "Selected Devices"
+/// alongside groups (SPEC.md §9 2026-07-14): the persistent "Selected Speakers"
 /// set and the current Main Out target. Sibling of ``GroupStore``; same
 /// Application Support directory, its own file so the two evolve independently.
 ///

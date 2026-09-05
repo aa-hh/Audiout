@@ -31,14 +31,14 @@ import AudioutSharedUI
 ///   `.card`'s `raised` fill measures identical to this pane's own
 ///   `canvas`/`panel` ground (2026-09-04). Hidden whole for This Mac (the
 ///   device the audio comes FROM has no send to tune), which is why the
-///   "Groups" title below it carries two alternative top constraints;
-/// - "Groups" — BARE rows, one per saved group whose `memberIDs` contain this
+///   "Scenes" title below it carries two alternative top constraints;
+/// - "Scenes" — BARE rows, one per saved group whose `memberIDs` contain this
 ///   device, in the order the sidebar lists them, each the group's icon + name
 ///   + a trailing chevron. A row NAVIGATES: it reports out through
 ///   ``onSelectGroup`` and the host selects that group in the sidebar, which
 ///   opens its editor. Selecting is NOT activating — nothing here moves audio.
 ///   A device in no saved group keeps the slot and shows one non-clickable
-///   "Not in any group" row;
+///   "Not in any scene" row;
 /// - "About" — BARE fact rows. Status folds `connectionState` and
 ///   `isAvailable` into ONE value: as two rows they read as a contradiction
 ///   ("Not connected" sitting over "On the network: Yes"). AirPlay reports
@@ -75,7 +75,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// section purely for its GEOMETRY, which `GroupsHeaderParityTests` pins
     /// to the group editor's header band point for point.
     private let headerWell = GroupedSectionView()
-    /// The "Groups" and "About" lists — both `.bare`, so all either
+    /// The "Scenes" and "About" lists — both `.bare`, so all either
     /// contributes is the inset hairline between adjacent rows.
     private let groupsWell = GroupedSectionView()
     private let aboutWell = GroupedSectionView()
@@ -96,12 +96,12 @@ public final class DeviceDetailViewController: NSViewController {
     /// The Equalizer card's Reset button — moved off the editor and onto this
     /// title line so the loudness row inside the card is the checkbox alone.
     private let eqResetButton = NSButton()
-    private let groupsTitleLabel = NSTextField(labelWithString: "Groups")
+    private let groupsTitleLabel = NSTextField(labelWithString: "Scenes")
     private let aboutTitleLabel = NSTextField(labelWithString: "About")
     private let aboutStack = NSStackView()
     private let groupsStack = NSStackView()
 
-    /// "Groups" sits one section-gap below whatever precedes it, and WHICH
+    /// "Scenes" sits one section-gap below whatever precedes it, and WHICH
     /// slot that is depends on the device — the Equalizer card on a speaker,
     /// the identity band on This Mac. So both constraints are built once and
     /// `applyEQSectionVisibility()` swaps which one is active; rebuilding a
@@ -317,7 +317,7 @@ public final class DeviceDetailViewController: NSViewController {
             equalTo: document.trailingAnchor, constant: -GroupsPaneLayout.columnTrailingInset)
         columnFill.priority = .defaultHigh
 
-        // Both of the "Groups" title's possible top pins, built once (see the
+        // Both of the "Scenes" title's possible top pins, built once (see the
         // properties). Neither goes in the array below — exactly one is
         // activated by `applyEQSectionVisibility()`.
         groupsTitleBelowEQCard = groupsTitleLabel.topAnchor.constraint(
@@ -413,7 +413,7 @@ public final class DeviceDetailViewController: NSViewController {
             eqWell.bottomAnchor.constraint(equalTo: eqEditor.bottomAnchor,
                                            constant: GroupsPaneLayout.cardContentInset),
 
-            // "Groups". Its TOP is one of the two alternative pins built above
+            // "Scenes". Its TOP is one of the two alternative pins built above
             // — deliberately NOT in this array, since exactly one of them is
             // activated by `applyEQSectionVisibility()`.
             groupsTitleLabel.leadingAnchor.constraint(
@@ -468,7 +468,7 @@ public final class DeviceDetailViewController: NSViewController {
 
         view = container
 
-        // Seed the "Groups" title's top pin NOW, not at the next refresh.
+        // Seed the "Scenes" title's top pin NOW, not at the next refresh.
         // `show(device:)` is routinely called BEFORE the view is ever loaded
         // (see `MixerWindowController.showDetail`: it shows the device and
         // mounts the pane second), so the `refreshUI()` that ran then found
@@ -568,7 +568,7 @@ public final class DeviceDetailViewController: NSViewController {
     }
 
     /// Show or hide the Equalizer slot for the shown device, and pin the
-    /// "Groups" title under whichever slot then precedes it. This Mac is where
+    /// "Scenes" title under whichever slot then precedes it. This Mac is where
     /// the audio comes FROM: there is no send to tune, so the whole slot goes
     /// and Groups closes the gap behind it.
     ///
@@ -605,7 +605,7 @@ public final class DeviceDetailViewController: NSViewController {
         case .connecting:    return "Connecting…"
         case .reconnecting:  return "Reconnecting…"
         case .failed:        return "Couldn't connect"
-        case .off:           return device.isAvailable ? "Ready" : "Not on the network"
+        case .off:           return device.isAvailable ? "Ready" : "Not on Wi-Fi"
         }
     }
 
@@ -621,7 +621,7 @@ public final class DeviceDetailViewController: NSViewController {
         case .bluetooth, .localMac, .cast:
             return nil
         case .homePod, .appleTV, .airportExpress, .sonos, .generic:
-            return device.supportsAirPlay2 ? "AirPlay 2" : "AirPlay 1 — sync not exact"
+            return device.supportsAirPlay2 ? "AirPlay 2" : "AirPlay 1: sync not exact"
         }
     }
 
@@ -637,7 +637,7 @@ public final class DeviceDetailViewController: NSViewController {
         case .sonos:          return "Sonos"
         case .generic:        return "AirPlay Speaker"
         case .bluetooth:      return "Bluetooth Speaker"
-        case .cast:           return "Cast Device"
+        case .cast:           return "Cast Speaker"
         }
     }
 
@@ -652,7 +652,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// Shown when the device belongs to no saved group. The section STAYS —
     /// hiding it would make "which groups is this speaker in?" unanswerable
     /// from the page that exists to answer it.
-    private static let noGroupsRowText = "Not in any group"
+    private static let noGroupsRowText = "Not in any scene"
 
     /// Every saved group this device belongs to, in `groupController.groups`
     /// order — the same order the sidebar's Groups section lists them in
@@ -691,7 +691,7 @@ public final class DeviceDetailViewController: NSViewController {
         // fresh `NSButton` + `NSImage` per group each time threw away the rows
         // under the pointer several times a second during discovery. This is
         // exactly what a row renders, as one comparable value; an empty list
-        // compares equal to empty, so the "Not in any group" row is stable too.
+        // compares equal to empty, so the "Not in any scene" row is stable too.
         let projection = memberGroups.map {
             GroupRowProjection(
                 id: $0.id, name: $0.name,
@@ -929,7 +929,7 @@ public final class DeviceDetailViewController: NSViewController {
 
     /// What the membership section's rows READ, top to bottom: one entry per
     /// saved group the device belongs to, or the single non-clickable
-    /// "Not in any group" row when it belongs to none.
+    /// "Not in any scene" row when it belongs to none.
     public var test_groupRowTitles: [String] {
         groupsStack.arrangedSubviews.map { row in
             if let button = Self.groupRowButton(in: row) { return button.title }
@@ -1033,7 +1033,7 @@ public final class DeviceDetailViewController: NSViewController {
     }
 
     /// The VISIBLE slot titles, in page order — the page's shape as words
-    /// ("Equalizer", "Groups", "About"; This Mac drops the first).
+    /// ("Equalizer", "Scenes", "About"; This Mac drops the first).
     public var test_slotTitles: [String] {
         [eqTitleLabel, groupsTitleLabel, aboutTitleLabel]
             .filter { !$0.isHidden }
@@ -1111,7 +1111,7 @@ public final class DeviceDetailViewController: NSViewController {
         return groupsWell.convert(groupsWell.bounds, to: view)
     }
 
-    /// The "Groups" TITLE label's laid-out frame in the pane's own coordinates
+    /// The "Scenes" TITLE label's laid-out frame in the pane's own coordinates
     /// — it must sit between whatever precedes it (the Equalizer card, or the
     /// identity band on This Mac) and the list it titles, never inside either.
     public var test_groupsSectionTitleFrame: NSRect {
@@ -1163,7 +1163,7 @@ public final class DeviceDetailViewController: NSViewController {
         return eqResetButton.convert(eqResetButton.bounds, to: view)
     }
 
-    /// How many of the "Groups" title's two alternative top pins are active —
+    /// How many of the "Scenes" title's two alternative top pins are active —
     /// must be exactly 1 from the moment the view loads. Zero leaves the
     /// column's height ambiguous and collapses the scroll document; two
     /// conflict.

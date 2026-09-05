@@ -339,7 +339,7 @@ import Testing
         #expect(vc.test_ribbonBodyText == nil, "a first ask has no paragraph under it")
         #expect(vc.test_previewFrameLabel?.contains("macOS") ?? false,
                 "the frame says whose surface this is, so no line of copy has to")
-        #expect(vc.test_ribbonButtonTitles == ["Enable System Audio"])
+        #expect(vc.test_ribbonButtonTitles == ["Enable system audio"])
         #expect(vc.test_browseStep == nil)
     }
 
@@ -506,7 +506,7 @@ import Testing
         #expect(vc.test_demoMode == .settings)
         #expect(vc.test_heroRestingSwitchOn, "a granted step really would be found switched on")
         #expect(!vc.test_isDemoAnimating, "a browse is a reading position, not a rehearsal")
-        #expect(vc.test_ribbonButtonTitles == ["Open Settings…"], "the quiet way back to it")
+        #expect(vc.test_ribbonButtonTitles == ["Open settings…"], "the quiet way back to it")
         #expect(vc.test_activeStep == .bluetooth, "browsing never touches the sequence")
 
         #expect(await vc.test_pressRow(.audio))
@@ -576,7 +576,7 @@ import Testing
         #expect(!vc.test_isSkipped(.bluetooth))
         #expect(vc.test_checkRowState == .pending, "the check reverts with the re-opened row")
         #expect(!vc.test_doneExists, "and the gate closes with it")
-        #expect(vc.test_ribbonStatusText == "You skipped this earlier \u{2014} nothing's lost.")
+        #expect(vc.test_ribbonStatusText == "You skipped this earlier. Nothing's lost.")
         #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Enable Bluetooth Access"])
     }
 
@@ -586,7 +586,7 @@ import Testing
     @Test func rowsSpeakTheirStateAndTheirAction() async {
         let vc = makeVC(model: makeGrantableModel())
         #expect(vc.test_rowIsAccessibilityButton(.audio))
-        #expect(vc.test_rowAccessibilityAction(.audio) == "Enable System Audio")
+        #expect(vc.test_rowAccessibilityAction(.audio) == "Enable system audio")
         #expect(!vc.test_rowIsAccessibilityButton(.localNetwork), "a locked row offers no action")
         #expect(vc.test_rowAccessibilityLabel(.localNetwork) == "Find speakers on Wi\u{2011}Fi, locked")
 
@@ -600,7 +600,7 @@ import Testing
 
     @Test func skipIsOfferedOnlyOnTheOptionalSteps() async {
         let vc = makeVC(model: makeGrantableModel())
-        #expect(vc.test_ribbonButtonTitles == ["Enable System Audio"], "System Audio is required")
+        #expect(vc.test_ribbonButtonTitles == ["Enable system audio"], "System Audio is required")
 
         await vc.test_allow([.audio, .localNetwork])
 
@@ -636,7 +636,7 @@ import Testing
     @Test func deniedAudioSwitchesThePrimaryToOpenSettings() async {
         let vc = makeVC(model: makeModel(audio: .denied))
         await vc.test_tapAllow(.audio)
-        #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
+        #expect(vc.test_ribbonButtonTitles == ["Open settings…"])
     }
 
     /// The refusal state, in the ribbon's own words: macOS only asks once, so
@@ -648,10 +648,10 @@ import Testing
         await vc.test_tapAllow(.audio)
 
         #expect(vc.test_ribbonStatusText
-                == "You chose Don't Allow. macOS only asks once \u{2014} from here it's "
+                == "You chose Don't Allow. macOS only asks once, so from here it's "
                    + "a switch in System Settings.")
         #expect(vc.test_rowIsBroken(.audio))
-        #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
+        #expect(vc.test_ribbonButtonTitles == ["Open settings…"])
         #expect(vc.test_ribbonStatusTextColor == Tokens.Color.label2,
                 "the failure hue is graphical-object-only (house rule 8) — the words beside the red glyph stay ordinary body ink")
     }
@@ -680,14 +680,14 @@ import Testing
 
         #expect(vc.test_activeStep == .localNetwork, "an unproven browse does not advance")
         #expect(vc.test_ribbonStatusText
-                == "Nothing has answered yet. If the permission dialog is open, choose Allow — or try again.")
-        #expect(vc.test_ribbonButtonTitles == ["Open Settings…", "Try Again"],
+                == "Nothing has answered yet. If the permission dialog is open, choose Allow, or try again.")
+        #expect(vc.test_ribbonButtonTitles == ["Open settings…", "Try again"],
                 "the bar reads leading to trailing, so the primary is last")
 
         await vc.test_ribbonTapPrimary()
 
         #expect(opened.isEmpty, "the primary browses again — it must not open Settings")
-        #expect(vc.test_ribbonButtonTitles == ["Open Settings…", "Try Again"])
+        #expect(vc.test_ribbonButtonTitles == ["Open settings…", "Try again"])
     }
 
     /// The retry really re-runs the browse, and the row reports what the second
@@ -758,7 +758,7 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
 
         #expect(vc.test_activeStep == .localNetwork, "a refusal does not advance the flow")
-        #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
+        #expect(vc.test_ribbonButtonTitles == ["Open settings…"])
         #expect(vc.test_ribbonStatusText?.contains("macOS only asks once") ?? false,
                 "a refusal reads as a refusal — no speaker advice, a speaker isn't the problem")
 
@@ -889,7 +889,7 @@ import Testing
 
         #expect(!vc.test_ribbonIsWaiting)
         #expect(!vc.test_stageIsDimmed)
-        #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
+        #expect(vc.test_ribbonButtonTitles == ["Open settings…"])
     }
 
     /// An undecided prime (the dialog is still up when the ceiling expires) must
@@ -899,7 +899,7 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
 
         #expect(!vc.test_ribbonIsWaiting, "never a stuck wait")
-        #expect(vc.test_ribbonButtonTitles == ["Open Settings…", "Try Again"])
+        #expect(vc.test_ribbonButtonTitles == ["Open settings…", "Try again"])
         #expect(vc.test_isRowPressable(.localNetwork))
     }
 
@@ -1036,7 +1036,7 @@ import Testing
         vc.test_fireStuckPromptTimer()
 
         #expect(vc.test_ribbonStatusText == "Dialog not responding?")
-        #expect(vc.test_ribbonButtonTitles.contains("Open Settings…"))
+        #expect(vc.test_ribbonButtonTitles.contains("Open settings…"))
 
         vc.test_ribbonTapQuietLink()
 
@@ -1059,7 +1059,7 @@ import Testing
 
         #expect(vc.test_ribbonStatusText != "Dialog not responding?",
                 "nothing is stuck any more")
-        #expect(!vc.test_ribbonButtonTitles.contains("Open Settings…"))
+        #expect(!vc.test_ribbonButtonTitles.contains("Open settings…"))
     }
 
     @Test func speakerSyncRoutesToLoginItemsThroughTheModelSeam() async {
@@ -1070,8 +1070,8 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         #expect(vc.test_activeStep == .speakerSync)
-        #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Turn On at Login"])
-        #expect(vc.test_heroHeadline == "Keep speakers in perfect time")
+        #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Turn on at login"])
+        #expect(vc.test_heroHeadline == "Keep speakers on one shared clock")
         #expect(vc.test_heroWhy == "A small helper shares one clock so your speakers never drift.")
 
         await vc.test_tapAllow(.speakerSync)
@@ -1380,7 +1380,7 @@ import Testing
         #expect(vc.test_doneExists, "a browse is a reading position, not the gate closing")
         #expect(vc.test_doneTitle == "Start listening")
         #expect(vc.test_ribbonButtonTitles.contains("Start listening"))
-        #expect(vc.test_ribbonButtonTitles.contains("Open Settings…"),
+        #expect(vc.test_ribbonButtonTitles.contains("Open settings…"),
                 "the browsed row's own pane, beside the CTA")
         #expect(vc.test_doneIsReturnDefault, "Return stays with the CTA")
 
@@ -2452,8 +2452,8 @@ import Testing
         #expect(vc.test_titleText == "Let's get your sound back")
         #expect(vc.test_rowIsBroken(.audio))
         #expect(!vc.test_rowIsBroken(.localNetwork))
-        #expect(vc.test_ribbonStatusText == "This was on \u{2014} macOS says it's off now.")
-        #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
+        #expect(vc.test_ribbonStatusText == "This was on. macOS says it's off now.")
+        #expect(vc.test_ribbonButtonTitles == ["Open settings…"])
         #expect(vc.test_ribbonStatusTextColor == Tokens.Color.label2,
                 "the failure hue is graphical-object-only (house rule 8) — the words beside the red glyph stay ordinary body ink")
     }

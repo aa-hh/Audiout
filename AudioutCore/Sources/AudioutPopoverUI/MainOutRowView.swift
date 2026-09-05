@@ -4,7 +4,7 @@ import AppKit
 import AudioutCore
 import AudioutSharedUI
 
-/// The single **"Main Out"** row in the popover's System card — styled after
+/// The single **"Main Audio"** row in the popover's System card — styled after
 /// macOS Control Center's **Sound module** (SPEC §9, T-U9b). Laid out against the
 /// shared popover column grid (task B). Left to right: a leading speaker icon ·
 /// name-less flexible zone · a horizontal `NSSlider` (the master volume, stock
@@ -18,8 +18,8 @@ import AudioutSharedUI
 /// target's title (truncated with "…" if long). It is THE routing control — one
 /// place answers "where is my audio going?" — and keeps the two-section menu
 /// content (SPEC §9b — separators + headers):
-///   §1  "Selected Devices"      -> `.selectedDevices`
-///   §2  each saved Output Group -> `.group(id)`
+///   §1  "Selected Speakers"      -> `.selectedDevices`
+///   §2  each saved scene -> `.group(id)`
 /// The current target is checkmarked AND its title is the button's visible label,
 /// its accessibility value, and the `test_selectedTitle` hook.
 ///
@@ -55,7 +55,7 @@ public final class MainOutRowView: NSView {
         /// this option is the current selection, while the open menu keeps the
         /// full `title` — for any title too long for the fixed trailing-control
         /// width. `nil` ⇒ the button shows `title` like every other option.
-        /// (The host currently passes none: "Selected Devices" is count-free —
+        /// (The host currently passes none: "Selected Speakers" is count-free —
         /// Warm Signal decision m — and the column is sized to fit it.)
         public let buttonTitle: String?
         public init(title: String, target: MainOutTarget = .selectedDevices,

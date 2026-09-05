@@ -680,7 +680,7 @@ public final class OnboardingViewController: NSViewController {
                 // then the honest heads-up about the confirmation tone the
                 // probe really does play.
                 detail: "macOS calls this audio recording. Your audio flows "
-                    + "straight to your speakers — nothing is stored or sent. "
+                    + "straight to your speakers, and nothing is stored or sent. "
                     + "Allowing plays a brief tone to confirm it's working.",
                 heroHeadline: "Hear your Mac's sound",
                 // The tone warning rides the WHY line, which is the one piece of
@@ -689,7 +689,7 @@ public final class OnboardingViewController: NSViewController {
                 // no picture can warn about a sound.
                 whyLine: "Audiout needs this to send your music to your speakers. "
                     + "Allowing plays a brief tone to confirm it's working.",
-                allowTitle: "Enable System Audio",
+                allowTitle: "Enable system audio",
                 isSkippable: false,
                 spineAskTitle: "Hear your Mac's sound",
                 spineDoneTitle: "Hearing your Mac's sound")
@@ -745,13 +745,13 @@ public final class OnboardingViewController: NSViewController {
                 step: step,
                 symbolName: "clock.arrow.2.circlepath",
                 iconColor: Tokens.Color.permissionSpeakerSync,
-                activeTitle: "Keep your speakers in perfect time",
-                completedTitle: "Your speakers stay in perfect time",
-                detail: "Your speakers play in perfect time by sharing one "
-                    + "clock, through a small helper. Approve it once in Login Items.",
-                heroHeadline: "Keep speakers in perfect time",
+                activeTitle: "Keep your speakers on one shared clock",
+                completedTitle: "Your speakers share one clock",
+                detail: "Your speakers share one clock, through a small "
+                    + "helper. Approve it once in Login Items.",
+                heroHeadline: "Keep speakers on one shared clock",
                 whyLine: "A small helper shares one clock so your speakers never drift.",
-                allowTitle: "Turn On at Login",
+                allowTitle: "Turn on at login",
                 // Skippable (P0-1): approval lives in Login Items, where macOS
                 // can simply refuse — and without an exit an unapproved helper
                 // locked the gate with nothing to press. The why line above
@@ -807,8 +807,8 @@ public final class OnboardingViewController: NSViewController {
                 // one.
                 allowTitle: "Share Usage Counts",
                 isSkippable: true,
-                spineAskTitle: "Usage statistics",
-                spineDoneTitle: "Usage statistics")
+                spineAskTitle: "Usage counts",
+                spineDoneTitle: "Usage counts")
         }
     }
 
@@ -1268,7 +1268,7 @@ public final class OnboardingViewController: NSViewController {
 
     /// What the refusal says. The ✕ doing nothing is the symptom; this is the
     /// reason, and it points at the window the user has to deal with first.
-    static let closeRefusedStatus = "Answer the macOS dialog first \u{2014} it's on screen now."
+    static let closeRefusedStatus = "Answer the macOS dialog first. It's on screen now."
 
     /// The shortened stuck-dialog delay after a refused ✕ — reaching for the
     /// close box is itself evidence the dialog has stopped being answerable, so
@@ -1291,7 +1291,7 @@ public final class OnboardingViewController: NSViewController {
     /// The one line every unanswered system dialog gets. It names what the user
     /// is waiting ON — themselves, in another window — rather than implying the
     /// app is busy.
-    static let waitingStatus = "Waiting for your answer \u{2014} the real dialog is on screen now."
+    static let waitingStatus = "Waiting for your answer. The real dialog is on screen now."
     /// `.requested` means the ask went out and NOTHING answered it — the
     /// permission dialog is presumably still up, or its window expired. It does
     /// NOT mean the browse found no speaker (a browse that reached the network
@@ -1299,16 +1299,16 @@ public final class OnboardingViewController: NSViewController {
     /// switched-off speaker as the reason; it names the actual state and leaves
     /// both doors open.
     static let localNetworkUnansweredStatus = "Nothing has answered yet. If the permission "
-        + "dialog is open, choose Allow — or try again."
+        + "dialog is open, choose Allow, or try again."
     /// Speaker Sync's recovery, for a trip to Login Items that came back with
     /// the switch still off. The status names the place people actually go
     /// looking; the body repeats the step's own explanation and then names the
     /// cost of skipping, since a skip is now on offer here.
-    static let speakerSyncRecoveryStatus = "It isn't on yet \u{2014} the switch is in Login Items, "
+    static let speakerSyncRecoveryStatus = "It isn't on yet. The switch is in Login Items, "
         + "not Privacy & Security."
-    static let speakerSyncRecoveryBody = "Your speakers play in perfect time by sharing one clock, "
-        + "through a small helper. Approve it once in Login Items. You can skip this for now \u{2014} "
-        + "without it your speakers may drift apart."
+    static let speakerSyncRecoveryBody = "Your speakers share one clock, through a small "
+        + "helper. Approve it once in Login Items. You can skip this for now, but without it "
+        + "your speakers may drift apart."
     static let alertSymbol = "exclamationmark.triangle.fill"
     /// The gate's CTA (owner copy 2026-08-11: closing setup is what starts the
     /// deferred audio engine, so the button names that). Named once — a browse
@@ -1331,7 +1331,7 @@ public final class OnboardingViewController: NSViewController {
     /// ask — the one rehearsal whose two surfaces and ghosted Deny ARE the
     /// instruction, and which a screen reader cannot see.
     static let remoteControlSpokenCaption = "You'll see this from macOS: an alert, then System "
-        + "Settings. Choose Open System Settings \u{2014} not Deny \u{2014} then turn Audiout on "
+        + "Settings. Choose Open System Settings, not Deny, then turn Audiout on "
         + "in the list."
 
     /// Everything the ribbon shows, for whatever the window is doing right now.
@@ -1379,7 +1379,7 @@ public final class OnboardingViewController: NSViewController {
                 content.status = (Self.alertSymbol, Self.stuckPromptHint,
                                   Tokens.Color.label2, false)
                 content.body = Self.ribbonBody(copy.detail)
-                content.quietLink = "Open Settings…"
+                content.quietLink = "Open settings…"
                 return content
             }
             // A refused ✕ replaces the wait's line with the reason it was
@@ -1394,13 +1394,13 @@ public final class OnboardingViewController: NSViewController {
 
         // Something that was ON is off now — the reason this window re-opened.
         if isPermissionLost(step) {
-            content.status = (Self.alertSymbol, "This was on \u{2014} macOS says it's off now.",
+            content.status = (Self.alertSymbol, "This was on. macOS says it's off now.",
                               Tokens.Color.label2, false)
             content.body = Self.ribbonBody(
                 "Everything else you set up is still in place. Turn **Audiout** back on under "
-                + "\(Self.settingsPath(for: step)) — this is the only switch to flip.")
+                + "\(Self.settingsPath(for: step)). That is the only switch to flip.")
             content.primary = (step == .speakerSync ? "Open Login Items…"
-                                                    : "Open Settings…", .prominent)
+                                                    : "Open settings…", .prominent)
             return content
         }
 
@@ -1421,12 +1421,12 @@ public final class OnboardingViewController: NSViewController {
         // A refusal. macOS only asks once, so the honest next move is a switch.
         if isProvablyDenied(step) {
             content.status = (Self.alertSymbol,
-                              "You chose Don't Allow. macOS only asks once \u{2014} from here it's "
+                              "You chose Don't Allow. macOS only asks once, so from here it's "
                               + "a switch in System Settings.", Tokens.Color.label2, false)
             content.body = Self.ribbonBody(
-                "Turn **Audiout** on under \(Self.settingsPath(for: step)), then come back — "
-                + "this row ticks itself.")
-            content.primary = ("Open Settings…", .prominent)
+                "Turn **Audiout** on under \(Self.settingsPath(for: step)), then come back. "
+                + "This row ticks itself.")
+            content.primary = ("Open settings…", .prominent)
             content.showsSkip = copy.isSkippable
             return content
         }
@@ -1437,8 +1437,8 @@ public final class OnboardingViewController: NSViewController {
             content.status = (Self.alertSymbol, Self.localNetworkUnansweredStatus,
                               Tokens.Color.label2, false)
             content.body = Self.ribbonBody(copy.detail)
-            content.primary = ("Try Again", .prominent)
-            content.quietLink = offersSettingsLink(step) ? "Open Settings…" : nil
+            content.primary = ("Try again", .prominent)
+            content.quietLink = offersSettingsLink(step) ? "Open settings…" : nil
             return content
         }
 
@@ -1446,8 +1446,8 @@ public final class OnboardingViewController: NSViewController {
         if step == .remoteControl, model.remoteControlStatus == .requested {
             content.body = Self.ribbonBody(
                 "In Settings, switch **Audiout** on under Privacy & Security \u{25B8} Accessibility. "
-                + "macOS won't tell us when you do \u{2014} this row ticks itself.")
-            content.primary = ("Open Settings…", .prominent)
+                + "macOS won't tell us when you do. This row ticks itself.")
+            content.primary = ("Open settings…", .prominent)
             content.showsSkip = true
             return content
         }
@@ -1455,7 +1455,7 @@ public final class OnboardingViewController: NSViewController {
         // The first ask.
         content = firstAskRibbonContent(step)
         if reopenedSteps.contains(step) {
-            content.status = ("slash.circle", "You skipped this earlier \u{2014} nothing's lost.",
+            content.status = ("slash.circle", "You skipped this earlier. Nothing's lost.",
                               Tokens.Color.label2, false)
         }
         return content
@@ -1507,7 +1507,7 @@ public final class OnboardingViewController: NSViewController {
                 + "if you ever want to change it."
         }
         content.body = Self.ribbonBody(sentence)
-        content.quietLink = hasPane ? "Open Settings\u{2026}" : nil
+        content.quietLink = hasPane ? "Open settings\u{2026}" : nil
         return content
     }
 
@@ -1522,7 +1522,7 @@ public final class OnboardingViewController: NSViewController {
         case .bluetooth: return "Audiout can use Bluetooth speakers."
         // This one carries its own location: Login Items isn't under Privacy &
         // Security, so the shared path sentence would send the user wrong.
-        case .speakerSync: return "Your speakers stay in perfect time. It lives in Login Items\u{2026}"
+        case .speakerSync: return "Your speakers share one clock. It lives in Login Items\u{2026}"
         case .remoteControl: return "Your volume keys control Audiout."
         // Its switch is OURS, so this one names its own location too — the
         // shared "Privacy & Security ▸ …" sentence would send the user into
@@ -1733,7 +1733,7 @@ public final class OnboardingViewController: NSViewController {
         + "A few one-time permissions, one at a time."
 
     static let resumeSubtitle = "Everything you set up is still in place. One step is still "
-        + "open — it's yours whenever you want it."
+        + "open. It's yours whenever you want it."
 
     /// The specific unmet permission(s), named plainly, so the user knows
     /// exactly what to look for on the spine.

@@ -45,7 +45,7 @@ import AppKit
     }
 
     /// The two-section shape a real host builds: "Selected Devices" + one saved
-    /// group under an "Output Groups" header. `current` selects the checkmark.
+    /// group under a "Scenes" header. `current` selects the checkmark.
     private func makeRow(current: MainOutTarget = .selectedDevices)
         -> (MainOutRowView, RecordingDelegate)
     {
@@ -55,7 +55,7 @@ import AppKit
         row.apply(options: [
             .init(title: "Selected Devices (2)", target: .selectedDevices,
                   buttonTitle: "Selected (2)"),
-            .init(title: "Output Groups", isHeader: true),
+            .init(title: "Scenes", isHeader: true),
             .init(title: "tester", target: .group(id: "g1")),
         ], current: current, master: 50)
         return (row, delegate)
@@ -83,10 +83,10 @@ import AppKit
 
     @Test func outputGroupsHeaderIsDisabledAndInert() {
         let (row, _) = makeRow()
-        // The header renders via a title-case `attributedTitle` (One Case
+        // The header renders via a sentence-case `attributedTitle` (One Case
         // rule), which is what `NSMenuItem.title` reports back.
-        let header = row.test_menuItem(titled: "Output Groups")
-        #expect(header != nil, "the 'Output Groups' section header must exist")
+        let header = row.test_menuItem(titled: "Scenes")
+        #expect(header != nil, "the 'Scenes' section header must exist")
         #expect(!(header?.isEnabled ?? true),
                 "the header must be disabled so it can't be clicked like a real choice")
         #expect(header?.representedObject == nil,

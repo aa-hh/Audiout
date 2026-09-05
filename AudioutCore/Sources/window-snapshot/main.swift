@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// window-snapshot — offscreen PNG renderer for the "Groups" screen (mirrors
+// window-snapshot — offscreen PNG renderer for the "Scenes" screen (mirrors
 // `settings-snapshot`). The live window isn't visible to an agent shell, so
 // this assembles the REAL `MixerWindowController` (Groups content) against a
 // MockBackend-backed `GroupController`, hosts it in the REAL one-surface
@@ -585,7 +585,7 @@ func run() -> Int32 {
                             outDir: outDir, present: presentGroups)
 
         // 2. Create sheet: the sidebar "+" with nothing selected presents the
-        // standard macOS "New Group" sheet. `presentAsSheet` doesn't actually
+        // standard macOS "Add scene" sheet. `presentAsSheet` doesn't actually
         // draw offscreen/headless, so render the sheet controller's own view
         // directly at its fitted size instead of the window frame.
         windowController.test_presentCreateSheet(preselected: [])
@@ -677,7 +677,7 @@ func run() -> Int32 {
 
             // 8. Groups overview (direction C): the card field the sidebar's
             // pinned Groups row opens. Two more groups are saved so the grid
-            // has both of its columns AND the dashed "New Group" tile as its
+            // has both of its columns AND the dashed "Add scene" tile as its
             // last cell, and "Downstairs" is still the ACTIVE group from state
             // 7 — so the live card's gold border + wave marker render beside
             // two quiet ones, matching the Groups row's own gold marker.

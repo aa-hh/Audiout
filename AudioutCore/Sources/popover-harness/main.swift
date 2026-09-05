@@ -137,7 +137,7 @@ func run() -> Int32 {
     popover.update(devices: backend.devices)
 
     // --- 1. Baseline: Main Out row present; device rows for all 7; default passthrough.
-    print("\n[1] Baseline — Main Out row + Selected Devices section + default passthrough")
+    print("\n[1] Baseline — Main Out row + Selected Speakers section + default passthrough")
     checks.expectEqual(popover.test_deviceSectionRowCount, 7, "all 7 devices get a row")
     checks.expect(controller.isSpeakerSelected("local-mac"), "default: current device selected")
     checks.expect(controller.isPassthrough, "default state is passthrough (set == {local})")
@@ -146,10 +146,10 @@ func run() -> Int32 {
     // --- 2. Main Out selector: two sections (Selected Devices + groups after save).
     print("\n[2] Main Out selector sections")
     checks.expect(popover.test_mainOutRow.test_selectableTargets.contains(.selectedDevices),
-                  "selector offers Selected Devices")
+                  "selector offers Selected Speakers")
     // Decision m: the entry title is clean — no live "(n)" count.
-    checks.expect(popover.test_mainOutRow.test_optionTitles.contains("Selected Devices"),
-                  "selector has a Selected Devices entry")
+    checks.expect(popover.test_mainOutRow.test_optionTitles.contains("Selected Speakers"),
+                  "selector has a Selected Speakers entry")
 
     // --- 3. Auto-swap: toggling an AirPlay device ON while local is sole member drops local.
     print("\n[3] Auto-swap (AirPlay ON while current device is sole member)")
@@ -182,7 +182,7 @@ func run() -> Int32 {
     print("\n[6] Toggles compose without routing when Main Out targets a group")
     // Save the current Selected Devices as a group, point Main Out at it.
     popover.test_saveCurrentSetup(); drain()
-    checks.expectEqual(controller.groups.count, 1, "one group saved from Selected Devices")
+    checks.expectEqual(controller.groups.count, 1, "one scene saved from Selected Speakers")
     let group = controller.groups[0]
     popover.test_selectMainOut(.group(id: group.id)); drain()
     let outputBefore = Set(backend.devices.filter(\.isSelected).map(\.id))
@@ -270,7 +270,7 @@ func run() -> Int32 {
     print("\n[13] Main Out named dropdown")
     popover.test_selectMainOut(.selectedDevices); drain()
     // Decision m: the title is clean — no live "(n)" count.
-    checks.expectEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Devices",
+    checks.expectEqual(popover.test_mainOutRow.test_selectedTitle, "Selected Speakers",
                        "the Main Out dropdown shows the current target's name")
     popover.test_selectMainOut(.group(id: group.id)); drain()
     checks.expectEqual(popover.test_mainOutRow.test_selectedTitle, group.name,
@@ -324,8 +324,8 @@ func run() -> Int32 {
     // --- 17. Destination menu has exactly the two sections.
     print("\n[17] Destination menu sections")
     if let titles = popover.test_appRowDestinationTitles(for: musicBundleID) {
-        checks.expect(titles.contains("Current Device"), "menu has a Current Device section")
-        checks.expect(titles.contains("AirPlay Devices"), "menu has an AirPlay Devices section")
+        checks.expect(titles.contains("This Mac"), "menu has a This Mac section")
+        checks.expect(titles.contains("AirPlay Speakers"), "menu has an AirPlay Speakers section")
         // Headers are sentence-case now (One Case rule), so an all-caps scan
         // can't spot a leaked section — name the one that must not appear.
         checks.expect(!titles.contains { $0.localizedCaseInsensitiveContains("group") },

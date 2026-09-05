@@ -5,7 +5,7 @@ import AudioutCore
 import AudioutSharedUI
 
 /// The Groups screen's card overview: one card per saved group in a two-column
-/// grid, with the dashed "New Group" tile as the grid's last cell, and the
+/// grid, with the dashed "Add scene" tile as the grid's last cell, and the
 /// former empty pane absorbed as this screen's own zero-groups canvas.
 ///
 /// Direction C (`dev/notes/groups-speakers-split-direction-c-brief-2026-08-27.md`):
@@ -28,7 +28,7 @@ public final class GroupsOverviewViewController: NSViewController {
     public var onNewGroup: (() -> Void)?
     /// A card's "Rename…" context item was chosen.
     public var onRequestRename: ((String) -> Void)?
-    /// A card's "Delete Group…" context item was chosen.
+    /// A card's "Delete scene…" context item was chosen.
     public var onRequestDelete: ((String) -> Void)?
 
     // MARK: Model
@@ -62,15 +62,15 @@ public final class GroupsOverviewViewController: NSViewController {
     // MARK: Views
 
     private let titleGlyph = NSImageView()
-    private let titleLabel = NSTextField(labelWithString: "Groups")
+    private let titleLabel = NSTextField(labelWithString: "Scenes")
     private let countLabel = NSTextField(labelWithString: "")
     private let scrollView = NSScrollView()
     private let collectionView = GridCollectionView()
 
     private let emptyContainer = NSView()
-    private let emptyMessageLabel = NSTextField(labelWithString: "Group your speakers")
+    private let emptyMessageLabel = NSTextField(labelWithString: "Set up a scene")
     private let emptySubtitleLabel = NSTextField(wrappingLabelWithString:
-        "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
+        "Save a set of speakers as a scene, then switch to it in two clicks from the menu bar.")
     private let emptyNewTile = NewGroupTileView()
 
     private static let cardItemIdentifier = NSUserInterfaceItemIdentifier("GroupCardItem")
@@ -228,7 +228,7 @@ public final class GroupsOverviewViewController: NSViewController {
         let activeID = groupController.activeGroupID
         plans = groups.map { plan(for: $0, isLive: $0.id == activeID) }
 
-        countLabel.stringValue = plans.count == 1 ? "1 group" : "\(plans.count) groups"
+        countLabel.stringValue = plans.count == 1 ? "1 scene" : "\(plans.count) scenes"
 
         let isEmpty = plans.isEmpty
         scrollView.isHidden = isEmpty
@@ -272,7 +272,7 @@ public final class GroupsOverviewViewController: NSViewController {
 
     // MARK: Grid contents
 
-    /// Saved groups plus the trailing dashed "New Group" tile.
+    /// Saved groups plus the trailing dashed "Add scene" tile.
     private var cellCount: Int { plans.count + 1 }
 
     private func isNewTileIndex(_ index: Int) -> Bool { index == plans.count }
@@ -315,7 +315,7 @@ public final class GroupsOverviewViewController: NSViewController {
         // No destructive styling: `NSMenuItem` has no equivalent of
         // `hasDestructiveAction`, and the confirmation the delete goes through
         // is the host's, not this menu's.
-        menu.addItem(contextMenuItem("Delete Group…", #selector(deleteMenuItemSelected(_:)), id))
+        menu.addItem(contextMenuItem("Delete scene…", #selector(deleteMenuItemSelected(_:)), id))
         return menu
     }
 
@@ -410,7 +410,7 @@ public final class GroupsOverviewViewController: NSViewController {
         makeCard(isLive: isLive).test_glyphTint
     }
 
-    /// A card's meta line, attributes included — the "Playing now" range's
+    /// A card's meta line, attributes included — the "Playing" range's
     /// `goldText` is only visible here.
     public static func test_cardMetaAttributedString(isLive: Bool) -> NSAttributedString {
         makeCard(isLive: isLive).test_metaAttributedString
@@ -601,26 +601,27 @@ private struct CardPlan {
     /// Display names of the apps routed to this group, in route order.
     let feedingAppNames: [String]
 
-    /// "5 speakers", then " · Playing now" while the group is the live Main Out
-    /// target, then " · Playing Safari" (or "· Playing 3 apps") while apps are
+    /// "5 speakers", then " · Playing" while the group is the live Main Out
+    /// target, then " · Feeding Safari" (or "· Feeding 3 apps") while apps are
     /// routed to it — a group can be both at once, and each clause answers a
-    /// different question.
+    /// different question. "Feeding" (not "Playing") so this clause never
+    /// collides with the "Playing" live clause it can sit right next to.
     var metaText: String {
         let speakers = memberCount == 1 ? "1 speaker" : "\(memberCount) speakers"
         var parts = [speakers]
-        if isLive { parts.append("Playing now") }
+        if isLive { parts.append("Playing") }
         if let feeding = feedingText { parts.append(feeding) }
         return parts.joined(separator: " · ")
     }
 
-    /// "Playing Safari" for one routed app, "Playing 3 apps" for more, `nil`
+    /// "Feeding Safari" for one routed app, "Feeding 3 apps" for more, `nil`
     /// for none. One name is worth spelling out; three names would crowd a card
     /// this size and the count is the useful fact.
     var feedingText: String? {
         switch feedingAppNames.count {
         case 0:  return nil
-        case 1:  return "Playing \(feedingAppNames[0])"
-        default: return "Playing \(feedingAppNames.count) apps"
+        case 1:  return "Feeding \(feedingAppNames[0])"
+        default: return "Feeding \(feedingAppNames.count) apps"
         }
     }
 }
@@ -706,11 +707,11 @@ private final class GroupCardView: NSView {
 
         liveMarkerView.translatesAutoresizingMaskIntoConstraints = false
         liveMarkerView.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
-                                       accessibilityDescription: "Playing now")?
+                                       accessibilityDescription: "Playing")?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
         liveMarkerView.image?.isTemplate = true
         liveMarkerView.contentTintColor = Tokens.Color.gold
-        liveMarkerView.toolTip = "Playing now"
+        liveMarkerView.toolTip = "Playing"
         liveMarkerView.isHidden = true
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -800,14 +801,14 @@ private final class GroupCardView: NSView {
             chipStack.addArrangedSubview(MemberChipView(overflowText: overflowText))
         }
 
-        toolTip = plan.isLive ? "Playing now" : nil
-        setAccessibilityLabel(plan.isLive ? "\(plan.name), Playing now" : plan.name)
+        toolTip = plan.isLive ? "Playing" : nil
+        setAccessibilityLabel(plan.isLive ? "\(plan.name), Playing" : plan.name)
         needsDisplay = true
     }
 
     /// The meta line: the speaker count cool on an idle card, one step warmer
     /// on a live one (`labelCool2` measures 3.57:1 over the gold wash — under
-    /// the floor), and the "Playing now" half in `goldText`. That text is one
+    /// the floor), and the "Playing" half in `goldText`. That text is one
     /// of the live card's FOUR gold sites, with the wash, the seat's ring and
     /// the wave marker, under the module's seven-site rule in `AGENTS.md`.
     private func metaAttributedString(_ plan: CardPlan) -> NSAttributedString {
@@ -817,7 +818,7 @@ private final class GroupCardView: NSView {
             string: text,
             attributes: [.font: Tokens.Font.caption,
                          .foregroundColor: base])
-        guard plan.isLive, let liveRange = text.range(of: "Playing now") else { return attributed }
+        guard plan.isLive, let liveRange = text.range(of: "Playing") else { return attributed }
         attributed.addAttribute(.foregroundColor, value: Tokens.Color.goldText,
                                 range: NSRange(liveRange, in: text))
         return attributed
@@ -1013,7 +1014,7 @@ private final class MemberChipView: NSView {
     }
 }
 
-// MARK: - New Group tile
+// MARK: - Add scene tile
 
 private final class NewGroupTileItem: NSCollectionViewItem {
 
@@ -1037,7 +1038,7 @@ private final class NewGroupTileView: NSView {
 
     private let ringView = NSView()
     private let plusView = NSImageView()
-    private let label = NSTextField(labelWithString: "New Group")
+    private let label = NSTextField(labelWithString: "Add scene")
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1083,7 +1084,7 @@ private final class NewGroupTileView: NSView {
         ])
 
         setAccessibilityRole(.button)
-        setAccessibilityLabel("New Group")
+        setAccessibilityLabel("Add scene")
     }
 
     override func draw(_ dirtyRect: NSRect) {

@@ -174,7 +174,7 @@ public final class AudioSettingsViewController: NSViewController {
         // unwrapped width drags the whole pane (and the live window) wider
         // than the fixed content column — see hintLabel's doc comment.
         let subtitle = SettingsForm.hintLabel(
-            "Audio from these apps always plays on your Mac — never sent to speakers.")
+            "Audio from these apps always plays on your Mac, never sent to speakers.")
 
         listStack.orientation = .vertical
         listStack.alignment = .leading
@@ -300,7 +300,7 @@ public final class AudioSettingsViewController: NSViewController {
         case ..<21:  consequence = "a quiet, gentle start"
         case ..<51:  consequence = "a moderate, comfortable start"
         case ..<76:  consequence = "a loud start"
-        default:     consequence = "a very loud start — may startle"
+        default:     consequence = "a very loud start that may startle"
         }
         return "Connects at \(percentLabel(percent)) — \(consequence). "
             + "Each speaker's own slider takes over right after."
@@ -740,7 +740,7 @@ public final class AudioSettingsViewController: NSViewController {
         applyStatusLabel.stringValue = wasStreaming
             ? (result.reconnected == result.expected
                 ? "Speakers reconnected"
-                : "Some speakers didn't reconnect — check the mixer")
+                : "Some speakers didn't reconnect. Reconnect them from the Mixer.")
             : "Applied"
         applyStatusLabel.isHidden = false
 
@@ -846,11 +846,11 @@ public final class AudioSettingsViewController: NSViewController {
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
         button.image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
-        button.title = "Add App…"
+        button.title = "Add app…"
         button.contentTintColor = Tokens.Color.label2
         button.target = self
         button.action = #selector(addTapped(_:))
-        button.setAccessibilityLabel("Add excluded application")
+        button.setAccessibilityLabel("Add excluded app")
 
         row.addSubview(button)
         NSLayoutConstraint.activate([

@@ -361,7 +361,7 @@ import AppKit
         let menu = popover.test_outputDevicesPlusMenu()
         let titles = menu.items.map(\.title)
         #expect(titles.contains(""), "a separator precedes the Connect section")
-        #expect(menu.item(withTitle: "Bluetooth Pairings")?.isEnabled == false,
+        #expect(menu.item(withTitle: "Bluetooth pairings")?.isEnabled == false,
                 "the section header is a disabled label, not an action")
         let newIndex = titles.firstIndex(of: "Connect 'Zed Speaker'")
         let oldIndex = titles.firstIndex(of: "Connect 'Attic Speaker'")

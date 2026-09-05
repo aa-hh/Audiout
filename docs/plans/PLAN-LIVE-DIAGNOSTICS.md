@@ -150,27 +150,33 @@ already measures every write (`write_cadence_drift`, `WriteLatencySnapshot`);
 the mixed buffer is in hand there, off the render thread. Add one running
 peak-absolute-sample per output stream, reset every window.
 
-**Interface.** One decision-log line per output, every 5 s, alongside the
-existing `send_sched`:
+**Interface (built in S3).** One decision-log line per content stream, every
+5 s, alongside the existing `send_sched`:
 
 ```
-{"cat":"airplay","evt":"stream_health","device":"54:2A:1B:79:08:9E",
- "peak_dbfs":"-12.4","silent_s":"0","packets":"2153","dropped":"0",
- "rtsp_alive":"true","last_feedback_ms":"812"}
+{"cat":"airplay","evt":"stream_health","stream":"0","devices":"54:2A:1B:79:08:9E",
+ "peak_dbfs":"-12.4","silent_s":"0","writes":"2153","dropped_writes":"0"}
 ```
 
-`silent_s` counts consecutive seconds under −60 dBFS while the output is
-bound; it is the field a support reader looks at first. `last_feedback_ms` is
-the age of the last answered keep-alive (`raop_keep_alive_timer_cb`,
-`raop.c`), which is the only receiver-side liveness the sender has.
+`silent_s` counts consecutive seconds at or under −60 dBFS, running across
+windows until a louder write resets it; it is the field a support reader
+looks at first. `peak_dbfs` is the loudest sample in the window (−120 for all
+zeros). `devices` lists the ids bound to the stream and stays local.
 
-**Rule.** This line is written from the engine's existing periodic reporter,
-the one that writes `send_sched`. It adds a `max(abs())` over the window on a
-thread that already touches the buffer; nothing new runs on the IOProc.
+**Where the number comes from.** `StreamLevelTracker` in the engine package
+records on `AirPlayEngine.write(streams:)`, over the bytes already copied for
+the engine thread. That is the capture side's delivery path, never the
+IOProc. One max-abs scan per buffer outside the lock; the merge is locked.
+`AirPlayEngine.streamLevelSnapshot()` sits beside `writeSchedulingSnapshot()`;
+`NativeBackend`'s existing 5 s poller writes the line and maps stream to
+devices through its own bindings. The engine keeps no app concept.
 
-**Which module's interface widens.** `AirPlayEngine` exposes one more
-snapshot type next to `WriteLatencySnapshot`; `NativeBackend` writes the line.
-The engine keeps no app concept (licensing boundary in `AirPlayEngine/AGENTS.md`).
+**Left out on purpose.** The plan sketched `packets`, `rtsp_alive` and the age
+of the last answered keep-alive. Those live in the C sender and need a getter
+through the shim layer; `writes` and `dropped_writes` come from counters the
+Swift side already keeps. Ceiling: the line answers "did we send sound",
+not "did the receiver acknowledge it". Upgrade path: a `raop` stats getter
+if a drop ever needs receiver-side evidence.
 
 ### C4. The diagnostics bundle — one function, one button
 

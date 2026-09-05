@@ -245,6 +245,8 @@ public actor AirPlayEngine {
     // "probe always-on, rate-limited").
     private nonisolated let schedulingProbe = WriteSchedulingProbe()
 
+    private nonisolated let levels = StreamLevelTracker()
+
     // Test seam (headless verification). When set, `issueOverride` replaces the
     // backend device_* call in startOp: it still arms the REAL C dispatcher
     // waiter (outputs_callback_add + CompletionRegistry) and returns N, but does
@@ -1250,6 +1252,14 @@ public actor AirPlayEngine {
             )
         }
 
+        // Peak level per stream, over bytes already copied for the engine
+        // thread: this is the one place the delivered audio is in hand off the
+        // capture IOProc (C3 of PLAN-LIVE-DIAGNOSTICS.md).
+        for entry in prepared {
+            levels.record(streamId: entry.streamId, bytes: UnsafeRawPointer(entry.cbuf),
+                          byteCount: entry.byteCount, channels: PCMFormat.airplay.channels)
+        }
+
         let quality = media_quality(
             sample_rate: Int32(sampleRate),
             bits_per_sample: Int32(PCMFormat.airplay.bitsPerSample),
@@ -1405,6 +1415,13 @@ public actor AirPlayEngine {
     /// from a non-RT thread, never the engine thread.
     public nonisolated func writeSchedulingSnapshot() -> WriteSchedulingSnapshot {
         schedulingProbe.snapshot()
+    }
+
+    /// Peak level and silence run per content stream since the previous call
+    /// (see `StreamLevelSnapshot`). `nonisolated`, cheap, polled every ~5 s by
+    /// the host's telemetry bridge from a non-RT thread.
+    public nonisolated func streamLevelSnapshot() -> [StreamLevelSnapshot] {
+        levels.snapshot(sampleRate: PCMFormat.airplay.sampleRate)
     }
 
     // MARK: - Audio I/O workgroup (T7, docs/plans/PLAN-AUDIO-THREAD-SCHEDULING.md)
@@ -2542,5 +2559,72 @@ final class WriteSchedulingProbe: @unchecked Sendable {
             gap.p50Ms, gap.p95Ms, gap.p99Ms, gap.maxMs, gap.count)
         log.notice("\(line, privacy: .public)")
         FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
+}
+
+// MARK: - Stream level (PLAN-LIVE-DIAGNOSTICS.md C3)
+
+/// Per-stream peak level and consecutive-silence run, recorded on the write
+/// path where the S16LE bytes are already being copied for the engine thread —
+/// never the capture IOProc. The scan is a max-abs over one buffer (704
+/// samples per AirPlay frame) and runs outside the lock; only the merge is
+/// locked. Same shape as `WriteCadenceTracker`: a small `@unchecked Sendable`
+/// box read by a 5 s poller on a non-RT thread.
+final class StreamLevelTracker: @unchecked Sendable {
+    /// −60 dBFS in 16-bit sample counts (32768 × 10^(−3) = 32.8): a write whose
+    /// loudest sample is at or below this counts as silent.
+    static let silenceThreshold: Int32 = 32
+    static let floorDBFS: Double = -120
+
+    private struct Stream {
+        var windowPeak: Int32 = 0
+        var silentRunSamples: Int = 0
+        var writes: UInt64 = 0
+    }
+
+    private let lock = NSLock()
+    private var streams: [UInt32: Stream] = [:]
+
+    /// `bytes` is interleaved S16LE; `channels` turns the sample count into
+    /// frames, which `snapshot(sampleRate:)` turns into seconds.
+    func record(streamId: UInt32, bytes: UnsafeRawPointer, byteCount: Int, channels: Int) {
+        let sampleCount = byteCount / 2
+        var peak: Int32 = 0
+        var offset = 0
+        while offset + 1 < byteCount {
+            let s = Int32(bytes.loadUnaligned(fromByteOffset: offset, as: Int16.self))
+            let a = s < 0 ? -s : s
+            if a > peak { peak = a }
+            offset += 2
+        }
+        let frames = channels > 0 ? sampleCount / channels : sampleCount
+
+        lock.lock()
+        defer { lock.unlock() }
+        var stream = streams[streamId] ?? Stream()
+        stream.writes &+= 1
+        if peak > stream.windowPeak { stream.windowPeak = peak }
+        stream.silentRunSamples = peak <= Self.silenceThreshold ? stream.silentRunSamples + frames : 0
+        streams[streamId] = stream
+    }
+
+    /// Reports every stream written since the last call and resets each
+    /// window peak; the silence run and write count persist. A stream that
+    /// stopped being written drops out on the next call.
+    func snapshot(sampleRate: Int) -> [StreamLevelSnapshot] {
+        lock.lock()
+        defer { lock.unlock() }
+        let out = streams.keys.sorted().map { id -> StreamLevelSnapshot in
+            let s = streams[id]!
+            let dbfs = s.windowPeak > 0
+                ? 20 * log10(Double(s.windowPeak) / 32768)
+                : Self.floorDBFS
+            return StreamLevelSnapshot(streamId: id,
+                                       peakDBFS: dbfs,
+                                       silentSeconds: Double(s.silentRunSamples) / Double(max(sampleRate, 1)),
+                                       writes: s.writes)
+        }
+        for id in streams.keys { streams[id]?.windowPeak = 0 }
+        return out
     }
 }

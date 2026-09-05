@@ -8270,6 +8270,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             "gap_max_ms": String(format: "%.1f", snapshot.interArrivalGap.maxMs),
         ])
 
+        // One line per content stream: was there SOUND in what we sent? On
+        // 2026-09-05 a session read "connected" with packets flowing and no
+        // sound, and nothing in the log could tell it from healthy playback.
+        // `silent_s` is the field to read first. Device ids stay local.
+        let dropped = self.engine.writeBacklogSnapshot().droppedWrites
+        for level in self.engine.streamLevelSnapshot() {
+            let devices = self.streamBindings.filter { $0.value == level.streamId }.keys.sorted()
+            Telemetry.log(.airplay, "stream_health", [
+                "stream": "\(level.streamId)",
+                "devices": devices.joined(separator: ","),
+                "peak_dbfs": String(format: "%.1f", level.peakDBFS),
+                "silent_s": String(format: "%.0f", level.silentSeconds),
+                "writes": "\(level.writes)",
+                "dropped_writes": "\(dropped)",
+            ])
+        }
+
         // Schedule the next poll (~5s). This reschedules on stateQueue, matching the
         // pattern of the wake watchdog above (stateQueue.asyncAfter with a weak self).
         let work = DispatchWorkItem { [weak self] in self?.pollSchedulingSnapshot() }
@@ -10196,12 +10213,21 @@ protocol EngineControlling: Sendable {
     /// mixer's write path, same throttled/delta-gated cadence as
     /// `writeBacklogSnapshot()`/`write_backlog_drop`.
     nonisolated func writeCadenceSnapshot() -> WriteCadenceSnapshot
+
+    /// Peak level and silence run per content stream since the last call
+    /// (mirrors `AirPlayEngine/streamLevelSnapshot()`). Polled with the
+    /// scheduling snapshot every ~5 s into the `stream_health` line. Empty by
+    /// default so a conformer that predates it compiles unchanged.
+    nonisolated func streamLevelSnapshot() -> [StreamLevelSnapshot]
 }
 
 extension EngineControlling {
     /// Default: an all-zero (healthy) snapshot, so every existing test double
     /// compiles unchanged. ``EngineAdapter`` overrides this with the real read.
     func writeBacklogSnapshot() -> WriteBacklogSnapshot { WriteBacklogSnapshot() }
+
+    /// Default: no streams, same reason as `writeBacklogSnapshot()`.
+    nonisolated func streamLevelSnapshot() -> [StreamLevelSnapshot] { [] }
 
     /// Default: legacy single-stream behavior (`streamId` 0), so a conformer
     /// that predates T2 doesn't need updating. ``EngineAdapter`` overrides this
@@ -10269,6 +10295,7 @@ struct EngineAdapter: EngineControlling {
     /// Real read of the write-path backpressure guard (T14 diagnostic).
     /// `nonisolated` on the engine, so no hop/await is needed here.
     func writeBacklogSnapshot() -> WriteBacklogSnapshot { engine.writeBacklogSnapshot() }
+    nonisolated func streamLevelSnapshot() -> [StreamLevelSnapshot] { engine.streamLevelSnapshot() }
     @discardableResult
     func updateDiscovery(_ descriptor: DeviceDescriptor) async throws -> OutputID {
         try await engine.updateDiscovery(descriptor)

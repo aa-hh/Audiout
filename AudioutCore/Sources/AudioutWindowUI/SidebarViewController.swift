@@ -677,6 +677,14 @@ final class IconLabelCellView: NSTableCellView {
 /// the two: the pill covers the middle and the plate's corners peek out at
 /// both ends as stray arcs. That is the bug this rule exists to prevent.
 final class PlateRowView: NSTableRowView {
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        redrawOnAccessibilityDisplayChange()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
     /// Plate row height: the `.medium` source-list row plus breathing room, so
     /// the raised fill reads as a surface rather than a selection artifact.
     static let rowHeight: CGFloat = 36

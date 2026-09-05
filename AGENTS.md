@@ -135,6 +135,20 @@ repo. `AudioutCore` pins it by version.
 - **Inner-loop test command:** see [AudioutCore/AGENTS.md](AudioutCore/AGENTS.md) for
   guidance on scoping tests with `--filter`, and for the "tests must stay
   invisible" rule every UI test has to obey.
+- **New tests buy their place (Alec, 2026-09-04).** The suite is ~3,500 tests
+  and every one is a permanent tax on every commit, so:
+  1. A new test NAMES ITS DEFECT — one comment sentence stating the code change
+     that would turn it red. Can't write that sentence, don't write the test.
+  2. Test the axis that varies. A value constant across appearances gets one
+     assertion, not one per appearance cell; a sweep is justified only when
+     each cell can break independently (the Increase-Contrast seam qualifies).
+  3. Extend before adding: a row in an existing table (the contrast matrix)
+     beats a new test; a new test beats a new suite.
+  4. A test that cannot fail is deleted, not patched — self-comparisons,
+     assertions of a constructor's own argument, reads of a value the code
+     just wrote. One review found six in a single day's work; they read as
+     coverage and cover nothing. If the intent is real, rewrite it to read the
+     DRAWN or observed result.
 - **Flag finished worktrees `.prunable`; never hand-delete them.** Fifteen
   worktrees' SwiftPM caches once filled the disk to zero bytes free mid-build.
   `scripts/housekeeping.sh` (invoked automatically by `scripts/run-tests.sh`

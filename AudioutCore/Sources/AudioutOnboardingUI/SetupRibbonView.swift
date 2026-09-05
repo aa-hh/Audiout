@@ -140,8 +140,8 @@ final class SetupHeroHeadView: NSView {
     var test_headlineAccessibilityRole: NSAccessibility.Role? { headlineLabel.accessibilityRole() }
 }
 
-/// The LABELLED frame the rehearsal plays inside: a warm well with a caption
-/// band along its top edge saying whose surface this is.
+/// The LABELLED frame the rehearsal plays inside: a `Tokens.Color.well` with
+/// a caption band along its top edge saying whose surface this is.
 ///
 /// The label is the whole reason the frame exists (owner-approved 2026-08-12).
 /// The mock is a drawing of somebody else's window sitting inside ours, and
@@ -190,7 +190,7 @@ final class SetupPreviewFrameView: NSView {
         well.layer?.masksToBounds = true
         addSubview(well)
 
-        captionLabel.textColor = Tokens.Color.tertiaryLabel
+        captionLabel.textColor = Tokens.Color.label3
         captionLabel.translatesAutoresizingMaskIntoConstraints = false
         bandRule.borderWidth = 0
         labelBand.translatesAutoresizingMaskIntoConstraints = false
@@ -283,7 +283,7 @@ final class SetupPreviewFrameView: NSView {
     private static func captionText(_ text: String) -> NSAttributedString {
         NSAttributedString(string: text, attributes: [
             .font: Tokens.Font.microLabel,
-            .foregroundColor: Tokens.Color.tertiaryLabel,
+            .foregroundColor: Tokens.Color.label3,
         ])
     }
 
@@ -398,7 +398,7 @@ final class SetupRibbonView: NSView {
         statusRow.addArrangedSubview(statusLabel)
 
         bodyLabel.font = Tokens.Font.caption
-        bodyLabel.textColor = Tokens.Color.inkSecondary
+        bodyLabel.textColor = Tokens.Color.label2
         bodyLabel.maximumNumberOfLines = 0
         bodyLabel.preferredMaxLayoutWidth = Self.textWidth
         bodyLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -438,6 +438,12 @@ final class SetupRibbonView: NSView {
 
     // MARK: State
 
+    /// Whether Reduce Motion is on — through the override seam every animated
+    /// instrument in this codebase uses, so a headless test can drive both sides.
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
     func apply(_ content: RibbonContent) {
         if let status = content.status {
             statusRow.isHidden = false
@@ -454,8 +460,11 @@ final class SetupRibbonView: NSView {
                 statusGlyph.contentTintColor =
                     symbolName == Self.alertSymbol ? Tokens.Color.failure : status.color
             }
-            statusSpinner.isHidden = !status.spins
-            if status.spins { statusSpinner.startAnimation(nil) } else { statusSpinner.stopAnimation(nil) }
+            // Reduce Motion drops the spinner and leaves the words alone —
+            // the same policy the popover's own wait spinner already applies.
+            let spins = status.spins && !reduceMotion
+            statusSpinner.isHidden = !spins
+            if spins { statusSpinner.startAnimation(nil) } else { statusSpinner.stopAnimation(nil) }
         } else {
             statusRow.isHidden = true
             statusSpinner.stopAnimation(nil)
@@ -584,12 +593,19 @@ final class SetupRibbonView: NSView {
     // MARK: Test-support hooks
 
     var test_statusText: String? { statusRow.isHidden ? nil : statusLabel.stringValue }
+    /// The status line's own text colour — pinned separately from the glyph's,
+    /// since the failure hue is a graphical-object colour and must never
+    /// land on the words beside it (house rule 8, `Tokens.Color.failure`).
+    var test_statusTextColor: NSColor? { statusRow.isHidden ? nil : statusLabel.textColor }
     /// The status glyph's tint — `failure` on the alert triangle, the line's
     /// own colour on any other symbol.
     var test_statusGlyphTint: NSColor? { statusGlyph.isHidden ? nil : statusGlyph.contentTintColor }
     var test_bodyText: String? { bodyLabel.isHidden ? nil : bodyLabel.stringValue }
     /// Whether a wait is on screen (the spinner beat).
     var test_isWaiting: Bool { !statusRow.isHidden && !statusSpinner.isHidden }
+    /// Overrides the live Reduce Motion read for the status spinner, so a
+    /// headless test can drive both sides deterministically.
+    var test_reduceMotionOverride: Bool?
     /// The titles of the buttons the ribbon currently offers, in the order they
     /// read on screen (leading to trailing, so the primary is LAST).
     var test_buttonTitles: [String] {

@@ -654,6 +654,12 @@ public final class GroupCreationSheetController: NSViewController {
         loadViewIfNeeded()
         return iconWellPencilBadge.superview === iconWellButton
     }
+
+    /// How many times the icon well's pencil badge has re-stamped its frozen
+    /// layer colours. Both badge tokens step their alpha under Increase
+    /// Contrast and no repaint moves them, so this is how a test sees a
+    /// mid-session toggle actually reach the badge.
+    public var test_pencilBadgeRestampCount: Int { iconWellPencilBadge.test_restampCount }
 }
 
 /// A flipped document view so the checklist scrolls from the top rather than
@@ -673,9 +679,19 @@ private final class PencilBadgeView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = diameter / 2
-        layer?.backgroundColor = Tokens.Color.iconWellBadge.cgColor
         layer?.borderWidth = 1
-        layer?.borderColor = Tokens.Color.iconWellBadgeBorder.cgColor
+        restampLayerColors()
+        // Both badge tokens step their alpha under Increase Contrast, and
+        // both are frozen `CGColor`s on a `CALayer` — a repaint would not
+        // move them, so this view re-stamps off the notification instead of
+        // calling `redrawOnAccessibilityDisplayChange()`
+        // (`DeviceIconWellView`'s badge, same reasoning). No matching
+        // `removeObserver`: AppKit auto-unregisters on dealloc.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
 
         let pencil = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)
         pencil?.isTemplate = true
@@ -696,6 +712,21 @@ private final class PencilBadgeView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func restampLayerColors() {
+        layer?.backgroundColor = Tokens.Color.iconWellBadge.cgColor
+        layer?.borderColor = Tokens.Color.iconWellBadgeBorder.cgColor
+        test_restampCount += 1
+    }
+
+    /// Counts `restampLayerColors()` calls — colour equality alone cannot
+    /// tell "re-stamped correctly" from "never re-stamped, happened to start
+    /// correct" (`DeviceIconWellView.test_restampCount`'s reasoning).
+    private(set) var test_restampCount = 0
+
+    @objc private func accessibilityDisplayOptionsDidChange() {
+        restampLayerColors()
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

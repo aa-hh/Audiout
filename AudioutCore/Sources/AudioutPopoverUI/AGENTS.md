@@ -13,7 +13,7 @@ folder renders; routing arithmetic lives in Core.
 - Every delegate callback mutates, then calls `rebuild()`; no in-place mutation afterwards.
 - The popover is the only host of `PopoverPanelViewController`, in dev and shipping.
 - The surface claims the panel through `claimPanelForSurfaceHosting()`, the one handover door.
-- No `NSScrollView`: height flows through `preferredContentSize`, pinned top and bottom.
+- Height flows through `preferredContentSize`, pinned top and bottom. Exactly ONE `NSScrollView` exists in the panel: the Output Devices card's body (roadmap 039), which stops at `deviceListMaxHeight` (12 rows) or at what the screen leaves, whichever is lower. Its height is a constraint `fittingSizeSettled()` reconciles from the ROWS — a scroll view has no natural height, so measuring the scroll view instead gives a zero-height or screen-height panel. Every other card still pins its rows straight into its clip; do not add a second one.
 - `insertRow`/`removeRow` own the re-fit; never add your own height republish.
 - Two rebuild flavors: `rebuildForOpen()` discards manual toggles, `rebuild()` preserves them.
 - A subsection collapses by animating its own clip height, never rebuilding (2026-08-10).
@@ -26,6 +26,44 @@ folder renders; routing arithmetic lives in Core.
 - The Mixer carries an equalizer DOOR (the row button beside mute, and the row menu) and one mark (magenta border when the curve is not flat). No editor, no curve, no tone control on the Mixer (2026-08-22, amended 2026-09-03).
 - A never-aligned Bluetooth row's chip IS the wizard's door; a measured one opens the drawer.
 - A first-join alignment note is session state: ✕ hides it, nothing is written down.
+- The header strip draws its OWN chrome, and the three tabs are ONE capsule: a single
+  `NSToolbarItem` carries a `SurfaceToolbarTabCapsule` (a pill-shaped surface drawn
+  once) with the three `SurfaceToolbarSeatButton`s layered over it. Three separate
+  seats, one per tab, read as three islands and were rejected. The current tab is a
+  soft rounded highlight INSIDE the pill, hover the same highlight weaker, an idle tab
+  nothing — always painted ON the capsule, never instead of it, which is what keeps the
+  current screen lighter than its ground in dark mode. Pin is the standalone button
+  outside the capsule, wearing the same highlight; converting only half the strip failed
+  review on 2026-08-30. The seat button is the folder's one custom-drawn exception
+  (drawing only; tracking, keyboard and VoiceOver stay stock) because AppKit draws a
+  bordered item's hover as a CIRCLE and its selection as a rounded SQUARE. Never put a
+  cue behind `#available` — the package deploys to 14.2 (2026-09-04).
+- One shape per STATE, two shapes per kind of ITEM (2026-09-05, reversing the one-shape-
+  everywhere rule above). Every seat is cut at HALF ITS OWN HEIGHT
+  (`SurfaceToolbarSeat.seatCornerRadius`): Pin is square, so it draws a true circle; a tab
+  is wider than tall, so it draws a stadium. Hover, selection and press stay one shape at
+  three weights on both. Two things fall out of that one rule and must stay derived, never
+  retyped: the capsule is exactly `pinDiameter` tall, so the pill and Pin match in height;
+  and a tab's radius equals `capsuleCornerRadius - capsulePadding`, which is what makes the
+  highlight CONCENTRIC with the pill. Cutting the highlight at `Radius.control` (10) inside
+  a 16pt pill is the uneven gap Alec rejected — 3pt at mid-height, 6pt into the corner.
+- The CURRENT tab shows its name beside its glyph; the other two never do (2026-09-04).
+  One name on the strip at a time, clamped to `SurfaceToolbarSeat.maxNameWidth` and
+  truncated past it — that pair is what makes the 2026-09-03 failure impossible, where
+  three translated labels widened the strip until AppKit swept the tabs into the
+  overflow chevron. Never reveal a second name, never lift the clamp, and never widen
+  the strip on HOVER: the pointer must not reshape a control it is only passing over.
+  The reveal grows the seat itself and runs on `FoldAnimator`, the app's one reveal
+  clock, which is where Reduce Motion is already answered.
+- The Mixer tab does NOT draw `slider.horizontal.3`: that is the device row's equalizer
+  door (`DeviceRowView.eqSymbolName`), and sliders are what an equalizer looks like. The
+  tab draws `waveform` (2026-09-04).
+- Groups and Settings are BUILT a turn after the surface opens, never on the click that
+  selects them (`prewarmScreens`). Building is not mounting — neither reaches `setContent`.
+- A screen swap dissolves the incoming screen in: opacity 0 → 1 on `FoldAnimator`, the app's
+  one reveal clock, which is also where Reduce Motion is answered. Opacity is the ONLY thing
+  that travels, and every tick puts the session frame back, because showing the fade makes
+  the window lay out and a freshly mounted split view takes that as its chance to widen it.
 - Known stability findings in this target carry `STABILITY(id)` inline markers — details and fix sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 
@@ -34,3 +72,4 @@ folder renders; routing arithmetic lives in Core.
 - `PopoverController` → the Mixer brain: card stack, device ingest, controller calls.
 - `PopoverPanelViewController` → the panel view controller every host mounts.
 - `AppSurfaceController` → owns the shell, swaps the three screens.
+- `SurfaceToolbar` → the window's header strip; `SurfaceToolbarSeatButton` is what it draws.

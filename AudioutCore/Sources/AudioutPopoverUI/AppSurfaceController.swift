@@ -19,10 +19,20 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
     }
 
     /// Tab glyphs (plan U3). All three resolve on the macOS 14 deployment
-    /// target (verified on this box; each is a macOS 11-era symbol).
+    /// target (verified against CoreGlyphs' availability list: `waveform`
+    /// macOS 10.15, `hifispeaker.2` and `gearshape` macOS 11).
+    ///
+    /// Mixer is NOT the sliders glyph (Alec, 2026-09-04). `slider.horizontal.3`
+    /// is what every device row's equalizer door draws
+    /// (`DeviceRowView.eqSymbolName`) — that is what an equalizer looks like,
+    /// so the equalizer keeps it and the tab moves. `waveform` is audio
+    /// playing rather than a control being adjusted, and it collides with
+    /// nothing else on screen: the rows use `speaker.wave.2.fill` and
+    /// `speaker.slash.fill`, Groups uses `hifispeaker.2`, Settings
+    /// `gearshape`, and the alignment wizard `tuningfork`.
     var symbolName: String {
         switch self {
-        case .mixer: return "slider.horizontal.3"
+        case .mixer: return "waveform"
         case .groups: return "hifispeaker.2"
         case .settings: return "gearshape"
         }
@@ -32,7 +42,7 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
     /// nearest-meaning first.
     var fallbackSymbolNames: [String] {
         switch self {
-        case .mixer: return ["slider.horizontal.below.rectangle", "dial.min"]
+        case .mixer: return ["waveform.path", "waveform.circle"]
         case .groups: return ["hifispeaker.2.fill", "hifispeaker"]
         case .settings: return ["gearshape.fill", "gear"]
         }
@@ -64,8 +74,12 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
 ///
 /// **ONE FRAME.** The surface is `SurfaceLayout.width` wide and, for a whole
 /// open session, exactly one height: measured on each fresh show from the
-/// Mixer's exact fit, floored at `minimumContentSize` and capped to the
-/// screen. Every screen wears it, folds and drawers move rows INSIDE it, and
+/// Mixer's exact fit, floored at `minimumContentSize`, and capped by the
+/// Mixer's own device-list ceiling — `applyContentHeightLimit`, applied just
+/// before the measure, so a fleet past the ceiling scrolls inside the list and
+/// the frame never has to grow past it (roadmap 039). The screen's own limit
+/// (`screenContentHeightLimit`) is the upper bound on both. Every screen wears
+/// the result, folds and drawers move rows INSIDE it, and
 /// nothing resizes the window again until the surface closes — a width change
 /// on a screen switch slid the toolbar out from under the cursor and "reads
 /// as the surface twitching" (owner, 2026-08-12). The frame is applied
@@ -427,6 +441,7 @@ public final class AppSurfaceController {
             popoverController.surfaceDidShow()
         }
         publishVisibleScreen()
+        schedulePrewarm()
     }
 
     /// Discovery has quiesced (or the backstop fired): re-measure the SETTLED
@@ -475,6 +490,8 @@ public final class AppSurfaceController {
         splash = SurfaceSplashView.present(over: shell.window?.contentView)
         splash?.noteContentReady()
         splash?.noteDiscoverySettled()
+
+        schedulePrewarm()
 
         // Anything that was waiting for a window to exist (the deep link's
         // license sheet) — last, so it lands on the fronted, settled surface.
@@ -555,17 +572,29 @@ public final class AppSurfaceController {
         let panel = claimedMixerPanel()
         applyChromeTopInset()
         popoverController.rebuildForOpen()
+        // The device list's ceiling, and with it the panel's own maximum height:
+        // the LOWER of the list's twelve-row maximum and what this screen leaves.
+        // Applied before the measure, so a fleet past the ceiling scrolls inside
+        // the list instead of running the frame off the bottom of the screen.
+        panel.applyContentHeightLimit(screenContentHeightLimit())
         var size = panel.fittingSizeSettled()
         size.width = Self.minimumContentSize.width
         size.height = max(size.height, Self.minimumContentSize.height)
-        if let window = shell.window, let screen = window.screen ?? NSScreen.main {
-            let maxFrame = NSRect(x: 0, y: 0,
-                                  width: size.width,
-                                  height: screen.visibleFrame.height - 16)
-            size.height = min(size.height,
-                              window.contentRect(forFrameRect: maxFrame).height)
-        }
+        size.height = min(size.height, screenContentHeightLimit())
         return size
+    }
+
+    /// The tallest window CONTENT this screen can hold, with the shell's own
+    /// margin left over. `.greatestFiniteMagnitude` before there is a window to
+    /// measure a frame against (headless).
+    private func screenContentHeightLimit() -> CGFloat {
+        guard let window = shell.window, let screen = window.screen ?? NSScreen.main else {
+            return .greatestFiniteMagnitude
+        }
+        let maxFrame = NSRect(x: 0, y: 0,
+                              width: Self.minimumContentSize.width,
+                              height: screen.visibleFrame.height - 16)
+        return window.contentRect(forFrameRect: maxFrame).height
     }
 
     // MARK: Screen switching
@@ -599,6 +628,50 @@ public final class AppSurfaceController {
             popoverController.surfaceDidShow()
         }
         publishVisibleScreen()
+        fadeInMountedScreen()
+    }
+
+    // MARK: The swap's one animated value
+
+    /// Holds ``swapFade``. A constraint keeps its items unowned, so the view it
+    /// is written against has to outlive it — this is that view. It is in no
+    /// hierarchy and lays nothing out.
+    private let swapFadeHost = NSView()
+
+    /// The screen swap's ONE animated value: the incoming content's opacity,
+    /// 0 → 1.
+    ///
+    /// It rides an INACTIVE layout constraint's constant because a constraint
+    /// constant is what `FoldAnimator` tweens, and that animator is the app's
+    /// one reveal clock and the one place Reduce Motion is answered. Nothing
+    /// lays out from this constraint; the surface reads its constant on each
+    /// tick (``foldAnimatorDidTick``) and stamps it on the content view.
+    private lazy var swapFade: NSLayoutConstraint =
+        swapFadeHost.widthAnchor.constraint(equalToConstant: 0)
+
+    /// Dissolve the just-mounted screen in rather than cutting to it.
+    ///
+    /// Only OPACITY travels. The window frame is fixed for the whole open
+    /// session (the one-frame contract at the top of this file), so the frame
+    /// is not animated here and never can be.
+    ///
+    /// Reduce Motion needs no branch: `FoldAnimator.animate` settles every
+    /// tween synchronously in the caller's own turn under Reduce Motion, so the
+    /// content is simply THERE — opaque before anything displays the 0 this
+    /// sets a line earlier.
+    private func fadeInMountedScreen() {
+        guard isShown, let contentView = shell.window?.contentView else { return }
+        swapFade.constant = 0
+        contentView.layer?.opacity = 0
+        FoldAnimator.shared.animate(swapFade, to: 1, follower: self) { [weak self] in
+            self?.shell.window?.contentView?.layer?.opacity = 1
+        }
+    }
+
+    /// The opacity a swap is currently showing the screen at, for tests that
+    /// sample the travel rather than trusting that one was asked for.
+    var test_swapFadeOpacity: CGFloat {
+        CGFloat(shell.window?.contentView?.layer?.opacity ?? 1)
     }
 
     // MARK: Menu-bar click policy
@@ -682,6 +755,23 @@ public final class AppSurfaceController {
             shell.setContent(screenVC, defaultSize: sessionContentSize)
         }
         applySessionFrame()
+        // AppKit resizes the shell window to the hosted controller's
+        // `preferredContentSize`, and does so DEFERRED — so the frame just
+        // asserted is overridden a runloop later by whatever the screen last
+        // published. `revealFirstOpen` already pins the session size as its
+        // LAST write for exactly this reason; a swap needs the same, or a
+        // Mixer whose fit is under the 600 floor drags the window down to its
+        // raw fit some frames after the tab click. Probed headless: returning
+        // to the Mixer left the window 446 pt tall and moved its origin, and a
+        // Settings mount widened it by a point.
+        //
+        // Read back off the window rather than reusing `sessionContentSize`:
+        // the two round differently, and a half point of disagreement comes
+        // back as a one-point widen.
+        if let window = shell.window {
+            window.contentViewController?.preferredContentSize =
+                window.contentRect(forFrameRect: window.frame).size
+        }
     }
 
     // MARK: Lazy screens
@@ -689,8 +779,10 @@ public final class AppSurfaceController {
     /// The Mixer panel, claimed from its controller on first use. Claiming
     /// also installs the surface's size LISTENER: the surface never resizes to
     /// the panel — the frame is fixed — it only notices content the frame
-    /// cannot show and says so once per open. What to do about it (scroll the
-    /// Mixer) is roadmap 039's call; clipping silently is not.
+    /// cannot show and says so once per open. Roadmap 039 answered what to DO
+    /// about it — the device list scrolls — so the log line is now a backstop for
+    /// chrome (banners, App Routing) that outgrows the frame on its own, not the
+    /// everyday large-fleet case.
     private func claimedMixerPanel() -> PopoverPanelViewController {
         if let mixerPanel { return mixerPanel }
         let panel = popoverController.claimPanelForSurfaceHosting()
@@ -708,6 +800,43 @@ public final class AppSurfaceController {
             ])
         }
         return panel
+    }
+
+    /// Whether the off-click-path build of Groups and Settings has been asked
+    /// for in this process. Once, ever — the screens are kept for the process
+    /// lifetime, so there is nothing to redo.
+    private var prewarmRequested = false
+
+    /// Build Groups and Settings NOW, so the click that selects one only has to
+    /// mount a screen that already exists.
+    ///
+    /// Both are built lazily on first selection, and measured headless against
+    /// the seven-speaker demo fleet that first selection cost 56 ms for Groups —
+    /// 50 ms of it constructing `MixerWindowController` and its panes — against
+    /// 8 ms for every visit after. Three to four dropped frames inside the
+    /// click is what the owner saw as judder, and no amount of motion covers
+    /// work the main thread is blocked on; the only fix is to do it somewhere
+    /// else. Scheduled a turn after the surface opens, where the launch hold
+    /// (`SurfaceSplashView`, 0.7 s solid before it even starts leaving) is
+    /// covering the surface and nothing is animating.
+    ///
+    /// Building is NOT mounting: neither screen reaches `setContent`, so the
+    /// one session frame is untouched.
+    private func prewarmScreens() {
+        _ = builtGroupsScreen()
+        _ = builtSettingsScreen()
+        // The screens were built while the toolbar strip was already measurable,
+        // so seat them now rather than leaving the first mount to do it.
+        applyChromeTopInset()
+    }
+
+    /// Ask for the prewarm on the next main-queue turn, at most once per
+    /// process. Deliberately not synchronous: the caller is an open, and an
+    /// open must not pay for screens the user has not asked for yet.
+    private func schedulePrewarm() {
+        guard !prewarmRequested else { return }
+        prewarmRequested = true
+        DispatchQueue.main.async { [weak self] in self?.prewarmScreens() }
     }
 
     private func builtGroupsScreen() -> SurfaceScreenViewController {
@@ -792,6 +921,10 @@ public final class AppSurfaceController {
     /// ever changes once a session starts, so there is nothing to animate and
     /// no Reduce Motion or headless branch to take. Never re-centred either:
     /// the shell's `show(anchorRect:)` positions the window once, at open.
+    ///
+    /// A frame already in the right place is left alone, so the swap's
+    /// per-tick re-assert costs a comparison rather than a `setFrame` on every
+    /// frame of the dissolve.
     private func applySessionFrame() {
         guard let window = shell.window else { return }
         let frameSize = window.frameRect(
@@ -803,7 +936,9 @@ public final class AppSurfaceController {
             origin.x = min(max(vf.minX + 8, origin.x), vf.maxX - frameSize.width - 8)
             origin.y = max(vf.minY + 8, origin.y)
         }
-        window.setFrame(NSRect(origin: origin, size: frameSize), display: true)
+        let frame = NSRect(origin: origin, size: frameSize)
+        guard frame != window.frame else { return }
+        window.setFrame(frame, display: true)
     }
 
     // MARK: Test-support hooks
@@ -819,6 +954,10 @@ public final class AppSurfaceController {
     var test_groupsScreen: SurfaceScreenViewController? { groupsScreen }
     var test_settingsScreen: SurfaceScreenViewController? { settingsScreen }
     var test_settingsRoot: SettingsRootViewController? { settingsRoot }
+    /// Run the off-click-path screen build now, instead of a turn from now.
+    func test_prewarmScreens() { prewarmScreens() }
+    /// Whether the prewarm has been asked for in this process.
+    var test_prewarmRequested: Bool { prewarmRequested }
     /// The chrome inset screens are currently seated below (0 unpinned).
     var test_chromeTopInset: CGFloat { chromeTopInset }
     /// The launch splash, `nil` when this open showed none or it has left.
@@ -836,6 +975,28 @@ public final class AppSurfaceController {
     func test_notePixelVisibility(_ visible: Bool) { applyPixelVisibility(visible) }
     /// Whether the Mixer is currently asleep behind the occlusion latch.
     var test_surfaceCoveredHidden: Bool { surfaceCoveredHidden }
+}
+
+// MARK: - The swap fade's per-tick layout
+
+extension AppSurfaceController: FoldFollowing {
+
+    /// One tick of the swap's dissolve: stamp the tweened opacity on whatever
+    /// screen is currently mounted, then put the frame back where the session
+    /// says it goes.
+    ///
+    /// The re-assert is not belt and braces. Showing a fade makes the window
+    /// lay out, and a freshly mounted split view takes that layout as its
+    /// chance to widen the window to its own minimum — the hazard
+    /// `chromeTopInset` already documents from the other direction (probed
+    /// there at 560 → 707; probed here as a one-point widen on the Settings
+    /// mount). The frame is FIXED for the open session, so the value written
+    /// here never changes and this is no second clock — it is the one clock
+    /// holding the frame still while the content dissolves.
+    public func foldAnimatorDidTick() {
+        shell.window?.contentView?.layer?.opacity = Float(swapFade.constant)
+        applySessionFrame()
+    }
 }
 
 // MARK: - SurfaceScreenViewController

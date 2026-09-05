@@ -142,7 +142,7 @@ enum SetupCardState: Equatable {
 /// One row of the Setup window's SPINE: a compact status strip — icon tile,
 /// short title, and exactly one trailing marker (padlock, checkmark, skip
 /// slash, broken-permission alert, or the auto-pass note) — plus a leading edge
-/// bar that marks the live row EMBER and a broken one red.
+/// bar that stays hidden except on a broken row, which it marks red.
 ///
 /// It carries no body, no buttons and no copy beyond its title (Direction 04,
 /// owner-chosen): the rehearsal is the onboarding's actual idea, so the mock
@@ -191,8 +191,9 @@ final class SetupSpineRowView: NSView {
     /// The trailing marker slot: one position that says locked, then earned.
     /// Also the checkmark's grown width (the 0 → 16 slide-in).
     static let markerSlot: CGFloat = 16
-    /// The leading edge bar — EMBER on the live row, red on a broken one, gone
-    /// otherwise. Clipped by the surface's own corner radius.
+    /// The leading edge bar — red on a broken row, gone otherwise (the live
+    /// row carries no edge bar of its own; see `isLive`). Clipped by the
+    /// surface's own corner radius.
     static let edgeBarWidth: CGFloat = 3
     /// How far a locked step's icon tile fades. Enough to read as not-yet-yours
     /// beside the live row, not so far that the glyph stops being legible.
@@ -246,8 +247,8 @@ final class SetupSpineRowView: NSView {
     private var checkmarkGeneration = 0
 
     private(set) var state: SetupCardState = .pending
-    /// Whether this row is the flow's live step — the gold edge, the lifted
-    /// surface, and the press that fires the ribbon's primary action.
+    /// Whether this row is the flow's live step — the gold selection fill on
+    /// the surface, and the press that fires the ribbon's primary action.
     private(set) var isLive = false
     /// Whether the hero pane is currently browsing this (decided) row.
     private(set) var isBrowseSelected = false
@@ -287,7 +288,7 @@ final class SetupSpineRowView: NSView {
         surface.layer?.masksToBounds = true
         addSubview(surface)
 
-        edgeBar = RoundedContainerView(fill: Tokens.Color.ember, border: .clear, radius: 0)
+        edgeBar = RoundedContainerView(fill: Tokens.Color.failure, border: .clear, radius: 0)
         edgeBar.borderWidth = 0
         edgeBar.isHidden = true
         surface.addSubview(edgeBar)
@@ -315,7 +316,7 @@ final class SetupSpineRowView: NSView {
         checkmark.alphaValue = 0
 
         configureMarker(lockGlyph, symbolName: "lock.fill", accessibility: "Locked",
-                        tint: Tokens.Color.tertiaryLabel)
+                        tint: Tokens.Color.label3)
         // razor: a skipped row is the slash glyph plus a dimmed title, NOT a
         // dashed rim. `RoundedContainerView` draws its border on the layer, and
         // a dash pattern needs a `CAShapeLayer` of its own — a whole second
@@ -332,7 +333,7 @@ final class SetupSpineRowView: NSView {
         spinner.translatesAutoresizingMaskIntoConstraints = false
 
         noteLabel.font = Tokens.Font.caption
-        noteLabel.textColor = Tokens.Color.inkSecondary
+        noteLabel.textColor = Tokens.Color.label2
         noteLabel.translatesAutoresizingMaskIntoConstraints = false
         noteLabel.setContentHuggingPriority(.required, for: .horizontal)
         noteLabel.isHidden = true
@@ -411,6 +412,12 @@ final class SetupSpineRowView: NSView {
 
     // MARK: State
 
+    /// Whether Reduce Motion is on — through the override seam every animated
+    /// instrument in this codebase uses, so a headless test can drive both sides.
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
     /// Repaint for `state`.
     ///
     /// - Parameters:
@@ -446,8 +453,8 @@ final class SetupSpineRowView: NSView {
         // floor in both appearances where the system alias did not.
         titleLabel.textColor = switch state {
         case .active: Tokens.Color.label
-        case .pending: Tokens.Color.tertiaryLabel
-        case .completed, .autoPassed, .skipped: Tokens.Color.inkSecondary
+        case .pending: Tokens.Color.label3
+        case .completed, .autoPassed, .skipped: Tokens.Color.label2
         }
         // Dimming is the tile's ONLY state role: its glyph tint is permanent,
         // and the trailing marker is what says "earned".
@@ -473,7 +480,7 @@ final class SetupSpineRowView: NSView {
         brokenGlyph.isHidden = isWaiting || !isBroken
         applyCheckmark(shown: !isWaiting && !isBroken && isCheckmarked(state),
                        animated: animated && !wasCompleted && isCheckmarked(state))
-        if isWaiting { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        if isWaiting && !reduceMotion { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
 
         applySurface()
         applyAccessibility()
@@ -728,6 +735,13 @@ final class SetupSpineRowView: NSView {
     var test_isBroken: Bool { isBroken }
     /// Whether the trailing slot is showing the waiting spinner.
     var test_isWaiting: Bool { isWaiting }
+    /// Overrides the live Reduce Motion read for the waiting spinner, so a
+    /// headless test can drive both sides deterministically.
+    var test_reduceMotionOverride: Bool?
+    /// Whether the waiting spinner is actually animating right now — distinct
+    /// from ``test_isWaiting``, which is the logical state Reduce Motion must
+    /// not silence.
+    var test_spinnerIsAnimating: Bool { isWaiting && !reduceMotion }
     /// Whether the hero pane is browsing this row.
     var test_isBrowseSelected: Bool { isBrowseSelected }
     /// The leading edge bar's fill, or nil when no bar is drawn — the ember-not-

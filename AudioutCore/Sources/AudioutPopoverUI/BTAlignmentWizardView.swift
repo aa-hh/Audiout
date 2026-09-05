@@ -1178,6 +1178,17 @@ public final class BTAlignmentWizardView: NSView {
     /// An attributed title bypasses AppKit's own disabled dimming, so a
     /// disabled Back has to be dimmed explicitly — otherwise "nothing to undo
     /// yet" reads exactly like "undo is right here".
+    ///
+    /// RULING (2026-09-04): the disabled title's `label2` at
+    /// `PopoverColumnGrid.faderDisabledAlpha` measures 1.81:1 to 2.65:1
+    /// across the four appearance x Increase-Contrast cells — well under a
+    /// text floor. ACCEPTED anyway: the control is genuinely disabled
+    /// (`button.isEnabled` is the branch above), and WCAG 1.4.3 / 1.4.11
+    /// exempt inactive components. No test pair for this — measuring it
+    /// would mean re-typing the wizard's own ground, which sits behind a
+    /// blend fraction private to this file (`lightRimAlpha`); that is
+    /// exactly the shape `CompositedTokenContrastTests`'s DELIBERATE
+    /// EXCLUSIONS doc already declines to re-type for the same reason.
     private func styleCornerButton(_ button: NSButton) {
         let ink = button.isEnabled
             ? Tokens.Color.label2

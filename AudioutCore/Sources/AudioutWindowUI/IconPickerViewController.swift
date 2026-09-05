@@ -50,7 +50,7 @@ public final class IconPickerViewController: NSViewController {
     private let grid = NSGridView()
     private let searchField = NSSearchField()
     private let previewImageView = NSImageView()
-    /// Mini warm-canvas tile behind the exact-name preview glyph (Warm
+    /// Mini tile behind the exact-name preview glyph (Warm
     /// Signal: the preview shows the symbol on the product's own surface,
     /// not on bare popover material). Hidden/shown in lockstep with
     /// `previewImageView`.
@@ -136,7 +136,7 @@ public final class IconPickerViewController: NSViewController {
         previewImageView.contentTintColor = Tokens.Color.label2
         previewImageView.isHidden = true
 
-        // The preview glyph sits centered on its mini warm-canvas tile; the
+        // The preview glyph sits centered on its mini tile; the
         // tile (not the bare glyph) is what the search row shows/hides.
         previewTile.translatesAutoresizingMaskIntoConstraints = false
         previewTile.isHidden = true
@@ -551,6 +551,14 @@ private final class AppearanceObservingView: NSView {
 /// surface. Drawn in `draw(_:)` so both tokens re-resolve live per appearance +
 /// Increase Contrast (the `WarmCanvasView` pattern); flat fill, no grain.
 private final class WarmPreviewTileView: NSView {
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        redrawOnAccessibilityDisplayChange()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
     override func draw(_ dirtyRect: NSRect) {
         let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
         let radius = Tokens.Layout.Radius.control

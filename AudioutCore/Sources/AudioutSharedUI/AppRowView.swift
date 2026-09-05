@@ -1035,6 +1035,12 @@ public final class AppRowView: NSView {
 
     // MARK: Test-support hooks — destination subtitle (A3)
 
+    /// The SF Symbol name this row was handed for `destinationID` — what the
+    /// menu draws beside that entry. `nil` if no such destination.
+    public func test_destinationSymbolName(forDestinationID id: String) -> String? {
+        destinations.first { $0.id == id }?.symbolName
+    }
+
     /// The real `NSMenuItem` for `destinationID` in the trailing destination
     /// popup's OWN menu. Exposed so tests can assert its title/attributedTitle
     /// stay plain even when `subtitle` is set — `NSPopUpButton` mirrors its

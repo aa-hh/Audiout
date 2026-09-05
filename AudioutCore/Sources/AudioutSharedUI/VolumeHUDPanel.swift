@@ -308,7 +308,7 @@ private final class VolumeSegmentBarView: NSView {
         guard segmentWidth > 0 else { return }
 
         let filledColor = Tokens.Color.label
-        let emptyColor = Tokens.Color.tertiaryLabel
+        let emptyColor = Tokens.Color.label3
 
         for i in 0..<count {
             let x = CGFloat(i) * (segmentWidth + VolumeHUDPanel.segmentGap)

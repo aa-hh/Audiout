@@ -142,15 +142,19 @@ if [ -f "$g7" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# GUARD 4 (BLOCKING): the full test suite must pass before Swift code is
-# committed. THE coverage guarantee — nothing broken gets committed, and since
-# everything that reaches main was committed here first, main stays green.
+# GUARD 4 (BLOCKING): the tests must pass before Swift code is committed. THE
+# coverage guarantee — nothing broken gets committed, and since everything that
+# reaches main was committed here first, main stays green.
 #
-# Agents may run `swift test --filter <Suite>` while iterating (fast); a
-# too-narrow filter can miss a suite the change broke, but that risk is absorbed
-# HERE — no commit touching AudioutCore Swift sources/tests lands until the
-# WHOLE suite (parallelised) passes. So filtering can only ever cost one extra
-# fix cycle at commit time.
+# How much runs depends on the commit (Alec, 2026-09-04):
+#   - a branch commit runs only the suites that plausibly cover its staged
+#     Swift, derived by guard-test-scope.sh (which fails closed to the full
+#     suite whenever it cannot map a file)
+#   - a merge landing on main runs the FULL suite with the pass cache off
+# The full run on every commit was the main cost of committing, and the risk it
+# absorbed lands one step later instead: nothing reaches main without a full,
+# uncached run, so a too-narrow branch filter costs at most one fix cycle at
+# merge time.
 #
 # Scope: only runs when staged files include AudioutCore Swift source/test
 # files. Docs/config/other commits skip it (no code changed → nothing to gate).
@@ -166,9 +170,29 @@ staged_swift=$(git diff --cached --name-only --diff-filter=ACM -- \
     'AudioutCore/Sources/' 'AudioutCore/Tests/' 2>/dev/null | grep '\.swift$')
 if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    # Scope first — see guard-test-scope.sh for the mapping and why it fails
+    # closed. Missing helper => full suite, the old behaviour.
+    scope=FULL
+    g4scope="$hook_dir/guard-test-scope.sh"
+    if [ -f "$g4scope" ]; then
+        scope=$(sh "$g4scope")
+    fi
+    # A merge onto main is the last gate before main, so it never runs filtered
+    # and never accepts the runner's "these sources already passed" cache.
+    merge_env=""
+    if [ "$branch" = "main" ] && [ -f "$git_dir/MERGE_HEAD" ]; then
+        scope=FULL
+        merge_env="AUDIOUT_TEST_NO_CACHE=1"
+    fi
     echo "" >&2
-    echo "  Guard 4: AudioutCore Swift changed — running full suite" >&2
-    echo "  (scripts/run-tests.sh) before commit. ~70s warm; --no-verify to skip." >&2
+    if [ "$scope" = "FULL" ]; then
+        echo "  Guard 4: AudioutCore Swift changed — running full suite" >&2
+        echo "  (scripts/run-tests.sh) before commit. ~70s warm; --no-verify to skip." >&2
+    else
+        echo "  Guard 4: AudioutCore Swift changed — running the suites covering it:" >&2
+        echo "    $scope" >&2
+        echo "  (AUDIOUT_FULL_SUITE=1 to force the full run; --no-verify to skip.)" >&2
+    fi
     # Via the shared runner, NOT a bare `swift test`: the runner takes a
     # machine-wide lock so concurrent agents queue instead of thrashing 8 cores
     # with N full suites at once, and skips the run outright when these exact
@@ -211,15 +235,33 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     # the unset is scoped to the swift calls so the staged-diff guards above
     # keep reading the commit's real index.
     nogit='env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE'
-    if ! { if [ -n "$run_suite" ]; then $nogit "$run_suite"; \
-           else ( cd "$repo_root/AudioutCore" && $nogit swift test --parallel >&2 ); fi; }; then
+    # $nogit and $merge_env are deliberately unquoted — each must reach `env` as
+    # separate words. "$scope" stays quoted: it is one regex with `|` in it, and
+    # unquoting it would hand the shell a pipeline.
+    # No runner found (a branch older than run-tests.sh) => full suite inline,
+    # unchanged from before.
+    run_guard4() {
+        if [ -z "$run_suite" ]; then
+            ( cd "$repo_root/AudioutCore" \
+                && $nogit swift test --build-system native --parallel >&2 )
+        elif [ "$scope" = "FULL" ]; then
+            $nogit $merge_env "$run_suite"
+        else
+            $nogit $merge_env "$run_suite" --filter "$scope"
+        fi
+    }
+    if ! run_guard4; then
         echo "" >&2
-        echo "  REFUSED: full test suite failed. Fix the failures" >&2
+        echo "  REFUSED: the tests Guard 4 ran failed. Fix the failures" >&2
         echo "  (or 'git commit --no-verify' for a real emergency)." >&2
         echo "" >&2
         exit 1
     fi
-    echo "  Guard 4: full suite passed." >&2
+    if [ "$scope" = "FULL" ]; then
+        echo "  Guard 4: full suite passed." >&2
+    else
+        echo "  Guard 4: the suites covering this change passed." >&2
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -272,7 +314,9 @@ fi
 #
 # AirPlayEngine's suite is small (~144 tests, ~2s) — no lock/queue/pass-cache
 # machinery like scripts/run-tests.sh; a plain `swift test` inline is fast
-# enough that the machinery would cost more than it saves.
+# enough that the machinery would cost more than it saves. For the same reason
+# it kept running in full when Guard 4 went filtered on 2026-09-04: two seconds
+# is not worth narrowing.
 #
 # Escape hatch: `git commit --no-verify`, same as Guard 4. Missing `swift`
 # toolchain => skip.

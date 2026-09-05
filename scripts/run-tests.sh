@@ -378,6 +378,10 @@ if [ ! -d "$core/.build/checkouts" ] || [ -z "$(ls -A "$core/.build/checkouts" 2
     ( cd "$core" && swift package resolve ) >&2 || true
 fi
 
+# Clear any compiler left orphaned by a killed wrapper before competing for
+# the lock -- see scripts/reap-orphaned-swift.sh for why this is not paranoia.
+bash "$(dirname "${BASH_SOURCE[0]}")/reap-orphaned-swift.sh" || true
+
 # --- run --------------------------------------------------------------------
 # `set -e` is off for this one command so a failure reaches the cache logic
 # (which must NOT write a stamp) and the trap, rather than exiting immediately.
@@ -386,8 +390,19 @@ set +e
 # (`--parallel` or `--no-parallel`) rather than as one quoted word. "$@" stays
 # quoted so caller arguments with spaces survive.
 # shellcheck disable=SC2086
-( cd "$core" && swift test $test_args "$@" ) >&2
+#
+# Backgrounded under `set -m` so the subshell becomes its own PROCESS GROUP,
+# then killed as a group if this wrapper dies. Without that, a timeout or a
+# Ctrl-C leaves the compiler running, holding SwiftPM's per-`.build` lock, and
+# every later build queues behind it silently -- the failure looks like a slow
+# build and cost hours on 2026-09-04. `wait` still yields the real exit status.
+set -m
+( cd "$core" && swift test $test_args "$@" ) >&2 &
+swift_pgid=$!
+trap 'kill -- -"$swift_pgid" 2>/dev/null; rm -f "$slot_file" 2>/dev/null' EXIT HUP INT TERM
+wait "$swift_pgid"
 status=$?
+set +m
 set -e
 
 if [ "$status" -eq 0 ] && [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ]; then

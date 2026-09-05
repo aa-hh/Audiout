@@ -459,7 +459,7 @@ public final class AudioSettingsViewController: NSViewController {
         advancedTitle.attributedTitle = NSAttributedString(
             string: "Advanced",
             attributes: [.font: Tokens.Font.captionEmphasized,
-                         .foregroundColor: Tokens.Color.secondaryLabel])
+                         .foregroundColor: Tokens.Color.label2])
         advancedTitle.target = self
         advancedTitle.action = #selector(advancedTitleTapped)
         // A click-target duplicate of the triangle beside it, which keeps the
@@ -660,7 +660,7 @@ public final class AudioSettingsViewController: NSViewController {
 
         applyStatusLabel.translatesAutoresizingMaskIntoConstraints = false
         applyStatusLabel.font = Tokens.Font.caption
-        applyStatusLabel.textColor = Tokens.Color.secondaryLabel
+        applyStatusLabel.textColor = Tokens.Color.label2
         applyStatusLabel.isHidden = true
 
         let statusRow = NSView()
@@ -810,7 +810,7 @@ public final class AudioSettingsViewController: NSViewController {
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
         remove.image = NSImage(systemSymbolName: "minus.circle.fill", accessibilityDescription: "Remove")?
             .withSymbolConfiguration(config)
-        remove.contentTintColor = Tokens.Color.secondaryLabel
+        remove.contentTintColor = Tokens.Color.label2
         remove.target = self
         remove.action = #selector(removeTapped(_:))
         remove.identifier = NSUserInterfaceItemIdentifier(app.bundleID)
@@ -847,7 +847,7 @@ public final class AudioSettingsViewController: NSViewController {
         button.image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
         button.title = "Add App…"
-        button.contentTintColor = Tokens.Color.secondaryLabel
+        button.contentTintColor = Tokens.Color.label2
         button.target = self
         button.action = #selector(addTapped(_:))
         button.setAccessibilityLabel("Add excluded application")
@@ -1105,11 +1105,21 @@ extension AudioSettingsViewController: FoldFollowing {
     public func foldAnimatorDidTick() { republishFittedHeight() }
 }
 
-/// A rounded hairline border around the excluded-apps list. Drawn with
-/// `NSColor.separatorColor` in `draw(_:)` (resolved under the current appearance),
-/// so it adapts to light/dark and the app's theme override with no manual
-/// appearance-change bookkeeping.
+/// A rounded hairline border around the excluded-apps list. Drawn in
+/// `draw(_:)` (not a stamped layer color), so it needs both repaint triggers
+/// to track the current appearance: `viewDidChangeEffectiveAppearance` for
+/// light/dark and the app's theme override, and
+/// `redrawOnAccessibilityDisplayChange` for Increase Contrast, which fires no
+/// appearance change of its own (`AccessibilityDisplayRedraw.swift`).
 final class BorderedListView: NSView {
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        redrawOnAccessibilityDisplayChange()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
@@ -1117,5 +1127,10 @@ final class BorderedListView: NSView {
         Tokens.Color.separator.setStroke()
         path.lineWidth = 1
         path.stroke()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }

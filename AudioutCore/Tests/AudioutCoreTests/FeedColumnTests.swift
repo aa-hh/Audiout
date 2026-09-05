@@ -93,23 +93,101 @@ import AudioutCore
 
     // MARK: Error overrides the feed (failure-red words)
 
-    @Test func failedOverridesTheFeedWithCouldntConnect() {
+    /// The failure override is now a GLYPH, not words (Alec, 2026-09-04):
+    /// every headline overflowed the feed slot, so the words moved to the
+    /// tooltip and the spoken value. The rung itself is unchanged — a failure
+    /// still takes the whole column, in the failure tone, and still overrides
+    /// any composite the row would otherwise draw.
+    @Test func failedOverridesTheFeedWithAGlyphAndMovesTheHeadlineOffTheRow() {
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
                   selected: true, controllable: true, routedAppNames: ["Music"])
-        #expect(row.test_feedText == "Didn't respond", "failure overrides the composite entirely — never both — with the failure's own headline")
-        #expect(row.test_feedIsErrorColored)
+        #expect(row.test_feedText == nil, "failure overrides the composite entirely — and carries no words of its own")
+        #expect(row.test_feedErrorPillHasGlyph, "an error pill reads by shape (P2-6) — here by shape alone")
+        #expect(row.test_feedErrorGlyphIsFailureColored, "…in the failure tone")
         #expect(row.test_statusText == nil, "the sublabel carries no words for a failed bus row")
-        #expect(row.test_feedTooltip == nil, "a failed row's tooltip carries no feed names")
-        #expect(row.test_feedErrorPillHasGlyph, "an error pill reads by shape, not colour alone (P2-6)")
+        #expect(row.test_feedTooltip == "Didn't respond", "the headline reaches the pointer on the tooltip")
+        #expect(row.test_accessibilityValue?.contains("Didn't respond") == true,
+                "…and the screen reader through the row's spoken value")
     }
 
-    @Test func unavailableOverridesTheFeed() {
+    /// The unavailable rung is a GLYPH too (2026-09-04): "Unavailable" needs
+    /// 83.3 pt of a Bluetooth row's 52 pt feed slot, so it clipped exactly
+    /// the way the failure headlines did. Same treatment, same tone, word on
+    /// the tooltip and in the spoken value.
+    @Test func unavailableOverridesTheFeedWithAGlyphAndMovesTheWordOffTheRow() {
         let row = makeBusRow()
         row.apply(makeDevice(isAvailable: false), selected: true, routedAppNames: ["Music"])
-        #expect(row.test_feedText == "Unavailable")
-        #expect(row.test_feedIsErrorColored)
-        #expect(row.test_feedErrorPillHasGlyph)
+        #expect(row.test_feedText == nil, "the unavailable override carries no words of its own")
+        #expect(row.test_feedErrorPillHasGlyph, "it reads by shape (P2-6) — here by shape alone")
+        #expect(row.test_feedErrorGlyphIsFailureColored, "…in the failure tone it has always used")
+        #expect(row.test_feedTooltip == "Unavailable", "the word reaches the pointer on the tooltip")
+        #expect(row.test_accessibilityValue?.contains("Unavailable") == true,
+                "…and the screen reader through the row's spoken value")
+    }
+
+    // MARK: Where the pills SIT in the column
+
+    /// Lay a row out at a realistic popover width so the trailing columns get
+    /// real frames — `DeviceRowView` constrains only its height.
+    private func laidOut(_ row: DeviceRowView) -> DeviceRowView {
+        row.frame = NSRect(x: 0, y: 0, width: 420, height: DeviceRowView.rowHeight)
+        row.layoutSubtreeIfNeeded()
+        return row
+    }
+
+    /// The failure rung is a lone glyph in a column of its own, so it CENTRES
+    /// (Alec, 2026-09-04). It used to keep the leading edge a left-aligned
+    /// TEXT pill needs, which left the triangle hanging at the column's left
+    /// margin with 120 pt of empty column beside it.
+    @Test func theFailureGlyphCentresInItsColumn() {
+        let row = laidOut(makeBusRow())
+        row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
+                  selected: true, controllable: true)
+        row.layoutSubtreeIfNeeded()
+        let feed = row.test_trailingSlotFrames.feed
+        let wanted = row.bounds.maxX - PopoverColumnGrid.trailingControlCenterFromTrailing
+        #expect(abs(feed.midX - wanted) <= 1,
+                "the glyph pill is off centre — \(feed) in \(row.bounds), wanted midX \(wanted)")
+    }
+
+    /// …and the unavailable rung, which draws the same lone glyph.
+    @Test func theUnavailableGlyphCentresInItsColumnToo() {
+        let row = laidOut(makeBusRow())
+        row.apply(makeDevice(isAvailable: false), selected: true)
+        row.layoutSubtreeIfNeeded()
+        let feed = row.test_trailingSlotFrames.feed
+        let wanted = row.bounds.maxX - PopoverColumnGrid.trailingControlCenterFromTrailing
+        #expect(abs(feed.midX - wanted) <= 1,
+                "the glyph pill is off centre — \(feed) in \(row.bounds)")
+    }
+
+    /// Pills that carry WORDS are unmoved: they still start on the column's
+    /// leading edge, so a list of rows reads down one left edge. This is the
+    /// half the centring must not disturb.
+    @Test func pillsWithWordsStillStartOnTheColumnsLeadingEdge() {
+        let row = laidOut(makeBusRow())
+        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
+        row.layoutSubtreeIfNeeded()
+        let feed = row.test_trailingSlotFrames.feed
+        let wanted = row.bounds.maxX - PopoverColumnGrid.feedColumnLeadingFromTrailing
+        #expect(abs(feed.minX - wanted) <= 1,
+                "a text pill moved off the column's leading edge — \(feed) in \(row.bounds)")
+    }
+
+    /// A row that goes from failed to feeding puts the pills BACK on the
+    /// leading edge — the two placements are one pair, and only one may be
+    /// live at a time.
+    @Test func recoveringFromFailureRestoresTheLeadingEdge() {
+        let row = laidOut(makeBusRow())
+        row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
+                  selected: true, controllable: true)
+        row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
+        row.layoutSubtreeIfNeeded()
+        let feed = row.test_trailingSlotFrames.feed
+        let wanted = row.bounds.maxX - PopoverColumnGrid.feedColumnLeadingFromTrailing
+        #expect(abs(feed.minX - wanted) <= 1,
+                "the centred placement outlived the failure — \(feed) in \(row.bounds)")
     }
 
     // MARK: Connecting/reconnecting/muted are NOT shown in the FEED column
@@ -121,7 +199,7 @@ import AudioutCore
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .connecting), selected: true, controllable: true)
         #expect(row.test_feedText == "System")
-        #expect(!(row.test_feedIsErrorColored))
+        #expect(!row.test_feedErrorPillHasGlyph)
     }
 
     @Test func mutedRowsFeedStillShowsTheCompositeMuteLivesOnTheControl() {
@@ -168,11 +246,14 @@ import AudioutCore
     }
 
     @Test func failedDeviceShowsOnlyTheError() {
-        // The error override takes the WHOLE column.
+        // The error override takes the WHOLE column — as one glyph, with the
+        // cause on the tooltip.
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .vanished)), supportsAirPlay2: false),
                   selected: true, controllable: true)
-        #expect(row.test_feedText == "Not on the network")
+        #expect(row.test_feedText == nil)
+        #expect(row.test_feedErrorPillHasGlyph)
+        #expect(row.test_feedTooltip == "Not on the network")
     }
 
     // MARK: STATIC "+N" overflow — locked, no interactive reveal

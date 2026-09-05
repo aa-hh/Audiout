@@ -31,12 +31,12 @@ public final class MembershipRowView: NSView {
     /// stock checkbox row (Alec, Q6 2026-07-25).
     ///
     /// The row has exactly TWO hosts and they are visually different surfaces:
-    /// the Groups editor is a WARM pane (`Tokens.Color.canvas` family), while
-    /// "New Group" is a standard AppKit sheet on the system's own white/grey.
-    /// `ember` measures ~2.34–2.48:1 on that white — the gold node would be
-    /// near-invisible there — so the rail is warm-pane-only and the sheet keeps
-    /// plain stock rows. Do NOT warm the Apple sheet, and do NOT introduce a
-    /// second, darker gold to make the node survive on white.
+    /// the Groups editor is the app's own themed pane, while "New Group" is a
+    /// standard AppKit sheet on the system's own white/grey. `ember` measures
+    /// ~2.34–2.48:1 on that white — the gold node would be near-invisible
+    /// there — so the rail is pane-only and the sheet keeps plain stock rows.
+    /// Do NOT warm the Apple sheet, and do NOT introduce a second, darker
+    /// gold to make the node survive on white.
     public enum Surface: Equatable {
         /// The Groups window's group editor: invisible checkbox cell + a gold
         /// `MembershipBusView` node, threaded by the pane-level rail overlay.
@@ -100,6 +100,7 @@ public final class MembershipRowView: NSView {
         busView.emphasizesDimmedMemberRim = true
         buildSubviews()
         apply(device: device, checked: checked, iconSymbolName: iconSymbolName)
+        redrawOnAccessibilityDisplayChange()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -255,7 +256,8 @@ public final class MembershipRowView: NSView {
     ///
     /// Warm on the warm pane means the audio is genuinely reaching this member
     /// — the group is armed AND the device is in it (C5). Everything else is
-    /// cool. The system sheet is Apple's, so it keeps stock ink.
+    /// cool. The system sheet's branch takes the neutral ink ladder — label,
+    /// label2, label3 — with no temperature split.
     private func applyInk() {
         switch surface {
         case .warmPane:

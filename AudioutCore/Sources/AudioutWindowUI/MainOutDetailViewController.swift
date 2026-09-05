@@ -43,8 +43,8 @@ public final class MainOutDetailViewController: NSViewController {
     private let nameLabel = NSTextField(labelWithString: MainOutDetailViewController.title)
     private let headerWell = GroupedSectionView()
     private let eqWell = GroupedSectionView()
-    /// Titles the page's one card, the same idiom (and geometry) as the device
-    /// pane's "Equalizer" label above its own.
+    /// Titles the page's one recessed section, the same idiom (and geometry)
+    /// as the device pane's "Equalizer" label above its own.
     private let eqTitleLabel = NSTextField(labelWithString: "Equalizer")
     /// The Equalizer card's Reset button, on the title line beside
     /// `eqTitleLabel` — same idiom as `DeviceDetailViewController`.
@@ -120,7 +120,7 @@ public final class MainOutDetailViewController: NSViewController {
         // rail-free inset, like the device pane's sections.
         headerWell.contentLeadingInset = GroupsPaneLayout.contentLeadingInset
         eqWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
-        // Identity is bare; the Equalizer is this page's one card.
+        // Identity is bare; the Equalizer is this page's one box.
         headerWell.style = .bare
 
         eqTitleLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -136,6 +136,10 @@ public final class MainOutDetailViewController: NSViewController {
         eqResetButton.action = #selector(resetTapped(_:))
         eqResetButton.setAccessibilityLabel("Reset tone to flat")
 
+        // The Equalizer sits in a recess for the same reason it does on the
+        // device page: `raised` resolves to the pane's own ground in light, so
+        // a `.card` here is an outline around nothing.
+        eqWell.style = .well
         for well in [headerWell, eqWell] {
             well.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(well)
@@ -285,8 +289,15 @@ public final class MainOutDetailViewController: NSViewController {
     /// The footnote's visible text.
     public var test_noteText: String { noteLabel.stringValue }
 
-    /// The card's title text — the same word the device pane's card carries.
+    /// The Equalizer section's title text — the same word the device pane's
+    /// own section carries.
     public var test_eqSectionTitleText: String { eqTitleLabel.stringValue }
+
+    /// The Equalizer section's drawn container style. `.well`: in light,
+    /// `.card`'s `raised` fill resolves to this pane's own ground, so a card
+    /// here would be an outline around nothing — the same reason the device
+    /// detail page's Equalizer is recessed.
+    public var test_eqSectionIsRecessed: Bool { eqWell.style == .well }
 
     /// The page title's visible text.
     public var test_titleText: String { nameLabel.stringValue }

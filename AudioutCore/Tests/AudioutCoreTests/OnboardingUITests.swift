@@ -79,6 +79,14 @@ import Testing
         private let lock = NSLock()
         private var resumeGate: (() -> Void)?
         private var parkedWaiter: (() -> Void)?
+        /// A `resume()` that arrived before anything was parked. Without it
+        /// the signal is DROPPED and the next `park()` waits forever: the
+        /// caller only reaches `park()` after an `await`, so a test that
+        /// resumes first loses the race. That is the hang — it needs no
+        /// hardware and no permission, only the scheduler ordering the two
+        /// the wrong way round, which is why it surfaced in a full serial run
+        /// and not in this suite on its own (2026-09-05).
+        private var pendingResume = false
 
         func probe() async -> Bool { found > 0 }
 
@@ -92,13 +100,21 @@ import Testing
 
         private func park() async {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                let waiter: (() -> Void)? = lock.withLock {
+                enum Next { case resumeNow, wait(( () -> Void)?) }
+                let next: Next = lock.withLock {
+                    if pendingResume {
+                        pendingResume = false
+                        return .resumeNow
+                    }
                     resumeGate = { continuation.resume() }
                     let waiter = parkedWaiter
                     parkedWaiter = nil
-                    return waiter
+                    return .wait(waiter)
                 }
-                waiter?()
+                switch next {
+                case .resumeNow: continuation.resume()
+                case .wait(let waiter): waiter?()
+                }
             }
         }
 
@@ -117,6 +133,7 @@ import Testing
             let gate: (() -> Void)? = lock.withLock {
                 let gate = resumeGate
                 resumeGate = nil
+                if gate == nil { pendingResume = true }
                 return gate
             }
             gate?()
@@ -133,6 +150,9 @@ import Testing
         private var parkNext = false
         private var parkedResume: (() -> Void)?
         private var parkedWaiter: (() -> Void)?
+        /// Same lost-wakeup guard as `SteppedLocalNetwork.pendingResume`, for
+        /// the same reason — see the comment there.
+        private var pendingResume = false
         private(set) var primeCount = 0
 
         func probe() async -> Bool { true }
@@ -155,13 +175,21 @@ import Testing
             case .instant: return .granted(foundSpeakers: 2)
             case .parked:
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    let waiter: (() -> Void)? = lock.withLock {
+                    enum Next { case resumeNow, wait(( () -> Void)?) }
+                    let next: Next = lock.withLock {
+                        if pendingResume {
+                            pendingResume = false
+                            return .resumeNow
+                        }
                         parkedResume = { continuation.resume() }
                         let waiter = parkedWaiter
                         parkedWaiter = nil
-                        return waiter
+                        return .wait(waiter)
                     }
-                    waiter?()
+                    switch next {
+                    case .resumeNow: continuation.resume()
+                    case .wait(let waiter): waiter?()
+                    }
                 }
                 onReachable()
                 return .granted(foundSpeakers: 2)
@@ -183,6 +211,7 @@ import Testing
             let gate: (() -> Void)? = lock.withLock {
                 let gate = parkedResume
                 parkedResume = nil
+                if gate == nil { pendingResume = true }
                 return gate
             }
             gate?()
@@ -623,6 +652,8 @@ import Testing
                    + "a switch in System Settings.")
         #expect(vc.test_rowIsBroken(.audio))
         #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
+        #expect(vc.test_ribbonStatusTextColor == Tokens.Color.label2,
+                "the failure hue is graphical-object-only (house rule 8) — the words beside the red glyph stay ordinary body ink")
     }
 
     @Test func theSecondAllowOnDeniedAudioRoutesToTheRecordingPane() async {
@@ -822,6 +853,31 @@ import Testing
         #expect(!vc.test_ribbonIsWaiting, "the wait clears with the answer")
         #expect(!vc.test_rowIsWaiting(.localNetwork), "false after the answer lands")
         #expect(vc.test_spineTitle(of: .localNetwork) == "2 speakers on your network")
+    }
+
+    /// The ribbon's status spinner and the row's own must both honor Reduce
+    /// Motion — the wait itself stays visible in words, but neither spinner
+    /// spins.
+    @Test func reduceMotionDropsTheLocalNetworkWaitSpinners() async {
+        let net = SteppedLocalNetwork(found: 2)
+        let vc = makeVC(model: makeModel(audio: .granted, localNetwork: net))
+        await vc.test_tapAllow(.audio)
+        vc.test_ribbonReduceMotionOverride = true
+        vc.test_setRowReduceMotionOverride(.localNetwork, true)
+
+        let priming = Task { await vc.test_tapAllow(.localNetwork) }
+
+        await net.waitUntilParked()
+        await waitUntil { vc.test_ribbonStatusText == OnboardingViewController.waitingStatus }
+        #expect(vc.test_ribbonStatusText == OnboardingViewController.waitingStatus,
+                "the wait is still named in words")
+        #expect(!vc.test_ribbonIsWaiting, "Reduce Motion: the ribbon's own spinner never shows")
+        #expect(vc.test_rowIsWaiting(.localNetwork), "the row still knows it is waiting")
+        #expect(!vc.test_rowSpinnerIsAnimating(.localNetwork), "Reduce Motion: the row spinner never spins")
+
+        net.resume()
+        net.resume()
+        await priming.value
     }
 
     /// A refusal skips the second half entirely — there is nothing left to
@@ -1369,6 +1425,25 @@ import Testing
         #expect(vc.test_demoMode == .settled, "…together with the finale")
     }
 
+    /// The final check's spinner must also honor Reduce Motion — "running" is
+    /// still the logical state the row's title reports, but the spinner
+    /// itself never spins.
+    @Test func reduceMotionDropsTheFinalCheckSpinner() async {
+        let vc = makeVC(model: makeGrantableModel())
+        vc.test_checkRowReduceMotionOverride = true
+
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)   // the last decision — the check auto-runs
+
+        #expect(vc.test_checkRowState == .running)
+        #expect(vc.test_checkRowIsSpinning, "the logical state is still \"running\"")
+        #expect(!vc.test_checkRowSpinnerIsAnimating, "Reduce Motion: the spinner never spins")
+
+        await vc.test_awaitFinalCheck()
+        #expect(vc.test_checkRowState == .passed)
+    }
+
     /// The row is real UI (unlike the decorative demo pane): one VoiceOver
     /// element whose label is the same state-carrying title the pixels draw.
     @Test func theCheckRowSpeaksItsStateToVoiceOver() async {
@@ -1579,6 +1654,9 @@ import Testing
         private var mode: Mode = .grant
         private var parkedResume: (() -> Void)?
         private var parkedWaiter: (() -> Void)?
+        /// Same lost-wakeup guard as `SteppedLocalNetwork.pendingResume` —
+        /// see the comment there.
+        private var pendingResume = false
         private var primeCount = 0
 
         func probe() async -> Bool { true }
@@ -1596,13 +1674,21 @@ import Testing
                 return .denied
             case .park:
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    let waiter: (() -> Void)? = lock.withLock {
+                    enum Next { case resumeNow, wait(( () -> Void)?) }
+                    let next: Next = lock.withLock {
+                        if pendingResume {
+                            pendingResume = false
+                            return .resumeNow
+                        }
                         parkedResume = { continuation.resume() }
                         let waiter = parkedWaiter
                         parkedWaiter = nil
-                        return waiter
+                        return .wait(waiter)
                     }
-                    waiter?()
+                    switch next {
+                    case .resumeNow: continuation.resume()
+                    case .wait(let waiter): waiter?()
+                    }
                 }
                 return .denied
             }
@@ -1623,6 +1709,7 @@ import Testing
             let gate: (() -> Void)? = lock.withLock {
                 let gate = parkedResume
                 parkedResume = nil
+                if gate == nil { pendingResume = true }
                 return gate
             }
             gate?()
@@ -2367,6 +2454,8 @@ import Testing
         #expect(!vc.test_rowIsBroken(.localNetwork))
         #expect(vc.test_ribbonStatusText == "This was on \u{2014} macOS says it's off now.")
         #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
+        #expect(vc.test_ribbonStatusTextColor == Tokens.Color.label2,
+                "the failure hue is graphical-object-only (house rule 8) — the words beside the red glyph stay ordinary body ink")
     }
 
     @Test func permissionLostNamesTheUnmetPermissionInTheHeader() {

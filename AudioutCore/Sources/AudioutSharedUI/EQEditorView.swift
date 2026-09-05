@@ -213,7 +213,7 @@ public final class EQEditorView: NSView {
         // `secondaryLabel`, never `tertiaryLabel`: the line is live state text
         // explaining the controls beneath it, and the module rule is that a
         // dimmed label must be dimmed BY something.
-        bypassLabel.textColor = Tokens.Color.secondaryLabel
+        bypassLabel.textColor = Tokens.Color.label2
         bypassLabel.lineBreakMode = .byTruncatingTail
     }
 
@@ -222,7 +222,7 @@ public final class EQEditorView: NSView {
         configureGainSlider(trebleSlider, action: #selector(trebleChanged(_:)), label: "Treble")
         for readout in [bassReadout, trebleReadout, balanceReadout] {
             readout.font = Tokens.Font.caption
-            readout.textColor = Tokens.Color.secondaryLabel
+            readout.textColor = Tokens.Color.label2
             readout.alignment = .right
         }
 
@@ -289,7 +289,7 @@ public final class EQEditorView: NSView {
     /// and readout-to-readout with Bass/Treble.
     private func sliderRow(caption: NSTextField, middle: NSView, readout: NSTextField?) -> NSView {
         caption.font = Tokens.Font.caption
-        caption.textColor = Tokens.Color.secondaryLabel
+        caption.textColor = Tokens.Color.label2
         let row = NSStackView(views: readout.map { [caption, middle, $0] } ?? [caption, middle])
         row.translatesAutoresizingMaskIntoConstraints = false
         row.orientation = .horizontal
@@ -316,7 +316,7 @@ public final class EQEditorView: NSView {
         let rightLabel = NSTextField(labelWithString: "R")
         for label in [leftLabel, rightLabel] {
             label.font = Tokens.Font.caption
-            label.textColor = Tokens.Color.tertiaryLabel
+            label.textColor = Tokens.Color.label3
         }
         let row = NSStackView(views: [leftLabel, balanceSlider, rightLabel])
         row.translatesAutoresizingMaskIntoConstraints = false
@@ -358,15 +358,15 @@ public final class EQEditorView: NSView {
         advancedTitle.attributedTitle = NSAttributedString(
             string: "Advanced",
             attributes: [.font: Tokens.Font.caption,
-                         .foregroundColor: Tokens.Color.secondaryLabel])
+                         .foregroundColor: Tokens.Color.label2])
         advancedTitle.target = self
         advancedTitle.action = #selector(advancedTitleTapped(_:))
 
         advancedHint.font = Tokens.Font.caption
-        advancedHint.textColor = Tokens.Color.tertiaryLabel
+        advancedHint.textColor = Tokens.Color.label3
 
         advancedReadout.font = Tokens.Font.caption
-        advancedReadout.textColor = Tokens.Color.secondaryLabel
+        advancedReadout.textColor = Tokens.Color.label2
         advancedReadout.alignment = .right
         advancedReadout.widthAnchor.constraint(
             equalToConstant: EQEditorView.eqDrawerReadoutWidth).isActive = true
@@ -457,7 +457,7 @@ public final class EQEditorView: NSView {
         // the unit for the row of numbers rather than an eleventh column.
         hzLegend.translatesAutoresizingMaskIntoConstraints = false
         hzLegend.font = Tokens.Font.caption
-        hzLegend.textColor = Tokens.Color.tertiaryLabel
+        hzLegend.textColor = Tokens.Color.label3
         advancedContent.addSubview(hzLegend)
         constraints.append(hzLegend.centerXAnchor.constraint(
             equalTo: advancedContent.leadingAnchor, constant: leadingInset / 2))
@@ -488,7 +488,7 @@ public final class EQEditorView: NSView {
 
         let label = NSTextField(labelWithString: title)
         label.font = Tokens.Font.caption
-        label.textColor = Tokens.Color.tertiaryLabel
+        label.textColor = Tokens.Color.label3
         label.alignment = .center
         bandLabels.append(label)
 

@@ -22,8 +22,15 @@ or `GroupController`.
 - The identity stack yields the Equalizer slot on EVERY row, so names truncate alike.
 - Instruments reconcile accessibility-display changes live; the accent dial is a third trigger.
 - Warm ink and gold wash mean `isRouteArmed`; cool means silent. Instruments are flat, no `CALayer` blooms.
+- `Tokens.Color.muted` is fenced to the device row's engaged mute button; a second consumer fails a test.
 - `setContent`'s `defaultSize:` seeds only the first mount of a content controller.
 - `ControlPanelBackingView` is an approved custom-drawn exception; NSPanel has no arrow.
+- `Tokens.Color.shadow`'s three real consumers are flat and clipped, never an
+  `NSShadow`: `WarmFaderCell` (here), `AlignmentPlateCell` (`AudioutPopoverUI`),
+  and `GroupedSectionView`'s `.well` style (`AudioutWindowUI`, the device
+  detail page's Equalizer recess, 2026-09-04). `WarmFaderCell` and the `.well`
+  style each draw one inset-shade band; `AlignmentPlateCell` draws two lips (a
+  lit one and a shade one) at its own per-state alphas.
 - Stability findings carry `STABILITY(id)` markers; sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 - Long-form traps and changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md); grep before debugging.
 

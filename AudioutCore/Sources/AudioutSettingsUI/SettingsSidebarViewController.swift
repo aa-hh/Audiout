@@ -176,7 +176,7 @@ extension SettingsSidebarViewController: NSOutlineViewDelegate {
         let textField = NSTextField(labelWithString: "")
         textField.translatesAutoresizingMaskIntoConstraints = false
         textField.font = Tokens.Font.captionEmphasized
-        textField.textColor = Tokens.Color.secondaryLabel
+        textField.textColor = Tokens.Color.label2
         textField.lineBreakMode = .byTruncatingTail
         cell.addSubview(textField)
         cell.textField = textField

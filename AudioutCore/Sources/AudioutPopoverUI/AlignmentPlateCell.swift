@@ -249,7 +249,7 @@ public final class AlignmentPlateCell: NSButtonCell {
     ///   `AlignmentTokenContrastTests` uses to measure a token under a fixed
     ///   appearance. `gold` is still read from Tokens rather than copied, so
     ///   the accent dial and Increase Contrast both still reach it.
-    private static var primaryFillColor: NSColor {
+    static var primaryFillColor: NSColor {
         var resolved = Tokens.Color.gold
         NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
             resolved = Tokens.Color.gold.usingColorSpace(.sRGB) ?? resolved
@@ -261,7 +261,7 @@ public final class AlignmentPlateCell: NSButtonCell {
     /// goes white under light Increase Contrast, and white on the pinned
     /// `#E8B84B` measures 1.84:1 — the ink has to be resolved under the same
     /// appearance the fill is (10.18:1).
-    private static var primaryInkColor: NSColor {
+    static var primaryInkColor: NSColor {
         var resolved = Tokens.Color.inkOnFill
         NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
             resolved = Tokens.Color.inkOnFill.usingColorSpace(.sRGB) ?? resolved

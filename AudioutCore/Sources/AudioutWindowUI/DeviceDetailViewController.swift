@@ -26,10 +26,12 @@ import AudioutSharedUI
 ///   it is a PLAIN label — bordered + pencil means editable, bare means
 ///   read-only, which is exactly the difference between a group's name
 ///   (renameable) and a device's (not);
-/// - "Equalizer" — the page's ONE INSTRUMENT, and therefore its ONLY
-///   ``GroupedSectionView/Style/card``. Hidden whole for This Mac (the device
-///   the audio comes FROM has no send to tune), which is why the "Groups"
-///   title below it carries two alternative top constraints;
+/// - "Equalizer" — the page's ONE INSTRUMENT, and therefore its ONLY box: a
+///   ``GroupedSectionView/Style/well`` rather than `.card`, because in light
+///   `.card`'s `raised` fill measures identical to this pane's own
+///   `canvas`/`panel` ground (2026-09-04). Hidden whole for This Mac (the
+///   device the audio comes FROM has no send to tune), which is why the
+///   "Groups" title below it carries two alternative top constraints;
 /// - "Groups" — BARE rows, one per saved group whose `memberIDs` contain this
 ///   device, in the order the sidebar lists them, each the group's icon + name
 ///   + a trailing chevron. A row NAVIGATES: it reports out through
@@ -77,9 +79,10 @@ public final class DeviceDetailViewController: NSViewController {
     /// contributes is the inset hairline between adjacent rows.
     private let groupsWell = GroupedSectionView()
     private let aboutWell = GroupedSectionView()
-    /// The page's ONE instrument, and therefore its one `.card`, wrapping the
-    /// shared editor. Hidden whole for This Mac — the audio's SOURCE has no
-    /// send to tune.
+    /// The page's ONE instrument, wrapping the shared editor — a `.well`
+    /// (recessed), not a `.card`, so it still reads sunk where `raised`
+    /// flattens to the pane's own ground in light (2026-09-04). Hidden whole
+    /// for This Mac — the audio's SOURCE has no send to tune.
     private let eqWell = GroupedSectionView()
     private let eqEditor: EQEditorView
     /// The three slot titles. Each is a plain sibling label sitting on bare
@@ -170,6 +173,7 @@ public final class DeviceDetailViewController: NSViewController {
         iconWell.translatesAutoresizingMaskIntoConstraints = false
         iconWell.widthAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
         iconWell.heightAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
+        iconWell.setAccessibilityLabel("Edit speaker icon")
         iconWell.onClick = { [weak self] in
             _ = self?.presentIconPicker()
         }
@@ -260,10 +264,15 @@ public final class DeviceDetailViewController: NSViewController {
         // container anyone asked for. The two fact lists are stroked `panel`
         // rows (the iPhone companion's PanelRow): the pane ground is `panel`
         // too, so their edge is the only pixel separating them from it. The
-        // Equalizer stays the one `raised` card, because it is the instrument.
+        // Equalizer stays the page's one instrument, but recesses as `.well`
+        // rather than `.card` (2026-09-04): in light, `raised` measures
+        // identical to this pane's `canvas`/`panel` ground, so the card was a
+        // 1 pt outline around nothing — `well` is the one neutral that stays
+        // visibly sunk on the flat chassis (DESIGN.md "Elevation & Depth").
         headerWell.style = .bare
         groupsWell.style = .panel
         aboutWell.style = .panel
+        eqWell.style = .well
         eqEditor.translatesAutoresizingMaskIntoConstraints = false
         eqEditor.delegate = self
 
@@ -830,7 +839,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// case.
     private func refreshIcon() {
         guard let device = shownDevice else { return }
-        let name = deviceIconController?.symbolName(for: device) ?? device.kind.symbolName
+        let name = deviceIconController?.symbolName(for: device) ?? device.symbolName
         let image = NSImage(systemSymbolName: name, accessibilityDescription: device.name)
         image?.isTemplate = true
         iconWell.iconImageView.image = image
@@ -848,7 +857,7 @@ public final class DeviceDetailViewController: NSViewController {
     @discardableResult
     private func presentIconPicker() -> IconPickerViewController {
         let device = shownDevice
-        let defaultName = device?.kind.symbolName ?? ""
+        let defaultName = device?.symbolName ?? ""
         let currentOverride = device.flatMap { deviceIconController?.overrides[$0.id] }
 
         let picker = IconPickerViewController()
@@ -984,7 +993,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// The symbol name currently rendered by the icon well.
     public var test_iconSymbolName: String? {
         guard let device = shownDevice else { return nil }
-        return deviceIconController?.symbolName(for: device) ?? device.kind.symbolName
+        return deviceIconController?.symbolName(for: device) ?? device.symbolName
     }
 
     /// HEADER PARITY hooks — the three numbers that must match
@@ -1031,16 +1040,19 @@ public final class DeviceDetailViewController: NSViewController {
             .map(\.stringValue)
     }
 
-    /// Every VISIBLE `.card` section's frame in the pane's own coordinates, in
-    /// subview order. There is exactly one on a speaker and none on This Mac:
-    /// a box is earned by holding a different instrument, never by length.
-    /// Walked RECURSIVELY — the column sits inside a scroll view, so the
-    /// sections are several levels down rather than two.
+    /// Every VISIBLE `.card` OR `.well` section's frame in the pane's own
+    /// coordinates, in subview order — both are "box" instruments, as
+    /// opposed to `.panel`/`.bare`. There is exactly one on a speaker (the
+    /// Equalizer, a `.well` since 2026-09-04) and none on This Mac: a box is
+    /// earned by holding a different instrument, never by length. Walked
+    /// RECURSIVELY — the column sits inside a scroll view, so the sections
+    /// are several levels down rather than two.
     public var test_cardFrames: [NSRect] {
         view.layoutSubtreeIfNeeded()
         func cards(_ v: NSView) -> [GroupedSectionView] {
             let here: [GroupedSectionView]
-            if let section = v as? GroupedSectionView, section.style == .card, !section.isHidden {
+            if let section = v as? GroupedSectionView,
+               (section.style == .card || section.style == .well), !section.isHidden {
                 here = [section]
             } else {
                 here = []

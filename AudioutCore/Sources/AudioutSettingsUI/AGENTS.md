@@ -18,7 +18,7 @@ Settings screen. There is no standalone Settings window.
 - `selectSection(at:)` drives real sidebar selection, not a direct pane swap, so tests exercise it.
 - Call `paneView(at:)` on a fresh controller before any show, or the snapshot stretches.
 - The `settings-snapshot` goldens are not regenerated on macOS 27; never regenerate them.
-- Controls stay stock, the background warm; the one gold is the licence sheet's Register.
+- Controls stay stock, the background the pane's own neutral ground; the one gold is the licence sheet's Register.
 - Theme tiles use absolute sRGB mirrors of the palette; live tokens would lie about appearance.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 

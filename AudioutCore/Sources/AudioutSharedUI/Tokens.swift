@@ -371,6 +371,102 @@ public enum Tokens {
                        light: 0x2C6E86, lightHighContrast: 0x265E73)
         }
 
+        /// **Muted** — the one hue in the app that means "this output is
+        /// deliberately silent". Its consumers are the device row's and the
+        /// Main Out row's engaged mute buttons
+        /// (`DeviceRowView.updateMuteTint()`,
+        /// `MainOutRowView.updateMuteTint()`), which fill the
+        /// `custom.speaker.slash.square.fill` symbol's enclosing square
+        /// OPAQUELY in this tone and draw the speaker and slash inside it in
+        /// WHITE.
+        ///
+        /// ONE VALUE IN BOTH APPEARANCES, unlike almost every other token
+        /// here. Two reasons, and the second is the owner's rule. First
+        /// measurement: white marks on the old bright dark value `#8E93F0`
+        /// measure 2.77:1, under the 4.5:1 mark floor — the dark half had to
+        /// come down anyway once the marks stopped being knocked out in
+        /// ``panel``. Second, Alec's rule (2026-09-04): an engaged control
+        /// wears the SAME fill in light and dark, so a muted row looks like a
+        /// muted row wherever you meet it.
+        ///
+        /// WHERE IT MAY NOT APPEAR: anywhere else. It is not a second cool
+        /// accent, not a disabled/dimmed tone, and not available to a control
+        /// that merely happens to be off. A row that is silent for some OTHER
+        /// reason — unavailable, failed, not a member — keeps its existing
+        /// treatment, because this hue answers "someone muted this", not "no
+        /// sound is coming out".
+        ///
+        /// WHY A NEW HUE RATHER THAN ONE ALREADY HERE. `gold`/`ember` mean the
+        /// row is carrying audio, so mute can never borrow them; `failure` red
+        /// means something went wrong and a mute is deliberate; `party`/
+        /// `partyRampDeep` is the alignment wizard's group identity, `ring` its
+        /// reference light, the five `permission*` hues are fenced to
+        /// onboarding, and `bluetoothBrand` is a vendor mark. Cool is the
+        /// semantically right direction (warm means sound is flowing there,
+        /// cool means silent), and this sits 40-43° of hue off `ring`'s
+        /// desaturated steel and 29° off `permissionSystemAudio`'s blue —
+        /// measured ΔE (CIE76) 35.1-66.1 from `ring` and never below 14.0 from
+        /// any permission hue in any cell.
+        ///
+        /// WHY OPAQUE, not the translucent pill it replaces. A tint of this
+        /// hue tops out at 2.3:1 against the row ground even at 45% — under
+        /// the 3:1 non-text floor in every appearance, which is exactly why
+        /// the old 22% neutral pill did not read as anything. Opaque, the
+        /// square clears the floor with room to spare and the marks read as a
+        /// knock-out.
+        ///
+        /// TWO VALUES NOW, and the single-value rule above is retired for
+        /// this token (Alec, 2026-09-05: light mode was "impossible to see").
+        /// The rule assumed the hue was a FILL, where one value reads on both
+        /// grounds. It is a thin outline since the marks stopped being filled
+        /// — 0.875 pt of stroke — and a stroke that thin has no area to carry
+        /// a marginal ratio. Measured on `panel`: `#8E93F0` is 5.18:1 on the
+        /// dark row and 2.45:1 on the light one, which is what he was looking
+        /// at. Deepened for light only, the same move `goldText` makes for the
+        /// same reason: `#585EC7` measures 5.24:1 on light and the dark half
+        /// does not move a pixel.
+        public static var muted: NSColor {
+            warmDynamic(name: "muted", dark: 0x8E93F0, light: 0x585EC7)
+        }
+
+        /// **Equalizer** — the counterpart to ``muted``: the one hue that
+        /// means "this speaker's curve is not flat". Its consumer is the
+        /// device row's engaged Equalizer door
+        /// (`DeviceRowView.updateEQButton()`), which fills the
+        /// `custom.slider.horizontal.2.square.fill` symbol's enclosing square
+        /// OPAQUELY in this tone and draws the two band sliders inside it in
+        /// WHITE.
+        ///
+        /// WHERE IT MAY NOT APPEAR: anywhere else, on the same fence
+        /// ``muted`` carries. It is not a general "on" green, not a success
+        /// tone, and not available to a second control that happens to be
+        /// engaged. A door that is dark for some other reason — unavailable,
+        /// unsupported — keeps its at-rest ink.
+        ///
+        /// TWO VALUES, deepened for light, the same reversal ``muted`` took
+        /// on 2026-09-05 and for the same reason: the mark is a 0.875 pt
+        /// outline now, not a filled square, and a stroke that thin does not
+        /// carry a mid-range ratio. Owner's call from the live build ("the
+        /// emerald is invisible as well"), picked from a rendered ladder.
+        ///
+        /// WHY THIS GREEN. The door used to wear ``goldText``, and gold means
+        /// "audio is flowing here" everywhere else in the app — one hue
+        /// carrying two ideas on a row that also draws the gold live wash
+        /// behind it. Green is unspoken for. `#227950` was chosen over six
+        /// other candidates on separation: it sits 85° of hue off ``muted``,
+        /// which is the control 6 pt to its right, and 11° off
+        /// ``permissionUsageStats``, which is fenced to onboarding and never
+        /// shares a screen with a device row.
+        ///
+        /// CONTRAST RATIONALE (measured on `panel`, floor 3:1). Dark keeps
+        /// `#227950` at 3.70:1 and does not move. Light goes to `#1C6543`,
+        /// 6.73:1 against the 5.14:1 it replaced — one step down the ladder,
+        /// which was as far as the hue could deepen before it stops reading
+        /// as green at all and starts reading as near-black.
+        public static var equalizer: NSColor {
+            warmDynamic(name: "equalizer", dark: 0x227950, light: 0x1C6543)
+        }
+
         /// The COOL body ink — the same second-rung job as ``label2`` on a
         /// surface that carries no warmth of its own. Barred from `liveRow`
         /// and `liveRaised`: it measures 7.07:1 there and would pass, but a
@@ -1056,14 +1152,6 @@ public enum Tokens {
         public static var inkTertiary: NSColor { label3 }
         @available(*, deprecated, renamed: "gold")
         public static var accent: NSColor { gold }
-        @available(*, deprecated, renamed: "failure")
-        public static var warning: NSColor { failure }
-        @available(*, deprecated, renamed: "inkOnFill")
-        public static var inkOnGold: NSColor { inkOnFill }
-        @available(*, deprecated, renamed: "wireCore")
-        public static var syncSignal: NSColor { wireCore }
-        @available(*, deprecated, renamed: "party")
-        public static var partySignal: NSColor { party }
         @available(*, deprecated, renamed: "partyRampDeep")
         public static var partySignalDeep: NSColor { partyRampDeep }
     }

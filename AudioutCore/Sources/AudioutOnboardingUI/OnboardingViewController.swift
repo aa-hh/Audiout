@@ -1368,7 +1368,7 @@ public final class OnboardingViewController: NSViewController {
 
         // A wait takes every button away: the answer is somewhere else now.
         if step == .localNetwork, model.localNetworkPhase == .verifying {
-            content.status = (nil, "Checking your network\u{2026}", Tokens.Color.inkSecondary, true)
+            content.status = (nil, "Checking your network\u{2026}", Tokens.Color.label2, true)
             content.body = Self.ribbonBody(copy.detail)
             return content
         }
@@ -1395,7 +1395,7 @@ public final class OnboardingViewController: NSViewController {
         // Something that was ON is off now — the reason this window re-opened.
         if isPermissionLost(step) {
             content.status = (Self.alertSymbol, "This was on \u{2014} macOS says it's off now.",
-                              Tokens.Color.failure, false)
+                              Tokens.Color.label2, false)
             content.body = Self.ribbonBody(
                 "Everything else you set up is still in place. Turn **Audiout** back on under "
                 + "\(Self.settingsPath(for: step)) — this is the only switch to flip.")
@@ -1422,7 +1422,7 @@ public final class OnboardingViewController: NSViewController {
         if isProvablyDenied(step) {
             content.status = (Self.alertSymbol,
                               "You chose Don't Allow. macOS only asks once \u{2014} from here it's "
-                              + "a switch in System Settings.", Tokens.Color.failure, false)
+                              + "a switch in System Settings.", Tokens.Color.label2, false)
             content.body = Self.ribbonBody(
                 "Turn **Audiout** on under \(Self.settingsPath(for: step)), then come back — "
                 + "this row ticks itself.")
@@ -1569,7 +1569,7 @@ public final class OnboardingViewController: NSViewController {
                     // body is 11 pt caption, and a `bodyEmphasized` run inside
                     // it sets a bigger face on the one word that matters.
                     .font: isBold ? Tokens.Font.captionEmphasized : Tokens.Font.caption,
-                    .foregroundColor: Tokens.Color.inkSecondary,
+                    .foregroundColor: Tokens.Color.label2,
                 ]))
             }
             isBold.toggle()
@@ -1720,13 +1720,13 @@ public final class OnboardingViewController: NSViewController {
             headerMessage = .resume
             titleLabel.stringValue = "Pick up where you left off"
             subtitleLabel.stringValue = Self.resumeSubtitle
-            subtitleLabel.textColor = Tokens.Color.inkSecondary
+            subtitleLabel.textColor = Tokens.Color.label2
             return
         }
         headerMessage = .welcome
         titleLabel.stringValue = "Welcome to Audiout"
         subtitleLabel.stringValue = Self.welcomeSubtitle
-        subtitleLabel.textColor = Tokens.Color.inkSecondary
+        subtitleLabel.textColor = Tokens.Color.label2
     }
 
     static let welcomeSubtitle = "Play your Mac's sound on the speakers around your home. "
@@ -2069,6 +2069,18 @@ public final class OnboardingViewController: NSViewController {
     /// Whether a row is drawing the waiting spinner.
     public func test_rowIsWaiting(_ step: SetupStep) -> Bool { _ = view; return rows[step]?.test_isWaiting ?? false }
 
+    /// Overrides a row's live Reduce Motion read, so a headless test can drive
+    /// its waiting spinner deterministically.
+    public func test_setRowReduceMotionOverride(_ step: SetupStep, _ override: Bool?) {
+        _ = view
+        rows[step]?.test_reduceMotionOverride = override
+    }
+
+    /// Whether a row's waiting spinner is actually animating right now.
+    public func test_rowSpinnerIsAnimating(_ step: SetupStep) -> Bool {
+        _ = view; return rows[step]?.test_spinnerIsAnimating ?? false
+    }
+
     /// Await whatever a genuine return from an armed Settings trip started —
     /// the seam a headless walk needs since that re-read runs off the app's
     /// own reactivation notification, not off a click.
@@ -2175,10 +2187,18 @@ public final class OnboardingViewController: NSViewController {
     /// Whether the preview frame is drawing its well, rim and clip.
     public var test_previewFrameDrawsChrome: Bool { _ = view; return previewFrame.test_drawsChrome }
     public var test_ribbonStatusText: String? { _ = view; return ribbon.test_statusText }
+    /// The status line's own text colour — see ``SetupRibbonView/test_statusTextColor``.
+    public var test_ribbonStatusTextColor: NSColor? { _ = view; return ribbon.test_statusTextColor }
     public var test_ribbonBodyText: String? { _ = view; return ribbon.test_bodyText }
     public var test_ribbonButtonTitles: [String] { _ = view; return ribbon.test_buttonTitles }
     /// Whether a wait is on screen (the spinner beat, with every button gone).
     public var test_ribbonIsWaiting: Bool { _ = view; return ribbon.test_isWaiting }
+    /// Overrides the ribbon's live Reduce Motion read, so a headless test can
+    /// drive its status spinner deterministically.
+    public var test_ribbonReduceMotionOverride: Bool? {
+        get { _ = view; return ribbon.test_reduceMotionOverride }
+        set { _ = view; ribbon.test_reduceMotionOverride = newValue }
+    }
     /// Press the ribbon's primary and wait for whatever it starts.
     public func test_ribbonTapPrimary() async {
         _ = view
@@ -2200,11 +2220,21 @@ public final class OnboardingViewController: NSViewController {
     /// The check row's on-screen title (the state-carrying copy).
     public var test_checkRowTitle: String { _ = view; return checkRow.test_title }
 
-    /// Whether the check row is showing its earned green checkmark.
+    /// Whether the check row is showing its earned gold checkmark.
     public var test_checkRowHasCheckmark: Bool { _ = view; return checkRow.test_hasCheckmark }
 
     /// Whether the check row's spinner is on screen (the running state).
     public var test_checkRowIsSpinning: Bool { _ = view; return checkRow.test_isSpinning }
+
+    /// Overrides the check row's live Reduce Motion read, so a headless test
+    /// can drive its spinner deterministically.
+    public var test_checkRowReduceMotionOverride: Bool? {
+        get { _ = view; return checkRow.test_reduceMotionOverride }
+        set { _ = view; checkRow.test_reduceMotionOverride = newValue }
+    }
+
+    /// Whether the check row's spinner is actually animating right now.
+    public var test_checkRowSpinnerIsAnimating: Bool { _ = view; return checkRow.test_spinnerIsAnimating }
 
     /// What VoiceOver reads for the check row — derived from the same title
     /// the pixels draw.

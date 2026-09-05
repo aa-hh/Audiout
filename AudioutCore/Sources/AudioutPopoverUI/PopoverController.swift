@@ -1594,7 +1594,9 @@ public final class PopoverController: NSObject {
         // a listed Bluetooth row) actually renders under it — chrome must
         // never name absent content. Gated on the SECTIONS, not on collapse
         // (a collapsed subsection still has its rows, exactly as a collapsed
-        // card keeps its own column titles).
+        // card keeps its own column titles). Left-aligns in its own column
+        // on `offsetTitleLeadingFromTrailing`, matching how "Source"
+        // left-aligns above, over the SYNC chip it names.
         let showsOffsetTitle = sections.contains {
             ($0.title == Self.thisMacSubsectionTitle
                 || $0.title == Self.bluetoothSubsectionTitle) && !$0.devices.isEmpty
@@ -1605,11 +1607,15 @@ public final class PopoverController: NSObject {
                             PopoverColumnGrid.feedColumnLeadingFromTrailing,
                         trailingTitleToolTip: Self.sourceColumnHelp,
                         secondTrailingTitle: showsOffsetTitle ? "Offset" : nil,
-                        secondTrailingTitleTrailing:
-                            PopoverColumnGrid.offsetTitleTrailingFromTrailing,
+                        secondTrailingTitleLeadingFromTrailing:
+                            PopoverColumnGrid.offsetTitleLeadingFromTrailing,
                         secondTrailingTitleToolTip: showsOffsetTitle ? Self.offsetColumnHelp : nil,
                         collapsible: true,
                         collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
+                        // The one card whose list can outgrow the surface (roadmap
+                        // 039): past its ceiling the speakers scroll, while this
+                        // header — "Source", "Offset" — holds still above them.
+                        scrollsBody: true,
                         onToggle: { [weak self] in self?.toggleCard(Self.outputDevicesCardTitle) })
         // Dormancy note (spec §4.7 FINAL, S5): only a GENUINELY-DIVERGING group
         // target annotates the card ("Inactive — Audio Out is using 'X'", a
@@ -2568,20 +2574,28 @@ public final class PopoverController: NSObject {
 
     /// The Main Audio ring's RESTING form predicate (ring-resting-state task,
     /// separate from `mainOutConnectionState` above — which stays untouched):
-    /// true iff the active target's members are ALL the local device (the set
-    /// non-empty) and the master is unmuted. This is exactly the case where
-    /// audio is genuinely playing (locally, through the Mac) but there's no
-    /// remote AirPlay handshake for `mainOutConnectionState` to report, so it
-    /// correctly falls through to `.off` — leaving the rail's curve into the
-    /// ring with nothing to land on unless the ring renders its resting form.
+    /// true iff the local device is AMONG the active target's members and the
+    /// master is unmuted. This is exactly the case where audio is genuinely
+    /// playing (locally, through the Mac) but there's no remote AirPlay
+    /// handshake for `mainOutConnectionState` to report, so it correctly falls
+    /// through to `.off` — leaving the rail's curve into the ring with nothing
+    /// to land on unless the ring renders its resting form.
+    ///
+    /// AMONG, not "all of": the mixed set {local, AirPlay…} is reachable
+    /// (`GroupController.setDeviceSelected` auto-swaps the Mac out only when it
+    /// is the SOLE member), and the Mac keeps rendering audio in it. Requiring
+    /// every member to be local hid the ring for the whole time a speaker sat
+    /// selected-but-not-connected beside the Mac — the rail curved up into
+    /// nothing, which is the exact failure this form exists to prevent. When a
+    /// member does connect, `mainOutConnectionState` reports `.connected` and
+    /// the connected form wins regardless of what this returns.
     private func mainOutIsLocalOnlyArmed(_ controller: GroupController) -> Bool {
         let memberIDs: [String]
         switch controller.mainOut {
         case .selectedDevices: memberIDs = Array(controller.selectedDeviceIDs)
         case .group(let id):   memberIDs = controller.groups.first { $0.id == id }?.memberIDs ?? []
         }
-        guard !memberIDs.isEmpty,
-              memberIDs.allSatisfy({ devicesByID[$0]?.isLocalDevice == true })
+        guard memberIDs.contains(where: { devicesByID[$0]?.isLocalDevice == true })
         else { return false }
         return !controller.isMainOutMuted
     }
@@ -3184,6 +3198,14 @@ public final class PopoverController: NSObject {
     /// Apple-owned, so the affordance is the Settings trip — the fresh row then
     /// arrives through the ordinary connected-only listing.
     ///
+    /// The row names the ACTION only: the "Bluetooth Devices" header directly
+    /// above it already names the kind, so the word on both lines would make an
+    /// empty section say the same thing twice. VoiceOver hears the full phrase
+    /// through `accessibilityLabel` — a button announced on its own has no
+    /// header to lean on. The header itself stays: it is the collapse key, it
+    /// is the shape the AirPlay empty state uses too, and dropping it would
+    /// only push "Bluetooth" back down into this row.
+    ///
     /// A LINK, never a push button: a bordered pill is the only chrome-drawn
     /// control in a card of borderless rows, which lets an ABSENCE — a section
     /// with nothing in it — pull more eye than the live speakers above it.
@@ -3193,9 +3215,17 @@ public final class PopoverController: NSObject {
     /// `test_fireBluetoothConnectClick`). Deliberately NOT accent-tinted: gold is
     /// spoken for here — it means "in the mix" — and a gold link in a device list
     /// would claim a membership it doesn't have.
+    ///
+    /// Leading edge sits on `firstElementLeading(indented: false)` (38.5), the
+    /// same x a device row's ICON starts at — not `nameColumnLeading` (73.5),
+    /// which is where the NAME starts, one column further in. With no device
+    /// rows present under the subsection title to compare against, the deeper
+    /// anchor would read as an indent nested inside another indent; the "+"
+    /// sits exactly where a device icon would instead.
     private func makeBluetoothConnectRow() -> NSView {
-        let button = PointingHandButton(title: "Connect a Bluetooth device…",
+        let button = PointingHandButton(title: "Connect a speaker",
                                         target: self, action: #selector(bluetoothConnectRowClicked(_:)))
+        button.setAccessibilityLabel("Connect a Bluetooth speaker")
         button.translatesAutoresizingMaskIntoConstraints = false
         button.bezelStyle = .accessoryBar
         button.isBordered = false
@@ -3204,8 +3234,9 @@ public final class PopoverController: NSObject {
         // greyed-out placeholder line. `contentTintColor` reliably tints a
         // button's template IMAGE (the comment below covers why the TITLE takes
         // a different route), so the glyph carries the same neutral secondary
-        // tone the title does.
-        button.image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil)
+        // tone the title does. Filled (`plus.circle.fill`) rather than outlined,
+        // for a simpler, more inviting mark.
+        button.image = NSImage(systemSymbolName: "plus.circle.fill", accessibilityDescription: nil)
         button.imagePosition = .imageLeading
         button.contentTintColor = Tokens.Color.secondaryLabel
         // The title's colour is set through `attributedTitle`, not
@@ -3213,18 +3244,21 @@ public final class PopoverController: NSObject {
         // IMAGE, but its effect on a title varies by bezel style. The dynamic
         // token resolves per appearance at draw time (the same way the FEED
         // pills' attributed colours do), so a live light/dark switch follows.
+        // The TITLE reads at full `label` while the GLYPH stays `secondaryLabel`
+        // — the weight difference between the two carries the row's appeal,
+        // instead of a bordered pill.
         button.attributedTitle = NSAttributedString(
             string: button.title,
             attributes: [.font: Tokens.Font.menuItem,
-                         .foregroundColor: Tokens.Color.secondaryLabel])
+                         .foregroundColor: Tokens.Color.label])
         bluetoothConnectButton = button
         let wrapper = NSView()
         wrapper.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(button)
-        let nameColumnLeading = PopoverColumnGrid.nameColumnLeading
+        let leading = PopoverColumnGrid.firstElementLeading(indented: false)
         NSLayoutConstraint.activate([
             wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
-            button.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
+            button.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: leading),
             button.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
         ])
         return wrapper
@@ -3531,7 +3565,7 @@ public final class PopoverController: NSObject {
             entries.append(.init(id: Self.resumeDestinationID(forDeviceID: resumeDevice.id),
                                  title: "Resume → \(resumeDevice.name)",
                                  isLocal: false,
-                                 symbolName: resumeDevice.kind.symbolName,
+                                 symbolName: resumeDevice.symbolName,
                                  isStandalone: true,
                                  subtitle: "Return to where this app was playing"))
         }
@@ -3577,14 +3611,14 @@ public final class PopoverController: NSObject {
                 return false
             }
             entries.append(.init(id: device.id, title: device.name, isLocal: false,
-                                 symbolName: device.kind.symbolName,
+                                 symbolName: device.symbolName,
                                  subtitle: othersAlreadyRoutedHere ? Self.sameSpeakerQualitySubtitle : nil))
         }
         if case .device(let id) = current,
            !available.contains(where: { $0.id == id }),
            let device = devices.first(where: { $0.id == id && !$0.isLocalDevice }) {
             entries.append(.init(id: device.id, title: device.name, isLocal: false,
-                                 symbolName: device.kind.symbolName,
+                                 symbolName: device.symbolName,
                                  subtitle: Self.offlineDestinationSubtitle))
         }
         return entries
@@ -3824,16 +3858,18 @@ public final class PopoverController: NSObject {
         // A deselect may have taken the alignment wizard's target out of the
         // user's audio intent — tear it down now, not on the next snapshot.
         reconcileBTAlignmentNotes(animated: true)
-
-        // A4: an auto-swap toggled the LOCAL row's membership for the user (not a
-        // direct click on that row), so flash it once to draw the eye. Must run
-        // AFTER the repaint above so it targets the currently-mounted row instance
-        // (this path does no rebuild, so `deviceRowsByID`'s local row is live);
-        // `flashRow()` is a no-op under Reduce Motion and when no row exists.
-        if result.autoSwappedCurrentDevice,
-           let localID = devicesByID.values.first(where: \.isLocalDevice)?.id {
-            deviceRowsByID[localID]?.flashRow()
-        }
+        // An auto-swap does NOT flash the Mac's row (Alec, live, 2026-09-05:
+        // "it quickly flashes on the MacBook before going to the device I just
+        // clicked on … same thing when it goes backwards"). The A4 attention
+        // pulse is `Tokens.Color.gold`, which everywhere else on this panel
+        // means signal — in the mix, carrying audio — so a half-second gold
+        // wash over the whole Mac row at the exact moment its membership
+        // changes reads as "the Mac just took the audio", the opposite of what
+        // happened, in BOTH directions of the swap (`setDeviceSelected` raises
+        // `autoSwappedCurrentDevice` for the AirPlay-takes-over case and for
+        // the current-device floor that hands the audio back). The checkbox,
+        // the node dot and the row's own wash all moved synchronously in the
+        // repaint above, so nothing is left unsaid without it.
     }
 
     private func presentRefusal(_ reason: String) {
@@ -3889,6 +3925,15 @@ public final class PopoverController: NSObject {
     /// Devices" split. `nil` if no such row.
     public func test_appRowDestinationTitles(for bundleID: String) -> [String]? {
         appRowsByBundleID[bundleID]?.test_menuTitles
+    }
+
+    /// The glyph `bundleID`'s row offers for one destination — the same
+    /// resolved symbol the device rows draw, so a pair of AirPods is
+    /// headphones in both places rather than a radio here and headphones
+    /// there. `nil` if no such row or destination.
+    public func test_appRowDestinationSymbolName(for bundleID: String,
+                                                 destinationID: String) -> String? {
+        appRowsByBundleID[bundleID]?.test_destinationSymbolName(forDestinationID: destinationID)
     }
 
     /// The currently selected destination id for `bundleID`'s row (the sentinel
@@ -3982,6 +4027,12 @@ public final class PopoverController: NSObject {
     public func test_columnTitleToolTips(title: String) -> [String?] {
         panel.test_columnTitleToolTips(title: title)
     }
+    /// Each of `title`'s column legends' leading edge, inward from the header
+    /// row's trailing edge, in creation order — the assertion surface for a
+    /// legend's left-aligned POSITION (e.g. "Source", "Offset").
+    public func test_columnTitleLeadingInsets(title: String) -> [CGFloat] {
+        panel.test_columnTitleLeadingInsets(title: title)
+    }
     /// Whether the header accessory for `title` is enabled (`nil` if none) — F1.
     public func test_cardAccessoryEnabled(title: String) -> Bool? {
         panel.test_accessoryEnabled(title: title)
@@ -4056,6 +4107,30 @@ public final class PopoverController: NSObject {
     /// Drive the resize primitive directly (offscreen; no live popover) so tests can
     /// assert the published size equals the content's fitting height.
     public func test_applyExactFitSize() { panel.panelContentDidChangeHeight(animated: false) }
+
+    // MARK: Device-list ceiling hooks (roadmap 039)
+
+    /// Apply the session's content-height limit exactly as the surface does —
+    /// including the measure that follows it in `measureSessionContentSize`, which is
+    /// the pass that settles the list's clip view over the new ceiling. Without
+    /// it the scroll view's own geometry still reads its uncapped height.
+    public func test_applyContentHeightLimit(_ maxContentHeight: CGFloat) {
+        panel.applyContentHeightLimit(maxContentHeight)
+        _ = panel.fittingSizeSettled()
+    }
+    /// The ceiling the device list currently wears.
+    public var test_deviceListCeiling: CGFloat { panel.test_deviceListCeiling }
+    /// The device list's scroll view (`nil` before the card is built).
+    public var test_deviceListScrollView: NSScrollView? { panel.test_deviceListScrollView }
+    /// A card's always-visible header row (the chrome above a scrolling body).
+    public func test_cardHeaderRow(title: String) -> NSView? {
+        panel.test_cardHeaderRow(title: title)
+    }
+    /// Drive the keyboard-focus reveal without a window to hold the responder.
+    @discardableResult
+    public func test_revealFocusedRow(_ responder: NSResponder?) -> Bool {
+        panel.revealFocusedRow(responder)
+    }
 
     /// The collapse-reactive rail geometry the overlay resolves from the current
     /// laid-out frames (origin at ring vs collapsed header, the terminus dot, the
@@ -4175,6 +4250,25 @@ public final class PopoverController: NSObject {
     /// Whether the mounted Connect row carries its leading glyph — the half of
     /// "reads as clickable" a headless run can actually see.
     public var test_bluetoothConnectRowHasGlyph: Bool { bluetoothConnectButton?.image != nil }
+
+    /// The Connect row's visible title and the label VoiceOver speaks. They
+    /// differ on purpose: the subsection header carries "Bluetooth" for the
+    /// eye, the accessibility label carries it for the ear.
+    public var test_bluetoothConnectRowTitles: (visible: String, spoken: String?)? {
+        guard let button = bluetoothConnectButton else { return nil }
+        return (button.title, button.accessibilityLabel())
+    }
+
+    /// Leading inset of the Connect row's button from its own row's leading
+    /// edge — pinned to `firstElementLeading(indented: false)` (where a
+    /// device row's ICON sits), not the deeper `nameColumnLeading` (where a
+    /// NAME sits), so the "+" reads as one indent step, not two. `nil` if the
+    /// row isn't mounted. Force a layout pass first (e.g. via
+    /// `test_panelView`) so the frame is current.
+    public var test_bluetoothConnectRowLeadingInset: CGFloat? {
+        guard let button = bluetoothConnectButton, let wrap = button.superview else { return nil }
+        return button.frame.minX - wrap.bounds.minX
+    }
 
     /// The AirPlay empty-state line the last rebuild rendered, `nil` when it
     /// rendered none.

@@ -365,16 +365,26 @@ public final class GroupsOverviewViewController: NSViewController {
     /// One card built off-screen, for the ink and seat seams below: the grid's
     /// real cells are never realized headlessly, so a test that read them
     /// would read nothing.
-    private static func makeCard(isLive: Bool) -> GroupCardView {
+    private static func makeCard(isLive: Bool,
+                                 chipSymbolNames: [String] = [],
+                                 overflowText: String? = nil) -> GroupCardView {
         let card = GroupCardView()
         card.plan = CardPlan(groupID: "g",
                              name: "Test",
                              symbolName: Group.defaultIconSymbolName,
                              memberCount: 2,
                              isLive: isLive,
-                             chipSymbolNames: [],
-                             overflowText: nil)
+                             chipSymbolNames: chipSymbolNames,
+                             overflowText: overflowText)
         return card
+    }
+
+    /// One card and everything it hangs off itself — its icon seat, a member
+    /// chip and the overflow chip — built off-screen. The grid's real cells
+    /// are never realized headlessly, so this is the only way a test can
+    /// reach those views at all (`test_memberChipGlyphTint`'s reasoning).
+    public static func test_makeCardOffScreen() -> NSView {
+        makeCard(isLive: true, chipSymbolNames: ["hifispeaker"], overflowText: "+2")
     }
 
     /// A card's name colour — cool while the group is idle, `label` while it
@@ -654,6 +664,7 @@ private final class GroupCardView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         build()
+        redrawOnAccessibilityDisplayChange()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -849,6 +860,13 @@ private final class GroupCardView: NSView {
 /// dark and 1.154:1 light with a `containerEdge` edge at 2.006:1 / 1.751:1.
 private final class IconSeatView: NSView {
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        redrawOnAccessibilityDisplayChange()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
     var isLive: Bool = false { didSet { needsDisplay = true } }
 
     /// The edge this seat draws, and how thick — read by `draw(_:)` and by the
@@ -879,8 +897,9 @@ private final class IconSeatView: NSView {
 }
 
 /// One member speaker's 24 pt chip along a card's bottom edge — a `raised`
-/// fill in a `containerEdge` edge at the control radius — or the dashed
-/// borderless `+N` chip standing in for the members past the fourth.
+/// fill in a `containerEdge` edge at the control radius — or the dashed,
+/// unfilled `+N` chip standing in for the members past the fourth, sharing
+/// the same `containerEdge` stroke.
 private final class MemberChipView: NSView {
 
     private let isOverflow: Bool
@@ -905,6 +924,7 @@ private final class MemberChipView: NSView {
             glyphView.heightAnchor.constraint(equalToConstant: 13),
         ])
         applyFixedSize()
+        redrawOnAccessibilityDisplayChange()
     }
 
     init(overflowText: String) {
@@ -921,6 +941,7 @@ private final class MemberChipView: NSView {
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
         applyFixedSize()
+        redrawOnAccessibilityDisplayChange()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -941,15 +962,14 @@ private final class MemberChipView: NSView {
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
                                 xRadius: radius, yRadius: radius)
         path.lineWidth = 1
+        Tokens.Color.containerEdge.setStroke()
         if isOverflow {
             path.setLineDash([3, 2], count: 2, phase: 0)
-            Tokens.Color.hairline.setStroke()
             path.stroke()
             return
         }
         Tokens.Color.raised.setFill()
         path.fill()
-        Tokens.Color.containerEdge.setStroke()
         path.stroke()
     }
 
@@ -991,6 +1011,7 @@ private final class NewGroupTileView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         build()
+        redrawOnAccessibilityDisplayChange()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

@@ -399,18 +399,21 @@ public final class MainOutRowView: NSView {
 
         // Speaker mute button, LEFT of the master slider (same visual pattern as
         // `DeviceRowView`'s per-device mute): `pushOnPushOff` so the mute STATE
-        // still toggles and the delegate still fires, but the glyph itself stays
-        // fixed on `speaker.wave.2.fill` in both states (no alternate/slash image
-        // — ahh wants the icon to never change on toggle). Muted state is shown by
-        // tint color only.
+        // still toggles and the delegate still fires, while the SYMBOL swaps
+        // between its outline and filled squares. The mark used to stay fixed
+        // in both states (Alec, an earlier call); he reversed that on
+        // 2026-09-04 — a mute that changes nothing but its tint reads as no
+        // mute at all. This is only the seeded image; `updateMuteTint()` owns
+        // both states and re-makes it on every appearance change.
         muteButton.translatesAutoresizingMaskIntoConstraints = false
         muteButton.setButtonType(.pushOnPushOff)
         muteButton.isBordered = false
         muteButton.imagePosition = .imageOnly
-        let muteConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
-        muteButton.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
-                                   accessibilityDescription: "Mute Main Audio")?
-            .withSymbolConfiguration(muteConfig)
+        // Unscaled — see ``RowAccessorySymbol/pointSize``.
+        muteButton.imageScaling = .scaleNone
+        muteButton.image = RowAccessorySymbol.image(
+            named: RowAccessorySymbol.muteRest,
+            ink: Tokens.Color.label2)
         muteButton.target = self
         muteButton.action = #selector(muteToggled(_:))
         muteButton.setContentHuggingPriority(.required, for: .horizontal)
@@ -587,22 +590,43 @@ public final class MainOutRowView: NSView {
 
     // MARK: Private Helpers
 
-    /// Updates the mute button's engaged treatment (tint + the S3 filled
-    /// accent pill, spec §3.4/§3.5) and accessibility label for the current
-    /// state. Drawing-only, on the real `NSButton`'s backing layer — behavior,
-    /// keyboard, and VoiceOver untouched; the glyph NEVER swaps to a slash
-    /// (locked decision). Mirrors `DeviceRowView.updateMuteTint()`.
+    /// Updates the mute button for the current state: `.on` draws
+    /// ``RowAccessorySymbol/muteEngaged``, the filled square with a
+    /// ``Tokens/Color/muted`` enclosure and the marks punched out of it;
+    /// `.off` draws
+    /// ``RowAccessorySymbol/muteRest``, the outline square in one neutral ink.
+    /// Drawing only — behavior, keyboard and VoiceOver untouched. The SAME two
+    /// symbols every device row below wears, so the two rows cannot present
+    /// one state as two different objects.
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
-        muteButton.contentTintColor = engaged ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
-        muteButton.wantsLayer = true
-        muteButton.layer?.cornerRadius = PopoverColumnGrid.mutePillCornerRadius
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            muteButton.layer?.backgroundColor = engaged
-                ? Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha).cgColor
-                : nil
-        }
+        // One shape, two inks — see `DeviceRowView.updateMuteTint()`.
+        muteButton.image = RowAccessorySymbol.image(
+            named: RowAccessorySymbol.muteRest,
+            ink: engaged ? Self.engagedInk(in: effectiveAppearance)
+                         : Self.restInk(in: effectiveAppearance))
         configureAccessibility()
+    }
+
+    /// ``Tokens/Color/muted`` on the enclosing square, the marks punched
+    /// through it as transparency. Resolved in this row's own appearance,
+    /// because a dynamic `NSColor` would otherwise resolve against whichever
+    /// appearance is current when the image is composited.
+    private static func engagedInk(in appearance: NSAppearance) -> NSColor {
+        var fill = Tokens.Color.muted
+        appearance.performAsCurrentDrawingAppearance {
+            fill = Tokens.Color.muted.usingColorSpace(.sRGB) ?? fill
+        }
+        return fill
+    }
+
+    /// One neutral ink over the whole outline square.
+    private static func restInk(in appearance: NSAppearance) -> NSColor {
+        var ink = Tokens.Color.label
+        appearance.performAsCurrentDrawingAppearance {
+            ink = Tokens.Color.label.usingColorSpace(.sRGB) ?? ink
+        }
+        return ink
     }
 
     /// The pill's engaged fill is a static `CGColor` — re-stamp on a live
@@ -747,9 +771,23 @@ public final class MainOutRowView: NSView {
     public var test_hasWarmFaderSkin: Bool { slider.cell is WarmFaderCell }
     /// The dot's current fill color (resolved) — gold armed / socket dark.
     public var test_dotFillColor: NSColor? { armedDotView.test_fillColor }
-    /// Whether the master-mute button is drawing its ENGAGED pill (S3).
+    /// Whether the master-mute button is drawing its ENGAGED symbol — a
+    /// raster comparison against the same symbol built from the same ink,
+    /// so the hook reads the drawn image rather than a flag.
     public var test_isMutePillEngaged: Bool {
-        muteButton.state == .on && muteButton.layer?.backgroundColor != nil
+        guard muteButton.state == .on,
+              let drawn = muteButton.image?.tiffRepresentation,
+              let reference = RowAccessorySymbol.image(
+                named: RowAccessorySymbol.muteRest,
+                ink: Self.engagedInk(in: effectiveAppearance))?.tiffRepresentation
+        else { return false }
+        return drawn == reference
+    }
+    /// The mute mark's frame — the button, which is the mark now, so a test
+    /// can pin this row's control to the same size the device rows below draw.
+    public var test_muteSeatFrame: NSRect {
+        layoutSubtreeIfNeeded()
+        return muteButton.frame
     }
     /// The row's current VoiceOver VALUE ("muted" / "armed" composition).
     public var test_accessibilityValue: String? { accessibilityValue() as? String }

@@ -15,7 +15,7 @@ import AudioutSharedUI
 /// - `running` shows the small spinner in the trailing slot (the same "a wait
 ///   on screen says what it is waiting for" rule the cards follow: the title
 ///   itself names the wait).
-/// - `passed` earns the same green checkmark a completed card gets.
+/// - `passed` earns the same gold checkmark a completed card gets.
 ///
 /// The glyph is `Tokens.Color.gold` ON PURPOSE, not a permission hue: this
 /// row is the first note of the finale's colour story (gold ripple, gold
@@ -104,16 +104,22 @@ final class SetupCheckRowView: NSView {
         ])
     }
 
+    /// Whether Reduce Motion is on — through the override seam every animated
+    /// instrument in this codebase uses, so a headless test can drive both sides.
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
     func apply(_ state: SetupFinalCheckState) {
         self.state = state
         titleLabel.stringValue = Self.title(for: state)
-        titleLabel.textColor = state == .pending ? Tokens.Color.tertiaryLabel
-                                                 : Tokens.Color.secondaryLabel
+        titleLabel.textColor = state == .pending ? Tokens.Color.label3
+                                                 : Tokens.Color.label2
         // The tile's only state role is the dormant dimming — the glyph tint
         // itself never changes (the no-flash rule).
         iconTile.alphaValue = state == .pending ? SetupSpineRowView.lockedTileAlpha : 1
         checkmark.isHidden = state != .passed
-        if state == .running { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        if state == .running && !reduceMotion { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
         applyAccessibility()
     }
 
@@ -141,6 +147,13 @@ final class SetupCheckRowView: NSView {
     var test_title: String { titleLabel.stringValue }
     var test_hasCheckmark: Bool { !checkmark.isHidden }
     var test_isSpinning: Bool { state == .running }
+    /// Overrides the live Reduce Motion read for the check row's spinner, so a
+    /// headless test can drive both sides deterministically.
+    var test_reduceMotionOverride: Bool?
+    /// Whether the spinner is actually animating right now — distinct from
+    /// ``test_isSpinning``, which is the logical state Reduce Motion must not
+    /// silence.
+    var test_spinnerIsAnimating: Bool { state == .running && !reduceMotion }
     var test_tileAlpha: CGFloat { iconTile.alphaValue }
     var test_iconTint: NSColor? { iconTile.test_restingTint }
     var test_accessibilityLabel: String? { accessibilityLabel() }

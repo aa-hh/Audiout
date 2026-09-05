@@ -25,6 +25,11 @@
 # remote/local split and fetches the products it needs.
 set -eu
 
+# A compiler orphaned by a killed wrapper holds the .build lock and makes
+# this script hang with no output at all. Clear it first -- see
+# scripts/reap-orphaned-swift.sh.
+bash "$(dirname "${BASH_SOURCE[0]}")/reap-orphaned-swift.sh" || true
+
 repo_root=$(git rev-parse --show-toplevel)
 package=${AUDIOUT_BUILD_PACKAGE:-AudioutCore}
 

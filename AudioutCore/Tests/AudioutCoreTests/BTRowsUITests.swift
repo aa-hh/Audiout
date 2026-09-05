@@ -14,6 +14,14 @@ import AppKit
 @MainActor
 @Suite final class BTDeviceRowTests: IsolatedSuite {
 
+    /// See ``CompiledSymbolFixture``: without it every symbol below is nil.
+    override init() {
+        super.init()
+        if CompiledSymbolFixture.install() == nil {
+            Issue.record("the symbol fixture failed to compile")
+        }
+    }
+
     private final class SpyDelegate: DeviceRowView.Delegate {
         var toggles: [(on: Bool, id: String)] = []
         var reconnects: [String] = []
@@ -106,7 +114,7 @@ import AppKit
         let row = makeRow(btDevice(available: false, state: .connecting), delegate: SpyDelegate())
         #expect(row.test_busNode == .connecting)
         #expect(row.test_ringForm == .connecting)
-        #expect(row.test_feedText != "Unavailable",
+        #expect(!row.test_feedErrorPillHasGlyph,
                 "the in-flight attempt is never shouted over by the unavailable pill")
     }
 
@@ -155,21 +163,32 @@ import AppKit
         #expect(row.test_meterLevel() == 0.4, "levels now land on a meter the user can see")
     }
 
-    // MARK: Failure headline (never instructional sublabels)
+    // MARK: Failure mark (glyph on the row, headline on the tooltip)
 
-    @Test func failedRowRendersTheFailureHeadlineInTheFeedPill() {
+    /// The row draws ONE failure glyph whatever the cause (Alec, 2026-09-04).
+    /// This retires the BT-UI decision that "Connected elsewhere" and "Not
+    /// paired" must read distinctly ON THE ROW — every headline overflowed the
+    /// 52 pt Bluetooth feed slot and clipped mid-word, and Alec chose one
+    /// consistent glyph over words-when-they-fit. The distinction survives, on
+    /// the tooltip and in the spoken value. Still no instructional sublabels.
+    @Test func failedRowRendersAGlyphAndKeepsTheHeadlineOnTheTooltip() {
         let spy = SpyDelegate()
         let elsewhere = makeRow(
             btDevice(available: false, state: .failed(.init(cause: .connectedElsewhere))),
             delegate: spy, selected: true)
-        #expect(elsewhere.test_feedText == "Connected elsewhere")
-        #expect(elsewhere.test_feedIsErrorColored)
+        #expect(elsewhere.test_feedText == nil, "no words in the pill at Bluetooth row width")
+        #expect(elsewhere.test_feedErrorPillHasGlyph)
+        #expect(elsewhere.test_feedErrorGlyphIsFailureColored)
+        #expect(elsewhere.test_feedTooltip == "Connected elsewhere")
+        #expect(elsewhere.test_accessibilityValue?.contains("Connected elsewhere") == true)
         #expect(elsewhere.test_ringForm == .failed)
 
         let notPaired = makeRow(
             btDevice(available: false, state: .failed(.init(cause: .notPaired))),
             delegate: spy, selected: true)
-        #expect(notPaired.test_feedText == "Not paired")
+        #expect(notPaired.test_feedTooltip == "Not paired",
+                "the two causes still read apart — on the tooltip, not on the row")
+        #expect(notPaired.test_accessibilityValue?.contains("Not paired") == true)
         #expect(notPaired.test_statusText == nil, "no instructional sublabels — ever")
     }
 
@@ -271,7 +290,7 @@ import AppKit
         #expect(row.test_syncChipIsEngaged)
         #expect(row.test_syncChipFill
                 == Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha),
-                "exactly the mute pill's engaged fill")
+                "the engaged-chrome fill at the pill alpha")
         #expect(row.test_syncChipFill != Tokens.Color.gold, "…and never the gold accent")
         #expect(row.test_syncChipTitleColor == Tokens.Color.engagedChrome)
         #expect(row.test_syncChipBorderColor == Tokens.Color.engagedChrome)
@@ -440,33 +459,70 @@ import AppKit
                 "one name column across every row shape — got \(trailings)")
     }
 
-    /// The door's ONE mark: the glyph goes gold and a step heavier when the
-    /// curve is not flat — the response scope's own two variables (hue and
-    /// line weight) at 13 pt. The door stays image-only either way.
-    @Test func aShapedSpeakerWearsTheGoldGlyphAndAFlatOneDoesNot() {
+    /// The door's active mark: the FILLED
+    /// ``RowAccessorySymbol/equalizerEngaged`` square in
+    /// ``Tokens/Color/equalizer`` with white sliders inside it; a flat curve
+    /// wears the outline square in one neutral ink. It was a bare gold glyph
+    /// until 2026-09-04 (3.64:1 on `canvas` in light against the at-rest
+    /// grey's 5.97:1 — the "on" state read dimmer than the "off" one), then a
+    /// drawn gold seat, and now the symbol's own square. Green, not gold,
+    /// because gold means "audio is flowing here" on this same row.
+    @Test func aShapedSpeakerWearsTheFilledSquareAndAFlatOneDoesNot() {
         let flat = makeRow(btDevice(), delegate: SpyDelegate(), selected: true)
-        #expect(flat.test_eqTintColor == Tokens.Color.label2,
-                "a flat curve leaves the door at rest")
-        #expect(flat.test_eqSymbolIsHeavy == false)
+        #expect(flat.test_eqDrawsRestSymbol, "a flat curve leaves the door at rest")
+        #expect(!flat.test_eqDrawsEngagedSymbol, "…with no fill behind the marks")
         #expect(flat.test_eqButtonHasTitle == false, "the door is image-only")
 
         let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
                              isEQShaped: true)
-        #expect(shaped.test_eqTintColor == Tokens.Color.gold)
-        #expect(shaped.test_eqSymbolIsHeavy,
-                "the weight is the non-colour half of the mark")
+        #expect(shaped.test_eqDrawsEngagedSymbol, "the state is a FILL now, not a glyph hue")
+        #expect(!shaped.test_eqDrawsRestSymbol)
         #expect(shaped.test_eqButtonHasTitle == false)
     }
 
-    /// The mark must not be colour ALONE — the same rule the scope follows.
-    /// Weight is the second cue for a viewer who cannot separate gold from
-    /// grey, and the spoken value is the third.
-    @Test func theShapedMarkCarriesMoreThanItsHue() {
+    /// Shape no longer carries the state — colour does, alone (owner,
+    /// 2026-09-05: filling the square read as too big and too heavy to sit
+    /// beside the row's type). The spoken VoiceOver value is the
+    /// colour-independent cue now; this only pins that the two states still
+    /// render distinguishably at the pixel level.
+    @Test func theShapedAndFlatMarksRenderDifferently() {
         let shaped = makeRow(btDevice(), delegate: SpyDelegate(), selected: true,
                              isEQShaped: true)
         let flat = makeRow(btDevice(), delegate: SpyDelegate(), selected: true)
-        #expect(shaped.test_eqSymbolIsHeavy != flat.test_eqSymbolIsHeavy,
-                "shape survives a viewer who cannot read the hue")
+        let coverage = "shaped \(shaped.test_eqInkCoverage), flat \(flat.test_eqInkCoverage)"
+        #expect(flat.test_eqInkCoverage > 0, "the at-rest door rendered no ink — \(coverage)")
+        #expect(shaped.test_eqInkCoverage > 0, "the shaped door rendered no ink — \(coverage)")
+    }
+
+    /// The door's mark and the muted speaker's are ONE shape — same size, same
+    /// centre line (Alec, 2026-09-04: "the same object in two colours"). They
+    /// were two until then, a 24 x 22 rounded square 6 pt from a capsule, and
+    /// read as two unrelated kinds of control. Hue says which is which now;
+    /// geometry does not.
+    @Test func theDoorMarkAndTheMuteMarkAreOneShape() {
+        let muted = Device(id: "C4-38-75-0E-BF-4A:output", name: "Sonos Move 2",
+                           kind: .bluetooth, supportsAirPlay2: false, isMuted: true)
+        let shaped = makeRow(muted, delegate: SpyDelegate(), selected: true,
+                             isEQShaped: true)
+        shaped.layoutSubtreeIfNeeded()
+
+        guard let doorInk = shaped.test_eqGlyphInkFrame,
+              let muteInk = shaped.test_muteMarkInkFrame else {
+            Issue.record("a mark rendered no ink — this check covered nothing")
+            return
+        }
+        let marks = "door \(doorInk), mute \(muteInk)"
+        #expect(abs(doorInk.width - muteInk.width) <= 1,
+                "the two engaged marks are different widths — \(marks)")
+        #expect(abs(doorInk.height - muteInk.height) <= 1,
+                "…or different heights — \(marks)")
+        #expect(abs(doorInk.midY - muteInk.midY) <= 0.75,
+                "the two engaged marks sit on one centre line — \(marks)")
+        #expect(doorInk.width <= PopoverColumnGrid.eqButtonWidth,
+                "the mark outgrew its column and would eat the gap — \(marks)")
+        // No absolute width assert here — AppKit's rounding grid varies per run.
+        #expect(abs((shaped.test_muteButtonFrame.minX - shaped.test_eqButtonFrame.maxX)
+                    - PopoverColumnGrid.eqToMuteGap) <= 1, "the 6 pt gap to mute is unmoved")
     }
 
     @Test func clickingTheEQButtonOpensTheEqualizer() {
@@ -655,6 +711,27 @@ import AppKit
         #expect(popover.test_bluetoothRowOrder() == ["bt-a:output"])
         #expect(popover.test_offsetColumnTitleShown(),
                 "one listed BT row brings its SYNC chip — and the title back")
+    }
+
+    /// "Offset" left-aligns in its OWN column, over the sync chip, matching how
+    /// "Source" left-aligns over the feed pills. Pins the leading anchor so a
+    /// future change to the chip geometry cannot silently drag the legend off
+    /// its column without a test noticing.
+    @Test func offsetColumnTitleLeftAlignsOverTheSyncChipColumn() {
+        let (popover, _, _) = makePopover()
+        popover.update(devices: [airplay(), bt("bt-a:output", name: "Attic Speaker")])
+        #expect(popover.test_offsetColumnTitleShown(), "precondition: the title is printed")
+        _ = popover.test_panelView   // forces layout so label frames are current
+
+        let insets = popover.test_columnTitleLeadingInsets(title: "Output Devices")
+        #expect(insets.count == 2, "Source, then Offset")
+        let (sourceInset, offsetInset) = (insets[0], insets[1])
+        #expect(abs(sourceInset - PopoverColumnGrid.feedColumnLeadingFromTrailing) <= 1,
+                "Source's own anchor is unchanged")
+        #expect(abs(offsetInset - PopoverColumnGrid.offsetTitleLeadingFromTrailing) <= 1,
+                "Offset now left-aligns on the sync chip's own leading edge")
+        #expect(sourceInset - offsetInset >= 1,
+                "Source sits left of Offset, not stacked over it")
     }
 
     @Test func bluetoothSubsectionRendersAfterAirPlaySortedByRecency() {
@@ -1131,4 +1208,79 @@ import AppKit
                 "a non-Bluetooth row can never carry a drawer")
         #expect(!popover.test_syncDrawerVisible)
     }
+}
+
+/// The dark ink `inkOnFill` carries in three of its four appearances —
+/// `#171104`. Written as a literal on purpose: re-resolving the token would
+/// agree with the seat's border by construction.
+private extension NSColor {
+    var isWarmSignalDarkInk: Bool {
+        guard let srgb = usingColorSpace(.sRGB) else { return false }
+        return abs(srgb.redComponent - 0x17 / 255.0) < 0.01
+            && abs(srgb.greenComponent - 0x11 / 255.0) < 0.01
+            && abs(srgb.blueComponent - 0x04 / 255.0) < 0.01
+    }
+
+    /// The white `inkOnFill` flips to under light + Increase Contrast.
+    var isWarmSignalWhiteInk: Bool {
+        guard let srgb = usingColorSpace(.sRGB) else { return false }
+        return srgb.redComponent > 0.99 && srgb.greenComponent > 0.99
+            && srgb.blueComponent > 0.99
+    }
+}
+
+/// Nested under `SerializedSharedState`: forcing Increase Contrast writes
+/// `Tokens.test_increaseContrastOverride`, which is process-wide.
+extension SerializedSharedState {
+
+@MainActor
+@Suite struct EqualizerEngagedMarkTests {
+
+    /// The engaged door paints ``Tokens/Color/equalizer`` on its enclosing
+    /// square and WHITE on the sliders inside it — in all four appearance
+    /// cells, read back out of the rendered pixels. One fill in light and
+    /// dark is the rule (Alec, 2026-09-04), so this suite is also what fails
+    /// if someone re-splits the hue by appearance.
+    ///
+    /// It replaces the seat-border suite that stood here: the border, the
+    /// gold seat and the `inkOnFill` pin all retired with the drawn seat.
+    @Test func theEngagedDoorPaintsTheReservedHueWithMarksPunchedThrough() {
+        defer { Tokens.test_increaseContrastOverride = nil }
+        let device = Device(id: "C4-38-75-0E-BF-4A:output", name: "Sonos Move 2",
+                            kind: .bluetooth, supportsAirPlay2: false)
+        let row = DeviceRowView(device: device, showsToggle: true, showsMeter: true,
+                                showsBus: true, showsSyncControls: true)
+
+        for (name, appearance) in [("dark", NSAppearance.Name.darkAqua),
+                                   ("light", .aqua)] {
+            for increaseContrast in [false, true] {
+                Tokens.test_increaseContrastOverride = increaseContrast
+                row.appearance = NSAppearance(named: appearance)
+                // The palette is baked by `apply`; a headless view cannot be
+                // trusted to deliver `viewDidChangeEffectiveAppearance` on its
+                // own, and a check that reads a stale image checks nothing.
+                row.apply(device, selected: true, controllable: true, isEQShaped: true)
+
+                var expected = Tokens.Color.equalizer
+                NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
+                    expected = Tokens.Color.equalizer.usingColorSpace(.sRGB) ?? expected
+                }
+                let inks = row.test_eqDrawnInks
+                let cell = "\(name), Increase Contrast \(increaseContrast)"
+                #expect(inks.contains { close($0, expected) },
+                        Comment(rawValue: "\(cell): the square is not the equalizer hue — drew \(inks)"))
+                #expect(!inks.contains { close($0, .white) },
+                        Comment(rawValue: "\(cell): the sliders must be punched through, not painted — drew \(inks)"))
+            }
+        }
+    }
+
+    private func close(_ a: NSColor, _ b: NSColor) -> Bool {
+        guard let a = a.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return false }
+        return abs(a.redComponent - b.redComponent) < 0.02
+            && abs(a.greenComponent - b.greenComponent) < 0.02
+            && abs(a.blueComponent - b.blueComponent) < 0.02
+    }
+}
+
 }

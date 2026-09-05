@@ -34,7 +34,9 @@ import AppKit
 ///    `liveRow`, `liveRaised`, `glow`, `socket` and `meter` — each documented
 ///    as a quiet surface in its own Tokens.swift rationale. `socket` is exempt
 ///    from a GROUND floor only: it is always ringed, and Test D below pins it
-///    against the ring.
+///    against the ring. `panel` is likewise exempt as a ground, but Test A
+///    holds it to a glyph floor in the one place it is a FOREGROUND: knocked
+///    out of the mute pill.
 @MainActor
 extension SerializedSharedState {
 
@@ -157,6 +159,21 @@ extension SerializedSharedState {
         let textGrounds: [(String, NSColor)] = [("canvas", canvas), ("panel", panel),
                                                 ("raised", raised), ("well", well)]
 
+        // The two WASHED grounds a device row's mute pill also sits on, built
+        // the way `DeviceRowView.draw(_:)` builds them: the row's `panel`
+        // ground under the gold live wash, or under the neutral hover wash.
+        // Neither is a token, so neither can be named as one — they are
+        // composited per appearance and handed in as opaque grounds.
+        func rowWashGrounds(_ appearanceName: NSAppearance.Name) -> [(String, NSColor)] {
+            let ground = resolved(panel, appearanceName: appearanceName)
+            func wash(_ token: NSColor, _ alpha: CGFloat) -> NSColor {
+                composited(resolved(token, appearanceName: appearanceName)
+                            .withAlphaComponent(alpha), over: ground)
+            }
+            return [("live wash", wash(Tokens.Color.gold, PopoverColumnGrid.rowLiveWashAlpha)),
+                    ("hover wash", wash(Tokens.Color.engagedChrome, PopoverColumnGrid.rowHoverWashAlpha))]
+        }
+
         let entries: [ContrastEntry] = [
             // TEXT, floor 4.5:1
             ContrastEntry(name: "label2", token: Tokens.Color.label2, floor: 4.5,
@@ -179,12 +196,28 @@ extension SerializedSharedState {
             // NON-TEXT, floor 3.0:1
             ContrastEntry(name: "failure", token: Tokens.Color.failure, floor: 3.0,
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised)])),
+            // `canvas` joined gold's grounds on 2026-09-04. The omission is why
+            // the Equalizer door's gold-on-canvas glyph (3.64:1 light, and
+            // inverted against its own at-rest grey) was never caught here.
             ContrastEntry(name: "gold", token: Tokens.Color.gold, floor: 3.0,
-                         groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
+                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel),
+                                                  ("raised", raised), ("well", well)])),
             ContrastEntry(name: "ember", token: Tokens.Color.ember, floor: 3.0,
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
             ContrastEntry(name: "ring", token: Tokens.Color.ring, floor: 3.0,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
+            // The mute pill is OPAQUE, so it is measured on every ground a
+            // device row can put behind it — at rest, live-washed, hovered.
+            ContrastEntry(name: "muted", token: Tokens.Color.muted, floor: 3.0,
+                         groundsFor: { appearanceName in
+                             [("canvas", canvas), ("panel", panel), ("raised", raised)]
+                                 + rowWashGrounds(appearanceName)
+                         }),
+            // `panel` is a BACKDROP everywhere else; on the mute pill it is the
+            // ink the slashed glyph is knocked out in, so it carries a glyph
+            // floor there and nowhere else.
+            ContrastEntry(name: "panel knocked out of muted", token: panel, floor: 4.5,
+                         groundsFor: sameGrounds([("muted", Tokens.Color.muted)])),
             ContrastEntry(name: "rim", token: Tokens.Color.rim, floor: 3.0,
                          groundsFor: sameGrounds([("canvas", canvas), ("raised", raised), ("well", well)])),
             ContrastEntry(name: "railDormant", token: Tokens.Color.railDormant, floor: 3.0,

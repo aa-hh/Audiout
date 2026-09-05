@@ -228,6 +228,14 @@ public final class DeviceRowView: NSView {
     /// its real checkbox there and never mounts this stack. See
     /// ``updateFeedText()``.
     private let feedStack = NSStackView()
+    /// `feedStack`'s two placements in the FEED column, exactly one active at
+    /// a time. Values LEFT-ALIGN on the column's leading edge, because a row
+    /// of pills that starts at a different x per row is unreadable down a
+    /// list. The failure rung is a lone glyph in a column of its own, so it
+    /// CENTRES instead of sitting where a left-aligned text pill used to
+    /// start (Alec, 2026-09-04).
+    private var feedStackLeadingConstraint: NSLayoutConstraint?
+    private var feedStackCenterConstraint: NSLayoutConstraint?
     /// The transient **"Removed — Undo"** affordance shown after the user takes
     /// a LIVE room out of Main Audio (the highest-stakes click in the app: it
     /// silences a playing room instantly). The host decides when it is offered
@@ -294,11 +302,19 @@ public final class DeviceRowView: NSView {
     /// Mounted only when ``supportsEqualizer``; the layout reserves its slot on
     /// every row either way, so the name truncates identically across rows.
     private let eqButton = NSButton()
-    /// The door's glyph — three band faders, the equalizer's own picture.
-    /// Named because ``updateEQButton`` re-makes the image to change its
-    /// WEIGHT and must ask for the same symbol the builder mounted.
-    private static let eqSymbolName = "slider.horizontal.3"
-    /// The point size every accessory glyph on this row is drawn at.
+    /// The mute button's at-rest symbol — the outline square.
+    private static let muteRestSymbolName = RowAccessorySymbol.muteRest
+    /// The mute button's ENGAGED symbol — the filled square. The mark inside
+    /// is the same slashed speaker either way; what changes is the square.
+    private static let muteEngagedSymbolName = RowAccessorySymbol.muteEngaged
+    /// The Equalizer door's at-rest symbol — the outline square.
+    private static let eqRestSymbolName = RowAccessorySymbol.equalizerRest
+    /// The Equalizer door's ENGAGED symbol — the filled square.
+    private static let eqEngagedSymbolName = RowAccessorySymbol.equalizerEngaged
+    /// The point size every accessory glyph on this row that is NOT one of the
+    /// four custom symbols is drawn at. The symbols carry their own
+    /// (``RowAccessorySymbol/pointSize``), larger, because their enclosing
+    /// square is the whole control rather than a mark inside a seat.
     private static let accessoryGlyphPointSize: CGFloat = 13
 
     /// The under-name VU meter (Warm Signal v4 §Call-1), mounted inside the
@@ -871,57 +887,105 @@ public final class DeviceRowView: NSView {
         layer?.add(transition, forKey: Self.brightenTransitionKey)
     }
 
-    /// Updates the mute button's engaged treatment for the current
-    /// `muteButton.state` (V1 + S3, spec §3.4/§3.5): `.on` (muted) reads as an
-    /// accent-tinted glyph inside a **filled accent pill** (drawing-only, on
-    /// the real `NSButton`'s backing layer — behavior/keyboard/VoiceOver
-    /// untouched); `.off` reverts to the neutral secondary tint with no pill.
-    /// The glyph itself NEVER changes (no alternate/slash image — locked
-    /// decision). Mirrors `MainOutRowView.updateMuteTint()`. Called from
-    /// `apply` (model refresh) AND `muteToggled` (a live click) so both paths
-    /// land the same treatment instantly, and from
-    /// `viewDidChangeEffectiveAppearance` (the pill fill is a static CGColor).
+    /// Updates the mute button for the current `muteButton.state`. `.on`
+    /// (muted) draws ``RowAccessorySymbol/muteEngaged`` — the FILLED square,
+    /// its enclosure in an opaque ``Tokens/Color/muted`` and the speaker and
+    /// slash inside it in white. `.off` draws
+    /// ``RowAccessorySymbol/muteRest``, the same mark as an outline square in
+    /// one neutral ink. Drawing only: behavior, keyboard and VoiceOver are
+    /// untouched.
+    ///
+    /// Called from `apply` (model refresh) AND `muteToggled` (a live click) so
+    /// both paths land the treatment instantly, and from
+    /// `viewDidChangeEffectiveAppearance` — the ink is baked into the image,
+    /// so a light/dark switch has to re-make it.
+    ///
+    /// WHAT IT MAY NOT GO BACK TO. Two treatments are retired here, and
+    /// neither may return. The first was an `engagedChrome` capsule at
+    /// ``PopoverColumnGrid/mutePillFillAlpha`` behind an unslashed speaker — a
+    /// faint grey pill that read as nothing (Alec, 2026-09-04: "the active
+    /// mute state does not look like any other mute state I have seen in my
+    /// life"). The second was its replacement, an opaque `muted` rounded
+    /// rectangle painted on a sibling `NSView` behind a system
+    /// `speaker.slash.fill`: correct on measurement, but two views and two
+    /// hand-pinned sizes to draw one mark. The enclosing square belongs to the
+    /// symbol now.
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
-        muteButton.contentTintColor = engaged ? Tokens.Color.engagedChrome : Tokens.Color.label2
-        muteButton.wantsLayer = true
-        muteButton.layer?.cornerRadius = PopoverColumnGrid.mutePillCornerRadius
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            muteButton.layer?.backgroundColor = engaged
-                ? Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha).cgColor
-                : nil
-        }
+        // ONE shape in two inks (owner, 2026-09-05). The filled square is
+        // retired: it drew the marks as holes, so the mark's own glyph read
+        // white on a light row and near-black on a dark one. Colour carries
+        // the state now and the shape never changes.
+        muteButton.image = RowAccessorySymbol.image(
+            named: Self.muteRestSymbolName,
+            ink: engaged ? Self.engagedInk(fill: Tokens.Color.muted, in: effectiveAppearance)
+                         : Self.restInk(in: effectiveAppearance))
+        muteButton.setAccessibilityLabel(engaged ? "Unmute \(device.name)" : "Mute \(device.name)")
     }
 
-    /// The Equalizer door's one MARK: the glyph itself goes GOLD and a step
-    /// heavier when this speaker's curve is not flat.
+    /// The Equalizer door's active MARK: a shaped curve draws
+    /// ``RowAccessorySymbol/equalizerEngaged`` — the FILLED square, its
+    /// enclosure in an opaque ``Tokens/Color/equalizer``, the two band
+    /// sliders punched through it as transparency — the row shows through
+    /// the marks, the treatment the owner approved (2026-09-05). A flat curve draws
+    /// ``RowAccessorySymbol/equalizerRest``, the outline square in the same
+    /// neutral ink mute wears at rest. Mute sits 6 pt trailing wearing the
+    /// same square: the two engaged marks are one object in two colours
+    /// (Alec, 2026-09-04), and hue alone says which control it is.
     ///
-    /// It is the response scope's own language, scaled down to 13 pt. That
-    /// scope draws a shaped curve in `gold` at `shapedLineWidth`, and a flat
-    /// one as a neutral `scopeFlatLine` hairline — "gold means signal, and
-    /// flat is the absence of shaping" (`EQResponseCurveView`). The door onto
-    /// that scope now says the same thing in the same two variables, hue and
-    /// weight, so the mark carries a non-colour cue as well as a colour one.
+    /// WHY GREEN AND NOT GOLD. The door wore ``Tokens/Color/goldText`` until
+    /// the symbols landed, and gold means "audio is flowing here" everywhere
+    /// else — including the live wash this row draws behind the door. One hue
+    /// cannot carry both. ``Tokens/Color/equalizer`` carries the measurements
+    /// and the separation from ``Tokens/Color/muted`` beside it.
     ///
-    /// Two things this mark deliberately is NOT. It is not `partySignal`:
-    /// that magenta is the alignment wizard's REFERENCE-LIGHT colour, meaning
-    /// "this is the other speaker in the run", and spending it here would make
-    /// one hue carry two unrelated meanings. And it is not a border: the mute
-    /// button immediately trailing already says "engaged" with a filled pill,
-    /// so a second shape for the same idea would give one row three
-    /// vocabularies. One mark per control.
+    /// It is still deliberately NOT `partySignal`: that magenta is the
+    /// alignment wizard's reference-light colour, meaning "this is the other
+    /// speaker in the run".
     private func updateEQButton() {
         guard supportsEqualizer else { return }
         eqButton.setAccessibilityLabel("Equalizer for \(device.name)")
         eqButton.setAccessibilityValue(isEQShaped ? "Shaped" : "Flat")
-        eqButton.contentTintColor = isEQShaped ? Tokens.Color.gold : Tokens.Color.label2
-        // The symbol image is re-made rather than re-tinted: weight lives in
-        // the `SymbolConfiguration`, not in the tint.
-        eqButton.image = NSImage(systemSymbolName: Self.eqSymbolName,
-                                 accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: Self.accessoryGlyphPointSize,
-                                           weight: isEQShaped ? .semibold : .regular))
+        // One shape, two inks — see `updateMuteTint()`.
+        eqButton.image = RowAccessorySymbol.image(
+            named: Self.eqRestSymbolName,
+            ink: isEQShaped
+                ? Self.engagedInk(fill: Tokens.Color.equalizer, in: effectiveAppearance)
+                : Self.restInk(in: effectiveAppearance))
     }
+
+    /// The engaged ink: `fill` on the symbol's enclosing square, with the
+    /// marks left as the holes the template cuts in it — the row shows
+    /// through them, so the state needs no second colour.
+    ///
+    /// Resolved in the row's own appearance before it reaches the drawing: a
+    /// dynamic `NSColor` would otherwise resolve against whatever appearance
+    /// happens to be current when the image is composited.
+    private static func engagedInk(fill: NSColor, in appearance: NSAppearance) -> NSColor {
+        var resolved = fill
+        appearance.performAsCurrentDrawingAppearance { resolved = fill.usingColorSpace(.sRGB) ?? fill }
+        return resolved
+    }
+
+    /// The at-rest ink, so the outline square and the mark inside it read as
+    /// a single drawn line. `label` is the row's accessory ink — light warm
+    /// grey in dark, dark warm brown in light — and the contrast suites
+    /// already hold it to the body floor on every ground this row puts
+    /// behind it.
+    private static func restInk(in appearance: NSAppearance) -> NSColor {
+        var resolved = Tokens.Color.label
+        appearance.performAsCurrentDrawingAppearance {
+            resolved = Tokens.Color.label.usingColorSpace(.sRGB) ?? Tokens.Color.label
+        }
+        return resolved
+    }
+
+    /// The configuration every accessory glyph on this row that is NOT one of
+    /// the four custom symbols is drawn with. One definition, so a glyph the
+    /// row swaps at runtime cannot drift in size or weight from the one it
+    /// replaced.
+    private static let accessoryGlyphConfig = NSImage.SymbolConfiguration(
+        pointSize: accessoryGlyphPointSize, weight: .regular)
 
     /// The pill's engaged fill is a static `CGColor` — re-stamp on a live
     /// light/dark or Increase-Contrast switch (the dot/ring/bus subviews all
@@ -1072,6 +1136,25 @@ public final class DeviceRowView: NSView {
     /// already expects between segment WORDS.
     private static let feedSegmentSeparator = " · "
 
+    /// The word the unavailable rung keeps off the row itself, on the tooltip
+    /// and in the spoken value — the same word the non-bus sublabel prints.
+    static let unavailableHeadline = "Unavailable"
+
+    /// Whether the FEED column is drawing the unavailable rung's bare glyph.
+    /// One source for the drawing and for ``configureAccessibility()``, so the
+    /// spoken value can never claim a word the column isn't showing.
+    /// A Bluetooth reconnect attempt keeps `isAvailable == false` until the
+    /// endpoint appears — the connecting ring/node carry that state, so don't
+    /// shout "Unavailable" over an attempt still in flight.
+    private var showsUnavailableFeedGlyph: Bool {
+        guard busActive, !device.isAvailable else { return false }
+        switch device.connectionState {
+        case .failed: return false
+        case .connecting, .reconnecting: return !device.isBluetooth
+        default: return true
+        }
+    }
+
     /// Re-derive and push the FEED column's pills from the current device/
     /// mix/redirect state (``mainMixSourceName``/``feedAppNames``, set by
     /// ``apply``). No-op — hides `feedStack` — when this row hosts no FEED
@@ -1083,8 +1166,9 @@ public final class DeviceRowView: NSView {
     /// 1. `.failed` connection → a SINGLE "Couldn't connect" pill, failure-red
     ///    (spec item 3 "error overrides the feed" — pairs with the red halo
     ///    ring).
-    /// 2. else device unavailable → a single "Unavailable" pill, failure-red
-    ///    (the spec groups both under "failure-red words").
+    /// 2. else device unavailable → the same single failure-red glyph pill,
+    ///    its word on the tooltip and in the spoken value (the spec groups
+    ///    both under "failure-red", and both overflowed the slot as words).
     /// 3. else ONE PILL PER VALUE: `mainMixSourceName` (when non-nil) followed
     ///    by one pill per `feedAppNames` entry, in order — NEVER collapsed to
     ///    a single reason. Empty (nil main-mix AND no app names) renders no
@@ -1098,30 +1182,34 @@ public final class DeviceRowView: NSView {
             return
         }
         if case .failed(let failure) = device.connectionState {
-            // The failure HEADLINE, not a hardcoded generic (BT-UI locked spec:
-            // "failure headline sublabel" — "Connected elsewhere"/"Not paired"
-            // must read distinctly; `.unknown` still renders "Couldn't
-            // connect", so AirPlay's common case is unchanged). Copy lives on
-            // `ConnectionFailure` — single source shared with the panel.
-            feedStack.toolTip = nil
-            setFeedText(failure.headline, color: Tokens.Color.failure)
+            // GLYPH ONLY, with the words on the tooltip and in the row's
+            // spoken value (Alec, 2026-09-04). Every one of the twelve
+            // headlines overflowed the Bluetooth feed slot — "Couldn't
+            // connect" needs 113.2 pt of a 52 pt slot and the triangle eats
+            // 19 pt before the first character, so the pill clipped mid-word.
+            // Alec chose the consistent version over "words when they fit",
+            // so an AirPlay row's wider slot draws the same bare glyph. The
+            // headline is not lost: `feedStack.toolTip` carries it on hover
+            // and `configureAccessibility` speaks it. This DOES retire the
+            // BT-UI spec's "'Connected elsewhere' and 'Not paired' read
+            // distinctly on the row" — knowingly traded for one shape.
+            setFeedFailureGlyph()
+            // AFTER the render: `renderFeedPills` → `clearFeedPills()` wipes
+            // `feedStack.toolTip` as it tears the old pills down.
+            feedStack.toolTip = failure.headline
             return
         }
-        if !device.isAvailable {
-            // A BT reconnect attempt keeps `isAvailable == false` until the
-            // endpoint appears — the connecting ring/node carry that state, so
-            // don't shout "Unavailable" over an attempt still in flight.
-            var isConnectingNow: Bool {
-                switch device.connectionState {
-                case .connecting, .reconnecting: return true
-                default: return false
-                }
-            }
-            if !(device.isBluetooth && isConnectingNow) {
-                feedStack.toolTip = nil
-                setFeedText("Unavailable", color: Tokens.Color.failure)
-                return
-            }
+        if showsUnavailableFeedGlyph {
+            // GLYPH ONLY, same as the `.failed` rung above: "Unavailable"
+            // needs 83.3 pt of the Bluetooth row's 52 pt slot (60.3 pt of
+            // text plus the triangle's 19 pt and the pill's own padding), so
+            // the pill clipped to about "Unava". The word rides
+            // `feedStack.toolTip` and the row's spoken value instead.
+            setFeedFailureGlyph()
+            // AFTER the render: `renderFeedPills` → `clearFeedPills()` wipes
+            // `feedStack.toolTip` as it tears the old pills down.
+            feedStack.toolTip = Self.unavailableHeadline
+            return
         }
         var segments: [FeedSegment] = []
         // Pill tint says what is SOUNDING (D7): the main-mix pill goes
@@ -1182,12 +1270,25 @@ public final class DeviceRowView: NSView {
         feedStack.toolTip = nil
     }
 
-    /// Render a SINGLE failure-red pill — the "Couldn't
-    /// connect" / "Unavailable" rungs.
-    private func setFeedText(_ text: String, color: NSColor) {
-        let attr = NSAttributedString(
-            string: text, attributes: [.font: Tokens.Font.caption, .foregroundColor: color])
-        renderFeedPills([(attributedText: attr, isError: true)])
+    /// Render the SINGLE failure pill: the triangle glyph alone, in
+    /// `failure`, with no words at all. Both failure rungs — `.failed` and
+    /// unavailable — draw this one pill; their words ride `feedStack`'s
+    /// tooltip and the row's spoken value instead (2026-09-04).
+    private func setFeedFailureGlyph() {
+        renderFeedPills([(attributedText: NSAttributedString(), isError: true)])
+        setFeedStackCentered(true)
+    }
+
+    /// Point `feedStack` at one of its two placements: CENTRED in the FEED
+    /// column (the lone failure glyph, which has a column to itself) or
+    /// LEFT-ALIGNED on the column's leading edge (every pill that carries
+    /// words, so a list of rows reads down one edge). Only one of the pair is
+    /// ever active — activating the new one first would make the layout
+    /// briefly unsatisfiable.
+    private func setFeedStackCentered(_ centered: Bool) {
+        // Deactivate first: with both live the layout is unsatisfiable.
+        (centered ? feedStackLeadingConstraint : feedStackCenterConstraint)?.isActive = false
+        (centered ? feedStackCenterConstraint : feedStackLeadingConstraint)?.isActive = true
     }
 
     /// Compose `segments` (main-mix + app tokens, already colored) into ONE
@@ -1198,6 +1299,8 @@ public final class DeviceRowView: NSView {
     /// "+N" pill for the dropped count — no interactive reveal, locked.
     /// Clears the pills when there is nothing to show at all.
     private func setFeedSegments(_ segments: [FeedSegment]) {
+        // Pills that carry words left-align, whatever the previous render was.
+        setFeedStackCentered(false)
         guard !segments.isEmpty else {
             clearFeedPills()
             return
@@ -1462,11 +1565,11 @@ public final class DeviceRowView: NSView {
         readoutLabel.alignment = .right
         readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
 
-        configureAccessoryButton(muteButton, symbol: "speaker.wave.2.fill",
+        configureAccessoryButton(muteButton, symbol: Self.muteRestSymbolName,
                                   action: #selector(muteToggled(_:)))
         // Same accessory voice as mute, but a plain push button: this one is a
         // DOOR (it opens the Groups screen's equalizer), never a toggle.
-        configureAccessoryButton(eqButton, symbol: Self.eqSymbolName,
+        configureAccessoryButton(eqButton, symbol: Self.eqRestSymbolName,
                                  action: #selector(equalizerButtonClicked(_:)))
         eqButton.setButtonType(.momentaryChange)
         eqButton.title = ""          // a door, not a labelled control
@@ -1639,15 +1742,23 @@ public final class DeviceRowView: NSView {
                 // share. The stack's mask clips an overlong pill at that cap,
                 // same honest-clipping fallback as elsewhere. (BT-OFFSET-UI's
                 // "feed pill far right" is superseded — see `btFeedSlotWidth`.)
+                let feedLeading = feedStack.leadingAnchor.constraint(
+                    equalTo: trailingAnchor,
+                    constant: -PopoverColumnGrid.feedColumnLeadingFromTrailing)
+                feedStackLeadingConstraint = feedLeading
+                // The sync row's FEED slot runs from the column's leading edge
+                // for `btFeedSlotWidth`, so its centre is half that width in.
+                feedStackCenterConstraint = feedStack.centerXAnchor.constraint(
+                    equalTo: trailingAnchor,
+                    constant: -(PopoverColumnGrid.feedColumnLeadingFromTrailing
+                                - PopoverColumnGrid.btFeedSlotWidth / 2))
                 constraints.append(contentsOf: [
-                    feedStack.leadingAnchor.constraint(
-                        equalTo: trailingAnchor,
-                        constant: -PopoverColumnGrid.feedColumnLeadingFromTrailing),
+                    feedLeading,
                     feedStack.widthAnchor.constraint(
                         lessThanOrEqualToConstant: PopoverColumnGrid.btFeedSlotWidth),
                     // The chip: one fixed-width control closing the slot. The
                     // card header's "Offset" title trailing-aligns on
-                    // `offsetTitleTrailingFromTrailing`, which follows
+                    // `offsetTitleLeadingFromTrailing`, which follows
                     // `syncTrailing`, so it lands over the chip either way.
                     syncChipButton.trailingAnchor.constraint(
                         equalTo: trailingAnchor,
@@ -1669,10 +1780,18 @@ public final class DeviceRowView: NSView {
                 // — just anchored from its other end), so pills start flush
                 // left within the reserved column instead of hugging its
                 // trailing edge.
+                let feedLeading = feedStack.leadingAnchor.constraint(
+                    equalTo: trailingAnchor,
+                    constant: -PopoverColumnGrid.feedColumnLeadingFromTrailing)
+                feedStackLeadingConstraint = feedLeading
+                // The plain bus row's FEED slot IS the trailing control
+                // column, so its centre is the column's own centre — the x the
+                // card header's trailing label already centres over.
+                feedStackCenterConstraint = feedStack.centerXAnchor.constraint(
+                    equalTo: trailingAnchor,
+                    constant: -PopoverColumnGrid.trailingControlCenterFromTrailing)
                 constraints.append(contentsOf: [
-                    feedStack.leadingAnchor.constraint(
-                        equalTo: trailingAnchor,
-                        constant: -PopoverColumnGrid.feedColumnLeadingFromTrailing),
+                    feedLeading,
                     feedStack.widthAnchor.constraint(
                         lessThanOrEqualToConstant: PopoverColumnGrid.trailingControlWidth),
                 ])
@@ -1728,16 +1847,19 @@ public final class DeviceRowView: NSView {
         button.bezelStyle = .accessoryBar        // SPEC §9 device-row mute
         button.setButtonType(.pushOnPushOff)
         button.isBordered = false
-        // Speaker glyph LEFT of the slider: `pushOnPushOff` still toggles the
-        // mute STATE (and fires the delegate) on tap, but the glyph itself stays
-        // fixed on `symbol` in both states — no alternate/slash image (ahh wants
-        // the icon to never change on toggle). Mute state is reflected only via
-        // `button.state` and the accessibility label update in `apply`.
-        let config = NSImage.SymbolConfiguration(pointSize: Self.accessoryGlyphPointSize,
-                                                 weight: .regular)
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(config)
+        // `symbol` is only the SEEDED glyph, and it is one of the four custom
+        // symbols — `NSImage(systemSymbolName:)` finds Apple's own and would
+        // return nil for it. The mute button swaps its own in
+        // `updateMuteTint()` (slashed while engaged) and the Equalizer door
+        // re-makes its own in `updateEQButton()`.
+        button.image = RowAccessorySymbol.image(named: symbol,
+                                                ink: Self.restInk(in: effectiveAppearance))
         button.imagePosition = .imageOnly
+        // Unscaled: the symbol's image box is wider than the 24 pt column by
+        // its empty side bearings, and the default `.scaleProportionallyDown`
+        // would shrink the whole mark to fit them in. See
+        // ``RowAccessorySymbol/pointSize``.
+        button.imageScaling = .scaleNone
         button.contentTintColor = Tokens.Color.label2
         button.target = self
         button.action = action
@@ -2313,26 +2435,25 @@ public final class DeviceRowView: NSView {
         return text.isEmpty ? nil : text
     }
 
-    /// Whether the FEED column is CURRENTLY rendering the failure-red override
-    /// (`Couldn't connect` / `Unavailable`, spec item 3) — reads the (single)
-    /// pill's resolved color (an error message is never mixed with normal
-    /// pills), so a test can't drift from what's actually painted.
-    public var test_feedIsErrorColored: Bool {
-        feedPills.first?.test_isErrorColored ?? false
-    }
-
-    /// Whether the FEED column's leading (error-override) pill CURRENTLY
-    /// carries its triangle glyph (P2-6) — an error pill reads by shape, not
-    /// colour alone.
+    /// Whether the FEED column is CURRENTLY rendering an error override
+    /// (`.failed` or unavailable, spec item 3) — reads the (single) pill's
+    /// mounted triangle glyph (P2-6), which is the whole of what either
+    /// override draws since both lost their words on 2026-09-04.
     public var test_feedErrorPillHasGlyph: Bool {
         feedPills.first?.test_hasErrorGlyph ?? false
     }
 
+    /// Whether that glyph is CURRENTLY painted in the failure tone — the
+    /// colour half of the error signal, which lives on the glyph rather than
+    /// on a text run now that neither override carries words.
+    public var test_feedErrorGlyphIsFailureColored: Bool {
+        feedPills.first?.test_errorGlyphIsFailureColored ?? false
+    }
+
     /// The FEED column's leading pill's CURRENTLY-painted foreground color
-    /// (the main-mix pill when not an error override): `label3` while
-    /// ``controlsMuted``, `goldText` while the main mix is sounding here,
-    /// `label2` otherwise. Reads what's actually painted, like
-    /// ``test_feedIsErrorColored``.
+    /// (the main-mix pill; an error override has no text run at all):
+    /// `label3` while ``controlsMuted``, `goldText` while the main mix is
+    /// sounding here, `label2` otherwise. Reads what's actually painted.
     public var test_feedNeutralColor: NSColor? {
         feedPills.first?.test_leadingRunColor
     }
@@ -2392,29 +2513,195 @@ public final class DeviceRowView: NSView {
     /// from the on-icon dot). Retained for the T-U8 reset test.
     public var test_iconTint: NSColor? { iconView.contentTintColor }
 
-    /// The mute button's current tint (V1) — `engagedChrome` while muted,
-    /// `label2` otherwise. The glyph itself never changes; only
-    /// this tint does.
-    public var test_muteTintColor: NSColor? { muteButton.contentTintColor }
+    /// The inks the MUTE button actually paints, most-used first — the button
+    /// rendered to a bitmap and the pixels its mark covers bucketed by 8-bit
+    /// sRGB value. Engaged that is the enclosing square's fill alone —
+    /// the marks are holes, and a hole has no ink. At rest, one neutral ink.
+    ///
+    /// Colours the drawing code applied are no evidence on their own: the ink
+    /// is baked into the image and the button re-tints nothing, so a symbol
+    /// that renders as a blank square still reports the colour it was asked
+    /// for. This reads pixels.
+    public var test_muteDrawnInks: [NSColor] { drawnInks(of: muteButton) }
+
+    /// The same, for the Equalizer door.
+    public var test_eqDrawnInks: [NSColor] { drawnInks(of: eqButton) }
+
+    /// Every fully opaque colour `button` paints, most-used first, dropping
+    /// anything under 2% of the inked pixels — which is where a symbol's
+    /// antialiased edges land.
+    private func drawnInks(of button: NSButton) -> [NSColor] {
+        layoutSubtreeIfNeeded()
+        guard button.bounds.width > 0, button.bounds.height > 0,
+              let rep = button.bitmapImageRepForCachingDisplay(in: button.bounds)
+        else { return [] }
+        button.cacheDisplay(in: button.bounds, to: rep)
+        var counts: [Int: Int] = [:]
+        var opaque = 0
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                // 0.75, not 1: the mark is an unscaled image centred in a
+                // narrower button, so it lands on a fractional offset and
+                // every edge is antialiased — an outline square's thin stroke
+                // has almost no fully opaque pixel in it. `colorAt`
+                // un-premultiplies, so a partly covered pixel still reports
+                // the ink itself and the reading stays exact.
+                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                      c.alphaComponent >= 0.75 else { continue }
+                opaque += 1
+                let key = (Int(c.redComponent * 255 + 0.5) << 16)
+                    | (Int(c.greenComponent * 255 + 0.5) << 8)
+                    | Int(c.blueComponent * 255 + 0.5)
+                counts[key, default: 0] += 1
+            }
+        }
+        guard opaque > 0 else { return [] }
+        return counts
+            .filter { CGFloat($0.value) / CGFloat(opaque) >= 0.02 }
+            .sorted { $0.value > $1.value }
+            .map {
+                NSColor(srgbRed: CGFloat(($0.key >> 16) & 0xFF) / 255,
+                        green: CGFloat(($0.key >> 8) & 0xFF) / 255,
+                        blue: CGFloat($0.key & 0xFF) / 255, alpha: 1)
+            }
+    }
+
     /// Whether this row mounted the Equalizer door at all.
     public var test_hasEQButton: Bool { eqButton.superview != nil }
     public var test_eqButtonFrame: NSRect { eqButton.frame }
     public var test_eqButtonHasTitle: Bool { !eqButton.title.isEmpty }
-    /// The Equalizer door's not-flat mark: its glyph tint (`gold` when shaped,
-    /// `label2` at rest) and the symbol weight that rides with it.
-    public var test_eqTintColor: NSColor? { eqButton.contentTintColor }
-    public var test_eqSymbolIsHeavy: Bool {
-        eqButton.image?.symbolConfiguration == NSImage.SymbolConfiguration(
-            pointSize: Self.accessoryGlyphPointSize, weight: .semibold)
+    /// Whether the door CURRENTLY draws its ENGAGED symbol — the filled
+    /// square: a ``Tokens/Color/equalizer`` enclosure with the marks
+    /// punched out of it.
+    /// A pixel comparison against the same symbol built from the same ink,
+    /// so the hook reads the drawn image rather than a flag.
+    public var test_eqDrawsEngagedSymbol: Bool {
+        matchesSymbol(eqButton.image, RowAccessorySymbol.equalizerRest,
+                      ink: Self.engagedInk(fill: Tokens.Color.equalizer,
+                                           in: effectiveAppearance))
     }
+
+    /// Whether the door CURRENTLY draws its AT-REST symbol — the outline
+    /// square in one neutral ink.
+    public var test_eqDrawsRestSymbol: Bool {
+        matchesSymbol(eqButton.image, RowAccessorySymbol.equalizerRest,
+                      ink: Self.restInk(in: effectiveAppearance))
+    }
+
+    /// The door glyph's frame in the row's own coordinates, after a layout
+    /// pass. The symbol IS the mark now, so the button's frame is what the
+    /// "same size, 6 pt apart" assertions measure.
+    public var test_eqSeatFrame: NSRect {
+        layoutSubtreeIfNeeded()
+        return eqButton.frame
+    }
+
+    /// The door symbol's DRAWN ink, in the row's own coordinates. The image
+    /// box is no substitute — a symbol image carries transparent margin around
+    /// its ink, so measuring the box says nothing about how big the enclosing
+    /// square actually lands in the row's 24 pt column.
+    public var test_eqGlyphInkFrame: NSRect? { inkFrame(of: eqButton) }
+
+    /// The same, for the mute button — what proves the two controls draw one
+    /// square at one size, and that the square holds still across a toggle.
+    public var test_muteMarkInkFrame: NSRect? { inkFrame(of: muteButton) }
+
+    /// How much of the Equalizer door's slot its mark actually INKS, 0-1 —
+    /// the measure that separates a filled square from an outline one without
+    /// reading a colour, which is what makes the engaged state legible to
+    /// someone who cannot tell the two hues apart.
+    public var test_eqInkCoverage: CGFloat { inkCoverage(of: eqButton) }
+
+    /// The same, for the mute button.
+    public var test_muteInkCoverage: CGFloat { inkCoverage(of: muteButton) }
+
+    /// The fraction of `button`'s rendered pixels carrying any ink at all.
+    private func inkCoverage(of button: NSButton) -> CGFloat {
+        layoutSubtreeIfNeeded()
+        guard button.bounds.width > 0, button.bounds.height > 0,
+              let rep = button.bitmapImageRepForCachingDisplay(in: button.bounds)
+        else { return 0 }
+        button.cacheDisplay(in: button.bounds, to: rep)
+        var inked = 0
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.02 {
+                inked += 1
+            }
+        }
+        return CGFloat(inked) / CGFloat(rep.pixelsWide * rep.pixelsHigh)
+    }
+
+    /// `button` rendered to a bitmap, with its non-transparent pixels bounded
+    /// and mapped back into the row's own coordinates. `nil` only when the
+    /// render itself fails; a caller must FAIL on that rather than skip, or
+    /// the check silently stops covering anything.
+    private func inkFrame(of button: NSButton) -> NSRect? {
+        layoutSubtreeIfNeeded()
+        guard button.bounds.width > 0, button.bounds.height > 0,
+              let rep = button.bitmapImageRepForCachingDisplay(in: button.bounds)
+        else { return nil }
+        button.cacheDisplay(in: button.bounds, to: rep)
+        let scaleX = button.bounds.width / CGFloat(rep.pixelsWide)
+        let scaleY = button.bounds.height / CGFloat(rep.pixelsHigh)
+        var minX = rep.pixelsWide, maxX = -1, minY = rep.pixelsHigh, maxY = -1
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.02 {
+                minX = min(minX, x); maxX = max(maxX, x)
+                minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        // `colorAt` counts rows from the TOP; the row's coordinates are
+        // bottom-up, so the bitmap's last inked row is the ink's bottom edge.
+        return NSRect(
+            x: button.frame.minX + CGFloat(minX) * scaleX,
+            y: button.frame.minY + button.bounds.height - CGFloat(maxY + 1) * scaleY,
+            width: CGFloat(maxX - minX + 1) * scaleX,
+            height: CGFloat(maxY - minY + 1) * scaleY)
+    }
+
     public func test_clickEQButton() { eqButton.performClick(nil) }
     public var test_muteButtonFrame: NSRect { muteButton.frame }
     public var test_identityStackFrame: NSRect { identityStack.frame }
+    /// The mute mark's frame — the button, which is the mark now. It has to
+    /// hold still across a toggle and match the Equalizer door's.
+    public var test_muteSeatFrame: NSRect {
+        layoutSubtreeIfNeeded()
+        return muteButton.frame
+    }
 
-    /// Whether the mute button is currently drawing its ENGAGED pill (S3, spec
-    /// §3.4/§3.5): `.on` state + the accent pill fill stamped on its layer.
+    /// Whether the mute button is currently drawing its ENGAGED symbol — the
+    /// filled square with a ``Tokens/Color/muted`` enclosure and white marks.
     public var test_isMutePillEngaged: Bool {
-        muteButton.state == .on && muteButton.layer?.backgroundColor != nil
+        muteButton.state == .on && test_mutePillIsMutedHue
+    }
+
+    /// Whether the drawn mute image IS the engaged symbol built from the
+    /// ``Tokens/Color/muted`` ink resolved in this row's own appearance —
+    /// a raster comparison, so the test reads pixels rather than intent.
+    public var test_mutePillIsMutedHue: Bool {
+        matchesSymbol(muteButton.image, RowAccessorySymbol.muteRest,
+                      ink: Self.engagedInk(fill: Tokens.Color.muted,
+                                           in: effectiveAppearance))
+    }
+
+    /// Whether the mute button is drawing its AT-REST symbol.
+    public var test_muteDrawsRestSymbol: Bool {
+        matchesSymbol(muteButton.image, RowAccessorySymbol.muteRest,
+                      ink: Self.restInk(in: effectiveAppearance))
+    }
+
+    /// Whether `drawn` rasterises identically to `name` built with `ink`.
+    /// A pixel comparison rather than a name lookup: an `NSImage` reconfigured
+    /// with a `SymbolConfiguration` reports no name to read back, and
+    /// comparing rasters pins the ink, the point size and the weight in one
+    /// assertion.
+    private func matchesSymbol(_ drawn: NSImage?, _ name: String, ink: NSColor) -> Bool {
+        guard let drawn = drawn?.tiffRepresentation,
+              let reference = RowAccessorySymbol.image(named: name, ink: ink)?
+                  .tiffRepresentation
+        else { return false }
+        return drawn == reference
     }
 
     // MARK: Route-armed dot (spec §3.3) test hooks
@@ -3006,6 +3293,18 @@ public final class DeviceRowView: NSView {
         // dot's wording — "playing here" when a confirmed live feed lights it,
         // "armed" for the held main-mix route.
         var valueParts: [String] = []
+        // The FEED column stopped printing the failure HEADLINE on 2026-09-04
+        // (it draws a bare triangle now), so the words arrive here rather than
+        // becoming unreachable. Bus rows only: a non-bus row still carries the
+        // headline in its sublabel, and saying it twice would be worse than
+        // the clipping this replaced. The label's own ", couldn't connect"
+        // clause stays — it is the ring's state, not the cause.
+        if busActive, case .failed(let failure) = device.connectionState {
+            valueParts.append(failure.headline)
+        }
+        // Same trade on the unavailable rung: its word left the column on the
+        // same day and for the same reason, so it arrives here instead.
+        if showsUnavailableFeedGlyph { valueParts.append(Self.unavailableHeadline) }
         if device.isMuted || isMasterMuted { valueParts.append("muted") }
         if isRouteArmed { valueParts.append(hasLiveFeeds ? "playing here" : "armed") }
         if volumePendingApply { valueParts.append("applying volume") }
@@ -3151,9 +3450,9 @@ private final class SyncChipCell: NSButtonCell {
         super.draw(withFrame: cellFrame, in: controlView)
     }
 
-    /// The engaged fill — the mute pill's exact recipe
-    /// (``Tokens/Color/engagedChrome`` at `mutePillFillAlpha`), never a solid gold.
-    /// `nil` in every other state: a resting chip is an outline only.
+    /// The engaged fill — ``Tokens/Color/engagedChrome`` at
+    /// `mutePillFillAlpha`, never a solid gold. `nil` in every other state: a
+    /// resting chip is an outline only.
     var fillColor: NSColor? {
         guard isEngaged else { return nil }
         return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha)

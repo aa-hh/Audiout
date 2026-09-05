@@ -117,7 +117,13 @@ import AudioutCore
         let row = DeviceRowView(device: failed, showsBus: true)
         row.apply(failed, selected: true, controllable: true)
         #expect((row.test_accessibilityLabel ?? "").hasSuffix(", couldn't connect"))
-        #expect(row.test_accessibilityValue == "", "a failed route is never spoken as armed")
+        // Since 2026-09-04 the value also carries the failure's own headline —
+        // the FEED pill stopped printing it. The intent here is unchanged: no
+        // armed fragment shares an announcement with a failure.
+        #expect(!(row.test_accessibilityValue ?? "").contains("armed"),
+                "a failed route is never spoken as armed")
+        #expect(row.test_accessibilityValue == "Didn't respond",
+                "the headline the pill no longer prints is spoken here instead")
         #expect(!(row.test_routeArmed))
     }
 

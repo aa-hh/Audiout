@@ -517,19 +517,21 @@ public enum PopoverColumnGrid {
     /// measured 1.256:1 on dark `panel`, 1.140:1 on the light ground.
     public static let rowLiveWashAlpha: CGFloat = 0.12
 
-    // MARK: Engaged mute pill (Warm Signal v3 §3.4/§3.5, S3)
+    // MARK: The engaged fill behind a row accessory (Warm Signal v3 §3.4/§3.5, S3)
     //
-    // A muted row's mute button gains a filled PILL behind its (never-slashed
-    // — locked decision) speaker glyph: drawing only, on the real `NSButton`'s
-    // backing layer; behavior/keyboard/VoiceOver untouched.
+    // A row's two engaged accessory marks — the muted speaker and the
+    // Equalizer door on a shaped curve — are ONE rounded square in two
+    // colours (Alec, 2026-09-04: "the same object in two colours"), and that
+    // square is now part of the SYMBOL rather than a rectangle drawn behind
+    // it. `RowAccessorySymbol` owns the four images and their point size; the
+    // seat's own geometry constants, `engagedSeatSize` and
+    // `engagedSeatCornerRadius`, retired with the two `NSView`s that drew it.
 
-    /// Alpha of the engaged pill's ``Tokens/Color/engagedChrome`` fill —
-    /// subtle, because mute is config-adjacent, not a signal. The strongest
-    /// alpha in that token's ladder, since a pill is smaller than a row wash
-    /// and needs the extra weight to read at glyph scale.
+    /// Alpha of an ``Tokens/Color/engagedChrome`` engaged fill — subtle,
+    /// because mute is config-adjacent, not a signal. The strongest alpha in
+    /// that token's ladder, since a seat is smaller than a row wash and needs
+    /// the extra weight to read at glyph scale.
     public static let mutePillFillAlpha: CGFloat = 0.22
-    /// Corner radius of the engaged pill — the control radius (iOS Shapes).
-    public static let mutePillCornerRadius: CGFloat = Tokens.Layout.Radius.control
 
     // MARK: Single-selection highlight (AppRowView, 2026-07-17)
     //
@@ -660,9 +662,10 @@ public enum PopoverColumnGrid {
     /// body row without crowding the row's vertical rhythm.
     public static let syncChipHeight: CGFloat = 18
     /// Corner radius of the SYNC value chip. A soft rounded rect ("this is a
-    /// control you can press"), deliberately NOT the fully-rounded capsule —
-    /// that shape means "control engaged" (`mutePillCornerRadius`) and the
-    /// chip is a resting affordance, not an engaged state.
+    /// control you can press"). What tells it apart from the engaged marks up
+    /// the row is the FILL, not the corner: this chip is an OUTLINE around a
+    /// value it is showing you, where the mute button and the Equalizer door
+    /// wear a solid filled square to say "engaged".
     public static let syncChipCornerRadius: CGFloat = 5
     /// Stroke width of the chip's border, solid (tuned) or dashed (untuned).
     public static let syncChipBorderWidth: CGFloat = 1
@@ -688,19 +691,17 @@ public enum PopoverColumnGrid {
     /// row's trailing control, with the feed pills to its left.
     public static var syncTrailing: CGFloat { trailingInset }
     /// Distance from the row trailing edge to the "Offset" column title's
-    /// TRAILING edge on the card header line — the chip column's own trailing
-    /// edge, so the title hangs over the chip it names and moves with it
-    /// (sibling of `feedColumnLeadingFromTrailing`, the "Source" title's
-    /// anchor on the same line). The pair reads in the order of the controls
-    /// beneath it and clears itself by a wide margin: at
-    /// `Tokens.Font.captionMedium` "Source" measures 37.7 pt and starts 154 in,
-    /// so it ends 116.3 in; "Offset" measures 33.6 pt and ends 14 in, so it
-    /// starts 47.6 in — **68.7 pt of clear air** between them. Re-anchoring
-    /// the chip re-anchors this title, which is the point: with the chip on
-    /// the slot's other side these same two anchors printed each legend over
-    /// the OTHER column's control. This legend prints exactly once, on the
-    /// card header, never on a subsection line.
-    public static var offsetTitleTrailingFromTrailing: CGFloat { syncTrailing }
+    /// LEADING edge — the SYNC chip's own leading edge (`syncTrailing +
+    /// syncChipWidth`), so the title LEFT-ALIGNS over its column exactly as
+    /// "Source" left-aligns on `feedColumnLeadingFromTrailing` (sibling
+    /// anchor, same card header line). At `Tokens.Font.captionMedium`
+    /// "Source" measures 37.7 pt and starts at 154, ending at 116.3;
+    /// "Offset" measures 33.6 pt and starts here at 98, ending at 64.4 —
+    /// **18.3 pt of clear air** between them. Re-anchoring the chip
+    /// re-anchors this title, which is the point: the title always sits
+    /// over the chip it names. This legend prints exactly once, on the card
+    /// header, never on a subsection line.
+    public static var offsetTitleLeadingFromTrailing: CGFloat { syncTrailing + syncChipWidth }
 
     // MARK: SYNC drawer (PLAN-BT-SYNC-DRAWER T5 — `BTSyncDrawerView`)
     //

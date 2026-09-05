@@ -254,6 +254,13 @@ import AppKit
         #expect(popover.test_bluetoothConnectRowHasGlyph,
                 "the Connect row carries its leading glyph")
 
+        // The header above already says "Bluetooth", so the row says only what
+        // clicking does — and VoiceOver, which announces the button with no
+        // header to lean on, still hears the full phrase.
+        let titles = popover.test_bluetoothConnectRowTitles
+        #expect(titles?.visible == "Connect a speaker")
+        #expect(titles?.spoken == "Connect a Bluetooth speaker")
+
         var pairTaps = 0
         popover.onPairBluetoothSpeaker = { pairTaps += 1 }
         popover.test_fireBluetoothConnectClick()
@@ -262,6 +269,21 @@ import AppKit
         popover.update(devices: [local(), airplay(), bt("bt-live:output", name: "Live Speaker")])
         #expect(!popover.test_bluetoothConnectRowShown(),
                 "a connected device replaces the empty state")
+    }
+
+    /// The Connect row's "+" sits where a device row's ICON would (one indent
+    /// step), not where a device NAME would (two) — with no rows present, the
+    /// deeper anchor would read as an indent nested inside another indent.
+    @Test func emptyBluetoothConnectRowAlignsOnTheIconColumnNotTheNameColumn() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay()])
+        #expect(popover.test_bluetoothConnectRowShown(), "precondition: the empty state is mounted")
+        _ = popover.test_panelView   // forces layout so the button's frame is current
+
+        let inset = popover.test_bluetoothConnectRowLeadingInset
+        #expect(inset != nil)
+        #expect(abs((inset ?? -1) - PopoverColumnGrid.firstElementLeading(indented: false)) <= 1,
+                "the \"+\" starts on the icon column, not the deeper name column")
     }
 
     /// An explicit "+"-menu Connect attempt is listed for the REST OF THE

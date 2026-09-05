@@ -4,14 +4,38 @@ import Testing
 import Foundation
 import AppKit
 @testable import AudioutSharedUI
+@testable import AudioutPopoverUI
 
 /// Wizard-stage v2 spec §2.1/§6: the alignment wizard's stage instruments in
 /// `Tokens.Color`, measured against the same floors the spec's
 /// table states. `MembershipWellContrastTests` idiom (own private
 /// `relativeLuminance`/`contrastRatio`/`resolved` helpers, deliberately not
 /// shared across files).
+///
+/// Nested into `SerializedSharedState` (see `SerializedSharedStateSuite.swift`):
+/// the Increase-Contrast sweeps below drive
+/// `Tokens.test_increaseContrastOverride`, which is global to the process, so
+/// running alongside another suite that does the same would be a real race.
 @MainActor
+extension SerializedSharedState {
+
 @Suite final class AlignmentTokenContrastTests: IsolatedSuite {
+
+    deinit {
+        // Process-global test seam; restore it unconditionally so no other
+        // test in the process inherits a forced Increase-Contrast reading.
+        Tokens.test_increaseContrastOverride = nil
+    }
+
+    /// Runs `body` once with Increase Contrast forced off and once forced on,
+    /// then restores the live reading.
+    private func acrossIncreaseContrast(_ body: (Bool) -> Void) {
+        defer { Tokens.test_increaseContrastOverride = nil }
+        for increaseContrast in [false, true] {
+            Tokens.test_increaseContrastOverride = increaseContrast
+            body(increaseContrast)
+        }
+    }
 
     // MARK: WCAG contrast math (mirrors MembershipWellContrastTests' private helpers)
 
@@ -121,6 +145,72 @@ import AppKit
                 "inkOnFill vs the pinned primary-plate gold: \(ratio):1 below the \(floor):1 floor")
     }
 
+    /// The pair above, swept across BOTH Increase-Contrast readings and BOTH
+    /// window appearances — the seam the single measurement above does not
+    /// drive, and the seam this ink's pinning exists for. `inkOnFill` goes WHITE
+    /// under light + Increase Contrast: right on the light-Increase-Contrast
+    /// gold it was authored for, 1.84:1 on the dark gold this plate actually
+    /// draws. Both halves are read from the cell, so a lost pinning fails here
+    /// rather than in someone's eyes.
+    @Test func primaryPlateInkClearsTheBodyFloorAcrossTheIncreaseContrastSeam() {
+        let floor: CGFloat = 4.5
+        acrossIncreaseContrast { increaseContrast in
+            for window in [NSAppearance.Name.aqua, .darkAqua] {
+                var ratio: CGFloat = 0
+                NSAppearance(named: window)?.performAsCurrentDrawingAppearance {
+                    ratio = self.contrastRatio(AlignmentPlateCell.primaryInkColor,
+                                               AlignmentPlateCell.primaryFillColor)
+                }
+                #expect(ratio >= floor,
+                        """
+                        the primary plate's ink on its gold \
+                        (\(window.rawValue), Increase Contrast \(increaseContrast)): \
+                        \(ratio):1 below the \(floor):1 floor
+                        """)
+            }
+        }
+    }
+
+    // MARK: The stage plate's bezel — a fixed dark instrument, a pinned edge
+
+    /// `AlignmentStageView` draws the plate's 1pt bezel in `rim`, at 0.35 alpha
+    /// under a dark window and 0.9 under a light one. The alpha follows the
+    /// window because the heavier edge is what separates a black plate from
+    /// white paper — but the plate itself is FIXED dark in both appearances, so
+    /// the ratio that matters is edge against `stagePlate`, and the edge's
+    /// COLOUR has to come from the appearance the plate actually is.
+    ///
+    /// The light window is what this measures: the dark one draws the bezel at
+    /// 0.35 deliberately faint inside a dark chassis and has no floor. Left
+    /// resolving with the window, the light hexes gave 3.47:1 with Increase
+    /// Contrast off and 2.89:1 with it ON: the setting a user turns on to read
+    /// better made the bezel worse and pushed it under the floor. The last
+    /// assertion forbids that direction outright, floor or no floor.
+    @Test func stagePlateEdgeClearsTheNonTextFloorAcrossTheIncreaseContrastSeam() throws {
+        let floor: CGFloat = 3.0
+        // Mirrors `AlignmentStageView.stampColors`' light-window branch.
+        let lightWindowAlpha: CGFloat = 0.9
+
+        var measured: [Bool: CGFloat] = [:]
+        acrossIncreaseContrast { increaseContrast in
+            let plate = self.resolved(Tokens.Color.stagePlate, appearanceName: .darkAqua)
+            var edge = Tokens.Color.rim
+            NSAppearance(named: .aqua)?.performAsCurrentDrawingAppearance {
+                edge = AlignmentStageView.plateEdge.usingColorSpace(.sRGB) ?? edge
+            }
+            let composited = edge.blended(withFraction: 1 - lightWindowAlpha, of: plate) ?? edge
+            measured[increaseContrast] = self.contrastRatio(composited, plate)
+        }
+
+        let off = try #require(measured[false])
+        let on = try #require(measured[true])
+        #expect(off >= floor, "the stage plate's bezel: \(off):1 below the \(floor):1 floor")
+        #expect(on >= floor,
+                "the stage plate's bezel under Increase Contrast: \(on):1 below the \(floor):1 floor")
+        #expect(on >= off,
+                "Increase Contrast LOWERED the stage plate's bezel contrast, \(off):1 -> \(on):1")
+    }
+
     // MARK: The Deep companions — themed chrome, light grounds only (spec §2.1)
 
     @Test func lightSyncSignalDeepClearsTheFloorOnLightCanvasAndRaised() {
@@ -150,4 +240,6 @@ import AppKit
         let vsWell = contrastRatio(composited, well)
         #expect(vsWell >= floor, "ring @0.9 vs light well: \(vsWell):1 below the \(floor):1 floor")
     }
+}
+
 }

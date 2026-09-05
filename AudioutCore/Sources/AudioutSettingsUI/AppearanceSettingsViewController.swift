@@ -71,7 +71,7 @@ public final class AppearanceSettingsViewController: NSViewController {
         let heading = SettingsForm.sectionHeader("Theme")
         let subtitle = SettingsForm.label("Follow the system, or force light or dark.")
         subtitle.font = Tokens.Font.caption
-        subtitle.textColor = Tokens.Color.secondaryLabel
+        subtitle.textColor = Tokens.Color.label2
 
         let column = NSStackView(views: [heading, tileRow, subtitle])
         column.orientation = .vertical
@@ -97,7 +97,7 @@ public final class AppearanceSettingsViewController: NSViewController {
 
         let subtitle = SettingsForm.label("How strongly meters, dots, and rings use the brand gold.")
         subtitle.font = Tokens.Font.caption
-        subtitle.textColor = Tokens.Color.secondaryLabel
+        subtitle.textColor = Tokens.Color.label2
 
         accentRadios = accentOrder.map { style in
             let radio = NSButton(radioButtonWithTitle: style.displayName,
@@ -253,6 +253,7 @@ final class ThemeTileButton: NSButton {
     init(theme: AppearanceTheme) {
         self.theme = theme
         super.init(frame: .zero)
+        redrawOnAccessibilityDisplayChange()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -299,8 +300,8 @@ final class ThemeTileButton: NSButton {
 
     /// One theme's **warm product-panel** preview palette (Warm Signal spec
     /// §5.2 — the tiles "preview the actual product", so the body is the real
-    /// warm canvas with a lit gold row + meter sliver; these are the ONLY
-    /// warm/gold pixels anywhere in Settings, because they depict the product).
+    /// product panel with a lit gold row + meter sliver; these are the ONLY
+    /// gold pixels anywhere in Settings, because they depict the product).
     /// Same ABSOLUTE-palette exception as `Mock` above, deliberately extended
     /// to the warm values: the tile portrays an appearance, it doesn't adopt
     /// one, so these are fixed sRGB mirrors of the spec §1.1/§1.2 hexes —
@@ -433,8 +434,8 @@ final class ThemeTileButton: NSButton {
         }
     }
 
-    /// Draw one miniature window previewing the REAL warm panel (spec §5.2):
-    /// rounded body filled with the warm canvas, a title-bar strip with
+    /// Draw one miniature window previewing the real product panel (spec §5.2):
+    /// rounded body filled with the panel canvas, a title-bar strip with
     /// optional traffic lights, then a **lit gold row** (icon well · name bar ·
     /// gold route-armed dot, with an ember→gold meter sliver beneath the name)
     /// over an idle dimmed row — the popover's own status-cluster language in
@@ -508,6 +509,11 @@ final class ThemeTileButton: NSButton {
         palette.stroke.setStroke()
         frame.lineWidth = 1
         frame.stroke()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 
     // MARK: Test-support hooks (V5 — preview-palette/Tokens pin)

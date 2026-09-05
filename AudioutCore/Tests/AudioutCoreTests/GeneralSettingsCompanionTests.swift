@@ -5,6 +5,7 @@ import Testing
 import AppKit
 @testable import AudioutCore
 @testable import AudioutSettingsUI
+@testable import AudioutSharedUI
 
 /// FIX-C: the Settings › General "Allow control from iPhone" switch must
 /// never misrepresent whether the companion LAN server is actually running.
@@ -98,6 +99,8 @@ import AppKit
         let note = pane.test_allowRemoteControlOverrideNote
         #expect(note != nil)
         #expect(note?.contains("AUDIOUT_COMPANION") == true)
+        #expect(pane.test_allowRemoteControlOverrideNoteTextColor == Tokens.Color.label2,
+                "this note names a setting in force, not a failure — it never takes the red")
     }
 
     @Test func overrideForcedOffAlsoReflectsEffectiveValue() {
@@ -175,6 +178,8 @@ import AppKit
         #expect(pane.test_phoneRowCount == 2)
         #expect(pane.test_rememberedPhones.map(\.name) == ["Alec's iPhone", "Guest's iPhone"])
         #expect(pane.test_rememberedPhones.map(\.decision) == ["Allowed", "Denied"])
+        #expect(pane.test_phoneRowDecisionTextColor(at: 1) == Tokens.Color.label2,
+                "a recorded \"Denied\" is a fact about a past decision, not a failure — it never takes the red")
     }
 
     @Test func emptyListHidesTheSection() throws {

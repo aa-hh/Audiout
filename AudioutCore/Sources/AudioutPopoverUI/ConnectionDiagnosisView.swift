@@ -127,7 +127,7 @@ public final class ConnectionDiagnosisView: NSView {
 
         suggestionLabel.translatesAutoresizingMaskIntoConstraints = false
         suggestionLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
-        suggestionLabel.textColor = Tokens.Color.secondaryLabel
+        suggestionLabel.textColor = Tokens.Color.label2
         background.addSubview(suggestionLabel)
 
         configureSmallButton(retryButton, title: "Try Again", action: #selector(retryClicked(_:)))
@@ -204,7 +204,7 @@ public final class ConnectionDiagnosisView: NSView {
         dismissButton.isBordered = false
         dismissButton.imagePosition = .imageOnly
         dismissButton.imageScaling = .scaleProportionallyDown
-        dismissButton.contentTintColor = Tokens.Color.secondaryLabel
+        dismissButton.contentTintColor = Tokens.Color.label2
         dismissButton.target = self
         dismissButton.action = #selector(dismissClicked(_:))
         dismissButton.keyEquivalent = "\u{1b}"

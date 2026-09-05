@@ -55,6 +55,24 @@ final class CardView: NSView {
         c.priority = .defaultHigh
         return c
     }()
+    /// The scrolling host between `bodyClip` and `bodyStack`, for a card built
+    /// with `scrollingBody: true` (the Output Devices card — roadmap 039).
+    /// `nil` for every other card, which keeps the original direct pin.
+    private(set) var bodyScrollView: NSScrollView?
+    /// The scrolling body's own height, `min(rows, bodyMaxHeight)`, recomputed by
+    /// ``reconcileBodyHeight()``. Priority 999, not required, for the same reason
+    /// the bottom pin below is `.defaultHigh`: a collapse's required height-0
+    /// constraint has to win over it.
+    private var bodyScrollHeight: NSLayoutConstraint?
+    /// The tallest a SCROLLING body may draw before its rows start scrolling
+    /// inside it instead of growing the card. Ignored by a non-scrolling card,
+    /// whose body has no ceiling at all.
+    var bodyMaxHeight: CGFloat = .greatestFiniteMagnitude {
+        didSet {
+            guard bodyMaxHeight != oldValue else { return }
+            reconcileBodyHeight()
+        }
+    }
     /// Whether the body is currently collapsed (height pinned to 0 + hidden).
     private(set) var isBodyCollapsed = false
     /// The panel this card is mounted in, which re-fits itself (and the surface
@@ -75,7 +93,12 @@ final class CardView: NSView {
     /// collapse branch). `nil` until the first animated toggle.
     private(set) var lastAnimatedStartHeight: CGFloat?
 
-    init() {
+    /// `scrollingBody` seats the body rows in an `NSScrollView` instead of pinning
+    /// them straight into the clip (roadmap 039 — the Output Devices card is the
+    /// one card whose list can outgrow the surface). The card's own header row
+    /// stays outside it, so the section title and the "Source"/"Offset" column
+    /// legends hold still while the speakers scroll under them.
+    init(scrollingBody: Bool = false) {
         super.init(frame: .zero)
         // No chrome of any kind (de-nest, see the class doc comment): no
         // layer, no mask, no material, no shadow. `contentStack` mounts
@@ -103,26 +126,131 @@ final class CardView: NSView {
         bodyStack.alignment = .leading
         bodyStack.distribution = .fill
         bodyStack.spacing = 0
-        bodyClip.addSubview(bodyStack)
 
         NSLayoutConstraint.activate([
             contentStack.topAnchor.constraint(equalTo: topAnchor),
             contentStack.leadingAnchor.constraint(equalTo: leadingAnchor),
             contentStack.trailingAnchor.constraint(equalTo: trailingAnchor),
             contentStack.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            // The body stack is TOP-pinned strongly inside the clip; the BOTTOM pin
-            // is `.defaultHigh` (not required) so an active height-0 constraint can
-            // override it during collapse. When expanded (that constraint inactive)
-            // the bottom pin drives the clip's height to the content. Because the
-            // top pin is the strong one, a collapse clips the rows from the BOTTOM
-            // (they hold their position at the top and vanish under the shrinking
-            // clip edge — the CC-style disclosure), not by compressing.
-            bodyStack.topAnchor.constraint(equalTo: bodyClip.topAnchor),
-            bodyStack.leadingAnchor.constraint(equalTo: bodyClip.leadingAnchor),
-            bodyStack.trailingAnchor.constraint(equalTo: bodyClip.trailingAnchor),
-            bodyClipBottomPin,
         ])
+
+        if scrollingBody {
+            mountScrollingBody()
+        } else {
+            bodyClip.addSubview(bodyStack)
+            NSLayoutConstraint.activate([
+                // The body stack is TOP-pinned strongly inside the clip; the BOTTOM pin
+                // is `.defaultHigh` (not required) so an active height-0 constraint can
+                // override it during collapse. When expanded (that constraint inactive)
+                // the bottom pin drives the clip's height to the content. Because the
+                // top pin is the strong one, a collapse clips the rows from the BOTTOM
+                // (they hold their position at the top and vanish under the shrinking
+                // clip edge — the CC-style disclosure), not by compressing.
+                bodyStack.topAnchor.constraint(equalTo: bodyClip.topAnchor),
+                bodyStack.leadingAnchor.constraint(equalTo: bodyClip.leadingAnchor),
+                bodyStack.trailingAnchor.constraint(equalTo: bodyClip.trailingAnchor),
+                bodyClipBottomPin,
+            ])
+        }
+    }
+
+    /// Seat `bodyStack` inside a scroll view filling `bodyClip`, and give the
+    /// scroll view the explicit height the clip then wears.
+    ///
+    /// A scroll view has NO natural height — left to itself it would collapse the
+    /// clip to nothing, and with it the panel's measured fit. So the height is a
+    /// constraint this card recomputes (`reconcileBodyHeight`) from the ROWS'
+    /// fitting height, capped at `bodyMaxHeight`: the measure still comes from the
+    /// content, exactly as it did when the rows were pinned here directly.
+    ///
+    /// The scroll view keeps the clip's own constraint SHAPE — top/leading/trailing
+    /// required, bottom `.defaultHigh` — so a collapse's required height-0
+    /// constraint still wins and the rows still slide up under the shrinking clip
+    /// edge rather than compressing.
+    ///
+    /// Overlay scrollers, forced (see `preferredScrollerStyleDidChange`): a legacy
+    /// scroller takes real width out of the clip view, and every column in the
+    /// popover is measured inward from the row's trailing edge
+    /// (`PopoverColumnGrid`), so a scroller that ate width would shift the whole
+    /// grid the moment the list outgrew its ceiling.
+    private func mountScrollingBody() {
+        // A FLIPPED document, holding the stack unchanged. `NSStackView` is not
+        // flipped, and a non-flipped document view puts the scroller's resting
+        // position (`bounds.origin.y == 0`) at the BOTTOM of the content — the
+        // list would open showing its last rows. Flipping a wrapper rather than
+        // the stack itself leaves every row's own coordinate space exactly as it
+        // is everywhere else in the panel.
+        let document = FlippedDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(bodyStack)
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = document
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.horizontalScrollElasticity = .none
+        bodyClip.addSubview(scroll)
+        bodyScrollView = scroll
+
+        let height = scroll.heightAnchor.constraint(equalToConstant: 0)
+        height.priority = NSLayoutConstraint.Priority(999)
+        bodyScrollHeight = height
+        let bottom = scroll.bottomAnchor.constraint(equalTo: bodyClip.bottomAnchor)
+        bottom.priority = .defaultHigh
+
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: bodyClip.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: bodyClip.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: bodyClip.trailingAnchor),
+            bottom,
+            height,
+            // The document is exactly as wide as the scroll view — with overlay
+            // scrollers that is the clip view's width too, so the columns land
+            // where they always did — and exactly as tall as the rows.
+            document.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            bodyStack.topAnchor.constraint(equalTo: document.topAnchor),
+            bodyStack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            bodyStack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            bodyStack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
+        ])
+
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(preferredScrollerStyleDidChange),
+            name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
+    }
+
+    /// Plugging in a mouse flips the system's preferred scroller style to
+    /// `.legacy`, and AppKit re-applies that preference to every scroll view.
+    /// Force `.overlay` straight back: a legacy scroller would narrow the clip
+    /// view and drag every trailing-anchored column left with it.
+    @objc private func preferredScrollerStyleDidChange() {
+        bodyScrollView?.scrollerStyle = .overlay
+    }
+
+    /// Bring the scrolling body's height back in line with its rows — the rows'
+    /// fitting height, capped at `bodyMaxHeight`. A no-op for a non-scrolling
+    /// card (its clip already flexes with the rows pinned inside it) and for a
+    /// height that has not moved.
+    func reconcileBodyHeight() {
+        guard let bodyScrollHeight else { return }
+        bodyStack.layoutSubtreeIfNeeded()
+        let target = min(bodyStack.fittingSize.height, bodyMaxHeight)
+        guard abs(bodyScrollHeight.constant - target) > 0.5 else { return }
+        bodyScrollHeight.constant = target
+    }
+
+    /// Scroll `view` into the visible part of the list, when the list scrolls and
+    /// `view` is one of its rows (or lives inside one). The keyboard's answer to a
+    /// list taller than its ceiling: tabbing to a row off the bottom brings it up.
+    @discardableResult
+    func revealBodyRow(_ view: NSView) -> Bool {
+        guard bodyScrollView != nil, view.isDescendant(of: bodyStack) else { return false }
+        layoutSubtreeIfNeeded()
+        return view.scrollToVisible(view.bounds)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -175,7 +303,9 @@ final class CardView: NSView {
     var bodyFittingHeight: CGFloat {
         guard bodyClip.superview != nil else { return 0 }
         bodyStack.layoutSubtreeIfNeeded()
-        return bodyStack.fittingSize.height
+        // Capped for a scrolling body: the expand target is how tall the clip
+        // actually settles at, which is the ceiling once the rows pass it.
+        return min(bodyStack.fittingSize.height, bodyMaxHeight)
     }
 
     /// The clip container's current laid-out height (0 when collapsed).
@@ -318,4 +448,10 @@ extension CardView: RailSectionProviding {
     var railSectionHeaderBounds: NSRect { railHeaderRow?.bounds ?? .zero }
     var railSectionClipView: NSView? { mountedBodyClip }
     var railSectionClipBounds: NSRect { mountedBodyClip?.bounds ?? .zero }
+}
+
+/// The scrolling device list's document view: a plain container whose only job
+/// is to be FLIPPED, so the list rests at its first row instead of its last.
+private final class FlippedDocumentView: NSView {
+    override var isFlipped: Bool { true }
 }

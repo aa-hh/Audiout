@@ -195,6 +195,31 @@ import CoreAudio
                 "disconnect/rejoin must never split one speaker into two rows")
     }
 
+    /// The glyph never walks back mid-session. `merge` carries no device
+    /// class for a connected output with no paired record, and none at all
+    /// while the Bluetooth grant is missing, so a later snapshot routinely
+    /// arrives without the class the row already learned. Clearing it would
+    /// drop a pair of headphones back to the neutral speaker glyph while they
+    /// are still playing.
+    @Test func aLaterClasslessSnapshotKeepsTheGlyphTheRowAlreadyLearned() {
+        let (backend, bt) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+
+        // 0x06 is the Audio/Video minor class for headphones.
+        bt.fire([BTDeviceSnapshot(id: sonos.id, name: sonos.name, isConnected: true,
+                                  deviceClassMinor: 0x06)])
+        waitFor { self.device(backend, self.sonos.id)?.symbolName == "headphones" }
+
+        // The rename is only there to make the second fold observable: the
+        // snapshot is applied on `stateQueue`, so waiting on the row itself
+        // would let the check run before the classless snapshot lands.
+        bt.fire([BTDeviceSnapshot(id: sonos.id, name: "Renamed", isConnected: true)])
+        waitFor { self.device(backend, self.sonos.id)?.name == "Renamed" }
+        #expect(device(backend, sonos.id)?.symbolName == "headphones",
+                "a snapshot with no class read keeps the last one, it does not erase it")
+    }
+
     /// A device that leaves the merged list entirely (unpaired mid-session)
     /// goes unavailable but keeps its row — mirrors `markDisappeared`.
     @Test func vanishedDeviceGoesUnavailableNotRemoved() {

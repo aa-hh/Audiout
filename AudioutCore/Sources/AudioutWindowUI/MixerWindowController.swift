@@ -277,6 +277,26 @@ public final class MixerWindowController {
         editorViewController.onDidCancelRename = { [weak self] in
             self?.sidebarViewController.claimKeyboardFocus()
         }
+        // Build the three swapped panes' view trees HERE rather than on the
+        // first swap that shows one. Measured headless with the seven-speaker
+        // demo fleet: the first `showDetail` — the Mixer row's "Equalizer…"
+        // door — cost 30 ms of view building on the main thread, on top of the
+        // 50 ms this controller already costs to construct, and the whole 80 ms
+        // landed inside the click ("very juddery", owner, 2026-09-04). This
+        // controller is itself built off the click path now
+        // (`AppSurfaceController.prewarmScreens`), so moving the panes into it
+        // takes them off the click path too.
+        for pane in [detailViewController as NSViewController,
+                     mainOutDetailViewController,
+                     editorViewController] {
+            pane.loadViewIfNeeded()
+            // Loading the tree is only half of it: the first swap that shows a
+            // pane also pays for solving its constraints from nothing. Solving
+            // them once here leaves the swap re-solving an already-solved
+            // layout at a new width, which measured 8 ms cheaper.
+            pane.view.layoutSubtreeIfNeeded()
+        }
+
         // An icon override picked in any pane repaints every surface. Chain onto
         // any existing observer rather than clobbering it — the controller is
         // shared and another owner may already be listening.
@@ -749,6 +769,13 @@ public final class MixerWindowController {
 /// pure chrome and must never swallow a click meant for what it borders.
 final class HairlineView: NSView {
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        redrawOnAccessibilityDisplayChange()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -802,7 +829,7 @@ final class ContentPaneHostViewController: NSViewController {
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
 
         // Warm Signal §5.3: the CONTENT pane (swapped pane + footer strip)
-        // sits on the warm `panel` canvas; the split view / sidebar / chrome
+        // sits on the `panel` canvas; the split view / sidebar / chrome
         // around it stay stock. The root of this host is that canvas.
         let root = WarmPanelView()
         // The seam between the chrome above and this warm pane (design

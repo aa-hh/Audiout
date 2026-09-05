@@ -11,6 +11,7 @@ import AudioToolbox
 import CoreBluetooth
 import Foundation
 import IOBluetooth
+import os
 
 // MARK: - Records
 
@@ -34,12 +35,21 @@ public struct BTDeviceSnapshot: Sendable, Equatable {
     /// years-dead ghosts — this is the fact a later wave filters/sorts by.
     /// `nil` when unknown (no paired record, or the OS reported none).
     public let lastUsed: Date?
+    /// The pairing's Audio/Video MINOR device class from its Class of Device
+    /// (`IOBluetoothDevice.deviceClassMinor`) — headphones, loudspeaker, car
+    /// audio and so on, the one fact that separates a headset from a speaker
+    /// cabinet. `nil` when no paired record backs this row (the paired list is
+    /// unreadable without the Bluetooth grant), and the glyph then falls back
+    /// to the neutral speaker (`Device.symbolName`).
+    public let deviceClassMinor: UInt32?
 
-    public init(id: String, name: String, isConnected: Bool, lastUsed: Date? = nil) {
+    public init(id: String, name: String, isConnected: Bool, lastUsed: Date? = nil,
+                deviceClassMinor: UInt32? = nil) {
         self.id = id
         self.name = name
         self.isConnected = isConnected
         self.lastUsed = lastUsed
+        self.deviceClassMinor = deviceClassMinor
     }
 }
 
@@ -68,6 +78,10 @@ struct BTPairedRecord: Sendable, Equatable {
     /// mice, and phones out of the merge.
     let isAudioCapable: Bool
     let lastUsed: Date?
+    /// `IOBluetoothDevice.deviceClassMinor` — see ``BTDeviceSnapshot/deviceClassMinor``.
+    /// Recorded at pairing like the major class, so it is readable for a
+    /// long-disconnected device too. `nil` when the OS reported none.
+    let deviceClassMinor: UInt32?
 }
 
 // MARK: - Seam
@@ -265,7 +279,8 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
             }
             let record = key.flatMap { pairedByMAC[$0] }
             snapshots.append(BTDeviceSnapshot(
-                id: output.uid, name: output.name, isConnected: true, lastUsed: record?.lastUsed))
+                id: output.uid, name: output.name, isConnected: true, lastUsed: record?.lastUsed,
+                deviceClassMinor: record?.deviceClassMinor))
         }
         for record in paired {
             guard record.isAudioCapable,
@@ -275,7 +290,8 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
             seenMACs.insert(key)
             snapshots.append(BTDeviceSnapshot(
                 id: id, name: record.name ?? record.address ?? id,
-                isConnected: false, lastUsed: record.lastUsed))
+                isConnected: false, lastUsed: record.lastUsed,
+                deviceClassMinor: record.deviceClassMinor))
         }
         return snapshots.sorted { $0.id < $1.id }
     }
@@ -392,15 +408,48 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
     // NEVER call without the authorization gate having passed — see the class
     // doc: an ungranted IOBluetooth touch kills the process outright.
 
+    /// The unified log, not stderr: the only run that can answer what a real
+    /// speaker reports is an `open`-launched signed `.app` (the paired list is
+    /// unreadable without the Bluetooth grant, which a `swift run` binary does
+    /// not hold), and a launchd-started app's stderr goes nowhere readable.
+    /// Read it back with
+    /// `log show --last 5m --predicate 'subsystem == "com.audiout.Audiout"'`
+    /// — `.notice`, NOT `.debug`: macOS discards debug messages unless someone
+    /// raises the level with `sudo log config`, so a `.debug` diagnostic cannot
+    /// be read in the one situation it exists for (2026-09-04 — it shipped that
+    /// way and had to be caught on a live `log stream` instead). It carries
+    /// class numbers only, never a device name, so persisting it is safe.
+    private static let log = Logger(subsystem: "com.audiout.Audiout", category: "bluetooth")
+
     private static let systemPairedRecords: @Sendable () -> [BTPairedRecord] = {
         let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+        // Diagnostic: nobody has established what AirPods report in the MINOR
+        // class field, and the glyph mapping in `Device.symbolName` rests on
+        // it. The CLASS NUMBERS are the whole answer, so that is all this
+        // writes — one `.debug` line for the whole enumeration, which
+        // `refreshLocked` runs on every Core Audio device-list change. Device
+        // NAMES stay out of it entirely: a unified-log entry is readable by
+        // anything on the system, and PRODUCT.md's "Data Collection" line
+        // says a speaker's name never leaves the machine.
+        log.notice("paired audio device classes: \(pairedClassSummary(paired), privacy: .public)")
         return paired.map { device in
             BTPairedRecord(
                 name: device.name,
                 address: device.addressString,
                 isAudioCapable: isAudioCapable(device),
-                lastUsed: device.recentAccessDate())
+                lastUsed: device.recentAccessDate(),
+                deviceClassMinor: device.deviceClassMinor)
         }
+    }
+
+    /// Every pairing's major/minor class pair as one hex string — the only
+    /// part of the paired list the glyph question needs. Audio-capable
+    /// pairings only, so a keyboard or a mouse is not in the answer.
+    private static func pairedClassSummary(_ paired: [IOBluetoothDevice]) -> String {
+        paired
+            .filter { isAudioCapable($0) }
+            .map { String(format: "%02x/%02x", $0.deviceClassMajor, $0.deviceClassMinor) }
+            .joined(separator: " ")
     }
 
     /// A cached A2DP AudioSink SDP record (UUID16 0x110B) is the strong signal;

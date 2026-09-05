@@ -25,9 +25,10 @@ import Testing
 
     private func paired(
         name: String? = "JBL Flip 5", address: String? = "70-99-1c-51-8f-a8",
-        isAudioCapable: Bool = true, lastUsed: Date? = nil
+        isAudioCapable: Bool = true, lastUsed: Date? = nil, deviceClassMinor: UInt32? = nil
     ) -> BTPairedRecord {
-        BTPairedRecord(name: name, address: address, isAudioCapable: isAudioCapable, lastUsed: lastUsed)
+        BTPairedRecord(name: name, address: address, isAudioCapable: isAudioCapable,
+                       lastUsed: lastUsed, deviceClassMinor: deviceClassMinor)
     }
 
     // MARK: Transport / output filter
@@ -88,6 +89,27 @@ import Testing
         #expect(whileConnected.map(\.id) == whileDisconnected.map(\.id))
         #expect(whileConnected.first?.isConnected == true)
         #expect(whileDisconnected.first?.isConnected == false)
+    }
+
+    /// The pairing's minor device class rides the merge on BOTH paths — it is
+    /// what tells a headset from a speaker cabinet downstream
+    /// (`Device.symbolName`), and a connected speaker reaches it only through
+    /// its paired record, since Core Audio never reports a Class of Device.
+    @Test func deviceClassRidesBothMergePaths() {
+        let headphones = paired(name: "Sonos Move 2", address: "c4-38-75-0e-bf-4a",
+                                deviceClassMinor: 0x06)
+        let whileConnected = BTDeviceEnumerator.merge(outputs: [btOutput()], paired: [headphones])
+        let whileDisconnected = BTDeviceEnumerator.merge(outputs: [], paired: [headphones])
+        #expect(whileConnected.first?.deviceClassMinor == 0x06)
+        #expect(whileDisconnected.first?.deviceClassMinor == 0x06)
+    }
+
+    /// A connected output no paired record claims — the paired list is empty
+    /// without the Bluetooth grant — keeps its row with NO class, which is what
+    /// makes the glyph fall back rather than guess.
+    @Test func connectedOutputWithNoPairedRecordCarriesNoDeviceClass() {
+        let merged = BTDeviceEnumerator.merge(outputs: [btOutput()], paired: [])
+        #expect(merged.first?.deviceClassMinor == nil)
     }
 
     /// Keyboards, mice, and phones are paired too — only audio-capable records

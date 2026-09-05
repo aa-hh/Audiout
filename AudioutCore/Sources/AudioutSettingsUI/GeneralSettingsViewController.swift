@@ -228,7 +228,7 @@ public final class GeneralSettingsViewController: NSViewController {
             "Controlled by the \(AppSettings.allowRemoteControlEnvironmentVariableName) "
             + "setting for this launch — the switch can't change it."
         remoteControlOverrideNote.font = Tokens.Font.caption
-        remoteControlOverrideNote.textColor = Tokens.Color.warning
+        remoteControlOverrideNote.textColor = Tokens.Color.label2
         remoteControlOverrideNote.lineBreakMode = .byWordWrapping
         remoteControlOverrideNote.maximumNumberOfLines = 0
         remoteControlOverrideNote.preferredMaxLayoutWidth = SettingsForm.contentWidth - 40
@@ -496,7 +496,7 @@ public final class GeneralSettingsViewController: NSViewController {
     /// empty, so a first phone appearing mid-session can show up live.
     private func makePhoneListViews() -> [NSView] {
         phoneListHeading.font = Tokens.Font.captionEmphasized
-        phoneListHeading.textColor = Tokens.Color.secondaryLabel
+        phoneListHeading.textColor = Tokens.Color.label2
 
         phoneListStack.orientation = .vertical
         phoneListStack.alignment = .leading
@@ -548,7 +548,7 @@ public final class GeneralSettingsViewController: NSViewController {
         let decisionLabel = SettingsForm.label(approval.decision == .approved ? "Allowed" : "Denied")
         decisionLabel.font = Tokens.Font.caption
         decisionLabel.textColor = approval.decision == .approved
-            ? Tokens.Color.secondaryLabel : Tokens.Color.warning
+            ? Tokens.Color.label2 : Tokens.Color.label2
 
         let remove = NSButton()
         remove.translatesAutoresizingMaskIntoConstraints = false
@@ -558,7 +558,7 @@ public final class GeneralSettingsViewController: NSViewController {
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
         remove.image = NSImage(systemSymbolName: "minus.circle.fill", accessibilityDescription: "Remove")?
             .withSymbolConfiguration(config)
-        remove.contentTintColor = Tokens.Color.secondaryLabel
+        remove.contentTintColor = Tokens.Color.label2
         remove.target = self
         remove.action = #selector(revokePhoneTapped(_:))
         remove.identifier = NSUserInterfaceItemIdentifier(approval.clientID)
@@ -859,6 +859,14 @@ public final class GeneralSettingsViewController: NSViewController {
         return remoteControlResolution.isForced ? remoteControlOverrideNote.stringValue : nil
     }
 
+    /// The override note's actual rendered text colour — pins that this is a
+    /// plain caption, not the failure/warning red (it names a setting, not a
+    /// problem).
+    public var test_allowRemoteControlOverrideNoteTextColor: NSColor {
+        _ = view
+        return remoteControlOverrideNote.textColor ?? .clear
+    }
+
     /// Drive the switch to `on`/`off` and run the same action a real click
     /// would. While overridden this is a no-op on the persisted setting (the
     /// action itself refuses, mirroring the disabled real control) — FIX-C.
@@ -892,6 +900,16 @@ public final class GeneralSettingsViewController: NSViewController {
     public var test_phoneRowCount: Int {
         _ = view
         return phoneListStack.arrangedSubviews.count
+    }
+
+    /// The rendered Allowed/Denied caption's actual text colour at a row
+    /// index — pins that a recorded decision is a plain word, not the
+    /// failure/warning red, regardless of which way the decision went.
+    public func test_phoneRowDecisionTextColor(at index: Int) -> NSColor? {
+        _ = view
+        guard phoneListStack.arrangedSubviews.indices.contains(index) else { return nil }
+        let row = phoneListStack.arrangedSubviews[index]
+        return row.subviews.compactMap { $0 as? NSTextField }.dropFirst().first?.textColor
     }
 
     /// Revoke a phone through the same path its row's ✕ button runs.

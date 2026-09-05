@@ -501,40 +501,39 @@ import AudioutCore
         #expect(row.test_statusText == "System · Safari")
     }
 
-    // MARK: V1 — mute tint (accent while muted, secondary otherwise)
+    // MARK: V1 — the mute mark (filled square while muted, outline otherwise)
 
-    @Test func muteTintIsEngagedChromeWhenMutedViaApply() {
+    @Test func muteDrawsTheFilledSquareWhenMutedViaApply() {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isMuted: true)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
 
-        #expect(row.test_muteTintColor == Tokens.Color.engagedChrome,
-                "apply() lands the engaged-chrome tint while muted")
+        #expect(row.test_mutePillIsMutedHue,
+                "apply() must land the filled square in the reserved muted hue")
     }
 
-    @Test func muteTintIsSecondaryWhenUnmutedViaApply() {
+    @Test func muteDrawsTheOutlineSquareWhenUnmutedViaApply() {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isMuted: false)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
 
-        #expect(row.test_muteTintColor == Tokens.Color.label2, "unmuted reads as the neutral label2 tint")
+        #expect(row.test_muteDrawsRestSymbol, "unmuted reads as the outline square")
     }
 
-    @Test func muteTintUpdatesInstantlyOnLiveClick() {
+    @Test func muteMarkUpdatesInstantlyOnLiveClick() {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isMuted: false)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
-        #expect(row.test_muteTintColor == Tokens.Color.label2)
+        #expect(row.test_muteDrawsRestSymbol)
 
         // `test_toggleMute` drives the exact same path a real click does
         // (AppKit's own state flip, then `muteToggled(_:)`'s `updateMuteTint()`)
-        // — the tint must update WITHOUT waiting for a host-driven `apply`.
+        // — the mark must update WITHOUT waiting for a host-driven `apply`.
         row.test_toggleMute(true)
-        #expect(row.test_muteTintColor == Tokens.Color.engagedChrome,
-                "a live click updates the tint instantly")
+        #expect(row.test_mutePillIsMutedHue, "a live click swaps the symbol instantly")
 
         row.test_toggleMute(false)
-        #expect(row.test_muteTintColor == Tokens.Color.label2, "toggling back off reverts the tint instantly")
+        #expect(row.test_muteDrawsRestSymbol, "toggling back off reverts the symbol instantly")
     }
 
     // MARK: V7 — the `%` readout dims with the slider's disabled state

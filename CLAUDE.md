@@ -29,7 +29,7 @@ with `scripts/ios.sh build --root <that checkout>`.
 git config core.hooksPath .githooks
 ```
 
-Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4/6** run the test suites on any commit touching Swift sources. **Guard 7** blocks Swift commits until the staged-diff readability self-review has run — `scripts/self-review.sh`, rubric in [`docs/REVIEW-RUBRIC.md`](docs/REVIEW-RUBRIC.md).
+Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4/6** run the test suites on any commit touching Swift sources — on a branch commit Guard 4 runs only the suites covering the staged files (`.githooks/guard-test-scope.sh` derives them, and falls back to the full suite whenever it cannot map a file or the commit deletes one); a merge landing on `main` runs the full suite with the pass cache off. `AUDIOUT_FULL_SUITE=1` forces the full run anywhere. Guard 6 (AirPlayEngine, ~2s) always runs in full. **Guard 7** blocks Swift commits until the staged-diff readability self-review has run — `scripts/self-review.sh`, rubric in [`docs/REVIEW-RUBRIC.md`](docs/REVIEW-RUBRIC.md).
 
 ## Build & run
 

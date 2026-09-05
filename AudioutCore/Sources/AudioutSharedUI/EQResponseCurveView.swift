@@ -343,7 +343,7 @@ public final class EQResponseCurveView: NSView {
     private func drawRuler(beside plot: NSRect) {
         let attributes: [NSAttributedString.Key: Any] = [
             .font: Tokens.Font.caption,
-            .foregroundColor: Tokens.Color.secondaryLabel,
+            .foregroundColor: Tokens.Color.label2,
         ]
         // The typographic MINUS, matching `EQEditorView.gainText`, so "−12"
         // keeps the digit width "+12" has.

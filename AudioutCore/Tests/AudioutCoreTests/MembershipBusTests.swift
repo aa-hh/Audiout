@@ -54,11 +54,12 @@ import AudioutCore
         // The dim flag rides along; it reaches only a FILL, and a hollow node
         // has none — the rim is the rail's and stays ember.
         #expect(row.test_busNodeDimmed == true, "…and carries the unavailable dim")
-        // Unavailable is a tinted `.nonMember` + the "Unavailable" FEED
-        // override (v4.1 item 3 moved this word off the sublabel and onto the
-        // FEED column, since this row is a bus row).
-        #expect(row.test_feedText == "Unavailable")
-        #expect(row.test_feedIsErrorColored)
+        // Unavailable is a tinted `.nonMember` + the failure-red FEED
+        // override (v4.1 item 3 moved this state off the sublabel and onto
+        // the FEED column, since this row is a bus row; 2026-09-04 dropped
+        // its word for the bare glyph, which fits the 52 pt slot).
+        #expect(row.test_feedErrorPillHasGlyph)
+        #expect(row.test_feedErrorGlyphIsFailureColored)
         #expect(row.test_statusText == nil, "the sublabel carries no words on a bus row's unavailable state")
     }
 

@@ -173,7 +173,7 @@ let package = Package(
         // records which tag it is actually on. 0.6.0 is the floor because
         // that is the tag `CompanionMessage.alignmentApplied` landed in, and
         // the companion server sends it on every applied measurement.
-        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.8.0"),
+        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.8.1"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

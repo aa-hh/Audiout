@@ -13,28 +13,12 @@
 #   2. A build made WITH one carries EXACTLY that URL. A paid build whose key
 #      is missing or stale cannot register, and the buyer is stranded.
 #
-# WHY THIS IS A SCRIPT AND NOT CI: it used to be the `build-invariants` job in
-# .github/workflows/license-gate.yml, on a macos runner. GitHub bills macOS at
-# 10x, so a ~4.5 minute job cost ~45 minutes of allowance every time it ran —
-# on every PR touching scripts/, AudioutCore/ or AirPlayEngine/. That single
-# job was the bulk of a 2000-minute monthly budget, and it is now deleted: no
-# macOS runner remains in this repo, and this script is the only thing that
-# checks these invariants.
-#
-# Moving it here LOSES nothing that matters, because the check rides on a
-# machine that must already be working: make-release.sh builds, signs with a
-# Developer ID and notarises locally, so a release cannot happen without a
-# functioning local Mac build. make-app.sh routes compilation to the other Mac
-# when it is up (scripts/lib/remote.sh) and falls back locally when it is not,
-# so this is faster when that machine is available and correct when it is not.
-#
-# KNOWN GAP, accepted deliberately: the deleted CI job installed the Homebrew
-# dependencies from scratch on a clean runner, so it would have caught a build
-# that had come to depend on something outside that list. Nothing checks that
-# now. Both of this project's Macs have the dependencies already, so the way
-# it would surface is a buyer's machine failing to launch a release — which
-# bundle-dylibs.sh and scripts/verify-standalone-app.sh are the real defence
-# against, not a CI runner.
+# Where each mode runs: invariant 1 (the unlicensed probe build) is CI's job —
+# the `build-invariants` macOS job in .github/workflows/license-gate.yml runs
+# `full` on every PR touching the build, free now the repo is public. (The job
+# was deleted while the repo was private: macOS billed at 10x and was the bulk
+# of a 2000-minute monthly budget.) Invariant 2 gates the artifact that
+# actually ships: make-release.sh runs `artifact` on every release build.
 #
 # Usage:
 #   check-license-invariants.sh full [<app-bundle> <expected-url>]
@@ -102,8 +86,11 @@ case "$MODE" in
     echo "==> Building WITHOUT a licence URL (invariant 1)"
     # env -u, not `AUDIOUT_LICENSE_URL= `: make-app.sh keys off the variable
     # being SET, so an empty value would not exercise the unlicensed path. The
+    # Sparkle pair is unset too: the publish pipeline exports
+    # SPARKLE_ED_PUBLIC_KEY, and make-app.sh refuses a key with no feed URL —
+    # which this deliberately unlicensed build can never have. The
     # PostHog values are placeholders — this build is inspected, never run.
-    ( cd "$REPO_ROOT" && env -u AUDIOUT_LICENSE_URL \
+    ( cd "$REPO_ROOT" && env -u AUDIOUT_LICENSE_URL -u SPARKLE_ED_PUBLIC_KEY -u SPARKLE_FEED_URL \
         POSTHOG_PROJECT_TOKEN=invariant-check \
         POSTHOG_HOST=https://example.invalid \
         bash "$SCRIPT_DIR/make-app.sh" "$UNLICENSED_DIR" >/dev/null )

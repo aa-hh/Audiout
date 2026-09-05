@@ -102,8 +102,11 @@ case "$MODE" in
     echo "==> Building WITHOUT a licence URL (invariant 1)"
     # env -u, not `AUDIOUT_LICENSE_URL= `: make-app.sh keys off the variable
     # being SET, so an empty value would not exercise the unlicensed path. The
+    # Sparkle pair is unset too: the publish pipeline exports
+    # SPARKLE_ED_PUBLIC_KEY, and make-app.sh refuses a key with no feed URL —
+    # which this deliberately unlicensed build can never have. The
     # PostHog values are placeholders — this build is inspected, never run.
-    ( cd "$REPO_ROOT" && env -u AUDIOUT_LICENSE_URL \
+    ( cd "$REPO_ROOT" && env -u AUDIOUT_LICENSE_URL -u SPARKLE_ED_PUBLIC_KEY -u SPARKLE_FEED_URL \
         POSTHOG_PROJECT_TOKEN=invariant-check \
         POSTHOG_HOST=https://example.invalid \
         bash "$SCRIPT_DIR/make-app.sh" "$UNLICENSED_DIR" >/dev/null )

@@ -1599,25 +1599,28 @@ import AudioutProtocol
         #expect(popover.test_appRowSliderDimmed(for: "com.example.music") == false, "Bug T2 — the slider is live for the explicit Current Device pick (its own stream)")
     }
 
-    /// T4b (a deliberate product call, not a bug): an AirPlay-1-only (RAOP)
-    /// device must never appear as a per-app routing target — a per-app rebind
-    /// (`NativeBackend.performBindOp`'s `.rebind`, fired on a route change)
-    /// re-anchors an AP1 device's clock (no shared timing protocol with AP2),
-    /// drifting it out of sync with the rest of a group, and some classic
-    /// receivers briefly reject the RTSP reconnect. `demoFleet`'s "Mixer"
-    /// (`airport-mixer`) is `supportsAirPlay2 == false` — it must be excluded
-    /// from the destination menu even though it's a perfectly normal, selectable
-    /// Selected-Devices row (AP1 devices are still fine for whole-fleet output,
-    /// just not per-app redirect targets).
-    @Test func appRowDestinationMenuExcludesAirPlay1OnlyDevices() async throws {
+    /// An AirPlay-1-only (RAOP) device IS a per-app routing target. This
+    /// reverses T4b, which excluded it on the theory that a per-app rebind
+    /// (`NativeBackend.performBindOp`'s `.rebind`) would re-anchor the
+    /// device's clock and drift it out of sync. It cannot: the vendored
+    /// sender's `master_session_make` keys a master session on
+    /// `(stream_id, quality, encrypt)`
+    /// (`AirPlayEngine/Sources/CAirPlayEngine/sender/raop.c`), so two devices
+    /// on different per-app streams never share one — there is no shared clock
+    /// for a rebind to desync. `NativeBackendTests
+    /// .appRouteToAirPlay1OnlyDeviceIsBound` pins the binding itself.
+    ///
+    /// `demoFleet`'s "Mixer" (`airport-mixer`) is the `supportsAirPlay2 ==
+    /// false` row this reads.
+    @Test func appRowDestinationMenuOffersAirPlay1OnlyDevices() async throws {
         let appRouting = tempAppRoutingController()
         appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
         let (popover, _, _) = try await makePopover(appRouting: appRouting,
                                                      runningAppsProvider: routedApps)
 
         let titles = try #require(popover.test_appRowDestinationTitles(for: "com.example.music"))
-        #expect(!(titles.contains("Mixer")),
-                "an AirPlay-1-only device (supportsAirPlay2 == false) must never be offered as a per-app routing target")
+        #expect(titles.contains("Mixer"),
+                "an AirPlay-1-only device carries a per-app stream like any other engine-driven device")
         #expect(titles.contains("Office"), "an AirPlay-2 device is still offered normally")
     }
 
@@ -2251,14 +2254,18 @@ import AudioutProtocol
         #expect(item?.isEnabled == false)
     }
 
-    /// A group whose members include an AirPlay-1 speaker: that member simply
-    /// isn't reachable as a per-app target, so the entry says so.
-    @Test func groupEntryDisclosesAnIneligibleMember() async throws {
+    /// A group with a member the fleet cannot see right now — a speaker
+    /// switched off, say — discloses that rather than silently shrinking.
+    /// This used to seed an AirPlay-1 member and call it ineligible; AP1 is a
+    /// valid per-app target now, so an unreachable member is what still
+    /// reaches this branch. It is the "away", not the "claimed by the main
+    /// mix" wording — those are different facts and separate tests.
+    @Test func groupEntryDisclosesAnUnreachableMember() async throws {
         let appRouting = tempAppRoutingController()
         seedRoute(appRouting, bundleID: "com.example.music", displayName: "Music")
         let (popover, groups, backend) = try await makePopover(appRouting: appRouting,
                                                                runningAppsProvider: routedApps)
-        let groupID = try seedGroup(groups, members: ["office", "airport-mixer"])
+        let groupID = try seedGroup(groups, members: ["office", "attic-never-discovered"])
         popover.test_simulateOpen()
 
         let row = try #require(popover.test_appRow(for: "com.example.music"))

@@ -119,6 +119,8 @@ final class SurfaceToolbarController: NSObject {
 
 
     static let pinItemIdentifier = NSToolbarItem.Identifier("SurfacePin")
+    /// The centred wordmark + icon (owner, 2026-09-05).
+    static let brandItemIdentifier = NSToolbarItem.Identifier("SurfaceBrand")
 
     /// The ONE item carrying all three tabs. Three identifiers, one per
     /// screen, is what let the tabs drift apart into three islands; one item
@@ -142,6 +144,15 @@ final class SurfaceToolbarController: NSObject {
     private var tabsItem: NSToolbarItem?
     private var tabButtons: [SurfaceScreen: SurfaceToolbarSeatButton] = [:]
     private var pinItem: NSToolbarItem?
+    /// Pin draws the SAME seat as a tab (owner, 2026-09-05: style Pin
+    /// like the tabs, keep it on the right). Cut at half its own height
+    /// by `SurfaceToolbarSeat.seatCornerRadius`, and square, so it comes
+    /// out a circle. A bordered system item would render as glass ONLY
+    /// when no custom view shares the strip — the capsule is one, so a
+    /// bordered Pin beside it read as a flat square.
+    private var pinButton: SurfaceToolbarSeatButton? {
+        pinItem?.view as? SurfaceToolbarSeatButton
+    }
 
     private func tabButton(_ screen: SurfaceScreen) -> SurfaceToolbarSeatButton? {
         tabButtons[screen]
@@ -156,6 +167,11 @@ final class SurfaceToolbarController: NSObject {
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         toolbar.autosavesConfiguration = false
+        // The brand rides the WINDOW's centre line, not the midpoint of
+        // whatever space the tabs and Pin leave between them — those are
+        // different points, because the tab group is far wider than Pin
+        // (owner, 2026-09-05: the wordmark must be dead centre).
+        toolbar.centeredItemIdentifiers = [Self.brandItemIdentifier]
     }
 
     /// Attach to the shell window: the toolbar becomes the window's one header
@@ -208,17 +224,18 @@ final class SurfaceToolbarController: NSObject {
     }
 
     private func applyPinAppearance() {
-        guard let pinItem else { return }
+        guard let pinItem, let pinButton else { return }
         let label = isPinned ? "Unpin" : "Pin"
-        // Pinned state is the SYMBOL: `pin.fill` while pinned, the outline
-        // otherwise. The engaged wash Pin used to wear cannot exist on a
-        // bordered item — the system owns its chrome — and the filled glyph
-        // is the same statement in the system's own vocabulary.
-        pinItem.image = Self.resolveSymbol(isPinned ? "pin.fill" : "pin",
-                                           fallbacks: ["pin"],
-                                           accessibilityDescription: label)
+        pinButton.configure(symbol: Self.resolveSymbol(isPinned ? "pin.fill" : "pin",
+                                                       fallbacks: ["pin"],
+                                                       accessibilityDescription: label),
+                            label: label,
+                            toolTip: isPinned ? "Unpin — return to the menu bar" : "Pin as a window",
+                            isTab: false)
+        // Pinned reads as a selected seat — the same weight the current screen
+        // wears, because it is the same statement about the same strip.
+        pinButton.isEngaged = isPinned
         pinItem.label = label
-        pinItem.toolTip = isPinned ? "Unpin — return to the menu bar" : "Pin as a window"
     }
 
     // MARK: Actions
@@ -287,6 +304,10 @@ final class SurfaceToolbarController: NSObject {
     /// The seat button behind an item, for tests that render real pixels.
     func test_tabButton(_ screen: SurfaceScreen) -> SurfaceToolbarSeatButton? { tabButton(screen) }
     var test_pinItem: NSToolbarItem? { pinItem }
+    var test_pinButton: SurfaceToolbarSeatButton? { pinButton }
+    var test_brandView: SurfaceBrandView? {
+        toolbar.items.compactMap { $0.view as? SurfaceBrandView }.first
+    }
     /// The index of the tab DRAWING the engaged seat, `nil` if none is, more
     /// than one if the strip ever marked two (which `test_engagedTabCount`
     /// catches).
@@ -311,19 +332,19 @@ final class SurfaceToolbarController: NSObject {
     /// wears the one authored control. The 2026-08-30 failure was half the
     /// strip converted.
     var test_everyItemWearsTheSeat: Bool {
-        // Exactly ONE custom view — the capsule, with every tab inside it.
-        // Pin is deliberately not here: it is the bordered item the system
-        // draws as its glass circle (2026-09-05), so a second custom view in
-        // the strip means someone un-converted one or the other.
+        // Every CONTROL in the strip wears the authored seat: the three tabs
+        // inside the capsule, and Pin outside it. The brand lockup is the one
+        // custom view that is not a seat — it is decorative, not a control.
         let views = toolbar.items.compactMap(\.view)
-        guard views.count == 1,
-              let capsule = views.first as? SurfaceToolbarTabCapsule else { return false }
+        guard let capsule = views.compactMap({ $0 as? SurfaceToolbarTabCapsule }).first,
+              let pin = pinButton, !pin.isDescendant(of: capsule)
+        else { return false }
         let tabs = SurfaceScreen.allCases.compactMap(tabButton)
         return tabs.count == SurfaceScreen.allCases.count
             && tabs.allSatisfy { $0.isDescendant(of: capsule) }
     }
     /// Whether the pin item resolved a symbol image.
-    var test_pinItemHasImage: Bool { pinItem?.image != nil }
+    var test_pinItemHasImage: Bool { pinButton?.image != nil }
     var test_pinItemLabel: String? { pinItem?.label }
     /// Fire a tab exactly as a click on it would — a REAL click through the
     /// button's own target/action, not a hand-run selector.
@@ -332,7 +353,7 @@ final class SurfaceToolbarController: NSObject {
     }
     /// Simulate clicking Pin. A bordered item has no view to click, so this
     /// sends the item's own action the way the toolbar would.
-    func test_tapPin() { pinTapped(nil) }
+    func test_tapPin() { pinButton?.performClick(nil) }
 }
 
 // MARK: - NSToolbarDelegate
@@ -347,7 +368,7 @@ extension SurfaceToolbarController: NSToolbarDelegate {
         // (measured on macOS 26: Mixer gave circle + capsule(2), Groups three
         // circles, Settings capsule(2) + circle). A capsule we draw ourselves
         // has neither behaviour.
-        [Self.tabsItemIdentifier, .flexibleSpace, Self.pinItemIdentifier]
+        [Self.tabsItemIdentifier, Self.brandItemIdentifier, .flexibleSpace, Self.pinItemIdentifier]
     }
 
     /// Deliberately EMPTY. This seam is what turns AppKit's own selection
@@ -398,27 +419,89 @@ extension SurfaceToolbarController: NSToolbarDelegate {
 
         case Self.pinItemIdentifier:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            // BORDERED, deliberately — the one configuration macOS 26 draws
-            // as its own glass CIRCLE, the shape the owner asked Pin to be
-            // (2026-09-05). A custom-view item cannot get there: the system
-            // wraps every toolbar item in its own chrome, that wrapper is a
-            // rounded square whose shape no API controls (`NSToolbarItem`
-            // gained only `style` and `backgroundTintColor` in 26), and the
-            // seat we drew inside it was never the outline on screen. This
-            // reverses the 2026-08-30 "every item wears our seat" rule FOR
-            // PIN ONLY: the defect that rule fixed was hover-circle versus
-            // selected-rounded-square on one control, and Pin is never the
-            // toolbar's selected item, so only the circle exists for it.
-            item.isBordered = true
-            item.target = self
-            item.action = #selector(pinTapped(_:))
+            // Pin wears a seat button, `isTab: false`, which draws the circle.
+            let button = SurfaceToolbarSeatButton(
+                frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.pinSize))
+            button.target = self
+            button.action = #selector(pinTapped(_:))
+            item.view = button
             item.visibilityPriority = .high
             pinItem = item
             applyPinAppearance()
+            return item
+
+        case Self.brandItemIdentifier:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.view = SurfaceBrandView()
+            // Decorative — never swept into the overflow chevron, never a
+            // click target.
+            item.visibilityPriority = .high
             return item
 
         default:
             return nil
         }
     }
+}
+
+/// The header's centred brand lockup: the Audiout icon beside the wordmark
+/// (owner, 2026-09-05). Decorative — it carries no action and is not an
+/// accessibility element, because the window already names itself.
+///
+/// The wordmark is `Tokens.Font.wordmark` (ClashDisplay-Semibold), the one
+/// face reserved for setting "Audiout" and nothing else; it falls back to the
+/// bold system font when the `.otf` is not registered (every context but the
+/// assembled `.app`), so this never draws nothing.
+final class SurfaceBrandView: NSView {
+    static let iconSize: CGFloat = 20
+    static let iconGap: CGFloat = 6
+
+    /// The wordmark's own centre in this view's coordinates — the point
+    /// that must sit on the window's centre line. Read by the test.
+    var test_wordmarkCenterX: CGFloat { wordmarkLabel.frame.midX }
+    private let wordmarkLabel = NSTextField(labelWithString: "Audiout")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let icon = NSImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.image = BrandMark.image?.copy() as? NSImage
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.setAccessibilityElement(false)
+
+        let wordmark = wordmarkLabel
+        wordmark.translatesAutoresizingMaskIntoConstraints = false
+        wordmark.font = Tokens.Font.wordmark(size: 17)
+        wordmark.textColor = Tokens.Color.label
+        wordmark.setAccessibilityElement(false)
+
+        addSubview(icon)
+        addSubview(wordmark)
+
+        // The WORDMARK is what has to land on the centre line, with the icon
+        // hanging off its left (owner, 2026-09-05) — centring the lockup as a
+        // whole pushes the word right of centre by half the icon. So the view
+        // carries a trailing gutter exactly as wide as the icon plus its gap:
+        // that makes the wordmark the view's own centre, and AppKit centring
+        // the view then puts the WORD on the window's centre line.
+        let gutter = Self.iconSize + Self.iconGap
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: Self.iconSize),
+            icon.heightAnchor.constraint(equalToConstant: Self.iconSize),
+
+            wordmark.leadingAnchor.constraint(equalTo: icon.trailingAnchor,
+                                              constant: Self.iconGap),
+            wordmark.trailingAnchor.constraint(equalTo: trailingAnchor,
+                                               constant: -gutter),
+            wordmark.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            heightAnchor.constraint(equalToConstant: SurfaceToolbarSeat.pinDiameter),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

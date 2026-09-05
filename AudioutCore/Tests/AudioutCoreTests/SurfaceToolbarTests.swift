@@ -39,9 +39,13 @@ import AudioutSharedUI
         let (controller, window) = makeAttached()
         #expect(controller.test_itemIdentifiers == [
             SurfaceToolbarController.tabsItemIdentifier,
+            SurfaceToolbarController.brandItemIdentifier,
             .flexibleSpace,
             SurfaceToolbarController.pinItemIdentifier,
-        ], "ONE item carries all three tabs, and Pin trails it outside that capsule")
+        ], "ONE item carries all three tabs, the brand rides the centre, and Pin trails outside the capsule")
+        #expect(controller.toolbar.centeredItemIdentifiers
+                    == [SurfaceToolbarController.brandItemIdentifier],
+                "the brand is centred on the WINDOW, not on the gap the other items leave")
         #expect(window.toolbar === controller.toolbar)
         #expect(window.toolbarStyle == .unified, "D1: unified — the toolbar IS the one header strip")
     }
@@ -245,8 +249,12 @@ import AudioutSharedUI
             #expect(tab.isDescendant(of: capsule),
                     "every tab lives INSIDE the one capsule — three siblings in the strip is the three-islands failure")
         }
-        #expect(controller.test_pinItem?.view == nil,
-                "Pin is the standalone bordered item BESIDE the group, never a fourth thing inside it")
+        #expect(controller.test_pinButton != nil,
+                "Pin wears the same authored seat as a tab")
+        if let pin = controller.test_pinButton {
+            #expect(!pin.isDescendant(of: capsule),
+                    "Pin stands BESIDE the group, never a fourth thing inside it")
+        }
     }
 
     /// The selection has to be visible on exactly one tab.
@@ -578,41 +586,83 @@ import AudioutSharedUI
         }
     }
 
-    /// Pin is a TRUE CIRCLE (Alec, 2026-09-05: "make the pin button a circle
-    /// instead of an oval", then "so so so close" against the rounded square
-    /// still on screen). The shape is the SYSTEM'S, and the only way to ask
-    /// for it is a bordered item with no custom view: macOS 26 draws exactly
-    /// that as a glass circle, and `NSToolbarItem` exposes no shape, corner
-    /// radius or bezel to set on anything else.
+    /// The WORDMARK sits on the centre line, not the lockup (owner,
+    /// 2026-09-05: "the actual word mark itself needs to be completely dead
+    /// center, with the icon off the left of it").
     ///
-    /// So this asserts the configuration rather than pixels. Drawing our own
-    /// seat inside the item is what produced the oval — the system's wrapper
-    /// sat around it, and no probe of our bitmap could ever have seen that.
-    /// A custom view returning here is that regression.
-    @Test func pinIsTheBorderedItemMacOSDrawsAsACircle() {
-        let (controller, _) = makeAttached()
-        guard let pin = controller.test_pinItem else {
-            Issue.record("the strip carries no Pin item")
-            return
-        }
-        #expect(pin.view == nil,
-                "a custom view puts our own seat inside the system's wrapper — the oval")
-        #expect(pin.isBordered,
-                "bordered is the one configuration macOS draws as a circle")
-        #expect(pin.image != nil, "and the glyph is the item's, not a subview's")
+    /// Centring the lockup as a whole is the defect this catches: it puts the
+    /// word half an icon right of centre, which is what shipped first. The
+    /// view answers by carrying a trailing gutter the width of the icon plus
+    /// its gap, so the word IS the view's centre — that is what is measured.
+    @Test func theWordmarkIsCentredAndTheIconHangsOffItsLeft() {
+        let brand = SurfaceBrandView()
+        brand.layoutSubtreeIfNeeded()
+        let size = brand.fittingSize
+        brand.frame = NSRect(origin: .zero, size: size)
+        brand.layoutSubtreeIfNeeded()
+
+        #expect(abs(brand.test_wordmarkCenterX - size.width / 2) <= 1,
+                "the wordmark's centre is \(brand.test_wordmarkCenterX) in a \(size.width) pt view — it must be the middle")
     }
 
-    /// Pinned state reads off the SYMBOL, because a bordered item's chrome
-    /// belongs to the system and cannot carry our engaged wash.
+    /// Pin is a TRUE CIRCLE, drawn by us in the same seat language as a tab
+    /// (owner, 2026-09-05: style Pin like the tabs, keep it on the right).
+    ///
+    /// Asserted on real pixels, and the OUTER ring is what carries it: at 45°
+    /// a 34 pt square reaches 24 pt from its centre, so a rounded-square seat
+    /// still paints at radius 19 on the diagonal where a circle of radius 17
+    /// does not.
+    @Test func pinDrawsACircleAndNotARoundedSquare() {
+        #expect(SurfaceToolbarSeat.pinSize.width == SurfaceToolbarSeat.pinSize.height,
+                "a circle needs equal sides — \(SurfaceToolbarSeat.pinSize)")
+        let pin = SurfaceToolbarSeatButton(
+            frame: NSRect(origin: .zero, size: SurfaceToolbarSeat.pinSize))
+        pin.configure(symbol: nil, label: "Pin", toolTip: nil, isTab: false)
+        pin.isEngaged = true
+        guard let rep = render(pin, appearanceName: .darkAqua) else {
+            Issue.record("Pin rendered nothing to sample")
+            return
+        }
+        let radius = SurfaceToolbarSeat.pinDiameter / 2
+        let centre = NSPoint(x: radius, y: radius)
+        func probe(_ degrees: Int, _ distance: CGFloat) -> NSColor? {
+            let radians = CGFloat(degrees) * .pi / 180
+            return color(rep,
+                         atPoint: NSPoint(x: centre.x + cos(radians) * distance,
+                                          y: centre.y + sin(radians) * distance),
+                         in: pin.bounds)
+        }
+        for degrees in stride(from: 0, to: 360, by: 45) {
+            guard let inside = probe(degrees, radius - 2) else {
+                Issue.record("nothing sampled at \(degrees)°")
+                return
+            }
+            #expect(inside.alphaComponent > 0.05,
+                    Comment(rawValue: "Pin paints 2 pt inside its edge at \(degrees)°"))
+        }
+        for degrees in [45, 135, 225, 315] {
+            guard let outside = probe(degrees, radius + 2) else {
+                Issue.record("nothing sampled at \(degrees)°")
+                return
+            }
+            #expect(outside.alphaComponent < 0.05,
+                    Comment(rawValue: "and nothing 2 pt beyond the circle at \(degrees)° — a rounded square would still paint on the diagonal"))
+        }
+    }
+
+    /// Pinned state reads twice: the glyph swaps to `pin.fill`, and the seat
+    /// takes the same selected weight the current screen wears.
     @Test func pinShowsItsStateThroughTheGlyph() {
         let (controller, _) = makeAttached()
         // Compared as PIXELS: a symbol image loaded by name reports no `name()`
         // to read back, so anything less would pass on two nils.
-        let unpinned = controller.test_pinItem?.image?.tiffRepresentation
+        let unpinned = controller.test_pinButton?.image?.tiffRepresentation
+        #expect(controller.test_pinButton?.isEngaged == false, "unpinned draws no seat")
         controller.setPinned(true)
-        let pinned = controller.test_pinItem?.image?.tiffRepresentation
+        let pinned = controller.test_pinButton?.image?.tiffRepresentation
         #expect(unpinned != nil && pinned != nil, "both states must resolve a glyph")
         #expect(pinned != unpinned, "the glyph has to change between the two states")
+        #expect(controller.test_pinButton?.isEngaged == true, "and pinned wears the selected seat")
         #expect(controller.test_pinItem?.label == "Unpin")
     }
 

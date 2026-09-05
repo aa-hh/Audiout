@@ -124,6 +124,12 @@ TCC_PROBE_EXECUTABLE="tcc-probe"
 # Field.swift resolves Resources itself as of audiout-shared 0.8.1).
 # Names are `<PackageName>_<TargetName>.bundle`, deterministic from Package.swift.
 RESOURCE_BUNDLE_NAMES="AudioutCore_AudioutSharedUI.bundle AudioutShared_AudioutField.bundle"
+# A bundle the build PRODUCES but this list omits is silently left out of the
+# .app, and its consumer fatalErrors at first launch on a user's Mac — that is
+# exactly how the notarized 1.0.0 shipped broken. The per-name `test -d` below
+# cannot catch it: it only checks bundles already named here. So both build
+# paths also count what SwiftPM emitted and compare against this.
+RESOURCE_BUNDLE_COUNT="$(set -- $RESOURCE_BUNDLE_NAMES; echo $#)"
 
 # Codesigning identity, resolved in priority order:
 #   1. CODESIGN_IDENTITY from the environment — an explicit override. Set it to
@@ -295,7 +301,8 @@ swift build --package-path AirPlayEngine -c release --product $HELPER_EXECUTABLE
 HBIN=\$(swift build --package-path AirPlayEngine -c release --show-bin-path) && \
 rm -rf .remote-products && mkdir -p .remote-products && \
 cp \"\$BIN/$EXECUTABLE\" \"\$BIN/$TCC_PROBE_EXECUTABLE\" \"\$HBIN/$HELPER_EXECUTABLE\" .remote-products/ && \
-for b in $RESOURCE_BUNDLE_NAMES; do cp -R \"\$BIN/\$b\" .remote-products/ || exit 1; done"
+for b in $RESOURCE_BUNDLE_NAMES; do cp -R \"\$BIN/\$b\" .remote-products/ || exit 1; done && \
+{ N=\$(ls \"\$BIN\" | grep -c '\\.bundle\$' || true); [ \"\$N\" = $RESOURCE_BUNDLE_COUNT ] || { echo \"error: this build produced \$N SwiftPM resource bundles but make-app.sh ships $RESOURCE_BUNDLE_COUNT — add the new one to RESOURCE_BUNDLE_NAMES or it fatalErrors at first launch\" >&2; exit 1; }; }"
 
   RRC=0
   remote_run "$REPO_ROOT" "$REMOTE_CMD" || RRC=$?
@@ -401,6 +408,14 @@ test -x "$BUILT_HELPER"    || { echo "error: ptp-helper not found at $BUILT_HELP
 for b in $RESOURCE_BUNDLE_NAMES; do
   test -d "$RESOURCE_BUNDLES_DIR/$b" || { echo "error: resource bundle not found at $RESOURCE_BUNDLES_DIR/$b" >&2; exit 1; }
 done
+# Only meaningful on a local compile: a remote build's RESOURCE_BUNDLES_DIR is
+# the fetch staging dir, which by construction holds exactly what was asked for.
+# The remote compile runs the same count on its own machine instead.
+# BIN_DIR is only assigned on the local-compile path, hence the :- guard.
+if [ -n "${BIN_DIR:-}" ] && [ "$RESOURCE_BUNDLES_DIR" = "$BIN_DIR" ]; then
+  PRODUCED="$(ls "$BIN_DIR" | grep -c '\.bundle$' || true)"
+  [ "$PRODUCED" = "$RESOURCE_BUNDLE_COUNT" ] || { echo "error: this build produced $PRODUCED SwiftPM resource bundles but make-app.sh ships $RESOURCE_BUNDLE_COUNT ($RESOURCE_BUNDLE_NAMES) — add the new one, or its consumer fatalErrors at first launch on a user's Mac" >&2; exit 1; }
+fi
 
 # --- Assemble the bundle --------------------------------------------------
 echo "==> Assembling $APP_BUNDLE"

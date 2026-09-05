@@ -396,7 +396,7 @@ import Testing
         let vc = makeVC(model: makeModel(audio: .unsupported))
         await vc.test_tapAllow(.audio)
         #expect(!vc.test_hasCheckmark(.audio), "nobody granted anything")
-        #expect(vc.test_note(of: .audio) == "Requires macOS 14.2 or later")
+        #expect(vc.test_note(of: .audio) == "Requires macOS 14.4 or later")
         #expect(vc.test_spineTitle(of: .audio) == "Hear your Mac's sound",
                 "a row with no checkmark keeps the imperative title")
     }
@@ -407,7 +407,7 @@ import Testing
     @Test func anAutoPassedRowRefusesThePress() async {
         let vc = makeVC(model: makeModel(audio: .unsupported))
         await vc.test_tapAllow(.audio)
-        #expect(vc.test_note(of: .audio) == "Requires macOS 14.2 or later")
+        #expect(vc.test_note(of: .audio) == "Requires macOS 14.4 or later")
 
         #expect(!vc.test_isRowPressable(.audio))
         #expect(await vc.test_pressRow(.audio) == false)
@@ -1151,7 +1151,7 @@ import Testing
         await vc.test_tapAllow(.audio)
 
         let label = vc.test_rowAccessibilityLabel(.audio) ?? ""
-        #expect(label.hasSuffix(", requires macOS 14.2 or later"), "\(label)")
+        #expect(label.hasSuffix(", requires macOS 14.4 or later"), "\(label)")
         #expect(!label.contains(", allowed"), "\(label)")
     }
 

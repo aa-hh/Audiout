@@ -429,22 +429,38 @@ public final class AppRowView: NSView {
         var currentItem: NSMenuItem?
 
         func addHeader(_ title: String) {
-            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            item.attributedTitle = NSAttributedString(
-                string: title,
-                attributes: [
-                    .font: Tokens.Font.captionEmphasized,
-                    .foregroundColor: Tokens.Color.label3,
-                ])
-            menu.addItem(item)
+            // A rule above every section but the first. Sentence case (One Case)
+            // leaves the header in the entries' own type register, so the
+            // separation the uppercase transform used to carry is structural
+            // now: this rule, plus the indentation `addEntries` puts on the
+            // entries below it.
+            if let last = menu.items.last, !last.isSeparatorItem {
+                menu.addItem(.separator())
+            }
+            // `sectionHeader` is the ONLY item AppKit documents as
+            // non-interactive — it cannot be highlighted, hovered or picked,
+            // and it carries no action. A disabled plain item is NOT equivalent
+            // in this menu: an `NSPopUpButton` re-points every item's action at
+            // its own cell, and while `autoenablesItems` is on AppKit ignores
+            // `isEnabled` outright, so a hand-disabled header lights back up.
+            // Its appearance is owned by `NSMenu` and cannot be customised
+            // (AppKit release notes, macOS 14) — so no attributed title here.
+            menu.addItem(.sectionHeader(title: title))
         }
 
-        func addEntries(_ entries: [Destination]) {
+        /// `indented` sets the entries one step in from their section header, so
+        /// the header hangs to their left and reads as a heading rather than
+        /// another choice (Alec, 2026-09-05). This is a deliberate departure from
+        /// the HIG, which prefers a submenu to indentation; a submenu would put
+        /// every speaker an extra hop away, and reaching a speaker fast is the
+        /// point of this menu. Standalone entries sit under no header and so
+        /// stay flush.
+        func addEntries(_ entries: [Destination], indented: Bool = true) {
             for entry in entries {
                 let item = menuItem(
                     for: entry, isCurrent: entry.id == selectedID, action: action,
                     allowsAttributedSubtitle: allowsAttributedSubtitle)
+                item.indentationLevel = indented ? 1 : 0
                 menu.addItem(item)
                 if entry.id == selectedID { currentItem = item }
             }
@@ -463,7 +479,7 @@ public final class AppRowView: NSView {
         // are excluded for the same reason: they have their own section.
         let deviceEntries = destinations.filter { !$0.isLocal && !$0.isStandalone && !$0.isGroup }
 
-        addEntries(standaloneEntries)
+        addEntries(standaloneEntries, indented: false)
         if !standaloneEntries.isEmpty,
            !groupEntries.isEmpty || !localEntries.isEmpty || !deviceEntries.isEmpty {
             menu.addItem(.separator())
@@ -1080,9 +1096,15 @@ public final class AppRowView: NSView {
     public func test_meterLevel() -> Float { lastMeterLevel }
     /// The full ordered list of titles in the destination menu: the standalone
     /// entry (displayed as the bridge phrase "Follows main output", S6), a
-    /// separator (empty title), then the two disabled section headers
-    /// ("CURRENT DEVICE" / "AIRPLAY DEVICES") and their entries.
+    /// separator (empty title), then each section header preceded by its own
+    /// separator, and the entries that indent beneath it.
     public var test_menuTitles: [String] { destinationPopUp.menu?.items.map(\.title) ?? [] }
+    /// The destination menu's raw items. Titles alone can't tell a section
+    /// header from an entry — the local entry is itself titled "Current
+    /// Device" — so a test that must distinguish the two reads the items and
+    /// keys off `isSectionHeader` (or `representedObject`, which only a real
+    /// entry carries), never the title.
+    public var test_menuItems: [NSMenuItem] { destinationPopUp.menu?.items ?? [] }
     /// The currently checkmarked destination id.
     public var test_selectedDestinationID: String? {
         destinationPopUp.selectedItem?.representedObject as? String

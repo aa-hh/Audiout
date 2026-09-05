@@ -60,12 +60,16 @@ public struct UnsupportedAudioCaptureProbe: AudioCapturePermissionProbing {
 ///
 /// ## How it works
 /// 1. Read the live TCC decision first (the private `TCCAccessPreflight` behind
-///    ``SystemAudioCaptureTCC/preflight()``, macOS 14.4+). Already **granted** or
+///    ``SystemAudioCaptureTCC/preflight()``). The `kTCCServiceAudioCapture`
+///    bucket it reads is the one macOS 14.4 introduced, which is why the app's
+///    floor is 14.4 rather than the tap API's own 14.2 — below 14.4 the bucket
+///    is absent, and an absent bucket reads back as `.denied`, not
+///    `.undetermined` (see ``SystemAudioCaptureTCC``). Already **granted** or
 ///    **denied** → report it immediately — nothing to prove, and no surprise beep
 ///    when the user re-confirms an existing grant.
-/// 2. **Undetermined** (or pre-14.4, where TCC has no readable audio-capture
-///    bucket) → play a quiet sine **in this process** and open a muted tap of
-///    **only this process** (`CATapDescription(stereoMixdownOfProcesses:)`,
+/// 2. **Undetermined** → play a quiet sine **in this process** and open a
+///    muted tap of **only this process**
+///    (`CATapDescription(stereoMixdownOfProcesses:)`,
 ///    `muteBehavior = .muted`). Creating that tap surfaces the system prompt.
 ///    Tapping only ourselves keeps it off everyone else's audio (a global tap
 ///    would capture ambient audio, risking a false "granted" and contradicting
@@ -174,8 +178,12 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
     /// — otherwise a fast `.granted` read could be a stale, cdhash-pinned grant
     /// TCC will report but macOS will actually refuse to honor for this
     /// rebuilt binary, which is exactly the bug the functional probe exists to
-    /// catch. An undecided grant (or pre-14.4, where TCC has no readable
-    /// audio-capture bucket) always goes through the functional tone probe.
+    /// catch. An undecided grant always goes through the functional tone probe.
+    /// Note what does NOT happen here: an unreadable audio-capture bucket does
+    /// not fall through to the tone probe, because `preflight()` reports an
+    /// absent bucket as `.denied` and the guard below returns on `.denied`
+    /// first. That is the reason the app's floor is 14.4 — the OS versions
+    /// without the bucket would take this short-circuit and never recover.
     private func runProbe() -> PermissionStatus {
         let tccStatus = SystemAudioCaptureTCC.preflight()
         if case .denied? = tccStatus {
@@ -206,8 +214,8 @@ public final class CoreAudioTonePermissionProbe: AudioCapturePermissionProbing, 
     /// split ``SystemAudioCaptureTCC/combine(audio:screen:)`` uses.
     ///
     /// - `.denied` never reaches here (short-circuited by the caller).
-    /// - `.undetermined` or `nil` (pre-14.4) always needs the functional probe
-    ///   — there's no grant to trust yet.
+    /// - `.undetermined` or `nil` (TCC unreadable) always needs the functional
+    ///   probe — there's no grant to trust yet.
     /// - `.granted` only skips the functional probe when a fingerprint was
     ///   already proven AND it matches the binary running right now. No stored
     ///   fingerprint, or a mismatched one (a rebuild, or a stale grant pinned

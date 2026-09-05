@@ -127,8 +127,10 @@ everything privileged is small enough to read line-by-line.**
 **The three layers:**
 
 1. **Audio capture.** Two viable routes:
-   - *Core Audio process taps* (`AudioHardwareCreateProcessTap`, public since
-     macOS 14.4) — capture system/per-process audio with no kernel extension.
+   - *Core Audio process taps* (`AudioHardwareCreateProcessTap`, annotated
+     `API_AVAILABLE(macos(14.2))`; we ship a 14.4 floor because consent for it
+     is only readable in the TCC category 14.4 introduced) — capture
+     system/per-process audio with no kernel extension.
      Cleanest, and it's what enables per-app routing.
    - *Virtual output device* (a userspace `AudioServerPlugIn`, the same
      mechanism BlackHole uses) — the user selects it as their output; we grab

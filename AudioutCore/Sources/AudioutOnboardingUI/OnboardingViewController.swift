@@ -989,7 +989,12 @@ public final class OnboardingViewController: NSViewController {
         return .completed
     }
 
-    static let audioAutoPassNote = "Requires macOS 14.2 or later"
+    /// Unreachable in a shipped build: `.unsupported` is only produced below
+    /// macOS 14.2, and `LSMinimumSystemVersion` (14.4, see
+    /// AudioutCore/Package.swift) blocks installing there. It exists for a
+    /// build from source that lowers the deployment target, so it carries the
+    /// shipped floor's number rather than the probe's.
+    static let audioAutoPassNote = "Requires macOS 14.4 or later"
     static let speakerSyncAutoPassNote = "Couldn't be turned on"
 
     /// Whether this step's Allow has spent its prompt, so the next click is the

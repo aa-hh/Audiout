@@ -43,27 +43,40 @@ let brewFormulae = ["libevent", "libsodium", "libgcrypt", "libgpg-error", "libpl
 let swiftClangImporterFlags: [String] =
     brewFormulae.flatMap { ["-Xcc", "-I\(brewPrefix)/opt/\($0)/include"] }
 
-// Platform floor: raised from .v13 to .v14 for T-NB-PKGDEP-1. AirPlayEngine
-// (../AirPlayEngine/Package.swift) is .macOS(.v14) — its Core Audio process
-// tap capture (T-NB-CAPTURE-1) needs the tap API, which is 14.4+ (ahh runs
-// 14.4.1) — and a SwiftPM package's platform floor cannot be lower than any
-// local dependency it links (Xcode/SwiftPM enforces the dependency's
-// deployment target as a floor on any target that depends on it, and will
-// fail to build/resolve otherwise). Rather than fighting per-symbol
-// `@available` annotations to keep .v13 alive for code paths that never run
-// on 13 anyway (NativeBackend is opt-in via AIRPLAY_BACKEND=native), we take
-// the whole package to macOS 14. The mock/OwnTone-backed paths are unaffected —
-// they don't reference anything gated above .v13; this only tightens the
-// deployment target the app links for and installs on.
+// Platform floor: macOS 14.4, in the version-STRING form because `.v14` cannot
+// express a minor. Two separate things set it, and they land on different
+// numbers — the higher one wins.
 //
-// Raised again to 14.2 (the version-STRING form — `.v14` cannot express a
-// minor): the process-tap API onboarding's System Audio step depends on only
-// exists from 14.2, so 14.0/14.1 could install the app and then be told a
-// required permission is simply unavailable. `scripts/make-app.sh` already
-// stamps `LSMinimumSystemVersion` 14.2, so this makes the two agree.
+// The link floor is macOS 14. AirPlayEngine (../AirPlayEngine/Package.swift)
+// is .macOS(.v14) for its Core Audio process tap capture (T-NB-CAPTURE-1), and
+// a SwiftPM package's platform floor cannot be lower than any local dependency
+// it links: SwiftPM enforces the dependency's deployment target as a floor on
+// any target depending on it, and fails to build or resolve otherwise. Keeping
+// .v13 alive would mean fighting per-symbol `@available` annotations for code
+// paths that never run on 13 anyway (NativeBackend is opt-in via
+// AIRPLAY_BACKEND=native), so the whole package goes to 14. The
+// mock/OwnTone-backed paths reference nothing gated above .v13 and are
+// unaffected; this only tightens what the app links for and installs on.
+//
+// The real floor is 14.4, and it comes from the permission, not the API. The
+// tap calls themselves are older: Apple's header annotates
+// `AudioHardwareCreateProcessTap` `API_AVAILABLE(macos(14.2))`, so they
+// compile and run on 14.2 and 14.3. But the app does not merely call the API,
+// it reads consent for it through the private TCC framework, and 14.2/14.3
+// file audio capture under different TCC categories than the
+// `kTCCServiceAudioCapture` bucket `SystemAudioCaptureTCC` preflights. An
+// absent bucket does not read as undetermined — per that type's own measured
+// note, an unknown service name reads back as denied — so
+// `AudioCapturePermissionProbe.runProbe()` short-circuits on `.denied` before
+// the tone probe can recover. Below 14.4 a buyer would install, pay, and land
+// on a Setup row pointing at a permission they cannot grant. Nothing here has
+// ever been measured below 14.4.1, so that path is untested as well as
+// unsupported, and 14.4 is what README, PRODUCT.md, docs/SPEC.md and the
+// website all advertise. `scripts/make-app.sh` stamps the matching
+// `LSMinimumSystemVersion`; keep the two in step.
 let package = Package(
     name: "AudioutCore",
-    platforms: [.macOS("14.2")],
+    platforms: [.macOS("14.4")],
     products: [
         // The core library the AppKit app links against. It knows nothing about
         // AppKit — it's the seam between "the UI" and "wherever audio actually goes."

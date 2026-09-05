@@ -244,7 +244,7 @@ extension SerializedSharedState {
     /// view controller makes, because the tile itself is private to the row.
     @Test func glyphTintIsPermanentAcrossEveryCardState() {
         let states: [SetupCardState] = [.pending, .active, .completed,
-                                        .autoPassed(note: "Requires macOS 14.2 or later"),
+                                        .autoPassed(note: "Requires macOS 14.4 or later"),
                                         .skipped]
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
             for step in SetupStep.allCases {

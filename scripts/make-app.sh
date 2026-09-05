@@ -115,12 +115,15 @@ HELPER_LABEL="${BUNDLE_ID}.ptphelper"
 # build` invocation/bin dir below rather than a second package build.
 TCC_PROBE_EXECUTABLE="tcc-probe"
 
-# SwiftPM resource bundle for AudioutSharedUI (holds the in-app brand mark,
-# Audiout-Hero-1024.svg). SwiftPM emits it next to the app executable in the
-# build's bin dir; BrandMark resolves it from Contents/Resources at runtime — so
-# it MUST be copied into the .app or the in-app brand mark comes up blank.
-# Name is `<PackageName>_<TargetName>.bundle`, deterministic from Package.swift.
-RESOURCE_BUNDLE_NAME="AudioutCore_AudioutSharedUI.bundle"
+# SwiftPM resource bundles. SwiftPM emits each next to the app executable in
+# the build's bin dir; the code resolves them from Contents/Resources at
+# runtime — so each MUST be copied into the .app or its consumer breaks.
+# AudioutSharedUI holds the in-app brand mark (blank if missing, BrandMark.swift);
+# AudioutShared_AudioutField holds the emitter field's field.json (its absence
+# fatalErrored the notarized 1.0.0 at first launch, before any window —
+# Field.swift resolves Resources itself as of audiout-shared 0.8.1).
+# Names are `<PackageName>_<TargetName>.bundle`, deterministic from Package.swift.
+RESOURCE_BUNDLE_NAMES="AudioutCore_AudioutSharedUI.bundle AudioutShared_AudioutField.bundle"
 
 # Codesigning identity, resolved in priority order:
 #   1. CODESIGN_IDENTITY from the environment — an explicit override. Set it to
@@ -292,7 +295,7 @@ swift build --package-path AirPlayEngine -c release --product $HELPER_EXECUTABLE
 HBIN=\$(swift build --package-path AirPlayEngine -c release --show-bin-path) && \
 rm -rf .remote-products && mkdir -p .remote-products && \
 cp \"\$BIN/$EXECUTABLE\" \"\$BIN/$TCC_PROBE_EXECUTABLE\" \"\$HBIN/$HELPER_EXECUTABLE\" .remote-products/ && \
-cp -R \"\$BIN/$RESOURCE_BUNDLE_NAME\" .remote-products/"
+for b in $RESOURCE_BUNDLE_NAMES; do cp -R \"\$BIN/\$b\" .remote-products/ || exit 1; done"
 
   RRC=0
   remote_run "$REPO_ROOT" "$REMOTE_CMD" || RRC=$?
@@ -305,11 +308,17 @@ cp -R \"\$BIN/$RESOURCE_BUNDLE_NAME\" .remote-products/"
     # machine (scripts/housekeeping.sh exists for it), so clear them on EVERY
     # exit path rather than leaving a copy behind per build.
     trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
+    fetch_bundles() {
+      local b
+      for b in $RESOURCE_BUNDLE_NAMES; do
+        remote_fetch "$REPO_ROOT" ".remote-products/$b" "$STAGE/$b" &&
+          test -d "$STAGE/$b" || return 1
+      done
+    }
     if remote_fetch "$REPO_ROOT" ".remote-products/$EXECUTABLE" "$STAGE/$EXECUTABLE" &&
        remote_fetch "$REPO_ROOT" ".remote-products/$TCC_PROBE_EXECUTABLE" "$STAGE/$TCC_PROBE_EXECUTABLE" &&
        remote_fetch "$REPO_ROOT" ".remote-products/$HELPER_EXECUTABLE" "$STAGE/$HELPER_EXECUTABLE" &&
-       remote_fetch "$REPO_ROOT" ".remote-products/$RESOURCE_BUNDLE_NAME" "$STAGE/$RESOURCE_BUNDLE_NAME" &&
-       test -d "$STAGE/$RESOURCE_BUNDLE_NAME"; then
+       fetch_bundles; then
       # NO trailing slash on the bundle source, and the `test -d` above is part
       # of the fetch condition rather than a later assertion. Both are the same
       # rsync rule seen from two sides: a trailing slash means "copy the
@@ -317,13 +326,13 @@ cp -R \"\$BIN/$RESOURCE_BUNDLE_NAME\" .remote-products/"
       # $STAGE and $STAGE/<bundle> is never created. rsync still reports
       # SUCCESS, so without the `test -d` the fetch condition passes, the
       # graceful local-build fallback below is skipped, and the run dies ~70
-      # lines on at the hard `test -d "$BUILT_RESOURCE_BUNDLE"` exit instead.
+      # lines on at the hard per-bundle `test -d` exit instead.
       # (`remote_fetch` hands rsync the destination's PARENT — see its own
       # contract — which is what makes the slash-free form correct here.)
       BUILT_BINARY="$STAGE/$EXECUTABLE"
       BUILT_TCC_PROBE="$STAGE/$TCC_PROBE_EXECUTABLE"
       BUILT_HELPER="$STAGE/$HELPER_EXECUTABLE"
-      BUILT_RESOURCE_BUNDLE="$STAGE/$RESOURCE_BUNDLE_NAME"
+      RESOURCE_BUNDLES_DIR="$STAGE"
       chmod +x "$BUILT_BINARY" "$BUILT_TCC_PROBE" "$BUILT_HELPER"
       REMOTE_BUILT=1
       echo "==> Fetched 3 products from $remote_host"
@@ -356,7 +365,7 @@ echo "==> Building $EXECUTABLE (release)"
 swift build --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
 BIN_DIR="$(swift build --package-path "$PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_BINARY="$BIN_DIR/$EXECUTABLE"
-BUILT_RESOURCE_BUNDLE="$BIN_DIR/$RESOURCE_BUNDLE_NAME"
+RESOURCE_BUNDLES_DIR="$BIN_DIR"
 test -x "$BUILT_BINARY" || { echo "error: built binary not found at $BUILT_BINARY" >&2; exit 1; }
 
 # Same package as $EXECUTABLE, same release config — this lands in $BIN_DIR
@@ -389,7 +398,9 @@ fi  # REMOTE_BUILT
 test -x "$BUILT_BINARY"    || { echo "error: app binary not found at $BUILT_BINARY" >&2; exit 1; }
 test -x "$BUILT_TCC_PROBE" || { echo "error: tcc-probe not found at $BUILT_TCC_PROBE" >&2; exit 1; }
 test -x "$BUILT_HELPER"    || { echo "error: ptp-helper not found at $BUILT_HELPER" >&2; exit 1; }
-test -d "$BUILT_RESOURCE_BUNDLE" || { echo "error: resource bundle not found at $BUILT_RESOURCE_BUNDLE" >&2; exit 1; }
+for b in $RESOURCE_BUNDLE_NAMES; do
+  test -d "$RESOURCE_BUNDLES_DIR/$b" || { echo "error: resource bundle not found at $RESOURCE_BUNDLES_DIR/$b" >&2; exit 1; }
+done
 
 # --- Assemble the bundle --------------------------------------------------
 echo "==> Assembling $APP_BUNDLE"
@@ -408,15 +419,18 @@ chmod +x "$MACOS_DIR/$HELPER_EXECUTABLE"
 cp "$BUILT_TCC_PROBE" "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 chmod +x "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 
-# SwiftPM resource bundle → Contents/Resources, the only place codesign accepts
-# it (content at the .app root is refused: "unsealed contents present in the
+# SwiftPM resource bundles → Contents/Resources, the only place codesign accepts
+# them (content at the .app root is refused: "unsealed contents present in the
 # bundle root"). SwiftPM's own generated `Bundle.module` accessor does NOT look
 # here — it checks `Bundle.main.bundleURL/<name>.bundle` (the .app ROOT for a
 # bundled app) and then an absolute build-directory path baked in at compile
-# time — which is why BrandMark resolves the bundle itself rather than through
-# `Bundle.module`: see BrandMark.swift.
+# time — which is why every consumer resolves its bundle itself rather than
+# through `Bundle.module`: see BrandMark.swift and Field.swift (audiout-shared
+# ≥ 0.8.1).
 mkdir -p "$RESOURCES_DIR"
-cp -R "$BUILT_RESOURCE_BUNDLE" "$RESOURCES_DIR/$RESOURCE_BUNDLE_NAME"
+for b in $RESOURCE_BUNDLE_NAMES; do
+  cp -R "$RESOURCE_BUNDLES_DIR/$b" "$RESOURCES_DIR/$b"
+done
 
 # --- Wordmark font (ClashDisplay-Semibold) ---------------------------------
 # NOT in git and NOT in the SwiftPM resource bundle: the ITF Free Font License

@@ -117,8 +117,9 @@ test -d "$APP_BUNDLE" || { echo "ERROR: expected app bundle not found at $APP_BU
 # when it is up and does it here when it is not.
 #
 # This ran as the macos `build-invariants` CI job until it became the biggest
-# line on the GitHub Actions bill (macOS bills at 10x). It belongs here anyway:
-# it now gates the artifact that actually ships rather than a pull request.
+# line on the GitHub Actions bill (macOS bills at 10x); that job is now gone.
+# It belongs here anyway: it gates the artifact that actually ships rather than
+# a pull request, and this is the only place the invariants are checked.
 echo "==> Checking licence invariants"
 "$SCRIPT_DIR/check-license-invariants.sh" full "$APP_BUNDLE" "$AUDIOUT_LICENSE_URL"
 

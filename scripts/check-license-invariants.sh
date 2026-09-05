@@ -17,8 +17,9 @@
 # .github/workflows/license-gate.yml, on a macos runner. GitHub bills macOS at
 # 10x, so a ~4.5 minute job cost ~45 minutes of allowance every time it ran —
 # on every PR touching scripts/, AudioutCore/ or AirPlayEngine/. That single
-# job was the bulk of a 2000-minute monthly budget. The job still exists for
-# clean-machine runs, but only on workflow_dispatch now.
+# job was the bulk of a 2000-minute monthly budget, and it is now deleted: no
+# macOS runner remains in this repo, and this script is the only thing that
+# checks these invariants.
 #
 # Moving it here LOSES nothing that matters, because the check rides on a
 # machine that must already be working: make-release.sh builds, signs with a
@@ -27,10 +28,13 @@
 # when it is up (scripts/lib/remote.sh) and falls back locally when it is not,
 # so this is faster when that machine is available and correct when it is not.
 #
-# What it does NOT cover, and the workflow_dispatch job still does: the CI
-# runner installs the Homebrew dependencies from scratch, so it catches a build
-# that has quietly come to depend on something outside that list. Run the job
-# by hand before a significant release if that worries you.
+# KNOWN GAP, accepted deliberately: the deleted CI job installed the Homebrew
+# dependencies from scratch on a clean runner, so it would have caught a build
+# that had come to depend on something outside that list. Nothing checks that
+# now. Both of this project's Macs have the dependencies already, so the way
+# it would surface is a buyer's machine failing to launch a release — which
+# bundle-dylibs.sh and scripts/verify-standalone-app.sh are the real defence
+# against, not a CI runner.
 #
 # Usage:
 #   check-license-invariants.sh full [<app-bundle> <expected-url>]

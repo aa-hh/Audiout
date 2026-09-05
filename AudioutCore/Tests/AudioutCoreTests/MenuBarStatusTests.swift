@@ -51,10 +51,6 @@ import Testing
         )
     }
 
-    @Test func symbolName_outline_whenIdle() {
-        #expect(MenuBarStatus.symbolName(for: .idle) == "speaker.wave.3")
-    }
-
     // MARK: Streaming via Main Out (whole-system output set)
 
     @Test func isStreaming_true_whenAnyDeviceConnected() {
@@ -85,14 +81,6 @@ import Testing
         #expect(
             MenuBarStatus.isStreaming(devices: devices, liveRoutedAppNames: ["dev-2": ["Safari"]])
         )
-    }
-
-    @Test func symbolName_filled_whenStreaming() {
-        #expect(MenuBarStatus.symbolName(for: .streaming) == "speaker.wave.3.fill")
-    }
-
-    @Test func symbolName_badged_whenFailure() {
-        #expect(MenuBarStatus.symbolName(for: .failure) == "speaker.badge.exclamationmark")
     }
 
     // MARK: The three-state decision

@@ -401,7 +401,7 @@ is **sidebar + mixer** · volume is **horizontal rows**.
 | Element | AppKit API | Documented usage we follow |
 |---|---|---|
 | Status item | `NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)` | Customize only via its `button` property; the button's action runs the four-case click policy above. Provide a user setting to hide it (HIG). |
-| Status icon | `NSImage(systemSymbolName:variableValue:accessibilityDescription:)` | SF Symbol `speaker.wave.3.fill` with `variableValue` = master volume. Template rendering → correct in dark/light menu bar. |
+| Status icon | `NSImage(size:flipped:drawingHandler:)`, `isTemplate = true` | A frozen frame of the brand's emitter field (`StatusItemIcon`, constants from the shared `AudioutField` package), its reach driven by master volume — REVISED 2026-09-05; was SF Symbol `speaker.wave.3.fill` with `variableValue`, which was indistinguishable from the system volume item. Template rendering → correct in dark/light menu bar. |
 | Dropdown | The one surface's **Mixer screen**: an `NSPanel` anchored under the status button (unpinned) hosting the same exact-content-fit custom-view panel (no `NSScrollView`, no scrollbar — REVISED 2026-07-16, see below). Was an `NSPopover` until 2026-08-07 | Control-Center-style. Groups + devices are stacked custom views; expansion animates; click anywhere on a row toggles it. |
 
 ### Groups in the menu (decided 2026-07-09)

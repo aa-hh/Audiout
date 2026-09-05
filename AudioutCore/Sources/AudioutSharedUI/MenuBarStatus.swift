@@ -3,8 +3,8 @@ import AudioutCore
 /// Pure decision logic for the menu-bar status item's THREE-state glance:
 /// idle, streaming, failure. AppKit-free by design (no
 /// `NSImage`/`NSColor`/`NSStatusItem`) so it's unit-testable without a real
-/// status bar. `StatusItemIcon.make` (same target) turns `symbolName(for:)`
-/// into the actual `NSImage` — always a template image, per the macOS
+/// status bar. `StatusItemIcon.make` (same target) turns the decision into
+/// the actual `NSImage` — always a template image, per the macOS
 /// menu-bar-status-item convention — and `AudioutApp.StatusItemController`
 /// is the only caller of that.
 ///
@@ -74,21 +74,8 @@ public enum MenuBarStatus {
         return liveRoutedAppNames.values.contains { !$0.isEmpty }
     }
 
-    /// The base SF Symbol name for the given state: the OUTLINE variant while
-    /// idle/passthrough (`speaker.wave.3`), the FILLED variant while actively
-    /// streaming (`speaker.wave.3.fill`), and the BADGED variant when a
-    /// selected speaker has failed (`speaker.badge.exclamationmark`). Callers
-    /// layer their own `variableValue`/template rendering on top.
-    public static func symbolName(for state: State) -> String {
-        switch state {
-        case .idle: return "speaker.wave.3"
-        case .streaming: return "speaker.wave.3.fill"
-        case .failure: return "speaker.badge.exclamationmark"
-        }
-    }
-
-    /// What VoiceOver reads for the status glyph. The symbol shape carries
-    /// state and the arc carries level, and neither is spoken by itself — so
+    /// What VoiceOver reads for the status glyph. The glyph shape carries
+    /// state and the field's reach carries level, and neither is spoken by itself — so
     /// this composes the same facts in words: the failure, or the level plus
     /// mute plus whether audio is actually leaving the Mac.
     ///

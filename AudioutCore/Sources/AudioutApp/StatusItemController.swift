@@ -10,12 +10,15 @@ import AudioutSharedUI
 /// - never init `NSStatusItem` directly — use `statusItem(withLength:)`;
 /// - customize ONLY via `.button` (the item's `.view`/`.title`/`.image` are
 ///   deprecated);
-/// - the button image is an SF Symbol whose `variableValue` tracks master
-///   volume (the waves fill with level) in BOTH the idle and streaming states;
-/// - **idle/passthrough**: the OUTLINE variant (`speaker.wave.3`);
+/// - the button image is a frozen frame of the brand's emitter field
+///   (`StatusItemIcon`, decided 2026-09-05 — it replaced the
+///   `speaker.wave.3` SF Symbol, which was indistinguishable from the system
+///   volume item) whose reach tracks master volume (the waves travel further
+///   with level) in BOTH the idle and streaming states;
+/// - **idle/passthrough**: hollow source dot, dimmed field;
 /// - **actively streaming** (`MenuBarStatus.isStreaming` — anything leaving
-///   the Mac by any mechanism, Main Out or a per-app redirect): the FILLED
-///   variant (`speaker.wave.3.fill`).
+///   the Mac by any mechanism, Main Out or a per-app redirect): solid dot,
+///   full-strength field.
 ///
 /// BOTH states render as a plain TEMPLATE image — that is the macOS
 /// menu-bar-status-item convention (see `AudioutSharedUI.StatusItemIcon`'s
@@ -32,12 +35,12 @@ import AudioutSharedUI
 /// Three glance rules ride on top of that, and all three are alpha-only so the
 /// button image stays a TEMPLATE image (menu bar rules — it survives Reduce
 /// Transparency and both menu-bar appearances for free):
-/// - **master-mute drains the volume arc** to the empty `variableValue` state
-///   (mirrors the meter-drain rule) — `PopoverController.statusMasterVolume`
+/// - **master-mute drains the waves** to the lone source dot (mirrors the
+///   meter-drain rule) — `PopoverController.statusMasterVolume`
 ///   reports 0 while Main Out is muted, so the closed-panel glance never lies
 ///   "80% and broadcasting" while silent;
-/// - **a selected speaker that has FAILED** renders
-///   `speaker.badge.exclamationmark` instead of the wave glyph, so a broken
+/// - **a selected speaker that has FAILED** renders few loud marks plus an
+///   exclamation badge instead of the full field, so a broken
 ///   speaker never looks like a merely paused one. Deselecting it clears the
 ///   badge (`MenuBarStatus.state`);
 /// - **the accessibility description speaks all of it** — level, mute,
@@ -132,9 +135,10 @@ final class StatusItemController {
         onButtonClicked?(sender)
     }
 
-    /// Update the master-volume level (0…1) the status symbol reflects, then
-    /// rebuild the button image with the new `variableValue`. Rebuilding is the
-    /// documented way to change an SF Symbol's variable value (brief gotcha #9).
+    /// Update the master-volume level (0…1) the status glyph reflects, then
+    /// rebuild the button image with the new field reach (the glyph is a
+    /// static drawing — rebuilding on change is its only update path, exactly
+    /// as it was for the SF Symbol's `variableValue`, brief gotcha #9).
     func updateMasterVolume(_ level: Double) {
         let clamped = min(1, max(0, level))
         guard clamped != masterVolume else { return }

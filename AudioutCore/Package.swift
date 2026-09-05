@@ -219,7 +219,13 @@ let package = Package(
         // `Delegate` — no backend knowledge.
         .target(
             name: "AudioutSharedUI",
-            dependencies: ["AudioutCore"],
+            // AudioutField: the emitter field's shared numbers, which
+            // `StatusItemIcon` computes the menu-bar glyph from rather than
+            // retyping them (same rule as `EmitterFieldView`'s shader).
+            dependencies: [
+                "AudioutCore",
+                .product(name: "AudioutField", package: "audiout-shared"),
+            ],
             // `Resources/Symbols.xcassets` is EXCLUDED, not declared. SwiftPM
             // never runs `actool`, so a resource rule would copy the directory
             // in verbatim and every custom symbol would resolve to nil at

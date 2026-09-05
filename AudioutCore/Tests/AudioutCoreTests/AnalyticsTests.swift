@@ -6,8 +6,9 @@ import Testing
 @testable import AudioutCore
 
 /// Covers `Analytics` (`Sources/AudioutCore/Analytics.swift`): the no-sink
-/// no-op default, the consent gate on `capture(_:_:)`, and `setConsent`'s
-/// forwarding to the installed sink's `consentChanged`.
+/// no-op default, the consent gate on `capture(_:_:)` and
+/// `captureError(_:_:)`, the separation of the two delivery paths, and
+/// `setConsent`'s forwarding to the installed sink's `consentChanged`.
 ///
 /// Nested under `SerializedSharedState` because `Analytics.install`/
 /// `setConsent` mutate process-global state that would otherwise race any
@@ -29,7 +30,7 @@ extension SerializedSharedState {
             let captured = Captured()
             Analytics.install(Analytics.Sink(capture: { name, props in
                 captured.append(name, props)
-            }, consentChanged: { _ in }), consent: false)
+            }, captureError: { _, _ in }, consentChanged: { _ in }), consent: false)
             defer { Analytics.install(nil, consent: false) }
 
             Analytics.capture("test_event", ["k": "v"])
@@ -41,7 +42,7 @@ extension SerializedSharedState {
             let captured = Captured()
             Analytics.install(Analytics.Sink(capture: { name, props in
                 captured.append(name, props)
-            }, consentChanged: { _ in }), consent: true)
+            }, captureError: { _, _ in }, consentChanged: { _ in }), consent: true)
             defer { Analytics.install(nil, consent: false) }
 
             Analytics.capture("test_event", ["k": "v"])
@@ -52,12 +53,53 @@ extension SerializedSharedState {
             #expect(events.first?.1 == ["k": "v"])
         }
 
+        /// `captureError` carries the same consent gate as `capture` — an
+        /// opted-out user's failures must not reach PostHog error tracking
+        /// through the back door the crash reporter opened.
+        @Test(arguments: [false, true])
+        func captureErrorObeysTheConsentGate(consent: Bool) {
+            let errors = Captured()
+            Analytics.install(Analytics.Sink(capture: { _, _ in },
+                                             captureError: { name, props in
+                                                 errors.append(name, props)
+                                             },
+                                             consentChanged: { _ in }), consent: consent)
+            defer { Analytics.install(nil, consent: false) }
+
+            Analytics.captureError("capture:whole_system_failed", ["kind": "device_lost"])
+
+            #expect(errors.events().count == (consent ? 1 : 0))
+            if consent {
+                #expect(errors.events().first?.0 == "capture:whole_system_failed")
+                #expect(errors.events().first?.1 == ["kind": "device_lost"])
+            }
+        }
+
+        /// The two paths are separate deliveries, not one renamed: an event
+        /// must never arrive as an exception (it would raise a PostHog issue
+        /// for a button press), and a failure must never arrive as a plain
+        /// event (it would lose its stack trace).
+        @Test func captureAndCaptureErrorDoNotCrossOver() {
+            let events = Captured()
+            let errors = Captured()
+            Analytics.install(Analytics.Sink(capture: { events.append($0, $1) },
+                                             captureError: { errors.append($0, $1) },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+
+            Analytics.capture("mixer:device_selected")
+            Analytics.captureError("settings:save_failed")
+
+            #expect(events.events().map(\.0) == ["mixer:device_selected"])
+            #expect(errors.events().map(\.0) == ["settings:save_failed"])
+        }
+
         @Test func setConsentForwardsToConsentChangedAndGatesSubsequentCaptures() {
             let captured = Captured()
             let consentChanges = ConsentChanges()
             Analytics.install(Analytics.Sink(capture: { name, props in
                 captured.append(name, props)
-            }, consentChanged: { granted in
+            }, captureError: { _, _ in }, consentChanged: { granted in
                 consentChanges.append(granted)
             }), consent: false)
             defer { Analytics.install(nil, consent: false) }

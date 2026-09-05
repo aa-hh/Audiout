@@ -141,6 +141,12 @@ final class UsageStatsConsentCard: NSView {
     /// full. Keep it in step with what is actually sent — audited against a
     /// real ingested event on 2026-08-29, not against intent.
     ///
+    /// The failure half was added 2026-09-05 with `Analytics.captureError`.
+    /// The SDK had been reporting unhandled crashes since the first analytics
+    /// commit (`errorTrackingConfig.autoCapture`) without this string ever
+    /// saying so; the handled failures joined them, and now it does. Both
+    /// carry a stack trace of Audiout's own code and nothing the user typed.
+    ///
     /// It leads with the thing that makes this not tracking (the owner's call):
     /// there is no identity to attach anything to. Then it is specific, because
     /// the autocaptured payload is wider than an earlier draft claimed — that
@@ -149,9 +155,9 @@ final class UsageStatsConsentCard: NSView {
     /// to prevent. "City" rather than "region" is deliberate too: PostHog's
     /// location enrichment resolves to postal-code precision.
     static let bodyText = "No account, no name. Just a random ID for this copy of "
-        + "Audiout. It counts which features get used, and notes your Mac, macOS version, "
-        + "city, and whether Audiout is licensed. What you play, and what your speakers are "
-        + "called, never leave this Mac."
+        + "Audiout. It counts which features get used, reports crashes and failures like "
+        + "audio stopping, and notes your Mac, macOS version, city, and whether Audiout is "
+        + "licensed. What you play, and what your speakers are called, never leave this Mac."
 
     /// The stage's copy: out of the accessibility tree, and inert.
     ///

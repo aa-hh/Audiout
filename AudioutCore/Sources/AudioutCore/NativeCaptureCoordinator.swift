@@ -3033,6 +3033,20 @@ public enum NativeCaptureError: Error, Equatable, Sendable {
     }
 
     /// A human-readable, UI-renderable description of the failure and its remedy.
+    /// The case name alone, for analytics. Deliberately NOT
+    /// `String(describing:)`: every case but `.osUnsupported` carries a raw
+    /// `reason` string straight from Core Audio, and PRODUCT.md's Data
+    /// Collection fence allows enum-like strings only.
+    public var kind: String {
+        switch self {
+        case .tapCreationFailed: return "tap_creation_failed"
+        case .aggregateDeviceFailed: return "aggregate_device_failed"
+        case .formatReadFailed: return "format_read_failed"
+        case .deviceLost: return "device_lost"
+        case .osUnsupported: return "os_unsupported"
+        }
+    }
+
     public var userMessage: String {
         switch self {
         case .tapCreationFailed:

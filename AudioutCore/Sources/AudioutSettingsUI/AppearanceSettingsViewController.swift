@@ -541,7 +541,7 @@ private extension AppearanceTheme {
     /// Sentence-case tile label.
     var displayName: String {
         switch self {
-        case .system: return "Match System"
+        case .system: return "Match system"
         case .light:  return "Light"
         case .dark:   return "Dark"
         }
@@ -552,7 +552,7 @@ private extension AccentStyle {
     /// Radio title (spec §1.3's two dial names).
     var displayName: String {
         switch self {
-        case .fullGold: return "Full Gold"
+        case .fullGold: return "Full gold"
         case .subtle:   return "Subtle"
         }
     }

@@ -185,10 +185,10 @@ import AppKit
         let meta = GroupsOverviewViewController.test_cardMetaAttributedString(isLive: true)
         expectSameToken(meta.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor,
                         Tokens.Color.label2, "live card meta")
-        let playingNow = try #require(meta.string.range(of: "Playing now"))
+        let playingNow = try #require(meta.string.range(of: "Playing"))
         let start = NSRange(playingNow, in: meta.string).location
         expectSameToken(meta.attribute(.foregroundColor, at: start, effectiveRange: nil) as? NSColor,
-                        Tokens.Color.goldText, "live card \"Playing now\"")
+                        Tokens.Color.goldText, "live card \"Playing\"")
     }
 
     @Test func liveCardRingsTheSeatGoldAndIdleCardEdgesItCool() {

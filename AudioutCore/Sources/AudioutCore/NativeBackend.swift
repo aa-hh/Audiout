@@ -592,7 +592,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     // MARK: Per-app routing (T6)
     //
-    // ADDITIVE to the whole-system "Selected Devices" path above. `captureCoordinator`
+    // ADDITIVE to the whole-system "Selected Speakers" path above. `captureCoordinator`
     // (the whole-system tap) still produces stream_id 0; the two objects below produce
     // the per-app redirect streams (stream_id ≥ 1) that run ALONGSIDE it:
     //   - `perAppCapture` owns one Core Audio process tap per routed bundle ID.
@@ -1893,7 +1893,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.started = true
             self.lastSeenSystemVolume = localVolume
             // Surface the Mac's OWN current output device immediately (BUG B), so
-            // the popover has a "Current Device" row and GroupController can seed
+            // the popover has a "This Mac" row and GroupController can seed
             // the local-passthrough default the moment `start()` runs — before any
             // AirPlay discovery, and independent of whether the engine comes up.
             // It is NEVER fed to the engine or `addOutput`-ed: it's the local
@@ -4597,7 +4597,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// changes, passing the Settings excluded-apps denylist as `excludedBundleIDs`).
     ///
     /// This is ADDITIVE: it never touches `expectedSelected` / `added` / the capture
-    /// gate — the whole-system "Selected Devices" path (stream_id 0) keeps working
+    /// gate — the whole-system "Selected Speakers" path (stream_id 0) keeps working
     /// exactly as before. On call it:
     ///  1. Recomputes the mixer topology (`routeMixer.updateRoutes`), which fires
     ///     `onDestinationSetsChanged` synchronously iff the distinct app-sets changed
@@ -4655,7 +4655,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             let resolved = self.effectiveAppRoutesLocked(routes)
             let effective = resolved.routes
             let newRouted = Set(resolved.routedApps.map(\.bundleID))
-            // Bug T2: apps deliberately pinned to the local Mac ("Current Device").
+            // Bug T2: apps deliberately pinned to the local Mac ("This Mac").
             let newLocal = Set(effective.compactMap { route -> String? in
                 route.destination == .currentDevice ? route.bundleID : nil
             })
@@ -5236,7 +5236,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         /// A per-app redirect's dedicated stream (≥ 1). Ownership:
         /// `streamBindings[deviceID] == stream`. Re-added via `addOutput(_:streamId:)`.
         case perApp(stream: UInt32)
-        /// The whole-system "Selected Devices" output set (stream 0). Ownership:
+        /// The whole-system "Selected Speakers" output set (stream 0). Ownership:
         /// `added.contains(deviceID)`. Re-added via the single-stream `addOutput(_:)`
         /// — the exact op `convergeDevice` used to bind it.
         case wholeSystem
@@ -6894,7 +6894,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     // The Mac's own default output is surfaced as a Device with
     // `isLocalDevice == true`, `kind == .localMac`, `isAvailable == true`, and
     // `supportsAirPlay2 == false` (mirroring MockBackend's local fixture,
-    // MockBackend.swift:457). It is the "Current Device" the popover renders and
+    // MockBackend.swift:457). It is the "This Mac" the popover renders and
     // the target GroupController defaults Selected Devices to on launch
     // (passthrough). Because `isLocalDevice == true` (and it has no `outputIDs`
     // entry) it can never be desired-on in `setOutputSet` (which skips the local
@@ -10730,26 +10730,26 @@ extension BTOutputControlling {
     public func startCompanionAlignmentProbe(targetID: String, referenceID: String,
                                              onStarted: @escaping () -> Void,
                                              onFinished: @escaping () -> Void) -> String? {
-        "This Mac can't measure speaker timing."
+        "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
     }
     public func cancelCompanionAlignmentProbe(targetID: String) {}
     public func applyCompanionAlignmentMeasurement(targetID: String,
                                                    offsetMs: Double,
                                                    confidence: Double) -> CompanionAlignmentApplyResult {
-        .refused("This Mac can't measure speaker timing.")
+        .refused("This Mac can't measure speaker timing right now. Reconnect the speaker and try again.")
     }
     public func setCompanionAlignmentTick(targetID: String, active: Bool) -> String? {
-        "This Mac can't measure speaker timing."
+        "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
     }
     public func nudgeCompanionAlignmentTrim(targetID: String, deltaMs: Double) -> String? {
-        "This Mac can't measure speaker timing."
+        "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
     }
     public func revertCompanionAlignmentNudge(targetID: String) -> String? {
-        "This Mac can't measure speaker timing."
+        "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
     }
     public func clearCompanionAlignmentTuning(targetID: String) {}
     public func playCompanionAlignmentDemo(targetID: String, referenceID: String?) -> String? {
-        "This Mac can't measure speaker timing."
+        "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
     }
 }
 
@@ -10965,18 +10965,22 @@ extension NativeBackend: BTOutputControlling {
                                              onStarted: @escaping () -> Void,
                                              onFinished: @escaping () -> Void) -> String? {
         guard let coordinator = captureCoordinator else {
-            return "This Mac can't measure speaker timing."
+            return "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
         }
         // Only this layer knows whether the target has a delay line to measure
         // and how many other Bluetooth speakers are in the room. The
         // audible-target / usable-reference half of the preconditions is answered by
         // the wiring layer, off the same rule the snapshot publishes.
-        let (targetIsLive, otherBTAudible, referenceIsBluetooth) = stateQueue.sync {
+        let (targetIsLive, otherBTAudible, referenceIsBluetooth, targetName) = stateQueue.sync {
             (self.btSinkEnabled && self.btSelectedUIDs.contains(targetID),
              self.btSelectedUIDs.contains { $0 != targetID },
-             self.known[referenceID]?.isBluetooth == true)
+             self.known[referenceID]?.isBluetooth == true,
+             self.known[targetID]?.name)
         }
         guard targetIsLive else {
+            if let targetName {
+                return "\u{201C}\(targetName)\u{201D} isn't playing right now, so there's nothing to measure."
+            }
             return "That speaker isn't playing right now, so there's nothing to measure."
         }
         // Two Bluetooth speakers cannot be measured from one recording unless
@@ -10991,7 +10995,7 @@ extension NativeBackend: BTOutputControlling {
         // sweeps — a confident number attributable to neither speaker, which is
         // worse than no number at all.
         if staggered, !btSinkRendersAtFeedRate {
-            return "Can't tell these two speakers apart right now."
+            return "Can't tell these two speakers apart right now. Try again in a moment."
         }
         let runID = btTrimLock.withLock { () -> UUID? in
             guard companionAlignmentRun == nil, companionDemoTargetUID == nil,
@@ -11012,7 +11016,7 @@ extension NativeBackend: BTOutputControlling {
             return run.id
         }
         guard let runID else {
-            return "This Mac is already measuring a speaker — finish that first."
+            return "This Mac is already measuring a speaker. Finish that first."
         }
         setBTWizardTrimPreview(0, forDevice: targetID)
         // Reuse the wizard's whole staging: the participant hold (every other
@@ -11108,7 +11112,7 @@ extension NativeBackend: BTOutputControlling {
                                                    offsetMs: Double,
                                                    confidence: Double) -> CompanionAlignmentApplyResult {
         guard let run = takeCompanionProbeRun({ $0.targetUID == targetID }) else {
-            return .refused("That measurement isn't running any more — start it again.")
+            return .refused("That measurement isn't running any more. Start it again.")
         }
         // A phone quick enough to report before the tail elapsed leaves the
         // sweeps still playing; silence them here rather than letting the
@@ -11192,7 +11196,7 @@ extension NativeBackend: BTOutputControlling {
                 return true
             }
             guard claimed else {
-                return "This Mac is already measuring a speaker — finish that first."
+                return "This Mac is already measuring a speaker. Finish that first."
             }
             // The companion budget is ~10 min, long enough that a by-ear
             // session is never cut off mid-tune. The real switch-off is the
@@ -11286,7 +11290,7 @@ extension NativeBackend: BTOutputControlling {
             return (companionPreMeasurementLatencyMsByUID[targetID], true)
         }
         guard claimed else {
-            return "This Mac is already measuring a speaker — finish that first."
+            return "This Mac is already measuring a speaker. Finish that first."
         }
         let current = btMeasuredLatencyMs(forDevice: targetID) ?? 0
         // A comparison between two speakers, so every OTHER Bluetooth speaker

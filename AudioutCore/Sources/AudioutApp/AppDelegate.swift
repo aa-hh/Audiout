@@ -564,6 +564,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Set by the first ``presentStoreDataAlertOnce(message:info:)`` of the launch.
     private var storeDataAlertShown = false
 
+    /// Plain-language name for each settings file that ``StoreRecovery`` can
+    /// quarantine, keyed by its on-disk filename. Filenames mean nothing to a
+    /// user, so the quarantine alert (below) shows these instead. Falls back
+    /// to the bare filename for anything not listed here, so a store added
+    /// later never drops silently out of the message.
+    private static let quarantinedFileDescriptions: [String: String] = [
+        "groups.json": "your saved scenes",
+        "app-routes.json": "your per-app audio settings",
+        "routing.json": "your Main Audio settings",
+        "device-eq.json": "your equalizer settings",
+        "device-icons.json": "your speaker icons",
+        "excluded-apps.json": "your excluded apps list",
+        "bt-sync-trims.json": "your Bluetooth speaker offsets",
+        "cast-sync-offsets.json": "your Cast speaker offsets",
+    ]
+
+    private static func describeQuarantinedFiles(_ fileNames: [String]) -> String {
+        fileNames.map { quarantinedFileDescriptions[$0] ?? $0 }.joined(separator: ", ")
+    }
+
     /// Tell the user, at most once per launch, that a settings file could not be
     /// read or written. ONE alert covers both kinds and every store: a full or
     /// failing disk takes them all down together, and a stack of modals saying
@@ -769,9 +789,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // place that has any.
         StoreRecovery.onWriteFailure = { [weak self] error in
             DispatchQueue.main.async {
+                // Never ship a raw Cocoa error description in the visible
+                // alert — it can carry a local file path. Log the detail,
+                // show only the generic, actionable text.
+                self?.log("settings save failed: \(error.localizedDescription)")
                 self?.presentStoreDataAlertOnce(
                     message: "Audiout couldn't save a settings change",
-                    info: "\(error.localizedDescription)\n\nRecent changes may be lost when Audiout quits. Check that the startup disk isn't full.")
+                    info: "Recent changes may be lost when Audiout quits. Check that the startup disk isn't full.")
             }
         }
         // The emptiness check runs INSIDE the async block, not before it, so it
@@ -789,7 +813,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard !quarantined.isEmpty else { return }
             self?.presentStoreDataAlertOnce(
                 message: "Some of Audiout's saved settings couldn't be read",
-                info: "The unreadable files were set aside so nothing is lost: \(quarantined.joined(separator: ", ")). The affected settings are back to their defaults. Everything else is untouched.")
+                info: "The unreadable settings were set aside so nothing is lost: \(Self.describeQuarantinedFiles(quarantined)). They're back to their defaults. Everything else is untouched.")
         }
 
         // Updates and licence, AFTER the status item — none of it puts a pixel
@@ -935,7 +959,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onReselectAudiout = { [weak self] in
             (self?.backend as? NativeBackend)?.reselectAggregateAsDefault()
         }
-        // T6 (takeover status strip, state 4's "Try Again" button): the same
+        // T6 (takeover status strip, state 4's "Try again" button): the same
         // sanctioned single-device re-kick `retryUnreachableMembers()` already
         // drives for the "Speakers unreachable" fallback banner (AudioutPopoverUI)
         // — `GroupController.requestReconnect(for:)` per Main Out member that
@@ -1857,7 +1881,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // that one IS the macOS menu-bar convention (⌘,), unrelated to this rule.
         let settings = menu.addItem(withTitle: "Settings", action: #selector(menuOpenSettings), keyEquivalent: ",")
         settings.target = self
-        let groups = menu.addItem(withTitle: "Groups", action: #selector(menuOpenGroups), keyEquivalent: "")
+        let groups = menu.addItem(withTitle: "Scenes", action: #selector(menuOpenGroups), keyEquivalent: "")
         groups.target = self
         menu.addItem(.separator())
         // About carries NO ellipsis — it opens the About window and asks the
@@ -2401,7 +2425,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     from: clientID, now: ProcessInfo.processInfo.systemUptime) else {
                     reply(CompanionServer.CommandResult(
                         applied: false,
-                        refusalReason: "Too many commands — slow down and try again."))
+                        refusalReason: "Too many commands. Slow down and try again."))
                     return
                 }
                 // Icon requests are answered HERE, not in the dispatcher:

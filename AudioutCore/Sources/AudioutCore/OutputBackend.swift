@@ -52,7 +52,7 @@ public enum BackendEvent: Sendable, Equatable {
     /// device stayed put. The one event here that isn't about a `Device`.
     ///
     /// It exists to fix a live-session complaint: the volume keys move the
-    /// system output, which IS the local "Current Device" row, but while
+    /// system output, which IS the local "This Mac" row, but while
     /// streaming the capture tap MUTES that output — so the keys diligently
     /// adjusted a device nobody could hear while the AirPlay speakers actually
     /// playing ignored them. `AppDelegate` forwards this to

@@ -4,7 +4,7 @@ import AppKit
 import AudioutCore
 import AudioutSharedUI
 
-/// The "New Group" sheet (design revamp, SPEC.md §9 "Group setup"): a standard
+/// The "Add scene" sheet (design revamp, SPEC.md §9 "Group setup"): a standard
 /// macOS sheet presented on the Groups window, the way Calendar presents "New
 /// Calendar". The Groups window is CONFIGURATION-ONLY under the
 /// revamp, and that constraint reaches this sheet too: it only ever edits a
@@ -12,8 +12,7 @@ import AudioutSharedUI
 /// no routing. Activation lives in the app's popover, not here.
 ///
 /// Layout, top to bottom, form capped to ``formWidth``:
-/// - a "New Group" title line (design critique: the sheet used to open as an
-///   anonymous form with no heading);
+/// - an "Add scene" title line, so the sheet is never an anonymous form;
 /// - a `Name` `NSTextField`, prefilled by the caller via ``configure``;
 /// - a "Speakers" label + a scrollable checklist of `MembershipRowView` rows.
 ///   EVERY device is a candidate, unavailable ones included (Alec,
@@ -77,7 +76,7 @@ public final class GroupCreationSheetController: NSViewController {
     private static let pencilBadgeDiameter: CGFloat = 14
 
     private let nameField = NSTextField(string: "")
-    private let titleLabel = NSTextField(labelWithString: "New Group")
+    private let titleLabel = NSTextField(labelWithString: "Add scene")
     private let iconWellButton = NSButton()
     /// Corner pencil badge overlaid on `iconWellButton` — the sheet's icon
     /// well is a plain bordered square with no edit cue otherwise, breaking
@@ -142,8 +141,8 @@ public final class GroupCreationSheetController: NSViewController {
         titleLabel.font = Tokens.Font.bodyEmphasized
 
         nameField.translatesAutoresizingMaskIntoConstraints = false
-        nameField.placeholderString = "Group name"
-        nameField.setAccessibilityLabel("Group name")
+        nameField.placeholderString = "Scene name"
+        nameField.setAccessibilityLabel("Scene name")
         nameField.target = self
         nameField.action = #selector(nameFieldReturnPressed(_:))
         // RETURN ONLY. A text field also sends its action whenever editing
@@ -162,7 +161,7 @@ public final class GroupCreationSheetController: NSViewController {
         iconWellButton.isBordered = true
         iconWellButton.imagePosition = .imageOnly
         iconWellButton.toolTip = "Choose icon"
-        iconWellButton.setAccessibilityLabel("Choose group icon")
+        iconWellButton.setAccessibilityLabel("Choose scene icon")
         iconWellButton.target = self
         iconWellButton.action = #selector(iconWellTapped(_:))
         updateIconWell()
@@ -211,7 +210,7 @@ public final class GroupCreationSheetController: NSViewController {
         cancelButton.action = #selector(cancelTapped(_:))
 
         createButton.translatesAutoresizingMaskIntoConstraints = false
-        createButton.title = "Create"
+        createButton.title = "Add scene"
         createButton.bezelStyle = .rounded
         createButton.keyEquivalent = "\r"       // default button (Return)
         createButton.target = self
@@ -276,7 +275,7 @@ public final class GroupCreationSheetController: NSViewController {
     /// `defaultName`, and build the membership checklist from `devices` —
     /// EVERY device, unavailable ones included (Alec, 2026-08-28: an offline
     /// speaker may join a group and plays when it returns; this is also what
-    /// keeps the add bar's "New Group from N Speakers…" count honest when the
+    /// keeps the add bar's "Add scene from N speakers…" count honest when the
     /// selection includes a sleeping speaker). `preselected` checks any
     /// candidate whose id is a member.
     public func configure(defaultName: String, devices: [Device], preselected: Set<String> = []) {
@@ -292,7 +291,7 @@ public final class GroupCreationSheetController: NSViewController {
     /// render as an empty box beside a disabled Create button, which reads as
     /// a broken sheet rather than "nothing has been found yet".
     private static let emptyChecklistText =
-        "No speakers found yet. Speakers appear here once they\u{2019}re reachable on your network."
+        "No speakers found yet. Speakers appear here once they\u{2019}re reachable on your Wi-Fi network."
 
     /// The empty-state label while it is mounted, else nil.
     private var emptyChecklistLabel: NSTextField?
@@ -368,7 +367,7 @@ public final class GroupCreationSheetController: NSViewController {
             return
         }
         countLabel.stringValue =
-            selected + " \u{2014} already saved as \u{201C}\(existing.name)\u{201D}"
+            selected + ": already saved as \u{201C}\(existing.name)\u{201D}"
     }
 
     // MARK: Actions
@@ -410,7 +409,7 @@ public final class GroupCreationSheetController: NSViewController {
     /// other icon-rendering site — a stale override never shows a blank glyph.
     private func updateIconWell() {
         let symbolName = DeviceIcon.resolve(selectedIconSymbolName, default: Group.defaultIconSymbolName)
-        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Group icon")
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Scene icon")
         image?.isTemplate = true
         iconWellButton.image = image
         iconWellButton.contentTintColor = Tokens.Color.label2
@@ -433,7 +432,7 @@ public final class GroupCreationSheetController: NSViewController {
         guard !hasCreatedGroup else { return }
         guard !isShowingAlert else { return }
         let trimmed = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = trimmed.isEmpty ? "New Group" : trimmed
+        let name = trimmed.isEmpty ? "Scene" : trimmed
         // TAKEN NAME first: refusing the name wins over resolving the member
         // set, so the user fixes one thing at a time. Case-insensitive, and
         // against every group — nothing here is being renamed.
@@ -442,7 +441,7 @@ public final class GroupCreationSheetController: NSViewController {
             presentSheetAlert(
                 messageText: "That name is already taken.",
                 informativeText:
-                    "Another group is named \u{201C}\(name)\u{201D}. Choose a different name.")
+                    "Another scene is named \u{201C}\(name)\u{201D}. Choose a different name.")
             return
         }
         let memberIDs = candidateDevices.map(\.id).filter { checkedIDs.contains($0) }
@@ -461,8 +460,8 @@ public final class GroupCreationSheetController: NSViewController {
             // The form stays intact and Create stays enabled — try again.
             test_saveFailureReported = true
             presentSheetAlert(
-                messageText: "Couldn\u{2019}t create the group.",
-                informativeText: "The group couldn\u{2019}t be saved. Try again.")
+                messageText: "Couldn\u{2019}t create the scene.",
+                informativeText: "The scene couldn\u{2019}t be saved. Try again.")
             return
         }
         hasCreatedGroup = !result.alreadyExisted
@@ -527,9 +526,9 @@ public final class GroupCreationSheetController: NSViewController {
         let alert = NSAlert()
         alert.messageText =
             "Those speakers are already saved as \u{201C}\(result.group.name)\u{201D}."
-        alert.informativeText = "You can open that group, or go back and change the selection."
+        alert.informativeText = "You can open that scene, or go back and change the selection."
         alert.addButton(withTitle: "Open \u{201C}\(result.group.name)\u{201D}")
-        alert.addButton(withTitle: "Go Back")
+        alert.addButton(withTitle: "Go back")
         alertIsUp = true
         alert.beginSheetModal(for: window) { [weak self] response in
             self?.alertIsUp = false
@@ -625,7 +624,7 @@ public final class GroupCreationSheetController: NSViewController {
     /// `test_pickCurated`/`test_useDefault` hooks bypass presentation.
     public func test_pickIcon(_ name: String?) { pickIcon(name) }
 
-    /// The sheet's title line ("New Group"). `loadViewIfNeeded()` first since a
+    /// The sheet's title line ("Add scene"). `loadViewIfNeeded()` first since a
     /// headless test may ask before the sheet has ever been presented (the
     /// view loads lazily, same as every other hook below that reads it).
     public var test_titleText: String {

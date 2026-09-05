@@ -42,7 +42,7 @@ import Testing
         let expected: [ConnectionFailure.Cause: (headline: String, suggestion: String)] = [
             .notResponding: (
                 "Didn't respond",
-                "The speaker is visible on the network but isn't answering AirPlay requests — it may be stuck or held by another app. Power-cycle it, then try again."
+                "The speaker is visible on the network but isn't answering AirPlay requests. It may be stuck or held by another app. Power-cycle it, then try again."
             ),
             .vanished: (
                 "Not on the network",
@@ -50,7 +50,7 @@ import Testing
             ),
             .refusedOrBusy: (
                 "Connection refused",
-                "The speaker refused the connection — another device may hold an exclusive session. Stop playback from other apps or restart the speaker, then try again."
+                "The speaker refused the connection. Another device may hold an exclusive session. Stop playback from other apps or restart the speaker, then try again."
             ),
             .authRequired: (
                 "Password required",
@@ -62,7 +62,7 @@ import Testing
             ),
             .timedOut: (
                 "Took too long",
-                "The connection attempt didn't complete. The speaker or network may be busy — try again."
+                "The connection attempt didn't complete. The speaker or network may be busy. Try again."
             ),
             .unknown: (
                 "Couldn't connect",

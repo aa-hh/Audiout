@@ -106,7 +106,7 @@ public final class LicenseSheetViewController: NSViewController {
 
         // Only offered when there is something to remove; a fresh sheet
         // opened from "Enter License…" never shows it.
-        removeButton.title = "Remove License…"
+        removeButton.title = "Remove license…"
         removeButton.bezelStyle = .rounded
         removeButton.controlSize = .small
         removeButton.target = self
@@ -208,7 +208,7 @@ public final class LicenseSheetViewController: NSViewController {
             + "for a key the next time it opens and stops getting official "
             + "updates until you enter one."
         alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Keep license")
         // Return keeps the key: the destructive button is never the one an
         // absent-minded Return press hits.
         alert.buttons[0].hasDestructiveAction = true

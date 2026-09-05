@@ -115,7 +115,7 @@ public final class BTAlignmentWizardView: NSView {
     /// carries a real Try again button, so the copy no longer has to offer one
     /// in prose (spec §1).
     static let macIsLateCopy =
-        "Couldn’t get a clean reading — this Mac sounded later than the speaker, "
+        "Couldn’t get a clean reading. This Mac sounded later than the speaker, "
         + "which shouldn’t happen. Try again."
     /// The question, on the question screen — the one decision the run
     /// hangs on, asked ~15 times, so it stays in front of the user.
@@ -154,7 +154,7 @@ public final class BTAlignmentWizardView: NSView {
 
     /// The proposal's whole instruction — the NUMBER moved to the readout, so
     /// the sentence is free to be about listening.
-    private static let proposalBody = "Listen — the clicks should land as one."
+    private static let proposalBody = "Listen: the clicks should land as one."
     /// The finale's headline: the speaker is ready, and plays with everything.
     static func keptReadyCopy(target: String) -> String {
         "\(target) is ready to play with everything."
@@ -168,13 +168,13 @@ public final class BTAlignmentWizardView: NSView {
     /// popover" named nothing the user can see on screen (it is our word for
     /// the window, not theirs), and it was the app's only user-facing use of
     /// it.
-    private static let keptLocalCaption = "Fine-tune anytime from the SYNC control."
+    private static let keptLocalCaption = "Change it anytime from the SYNC control."
     /// What the run costs, before it starts — the title line's right slot on
     /// the intro, where the click count lives once the run is under way.
     private static let introSlotText = "About 15 clicks"
     /// The sheet's TITLE, on every screen — the plain sentence-form heading a
     /// sheet gets everywhere else in the app (`GroupCreationSheetController`'s
-    /// "New Group", `Tokens.Font.bodyEmphasized` at full `label`). It replaced
+    /// "Add scene", `Tokens.Font.bodyEmphasized` at full `label`). It replaced
     /// a tracked all-caps `ALIGN · <NAME>` mono nameplate (owner ruling
     /// 2026-08-24): that voice is the app's instrument chrome, and spending it
     /// on the sheet's own heading made the wizard read as a readout panel

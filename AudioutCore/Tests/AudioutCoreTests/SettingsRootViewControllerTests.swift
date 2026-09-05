@@ -192,7 +192,7 @@ import AudioutSharedUI
         general.licenseTransport = transport.closure
 
         #expect(general.test_licenseStatusText == "Unregistered. Audiout keeps working for this session, and asks for a license key the next time it opens.")
-        #expect(general.test_enterLicenseButtonTitle == "Enter License…")
+        #expect(general.test_enterLicenseButtonTitle == "Enter license…")
 
         transport.replies(#"{"status":"active"}"#)
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
@@ -203,7 +203,7 @@ import AudioutSharedUI
         transport.replies(#"{"status":"revoked"}"#)
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "This key was refunded or revoked. It no longer gets updates.")
+        #expect(general.test_licenseStatusText == "This key was refunded or revoked. Buy a new one to keep using Audiout.")
 
         transport.replies(#"{"status":"unknown"}"#)
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
@@ -222,7 +222,7 @@ import AudioutSharedUI
         transport.answer = (nil, nil, URLError(.notConnectedToInternet))
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "Not verified yet — Audiout couldn’t reach the license server. Your key is saved.")
+        #expect(general.test_licenseStatusText == "Your key is saved. Audiout hasn’t been able to verify it yet.")
     }
 
     /// A different key is an open question, not the old key's answer: while
@@ -240,9 +240,9 @@ import AudioutSharedUI
 
         transport.answer = (nil, nil, URLError(.notConnectedToInternet))
         general.test_setLicenseKey("AUDT-ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ")
-        #expect(general.test_licenseStatusText == "Not verified yet — Audiout couldn’t reach the license server. Your key is saved.")
+        #expect(general.test_licenseStatusText == "Your key is saved. Audiout hasn’t been able to verify it yet.")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "Not verified yet — Audiout couldn’t reach the license server. Your key is saved.")
+        #expect(general.test_licenseStatusText == "Your key is saved. Audiout hasn’t been able to verify it yet.")
     }
 
     /// Buying is offered only where it can work and only where it would help.
@@ -296,7 +296,7 @@ import AudioutSharedUI
         general.test_licenseSheet?.test_tapRemove()
         #expect(settings.licenseKey == nil)
         #expect(settings.licenseStatus == nil, "the verdict goes with the key")
-        #expect(general.test_enterLicenseButtonTitle == "Enter License…")
+        #expect(general.test_enterLicenseButtonTitle == "Enter license…")
     }
 
     /// The status line promises the key is saved, not that a retry is coming
@@ -311,7 +311,7 @@ import AudioutSharedUI
 
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "Not verified yet — Audiout couldn’t reach the license server. Your key is saved.")
+        #expect(general.test_licenseStatusText == "Your key is saved. Audiout hasn’t been able to verify it yet.")
         #expect(general.test_checkAgainIsVisible)
 
         transport.replies(#"{"status":"active"}"#)
@@ -331,7 +331,7 @@ import AudioutSharedUI
 
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "Not verified yet — Audiout couldn’t reach the license server. Your key is saved.")
+        #expect(general.test_licenseStatusText == "Your key is saved. Audiout hasn’t been able to verify it yet.")
 
         transport.replies(#"{"status":"active"}"#)
         general.viewWillAppear()
@@ -353,7 +353,7 @@ import AudioutSharedUI
         transport.replies(#"{"status":"active"}"#)
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(general.test_checkInDisclosureText == "Audiout checks in with the license server once per launch so we can spot a key shared across many machines. It sends your key, a random per-Mac id, and the app version — nothing else.")
+        #expect(general.test_checkInDisclosureText == "Audiout checks in with the license server once per launch to spot a key shared across many machines. It sends your key, a random per-Mac id, and the app version. Nothing else.")
 
         general.test_removeLicense()
         #expect(general.test_checkInDisclosureText == nil)

@@ -45,7 +45,7 @@ import AppKit
     }
 
     /// The two-section shape a real host builds: "Selected Devices" + one saved
-    /// group under an "Output Groups" header. `current` selects the checkmark.
+    /// group under a "Scenes" header. `current` selects the checkmark.
     private func makeRow(current: MainOutTarget = .selectedDevices)
         -> (MainOutRowView, RecordingDelegate)
     {
@@ -55,7 +55,7 @@ import AppKit
         row.apply(options: [
             .init(title: "Selected Devices (2)", target: .selectedDevices,
                   buttonTitle: "Selected (2)"),
-            .init(title: "Output Groups", isHeader: true),
+            .init(title: "Scenes", isHeader: true),
             .init(title: "tester", target: .group(id: "g1")),
         ], current: current, master: 50)
         return (row, delegate)
@@ -85,8 +85,8 @@ import AppKit
         let (row, _) = makeRow()
         // A section header keeps its plain `title`, which is what this lookup
         // matches on.
-        let header = row.test_menuItem(titled: "Output Groups")
-        #expect(header != nil, "the 'Output Groups' section header must exist")
+        let header = row.test_menuItem(titled: "Scenes")
+        #expect(header != nil, "the 'Scenes' section header must exist")
         // `isSectionHeader`, not `isEnabled`: AppKit reports a section header as
         // enabled while still refusing to highlight or pick it, and `isEnabled`
         // is ignored outright while the menu autoenables its items.

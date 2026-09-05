@@ -230,7 +230,7 @@ final class SurfaceToolbarController: NSObject {
                                                        fallbacks: ["pin"],
                                                        accessibilityDescription: label),
                             label: label,
-                            toolTip: isPinned ? "Unpin — return to the menu bar" : "Pin as a window",
+                            toolTip: isPinned ? "Return to the menu bar" : "Pin as a window",
                             isTab: false)
         // Pinned reads as a selected seat — the same weight the current screen
         // wears, because it is the same statement about the same strip.

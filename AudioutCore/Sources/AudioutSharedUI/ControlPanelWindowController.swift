@@ -437,7 +437,7 @@ public final class ControlPanelWindowController: NSWindowController {
         view.layer?.masksToBounds = true
     }
 
-    /// Set the panel's title bar text (e.g. "Groups", "Settings"). The title
+    /// Set the panel's title bar text (e.g. "Scenes", "Settings"). The title
     /// bar itself is invisible (T11), but the text still becomes the window's
     /// accessibility/VoiceOver title and the Mission Control / ⌘` window name.
     public func setTitle(_ title: String) {

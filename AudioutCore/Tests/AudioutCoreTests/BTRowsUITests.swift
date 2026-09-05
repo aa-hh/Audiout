@@ -688,7 +688,7 @@ import AppKit
     @Test func bluetoothSubsectionHeaderAlwaysRendersWithAConnectRowWhenEmpty() {
         let (popover, _, _) = makePopover()
         popover.update(devices: [local(), airplay()])
-        #expect(popover.test_subsectionTitles() == ["AirPlay Devices", "Bluetooth Devices"])
+        #expect(popover.test_subsectionTitles() == ["AirPlay Speakers", "Bluetooth Speakers"])
         #expect(popover.test_bluetoothRowOrder().isEmpty)
         #expect(popover.test_bluetoothConnectRowShown())
     }
@@ -723,7 +723,7 @@ import AppKit
         #expect(popover.test_offsetColumnTitleShown(), "precondition: the title is printed")
         _ = popover.test_panelView   // forces layout so label frames are current
 
-        let insets = popover.test_columnTitleLeadingInsets(title: "Output Devices")
+        let insets = popover.test_columnTitleLeadingInsets(title: "Output Speakers")
         #expect(insets.count == 2, "Source, then Offset")
         let (sourceInset, offsetInset) = (insets[0], insets[1])
         #expect(abs(sourceInset - PopoverColumnGrid.feedColumnLeadingFromTrailing) <= 1,
@@ -751,7 +751,7 @@ import AppKit
             bt("bt-old:output", name: "Attic Speaker"),
         ])
         #expect(popover.test_subsectionTitles()
-                == ["AirPlay Devices", "Bluetooth Devices"])
+                == ["AirPlay Speakers", "Bluetooth Speakers"])
         #expect(popover.test_bluetoothRowOrder()
                 == ["bt-new:output", "bt-old:output", "bt-ghost:output"],
                 "most recent first; a pairing with no recency sinks to the bottom")
@@ -771,7 +771,7 @@ import AppKit
 
         let menu = popover.test_outputDevicesPlusMenu()
         #expect(menu.items.map(\.title)
-                == ["Save Selected Devices as group", "Pair a Bluetooth speaker…"])
+                == ["Save Selected Speakers as scene", "Pair a Bluetooth speaker…"])
         menu.performActionForItem(at: 1)   // real AppKit menu dispatch
         #expect(paired == 1)
     }

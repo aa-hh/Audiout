@@ -5,7 +5,7 @@ import AudioutCore
 import AudioutSharedUI
 
 /// The group editor pane (design revamp: the Groups window is
-/// CONFIGURATION-ONLY — renaming, membership, and "Delete Group…" live here,
+/// CONFIGURATION-ONLY — renaming, membership, and "Delete scene…" live here,
 /// but activation/routing never do; that stays in the popover only). This is
 /// the absorbed T-U3: the in-menu editable field is impossible (menu item
 /// views get no keyboard events — `dev/notes/p1-menu-brief.md` §3), so a real
@@ -32,7 +32,7 @@ import AudioutSharedUI
 ///   name when emptied — a Finder rename in a box;
 /// - a "Speakers" list of `MembershipRowView` rows, one per candidate device
 ///   (per HIG — checkboxes for membership, not switches), in a second section;
-/// - a "Delete Group…" `NSButton`, with the line that says edits save
+/// - a "Delete scene…" `NSButton`, with the line that says edits save
 ///   themselves beside it.
 ///
 /// The two controls that LEAVE the pane share one band above all of that: the
@@ -150,7 +150,7 @@ public final class GroupEditorViewController: NSViewController {
     /// view tree.
     private var scrollView: NSScrollView?
 
-    /// The header's "Playing now" marker, shown ONLY while the edited group is
+    /// The header's "Playing" marker, shown ONLY while the edited group is
     /// the active Main Out — the SAME glyph + wording the sidebar's
     /// `IconLabelCellView` already uses, so one state has one name. It lives
     /// UNDER the rename field, inside the header band: the band's height is
@@ -171,10 +171,10 @@ public final class GroupEditorViewController: NSViewController {
 
     /// The line that says edits are saved as they are made — nothing on this
     /// pane waits for a button. Every group's editor shows it; an ACTIVE
-    /// group's, where "Playing now" is on screen while membership is being
+    /// group's, where "Playing" is on screen while membership is being
     /// edited, adds that nothing playing changes (``show(groupID:devices:)``).
     ///
-    /// HEIGHT BUDGET: it sits BESIDE "Delete Group…", centred on it, with no
+    /// HEIGHT BUDGET: it sits BESIDE "Delete scene…", centred on it, with no
     /// bottom pin, so it rides inside the button's existing bottom margin and
     /// costs the pane ZERO fitting height. At a seven-device fleet the pane has
     /// no spare points at all — a new band above the button would overflow it
@@ -290,7 +290,7 @@ public final class GroupEditorViewController: NSViewController {
         iconWell.isRailOrigin = true
         iconWell.widthAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
         iconWell.heightAnchor.constraint(equalToConstant: DeviceIconWellView.size).isActive = true
-        iconWell.setAccessibilityLabel("Edit group icon")
+        iconWell.setAccessibilityLabel("Edit scene icon")
         iconWell.onClick = { [weak self] in
             guard let self else { return }
             self.presentIconPicker(anchoredTo: self.iconWell)
@@ -316,7 +316,7 @@ public final class GroupEditorViewController: NSViewController {
         // makes the swap correct regardless of which runs first.
         nameField.cell = WarmNameFieldCell(textCell: nameField.stringValue)
         nameField.translatesAutoresizingMaskIntoConstraints = false
-        nameField.placeholderString = "Group name"
+        nameField.placeholderString = "Scene name"
         nameField.font = Tokens.Font.heading
         nameField.textColor = Tokens.Color.label
         nameField.alignment = .natural   // left-aligned (LTR) to match the column
@@ -331,7 +331,7 @@ public final class GroupEditorViewController: NSViewController {
         nameField.drawsBackground = false
         nameField.usesSingleLineMode = true
         nameField.lineBreakMode = .byTruncatingTail
-        nameField.setAccessibilityLabel("Group name")
+        nameField.setAccessibilityLabel("Scene name")
         nameField.target = self
         nameField.action = #selector(nameCommitted(_:))
         nameField.delegate = self
@@ -356,7 +356,7 @@ public final class GroupEditorViewController: NSViewController {
         membershipStack.spacing = 6
 
         deleteButton.translatesAutoresizingMaskIntoConstraints = false
-        deleteButton.title = "Delete Group…"
+        deleteButton.title = "Delete scene…"
         deleteButton.bezelStyle = .rounded
         deleteButton.target = self
         deleteButton.action = #selector(deleteTapped(_:))
@@ -384,7 +384,7 @@ public final class GroupEditorViewController: NSViewController {
         // so its `layout()` is not guaranteed to run on every container
         // resize. The popover could DELETE its container hook; here both stay.
         backButton.translatesAutoresizingMaskIntoConstraints = false
-        backButton.title = "Groups"
+        backButton.title = "Scenes"
         backButton.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: nil)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
         backButton.image?.isTemplate = true
@@ -395,11 +395,11 @@ public final class GroupEditorViewController: NSViewController {
         backButton.bezelStyle = .accessoryBar
         backButton.target = self
         backButton.action = #selector(backTapped(_:))
-        // The button says "Groups"; VoiceOver says where it goes.
-        backButton.setAccessibilityLabel("Back to Groups")
+        // The button says "Scenes"; VoiceOver says where it goes.
+        backButton.setAccessibilityLabel("Back to Scenes")
         // The one place the shortcut is printed: the screen has no menu bar
         // to list it (see `RailRepaintingView.performKeyEquivalent`).
-        backButton.toolTip = "Back to Groups (\u{2318}[)"
+        backButton.toolTip = "Back to Scenes (\u{2318}[)"
 
         let container = RailRepaintingView()
         container.railOverlay = railOverlay
@@ -501,7 +501,7 @@ public final class GroupEditorViewController: NSViewController {
             constant: -GroupsPaneLayout.contentTrailingInset)
         titleCap.priority = NSLayoutConstraint.Priority(999)
 
-        // The reassurance line takes whatever "Delete Group…" leaves of the
+        // The reassurance line takes whatever "Delete scene…" leaves of the
         // row, wrapping into it — an EQUALITY, because a wrapping label needs a
         // definite width to wrap inside. 999 rather than required so a
         // pathologically narrow pane breaks THIS rather than the button's own
@@ -585,7 +585,7 @@ public final class GroupEditorViewController: NSViewController {
             titleWidth,
             titleCap,
 
-            // The "Playing now" marker tucks UNDER the name, inside the header
+            // The "Playing" marker tucks UNDER the name, inside the header
             // band's own padding — it hangs off the field, never off the
             // section's bottom, so the band's pinned height can't follow it.
             playingBadge.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
@@ -664,7 +664,7 @@ public final class GroupEditorViewController: NSViewController {
             deleteButton.bottomAnchor.constraint(equalTo: document.bottomAnchor,
                                                  constant: -GroupsPaneLayout.paneBottomInset),
 
-            // Beside "Delete Group…", centred on it, with NO bottom pin: the
+            // Beside "Delete scene…", centred on it, with NO bottom pin: the
             // line's overhang rides inside the `paneBottomInset` margin above,
             // so the pane's fitting height is unchanged (see ``reassuranceLabel``).
             reassuranceLabel.leadingAnchor.constraint(
@@ -687,7 +687,7 @@ public final class GroupEditorViewController: NSViewController {
         view = container
     }
 
-    /// Build the header's "Playing now" marker: the sidebar's exact symbol and
+    /// Build the header's "Playing" marker: the sidebar's exact symbol and
     /// wording (`IconLabelCellView`), so the same state can't acquire a second
     /// name. `Tokens.Color.gold` is an INSTRUMENT — it keeps its authored value
     /// in every theme, and it tints the GLYPH only; the caption stays
@@ -696,7 +696,7 @@ public final class GroupEditorViewController: NSViewController {
         let glyph = NSImageView()
         glyph.translatesAutoresizingMaskIntoConstraints = false
         glyph.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
-                              accessibilityDescription: "Playing now")?
+                              accessibilityDescription: "Playing")?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
         glyph.image?.isTemplate = true
         glyph.contentTintColor = Tokens.Color.gold
@@ -704,7 +704,7 @@ public final class GroupEditorViewController: NSViewController {
         // would announce them twice.
         glyph.setAccessibilityElement(false)
 
-        let caption = NSTextField(labelWithString: "Playing now")
+        let caption = NSTextField(labelWithString: "Playing")
         caption.translatesAutoresizingMaskIntoConstraints = false
         caption.font = Tokens.Font.caption
         caption.textColor = Tokens.Color.label2
@@ -771,12 +771,12 @@ public final class GroupEditorViewController: NSViewController {
         // thin gold ring (drawing-only; pure model state from
         // `GroupController.activeGroupID`, never audio-driven — §3.3).
         // VoiceOver equivalent: the well's accessibilityValue mirrors the
-        // ring so the state isn't color-only (flagged for the C2 sweep to
-        // harmonize wording with the popover's LIVE vocabulary).
+        // ring so the state isn't color-only, using the same "Playing"
+        // words as the visible badge below.
         let isActive = groupController.activeGroupID == group.id
         isActiveGroup = isActive
         iconWell.isActiveGroup = isActive
-        iconWell.setAccessibilityValue(isActive ? "Active group" : "")
+        iconWell.setAccessibilityValue(isActive ? "Playing" : "")
         // The ring is colour alone; these two say it in words — the marker
         // states that this group IS playing, and the line answers the question
         // that raises while its membership is being edited. An inactive group
@@ -865,7 +865,7 @@ public final class GroupEditorViewController: NSViewController {
     private func refreshIconWell(group: Group) {
         let symbolName = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
         iconWellSymbolName = symbolName
-        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Group icon")
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Scene icon")
         image?.isTemplate = true
         iconWell.iconImageView.image = image
     }
@@ -917,7 +917,7 @@ public final class GroupEditorViewController: NSViewController {
     private func pinSoleMember(memberSet: Set<String>) {
         guard memberSet.count == 1, let onlyMemberID = memberSet.first else { return }
         rowsByID[onlyMemberID]?.setCheckboxEnabled(
-            false, tooltip: "A group needs at least one device. Use \u{201C}Delete Group\u{2026}\u{201D} to remove it.")
+            false, tooltip: "A scene needs at least one speaker. Use \u{201C}Delete scene\u{2026}\u{201D} to remove it.")
     }
 
     /// (Re)build the membership row list, checking members of `memberSet`.
@@ -1078,7 +1078,7 @@ public final class GroupEditorViewController: NSViewController {
         let alert = NSAlert()
         alert.messageText = "That name is already taken."
         alert.informativeText =
-            "Another group is named \u{201C}\(name)\u{201D}. Choose a different name."
+            "Another scene is named \u{201C}\(name)\u{201D}. Choose a different name."
         alert.alertStyle = .warning
         alert.beginSheetModal(for: window)
     }
@@ -1090,7 +1090,7 @@ public final class GroupEditorViewController: NSViewController {
         guard let window = view.window else { return }
         let alert = NSAlert()
         alert.messageText = message
-        alert.informativeText = "The group\u{2019}s saved settings couldn\u{2019}t be updated. Try again."
+        alert.informativeText = "The scene\u{2019}s saved settings couldn\u{2019}t be updated. Try again."
         alert.alertStyle = .warning
         alert.beginSheetModal(for: window)
     }
@@ -1170,7 +1170,7 @@ public final class GroupEditorViewController: NSViewController {
             }
         } else {
             // A group must keep at least one device — refuse to remove the last
-            // member (to remove the group entirely, use "Delete Group…"). Revert
+            // member (to remove the group entirely, use "Delete scene…"). Revert
             // the checkbox so the row reflects the unchanged membership and bail
             // before persisting an empty group.
             guard group.memberIDs.contains(where: { $0 != deviceID }) else {
@@ -1230,8 +1230,8 @@ public final class GroupEditorViewController: NSViewController {
         view.window?.makeFirstResponder(nameField)
     }
 
-    /// Run the same confirm-then-delete flow the "Delete Group…" button does —
-    /// the sidebar's context-menu "Delete Group…" path.
+    /// Run the same confirm-then-delete flow the "Delete scene…" button does —
+    /// the sidebar's context-menu "Delete scene…" path.
     public func requestDelete() {
         deleteTapped(deleteButton)
     }
@@ -1280,9 +1280,9 @@ public final class GroupEditorViewController: NSViewController {
         let alert = NSAlert()
         alert.messageText = "Delete \u{201C}\(group.name)\u{201D}?"
         alert.informativeText = groupController.activeGroupID == group.id
-            ? "This group is playing now. Deleting it switches playback to Selected Devices; "
-              + "speakers that are only in this group will stop."
-            : "Deleting a group doesn't change which speakers are playing."
+            ? "This scene is playing. Deleting it switches playback to Selected Speakers; "
+              + "speakers that are only in this scene will stop."
+            : "Deleting a scene doesn't change which speakers are playing."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
@@ -1420,7 +1420,7 @@ public final class GroupEditorViewController: NSViewController {
         pickIcon(name)
     }
 
-    /// Whether the header's gold "Playing now" marker is on screen — true for
+    /// Whether the header's gold "Playing" marker is on screen — true for
     /// the active Main Out group's editor only.
     public var test_playingBadgeVisible: Bool { !playingBadge.isHidden }
 
@@ -1448,7 +1448,7 @@ public final class GroupEditorViewController: NSViewController {
         rowsByID[deviceID]?.test_clickRow()
     }
 
-    /// True when "Delete Group…" is currently visible (always true — the
+    /// True when "Delete scene…" is currently visible (always true — the
     /// editor is edit-only).
     public var test_deleteButtonVisible: Bool { !deleteButton.isHidden }
 
@@ -1506,7 +1506,7 @@ public final class GroupEditorViewController: NSViewController {
             try groupController.deleteGroup(id: id)
         } catch {
             test_saveFailureReported = true
-            presentPersistFailureAlert(message: "Couldn\u{2019}t delete the group.")
+            presentPersistFailureAlert(message: "Couldn\u{2019}t delete the scene.")
             return
         }
         Analytics.capture("scene:deleted")
@@ -1529,7 +1529,7 @@ public final class GroupEditorViewController: NSViewController {
     /// name. Headless seam — the explanation is a window-guarded sheet.
     public private(set) var test_duplicateNameRefused = false
 
-    /// The confirmation the "Delete Group…" button would put up right now, or
+    /// The confirmation the "Delete scene…" button would put up right now, or
     /// nil when nothing is being edited. Built through the real
     /// ``makeDeleteAlert(for:)``, so the copy and the button roles under test
     /// are the ones the user sees.

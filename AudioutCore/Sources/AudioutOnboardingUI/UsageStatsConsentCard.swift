@@ -76,7 +76,7 @@ final class UsageStatsConsentCard: NSView {
         // the step's hue (Q3). A filled hue tile with white ink is retired
         // everywhere in this flow — no tile colours its own fill.
         let tile = IconTileView(symbolName: "chart.bar.xaxis",
-                                accessibility: "Usage statistics",
+                                accessibility: "Usage counts",
                                 color: Tokens.Color.permissionUsageStats,
                                 side: Self.tileSide,
                                 pointSize: 26)
@@ -148,7 +148,7 @@ final class UsageStatsConsentCard: NSView {
     /// was sending both, which is the failure mode this string exists to
     /// prevent. "City" rather than "region" is deliberate too: PostHog's
     /// location enrichment resolves to postal-code precision.
-    static let bodyText = "No account, no name \u{2014} just a random ID for this copy of "
+    static let bodyText = "No account, no name. Just a random ID for this copy of "
         + "Audiout. It counts which features get used, and notes your Mac, macOS version, "
         + "city, and whether Audiout is licensed. What you play, and what your speakers are "
         + "called, never leave this Mac."

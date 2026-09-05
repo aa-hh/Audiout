@@ -86,7 +86,7 @@ struct SetupCardContent {
             guard step == .localNetwork else { return completedTitle }
             switch foundSpeakers {
             case nil: return "Speakers on your Wi\u{2011}Fi are already reachable"
-            case 0: return "No speakers found yet \u{2014} switch one on and it'll appear"
+            case 0: return "No speakers found yet. Switch one on and it'll appear."
             // "Found" read as "connected to" to the owner, who was connected to
             // none of them: the count is what DISCOVERY saw, so the copy says
             // where they are rather than what we did with them.
@@ -696,7 +696,7 @@ final class SetupSpineRowView: NSView {
 
     private var stateSuffix: String {
         if isWaiting { return ", waiting" }
-        if isBroken { return ", turned off \u{2014} needs attention" }
+        if isBroken { return ", turned off, needs attention" }
         switch state {
         case .active: return ""
         case .pending: return ", locked"

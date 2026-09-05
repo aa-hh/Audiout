@@ -106,7 +106,7 @@ enum GroupsPaneLayout {
     /// label belongs to the section under it, not to the one above.
     static let labelToSectionGap: CGFloat = 6
     /// Visible gap from the last section to the pane's ACTION BAND — the
-    /// editor's "Delete Group…" + reassurance line, the detail pane's hint.
+    /// editor's "Delete scene…" + reassurance line, the detail pane's hint.
     /// Wider than ``sectionGap`` so the band reads as leaving the form rather
     /// than as one more section of it.
     static let actionBandGap: CGFloat = 22

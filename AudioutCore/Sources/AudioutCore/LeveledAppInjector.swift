@@ -12,7 +12,7 @@ import AudioToolbox
 /// redirected anywhere.
 ///
 /// ## What "leveled" means
-/// An app on "No Redirect" whose volume is BELOW 100. At exactly 100 the app is
+/// An app on "Follows main output" whose volume is BELOW 100. At exactly 100 the app is
 /// not leveled at all: it is not tapped, not excluded, not touched. Below 100 it
 /// is tapped `.mutedWhenTapped` (so it is silent at its normal output and out of
 /// the whole-system tap, exactly like a `.currentDevice` app) and its audio

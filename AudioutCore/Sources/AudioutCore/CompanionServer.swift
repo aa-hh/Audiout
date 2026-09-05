@@ -874,7 +874,7 @@ public final class CompanionServer: @unchecked Sendable {
             if let onCommand {
                 queue.async { onCommand(requestID, command, clientID, reply) }
             } else {
-                reply(CommandResult(applied: false, refusalReason: "server not ready"))
+                reply(CommandResult(applied: false, refusalReason: "The Mac isn't ready yet. Try again in a moment."))
             }
 
         case .welcome, .awaitingApproval, .state, .commandResult, .goodbye, .appIcons,

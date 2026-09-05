@@ -79,7 +79,7 @@ public enum PopoverColumnGrid {
     /// one clear indent step IN from the card header's own
     /// `firstElementLeading`, so the two header ranks read as nested rather
     /// than as four peers (both chevrons used to share the identical anchor,
-    /// which made "Output Devices" and "This Mac" look like siblings). The
+    /// which made "Output Speakers" and "This Mac" look like siblings). The
     /// step reuses the existing member-row indent
     /// (`indentedLeadingInset − leadingInset`) rather than minting a new
     /// magic number.
@@ -219,7 +219,7 @@ public enum PopoverColumnGrid {
     /// tight as a named dropdown allows so the flexible name column keeps room —
     /// sized (116 → 140, Warm Signal C1) so the two longest fixed dropdown
     /// titles, "Follows main output" (the app-row bridge phrase, decision 3) and
-    /// the count-free "Selected Devices" (decision m), fit a small-control
+    /// the count-free "Selected Speakers" (decision m), fit a small-control
     /// `NSPopUpButton` untruncated (measured fitting width 137 pt).
     public static let trailingControlWidth: CGFloat = 140
     /// The FEED column's available text width (Warm Signal v4.1 item 3) — the

@@ -48,7 +48,7 @@ import AppKit
 
     @Test func groupsRowMenuOffersOnlyNewGroup() {
         let sidebar = makeSidebar()
-        #expect(sidebar.test_contextMenuItems(for: .groupsOverview) == ["New Group…"])
+        #expect(sidebar.test_contextMenuItems(for: .groupsOverview) == ["Add scene"])
     }
 
     @Test func theGroupsRowMenuRunsTheAddPath() {
@@ -56,7 +56,7 @@ import AppKit
         var addCount = 0
         sidebar.onAddGroup = { addCount += 1 }
 
-        sidebar.test_clickContextMenuItem("New Group…", for: .groupsOverview)
+        sidebar.test_clickContextMenuItem("Add scene", for: .groupsOverview)
 
         #expect(addCount == 1)
     }
@@ -67,14 +67,14 @@ import AppKit
     @Test func speakerRowMenuNamesTheClickedSpeaker() {
         let sidebar = makeSidebar()
         #expect(sidebar.test_contextMenuItems(for: .device(id: "kitchen"))
-                == ["New Group from \u{201C}Kitchen\u{201D}…"])
+                == ["Add scene from \u{201C}Kitchen\u{201D}…"])
     }
 
     @Test func speakerRowMenuCountsAMultiSelection() {
         let sidebar = makeSidebar()
         sidebar.test_selectDevices(["office", "patio"])
         #expect(sidebar.test_contextMenuItems(for: .device(id: "patio"))
-                == ["New Group from 2 Speakers…"],
+                == ["Add scene from 2 speakers…"],
                 "the same wording the bottom bar retitles itself to")
     }
 
@@ -98,7 +98,7 @@ import AppKit
         sidebar.onNewGroupFromSelection = { created = $0 }
 
         sidebar.test_selectDevices(["office", "patio"])
-        sidebar.test_clickContextMenuItem("New Group from 2 Speakers…", for: .device(id: "patio"))
+        sidebar.test_clickContextMenuItem("Add scene from 2 speakers…", for: .device(id: "patio"))
 
         #expect(created == ["office", "patio"], "a clicked row inside the selection keeps it")
     }
@@ -109,7 +109,7 @@ import AppKit
         sidebar.onNewGroupFromSelection = { created = $0 }
 
         sidebar.test_selectDevices(["office", "patio"])
-        sidebar.test_clickContextMenuItem("New Group from \u{201C}Kitchen\u{201D}…",
+        sidebar.test_clickContextMenuItem("Add scene from \u{201C}Kitchen\u{201D}…",
                                           for: .device(id: "kitchen"))
 
         #expect(created == ["kitchen"], "a clicked row outside the selection replaces it")
@@ -120,7 +120,7 @@ import AppKit
         var created: [String]?
         sidebar.onNewGroupFromSelection = { created = $0 }
 
-        sidebar.test_clickContextMenuItem("New Group from \u{201C}Office\u{201D}…",
+        sidebar.test_clickContextMenuItem("Add scene from \u{201C}Office\u{201D}…",
                                           for: .device(id: "office"))
 
         #expect(created == ["office"])
@@ -243,13 +243,13 @@ import AppKit
                 as? NSTableCellView)
         #expect(offlineCell.textField?.accessibilityLabel() == "Patio, unavailable")
 
-        // "Playing now" moved with the groups (direction C): the pinned Groups
+        // "Playing" moved with the groups (direction C): the pinned Scenes
         // row is what carries the live marker, so it carries the spoken state.
         let activeCell = try #require(
             sidebar.outlineView(NSOutlineView(), viewFor: nil,
                                 item: SidebarViewController.Node(.groupsOverview))
                 as? NSTableCellView)
-        #expect(activeCell.textField?.accessibilityLabel() == "Groups, playing now")
+        #expect(activeCell.textField?.accessibilityLabel() == "Scenes, playing")
 
         let ordinaryCell = try #require(
             sidebar.outlineView(NSOutlineView(), viewFor: nil,

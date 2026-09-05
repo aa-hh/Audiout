@@ -267,7 +267,7 @@ public final class CompanionCommandDispatcher {
             // ms would tear every AirPlay stream down (~3-5s) on each replay.
             guard ms != settings.startBufferMs else { return .ok }
             guard !startBufferApplyInFlight else {
-                return .refused("A buffer change is already being applied — try again in a few seconds.")
+                return .refused("A buffer change is already being applied. Try again in a few seconds.")
             }
             startBufferApplyInFlight = true
             Task {
@@ -347,10 +347,10 @@ public final class CompanionCommandDispatcher {
         _ action: (CompanionAlignmentActions, String) -> String?
     ) -> Result {
         guard !targetID.isEmpty, targetID.count <= Limits.maxMemberIDChars else {
-            return .refused("Unknown device.")
+            return .refused("Unknown speaker.")
         }
         guard let alignmentActions else {
-            return .refused("This Mac can't measure speaker timing.")
+            return .refused("This Mac can't measure speaker timing right now. Reconnect the speaker and try again.")
         }
         if let reason = action(alignmentActions, targetID) { return .refused(reason) }
         return .ok
@@ -365,7 +365,7 @@ public final class CompanionCommandDispatcher {
             return refused
         }
         guard groupController.groups.count < Limits.maxGroups else {
-            return .refused("The Mac already has the maximum of \(Limits.maxGroups) groups.")
+            return .refused("The Mac already has the maximum of \(Limits.maxGroups) scenes.")
         }
         // Explicit id so a failed store write can be rolled back below.
         let newID = UUID().uuidString
@@ -375,7 +375,7 @@ public final class CompanionCommandDispatcher {
             // A dedup hit made NOTHING — saying `applied` would leave the phone
             // showing a success for a group that never appears.
             guard !created.alreadyExisted else {
-                return .refused("A group with those exact devices already exists (\(created.group.name)).")
+                return .refused("A scene with those exact speakers already exists (\(created.group.name)).")
             }
             return .ok
         } catch {
@@ -395,7 +395,7 @@ public final class CompanionCommandDispatcher {
         // from a ≤50ms-stale snapshot resurrect a group the Mac just deleted —
         // and bypasses `createGroup`'s dedup-by-member-set invariant.
         guard let existing = groupController.groups.first(where: { $0.id == state.id }) else {
-            return .refused("That group no longer exists on the Mac.")
+            return .refused("That scene no longer exists on the Mac.")
         }
         let trimmedName = state.name.trimmingCharacters(in: .whitespacesAndNewlines)
         if let refused = groupShapeRefusal(trimmedName: trimmedName, memberIDs: state.memberIDs,
@@ -471,22 +471,22 @@ public final class CompanionCommandDispatcher {
         // Same rule as the Mac's own rename path (GroupEditorViewController):
         // an all-whitespace name is refused, never a blank sidebar row.
         guard !trimmedName.isEmpty else {
-            return .refused("A group needs a name.")
+            return .refused("A scene needs a name.")
         }
         guard trimmedName.count <= Limits.maxGroupNameChars else {
-            return .refused("Group names are limited to \(Limits.maxGroupNameChars) characters.")
+            return .refused("Scene names are limited to \(Limits.maxGroupNameChars) characters.")
         }
         guard !memberIDs.isEmpty else {
-            return .refused("A group needs at least one device.")
+            return .refused("A scene needs at least one speaker.")
         }
         guard memberIDs.count <= Limits.maxGroupMembers else {
-            return .refused("Groups are limited to \(Limits.maxGroupMembers) devices.")
+            return .refused("Scenes are limited to \(Limits.maxGroupMembers) speakers.")
         }
         guard !memberIDs.contains(where: { $0.isEmpty || $0.count > Limits.maxMemberIDChars }) else {
-            return .refused("That group names an invalid device.")
+            return .refused("That scene names an invalid speaker.")
         }
         if let icon = iconSymbolName, icon.count > Limits.maxIconNameChars {
-            return .refused("That group's icon isn't valid.")
+            return .refused("That scene's icon isn't valid.")
         }
         return nil
     }
@@ -502,7 +502,7 @@ public final class CompanionCommandDispatcher {
     /// engine output alive, so it accepts too.
     private func deviceWriteRefusal(id: String) -> Result? {
         guard let device = groupController.devices.first(where: { $0.id == id }) else {
-            return .refused("Unknown device.")
+            return .refused("Unknown speaker.")
         }
         if device.isLocalDevice { return nil }
         switch device.connectionState {
@@ -548,7 +548,7 @@ public final class CompanionCommandDispatcher {
 
     private func refusal(for error: Error) -> Result {
         if let groupError = error as? GroupController.GroupError, groupError == .emptyMembership {
-            return .refused("A group needs at least one device.")
+            return .refused("A scene needs at least one speaker.")
         }
         // Never ship a raw error description to a LAN peer — Cocoa NSErrors
         // carry `NSFilePath` (`/Users/<name>/Library/...`). Log the detail
@@ -565,7 +565,7 @@ public final class CompanionCommandDispatcher {
         case "group":
             guard let groupID = state.groupID,
                   groupController.groups.contains(where: { $0.id == groupID }) else {
-                return .refused("Unknown group.")
+                return .refused("Unknown scene.")
             }
             groupController.setMainOut(.group(id: groupID))
             return .ok
@@ -583,7 +583,7 @@ public final class CompanionCommandDispatcher {
             destination = .currentDevice
         case "device":
             guard let deviceID, let device = groupController.devices.first(where: { $0.id == deviceID }) else {
-                return .refused("Unknown device.")
+                return .refused("Unknown speaker.")
             }
             // One-role-per-speaker, server side: the popover's redirect picker
             // skips Main Out members (PopoverController.appDestinations), and
@@ -593,7 +593,7 @@ public final class CompanionCommandDispatcher {
             // honestly instead. The phone's own picker filters too (AppsView);
             // this guard is the trust boundary for any client.
             guard !groupController.isMainOutMember(deviceID) else {
-                return .refused("\u{201C}\(device.name)\u{201D} is carrying Main Audio — deselect it as a speaker first.")
+                return .refused("\u{201C}\(device.name)\u{201D} is carrying Main Audio, deselect it as a speaker first.")
             }
             destination = .device(id: deviceID)
         default:

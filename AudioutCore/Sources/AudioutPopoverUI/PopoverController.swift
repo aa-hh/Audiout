@@ -81,7 +81,7 @@ private final class CardFooterView: NSView {
         // selected devices as a group, pair a Bluetooth speaker, connect a
         // known one — so its spoken name and tooltip must cover saving too,
         // not just "add a device".
-        let label = showsRemove ? "Add or remove application" : "Add or save devices"
+        let label = showsRemove ? "Add or remove application" : "Add or save speakers"
         segmented.setAccessibilityLabel(label)
         if !showsRemove { segmented.toolTip = label }
 
@@ -128,12 +128,12 @@ private final class CardFooterView: NSView {
 /// itself.
 ///
 /// Structure, top to bottom:
-/// 1. **System section — a single "Main Out" row** (`MainOutRowView`): speaker
-///    icon · "Main Out" · master gain slider + `%` · a trailing
+/// 1. **System section — a single "Main Audio" row** (`MainOutRowView`): speaker
+///    icon · "Main Audio" · master gain slider + `%` · a trailing
 ///    `NSPopUpButton` device selector. The selector is THE routing decision, with
-///    two sections: "Selected Devices" and each saved Output Group.
-/// 2. **"Selected Devices" section** — every discovered device, split into
-///    **Current Device** (the Mac) and **AirPlay Devices**. Each row's toggle
+///    two sections: "Selected Speakers" and each saved scene.
+/// 2. **"Selected Speakers" section** — every discovered device, split into
+///    **This Mac** (the Mac) and **AirPlay Speakers**. Each row's toggle
 ///    switch = membership in the persistent Selected Devices set (SPEC §9b). The
 ///    toggle COMPOSES the set; it routes only when Main Out targets Selected
 ///    Devices (the default). The current-device toggle enforces the Phase-1
@@ -231,7 +231,7 @@ public final class PopoverController: NSObject {
     /// the button, if ever rendered, taps into nothing.
     public var onReselectAudiout: (() -> Void)?
 
-    /// Called when the user taps the takeover status strip's "Try Again"
+    /// Called when the user taps the takeover status strip's "Try again"
     /// button (T6, state 4 — `.timedOut`): the bounded wait for the clock
     /// ran out, so the device the strip was explaining is now `.failed`
     /// (`enterFailure(_:cause:.timingUnavailable)`). The app wires this to
@@ -738,16 +738,16 @@ public final class PopoverController: NSObject {
     /// settled state by the next open.
     private var lastConnectedMemberIDs: Set<String>?
 
-    /// The sentinel destination id the Applications card's "Current Device" entry
+    /// The sentinel destination id the Applications card's "This Mac" entry
     /// carries (T-8). `AppRouteDestination.currentDevice` names no specific device,
     /// but `AppRowView` works in plain string ids; this sentinel bridges the two
     /// and is chosen so it can never collide with a real `Device.id`.
     static let currentDeviceDestinationID = "\u{0000}current-device"
 
-    /// The sentinel destination id the Applications card's standalone "No
-    /// Redirect" entry carries — the new default/neutral state for a newly-added
+    /// The sentinel destination id the Applications card's standalone "Follows
+    /// main output" entry carries — the new default/neutral state for a newly-added
     /// app (`AppRouteDestination.noRedirect`), distinct from the now-explicit
-    /// "Current Device" pick. Chosen so it can never collide with a real
+    /// "This Mac" pick. Chosen so it can never collide with a real
     /// `Device.id` or with `currentDeviceDestinationID`.
     static let noRedirectDestinationID = "\u{0000}no-redirect"
 
@@ -1143,7 +1143,7 @@ public final class PopoverController: NSObject {
     // MARK: Silence-fallback banner (Wave 2 W2-T2, R11)
 
     /// The exact banner copy from PLAN-RELIABILITY Wave 2.
-    static let localFallbackBannerText = "Speakers unreachable — playing on this Mac. Will resume automatically."
+    static let localFallbackBannerText = "Speakers unreachable. Playing on your Mac. Will resume automatically."
 
     /// Whether the generalized silence watchdog (R11) has fallen back to local
     /// playback because zero desired devices stayed connected. Drives the banner;
@@ -1220,7 +1220,7 @@ public final class PopoverController: NSObject {
     /// bullet: non-blocking, informational — this never changes what's actually
     /// streaming, it only tells the user why they might hear an echo.
     static let systemAirPlayNoteText =
-        "Your Mac's system output is also set to AirPlay — audio may play twice. Switch it back to avoid an echo."
+        "Your Mac's system output is also set to AirPlay. Audio may play twice. Switch it back to avoid an echo."
 
     /// Whether the system-AirPlay double-path guard (W3-T3) is currently active:
     /// this app is streaming a whole-system capture AND the macOS system default
@@ -1244,7 +1244,7 @@ public final class PopoverController: NSObject {
     /// "Audiout" token comes from `AggregateOutputDevice.productName` rather
     /// than a hardcoded string.
     static var routingBlockedNeedsDefaultText: String {
-        "\(AggregateOutputDevice.productName) isn't your Mac's output device — audio won't play until you switch back."
+        "\(AggregateOutputDevice.productName) isn't your Mac's output device. Audio won't play until you switch back."
     }
 
     /// Show or clear the routing-blocked-needs-default warning (T-UI). Called
@@ -1408,7 +1408,7 @@ public final class PopoverController: NSObject {
     /// (`.timedOut`) have one: state 2's own doc says plainly there's nothing
     /// an approval UX can do about a missing bundle component, and state 3 is
     /// transient. State 4's device is genuinely `.failed` by the time the
-    /// state shows, so "Try Again" gives the user the same single-device
+    /// state shows, so "Try again" gives the user the same single-device
     /// re-kick a `.failed` row's own diagnosis panel offers.
     private func takeoverStatusAction(for status: TakeoverStatus) -> SystemAirPlayNoteBannerView.Action? {
         switch status {
@@ -1419,7 +1419,7 @@ public final class PopoverController: NSObject {
                 handler: { [weak self] in self?.onOpenPTPHelperLoginItems?() })
         case .timedOut:
             return SystemAirPlayNoteBannerView.Action(
-                title: "Try Again",
+                title: "Try again",
                 accessibilityLabel: "Try connecting again",
                 handler: { [weak self] in self?.onRetryTakeover?() })
         case .helperMissing, .takingOver:
@@ -1608,7 +1608,7 @@ public final class PopoverController: NSObject {
         renderedBTConnectShown = false
         renderedSpeakerSearchText = nil
         bluetoothConnectButton = nil
-        // Combined header row: "Output Devices" title on the left. The
+        // Combined header row: "Output Speakers" title on the left. The
         // membership "Selected" column MOVED to the left spine
         // (v4 §Call-1), so this card no longer heads a membership column — but
         // its device rows' trailing dropdown column, once left empty, now
@@ -1676,9 +1676,9 @@ public final class PopoverController: NSObject {
         // decision 2026-08-28): no "This Mac" subsection wrapper any more — no
         // grouping label, no chevron, no per-subsection collapse. The row
         // lands in the CARD's body (`currentSubsectionStack` is nil here), so
-        // collapsing "Output Devices" still folds it with everything else,
+        // collapsing "Output Speakers" still folds it with everything else,
         // and the rail's order is untouched (`deviceSections()` still lists
-        // it first). "AirPlay Devices" is therefore the first subsection.
+        // it first). "AirPlay Speakers" is therefore the first subsection.
         if let macSection = sections.first(where: { $0.title == Self.thisMacSubsectionTitle }) {
             for device in macSection.devices {
                 panel.addRow(makeDeviceRow(device, indented: false))
@@ -1801,9 +1801,9 @@ public final class PopoverController: NSObject {
     /// survives as `deviceSections()`'s grouping key for the local band, which
     /// keeps the rail's full order and the section machinery on one list.
     static let thisMacSubsectionTitle = "This Mac"
-    static let airPlaySubsectionTitle = "AirPlay Devices"
-    static let bluetoothSubsectionTitle = "Bluetooth Devices"
-    static let castSubsectionTitle = "Cast Devices"
+    static let airPlaySubsectionTitle = "AirPlay Speakers"
+    static let bluetoothSubsectionTitle = "Bluetooth Speakers"
+    static let castSubsectionTitle = "Cast Speakers"
 
     /// One device-type subsection and the rows it would render, the Bluetooth
     /// connected-only filter already applied.
@@ -1814,7 +1814,7 @@ public final class PopoverController: NSObject {
 
     /// Bluetooth renders its header even with nothing listed — its empty
     /// state IS content (the Connect affordance). AirPlay does the same while a
-    /// search state is active: the state line needs the "AirPlay Devices"
+    /// search state is active: the state line needs the "AirPlay Speakers"
     /// grouping label above it to say WHAT was not found. The rest stay
     /// hidden-when-empty — and This Mac NEVER renders one (2026-08-28: its row
     /// is pinned directly under the card header, no subsection). This answer
@@ -1906,11 +1906,11 @@ public final class PopoverController: NSObject {
     }
 
     static let speakerSearchingText = "Looking for speakers…"
-    static let speakerNoneFoundText = "No AirPlay speakers found on this network."
+    static let speakerNoneFoundText = "No AirPlay speakers found on your Wi-Fi network."
     static let speakerNoneFoundHintText =
         "Make sure your speakers are awake and on the same Wi-Fi network as this Mac."
     static let speakerPermissionDeniedText =
-        "Audiout doesn\u{2019}t have permission to see devices on this network."
+        "Audiout doesn\u{2019}t have permission to see speakers on your Wi-Fi network."
     static let speakerPermissionDeniedHintText =
         "Allow Local Network for Audiout in System Settings \u{203A} Privacy & Security."
 
@@ -2185,13 +2185,13 @@ public final class PopoverController: NSObject {
     // MARK: Collapse-default policy (T-5, PLAN §B)
 
     /// The three card titles — Warm Signal §5.1's silkscreen vocabulary
-    /// ("System Audio" / "Output Devices" / "App Routing"; the panel renders as-is
+    /// ("System Audio" / "Output Speakers" / "App Routing"; the panel renders as-is
     /// the displayed header, the title-case copy lives here). Named constants
     /// because the title string IS the card's lookup/collapse key. The System
     /// Audio card was "Main Audio" pre-v4 (§Call-1 renamed the SECTION header to
     /// "System Audio"; the ROW inside it is now titled "Main Audio").
     static let mainAudioCardTitle = "System Audio"
-    static let outputDevicesCardTitle = "Output Devices"
+    static let outputDevicesCardTitle = "Output Speakers"
     /// Hover help for the Output Devices card's "Source" column legend.
     static let sourceColumnHelp =
         "What each speaker is playing. System is your Mac's audio. "
@@ -2229,7 +2229,7 @@ public final class PopoverController: NSObject {
 
     /// The Applications card's collapse default (C5): expanded iff ANY app route
     /// exists at all — a routed app is worth surfacing on open even while it's
-    /// still on the neutral "No Redirect" default, since the user added it on
+    /// still on the neutral "Follows main output" default, since the user added it on
     /// purpose. Exposed so the card-wiring only needs `collapsedState(for:
     /// Self.applicationsCardTitle, default: !applicationsDefaultExpanded)`.
     private var applicationsDefaultExpanded: Bool {
@@ -2299,14 +2299,14 @@ public final class PopoverController: NSObject {
 
     private func refreshMainOutRow() {
         guard let controller = groupController else { return }
-        // "Selected Devices" is CLEAN — no live "(n)" count (Warm Signal §5.1,
+        // "Selected Speakers" is CLEAN — no live "(n)" count (Warm Signal §5.1,
         // decision m: the dropdown names the current target, the device rows'
         // checkboxes already show the composition). The trailing-control column
         // (`PopoverColumnGrid.trailingControlWidth`) is sized so the full title
         // fits the collapsed button untruncated — no `buttonTitle` short form.
         var options: [MainOutRowView.Option] = [
             .init(title: "Destination", isHeader: true),
-            .init(title: "Selected Devices", target: .selectedDevices),
+            .init(title: "Selected Speakers", target: .selectedDevices),
         ]
         // Only groups that actually have a device are offered as routing targets —
         // an empty group can't be activated (and shouldn't exist under the
@@ -2314,7 +2314,7 @@ public final class PopoverController: NSObject {
         // filtered here defensively rather than shown as a dead entry).
         let routableGroups = controller.groups.filter { !$0.memberIDs.isEmpty }
         if !routableGroups.isEmpty {
-            options.append(.init(title: "Output Groups", isHeader: true))
+            options.append(.init(title: "Scenes", isHeader: true))
             for group in routableGroups {
                 // A saved GROUP names ITSELF on the collapsed button ("→ Kitchen"),
                 // never its member devices — shorter, never truncates, and matches
@@ -2427,7 +2427,7 @@ public final class PopoverController: NSObject {
         energizePendingIDs = []
         let (connected, failed) = energizeTargetTally()
         var summary = "\(energizeTargetName ?? "Main Audio") ready"
-        if connected > 0 { summary += " — \(connected) connected" }
+        if connected > 0 { summary += ", \(connected) connected" }
         if failed > 0 { summary += ", \(failed) didn’t connect" }
         postAnnouncement(summary)
     }
@@ -2475,8 +2475,8 @@ public final class PopoverController: NSObject {
     private func energizeTargetDisplayName(_ target: MainOutTarget,
                                            controller: GroupController) -> String {
         switch target {
-        case .selectedDevices: return "Selected Devices"
-        case .group(let id):   return controller.groups.first { $0.id == id }?.name ?? "the group"
+        case .selectedDevices: return "Selected Speakers"
+        case .group(let id):   return controller.groups.first { $0.id == id }?.name ?? "the scene"
         }
     }
 
@@ -2524,7 +2524,7 @@ public final class PopoverController: NSObject {
     private func offerRemovalUndo(for id: String) {
         removalUndoTimer?.invalidate()
         removalUndoDeviceID = id
-        postAnnouncement("Removed \(devicesByID[id]?.name ?? "device") from Main Audio")
+        postAnnouncement("Removed \(devicesByID[id]?.name ?? "speaker") from Main Audio")
         removalUndoTimer = Timer.scheduledTimer(withTimeInterval: Self.removalUndoWindow,
                                                 repeats: false) { [weak self] _ in
             self?.expireRemovalUndo()
@@ -2644,7 +2644,7 @@ public final class PopoverController: NSObject {
         return !controller.isMainOutMuted
     }
 
-    /// The collapsed destination-button label for the "Selected Devices" target:
+    /// The collapsed destination-button label for the "Selected Speakers" target:
     /// names the real destination instead of a bare "Selected (n)" count, which
     /// told the user how many devices were checked but not WHERE audio actually
     /// goes.
@@ -2747,7 +2747,7 @@ public final class PopoverController: NSObject {
         guard let controller = groupController,
               case .group(let id) = controller.mainOut else { return nil }
         guard let group = controller.groups.first(where: { $0.id == id }) else {
-            return DevicesCardDivergence(groupName: "a group", targetMemberIDs: [])
+            return DevicesCardDivergence(groupName: "a scene", targetMemberIDs: [])
         }
         let target = Set(group.memberIDs)
         guard controller.selectedDeviceIDs != target else { return nil }
@@ -3181,7 +3181,7 @@ public final class PopoverController: NSObject {
     /// Build the "+" affordance's menu FRESH per presentation — two items
     /// dispatching through real `NSMenuItem` target/action (tests drive them
     /// via `NSMenu.performActionForItem(at:)`, never a bypass seam):
-    /// "Save Selected Devices as group" (enabled iff `canSaveCurrentSetup`),
+    /// "Save Selected Speakers as scene" (enabled iff `canSaveCurrentSetup`),
     /// "Pair a Bluetooth speaker…" (device-tier decision 3 — never-paired
     /// speakers get NO rows; pairing is a one-tap Settings trip), and — the
     /// BT-LIST connected-only list's history surface — one "Connect '<name>'"
@@ -3189,7 +3189,7 @@ public final class PopoverController: NSObject {
     func makeOutputDevicesPlusMenu() -> NSMenu {
         let menu = NSMenu(title: "Add")
         menu.autoenablesItems = false
-        let save = NSMenuItem(title: "Save Selected Devices as group",
+        let save = NSMenuItem(title: "Save Selected Speakers as scene",
                               action: #selector(plusMenuSaveGroup(_:)), keyEquivalent: "")
         save.target = self
         save.isEnabled = canSaveCurrentSetup
@@ -3208,7 +3208,7 @@ public final class PopoverController: NSObject {
             .sorted { byBTRecency($0, $1, lastUsed: lastUsed) }
         if !unlisted.isEmpty {
             menu.addItem(.separator())
-            let header = NSMenuItem(title: "Bluetooth Pairings", action: nil, keyEquivalent: "")
+            let header = NSMenuItem(title: "Bluetooth pairings", action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
             for device in unlisted {
@@ -3273,7 +3273,7 @@ public final class PopoverController: NSObject {
     /// Apple-owned, so the affordance is the Settings trip — the fresh row then
     /// arrives through the ordinary connected-only listing.
     ///
-    /// The row names the ACTION only: the "Bluetooth Devices" header directly
+    /// The row names the ACTION only: the "Bluetooth Speakers" header directly
     /// above it already names the kind, so the word on both lines would make an
     /// empty section say the same thing twice. VoiceOver hears the full phrase
     /// through `accessibilityLabel` — a button announced on its own has no
@@ -3574,12 +3574,12 @@ public final class PopoverController: NSObject {
     /// Build one `AppRowView` for `route` against the discovered device `devices`.
     /// The destination popup leads with the standalone "Follows main output"
     /// entry (the default/neutral state), then mirrors `refreshMainOutRow`'s split — a
-    /// "Current Device" entry (local, now an explicit pick) then the available
+    /// "This Mac" entry (local, now an explicit pick) then the available
     /// (present + reachable) non-local AirPlay devices, plus this route's own
     /// target if it is currently unreachable (R5). The selected id is
     /// derived from `route.destination`, and the slider dims while local
     /// (decision 3, driven inside `AppRowView` by the selected entry's `isLocal`
-    /// — true for both "No Redirect" and "Current Device").
+    /// — true for both "Follows main output" and "This Mac").
     private func makeAppRow(_ route: AppRoute, devices: [Device]) -> AppRowView {
         let row = AppRowView(showsMeter: true)
         row.delegate = self
@@ -3602,7 +3602,7 @@ public final class PopoverController: NSObject {
     /// standalone unrouted entry — titled with the Warm Signal bridge phrase
     /// **"Follows main output"** (§5.1, decision 3), supplied by the HOST per the
     /// host-supplies-copy doctrine — then the
-    /// "Current Device" entry (decision 8, now an explicit pick), then every
+    /// "This Mac" entry (decision 8, now an explicit pick), then every
     /// AVAILABLE non-local device (`availableAirPlayDestinations`).
     /// Plain values only — `AppRowView` is isolated from Core's `AppRoute` (T-6).
     ///
@@ -3610,7 +3610,7 @@ public final class PopoverController: NSObject {
     /// it isn't offerable any more (R5). A route whose target went
     /// `isAvailable == false` is now kept rather than reset, and without this the
     /// row's `selectedDestinationID` would match nothing in the menu — which
-    /// `AppRowView.apply` reads as "No Redirect" (its `?? true` fallback), rendering
+    /// `AppRowView.apply` reads as "Follows main output" (its `?? true` fallback), rendering
     /// a dimmed slider and an unset-looking row for a route that is perfectly
     /// intact. The injected entry names the device and says what is actually
     /// happening to its audio meanwhile. Same inclusion rule
@@ -3733,7 +3733,7 @@ public final class PopoverController: NSObject {
         }
     }
 
-    /// The "Output Groups" section of one row's destination popup: EVERY saved
+    /// The "Scenes" section of one row's destination popup: EVERY saved
     /// group, each disclosing what picking it would actually do right now.
     /// Mirrors Main Out's own group list (same header, same "→ <name>"
     /// collapsed title). PLAN-POPOVER-ROUTING decision 4, which kept groups out
@@ -3792,7 +3792,7 @@ public final class PopoverController: NSObject {
         guard !usable.isEmpty else { return Self.emptyGroupDestinationSubtitle }
         let claimedByMainOut = group.memberIDs.contains { groupController?.isMainOutMember($0) == true }
         if claimedByMainOut {
-            return "Plays on \(usable.count) of \(total) — the rest are in the main mix"
+            return "Plays on \(usable.count) of \(total), the rest are in the main mix"
         }
         if usable.count < total { return Self.offlineGroupDestinationSubtitle }
         let usableIDs = Set(usable)
@@ -3824,14 +3824,14 @@ public final class PopoverController: NSObject {
     /// whole-system capture tap, so it plays wherever the Mac's current top-level
     /// selection points — and the redirect resumes on its own once the device is
     /// back, with nothing for the user to re-pick.
-    static let offlineDestinationSubtitle = "Offline — playing with system audio"
+    static let offlineDestinationSubtitle = "Offline, playing with system audio"
 
     /// The secondary line on an AirPlay device entry that already carries a
     /// DIFFERENT app's redirect (R3 stopgap). The real fix — resampling
     /// contributors onto one shared capture clock instead of a wall-clock frame
     /// grid — is a separate, larger follow-up; this is the honest heads-up in the
     /// meantime, not a claim the quality issue is solved.
-    static let sameSpeakerQualitySubtitle = "Already in use — may reduce quality"
+    static let sameSpeakerQualitySubtitle = "Already in use, may reduce quality"
 
     /// The available per-app route targets: reachable (`isAvailable`) devices
     /// whose KIND may carry a per-app stream, in the same stable order as the
@@ -3856,11 +3856,11 @@ public final class PopoverController: NSObject {
         devices.filter { $0.isAvailable && $0.canBePerAppRouteTarget() }
     }
 
-    /// Title for the "Current Device" entry — the local device's own name when the
+    /// Title for the "This Mac" entry — the local device's own name when the
     /// fleet includes it, else a generic fallback so the entry always reads
     /// sensibly (decision 8 — the app plays on this Mac).
     private func currentDeviceTitle(devices: [Device]) -> String {
-        devices.first(where: \.isLocalDevice)?.name ?? "Current Device"
+        devices.first(where: \.isLocalDevice)?.name ?? "This Mac"
     }
 
     /// Map an `AppRoute.destination` onto the plain-string id `AppRowView` selects
@@ -3915,7 +3915,7 @@ public final class PopoverController: NSObject {
 
     // MARK: Actions
 
-    /// "Save Selected Devices as group" is enabled iff there's a controller, the
+    /// "Save Selected Speakers as scene" is enabled iff there's a controller, the
     /// Selected Devices set is non-empty, and it doesn't already equal a saved
     /// group (SPEC §9 dedup).
     private var canSaveCurrentSetup: Bool {
@@ -3924,7 +3924,7 @@ public final class PopoverController: NSObject {
         return controller.group(matchingMemberSet: controller.selectedDeviceIDs) == nil
     }
 
-    /// Whether the last "Save Selected Devices as group" failed to persist —
+    /// Whether the last "Save Selected Speakers as scene" failed to persist —
     /// the headless-observable half of the alert below (hardening 11).
     public private(set) var test_saveGroupFailureReported = false
 
@@ -3952,10 +3952,15 @@ public final class PopoverController: NSObject {
     private func presentSaveGroupFailureAlert() {
         guard let window = panel.view.window else { return }
         let alert = NSAlert()
-        alert.messageText = "Couldn\u{2019}t save the group."
-        alert.informativeText = "The group\u{2019}s saved settings couldn\u{2019}t be written. Try again."
+        alert.messageText = "Couldn\u{2019}t save the scene."
+        alert.informativeText = "The scene\u{2019}s saved settings couldn\u{2019}t be written."
         alert.alertStyle = .warning
-        alert.beginSheetModal(for: window)
+        alert.addButton(withTitle: "Try again")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.saveCurrentSetup()
+        }
     }
 
     // MARK: Running-app picker (T-7, PLAN decision 6)
@@ -4123,8 +4128,8 @@ public final class PopoverController: NSObject {
     public func test_appRowBundleIDs() -> [String] { appRouting.appRoutes.map(\.bundleID) }
 
     /// The destination menu titles for `bundleID`'s row (including the disabled
-    /// section headers), so tests can assert the "Current Device" / "AirPlay
-    /// Devices" split. `nil` if no such row.
+    /// section headers), so tests can assert the "This Mac" / "AirPlay
+    /// Speakers" split. `nil` if no such row.
     public func test_appRowDestinationTitles(for bundleID: String) -> [String]? {
         appRowsByBundleID[bundleID]?.test_menuTitles
     }

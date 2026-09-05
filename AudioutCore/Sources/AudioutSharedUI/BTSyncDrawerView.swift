@@ -328,7 +328,7 @@ public final class BTSyncDrawerView: NSView {
         resetButton.controlSize = .small
         resetButton.font = Tokens.Font.caption
         resetButton.title = "Reset alignment"
-        let resetHelp = "Clear the measured alignment and the sync nudge for this device."
+        let resetHelp = "Clear the measured alignment and the sync nudge for this speaker."
         resetButton.setAccessibilityLabel("Reset alignment")
         resetButton.setAccessibilityHelp(resetHelp)
         resetButton.toolTip = resetHelp

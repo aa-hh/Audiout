@@ -68,8 +68,8 @@ public final class EQEditorView: NSView {
     /// and nothing else on the row tells the user which one they are in.
     public static func bypassNoteText(_ reason: Device.EQBypassReason) -> String {
         switch reason {
-        case .streamBudget: return "Not applied — too many different EQ settings at once."
-        case .perAppRouting: return "Not applied — apps are routed directly to this speaker."
+        case .streamBudget: return "Not applied. Reset another speaker's EQ to bring this one back."
+        case .perAppRouting: return "Not applied. An app playing straight to this speaker skips EQ; switch it to \u{201C}Follows main output\u{201D} to use it."
         }
     }
     /// The band labels, in ``DeviceEQ/bandCentresHz`` order. Spelled here

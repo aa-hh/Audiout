@@ -478,7 +478,7 @@ public enum CompanionAlignmentPreconditions {
         isAudible: (String) -> Bool
     ) -> Outcome {
         guard let target = devices.first(where: { $0.id == targetID }), target.isBluetooth else {
-            return .refused("Unknown device.")
+            return .refused("Unknown speaker.")
         }
         guard isAudible(targetID) else {
             return .refused(

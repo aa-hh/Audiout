@@ -1375,8 +1375,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         return label
     }
 
-    /// Add a small subsection header ("AirPlay Devices" / "Bluetooth
-    /// Devices") INSIDE the current card (SPEC §9b split). Tertiary label
+    /// Add a small subsection header ("AirPlay Speakers" / "Bluetooth
+    /// Speakers") INSIDE the current card (SPEC §9b split). Tertiary label
     /// color (V10, 2026-07-18): a grouping label sits one step below the
     /// column headers (`makeColumnHeaderLabel`, still secondary), so it reads
     /// as a quieter sub-level in the hierarchy rather than competing with

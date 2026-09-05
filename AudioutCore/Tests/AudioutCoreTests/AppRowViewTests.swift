@@ -41,7 +41,7 @@ import AppKit
 
     private func makeDestinations() -> [AppRowView.Destination] {
         [
-            AppRowView.Destination(id: "local", title: "Current Device", isLocal: true,
+            AppRowView.Destination(id: "local", title: "This Mac", isLocal: true,
                                    symbolName: "laptopcomputer"),
             AppRowView.Destination(id: "device-1", title: "Living Room", isLocal: false,
                                    symbolName: "airplayaudio"),
@@ -56,7 +56,7 @@ import AppKit
         [
             AppRowView.Destination(id: "no-redirect", title: "Follows main output", isLocal: true,
                                    symbolName: nil, isStandalone: true),
-            AppRowView.Destination(id: "local", title: "Current Device", isLocal: true,
+            AppRowView.Destination(id: "local", title: "This Mac", isLocal: true,
                                    symbolName: "laptopcomputer"),
             AppRowView.Destination(id: "device-1", title: "Living Room", isLocal: false,
                                    symbolName: "airplayaudio"),
@@ -100,8 +100,8 @@ import AppKit
     @Test func menuHasExactlyTwoSections() {
         let (row, _) = makeRow()
         let titles = row.test_menuTitles
-        #expect(titles.contains("Current Device"), "expected a 'Current Device' header, got \(titles)")
-        #expect(titles.contains("AirPlay Devices"), "expected an 'AirPlay Devices' header, got \(titles)")
+        #expect(titles.contains("This Mac"), "expected a 'This Mac' header, got \(titles)")
+        #expect(titles.contains("AirPlay Speakers"), "expected an 'AirPlay Speakers' header, got \(titles)")
         // Exactly the two headers + three destination entries, no Groups section.
         // Separators are the section rules, not content — they're excluded here
         // and asserted by `everySectionHeaderIsPrecededByARule`.
@@ -159,11 +159,11 @@ import AppKit
     @Test func menuSectionOrderIsCurrentDeviceThenAirPlayDevices() {
         let (row, _) = makeRow()
         let titles = row.test_menuTitles
-        let currentIndex = titles.firstIndex(of: "Current Device")
-        let airplayIndex = titles.firstIndex(of: "AirPlay Devices")
+        let currentIndex = titles.firstIndex(of: "This Mac")
+        let airplayIndex = titles.firstIndex(of: "AirPlay Speakers")
         #expect(currentIndex != nil)
         #expect(airplayIndex != nil)
-        #expect(currentIndex! < airplayIndex!, "Current Device section must come first")
+        #expect(currentIndex! < airplayIndex!, "This Mac section must come first")
     }
 
     @Test func selectedDestinationIsCheckmarked() {
@@ -171,10 +171,10 @@ import AppKit
         #expect(row.test_selectedDestinationID == "device-1")
     }
 
-    // MARK: Three-state menu structure (No Redirect / Current Device / AirPlay Devices)
+    // MARK: Three-state menu structure (No Redirect / This Mac / AirPlay Speakers)
 
     /// The standalone entry is first, with no header of its own, followed by
-    /// the "Current Device" section, then "AirPlay Devices" — in that order.
+    /// the "This Mac" section, then "AirPlay Speakers" — in that order.
     /// Its host-supplied title is the bridge phrase "Follows main output"
     /// (Warm Signal spec 5.1, decision 3 — S6), rendered VERBATIM like every
     /// other entry (host-supplies-copy doctrine).
@@ -184,8 +184,8 @@ import AppKit
         #expect(titles.first == "Follows main output",
                 "the standalone entry must be first, displayed as the bridge phrase")
         let standaloneIndex = titles.firstIndex(of: "Follows main output")
-        let currentDeviceHeaderIndex = titles.firstIndex(of: "Current Device")
-        let airplayHeaderIndex = titles.firstIndex(of: "AirPlay Devices")
+        let currentDeviceHeaderIndex = titles.firstIndex(of: "This Mac")
+        let airplayHeaderIndex = titles.firstIndex(of: "AirPlay Speakers")
         #expect(currentDeviceHeaderIndex != nil)
         #expect(airplayHeaderIndex != nil)
         #expect(standaloneIndex! < currentDeviceHeaderIndex!)
@@ -224,12 +224,12 @@ import AppKit
 
     // MARK: Slider enablement (no destination dims it any more)
 
-    /// Bug T2: "Current Device" is its OWN independent local stream (played on
+    /// Bug T2: "This Mac" is its OWN independent local stream (played on
     /// the Mac's built-in speakers), so its slider is LIVE, not dimmed.
     @Test func sliderNotDimmedWhenDestinationIsCurrentDevice() {
         let (row, _) = makeRow(selected: "local")
         #expect(!row.test_isSliderDimmed,
-                       "slider must be live while destination is Current Device (its own local stream)")
+                       "slider must be live while destination is This Mac (its own local stream)")
     }
 
     @Test func sliderNotDimmedWhenRedirected() {
@@ -246,12 +246,12 @@ import AppKit
                 "slider must stay live on No Redirect — below 100 the app is levelled in the mix")
     }
 
-    /// Bug T2: with all three states present, "Current Device" keeps a LIVE slider
+    /// Bug T2: with all three states present, "This Mac" keeps a LIVE slider
     /// (its own local stream).
     @Test func sliderNotDimmedWhenDestinationIsExplicitCurrentDeviceAmongThreeStates() {
         let (row, _) = makeRowWithThreeStates(selected: "local")
         #expect(!row.test_isSliderDimmed,
-                       "slider must be live for Current Device even with No Redirect present")
+                       "slider must be live for This Mac even with No Redirect present")
     }
 
     @Test func sliderNotDimmedWhenRedirectedAmongThreeStates() {
@@ -466,13 +466,13 @@ import AppKit
                       "an unrouted app's readout holds a stored level")
     }
 
-    /// An explicit "Current Device" pick IS an exception route with its own
+    /// An explicit "This Mac" pick IS an exception route with its own
     /// stream (Bug T2), so it counts as sounding under D1's routed ∧ running
     /// predicate — the same one the fader's gold fill already uses.
     @Test func readoutIsGoldTextWhenDestinationIsCurrentDevice() {
         let (row, _) = makeRow(selected: "local")
         assertSameHue(row.test_readoutTextColor, Tokens.Color.goldText,
-                      "Current Device is a live exception route")
+                      "This Mac is a live exception route")
     }
 
     @Test func readoutIsGoldTextWhenRedirectedAndRunning() {
@@ -501,7 +501,7 @@ import AppKit
             AppRowView.Destination(id: "no-redirect", title: "Follows main output", isLocal: true,
                                    symbolName: nil, isStandalone: true,
                                    subtitle: "Plays in the whole-system mix"),
-            AppRowView.Destination(id: "local", title: "Current Device", isLocal: true,
+            AppRowView.Destination(id: "local", title: "This Mac", isLocal: true,
                                    symbolName: "laptopcomputer", subtitle: "Plays on this Mac"),
             AppRowView.Destination(id: "device-1", title: "Living Room", isLocal: false,
                                    symbolName: "airplayaudio"),
@@ -541,7 +541,7 @@ import AppKit
         let item = row.test_destinationPopUpMenuItem(forDestinationID: "local")
         #expect(item?.attributedTitle == nil,
                      "the popup's own menu items must stay plain-titled")
-        #expect(item?.title == "Current Device")
+        #expect(item?.title == "This Mac")
     }
 
     @Test func routeToContextSubmenuRendersAttributedSubtitle() {
@@ -551,7 +551,7 @@ import AppKit
         let item = row.test_routeToMenuItem(forDestinationID: "local")
         #expect(item?.attributedTitle != nil,
                         "the context menu's Route to submenu may render an attributed subtitle")
-        #expect(item?.attributedTitle?.string == "Current Device\nPlays on this Mac")
+        #expect(item?.attributedTitle?.string == "This Mac\nPlays on this Mac")
         #expect(item?.toolTip == "Plays on this Mac")
     }
 
@@ -570,7 +570,7 @@ import AppKit
         [
             AppRowView.Destination(id: "no-redirect", title: "Follows main output", isLocal: true,
                                    symbolName: nil, isStandalone: true),
-            AppRowView.Destination(id: "local", title: "Current Device", isLocal: true,
+            AppRowView.Destination(id: "local", title: "This Mac", isLocal: true,
                                    symbolName: "laptopcomputer"),
             AppRowView.Destination(id: "group-1", title: "Kitchen", isLocal: false,
                                    symbolName: "rectangle.3.group",
@@ -598,11 +598,11 @@ import AppKit
         let (row, _) = makeRowWithGroups()
         let titles = row.test_menuTitles
 
-        #expect(titles.contains("Output Groups"))
-        let groupHeader = titles.firstIndex(of: "Output Groups")!
-        #expect(groupHeader < titles.firstIndex(of: "Current Device")!)
+        #expect(titles.contains("Scenes"))
+        let groupHeader = titles.firstIndex(of: "Scenes")!
+        #expect(groupHeader < titles.firstIndex(of: "This Mac")!)
         #expect(titles.firstIndex(of: "Kitchen")! == groupHeader + 1)
-        #expect(titles.firstIndex(of: "Current Device")! < titles.firstIndex(of: "AirPlay Devices")!)
+        #expect(titles.firstIndex(of: "This Mac")! < titles.firstIndex(of: "AirPlay Speakers")!)
     }
 
     @Test func aGroupIsNotAlsoListedUnderAirPlayDevices() {
@@ -715,7 +715,7 @@ import AppKit
     @Test func accessibilityLabelIncludesCurrentDeviceWhenNotRedirected() throws {
         let (row, _) = makeRow(selected: "local")
         let label = try #require(row.test_accessibilityLabel)
-        #expect(label.contains("Current Device"), "label (\"\(label)\") must name the Current Device destination")
+        #expect(label.contains("This Mac"), "label (\"\(label)\") must name the This Mac destination")
     }
 
     @Test func accessibilityLabelOmitsNotRunningWhenRunning() throws {

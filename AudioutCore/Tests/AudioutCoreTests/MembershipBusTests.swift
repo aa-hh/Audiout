@@ -361,9 +361,9 @@ import AudioutCore
         // Non-bus hosts (mixer window) are byte-for-byte unchanged.
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: false)
-        #expect(row.test_membershipAXLabel == "Add Test Speaker to Selected Devices")
+        #expect(row.test_membershipAXLabel == "Add Test Speaker to Selected Speakers")
         row.apply(makeDevice(), selected: true, controllable: true)
-        #expect(row.test_membershipAXLabel == "Remove Test Speaker from Selected Devices")
+        #expect(row.test_membershipAXLabel == "Remove Test Speaker from Selected Speakers")
     }
 
     @Test func gutterCheckboxTooltipNamesTheMixAction() {

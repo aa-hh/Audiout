@@ -11,7 +11,7 @@ public enum SidebarSelection: Equatable, Sendable {
     /// The whole mix — everything the app sends to speakers. One row, no id:
     /// it is a destination, not a device.
     case mainOut
-    /// The pinned "Groups" row: the saved-group card overview in the content
+    /// The pinned "Scenes" row: the saved-group card overview in the content
     /// pane (direction C — the sidebar itself lists no groups any more).
     case groupsOverview
     /// One saved group's editor. No sidebar row of its own: the overview's
@@ -32,9 +32,9 @@ public enum SidebarSelection: Equatable, Sendable {
 /// **System Audio** and **Speakers**. Saved groups used to be a third section
 /// here; a growing fleet pushed them off the top, so they moved into the
 /// content pane as `GroupsOverviewViewController`'s card grid, and their
-/// Rename…/Delete Group… menu went with them. What stays anchored to the
+/// Rename…/Delete scene… menu went with them. What stays anchored to the
 /// device list stays: the bottom add bar, its multi-select retitle, Cmd-N, and
-/// the speaker row's "New Group from Selection…". Selection is reported
+/// the speaker row's "Add scene from…" entry. Selection is reported
 /// through `onSelect`.
 ///
 /// The outline model is still a small tree of reference-typed `Node`s (one
@@ -50,7 +50,7 @@ public final class SidebarViewController: NSViewController {
     final class Node {
         enum Payload {
             case header(String)             // "System Audio" / "Speakers" (isGroupItem)
-            case groupsOverview             // the pinned "Groups" plate row (root-level leaf)
+            case groupsOverview             // the pinned "Scenes" plate row (root-level leaf)
             case mainOut                    // the one "Main Audio" row (flat leaf row)
             case device(Device)             // a device row (flat leaf row)
         }
@@ -77,7 +77,7 @@ public final class SidebarViewController: NSViewController {
     /// Called with the device ids a new group should be built from (SPEC.md §9
     /// — "click on speakers and multiselect to create a group"). Three routes
     /// reach it: the "+" button while devices are selected, Cmd-N with the same
-    /// selection, and a speaker row's "New Group from Selection…" context item
+    /// selection, and a speaker row's "Add scene from…" context item
     /// (which may carry the CLICKED row alone — see `menuNeedsUpdate`).
     public var onNewGroupFromSelection: (([String]) -> Void)?
 
@@ -204,7 +204,7 @@ public final class SidebarViewController: NSViewController {
         scrollView.autohidesScrollers = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        // Bottom add bar with a labeled "New Group…" affordance — the standard
+        // Bottom add bar with a labeled "Add scene" affordance — the standard
         // macOS source-list add control (SPEC.md §9), styled like Notes'
         // bottom-left "New Folder" button: borderless, system font, glyph +
         // title. Plain: new empty group. With devices selected: new group
@@ -214,11 +214,11 @@ public final class SidebarViewController: NSViewController {
         addButton.isBordered = false
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
         addButton.imagePosition = .imageLeading
-        addButton.title = "New Group…"
+        addButton.title = "Add scene"
         addButton.font = Tokens.Font.body
         addButton.target = self
         addButton.action = #selector(addTapped(_:))
-        addButton.toolTip = "New Group…"
+        addButton.toolTip = "Add scene"
         addButton.setButtonType(.momentaryPushIn)
 
         let addBar = NSView()
@@ -282,7 +282,7 @@ public final class SidebarViewController: NSViewController {
     /// hinted that cmd-clicking speakers changes what the button creates).
     private func updateAddButtonTitle() {
         let count = selectedDeviceIDs.count
-        let title = count >= 2 ? "New Group from \(count) Speakers…" : "New Group…"
+        let title = count >= 2 ? "Add scene from \(count) speakers…" : "Add scene"
         guard addButton.title != title else { return }
         addButton.title = title
         addButton.toolTip = title
@@ -464,7 +464,7 @@ public final class SidebarViewController: NSViewController {
         roots.compactMap { if case .header(let t) = $0.payload { return t } else { return nil } }
     }
 
-    /// True when the pinned "Groups" row is present (it always is).
+    /// True when the pinned "Scenes" row is present (it always is).
     public var test_hasGroupsRow: Bool {
         roots.contains { if case .groupsOverview = $0.payload { return true } else { return false } }
     }
@@ -513,7 +513,7 @@ public final class SidebarViewController: NSViewController {
     }
 
     /// Simulate a multi-selection of device rows (cmd/shift-click), for the
-    /// "New Group from Selection" gesture.
+    /// "Add scene from selection" gesture.
     public func test_selectDevices(_ ids: [String]) {
         var indexes = IndexSet()
         for id in ids {
@@ -530,8 +530,8 @@ public final class SidebarViewController: NSViewController {
     /// The device ids currently multi-selected (for asserts).
     public var test_selectedDeviceIDs: [String] { selectedDeviceIDs }
 
-    /// The bottom-bar add button's current title — "New Group…" plain, "New
-    /// Group from N Speakers…" while ≥2 speakers are multi-selected.
+    /// The bottom-bar add button's current title — "Add scene" plain, "Add
+    /// scene from N speakers…" while ≥2 speakers are multi-selected.
     public var test_addButtonTitle: String { addButton.title }
 
     /// Simulate clicking the "+" button (new empty group, or new-from-selection
@@ -613,11 +613,11 @@ final class IconLabelCellView: NSTableCellView {
         let v = NSImageView()
         v.translatesAutoresizingMaskIntoConstraints = false
         v.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
-                          accessibilityDescription: "Playing now")?
+                          accessibilityDescription: "Playing")?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
         v.image?.isTemplate = true
         v.contentTintColor = Tokens.Color.gold
-        v.toolTip = "Playing now"
+        v.toolTip = "Playing"
         v.isHidden = true
         v.setContentHuggingPriority(.required, for: .horizontal)
         return v
@@ -726,7 +726,7 @@ final class PlateRowView: NSTableRowView {
 /// razor: a view-local key equivalent is the ceiling. The Groups screen is
 /// hosted in the menu-bar surface and has no menu bar of its own, so Cmd-N
 /// works while the sidebar's tree is in the key window and nowhere else, and
-/// no UI can advertise the shortcut. Upgrade path: a real "New Group…" item in
+/// no UI can advertise the shortcut. Upgrade path: a real "Add scene…" item in
 /// the app's main menu, which would both widen the scope and print the ⌘N.
 private final class SidebarContainerView: NSView {
 
@@ -767,9 +767,9 @@ extension SidebarViewController: NSMenuDelegate {
         case .header, .mainOut:
             break   // no identity to act on — an empty menu shows nothing at all
         case .groupsOverview:
-            // The overview's one action. Rename…/Delete Group… moved to the
+            // The overview's one action. Rename…/Delete scene… moved to the
             // cards with the groups themselves.
-            menu.addItem(contextMenuItem("New Group…",
+            menu.addItem(contextMenuItem("Add scene",
                                          #selector(newGroupMenuItemSelected(_:)), ""))
         case .device(let device):
             // Clicked inside the multi-selection → the whole selection; clicked
@@ -781,8 +781,8 @@ extension SidebarViewController: NSMenuDelegate {
             // single id is always the clicked row, so it can be named outright
             // (the bottom bar's retitle already uses the plural form).
             let title = ids.count == 1
-                ? "New Group from \u{201C}\(device.name)\u{201D}\u{2026}"
-                : "New Group from \(ids.count) Speakers\u{2026}"
+                ? "Add scene from \u{201C}\(device.name)\u{201D}\u{2026}"
+                : "Add scene from \(ids.count) speakers\u{2026}"
             menu.addItem(contextMenuItem(title,
                                          #selector(newGroupFromSelectionMenuItemSelected(_:)), ids))
         }
@@ -853,7 +853,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
             return makeHeaderLabel(title)
         case .groupsOverview:
             return makeIconLabel(symbol: Group.defaultIconSymbolName,
-                                 text: "Groups", identifier: "groupsOverview",
+                                 text: "Scenes", identifier: "groupsOverview",
                                  showsActiveMarker: hasLiveGroup,
                                  showsDisclosure: true,
                                  emphasized: true)
@@ -898,7 +898,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
 
     // MARK: Cell builders
 
-    /// Section header cell ("Groups" / "Speakers") — a DIFFERENT cell shape
+    /// Section header cell ("Scenes" / "Speakers") — a DIFFERENT cell shape
     /// from `makeLabel`/`newCell` on purpose (design feedback 2026-07-18c):
     /// Finder's own sidebar headers sit flush-left with the ICON column
     /// below them, not indented to the item TEXT column, and render slightly
@@ -970,12 +970,12 @@ extension SidebarViewController: NSOutlineViewDelegate {
         cell.setDisclosureVisible(showsDisclosure)
         // Both states were COLOUR/GLYPH ONLY: a dimmed row and a gold marker
         // say nothing to VoiceOver. Same words the visible UI uses
-        // ("Unavailable" annotation, "Playing now" marker/tooltip). Set on
+        // ("Unavailable" annotation, "Playing" marker/tooltip). Set on
         // EVERY pass, unconditionally — cells are reused, so a conditional set
         // would leave the previous row's suffix on this one.
         let spoken = text
             + (dimmed ? ", unavailable" : "")
-            + (showsActiveMarker ? ", playing now" : "")
+            + (showsActiveMarker ? ", playing" : "")
         cell.textField?.setAccessibilityLabel(spoken)
         return cell
     }

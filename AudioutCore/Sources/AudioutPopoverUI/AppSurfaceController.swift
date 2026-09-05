@@ -93,8 +93,8 @@ public final class AppSurfaceController {
 
     private let popoverController: PopoverController
     private let settings: AppSettings
-    /// The shell window's one header strip (D1): tabs + centered app name +
-    /// Pin + Quit, as a real unified `NSToolbar`.
+    /// The shell window's one header strip (D1): three icon-only tabs + Pin,
+    /// as a real unified `NSToolbar`.
     private let toolbarController = SurfaceToolbarController()
     /// Lazily builds the Groups content the FIRST time the Groups tab is
     /// selected (`MixerWindowController.contentController` in the app — the

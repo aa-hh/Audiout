@@ -73,7 +73,7 @@ import AudioutSharedUI
     }
 
 
-    @Test func pinResolvesItsGlyphAndQuitIsAWord() {
+    @Test func pinResolvesItsGlyph() {
         let (controller, _) = makeAttached()
         #expect(controller.test_pinItemHasImage)
     }
@@ -114,12 +114,12 @@ import AudioutSharedUI
     /// had become custom-view items, which draw NO chrome — bare glyphs beside
     /// Pin/Quit's bordered circles, two styles
     /// in one strip. Every tab is the same bordered item Pin and Quit are.
-    @Test func everyTabWearsTheSameControlAsPinAndQuit() {
+    @Test func everyTabWearsTheSameControlAsPin() {
         let (controller, _) = makeAttached()
         #expect(controller.test_allTabsAreBordered,
-                "the tabs are bordered items — the same control Pin and Quit are")
+                "the tabs are bordered items — the same control Pin is")
         #expect(controller.test_pinItemIsBordered,
-                "and Pin/Quit really are bordered, so that comparison means something")
+                "and Pin really is bordered, so that comparison means something")
     }
 
     /// The tabs are `.space`-separated so the strip cannot RESHAPE with the

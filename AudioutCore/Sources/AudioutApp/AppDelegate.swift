@@ -715,7 +715,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 gate.present()
                 return
             }
-            let action = self.surface.clickAction(
+            // The surface is built LATER in this same launch pass. No event
+            // normally interleaves, but anything that ever spins the runloop
+            // mid-`applicationDidFinishLaunching` (a modal, an SDK) would let
+            // a click in — and it must drop, never crash the force-unwrap.
+            guard let surface = self.surface else { return }
+            let action = surface.clickAction(
                 setupIsOpen: self.onboardingWindowController != nil)
             if action == .refrontSetup {
                 self.onboardingWindowController?.present()
@@ -750,7 +755,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // they are reaching for the mixer. The Setup flow spends
             // `settings.telemetryAsked` whichever way it is answered, so
             // nothing re-asks anywhere; Settings › General is the way back.
-            self.surface.perform(action, anchorRect: self.statusAnchorRect())
+            surface.perform(action, anchorRect: self.statusAnchorRect())
         }
 
         // Secondary (right/control) click on the menu-bar icon raises a small menu

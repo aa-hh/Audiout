@@ -691,4 +691,59 @@ struct ControlPanelWindowControllerTests {
         #expect(!controller.consumeRecentResignDismissal(),
                 "nothing was dismissed, so there is nothing for a click to consume")
     }
+
+    /// A slow, deliberate press can hold the status button past the freshness
+    /// window: the mouse-down dismisses the panel, and by the mouse-up the
+    /// time stamp already reads stale — the time-only check then reopened the
+    /// panel on the very click that visibly closed it. The click's mouse-up
+    /// carries the same event number as its mouse-down, which recognises the
+    /// click at any press speed (`within: 0` = an arbitrarily long hold).
+    @Test func theDismissingClicksOwnMouseUpConsumesAtAnyPressSpeed() {
+        let controller = makeDismissableController()
+        controller.test_resignMouseDownNumberOverride = 41
+
+        resignKey(controller)
+
+        controller.test_clickMouseUpNumberOverride = 41
+        #expect(controller.consumeRecentResignDismissal(within: 0),
+                "the mouse-up of the dismissing click must consume, however long the press")
+    }
+
+    /// The number match must recognise only the dismissing click itself — a
+    /// LATER click's mouse-up carries a different number and falls back to
+    /// the time window, exactly as before.
+    @Test func aLaterClicksMouseUpDoesNotMatchTheDismissalNumber() {
+        let controller = makeDismissableController()
+        controller.test_resignMouseDownNumberOverride = 41
+
+        resignKey(controller)
+
+        controller.test_clickMouseUpNumberOverride = 42
+        #expect(!controller.consumeRecentResignDismissal(within: 0),
+                "a different click is not the one that dismissed the panel")
+    }
+
+    /// Re-fronting an already-visible unpinned panel (the sheet-attached
+    /// `.front` click, "Open Groups"/⌘, while the surface is open, a Finder
+    /// reopen) used to replay the 0→1 open fade over pixels the user was
+    /// already looking at — the panel blinked. The fade belongs to a reveal
+    /// only.
+    @Test func theOpenFadePlaysOnlyOnAFreshShow() {
+        let controller = makeController()
+        controller.test_isPanelVisibleOverride = true
+        controller.show(anchorRect: nil)
+        #expect(controller.window?.contentView?.layer?
+                    .animation(forKey: "controlPanelOpenFade") == nil,
+                "a re-front of a visible panel must not replay the open fade")
+
+        // The reveal half needs the fade to actually run, which Reduce Motion
+        // legitimately suppresses — skip it there rather than assert a fade
+        // the setting forbids.
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        controller.test_isPanelVisibleOverride = false
+        controller.show(anchorRect: nil)
+        #expect(controller.window?.contentView?.layer?
+                    .animation(forKey: "controlPanelOpenFade") != nil,
+                "a genuine reveal still fades in")
+    }
 }

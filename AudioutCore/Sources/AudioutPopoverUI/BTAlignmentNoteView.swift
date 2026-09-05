@@ -15,7 +15,7 @@ final class BTAlignmentNoteView: NSView {
 
     /// The explanation half — everything before the invitation.
     static func noteLead(name: String) -> String {
-        "\(name) will play a little behind the other speakers until it’s aligned. "
+        "\(name) plays a little behind the other speakers until it’s aligned. "
     }
 
     /// The invitation half, drawn in gold: the clickable end of the sentence.
@@ -98,12 +98,12 @@ final class BTAlignmentNoteView: NSView {
         hideButton.isBordered = false
         hideButton.imagePosition = .imageOnly
         hideButton.imageScaling = .scaleProportionallyDown
-        hideButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Hide")?
+        hideButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
         hideButton.contentTintColor = Tokens.Color.label3
         hideButton.target = self
         hideButton.action = #selector(hideClicked(_:))
-        hideButton.setAccessibilityLabel("Hide")
+        hideButton.setAccessibilityLabel("Dismiss")
         background.addSubview(hideButton)
 
         let copyWidth = copyLabel.widthAnchor.constraint(equalToConstant: 300)

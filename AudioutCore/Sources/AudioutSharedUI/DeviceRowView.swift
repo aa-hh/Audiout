@@ -7,7 +7,7 @@ import AudioutCore
 /// (`PopoverController`) in an `NSStackView` — the "same row component" the
 /// SPEC and PLAN-PHASE-1 §D call for: one implementation, one test surface.
 ///
-/// The row's PRIMARY control is a "Selected Devices" membership `NSButton`
+/// The row's PRIMARY control is a "Selected Speakers" membership `NSButton`
 /// checkbox (SPEC §9 routing model); volume and a small secondary mute button
 /// follow.
 ///
@@ -84,7 +84,7 @@ public final class DeviceRowView: NSView {
         /// also where the align-by-ear toggle moved (D9). Default no-op for
         /// hosts without the SYNC column.
         func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String)
-        /// The user clicked the transient "Removed — Undo" affordance after
+        /// The user clicked the transient "Removed: Undo" affordance after
         /// taking a live room out of Main Audio. The host puts the membership
         /// back through the SAME path a checkbox re-check takes. Default no-op
         /// for hosts that never offer the undo.
@@ -122,7 +122,7 @@ public final class DeviceRowView: NSView {
     public weak var delegate: Delegate?
     public private(set) var device: Device
 
-    /// Membership in the "Selected Devices" set (SPEC §9b). This is *composition*,
+    /// Membership in the "Selected Speakers" set (SPEC §9b). This is *composition*,
     /// not routing — the row is "selected" iff the host says so, independent of
     /// whether the backend currently reports the device as an output. The host
     /// passes this in via ``apply(_:selected:controllable:…)`` because the
@@ -143,7 +143,7 @@ public final class DeviceRowView: NSView {
     /// row hover additionally resizes an unselected one.
     private var isGutterHovered: Bool = false
 
-    /// The PRIMARY "Selected Devices" membership control (SPEC §9b device-row
+    /// The PRIMARY "Selected Speakers" membership control (SPEC §9b device-row
     /// toggle). An `NSButton` **checkbox** (`.switch` button type, empty title)
     /// under the "Selected" column header. `.state` is `.on`/`.off`, identical
     /// semantics to the mini switch it replaced — membership in the Selected
@@ -236,7 +236,7 @@ public final class DeviceRowView: NSView {
     /// start (Alec, 2026-09-04).
     private var feedStackLeadingConstraint: NSLayoutConstraint?
     private var feedStackCenterConstraint: NSLayoutConstraint?
-    /// The transient **"Removed — Undo"** affordance shown after the user takes
+    /// The transient **"Removed: Undo"** affordance shown after the user takes
     /// a LIVE room out of Main Audio (the highest-stakes click in the app: it
     /// silences a playing room instantly). The host decides when it is offered
     /// and owns its lifetime — the row only renders what it is handed. It sits
@@ -244,7 +244,7 @@ public final class DeviceRowView: NSView {
     /// just-removed device feeds nothing, so `feedStack` has nothing to show),
     /// so the offer costs no column reflow and the name never re-truncates.
     private let removalUndoStack = NSStackView()
-    private let removalUndoLabel = NSTextField(labelWithString: "Removed —")
+    private let removalUndoLabel = NSTextField(labelWithString: "Removed:")
     private let removalUndoButton = NSButton()
     /// Whether the host is currently offering the undo (mirrors the stack's
     /// visibility; read by the test hook and the FEED/SYNC suppression above).
@@ -386,9 +386,9 @@ public final class DeviceRowView: NSView {
     /// under their group header (SPEC §9 "one indented device row per member").
     private let indented: Bool
 
-    /// Whether the leading "Selected Devices" membership toggle is shown. Group
+    /// Whether the leading "Selected Speakers" membership toggle is shown. Group
     /// **member** rows hide it (membership in a group is fixed there — the toggle
-    /// is only for the Selected Devices section, task C); its slot stays reserved
+    /// is only for the Selected Speakers section, task C); its slot stays reserved
     /// for column alignment, filled instead by the indent. Defaults to `true` so
     /// the public API stays back-compatible (Selected-Devices rows keep the
     /// toggle).
@@ -434,7 +434,7 @@ public final class DeviceRowView: NSView {
 
     // MARK: Model
 
-    /// Update the row to a new device snapshot AND its "Selected Devices"
+    /// Update the row to a new device snapshot AND its "Selected Speakers"
     /// membership (SPEC §9b). The host owns the membership set (it lives in
     /// `GroupController`), so it passes `selected` here rather than the row
     /// reading `device.isSelected` (which is the backend output flag, a different
@@ -447,7 +447,7 @@ public final class DeviceRowView: NSView {
     ///     Defaults to `false` — the caller must pass `selected || isRedirectTarget`
     ///     to keep a plain selected device's slider/mute enabled; the default is a
     ///     back-compat footgun for callers that omit it entirely.
-    ///   - selectionDimmed: dims the "Selected Devices" checkbox (alpha ~0.4)
+    ///   - selectionDimmed: dims the "Selected Speakers" checkbox (alpha ~0.4)
     ///     without disabling it — DECISION: a dimmed row's checkbox stays fully
     ///     interactive; this is a visual de-emphasis only (e.g. a filtered/greyed
     ///     list context), never a disablement. Defaults to `false` so existing
@@ -1546,10 +1546,10 @@ public final class DeviceRowView: NSView {
         feedStack.wantsLayer = true
         feedStack.layer?.masksToBounds = true
 
-        // Live-removal undo: "Removed —" beside a link-style Undo button, in
+        // Live-removal undo: "Removed:" beside a link-style Undo button, in
         // the trailing slot. Stock `NSButton`, borderless, gold title — the
         // actionable half of the sentence carries the app's action tone while
-        // the "Removed —" half stays secondary text.
+        // the "Removed:" half stays secondary text.
         removalUndoLabel.translatesAutoresizingMaskIntoConstraints = false
         removalUndoLabel.font = Tokens.Font.caption
         removalUndoLabel.textColor = Tokens.Color.label2
@@ -1896,7 +1896,7 @@ public final class DeviceRowView: NSView {
     /// the module's one copy: ``BTSyncDrawerView`` reads it rather than
     /// re-authoring the sentence.
     static let alignTooltip =
-        "Play alignment ticks on this speaker and the rest of the group — adjust sync until they land as one"
+        "Play alignment ticks on this speaker and the rest of the group. Adjust sync until they land as one"
 
     /// What the chip says on a never-measured Bluetooth speaker, where it is
     /// the wizard's door rather than a value.
@@ -1933,7 +1933,7 @@ public final class DeviceRowView: NSView {
     /// its stop and still hear the gap.
     public static let castSyncHelpCopy =
         "Audiout already lines up the delay a Cast receiver reports. Use this for the part "
-        + "it can't report — a TV's own speakers, or the soundbar behind it."
+        + "it can't report: a TV's own speakers, or the soundbar behind it."
 
     private func configureSyncChip() {
         syncChipButton.translatesAutoresizingMaskIntoConstraints = false
@@ -2017,7 +2017,7 @@ public final class DeviceRowView: NSView {
         // the ambiguity D7 warns about — so hover (and VoiceOver, below) spell
         // it out while the chip itself stays a compact summary.
         let syncChipHelp = tuned
-            ? "Sync offset — \(BTSyncTrim.spokenOffset(syncChipValueMs)). Click to adjust."
+            ? "Sync offset: \(BTSyncTrim.spokenOffset(syncChipValueMs)). Click to adjust."
             : "This speaker has never been tuned. Click to adjust its sync offset."
         // The Mac's own row carries the explanation that used to live in
         // Settings › Audio › Advanced — this chip is now that setting's only
@@ -2338,7 +2338,7 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRow(self, didToggleEnabled: on, for: device.id)
     }
 
-    /// Simulate a REAL user click on the primary "Selected Devices" membership
+    /// Simulate a REAL user click on the primary "Selected Speakers" membership
     /// checkbox via AppKit's own `NSButton.performClick(_:)` — this exercises
     /// the actual `enableCheckbox.target`/`.action` wiring set up in
     /// `buildSubviews()` (`enableToggled(_:)`), the same path a live mouse
@@ -2792,7 +2792,7 @@ public final class DeviceRowView: NSView {
     /// controllability/unsupported-ness gate it.
     public var test_isSliderEnabled: Bool { slider.isEnabled }
 
-    /// Whether the "Selected Devices" membership is currently rendered dimmed (A1
+    /// Whether the "Selected Speakers" membership is currently rendered dimmed (A1
     /// / §4.7) — a visual de-emphasis that does NOT disable the control. For a
     /// non-bus row this is the checkbox alpha (~0.4); for a BUS row it's the node
     /// TINT (`busNodeDimmed`), since the bus dims via tint with the checkbox held
@@ -3344,8 +3344,8 @@ public final class DeviceRowView: NSView {
             enableCheckbox.setAccessibilityLabel("Include \(device.name) in main audio")
         } else {
             enableCheckbox.setAccessibilityLabel(
-                isSelectedInSet ? "Remove \(device.name) from Selected Devices"
-                                : "Add \(device.name) to Selected Devices")
+                isSelectedInSet ? "Remove \(device.name) from Selected Speakers"
+                                : "Add \(device.name) to Selected Speakers")
         }
         // The SYNC chip (T6) speaks as a DISCLOSURE control: a stable label,
         // the D7 phrase as its value ("22.4 milliseconds later" — never a
@@ -3377,8 +3377,8 @@ public final class DeviceRowView: NSView {
         // authoritative accessibility control. A hint on the name label documents
         // the click for VoiceOver users who land on it.
         nameLabel.setAccessibilityHelp(
-            isSelectedInSet ? "Click to remove from Selected Devices"
-                            : "Click to add to Selected Devices")
+            isSelectedInSet ? "Click to remove from Selected Speakers"
+                            : "Click to add to Selected Speakers")
     }
 
     /// The spoken FEED clause (v4.1 item 3) — the same `mainMixSourceName` +

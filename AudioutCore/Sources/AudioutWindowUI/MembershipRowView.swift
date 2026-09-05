@@ -13,7 +13,7 @@ import AudioutSharedUI
 /// name label.
 ///
 /// Deliberately NOT `DeviceRowView` (`../AudioutSharedUI/DeviceRowView.swift`):
-/// that row's primary control is "Selected Devices" / live routing membership
+/// that row's primary control is "Selected Speakers" / live routing membership
 /// and it carries a volume slider + mute button + connection-status badge —
 /// all routing/activation concerns this window must never expose (activation
 /// lives in the popover only, per the revamp). This row's checkbox means
@@ -31,7 +31,7 @@ public final class MembershipRowView: NSView {
     /// stock checkbox row (Alec, Q6 2026-07-25).
     ///
     /// The row has exactly TWO hosts and they are visually different surfaces:
-    /// the Groups editor is the app's own themed pane, while "New Group" is a
+    /// the Groups editor is the app's own themed pane, while "Add scene" is a
     /// standard AppKit sheet on the system's own white/grey. `ember` measures
     /// ~2.34–2.48:1 on that white — the gold node would be near-invisible
     /// there — so the rail is pane-only and the sheet keeps plain stock rows.
@@ -41,7 +41,7 @@ public final class MembershipRowView: NSView {
         /// The Groups window's group editor: invisible checkbox cell + a gold
         /// `MembershipBusView` node, threaded by the pane-level rail overlay.
         case warmPane
-        /// The stock "New Group" sheet: an ordinary AppKit checkbox row.
+        /// The stock "Add scene" sheet: an ordinary AppKit checkbox row.
         case systemSheet
     }
 
@@ -335,7 +335,7 @@ public final class MembershipRowView: NSView {
     /// this.
     private func updateCheckboxAccessibilityLabel() {
         checkbox.setAccessibilityLabel(
-            checked ? "Remove \(device.name) from group" : "Add \(device.name) to group")
+            checked ? "Remove \(device.name) from scene" : "Add \(device.name) to scene")
     }
 
     /// Enable or disable the membership checkbox, with an optional tooltip

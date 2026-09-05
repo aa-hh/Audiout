@@ -94,11 +94,11 @@ public final class GroupController {
     // MARK: Main Out / Selected Devices (SPEC.md §9 2026-07-14b — SoundSource model)
     //
     // Per-device toggles no longer route audio. They compose a PERSISTENT ad-hoc
-    // set — `selectedDeviceIDs` ("Selected Devices"). Routing happens ONLY via
+    // set — `selectedDeviceIDs` ("Selected Speakers"). Routing happens ONLY via
     // the Main Out selector (`mainOut` / `setMainOut`). The Mac's own output is
     // just one more device in the set; passthrough is DERIVED (set == {local}).
 
-    /// The persistent "Selected Devices" set (SPEC §9). Toggling a device's
+    /// The persistent "Selected Speakers" set (SPEC §9). Toggling a device's
     /// switch adds/removes it here; this alone does NOT route audio unless Main
     /// Out currently targets `.selectedDevices` (the default), in which case the
     /// change is live-applied. Persisted.
@@ -331,7 +331,7 @@ public final class GroupController {
     //
     // THE CORE MODEL (supersedes the 07-13 free-on/off version): a device's toggle
     // no longer routes audio — it adds/removes the device from the PERSISTENT
-    // `selectedDeviceIDs` set ("Selected Devices"). Audio is routed ONLY by the
+    // `selectedDeviceIDs` set ("Selected Speakers"). Audio is routed ONLY by the
     // Main Out selector (`setMainOut`). Toggling live-applies the output set when
     // Main Out currently targets `.selectedDevices` (the default). The Mac's own
     // output is one more device in the set; passthrough is DERIVED.
@@ -357,11 +357,11 @@ public final class GroupController {
     /// The local (Mac's own) device id in the current fleet, if discovered.
     private var localDeviceID: String? { devices.first(where: \.isLocalDevice)?.id }
 
-    /// Whether `id` is in the "Selected Devices" set. (Membership, NOT "is it
+    /// Whether `id` is in the "Selected Speakers" set. (Membership, NOT "is it
     /// receiving audio" — routing is decided by Main Out.)
     public func isSpeakerSelected(_ id: String) -> Bool { selectedDeviceIDs.contains(id) }
 
-    /// Add or remove a device from "Selected Devices" (SPEC §9b). Composes the
+    /// Add or remove a device from "Selected Speakers" (SPEC §9b). Composes the
     /// persistent set; live-applies the output set when Main Out targets
     /// `.selectedDevices`.
     ///
@@ -670,7 +670,7 @@ public final class GroupController {
     }
 
     /// Create a group from an explicit member list + optional per-member volumes
-    /// (the window's "New Group" / "New Group from Selection" paths). Dedups by
+    /// (the window's "Add scene" / "Add scene from selection" paths). Dedups by
     /// member set: if a group with an identical set already exists, resolves to
     /// it (`alreadyExisted == true`) rather than making a copy — in that case
     /// `iconSymbolName` is NOT applied, since the existing group's own icon
@@ -698,9 +698,9 @@ public final class GroupController {
         return CreateResult(group: saved, alreadyExisted: false)
     }
 
-    /// Build a group from the **Selected Devices** set + current volumes ("Save
+    /// Build a group from the **Selected Speakers** set + current volumes ("Save
     /// current setup as group…", SPEC.md §9 2026-07-14b — now = "save Selected
-    /// Devices as a group"). Dedups: if the set already equals a saved group,
+    /// Speakers as a scene"). Dedups: if the set already equals a saved group,
     /// that group is returned with `alreadyExisted == true` — never a second
     /// copy. Note this no longer activates on dedup, since routing is decided by
     /// Main Out (the caller can `setMainOut(.group(id:))` if desired).
@@ -722,8 +722,8 @@ public final class GroupController {
     public func nextDefaultGroupName() -> String {
         let taken = Set(groups.map(\.name))
         var n = 1
-        while taken.contains("Group \(n)") { n += 1 }
-        return "Group \(n)"
+        while taken.contains("Scene \(n)") { n += 1 }
+        return "Scene \(n)"
     }
 
     /// Remove a group. Deactivates it if it was active, and if Main Out pointed

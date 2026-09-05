@@ -74,7 +74,7 @@ import AppKit
         #expect(detail.test_metadataStrings["status"] == "Ready")
 
         detail.refresh(device: makeDevice(isAvailable: false))
-        #expect(detail.test_metadataStrings["status"] == "Not on the network")
+        #expect(detail.test_metadataStrings["status"] == "Not on Wi-Fi")
         #expect(detail.test_shownDeviceID == "d1")
     }
 
@@ -92,7 +92,7 @@ import AppKit
         let detail = DeviceDetailViewController(groupController: makeController(),
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(isAvailable: false, connectionState: .off))
-        #expect(detail.test_metadataStrings["status"] == "Not on the network",
+        #expect(detail.test_metadataStrings["status"] == "Not on Wi-Fi",
                 "Status folds availability in — it is the only row that reports it")
     }
 
@@ -142,7 +142,7 @@ import AppKit
         #expect(detail.test_metadataStrings["airplay"] == "AirPlay 2")
 
         detail.show(device: makeDevice(kind: .airportExpress, supportsAirPlay2: false))
-        #expect(detail.test_metadataStrings["airplay"] == "AirPlay 1 — sync not exact",
+        #expect(detail.test_metadataStrings["airplay"] == "AirPlay 1: sync not exact",
                 "says what AirPlay 1 costs, not just its version number")
     }
 
@@ -230,7 +230,7 @@ import AppKit
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         _ = detail.view
         detail.show(device: makeDevice(id: "office"))
-        #expect(detail.test_groupsSectionTitleText == "Groups")
+        #expect(detail.test_groupsSectionTitleText == "Scenes")
     }
 
     @Test func groupRowsListEverySavedGroupContainingTheDeviceInSidebarOrder() throws {
@@ -257,7 +257,7 @@ import AppKit
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         _ = detail.view
         detail.show(device: makeDevice(id: "office"))
-        #expect(detail.test_groupRowTitles == ["Not in any group"],
+        #expect(detail.test_groupRowTitles == ["Not in any scene"],
                 "the section stays visible and says so, rather than disappearing")
     }
 
@@ -269,7 +269,7 @@ import AppKit
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         _ = detail.view
         detail.show(device: makeDevice(id: "office"))
-        #expect(detail.test_groupRowTitles == ["Not in any group"])
+        #expect(detail.test_groupRowTitles == ["Not in any scene"])
 
         var group = try #require(controller.groups.first { $0.id == "g1" })
         group.memberIDs = ["office"]
@@ -589,7 +589,7 @@ import AppKit
     @Test func equalizerSectionIsShownOnASpeaker() {
         let detail = makeLoadedPane(device: makeDevice())
         #expect(detail.test_eqSectionShown)
-        #expect(detail.test_slotTitles == ["Equalizer", "Groups", "About"])
+        #expect(detail.test_slotTitles == ["Equalizer", "Scenes", "About"])
         #expect(detail.test_cardFrames.count == 1,
                 "the Equalizer is the page's one instrument, so its one box (a `.well`, not `.card`)")
     }
@@ -628,7 +628,7 @@ import AppKit
         detail.show(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
         #expect(detail.test_cardFrames.count == 0,
                 "This Mac has no instrument, so it has no card at all")
-        #expect(detail.test_slotTitles == ["Groups", "About"])
+        #expect(detail.test_slotTitles == ["Scenes", "About"])
     }
 
     /// The Main Audio page carries the same instrument in the same recess.
@@ -663,12 +663,12 @@ import AppKit
         device.eqBypassReason = .streamBudget
         let detail = makeLoadedPane(device: device)
         #expect(detail.test_eqEditor.test_bypassNoteText
-                == "Not applied — too many different EQ settings at once.")
+                == "Not applied. Reset another speaker's EQ to bring this one back.")
 
         device.eqBypassReason = .perAppRouting
         detail.refresh(device: device)
         #expect(detail.test_eqEditor.test_bypassNoteText
-                == "Not applied — apps are routed directly to this speaker.")
+                == "Not applied. An app playing straight to this speaker skips EQ; switch it to \u{201C}Follows main output\u{201D} to use it.")
     }
 
     @Test func aScrubAppliesAndAMouseUpCommits() {

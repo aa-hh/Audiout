@@ -468,7 +468,7 @@ import AppKit
         #expect(abs(valueMs - 200) <= 6, "the proposal is what the listener heard, got \(valueMs)")
         // The NUMBER moved to the readout, freeing the sentence to be about
         // listening (v2 spec §4).
-        #expect(wizard?.test_bodyText == "Listen — the clicks should land as one.")
+        #expect(wizard?.test_bodyText == "Listen: the clicks should land as one.")
         #expect(wizard?.test_readoutText == "\(Int(valueMs.rounded())) ms")
         #expect(wizard?.test_buttonTitles == [BTAlignmentWizardView.soundsRightTitle,
                                               BTAlignmentWizardView.stillOffTitle,

@@ -52,10 +52,10 @@ import AppKit
         Group(id: id, name: name, memberIDs: members, memberVolumes: [:])
     }
 
-    // MARK: "Playing …" — apps routed to a group
+    // MARK: "Feeding …" — apps routed to a group
 
     /// The overview plus an `AppRoutingController` seeded with `routes`
-    /// (bundle id → destination), which is what a card's "Playing" clause reads.
+    /// (bundle id → destination), which is what a card's "Feeding" clause reads.
     private func makeOverviewWithRoutes(
         groups: [Group], routes: [(bundleID: String, name: String, destination: AppRouteDestination)]
     ) throws -> GroupsOverviewViewController {
@@ -79,7 +79,7 @@ import AppKit
             groups: [group("g1", "Downstairs", members: ["office"])],
             routes: [("com.apple.Safari", "Safari", .group(id: "g1"))])
 
-        #expect(overview.test_cardFeedingText(id: "g1") == "Playing Safari")
+        #expect(overview.test_cardFeedingText(id: "g1") == "Feeding Safari")
     }
 
     @Test func severalRoutedAppsBecomeACount() throws {
@@ -89,7 +89,7 @@ import AppKit
                      ("com.apple.Music", "Music", .group(id: "g1")),
                      ("com.spotify.client", "Spotify", .group(id: "g1"))])
 
-        #expect(overview.test_cardFeedingText(id: "g1") == "Playing 3 apps")
+        #expect(overview.test_cardFeedingText(id: "g1") == "Feeding 3 apps")
     }
 
     @Test func aGroupNoAppTargetsSaysNothingAboutFeeding() throws {
@@ -255,7 +255,7 @@ import AppKit
             group("g1", "Downstairs", members: ["office"]),
         ])
 
-        #expect(overview.test_contextMenuItems(forCard: "g1") == ["Rename…", "Delete Group…"],
+        #expect(overview.test_contextMenuItems(forCard: "g1") == ["Rename…", "Delete scene…"],
                 "the sidebar's old group-row titles, verbatim")
     }
 
@@ -270,7 +270,7 @@ import AppKit
         overview.onRequestDelete = { deleted.append($0) }
 
         overview.test_clickContextMenuItem("Rename…", forCard: "g2")
-        overview.test_clickContextMenuItem("Delete Group…", forCard: "g1")
+        overview.test_clickContextMenuItem("Delete scene…", forCard: "g1")
 
         #expect(renamed == ["g2"])
         #expect(deleted == ["g1"])
@@ -284,9 +284,9 @@ import AppKit
         #expect(overview.test_cardGroupIDs.isEmpty)
         #expect(overview.test_isShowingEmptyCanvas,
                 "with nothing saved the overview IS the empty state — there is no separate pane")
-        #expect(overview.test_emptyMessageText == "Group your speakers")
+        #expect(overview.test_emptyMessageText == "Set up a scene")
         #expect(overview.test_emptySubtitleText ==
-                "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
+                "Save a set of speakers as a scene, then switch to it in two clicks from the menu bar.")
     }
 
     @Test func theEmptyCanvasTileRunsTheSameCreationPath() throws {

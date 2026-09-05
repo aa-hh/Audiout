@@ -62,7 +62,7 @@ public final class BusRailOverlayView: NSView {
     /// per the collapse-reactive contract (behavior 2). `nil` when the origin is
     /// not inside a collapsible section (e.g. a host that never collapses it).
     public weak var originSection: RailSectionProviding?
-    /// The collapsible section that holds the DEVICE rows — the "Output Devices"
+    /// The collapsible section that holds the DEVICE rows — the "Output Speakers"
     /// card. When it collapses (or is mid-collapse), the rail is CUT SHORT at this
     /// section's header with a terminus dot rather than drawn over now-hidden rows;
     /// its live clip frame drives the in-sync squeeze (behaviors 1 + 3).
@@ -1055,7 +1055,7 @@ public protocol RailHookProviding: AnyObject {
 }
 
 /// A collapsible section the rail passes through (the origin's "System Audio"
-/// card, or the device rows' "Output Devices" card), so `BusRailOverlayView` can
+/// card, or the device rows' "Output Speakers" card), so `BusRailOverlayView` can
 /// react to its collapse (collapse-reactive rail, 2026-07-22):
 ///
 /// - `railSectionCollapsed` — the section's target collapsed state.

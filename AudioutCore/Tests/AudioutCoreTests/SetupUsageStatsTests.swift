@@ -313,7 +313,7 @@ extension SerializedSharedState {
         #expect(await vc.test_pressRow(.usageStats))
 
         #expect(vc.test_demoMode == .prompt)
-        #expect(!vc.test_ribbonButtonTitles.contains("Open Settings…"),
+        #expect(!vc.test_ribbonButtonTitles.contains("Open settings…"),
                 "there is no System Settings pane to open for Audiout's own switch")
     }
 }

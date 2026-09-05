@@ -206,13 +206,13 @@ public final class AboutViewController: NSViewController {
         lockup.translatesAutoresizingMaskIntoConstraints = false
         rows.append(lockup)
 
-        sourceCodeButton.title = "View Source Code…"
+        sourceCodeButton.title = "View source code…"
         sourceCodeButton.bezelStyle = .rounded
         sourceCodeButton.target = self
         sourceCodeButton.action = #selector(viewSourceCodeTapped)
         rows.append(SettingsForm.row(
             title: "License",
-            subtitle: "GPL-2.0-or-later — see Third-Party Notices below.",
+            subtitle: "GPL-2.0-or-later. See Third-Party Notices below.",
             control: sourceCodeButton))
 
         let creditsLabel = SettingsForm.label("Third-Party Notices")

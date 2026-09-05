@@ -28,10 +28,10 @@ import AudioutSharedUI
 ///   the grid filtering above — a user can narrow the grid with a partial
 ///   name and tap a result, or type a full valid name and hit Apply
 ///   directly, in the same field;
-/// - a trailing "Use Default Icon" button that reports `nil` immediately
+/// - a trailing "Use default icon" button that reports `nil` immediately
 ///   (no Apply gate — resetting is always available).
 ///
-/// Every path — a grid tap, Apply, or "Use Default Icon" — funnels through
+/// Every path — a grid tap, Apply, or "Use default icon" — funnels through
 /// ``onPick``, then dismisses itself via `dismiss(self)` when actually
 /// presented (`view.window != nil`, the same live-vs-headless-test pattern
 /// `GroupCreationSheetController.finish` uses).
@@ -150,7 +150,7 @@ public final class IconPickerViewController: NSViewController {
         applyButton.isEnabled = false
 
         defaultButton.translatesAutoresizingMaskIntoConstraints = false
-        defaultButton.title = "Use Default Icon"
+        defaultButton.title = "Use default icon"
         defaultButton.bezelStyle = .rounded
         defaultButton.target = self
         defaultButton.action = #selector(defaultTapped(_:))
@@ -341,7 +341,7 @@ public final class IconPickerViewController: NSViewController {
         "wifi.router.fill": "Wi-Fi router",
         "guitars.fill": "Guitars",
         "gamecontroller.fill": "Game controller",
-        "rectangle.3.group": "Grouped devices",
+        "rectangle.3.group": "Scene speakers",
     ]
 
     private static func accessibilityLabel(forSymbol name: String) -> String {
@@ -491,7 +491,7 @@ public final class IconPickerViewController: NSViewController {
         pick(name)
     }
 
-    /// Simulate clicking "Use Default Icon".
+    /// Simulate clicking "Use default icon".
     public func test_useDefault() { useDefault() }
 
     /// The curated symbol names actually offered as grid cells right now, in

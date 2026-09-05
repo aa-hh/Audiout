@@ -77,7 +77,7 @@ public enum LicenseCopy {
     public static func statusLine(for status: LicenseStatus) -> String {
         switch status {
         case .active: return "Registered. Thank you for supporting Audiout."
-        case .revoked: return "This key was refunded or revoked. It no longer gets updates."
+        case .revoked: return "This key was refunded or revoked. Buy a new one to keep using Audiout."
         case .unknown: return "This key isn’t recognized. Check it against your receipt."
         case .invalid: return "That doesn’t look like an Audiout key (\(keyFormatHint))."
         }

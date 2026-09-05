@@ -98,7 +98,10 @@ import AppKit
         #expect(!pane.test_allowRemoteControlIsEnabled)
         let note = pane.test_allowRemoteControlOverrideNote
         #expect(note != nil)
-        #expect(note?.contains("AUDIOUT_COMPANION") == true)
+        // The note must NOT leak the raw environment-variable name to the user;
+        // it says a launch option is in force, in plain words.
+        #expect(note?.contains("AUDIOUT_COMPANION") == false)
+        #expect(note?.contains("launch option") == true)
         #expect(pane.test_allowRemoteControlOverrideNoteTextColor == Tokens.Color.label2,
                 "this note names a setting in force, not a failure — it never takes the red")
     }

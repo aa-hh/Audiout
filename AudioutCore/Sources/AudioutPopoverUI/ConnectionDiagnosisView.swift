@@ -6,7 +6,7 @@ import AudioutSharedUI
 
 /// The inline **diagnosis panel** that expands under a failed device row
 /// (`dev/notes/p1-connection-status-brief.md` §7.1): a one-line cause, a
-/// one-line suggested action, and "Try Again" / "Copy Details" buttons.
+/// one-line suggested action, and "Try again" / "Copy details" buttons.
 ///
 /// This view is a pure renderer of a `ConnectionFailure` — it owns no backend
 /// or pasteboard access. The host (`PopoverController`, T7) inserts/removes it
@@ -49,10 +49,10 @@ public final class ConnectionDiagnosisView: NSView {
     /// Inset of the dismiss button from the tinted background's top-trailing corner.
     private static let dismissButtonInset: CGFloat = 6
 
-    /// Called when the user clicks "Try Again". The host owns the actual retry
+    /// Called when the user clicks "Try again". The host owns the actual retry
     /// (re-adding the device to the Selected Devices set — brief §7.3).
     public var onRetry: (() -> Void)?
-    /// Called when the user clicks "Copy Details". The host writes to
+    /// Called when the user clicks "Copy details". The host writes to
     /// `NSPasteboard.general`; this view never touches the pasteboard.
     public var onCopyDetails: (() -> Void)?
     /// Called when the user clicks the dismiss ("x") button. The host removes
@@ -130,9 +130,9 @@ public final class ConnectionDiagnosisView: NSView {
         suggestionLabel.textColor = Tokens.Color.label2
         background.addSubview(suggestionLabel)
 
-        configureSmallButton(retryButton, title: "Try Again", action: #selector(retryClicked(_:)))
-        configureSmallButton(copyDetailsButton, title: "Copy Details", action: #selector(copyDetailsClicked(_:)))
-        // "Try Again" is the default action (P1-6): Return fires it without a
+        configureSmallButton(retryButton, title: "Try again", action: #selector(retryClicked(_:)))
+        configureSmallButton(copyDetailsButton, title: "Copy details", action: #selector(copyDetailsClicked(_:)))
+        // "Try again" is the default action (P1-6): Return fires it without a
         // click, the stock `.rounded` bezel renders the default treatment on
         // its own.
         retryButton.keyEquivalent = "\r"
@@ -298,9 +298,9 @@ public final class ConnectionDiagnosisView: NSView {
     public var test_headlineText: String { headlineLabel.stringValue }
     /// The rendered suggestion body text.
     public var test_suggestionText: String { suggestionLabel.stringValue }
-    /// Whether "Copy Details" is currently enabled (`failure.detail != nil`).
+    /// Whether "Copy details" is currently enabled (`failure.detail != nil`).
     public var test_copyDetailsEnabled: Bool { copyDetailsButton.isEnabled }
-    /// Whether "Copy Details" is currently hidden (`failure.detail == nil`,
+    /// Whether "Copy details" is currently hidden (`failure.detail == nil`,
     /// P3-1 — hidden, not just disabled, when there's nothing to copy).
     public var test_copyDetailsHidden: Bool { copyDetailsButton.isHidden }
     /// The tinted background's current layer color (appearance-adaptivity asserts).
@@ -310,14 +310,14 @@ public final class ConnectionDiagnosisView: NSView {
 
     /// Whether the dismiss button is present and has a resolved image (never blank).
     public var test_hasDismissButton: Bool { dismissButton.image != nil }
-    /// "Try Again"'s key equivalent — the default-button treatment (P1-6).
+    /// "Try again"'s key equivalent — the default-button treatment (P1-6).
     public var test_retryKeyEquivalent: String { retryButton.keyEquivalent }
     /// The dismiss button's key equivalent — Escape (P1-6).
     public var test_dismissKeyEquivalent: String { dismissButton.keyEquivalent }
 
-    /// Simulate a "Try Again" click.
+    /// Simulate a "Try again" click.
     public func test_tapRetry() { retryClicked(retryButton) }
-    /// Simulate a "Copy Details" click.
+    /// Simulate a "Copy details" click.
     public func test_tapCopyDetails() { copyDetailsClicked(copyDetailsButton) }
     /// Simulate a dismiss ("x") click.
     public func test_tapDismiss() { dismissClicked(dismissButton) }

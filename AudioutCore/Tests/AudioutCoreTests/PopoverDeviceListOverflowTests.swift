@@ -56,7 +56,7 @@ import AppKit
         return popover
     }
 
-    private var devicesCard: String { "Output Devices" }
+    private var devicesCard: String { "Output Speakers" }
 
     // MARK: The ceiling
 

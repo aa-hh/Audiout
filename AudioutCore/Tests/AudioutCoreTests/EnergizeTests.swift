@@ -168,7 +168,7 @@ import Testing
         #expect(popover.test_deviceRow(for: "en-c")?.test_busNode == .member,
                        "an already-connected member never drops to the beat's connecting node")
         #expect(popover.test_lastEnergizeAnnouncement ==
-                       "Switching Main Audio to Selected Devices")
+                       "Switching Main Audio to Selected Speakers")
     }
 
     @Test func beatPrunesAsMembersConnectThenSettles() {
@@ -194,7 +194,7 @@ import Testing
         #expect(popover.test_energizePendingIDs.isEmpty)
         #expect(!popover.test_energizeActive, "the switch has stopped moving")
         #expect(popover.test_lastEnergizeAnnouncement ==
-                       "Selected Devices ready — 3 connected")
+                       "Selected Speakers ready, 3 connected")
     }
 
     @Test func reduceMotionRemovesTheBeatButStillAnnounces() {
@@ -211,7 +211,7 @@ import Testing
         #expect(popover.test_deviceRow(for: "en-a")?.test_busNode == .member,
                        "the .off members snap straight to their resolved nodes")
         #expect(popover.test_lastEnergizeAnnouncement ==
-                       "Switching Main Audio to Selected Devices",
+                       "Switching Main Audio to Selected Speakers",
                        "the transition is still spoken — Reduce Motion drops the animation, not the announcement")
     }
 }

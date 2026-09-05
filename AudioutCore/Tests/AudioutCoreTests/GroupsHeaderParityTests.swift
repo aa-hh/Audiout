@@ -310,7 +310,7 @@ import AppKit
 
         #expect(window.test_detail.test_cardFrames.count == 1,
                 "the Equalizer is the page's one instrument, so the page's one card")
-        #expect(window.test_detail.test_slotTitles == ["Equalizer", "Groups", "About"],
+        #expect(window.test_detail.test_slotTitles == ["Equalizer", "Scenes", "About"],
                 "identity is bare and unlabelled; every other slot is a titled bare list")
         #expect(!window.test_detail.test_hasBoxDivider,
                 Comment(rawValue: "the stock NSBox rule is gone — it drew a 185pt line that stopped a third of " +

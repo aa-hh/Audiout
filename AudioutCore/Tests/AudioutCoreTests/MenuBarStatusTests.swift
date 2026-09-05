@@ -142,7 +142,7 @@ import Testing
         #expect(
             MenuBarStatus.accessibilityDescription(
                 state: .failure, masterVolumePercent: 80, isMuted: true)
-                == "Audiout — speaker connection failed"
+                == "Audiout, speaker connection failed"
         )
     }
 
@@ -150,7 +150,7 @@ import Testing
         #expect(
             MenuBarStatus.accessibilityDescription(
                 state: .streaming, masterVolumePercent: 80, isMuted: true)
-                == "Audiout — muted, streaming"
+                == "Audiout, muted, streaming"
         )
     }
 
@@ -158,7 +158,7 @@ import Testing
         #expect(
             MenuBarStatus.accessibilityDescription(
                 state: .idle, masterVolumePercent: 80, isMuted: true)
-                == "Audiout — muted"
+                == "Audiout, muted"
         )
     }
 
@@ -166,7 +166,7 @@ import Testing
         #expect(
             MenuBarStatus.accessibilityDescription(
                 state: .streaming, masterVolumePercent: 80, isMuted: false)
-                == "Audiout — 80%, streaming"
+                == "Audiout, 80%, streaming"
         )
     }
 
@@ -174,7 +174,7 @@ import Testing
         #expect(
             MenuBarStatus.accessibilityDescription(
                 state: .idle, masterVolumePercent: 80, isMuted: false)
-                == "Audiout — 80%"
+                == "Audiout, 80%"
         )
     }
 }

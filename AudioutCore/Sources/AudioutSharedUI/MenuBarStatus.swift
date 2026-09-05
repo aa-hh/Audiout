@@ -99,12 +99,12 @@ public enum MenuBarStatus {
         masterVolumePercent: Int,
         isMuted: Bool
     ) -> String {
-        if state == .failure { return "Audiout — speaker connection failed" }
+        if state == .failure { return "Audiout, speaker connection failed" }
         if isMuted {
-            return state == .streaming ? "Audiout — muted, streaming" : "Audiout — muted"
+            return state == .streaming ? "Audiout, muted, streaming" : "Audiout, muted"
         }
         return state == .streaming
-            ? "Audiout — \(masterVolumePercent)%, streaming"
-            : "Audiout — \(masterVolumePercent)%"
+            ? "Audiout, \(masterVolumePercent)%, streaming"
+            : "Audiout, \(masterVolumePercent)%"
     }
 }

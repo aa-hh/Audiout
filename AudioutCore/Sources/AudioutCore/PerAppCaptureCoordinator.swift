@@ -956,17 +956,17 @@ public enum PerAppCaptureError: Error, Equatable, Sendable {
     public var userMessage: String {
         switch self {
         case .appNotRunning:
-            return "That application isn't currently running."
+            return "That app isn't running."
         case .processNotYetAudible:
-            return "Waiting for that application to start playing audio."
+            return "Waiting for that app to start playing audio."
         case .tapCreationFailed:
-            return "Couldn't start audio capture for that application. Grant system-audio "
+            return "Couldn't start audio capture for that app. Grant system-audio "
                 + "recording permission in System Settings ▸ Privacy & Security ▸ Screen & "
                 + "System Audio Recording, then try again."
         case .aggregateDeviceFailed:
-            return "Couldn't set up audio capture for that application's current output device."
+            return "Couldn't set up audio capture for that app's current output device."
         case .formatReadFailed:
-            return "Couldn't read that application's audio format."
+            return "Couldn't read that app's audio format."
         case .deviceLost:
             return "The audio output device was disconnected."
         case .osUnsupported(let minimum):

@@ -21,7 +21,7 @@ struct RibbonContent {
     /// in it — the CTA exists iff the final check passed, and
     /// `test_primaryIsCTA` is what pins that.
     enum PrimaryKind: Equatable {
-        /// The everyday step button — Enable System Audio, Try Again, Open
+        /// The everyday step button — Enable system audio, Try Again, Open
         /// Settings….
         case prominent
         /// The finale's "Start listening" — the gate's CTA.

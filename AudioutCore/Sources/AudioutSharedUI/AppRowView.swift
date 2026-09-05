@@ -6,7 +6,7 @@ import AppKit
 /// (PLAN-POPOVER-ROUTING.md §A/§C task T-6): app icon · truncating name ·
 /// always-visible `NSSlider` (dimmed while the app plays on the
 /// current device, decision 3) · `%` readout · a trailing "redirect audio to…"
-/// `NSPopUpButton` sectioned **Current Device** / **AirPlay Devices** (decision
+/// `NSPopUpButton` sectioned **This Mac** / **AirPlay Speakers** (decision
 /// 4 — no Groups section). Removal is no longer a per-row hover affordance —
 /// it's the Applications card's ± footer segmented control, a "Remove from
 /// list" context-menu item, and Delete/Backspace on the selected row, all
@@ -30,7 +30,7 @@ public final class AppRowView: NSView {
         func appRow(_ row: AppRowView, didSetVolume volume: Int, for appID: String)
         /// The user picked a redirect destination from the trailing popup.
         /// `destinationID` is one of the ids passed in ``Configuration/destinations``
-        /// (the local "Current Device" entry or an AirPlay device id).
+        /// (the local "This Mac" entry or an AirPlay device id).
         func appRow(_ row: AppRowView, didSelectDestination destinationID: String, for appID: String)
         /// The user removed this app row entirely, via the ± footer's "−"
         /// segment, the row's "Remove from list" context-menu item, or
@@ -61,40 +61,40 @@ public final class AppRowView: NSView {
         case down
     }
 
-    /// One entry in the destination popup: the standalone "No Redirect" entry,
-    /// a local "Current Device" row, a saved output group, or an AirPlay device.
+    /// One entry in the destination popup: the standalone "Follows main output" entry,
+    /// a local "This Mac" row, a saved output group, or an AirPlay device.
     /// Plain values only
     /// (T-6 isolation requirement — no `AppRoute`/`AppRouteStore` dependency).
     public struct Destination {
         public let id: String
         public let title: String
-        /// True for BOTH the standalone "No Redirect" entry and the "Current
-        /// Device" entry — anything meaning "plays locally," which is what
+        /// True for BOTH the standalone "Follows main output" entry and the "This
+        /// Mac" entry — anything meaning "plays locally," which is what
         /// drives the volume slider's dim/disable state. `false` only for an
         /// AirPlay device entry.
         public let isLocal: Bool
         public let symbolName: String?
-        /// True for the standalone "No Redirect" entry, and also for a
+        /// True for the standalone "Follows main output" entry, and also for a
         /// per-row "Resume → <device>" entry a host may prepend (e.g.
         /// `PopoverController` offering a one-click way back to a device an
         /// app-quit reset cleared) — anything rendered first, with no section
-        /// header, above the "Current Device"/"AirPlay Devices" sections (the
+        /// header, above the "This Mac"/"AirPlay Speakers" sections (the
         /// default/neutral choice and any "get back to this" shortcut, both
         /// visually distinct from the named sections). Every other entry
-        /// (including "Current Device" and a plain device entry) leaves this
+        /// (including "This Mac" and a plain device entry) leaves this
         /// `false`.
         public let isStandalone: Bool
         /// Optional secondary line of copy shown under `title` in the
-        /// destination menu (e.g. clarifying what "No Redirect" or "Current
-        /// Device" means) and as the menu item's tooltip. `nil` renders exactly
+        /// destination menu (e.g. clarifying what "Follows main output" or "This
+        /// Mac" means) and as the menu item's tooltip. `nil` renders exactly
         /// as before — a single-line plain title. This view never invents this
         /// copy; the HOST supplies it (a later task passes real strings for the
-        /// standalone "No Redirect" and local "Current Device" entries).
+        /// standalone "Follows main output" and local "This Mac" entries).
         public let subtitle: String?
         /// True for a SAVED OUTPUT GROUP entry — listed under its own header
-        /// between the standalone entries and "Current Device". `isLocal` is
+        /// between the standalone entries and "This Mac". `isLocal` is
         /// `false` for these (a group's speakers are AirPlay), so this flag is
-        /// what keeps them out of the plain "AirPlay Devices" section.
+        /// what keeps them out of the plain "AirPlay Speakers" section.
         public let isGroup: Bool
         /// `false` renders the entry greyed out and unpickable, still naming
         /// what it is and why it can't be picked in its `subtitle` — e.g. a
@@ -131,7 +131,7 @@ public final class AppRowView: NSView {
         /// The currently selected destination id (matches one entry in `destinations`).
         public let selectedDestinationID: String
         /// All destinations to populate the trailing popup with, in display order:
-        /// the local "Current Device" entry(ies) first, then AirPlay devices.
+        /// the local "This Mac" entry(ies) first, then AirPlay devices.
         public let destinations: [Destination]
         /// Whether the app's process is currently running (T4). When `false`, the
         /// icon dims; an unrouted row also shows the offline badge, a routed row
@@ -171,7 +171,7 @@ public final class AppRowView: NSView {
     /// treatment now suppresses for routed rows) so `configureAccessibility`
     /// can always voice "not running" when true state says so.
     private var isRunning: Bool = true
-    /// True iff the selected destination is the standalone "No Redirect" entry
+    /// True iff the selected destination is the standalone "Follows main output" entry
     /// (`isStandalone`) — the neutral/unset state where the app just plays in the
     /// whole-system mix. It gates the ARMED fader fill ONLY — which means
     /// "redirected to a stream of its own", not "has a volume". Every
@@ -251,7 +251,7 @@ public final class AppRowView: NSView {
     public func apply(_ configuration: Configuration) {
         self.appID = configuration.appID
         self.destinations = configuration.destinations
-        // A missing selection (nothing matched) is treated as "No Redirect", the
+        // A missing selection (nothing matched) is treated as "Follows main output", the
         // safe neutral default.
         self.isNoRedirect = configuration.destinations
             .first { $0.id == configuration.selectedDestinationID }?.isStandalone ?? true
@@ -270,7 +270,7 @@ public final class AppRowView: NSView {
             slider.integerValue = configuration.volume
             readoutLabel.stringValue = VolumePercent.label(configuration.volume)
         }
-        // Live for EVERY destination. "Current Device" (Bug T2) and AirPlay routes
+        // Live for EVERY destination. "This Mac" (Bug T2) and AirPlay routes
         // each level their own stream; an un-redirected app is intercepted below
         // 100 and summed back into the whole-system mix at that volume, so there
         // is no destination left whose volume does nothing.
@@ -289,7 +289,7 @@ public final class AppRowView: NSView {
         // mere list presence — a live exception route is the bright anchor of
         // the APP EXCEPTIONS section at warm `label`; every non-live name sits
         // at the cool `labelCool`. "Routed" = destination ≠ the
-        // standalone follows-main-output sentinel (an explicit Current Device
+        // standalone follows-main-output sentinel (an explicit This Mac
         // pick IS an exception route with its own stream, Bug T2). LIVENESS
         // PROXY: `Configuration` exposes only `isRunning` (process alive) —
         // the confirmed-streaming signal (`BackendEvent.routedApps` /
@@ -404,11 +404,11 @@ public final class AppRowView: NSView {
     /// route the pick back through `destinationChanged(_:)`.
     ///
     /// Structure: every standalone entry (in `destinations`' own order — the
-    /// host may prepend a "Resume → <device>" entry ahead of the fixed "No
-    /// Redirect" entry) FIRST, with no header (the default/neutral choice and
+    /// host may prepend a "Resume → <device>" entry ahead of the fixed "Follows main
+    /// output" entry) FIRST, with no header (the default/neutral choice and
     /// any "get back to this" shortcut, visually distinct from every named
-    /// section), then a separator, then three sections: "Output Groups",
-    /// "Current Device", "AirPlay Devices".
+    /// section), then a separator, then three sections: "Scenes",
+    /// "This Mac", "AirPlay Speakers".
     ///
     /// - Parameter allowsAttributedSubtitle: whether an entry's `subtitle`
     ///   (A3) may render as a second attributed line under the title. Pass
@@ -466,7 +466,7 @@ public final class AppRowView: NSView {
             }
         }
 
-        // The standalone "No Redirect" entry sits above every section, with no
+        // The standalone "Follows main output" entry sits above every section, with no
         // header of its own — it's the neutral default, not a member of
         // either named group.
         let standaloneEntries = destinations.filter(\.isStandalone)
@@ -485,15 +485,15 @@ public final class AppRowView: NSView {
             menu.addItem(.separator())
         }
         if !groupEntries.isEmpty {
-            addHeader("Output Groups")
+            addHeader("Scenes")
             addEntries(groupEntries)
         }
         if !localEntries.isEmpty {
-            addHeader("Current Device")
+            addHeader("This Mac")
             addEntries(localEntries)
         }
         if !deviceEntries.isEmpty {
-            addHeader("AirPlay Devices")
+            addHeader("AirPlay Speakers")
             addEntries(deviceEntries)
         }
 
@@ -847,7 +847,7 @@ public final class AppRowView: NSView {
     public var test_highlightAlpha: CGFloat? { currentHighlightColor?.alphaComponent }
 
     /// The destination `%` readout's current text colour (V7: tertiary while
-    /// "No Redirect", secondary otherwise).
+    /// "Follows main output", secondary otherwise).
     public var test_readoutTextColor: NSColor? { readoutLabel.textColor }
 
     // MARK: Test-support hooks — APP EXCEPTIONS treatment (S6)
@@ -1079,7 +1079,7 @@ public final class AppRowView: NSView {
     /// The currently displayed volume (structural assertions).
     public var test_volume: Int { slider.integerValue }
     /// Whether the volume slider is currently dimmed/disabled. Always false: every
-    /// destination — "No Redirect" included — has a volume that does something.
+    /// destination — "Follows main output" included — has a volume that does something.
     public var test_isSliderDimmed: Bool { !slider.isEnabled }
     /// Whether the Warm fader would render its ENGAGED (gold-gradient) fill —
     /// the app-row armed predicate (routed ∧ running) ∧ slider enabled, read

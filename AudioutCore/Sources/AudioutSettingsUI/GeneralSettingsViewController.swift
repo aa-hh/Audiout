@@ -35,9 +35,9 @@ public final class GeneralSettingsViewController: NSViewController {
     private let licenseStatusHint = SettingsForm.hintLabel()
     private let checkAgainButton = NSButton()
     private let checkInDisclosureHint = SettingsForm.hintLabel(
-        "Audiout checks in with the license server once per launch so we can spot a key "
+        "Audiout checks in with the license server once per launch to spot a key "
         + "shared across many machines. It sends your key, a random per-Mac id, and the "
-        + "app version — nothing else.")
+        + "app version. Nothing else.")
     private let enterLicenseButton = NSButton()
     private let loginApprovalButton = NSButton()
     private var loginApprovalRow: NSView?
@@ -225,8 +225,7 @@ public final class GeneralSettingsViewController: NSViewController {
         // wider — see `SettingsForm.hintLabel`'s doc comment). Only mounted
         // when an override is actually in force.
         remoteControlOverrideNote.stringValue =
-            "Controlled by the \(AppSettings.allowRemoteControlEnvironmentVariableName) "
-            + "setting for this launch — the switch can't change it."
+            "A launch option is controlling this setting, so the switch can't change it."
         remoteControlOverrideNote.font = Tokens.Font.caption
         remoteControlOverrideNote.textColor = Tokens.Color.label2
         remoteControlOverrideNote.lineBreakMode = .byWordWrapping
@@ -271,7 +270,7 @@ public final class GeneralSettingsViewController: NSViewController {
 
         // The retry the status line promises, made a button instead of a wait
         // for the next launch. Shown only in the one state it can help.
-        checkAgainButton.title = "Check Again"
+        checkAgainButton.title = "Check again"
         checkAgainButton.bezelStyle = .rounded
         checkAgainButton.controlSize = .small
         checkAgainButton.target = self
@@ -296,7 +295,7 @@ public final class GeneralSettingsViewController: NSViewController {
         // "About Audiout…" opens the standalone About/Credits window (app
         // identity, GPL license + source link, third-party credits, support) —
         // see the type doc comment for why that content isn't inline here.
-        setupButton.title = "Setup…"
+        setupButton.title = "Run setup again…"
         setupButton.bezelStyle = .rounded
         setupButton.controlSize = .small
         setupButton.target = self
@@ -347,7 +346,7 @@ public final class GeneralSettingsViewController: NSViewController {
             touchBarSwitch.setAccessibilityLabel("Use Audiout's Touch Bar controls")
             rows.append(SettingsForm.row(
                 title: "Use Audiout's Touch Bar controls",
-                subtitle: "While Audiout is playing to speakers, show Touch Bar volume controls that work.",
+                subtitle: "While Audiout is playing to speakers, the Touch Bar volume keys control the speakers instead of the Mac.",
                 control: touchBarSwitch))
         }
         rows.append(contentsOf: [
@@ -388,7 +387,7 @@ public final class GeneralSettingsViewController: NSViewController {
                 + "for a license key the next time it opens."
         }
         guard let status else {
-            return "Not verified yet — Audiout couldn’t reach the license server. Your key is saved."
+            return "Your key is saved. Audiout hasn’t been able to verify it yet."
         }
         return LicenseSheetViewController.statusLine(for: status)
     }
@@ -434,7 +433,7 @@ public final class GeneralSettingsViewController: NSViewController {
 
         // "Enter License…" before a key exists; "Change…" once one is stored
         // (the sheet then prefills it and offers Remove License…).
-        enterLicenseButton.title = key.isEmpty ? "Enter License…" : "Change…"
+        enterLicenseButton.title = key.isEmpty ? "Enter license…" : "Change…"
 
         // Buying is offered only where it can work (a server) and only where it
         // would help (no key, or a key the server won’t honour).

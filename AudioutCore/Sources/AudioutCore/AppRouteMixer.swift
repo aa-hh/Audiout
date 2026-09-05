@@ -30,7 +30,7 @@ import AudioToolbox
 /// members. Apps on `.noRedirect` OR
 /// `.currentDevice` (both "plays locally" — see `AppRouteDestination`'s doc)
 /// never appear in its input and never appear in its output. The whole-system
-/// "Selected Devices" mix (stream_id 0, produced by the existing
+/// "Selected Speakers" mix (stream_id 0, produced by the existing
 /// ``NativeCaptureCoordinator`` and trimmed by T4) is a wholly separate stream
 /// the mixer knows nothing about — its stream_ids start at 1.
 ///

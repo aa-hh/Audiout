@@ -151,7 +151,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         headline.setAccessibilitySubrole(NSAccessibility.Subrole(rawValue: "AXHeading"))
 
         let why = NSTextField(wrappingLabelWithString:
-            "It takes one key to open — yours is in your receipt email, starting with AUDT.")
+            "It takes one key to open. Yours is in your receipt email, starting with AUDT.")
         why.font = Tokens.Font.titleLarge
         why.textColor = Tokens.Color.label2
         why.alignment = .center
@@ -427,7 +427,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         // the window says so rather than sitting blank while they shop.
         openURL(url)
         field.setScene(.waiting)
-        show("The checkout is in your browser. Come back with the key — it lands right here.")
+        show("The checkout is in your browser. Come back with the key, and it lands right here.")
     }
 
     @objc private func quitTapped() {

@@ -108,7 +108,7 @@ import AppKit
 
         await pane.test_selectLatencyOption(ms: 1500)
 
-        #expect(pane.test_applyStatusText == "Some speakers didn't reconnect — check the mixer")
+        #expect(pane.test_applyStatusText == "Some speakers didn't reconnect. Reconnect them from the Mixer.")
     }
 
     @Test func applyWhileIdleShowsPlainConfirmation() async {

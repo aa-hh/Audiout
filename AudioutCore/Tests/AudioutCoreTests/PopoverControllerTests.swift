@@ -103,7 +103,7 @@ import AudioutProtocol
         popover.test_saveCurrentSetup(); await drain(backend)
         let group = controller.groups[0]
         #expect(popover.test_mainOutRow.test_selectableTargets.contains(.group(id: group.id)), "the saved group is a Main Out option")
-        #expect(popover.test_mainOutRow.test_optionTitles.contains("Output Groups"), "groups are under an Output Groups header")
+        #expect(popover.test_mainOutRow.test_optionTitles.contains("Scenes"), "scenes are under a Scenes header")
     }
 
     @Test func emptyGroupIsNotOfferedAsAMainOutOption() async throws {
@@ -530,7 +530,7 @@ import AudioutProtocol
 
         popover.test_selectMainOut(.selectedDevices); await drain(backend)
         // Warm Signal decision m: the title is CLEAN — no live "(n)" count.
-        #expect(popover.test_mainOutRow.test_selectedTitle == "Selected Devices", "the named dropdown shows the current target, count-free")
+        #expect(popover.test_mainOutRow.test_selectedTitle == "Selected Speakers", "the named dropdown shows the current target, count-free")
         popover.test_selectMainOut(.group(id: group.id)); await drain(backend)
         #expect(popover.test_mainOutRow.test_selectedTitle == group.name, "selecting a group updates the named dropdown")
     }
@@ -1007,7 +1007,7 @@ import AudioutProtocol
         devices[idx].connectionState = .failed(.init(cause: .timedOut))
         popover.update(devices: devices)
 
-        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "R12: a failure keeps intent, so the checked set never diverged and there is no dormancy note to show")
+        #expect(popover.test_cardNoteTexts(title: "Output Speakers") == [], "R12: a failure keeps intent, so the checked set never diverged and there is no dormancy note to show")
         #expect(popover.test_deviceRow(for: "office")?.test_busNodeDimmed == false, "the FAILED member never tints — failure outranks configuration (R2)")
         #expect(popover.test_deviceRow(for: "office")?.test_feedErrorPillHasGlyph == true, "the failure FEED override takes the column")
         #expect(popover.test_deviceRow(for: "office")?.test_feedTooltip == "Took too long", "…and the failure's own headline reaches the tooltip (2026-09-04: the pill lost its words)")
@@ -1019,7 +1019,7 @@ import AudioutProtocol
         popover.test_deviceRow(for: "office")?.test_toggleEnabled(true)
         await drain(backend)
         #expect(controller.groups.first?.memberIDs == group.memberIDs, "the retry edited the Selected set, never the saved group")
-        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "…and the card is still undiverged afterwards")
+        #expect(popover.test_cardNoteTexts(title: "Output Speakers") == [], "…and the card is still undiverged afterwards")
     }
 
     // MARK: S4 (spec §4.6) — blocked row's in-place refusal note [RETIRED]
@@ -1080,7 +1080,7 @@ import AudioutProtocol
 
         // Both cards are collapsible and open EXPANDED (T-4 wires the affordance;
         // the collapse-default policy is a later task).
-        let title = "Output Devices"
+        let title = "Output Speakers"
         #expect(popover.test_isCardCollapsed(title: title) == false, "opens expanded")
         let fitting = try #require(popover.test_cardBodyFittingHeight(title: title))
         #expect(fitting > 0, "an expanded card has a non-zero body")
@@ -1115,7 +1115,7 @@ import AudioutProtocol
     /// applies the end state synchronously so `fittingSize` is exact immediately.
     @Test func panelHeightShrinksAndGrowsByBodyHeight() async throws {
         let (popover, _, _) = try await makePopover()
-        let title = "Output Devices"
+        let title = "Output Speakers"
 
         popover.test_applyExactFitSize()
         let expandedHeight = popover.test_panelFittingSize.height
@@ -1139,7 +1139,7 @@ import AudioutProtocol
     /// state and the body clip height are already final (no pending animation).
     @Test func reduceMotionPathAppliesEndStateSynchronously() async throws {
         let (popover, _, _) = try await makePopover()
-        let title = "Output Devices"
+        let title = "Output Speakers"
         // `animated: false` is the exact code path Reduce Motion takes.
         popover.test_toggleCard(title: title, animated: false)
         #expect(popover.test_isCardCollapsed(title: title) == true, "collapsed immediately")
@@ -1151,7 +1151,7 @@ import AudioutProtocol
     /// state matches the parity of the toggle count.
     @Test func rapidTogglesEndConsistent() async throws {
         let (popover, _, _) = try await makePopover()
-        let title = "Output Devices"
+        let title = "Output Speakers"
         // 5 toggles from expanded ⇒ collapsed (odd count).
         for _ in 0..<5 { popover.test_toggleCard(title: title, animated: true) }
         #expect(popover.test_isCardCollapsed(title: title) == true, "odd number of rapid toggles ends collapsed")
@@ -1162,7 +1162,7 @@ import AudioutProtocol
 
     // MARK: Collapse-reactive rail (2026-07-22)
 
-    /// Behavior 1 + 2 (far end): collapsing the DEVICE card ("Output Devices")
+    /// Behavior 1 + 2 (far end): collapsing the DEVICE card ("Output Speakers")
     /// cuts the rail with a terminus dot and stops drawing its now-hidden device
     /// nodes, while the origin stays on the Main Audio ring (only the far end
     /// resolved to the collapsed header).
@@ -1178,7 +1178,7 @@ import AudioutProtocol
             return
         }
 
-        popover.test_toggleCard(title: "Output Devices", animated: false)
+        popover.test_toggleCard(title: "Output Speakers", animated: false)
         popover.test_applyExactFitSize()
 
         let collapsed = try #require(popover.test_railPlan())
@@ -1226,9 +1226,9 @@ import AudioutProtocol
         #expect(!(before.stops.isEmpty), "the pre-collapse rail has device nodes")
 
         // Collapse then expand the device card (non-animated == the settled path).
-        popover.test_toggleCard(title: "Output Devices", animated: false)
+        popover.test_toggleCard(title: "Output Speakers", animated: false)
         popover.test_applyExactFitSize()
-        popover.test_toggleCard(title: "Output Devices", animated: false)
+        popover.test_toggleCard(title: "Output Speakers", animated: false)
         popover.test_applyExactFitSize()
 
         let after = try #require(popover.test_railPlan())
@@ -1240,7 +1240,7 @@ import AudioutProtocol
     /// plan is already the fully-collapsed shape, no pending animation to settle.
     @Test func reduceMotionCollapseResolvesRailInstantly() async throws {
         let (popover, _, _) = try await makePopover()
-        popover.test_toggleCard(title: "Output Devices", animated: false)
+        popover.test_toggleCard(title: "Output Speakers", animated: false)
         popover.test_applyExactFitSize()
 
         let plan = try #require(popover.test_railPlan())
@@ -1271,7 +1271,7 @@ import AudioutProtocol
         let (popover, _, _) = try await makePopover()
         popover.test_simulateOpen()
         #expect(popover.test_isCardCollapsed(title: "System Audio") == false)
-        #expect(popover.test_isCardCollapsed(title: "Output Devices") == false)
+        #expect(popover.test_isCardCollapsed(title: "Output Speakers") == false)
     }
 
     /// A manual toggle during one open is discarded on the NEXT open — defaults
@@ -1280,12 +1280,12 @@ import AudioutProtocol
     @Test func manualToggleDiscardedOnReopen() async throws {
         let (popover, _, _) = try await makePopover()
         popover.test_simulateOpen()
-        popover.test_toggleCard(title: "Output Devices", animated: false)
-        #expect(popover.test_isCardCollapsed(title: "Output Devices") == true, "manual toggle collapsed it this open")
+        popover.test_toggleCard(title: "Output Speakers", animated: false)
+        #expect(popover.test_isCardCollapsed(title: "Output Speakers") == true, "manual toggle collapsed it this open")
 
         // Simulate close + reopen: defaults are recomputed, discarding the toggle.
         popover.test_simulateOpen()
-        #expect(popover.test_isCardCollapsed(title: "Output Devices") == false, "reopening resets to the default — the manual toggle didn't persist")
+        #expect(popover.test_isCardCollapsed(title: "Output Speakers") == false, "reopening resets to the default — the manual toggle didn't persist")
     }
 
     /// A rebuild WITHIN one open (e.g. a backend device update) must preserve
@@ -1293,13 +1293,13 @@ import AudioutProtocol
     @Test func midOpenRebuildPreservesTransientState() async throws {
         let (popover, _, backend) = try await makePopover()
         popover.test_simulateOpen()
-        popover.test_toggleCard(title: "Output Devices", animated: false)
-        #expect(popover.test_isCardCollapsed(title: "Output Devices") == true)
+        popover.test_toggleCard(title: "Output Speakers", animated: false)
+        #expect(popover.test_isCardCollapsed(title: "Output Speakers") == true)
 
         // A mid-open rebuild triggered by a backend event (not a reopen).
         popover.update(devices: backend.devices)
         popover.rebuild()
-        #expect(popover.test_isCardCollapsed(title: "Output Devices") == true, "a mid-open rebuild preserves the transient toggle instead of resetting it")
+        #expect(popover.test_isCardCollapsed(title: "Output Speakers") == true, "a mid-open rebuild preserves the transient toggle instead of resetting it")
     }
 
     // MARK: Device set changes drive a full row rebuild (not just a repaint)
@@ -1590,7 +1590,7 @@ import AudioutProtocol
 
     /// A row's destination menu leads with the standalone "No Redirect" entry
     /// (no header — the new default/neutral choice), then splits into a
-    /// "Current Device" section (the local device) and an "AirPlay Devices"
+    /// "This Mac" section (the local device) and an "AirPlay Speakers"
     /// section (the available non-local fleet). A freshly-added route selects
     /// the "No Redirect" sentinel; every destination — that one included — keeps
     /// the slider LIVE, since an un-redirected app below 100 is levelled inside
@@ -1607,12 +1607,12 @@ import AudioutProtocol
         // host-supplies-copy doctrine; the view renders titles verbatim).
         #expect(titles.first == "Follows main output", "the menu leads with the standalone entry, displayed as the bridge phrase")
         let noRedirectIndex = titles.firstIndex(of: "Follows main output")
-        let currentDeviceHeaderIndex = titles.firstIndex(of: "Current Device")
-        let airplayHeaderIndex = titles.firstIndex(of: "AirPlay Devices")
-        #expect(currentDeviceHeaderIndex != nil, "the menu has a Current Device section")
-        #expect(airplayHeaderIndex != nil, "the menu has an AirPlay Devices section (decision 4 — no Groups)")
-        #expect(noRedirectIndex! < currentDeviceHeaderIndex!, "No Redirect must come before the Current Device section")
-        #expect(currentDeviceHeaderIndex! < airplayHeaderIndex!, "Current Device section must come before AirPlay Devices")
+        let currentDeviceHeaderIndex = titles.firstIndex(of: "This Mac")
+        let airplayHeaderIndex = titles.firstIndex(of: "AirPlay Speakers")
+        #expect(currentDeviceHeaderIndex != nil, "the menu has a This Mac section")
+        #expect(airplayHeaderIndex != nil, "the menu has an AirPlay Speakers section (decision 4 — no Groups)")
+        #expect(noRedirectIndex! < currentDeviceHeaderIndex!, "No Redirect must come before the This Mac section")
+        #expect(currentDeviceHeaderIndex! < airplayHeaderIndex!, "This Mac section must come before AirPlay Speakers")
         #expect(titles.contains("MacBook Pro Speakers"), "the Current Device entry carries the local device's name")
         #expect(titles.contains("Office"), "an available AirPlay device is offered")
 
@@ -1651,14 +1651,14 @@ import AudioutProtocol
                                                      runningAppsProvider: routedApps)
         popover.test_applyContentHeightLimit(.greatestFiniteMagnitude)
 
-        let before = try #require(popover.test_cardBodyClipHeight(title: "Output Devices"))
+        let before = try #require(popover.test_cardBodyClipHeight(title: "Output Speakers"))
         try #require(before > 0, "precondition: the list is standing before the pick")
 
         let row = try #require(popover.test_appRow(for: "com.example.music"))
         row.test_selectDestination(PopoverController.currentDeviceDestinationID)
         popover.test_panelView.layoutSubtreeIfNeeded()
 
-        let after = try #require(popover.test_cardBodyClipHeight(title: "Output Devices"))
+        let after = try #require(popover.test_cardBodyClipHeight(title: "Output Speakers"))
         #expect(after > 0,
                 Comment(rawValue: "the device list survives a destination pick — "
                         + "drew \(after)pt, was \(before)pt"))
@@ -2245,9 +2245,9 @@ import AudioutProtocol
         popover.test_simulateOpen()
 
         let titles = try #require(popover.test_appRowDestinationTitles(for: "com.example.music"))
-        #expect(titles.contains("Output Groups"))
+        #expect(titles.contains("Scenes"))
         #expect(titles.contains("Kitchen"))
-        #expect(titles.firstIndex(of: "Output Groups")! < titles.firstIndex(of: "AirPlay Devices")!)
+        #expect(titles.firstIndex(of: "Scenes")! < titles.firstIndex(of: "AirPlay Speakers")!)
     }
 
     @Test func pickingAGroupRoutesTheAppToThatGroup() async throws {
@@ -2325,7 +2325,7 @@ import AudioutProtocol
         let row = try #require(popover.test_appRow(for: "com.example.music"))
         let item = row.test_destinationPopUpMenuItem(
             forDestinationID: PopoverController.groupDestinationID(forGroupID: groupID))
-        #expect(item?.toolTip == "Plays on 1 of 2 — the rest are in the main mix")
+        #expect(item?.toolTip == "Plays on 1 of 2, the rest are in the main mix")
         #expect(item?.isEnabled == true)
     }
 
@@ -2425,7 +2425,7 @@ import AudioutProtocol
 
         let titles = try #require(popover.test_appRowDestinationTitles(for: "com.example.music"))
         #expect(titles.contains("Groupy"), "a group saved mid-open is offered without a reopen")
-        #expect(titles.contains("Output Groups"))
+        #expect(titles.contains("Scenes"))
     }
 
     /// The same signal covers the other group edits: a rename reaches the menu
@@ -2717,7 +2717,7 @@ import AudioutProtocol
 
         // Point Main Out at the group; checked == members ⇒ DERIVED case.
         popover.test_selectMainOut(.group(id: group.id)); await drain(backend)
-        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "derived-equal (checked set == group members) posts NO note (§4.7)")
+        #expect(popover.test_cardNoteTexts(title: "Output Speakers") == [], "derived-equal (checked set == group members) posts NO note (§4.7)")
         #expect(popover.test_deviceRow(for: "office")?.test_busNode == .member, "the derived member keeps its filled node")
         #expect(popover.test_deviceRow(for: "office")?.test_busNodeDimmed == false, "…at full gold emphasis — no dormant tint")
         #expect(popover.test_deviceRow(for: "airport-mixer")?.test_busNodeDimmed == false, "non-members keep full ink too in the derived case")
@@ -2725,7 +2725,7 @@ import AudioutProtocol
 
         // Diverge: check a device the group doesn't hold ⇒ note + scoped tint.
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true); await drain(backend)
-        #expect(popover.test_cardNoteTexts(title: "Output Devices") == ["Inactive — Main Audio is using '\(group.name)'"], "genuine divergence posts the note with the group's name")
+        #expect(popover.test_cardNoteTexts(title: "Output Speakers") == ["Inactive — Main Audio is using '\(group.name)'"], "genuine divergence posts the note with the group's name")
         #expect(popover.test_deviceRow(for: "office")?.test_busNodeDimmed == false, "a row INSIDE the active target keeps full emphasis")
         #expect(popover.test_deviceRow(for: "homepod-bed")?.test_busNodeDimmed == true, "a checked row OUTSIDE the target de-emphasizes via node tint")
         #expect(popover.test_deviceRow(for: "homepod-bed")?.test_busNode == .member, "…keeping its membership fill — the dim is a tint, never a state change")
@@ -2736,41 +2736,41 @@ import AudioutProtocol
         // Un-diverge (checked set returns to the group's members) ⇒ derived
         // again: the note unmounts LIVE off the membership toggle.
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: false); await drain(backend)
-        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "returning to the derived set removes the note live")
+        #expect(popover.test_cardNoteTexts(title: "Output Speakers") == [], "returning to the derived set removes the note live")
         #expect(popover.test_deviceRow(for: "airport-mixer")?.test_busNodeDimmed == false, "…and releases every tint")
 
         // Back to Selected Devices ⇒ no dormancy machinery at all.
         popover.test_selectMainOut(.selectedDevices); await drain(backend)
-        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "no dormancy note under Selected Devices")
+        #expect(popover.test_cardNoteTexts(title: "Output Speakers") == [], "no dormancy note under Selected Devices")
         #expect(popover.test_deviceRowSelectionDimmed(id: "office") == false, "no dim under Selected Devices")
     }
 
-    // MARK: Decision m — count-free "Selected Devices" title
+    // MARK: Decision m — count-free "Selected Speakers" title
 
-    /// The "Selected Devices" title is CLEAN (Warm Signal §5.1, decision m —
+    /// The "Selected Speakers" title is CLEAN (Warm Signal §5.1, decision m —
     /// the old A2 live "(n)" count is gone) and stays stable as toggles change
     /// the checked set; the collapsed button shows the same full title (no
     /// short-form `buttonTitle` — the trailing column is sized to fit it).
     @Test func selectedDevicesTitleStaysCountFree() async throws {
         let (popover, _, _) = try await makePopover()
         // Default selection is {local-mac}.
-        #expect(popover.test_mainOutRow.test_selectedTitle == "Selected Devices")
+        #expect(popover.test_mainOutRow.test_selectedTitle == "Selected Speakers")
 
         // Toggling devices in and out never adds a count to the title.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
-        #expect(popover.test_mainOutRow.test_selectedTitle == "Selected Devices", "the title stays count-free as the checked set grows")
-        #expect(popover.test_mainOutRow.test_buttonTitle == "Selected Devices", "the collapsed button shows the same full, count-free title")
+        #expect(popover.test_mainOutRow.test_selectedTitle == "Selected Speakers", "the title stays count-free as the checked set grows")
+        #expect(popover.test_mainOutRow.test_buttonTitle == "Selected Speakers", "the collapsed button shows the same full, count-free title")
 
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: false)
-        #expect(popover.test_mainOutRow.test_selectedTitle == "Selected Devices", "…and as it shrinks")
+        #expect(popover.test_mainOutRow.test_selectedTitle == "Selected Speakers", "…and as it shrinks")
     }
 
     /// A saved GROUP as the active Main Out target names the GROUP ITSELF on the
     /// collapsed button ("→ Kitchen"), not its member device(s) — shorter, never
     /// truncates, and matches exactly what the user picked from the dropdown.
     /// (Kept through the count-free Main Out decision: that decision removed the
-    /// `buttonTitle` short form for "Selected Devices" only; the GROUP branch
+    /// `buttonTitle` short form for "Selected Speakers" only; the GROUP branch
     /// still sets one.)
     @Test func collapsedButtonNamesGroupItselfNotMembers() async throws {
         let (popover, controller, backend) = try await makePopover()
@@ -3133,7 +3133,7 @@ import AudioutProtocol
     /// of the card — below every subsection.
     @Test func devicesPlusIsTheCardsLastRowNotAHeaderAccessory() async throws {
         let (popover, _, _) = try await makePopover()
-        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == nil,
+        #expect(popover.test_cardAccessoryEnabled(title: "Output Speakers") == nil,
                 "the header row carries no accessory any more")
         #expect(popover.test_devicesFooterIsLastCardRow,
                 "the + strip is the last row of the Output Devices card")
@@ -3149,11 +3149,11 @@ import AudioutProtocol
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         var menu = popover.test_outputDevicesPlusMenu()
         #expect(menu.items.first?.isEnabled == true, "a non-empty, not-yet-saved selection ⇒ save item enabled")
-        let wasCollapsed = popover.test_isCardCollapsed(title: "Output Devices")
+        let wasCollapsed = popover.test_isCardCollapsed(title: "Output Speakers")
 
         menu.performActionForItem(at: 0)   // real AppKit menu dispatch
         #expect(controller.groups.count == 1, "the save item created a group")
-        #expect(popover.test_isCardCollapsed(title: "Output Devices") == wasCollapsed, "the menu action did NOT collapse the card")
+        #expect(popover.test_isCardCollapsed(title: "Output Speakers") == wasCollapsed, "the menu action did NOT collapse the card")
         // The just-saved selection now equals a group ⇒ the save ITEM disables.
         menu = popover.test_outputDevicesPlusMenu()
         #expect(menu.items.first?.isEnabled == false, "selection already saved as a group ⇒ save item disables")
@@ -3195,7 +3195,7 @@ import AudioutProtocol
 
     // MARK: A3 — destination microcopy subtitles
 
-    /// The "No Redirect" and "Current Device" destination entries carry tooltip
+    /// The "Follows main output" and "This Mac" destination entries carry tooltip
     /// subtitles; AirPlay device entries get none.
     @Test func destinationEntriesCarrySubtitleTooltips() async throws {
         let appRouting = tempAppRoutingController()
@@ -3225,12 +3225,12 @@ import AudioutProtocol
         #expect(popover.test_localFallbackBannerText == nil, "no banner by default")
 
         popover.setLocalFallbackActive(true)
-        #expect(popover.test_localFallbackBannerText == "Speakers unreachable — playing on this Mac. Will resume automatically.",
+        #expect(popover.test_localFallbackBannerText == "Speakers unreachable. Playing on your Mac. Will resume automatically.",
                 "the banner shows the verbatim plan copy")
 
         // A rebuild (e.g. a device-set change) must keep the banner pinned.
         popover.update(devices: backend.devices)
-        #expect(popover.test_localFallbackBannerText == "Speakers unreachable — playing on this Mac. Will resume automatically.",
+        #expect(popover.test_localFallbackBannerText == "Speakers unreachable. Playing on your Mac. Will resume automatically.",
                 "the banner survives a rebuild while the fallback is active")
 
         popover.setLocalFallbackActive(false)
@@ -3286,7 +3286,7 @@ import AudioutProtocol
         #expect(!popover.test_structuralRebuildDeferred, "and the debt cleared")
     }
 
-    // MARK: "Save Selected Devices as group" reports its failures (hardening 11)
+    // MARK: "Save Selected Speakers as group" reports its failures (hardening 11)
 
     /// The success path stays exactly as it was, and reports no failure.
     @Test func savingSelectedDevicesAsAGroupSucceedsQuietly() async throws {
@@ -3296,7 +3296,7 @@ import AudioutProtocol
 
         let menu = popover.test_outputDevicesPlusMenu()
         let index = try #require(menu.items.firstIndex {
-            $0.title == "Save Selected Devices as group"
+            $0.title == "Save Selected Speakers as scene"
         })
         menu.performActionForItem(at: index)
 
@@ -3332,7 +3332,7 @@ import AudioutProtocol
 
         let menu = popover.test_outputDevicesPlusMenu()
         let index = try #require(menu.items.firstIndex {
-            $0.title == "Save Selected Devices as group"
+            $0.title == "Save Selected Speakers as scene"
         })
         menu.performActionForItem(at: index)
 
@@ -3372,7 +3372,7 @@ import AudioutProtocol
         #expect(popover.test_speakerSearchStateText == "Looking for speakers…")
         #expect(popover.test_bluetoothConnectRowShown(),
                 "the Bluetooth affordance still stands beside it")
-        #expect(popover.test_subsectionTitles().contains("AirPlay Devices"),
+        #expect(popover.test_subsectionTitles().contains("AirPlay Speakers"),
                 "the state line is grouped under the header that names it")
     }
 
@@ -3383,7 +3383,7 @@ import AudioutProtocol
         popover.rebuildForOpen()
         popover.test_fireSpeakerSearchGrace()
         #expect(popover.test_speakerSearchStateText
-                == "No AirPlay speakers found on this network.")
+                == "No AirPlay speakers found on your Wi-Fi network.")
     }
 
     /// A speaker arriving retires the state line entirely — nothing to explain
@@ -3395,7 +3395,7 @@ import AudioutProtocol
 
         popover.update(devices: [localMac(), Device(id: "office", name: "Office", kind: .homePod)])
         #expect(popover.test_speakerSearchStateText == nil)
-        #expect(popover.test_subsectionTitles().contains("AirPlay Devices"))
+        #expect(popover.test_subsectionTitles().contains("AirPlay Speakers"))
     }
 
     /// When the host knows macOS denied Local Network access, an empty list is
@@ -3406,7 +3406,7 @@ import AudioutProtocol
         popover.localNetworkDeniedProvider = { true }
         popover.rebuildForOpen()
         #expect(popover.test_speakerSearchStateText
-                == "Audiout doesn’t have permission to see devices on this network.")
+                == "Audiout doesn’t have permission to see speakers on your Wi-Fi network.")
     }
 
     /// A fleet that HAS a speaker never renders a state line, and the AirPlay
@@ -3418,7 +3418,7 @@ import AudioutProtocol
         popover.rebuildForOpen()
         #expect(popover.test_speakerSearchStateText == nil)
         #expect(popover.test_subsectionTitles()
-                == ["AirPlay Devices", "Bluetooth Devices"],
+                == ["AirPlay Speakers", "Bluetooth Speakers"],
                 "no empty AirPlay header, no missing one (the Mac row is pinned above the subsections)")
     }
 
@@ -3435,12 +3435,12 @@ import AudioutProtocol
         #expect(popover.test_systemAirPlayNoteText == nil, "no note by default")
 
         popover.setSystemAirPlayNoteActive(true)
-        #expect(popover.test_systemAirPlayNoteText == "Your Mac's system output is also set to AirPlay — audio may play twice. Switch it back to avoid an echo.",
+        #expect(popover.test_systemAirPlayNoteText == "Your Mac's system output is also set to AirPlay. Audio may play twice. Switch it back to avoid an echo.",
                 "the note shows the verbatim plan copy")
 
         // A rebuild (e.g. a device-set change) must keep the note pinned.
         popover.update(devices: backend.devices)
-        #expect(popover.test_systemAirPlayNoteText == "Your Mac's system output is also set to AirPlay — audio may play twice. Switch it back to avoid an echo.",
+        #expect(popover.test_systemAirPlayNoteText == "Your Mac's system output is also set to AirPlay. Audio may play twice. Switch it back to avoid an echo.",
                 "the note survives a rebuild while the guard is active")
 
         popover.setSystemAirPlayNoteActive(false)
@@ -3490,13 +3490,13 @@ import AudioutProtocol
         #expect(popover.test_systemAirPlayNoteText == nil, "no note by default")
 
         popover.setRoutingBlockedNeedsDefault(true)
-        #expect(popover.test_systemAirPlayNoteText == "Audiout isn't your Mac's output device — audio won't play until you switch back.",
+        #expect(popover.test_systemAirPlayNoteText == "Audiout isn't your Mac's output device. Audio won't play until you switch back.",
                 "shows the verbatim warning copy")
         #expect(popover.test_systemAirPlayNoteHasActionButton, "the warning offers the 'Use Audiout' remedy")
 
         // Precedence: even with a takeover status active, routing-blocked wins the slot.
         popover.setTakeoverStatus(.takingOver)
-        #expect(popover.test_systemAirPlayNoteText == "Audiout isn't your Mac's output device — audio won't play until you switch back.",
+        #expect(popover.test_systemAirPlayNoteText == "Audiout isn't your Mac's output device. Audio won't play until you switch back.",
                 "routing-blocked outranks an active takeover status")
 
         // Tapping "Use Audiout" fires the user-initiated re-select callback.
@@ -3538,7 +3538,7 @@ import AudioutProtocol
 
         // Clearing it reveals the still-set, lower-precedence warning.
         popover.setCaptureFailureMessage(nil)
-        #expect(popover.test_systemAirPlayNoteText == "Audiout isn't your Mac's output device — audio won't play until you switch back.",
+        #expect(popover.test_systemAirPlayNoteText == "Audiout isn't your Mac's output device. Audio won't play until you switch back.",
                 "with capture recovered, the routing-blocked warning shows through")
 
         popover.setRoutingBlockedNeedsDefault(false)
@@ -3638,7 +3638,7 @@ import AudioutProtocol
         popover.membershipHintShownProvider = { !dismissed }
         popover.onMembershipHintDismissed = { dismissed = true }
         popover.rebuild()
-        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [PopoverController.membershipHintText],
+        #expect(popover.test_cardNoteTexts(title: "Output Speakers") == [PopoverController.membershipHintText],
                 "a first-run user gets the hint on the Output Devices card")
 
         // Through the ROW's own delegate seam — the dismissal lives in
@@ -3647,22 +3647,22 @@ import AudioutProtocol
         popover.test_deviceRow(for: "office")?.test_toggleEnabled(true)
         await drain(backend)
         #expect(dismissed, "the first membership toggle in the Mixer retires the hint")
-        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [],
+        #expect(popover.test_cardNoteTexts(title: "Output Speakers") == [],
                 "…and the card rebuilds without it in the same gesture")
 
         popover.test_deviceRow(for: "office")?.test_toggleEnabled(false)
         await drain(backend)
-        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "it never comes back")
+        #expect(popover.test_cardNoteTexts(title: "Output Speakers") == [], "it never comes back")
 
         let (fresh, _, _) = try await makePopover()
         fresh.rebuild()
-        #expect(fresh.test_cardNoteTexts(title: "Output Devices") == [],
+        #expect(fresh.test_cardNoteTexts(title: "Output Speakers") == [],
                 "no provider wired means never shown — what keeps the snapshot tools unchanged")
     }
 
     @Test func outputDevicesLegendsCarryPlainSpeechTooltips() async throws {
         let (popover, _, _) = try await makePopover()
-        #expect(popover.test_columnTitleToolTips(title: "Output Devices")
+        #expect(popover.test_columnTitleToolTips(title: "Output Speakers")
                     == [PopoverController.sourceColumnHelp, PopoverController.offsetColumnHelp],
                 "both column legends explain themselves on hover")
     }
@@ -3691,7 +3691,7 @@ import AudioutProtocol
         assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
                        Tokens.Color.goldText, "the Mac alone is still the mix")
         #expect(popover.test_mainOutRow.test_routeArmed == false)
-        for title in ["Output Devices", "App Routing"] {
+        for title in ["Output Speakers", "App Routing"] {
             assertSameRGBA(popover.test_cardHeaderTitleColor(title: title),
                            Tokens.Color.label2, "\(title) starts silent")
         }
@@ -3702,7 +3702,7 @@ import AudioutProtocol
 
         assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
                        Tokens.Color.goldText, "System Audio sounds")
-        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "Output Devices"),
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "Output Speakers"),
                        Tokens.Color.goldText, "Output Devices sounds")
         assertSameRGBA(popover.test_cardHeaderTitleColor(title: "App Routing"),
                        Tokens.Color.label2, "no route, no gold")
@@ -3712,7 +3712,7 @@ import AudioutProtocol
         popover.mainOutRow(popover.test_mainOutRow, didSetMuted: true)
         assertSameRGBA(popover.test_cardHeaderTitleColor(title: "System Audio"),
                        Tokens.Color.label2, "master mute silences System Audio")
-        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "Output Devices"),
+        assertSameRGBA(popover.test_cardHeaderTitleColor(title: "Output Speakers"),
                        Tokens.Color.label2, "…and every device with it")
         #expect(popover.test_deviceRow(for: "office")?.test_routeArmed == false)
         #expect(popover.test_mainOutRow.test_routeArmed == false)

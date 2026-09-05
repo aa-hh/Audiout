@@ -215,9 +215,18 @@ attach the saved file. (`mailto:` cannot attach; the copy says so.)
 
 Analytics: `support:diagnostics_saved` with no properties.
 
-**Also a CLI.** `scripts/diagnostics.sh` calls the same function through the
-existing headless harness pattern, so an agent on this Mac makes the same
-bundle the customer would. Same seam, two adapters.
+**Built in S4** as `DiagnosticsBundle.write(to:snapshot:)` in `AudioutCore`,
+zipping through Foundation (`NSFileCoordinator`'s upload form), with
+`StateSnapshot` built from typed fields and the only `AppSettings` reads being
+`installID` and the licence STATUS. `companion-approvals.json` is not copied:
+it names approved phones. The About row and the save flow live in
+`AppDelegate.saveDiagnostics()`; the bundle test seeds a licence key and a
+companion token into settings and proves neither reaches any staged file.
+
+**No CLI.** The plan sketched `scripts/diagnostics.sh` as a second adapter.
+An agent on this Mac already reads the two log files directly, which is how
+the 2026-09-05 case was diagnosed; the bundle's value is for customers. Not
+built until something needs it.
 
 ### C5. (Decision D1) Upload instead of email attachment
 
@@ -256,7 +265,7 @@ Each slice merges alone and is useful alone.
 | S1 | Merge `claude/posthog-exceptions-bc04a3`; live-check one `$exception` in PostHog from a notarised build; add `Telemetry.fail` with the local/shared split; convert the six sites in C1 | `TelemetryTests`: a `fail` line carries `level:error` and the installed analytics sink receives exactly the `shared` fields; a `log` line carries `level:info` |
 | S2 | `logger.c` default file sink + rotation; timestamp prefix | `AirPlayEngineTests`: with the env var unset the sink opens under the Logs directory; a write past the cap rotates once and the active file restarts |
 | S3 | `stream_health` snapshot in the engine; line written from `NativeBackend`'s periodic reporter | engine test feeds a silent buffer and a −6 dBFS buffer through the write path and reads back `peak_dbfs` and `silent_s`; no assertion on timing |
-| S4 | `DiagnosticsBundle.write`; About button + save panel + mailto; `scripts/diagnostics.sh`; PRODUCT.md "Data Collection" gains the paragraph "Diagnostics you send us" | bundle test: the zip contains the five entries; `snapshot.json` never contains the licence key or the home directory path (assert on a seeded key and `NSHomeDirectory()`) |
+| S4 | `DiagnosticsBundle.write`; About button + save panel + mailto; PRODUCT.md "Data Collection" gains the paragraph "Diagnostics you send us" (no CLI, see C4) | bundle test: the zip contains the five entries; `snapshot.json` never contains the licence key or the home directory path (assert on a seeded key and `NSHomeDirectory()`) |
 | S5 | C5 upload, if D1 says so | backend lane |
 
 Docs that land with the code: `AudioutCore/Sources/AudioutCore/AGENTS.md` gets

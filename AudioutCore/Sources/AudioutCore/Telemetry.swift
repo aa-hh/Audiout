@@ -264,7 +264,7 @@ public enum Telemetry {
     /// not here (a pure path computation, mirroring `GroupStore.
     /// defaultDirectory`). Tests never touch this — they inject `directory`
     /// via `_resetForTesting`.
-    static var defaultDirectory: URL {
+    public static var defaultDirectory: URL {
         let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         return base.appendingPathComponent("Logs", isDirectory: true)

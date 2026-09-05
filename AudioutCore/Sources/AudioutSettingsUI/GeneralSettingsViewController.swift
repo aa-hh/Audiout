@@ -133,14 +133,16 @@ public final class GeneralSettingsViewController: NSViewController {
                 environment: [String: String] = ProcessInfo.processInfo.environment,
                 aboutInfo: AboutInfo = .current(),
                 openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
-                approvals: CompanionApprovalController? = nil) {
+                approvals: CompanionApprovalController? = nil,
+                saveDiagnostics: (() -> Void)? = nil) {
         self.loginItem = loginItem
         self.settings = settings
         self.approvals = approvals
         self.remoteControlResolution = AppSettings.resolvedAllowRemoteControlWithSource(
             environment: environment, settings: settings)
         self.openURL = openURL
-        self.aboutWindowController = AboutWindowController(info: aboutInfo, openURL: openURL)
+        self.aboutWindowController = AboutWindowController(info: aboutInfo, openURL: openURL,
+                                                           saveDiagnostics: saveDiagnostics)
         super.init(nibName: nil, bundle: nil)
         title = "General"
     }

@@ -12,6 +12,7 @@ import AudioutSharedUI
 import AudioutOnboardingUI
 import PostHog
 import Sparkle
+import UniformTypeIdentifiers
 
 /// Writes `message` to `STDERR_FILENO` with a raw `write(2)`, retrying on
 /// `EINTR` and otherwise ignoring failures.
@@ -2047,7 +2048,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func makeSettingsRoot() -> SettingsRootViewController {
         let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem(),
                                                     settings: settings,
-                                                    approvals: companionApprovals)
+                                                    approvals: companionApprovals,
+                                                    saveDiagnostics: { [weak self] in self?.saveDiagnostics() })
         // The way back in for `audiout://register` — weak because the surface
         // owns both for as long as the Settings screen exists.
         generalSettingsController = general
@@ -3265,6 +3267,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func log(_ message: String) {
         audioutEmergencyWriteStderr("[Audiout] \(message)\n")
+    }
+
+    // MARK: - Diagnostics bundle (Settings › About › Save diagnostics…)
+
+    /// Asks where to save, writes the bundle there, reveals it, and offers a
+    /// mail draft. A mail link cannot attach a file, so the draft's body says
+    /// to attach the one just saved. Nothing leaves the Mac from here.
+    @MainActor
+    private func saveDiagnostics() {
+        let info = AboutInfo.current()
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyyMMdd-HHmm"
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        let fileName = "Audiout-diagnostics-\(stamp.string(from: Date())).zip"
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = fileName
+        panel.directoryURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+        panel.allowedContentTypes = [.zip]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+
+        let snapshot = DiagnosticsBundle.StateSnapshot(
+            settings: settings,
+            app: info.appName, version: info.version, build: info.build,
+            backend: String(describing: type(of: backend)),
+            ptpHelper: "\(permissionProviders.ptpHelper.status)",
+            devices: backend.devices)
+        do {
+            try DiagnosticsBundle.write(to: destination, snapshot: snapshot)
+        } catch {
+            log("diagnostics bundle failed: \(error)")
+            let alert = NSAlert()
+            alert.messageText = "Audiout couldn’t save the diagnostics file"
+            alert.informativeText = "Try a different folder, or check that the disk isn’t full."
+            alert.runModal()
+            return
+        }
+        Analytics.capture("support:diagnostics_saved")
+        NSWorkspace.shared.activateFileViewerSelecting([destination])
+
+        let alert = NSAlert()
+        alert.messageText = "Diagnostics saved"
+        alert.informativeText = "Attach \(destination.lastPathComponent) to your email and describe what happened."
+        alert.addButton(withTitle: "Email support")
+        alert.addButton(withTitle: "Done")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        var components = URLComponents()
+        components.scheme = "mailto"
+        components.path = "support@audiout.app"
+        components.queryItems = [
+            URLQueryItem(name: "subject", value: "Audiout \(info.version) (\(info.build)) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString)"),
+            URLQueryItem(name: "body", value: "Please attach \(destination.lastPathComponent) (saved to \(destination.deletingLastPathComponent().lastPathComponent)) and describe what happened.\n\n"),
+        ]
+        if let url = components.url { NSWorkspace.shared.open(url) }
     }
 }
 

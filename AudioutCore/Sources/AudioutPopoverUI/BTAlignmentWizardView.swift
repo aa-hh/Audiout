@@ -90,6 +90,22 @@ public final class BTAlignmentWizardView: NSView {
     static let stopTitle = "Stop"
     static let soundsRightTitle = "Sounds right"
     static let stillOffTitle = "Still off"
+    /// The nudge band's two steps. SIGNED NUMBERS, no direction words — the
+    /// SYNC drawer's own steppers are a bare −/+ for the same reason
+    /// (`BTSyncDrawerView`: the amounts live on the buttons, the direction
+    /// lives in the value), and a wizard that said "later"/"earlier" here
+    /// would be teaching a second vocabulary for the control the user is
+    /// about to meet on the row.
+    static let nudgeDownTitle = "\u{2212}\(Int(nudgeStepMs)) ms"
+    static let nudgeUpTitle = "+\(Int(nudgeStepMs)) ms"
+    /// One press, in milliseconds. Coarse enough to hear on a first press —
+    /// 1 ms, the drawer's own step, is under the ear's resolution here and
+    /// would read as a dead button.
+    static let nudgeStepMs: Double = 5
+    static let backToQuestionsTitle = "More questions"
+    /// The nudge band's instruction. The number is the readout's, as
+    /// everywhere else on this sheet.
+    private static let nudgeBody = "Nudge it until the clicks land together."
     /// The manual path — typing a number or tapping the paddles in the SYNC
     /// control. Offered beside a proposal the listener doesn't like and on the
     /// unsettled bow-out, never as the default.
@@ -142,8 +158,19 @@ public final class BTAlignmentWizardView: NSView {
     /// stage's tooltip, where the number is available without being the
     /// headline.
     static func confidenceCopy(_ intervalMs: ClosedRange<Double>) -> String {
-        "Somewhere between \(signedMs(intervalMs.lowerBound)) "
-        + "and \(signedMs(intervalMs.upperBound)) ms"
+        // An interval with zero INSIDE it is a magnitude, not a span: while
+        // the run cannot yet tell which speaker is late, "somewhere between
+        // −550 and 550 ms" asks the reader to notice the two bounds are the
+        // same number wearing two signs and to do the subtraction themselves.
+        // "Within 550 ms" is that same fact already read out — and it is the
+        // whole opening stretch of every run, since a flat prior straddles
+        // zero by construction.
+        if intervalMs.lowerBound < 0 && intervalMs.upperBound > 0 {
+            let magnitude = Swift.max(-intervalMs.lowerBound, intervalMs.upperBound)
+            return "Within \(Int(magnitude.rounded())) ms"
+        }
+        return "Somewhere between \(signedMs(intervalMs.lowerBound)) "
+            + "and \(signedMs(intervalMs.upperBound)) ms"
     }
     /// A real minus sign (U+2212), not a hyphen — "-8" reads as a bug.
     private static func signedMs(_ ms: Double) -> String {
@@ -188,6 +215,14 @@ public final class BTAlignmentWizardView: NSView {
     /// The finale's headline: the speaker is ready, and plays with everything.
     static func keptReadyCopy(target: String) -> String {
         "\(target) is ready to play with everything."
+    }
+    /// What the kept number MEANS, under the headline. A run ends on a bare
+    /// "220 ms · kept", which names a quantity without saying whose lag it is
+    /// or which way it ran — the one fact the whole run was spent measuring.
+    /// Latency runs only: the Mac's own row is the zero everything else is
+    /// measured against, so it has no lag of its own to report.
+    static func keptLagCopy(target: String, valueMs: Int) -> String {
+        "\(target) was arriving \(valueMs) ms late. Audiout waits for it now."
     }
     /// A Bluetooth run wrote a MEASURED LATENCY; the number is the stage's
     /// caption, and this quiet line says where to change it later.
@@ -270,6 +305,11 @@ public final class BTAlignmentWizardView: NSView {
     /// tick still running, belief intact — so "Keep listening" puts the same
     /// question back rather than restarting anything.
     private var isShowingSoundHelp = false
+    /// The proposal is showing its two nudge steps instead of the
+    /// accept/reject pair. VIEW state for the same reason
+    /// ``isShowingSoundHelp`` is: the RUN has not changed its mind about
+    /// anything — the user is hand-tuning a value it already proposed.
+    private var isShowingNudge = false
 
     // MARK: Geometry (spec §3)
 
@@ -663,6 +703,9 @@ public final class BTAlignmentWizardView: NSView {
         // host-driven reference swap has moved past it, so it never survives
         // into a screen that has its own things to say.
         if case .question = screen {} else { isShowingSoundHelp = false }
+        // Same fence for the nudge band: a rejection, a restart or a bow-out
+        // has moved off this proposal, and the next one opens un-nudged.
+        if case .proposal = screen {} else { isShowingNudge = false }
 
         styleReadout(hero: false)
         updateTitleRow(for: screen)
@@ -775,33 +818,63 @@ public final class BTAlignmentWizardView: NSView {
             let wholeMs = Int(valueMs.rounded())
             styleReadout(hero: true)
             readout.stringValue = "\(wholeMs) ms"
+            pendingBestGuessMs = valueMs
+            guard !isShowingNudge else {
+                // Hand-tuning, with the tick still running: each press moves
+                // the live value, so the next click is already at it.
+                addBody(Self.nudgeBody)
+                addEdgePlateRow(
+                    makePlate(Self.nudgeDownTitle, action: #selector(nudgeDownClicked(_:))),
+                    makePlate(Self.nudgeUpTitle, action: #selector(nudgeUpClicked(_:))))
+                contentStack.setCustomSpacing(Self.spacingRow,
+                                              after: contentStack.arrangedSubviews[1])
+                addCentredPlate(makePlate(Self.soundsRightTitle, keycap: "⏎",
+                                          isPrimary: true,
+                                          action: #selector(acceptClicked(_:)),
+                                          isDefault: true))
+                // The estimator's own path stays open behind the hand-tune: a
+                // proposal that is 200 ms out is a wrong READING, and nudging
+                // it 5 ms at a time is the wrong tool for that.
+                addCornerRow(leading: (Self.backToQuestionsTitle,
+                                       #selector(rejectClicked(_:)), nil),
+                             trailing: (Self.stopTitle, #selector(stopClicked(_:)), "ESC"))
+                setAccessibilityLabel(
+                    "\(wholeMs) milliseconds. \(Self.nudgeBody)")
+                break
+            }
             addBody(Self.proposalBody)
             addEdgePlateRow(
                 makePlate(Self.soundsRightTitle, keycap: "⏎", isPrimary: true,
                           action: #selector(acceptClicked(_:)), isDefault: true),
-                makePlate(Self.stillOffTitle, action: #selector(rejectClicked(_:))))
+                makePlate(Self.stillOffTitle, action: #selector(stillOffClicked(_:))))
             // The manual path sits beside a proposal the listener doesn't
             // like — quiet, never a plate; Stop stays the way out.
             addCornerRow(leading: (Self.setByHandTitle, #selector(setByHandClicked(_:)), nil),
                          trailing: (Self.stopTitle, #selector(stopClicked(_:)), "ESC"))
-            pendingBestGuessMs = valueMs
             setAccessibilityLabel(
                 "Aligned at \(wholeMs) milliseconds. Does it sound right?")
 
-        case .kept:
+        case .kept(let valueMs):
             // The readout keeps the proposal's number until the stage's lock
             // settles — `armKeptReadout` crossfades "· kept" over it there.
             // The winning message is the hero line: the speaker is ready.
             let ready = Self.keptReadyCopy(target: session.targetName)
             let caption = session.measuresLatency ? Self.keptLatencyCaption : Self.keptLocalCaption
             addBody(ready, hero: true)
+            // What that number was, in words. A run that measured nothing to
+            // wait for (a floored 0) has no lag to report and says nothing.
+            let lagMs = Int(valueMs.rounded())
+            let lag = session.measuresLatency && lagMs > 0
+                ? Self.keptLagCopy(target: session.targetName, valueMs: lagMs)
+                : nil
+            if let lag { addCaption(lag) }
             addCaption(caption)
             contentStack.setCustomSpacing(Self.spacingTight,
                                           after: contentStack.arrangedSubviews[0])
             addCentredPlate(makeDonePlate(isPrimary: true, keycap: "⏎",
                                           action: #selector(keptDoneClicked(_:)),
                                           isDefault: true))
-            setAccessibilityLabel(ready + " " + caption)
+            setAccessibilityLabel([ready, lag, caption].compactMap { $0 }.joined(separator: " "))
 
         case .unsettled(let bestGuessMs):
             readout.stringValue = ""
@@ -1406,6 +1479,19 @@ public final class BTAlignmentWizardView: NSView {
 
     @objc private func acceptClicked(_ sender: NSButton) { session.acceptProposal() }
     @objc private func rejectClicked(_ sender: NSButton) { session.rejectProposal() }
+    /// "Still off" opens the hand-tune rather than spending a rejection: the
+    /// common case is a proposal that is nearly right, and three rejections is
+    /// the whole budget before the run bows out unsettled.
+    @objc private func stillOffClicked(_ sender: NSButton) {
+        isShowingNudge = true
+        render(session.screen)
+    }
+    @objc private func nudgeDownClicked(_ sender: NSButton) {
+        session.nudgeProposal(byMs: -Self.nudgeStepMs)
+    }
+    @objc private func nudgeUpClicked(_ sender: NSButton) {
+        session.nudgeProposal(byMs: Self.nudgeStepMs)
+    }
     @objc private func tryAgainClicked(_ sender: NSButton) { session.tryAgain() }
     /// The kept screen's Done. The run committed on Accept, so this is a close
     /// and nothing else — `cancel()` would be inert here anyway, but saying
@@ -1440,6 +1526,12 @@ public final class BTAlignmentWizardView: NSView {
     /// headless test has neither of.
     var test_stopNeedsConfirm: Bool { answersAtRisk >= Self.confirmStopAfterAnswers }
     var test_stage: AlignmentStageView { stage }
+    /// Every line of text the content band is printing, top to bottom — the
+    /// body plus any captions under it.
+    var test_contentLines: [String] {
+        contentStack.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue }
+            .filter { !$0.isEmpty }
+    }
     var test_bodyText: String? {
         (contentStack.arrangedSubviews.first as? NSTextField)?.stringValue
     }

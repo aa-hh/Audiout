@@ -352,6 +352,26 @@ public final class BTAlignmentWizardSession {
         transition(to: .kept(valueMs: keptMs))
     }
 
+    /// One step of hand-tuning on a proposal the listener can nearly live
+    /// with, applied LIVE so the next click is already at the new value —
+    /// dialing it in by ear is the whole point, and a step you cannot hear
+    /// until you commit is not a step.
+    ///
+    /// The ESTIMATOR is deliberately not told. Its belief was built from
+    /// which-side answers, and a nudge is not one: it carries no information
+    /// about which speaker was heard first, only that the user wants the
+    /// number somewhere else. Folding it in would let a hand-tune masquerade
+    /// as evidence. ``acceptProposal()`` persists whatever the screen is
+    /// showing, so the nudged value is the value kept.
+    public func nudgeProposal(byMs deltaMs: Double) {
+        guard case .proposal(let valueMs) = screen, !ended else { return }
+        let nudged = Swift.min(Swift.max(valueMs + deltaMs, candidateRangeMs.lowerBound),
+                               candidateRangeMs.upperBound)
+        guard nudged != valueMs else { return }
+        applyPreviewTrim(nudged, estimator.credibleHalfWidthMs)
+        transition(to: .proposal(valueMs: nudged))
+    }
+
     /// The proposal's "Still off": the run takes the correction and goes back
     /// to questions, or bows out if this was the second time.
     public func rejectProposal() {

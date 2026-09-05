@@ -35,6 +35,41 @@ import AudioutSharedUI
         -halfWidth...halfWidth
     }
 
+    // MARK: (a0) The ruler's own scale (roadmap 066)
+
+    /// The ruler re-gears its tick spacing per rung, so the same gap between
+    /// marks is worth different amounts at different points in a run. Without
+    /// the legend the reader has a gauge whose scale changes under them and
+    /// never says so.
+    @Test func theRulerStatesWhatOneMarkIsWorth() {
+        let stage = makeStage()
+        stage.apply(.question(intervalMs: interval(halfWidth: 20), range: range),
+                    animated: false)
+        stage.layoutSubtreeIfNeeded()
+        let tight = stage.test_scaleStampText
+        #expect(tight?.hasSuffix("ms per mark") == true,
+                "got \(String(describing: tight))")
+        stage.apply(.question(intervalMs: interval(halfWidth: 400), range: range),
+                    animated: false)
+        stage.layoutSubtreeIfNeeded()
+        #expect(stage.test_scaleStampText?.hasSuffix("ms per mark") == true)
+        #expect(stage.test_scaleStampText != tight,
+                "a re-geared ruler states its NEW step, or the legend is worse than none")
+    }
+
+    /// A bow-out leaves the instrument dark and still — the legend goes out
+    /// with the ticks it describes rather than labelling an unlit ruler.
+    @Test func theScaleLegendGoesOutWithTheRuler() {
+        let stage = makeStage()
+        stage.apply(.question(intervalMs: interval(halfWidth: 20), range: range),
+                    animated: false)
+        stage.layoutSubtreeIfNeeded()
+        #expect(stage.test_scaleStampText != nil)
+        stage.apply(.dormant, animated: false)
+        stage.layoutSubtreeIfNeeded()
+        #expect(stage.test_scaleStampText == nil)
+    }
+
     // MARK: (a) State mapping
 
     @Test func questionStateOrdersTargetBeforeReferenceInsideTheFrame() {

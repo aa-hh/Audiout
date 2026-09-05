@@ -493,6 +493,22 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         card.bodyMaxHeight = deviceListCeiling
     }
 
+    /// Bring the scrolling list's height back in line with the rows a rebuild
+    /// just mounted, WITHOUT publishing a new content height.
+    ///
+    /// `clearRows` drops the card and `beginCard` builds a fresh one whose
+    /// height constraint starts at 0 (`CardView.mountScrollingBody`), and a
+    /// scroll view has no natural height to fall back on. Rebuilds that end in
+    /// a size publish get their reconcile from `fittingSizeSettled`; the ones
+    /// that DON'T — every app-routing callback — left the list laid out at zero
+    /// while the card header and footer stayed, which read as the whole Output
+    /// Devices section collapsing (live, 2026-09-05). This is the reconcile on
+    /// its own, so those paths can repair the height without a republish the
+    /// row-level re-fit rules reserve for `insertRow`/`removeRow`.
+    func reconcileScrollingBodyHeight() {
+        scrollingCard?.reconcileBodyHeight()
+    }
+
     /// The list's current ceiling — what `applyContentHeightLimit` settled on.
     var test_deviceListCeiling: CGFloat { deviceListCeiling }
     /// The scrolling device list's scroll view, `nil` before the card is built.

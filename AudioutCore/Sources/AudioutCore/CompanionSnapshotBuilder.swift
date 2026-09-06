@@ -87,10 +87,9 @@ public enum CompanionSnapshotBuilder {
     ///     startBufferOptionsMs: the Mac-authoritative settings slice —
     ///     passed through as-is so the phone always renders the Mac's
     ///     current range/options (`Snapshot.settings`).
-    ///   - alignmentFor: how fresh a Bluetooth device's stored sync
-    ///     calibration is (`BTAlignmentFreshness.report(uid:hasStoreEntry:)`
-    ///     on the caller's side, because the store and the connect edges live
-    ///     in the backend). `nil` — the default, and every non-native backend
+    ///   - alignmentFor: what the Mac publishes about a Bluetooth device's
+    ///     timing (`BTSpeakerTiming.report(uid:)` on the caller's side,
+    ///     because the store and the connect edges live in the backend). `nil` — the default, and every non-native backend
     ///     — leaves `DeviceState.alignment` unset, which the phone reads as
     ///     "not reported". The reference half of that wire struct is NOT
     ///     injected: it is a function of the whole live device list, so
@@ -116,7 +115,7 @@ public enum CompanionSnapshotBuilder {
         connectVolumeMax: Int,
         startBufferMs: Int,
         startBufferOptionsMs: [Int],
-        alignmentFor: (Device) -> BTAlignmentReport? = { _ in nil }
+        alignmentFor: (Device) -> BTSpeakerTimingReport? = { _ in nil }
     ) -> Snapshot {
         let deviceStates = devices.map { device in
             deviceState(for: device, groupController: groupController, iconFor: iconFor,
@@ -231,14 +230,14 @@ public enum CompanionSnapshotBuilder {
         return candidates.first?.id
     }
 
-    /// The wire alignment struct for one device: the caller's freshness report
+    /// The wire alignment struct for one device: the caller's timing report
     /// plus the reference this builder computes. `nil` for every non-Bluetooth
     /// device, and for a Bluetooth one the caller has no report for.
     private static func alignmentState(
         for device: Device,
         among devices: [Device],
         groupController: GroupController,
-        alignmentFor: (Device) -> BTAlignmentReport?
+        alignmentFor: (Device) -> BTSpeakerTimingReport?
     ) -> DeviceState.AlignmentState? {
         guard device.kind == .bluetooth, let report = alignmentFor(device) else { return nil }
         return DeviceState.AlignmentState(
@@ -248,7 +247,8 @@ public enum CompanionSnapshotBuilder {
                 forTarget: device.id, among: devices,
                 isAudible: groupController.isMainOutMember),
             settleRemainingSeconds: report.settleRemainingSeconds,
-            clockState: report.clockState.rawValue)
+            clockState: report.clockState.rawValue,
+            source: report.source?.rawValue)
     }
 
     private static func deviceState(

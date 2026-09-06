@@ -2355,7 +2355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alignmentActions: makeCompanionAlignmentActions())
 
         // A reconnect (or an alignment landing) changes what the phone's
-        // speaker row says, and nothing else broadcasts for it — the freshness
+        // speaker row says, and nothing else broadcasts for it — the timing
         // store is the only thing that saw the edge.
         (backend as? BTOutputControlling)?.onBTAlignmentChanged = { [weak self] in
             DispatchQueue.main.async {
@@ -2462,7 +2462,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // schedule carries it.
                 // The alignment family is asynchronous for the same reason:
                 // what a run or a commit changes in the snapshot lands through
-                // the backend's own queues and the freshness store's callback,
+                // the backend's own queues and the timing store's callback,
                 // so an immediate rebuild is guaranteed to carry the state
                 // from before the command.
                 let effectIsAsynchronous: Bool
@@ -2738,9 +2738,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // reply is, so it reaches the phone first — but the phone
                     // does not lean on that order.
                     if let clientID {
+                        // Read back rather than returned: the row's source is
+                        // the timing module's to decide, and reading it here
+                        // is what keeps this message and the snapshot that
+                        // follows it saying the same thing.
                         self.companionServer.sendAlignmentApplied(
                             deviceID: targetID, measuredMs: measuredMs,
-                            correctedMs: correctedMs, to: clientID)
+                            correctedMs: correctedMs,
+                            source: bt.btAlignmentReport(forDevice: targetID)?.source?.rawValue,
+                            to: clientID)
                     }
                     return nil
                 }

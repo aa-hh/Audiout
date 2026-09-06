@@ -483,12 +483,16 @@ public final class CompanionServer: @unchecked Sendable {
 
     /// What the Mac made of the phone's measurement, sent only to the client
     /// that staged the run — it is the verdict that client is waiting to show.
+    /// `source` is the same `AudioutProtocol.AlignmentSource` value the next
+    /// snapshot will carry for this speaker, sent here too so the verdict is
+    /// labelled the moment it lands.
     public func sendAlignmentApplied(deviceID: String, measuredMs: Double,
-                                     correctedMs: Double, to clientID: UUID) {
+                                     correctedMs: Double, source: String?,
+                                     to clientID: UUID) {
         queue.async { [weak self] in
             guard let self, let client = self.clients[clientID], client.isWelcomed else { return }
             self.send(.alignmentApplied(deviceID: deviceID, measuredMs: measuredMs,
-                                        correctedMs: correctedMs), to: client)
+                                        correctedMs: correctedMs, source: source), to: client)
         }
     }
 

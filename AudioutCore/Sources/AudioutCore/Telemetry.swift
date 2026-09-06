@@ -44,9 +44,11 @@ public enum Telemetry {
     /// anchor — `LocalPlaybackEngine`/`SyncedLocalSink`), `lifecycle`
     /// (process/session boundaries — currently just the launch banner
     /// emitted below), `surface` (the one-surface window's frame decisions),
-    /// and `cast` (Cast session lifecycle + 1 s media-status samples).
+    /// `cast` (Cast session lifecycle + 1 s media-status samples), and
+    /// `discovery` (Bonjour appear/update/disappear as the backend consumes
+    /// them, plus browser state; the park lifecycle lives under `airplay`).
     public enum Category: String, Sendable {
-        case permission, captureWS, capturePA, airplay, localPlayback, lifecycle, surface, cast
+        case permission, captureWS, capturePA, airplay, localPlayback, lifecycle, surface, cast, discovery
     }
 
     /// Non-blocking. Formats `{"ts":...,"sid":...,"cat":...,"evt":...,

@@ -30,3 +30,4 @@ everything up to the `OutputBackend` seam and never imports AppKit.
 - `GroupController` → the routing brain, with `AppRoutingController` and `PhaseController`.
 - `StructuralStateGate` → repaint gating: has selection or grouping moved since painting?
 - `AppRouteStore` → persistence, beside `RoutingStore`, `GroupStore`, `AppSettings`, `DeviceEQStore`.
+- `NetworkPathRecoveryMonitor` → the Mac's own network path; fires "recovered" for the re-kick.

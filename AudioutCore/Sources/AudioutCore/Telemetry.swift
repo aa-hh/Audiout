@@ -56,6 +56,9 @@ public enum Telemetry {
     /// any new session (see the `sid` field), so a reader can find session
     /// boundaries in the file.
     public static func log(_ category: Category, _ event: StaticString, _ fields: [String: String] = [:]) {
+        if !localOnly.contains(event.description) {
+            Analytics.log(category.rawValue, event.description, fields)
+        }
         let snapshot: (sessionID: String, directory: URL, sink: Sink?)? = state.withLock { s in
             guard s.enabled else { return nil }
             return (s.sessionID, s.directoryOverride ?? defaultDirectory, s.sink)
@@ -64,6 +67,12 @@ public enum Telemetry {
         let line = formattedLine(sessionID: snapshot.sessionID, category: category, event: event, fields: fields)
         Writer.shared.write(line, sessionID: snapshot.sessionID, directory: snapshot.directory, sink: snapshot.sink)
     }
+
+    /// Lines that fire on a timer rather than on a decision (the Cast 1 s
+    /// media-status and lead samples). They stay in the local file and are
+    /// never forwarded to PostHog Logs: a casting session would otherwise
+    /// send thousands of identical lines an hour for no diagnostic gain.
+    static let localOnly: Set<String> = ["cast_media_status", "cast_lead_sample"]
 
     /// False whenever `HeadlessRuntime.isActive` (`swift test`, harness/
     /// snapshot tools) — unless this process has explicitly re-armed writing

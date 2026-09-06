@@ -103,6 +103,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.errorTrackingConfig.autoCapture = true
         config.captureScreenViews = false
         config.optOut = !settings.telemetryOptIn
+        // PostHog Logs: the Telemetry decision log, forwarded through
+        // Analytics.log under the same opt-in. Version defaults to the
+        // bundle's CFBundleShortVersionString.
+        config.logs.serviceName = "audiout-mac"
+#if DEBUG
+        config.logs.environment = "development"
+#else
+        config.logs.environment = "production"
+#endif
         let installID = settings.installID
         config.getAnonymousId = { UUID(uuidString: installID) ?? $0 }
         PostHogSDK.shared.setup(config)
@@ -125,7 +134,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // fires here instead. Without this, anyone who opts in from
                 // the Setup card would never contribute one.
                 Self.captureCoarseLocationOnce()
-            }
+            },
+            log: { PostHogSDK.shared.captureLog($0, level: .info, attributes: $1) }
         ), consent: settings.telemetryOptIn)
         if settings.telemetryOptIn { Self.captureCoarseLocationOnce() }
     }

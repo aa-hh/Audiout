@@ -28,11 +28,17 @@ public enum Analytics {
     public struct Sink: Sendable {
         public let capture: @Sendable (String, [String: String]) -> Void
         public let consentChanged: @Sendable (Bool) -> Void
+        /// Receives one diagnostic log line (PostHog Logs): message and
+        /// attributes. Defaults to a no-op so a sink that only captures
+        /// events still compiles.
+        public let log: @Sendable (String, [String: String]) -> Void
 
         public init(capture: @escaping @Sendable (String, [String: String]) -> Void,
-                    consentChanged: @escaping @Sendable (Bool) -> Void) {
+                    consentChanged: @escaping @Sendable (Bool) -> Void,
+                    log: @escaping @Sendable (String, [String: String]) -> Void = { _, _ in }) {
             self.capture = capture
             self.consentChanged = consentChanged
+            self.log = log
         }
     }
 
@@ -74,6 +80,26 @@ public enum Analytics {
         }
         snapshot?.capture(event.description, properties)
     }
+
+    /// Forwards one ``Telemetry`` line as a diagnostic log, under the same
+    /// consent gate as ``capture(_:_:)``. The message is `category.event`;
+    /// the fields become attributes, minus anything that names a device —
+    /// PRODUCT.md's promise is that device and speaker identifiers never
+    /// leave the Mac, and the local telemetry file keeps them anyway.
+    public static func log(_ category: String, _ event: String, _ fields: [String: String]) {
+        let snapshot: Sink? = state.withLock { s in
+            guard s.consent else { return nil }
+            return s.sink
+        }
+        guard let sink = snapshot else { return }
+        var attributes = fields.filter { !Self.deviceKeys.contains($0.key) }
+        attributes["category"] = category
+        sink.log("\(category).\(event)", attributes)
+    }
+
+    /// Field names ``Telemetry`` callers use for a device, speaker or
+    /// network identifier. Stripped before a line leaves the Mac.
+    static let deviceKeys: Set<String> = ["device", "deviceID", "uid", "name", "host", "address"]
 
     // MARK: - Implementation
 

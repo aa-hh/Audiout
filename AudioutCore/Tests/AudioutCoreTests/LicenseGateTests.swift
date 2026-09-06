@@ -497,6 +497,48 @@ import Testing
         #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
     }
 
+    /// A converted trial keeps its start date and loses its expiry — that is
+    /// what the validator writes when the paid key answers — so it reads as no
+    /// trial at all. Red if the offer were driven off that reading again: a
+    /// refund brings this window back, `TrialClock.start` refuses a Mac that
+    /// has trialled before, and the user would be let through on no trial and
+    /// no valid key, every launch.
+    @MainActor
+    @Test func aTrialThatConvertedIsNeverOfferedASecondOne() {
+        let settings = settings()
+        startTrial(settings, daysAgo: 3)
+        settings.trialExpiresAt = nil
+        #expect(TrialClock.state(settings: settings) == .none, "reads as no trial")
+
+        var passed = 0
+        let content = makeContent(settings, Transport(), onPassed: { passed += 1 })
+        #expect(!content.test_trialIsVisible)
+
+        content.test_tapTrial()
+        #expect(passed == 0)
+        #expect(!content.test_didPass)
+        #expect(settings.trialExpiresAt == nil, "no second trial was written")
+    }
+
+    /// A Mac reinstalled mid-trial has no local dates left, so only the
+    /// server's reason can say what happened. Red if the gate stopped reading
+    /// it: that user is welcomed to an app they have already spent a fortnight
+    /// in, with no hint of why the window is back.
+    @MainActor
+    @Test func theServersTrialExpiredReasonAlsoEndsTheTrial() {
+        let settings = settings()
+        settings.licenseKey = Self.key
+        settings.licenseStatus = .revoked
+        settings.licenseReason = "trial_expired"
+        #expect(TrialClock.state(settings: settings) == .none, "the dates are gone")
+
+        let content = makeContent(settings, Transport())
+        #expect(content.test_headlineText == "Your 14-day trial has ended.")
+        #expect(content.test_bodyText
+            == "Buy Audiout for €30, once, and keep everything you set up. "
+            + "Your scenes and speaker settings are still here.")
+    }
+
     /// A gate raised by a trial running out says so; every other gate still
     /// welcomes. Red if the two sets of words merged — a returning user would
     /// be welcomed to an app they have already used for a fortnight, with no

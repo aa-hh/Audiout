@@ -49,11 +49,11 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private let trialButton = NSButton()
     private var didPass = false
 
-    /// Where this Mac's trial stood when the gate was built. Read ONCE, in
-    /// `loadView`: it decides the headline, the body line and whether the trial
-    /// offer exists at all, and none of those may change while the window is
-    /// up — the surface's whole contract is that nothing on it moves.
-    private var trialState: TrialState = .none
+    /// Whether this gate is the one a finished trial lands on. Read ONCE, in
+    /// `loadView`: it decides the headline and the body line, and neither may
+    /// change while the window is up — the surface's whole contract is that
+    /// nothing on it moves.
+    private var trialHasEnded = false
 
     /// What the shared controls currently mean. The lost-key path MORPHS this
     /// one field and one button rather than opening anything: same geometry,
@@ -137,8 +137,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override func loadView() {
-        trialState = TrialClock.state(settings: settings)
-        if case .expired = trialState {
+        trialHasEnded = TrialClock.hasEnded(settings: settings)
+        if trialHasEnded {
             // The gate is only ever built in order to be shown, so building it
             // IS the impression — and it is the one moment a test can reach,
             // since nothing here may put a window on screen.
@@ -168,7 +168,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         let centred = NSMutableParagraphStyle()
         centred.alignment = .center
         let line: NSMutableAttributedString
-        if case .expired = trialState {
+        if trialHasEnded {
             // The expired headline names no product, so it has no wordmark run
             // and stays one plain run at the same size.
             line = NSMutableAttributedString(
@@ -192,7 +192,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         headlineLabel.setAccessibilityRole(.staticText)
         headlineLabel.setAccessibilitySubrole(NSAccessibility.Subrole(rawValue: "AXHeading"))
 
-        if case .expired = trialState {
+        if trialHasEnded {
             whyLabel.stringValue = Self.expiredBody
         } else {
             whyLabel.stringValue =
@@ -274,9 +274,12 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         quitButton.alphaValue = Self.quietRestAlpha
         quitButton.translatesAutoresizingMaskIntoConstraints = false
 
-        // The offer for someone who has no key and never had one. Shown ONLY
-        // from `.none`: a trial already running, or already spent, has nothing
-        // left to offer, and a second one is not a thing this app has. Bordered
+        // The offer for someone who has no key and never had one. The question
+        // is whether a trial has ever STARTED here, not whether one is running:
+        // a trial that converted to a purchase has no expiry left (the server's
+        // answer to a paid key clears it), so it reads as no trial at all, and
+        // if that key is later refunded this window comes back — offering a
+        // second trial that `TrialClock.start` would refuse to give. Bordered
         // rather than gold so it reads as the other road out of this window
         // without competing with Register for the eye.
         trialButton.title = Self.trialTitle
@@ -284,7 +287,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         trialButton.controlSize = .large
         trialButton.target = self
         trialButton.action = #selector(trialTapped)
-        trialButton.isHidden = trialState != .none
+        trialButton.isHidden = settings.trialStartedAt != nil
         trialButton.translatesAutoresizingMaskIntoConstraints = false
 
         let quietLinks = NSStackView(views: [pasteKeyButton, lostKeyButton])
@@ -506,9 +509,14 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// job (`TrialRegistrar`) that runs with the app already open. A start that
     /// blocked on a server would put the one wall this window exists to remove
     /// back in front of a user who has not even seen the app yet.
+    ///
+    /// The pass is granted by the trial that `TrialClock` actually wrote, never
+    /// by the click. `start` refuses a Mac that has had a trial before, and
+    /// letting the click through anyway would open the app on no trial and no
+    /// valid key, then do it again at every launch.
     @objc private func trialTapped() {
-        guard trialState == .none else { return }
         TrialClock.start(settings: settings)
+        guard case .active = TrialClock.state(settings: settings) else { return }
         Analytics.capture("license:trial_started")
         pass(afterBeat: false)
     }

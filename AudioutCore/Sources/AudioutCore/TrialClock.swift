@@ -55,7 +55,7 @@ public enum TrialClock {
             return .none
         }
         guard now < expiresAt else { return .expired(expiresAt: expiresAt) }
-        let daysLeft = max(0, Int(ceil(expiresAt.timeIntervalSince(now) / day)))
+        let daysLeft = Int(ceil(expiresAt.timeIntervalSince(now) / day))
         return .active(daysLeft: daysLeft, expiresAt: expiresAt, registered: settings.trialRegistered)
     }
 
@@ -69,6 +69,20 @@ public enum TrialClock {
         settings.trialStartedAt = now
         settings.trialExpiresAt = now.addingTimeInterval(length)
         settings.trialRegistered = false
+    }
+
+    /// Whether this Mac's trial is over, by either record that can say so.
+    ///
+    /// The local dates are one record and the licence server's verdict is the
+    /// other, and neither covers the other's case. A trial that never reached
+    /// the server has the dates and no verdict; a Mac whose stored dates are
+    /// gone — cleared, or never carried over — has only the server's word,
+    /// which comes back as `revoked` with the reason `trial_expired`. Either
+    /// one means the same thing to a reader, so both are read here rather than
+    /// at the surfaces that ask.
+    public static func hasEnded(settings: AppSettings, now: Date = Date()) -> Bool {
+        if case .expired = state(settings: settings, now: now) { return true }
+        return settings.licenseReason == "trial_expired"
     }
 
     /// Which one-time banner this Mac is still owed, or `nil` for none.

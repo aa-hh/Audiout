@@ -36,6 +36,9 @@ import Testing
     private final class Transport: @unchecked Sendable {
         private(set) var requests: [URLRequest] = []
         var answer: (Data?, URLResponse?, Error?) = (nil, nil, nil)
+        /// Runs after the request is recorded and before the answer is handed
+        /// back, so a test can change the world while the request is in flight.
+        var whileInFlight: () -> Void = {}
 
         func stub(status: Int, json: String) {
             answer = (Data(json.utf8),
@@ -47,6 +50,7 @@ import Testing
         var closure: LicenseValidator.Transport {
             { [self] request, completion in
                 requests.append(request)
+                whileInFlight()
                 completion(answer.0, answer.1, answer.2)
             }
         }
@@ -121,6 +125,34 @@ import Testing
 
         #expect(await register(settings, transport) == false)
         #expect(transport.requests.isEmpty)
+    }
+
+    /// Red if a key already on file stopped stopping the request. An
+    /// unregistered trial holds no key of its own, so one stored here was typed
+    /// by the user — and the answer to this request would overwrite their paid
+    /// licence with fourteen days, which nothing later puts back.
+    @Test func aStoredKeyBlocksRegistration() async {
+        let settings = unregisteredTrial()
+        settings.licenseKey = Self.key
+        let transport = Transport()
+
+        #expect(await register(settings, transport) == false)
+        #expect(transport.requests.isEmpty)
+        #expect(settings.licenseKey == Self.key)
+    }
+
+    /// The same key, arriving in the window the request is open: the user
+    /// pastes their licence into the gate while the trial start is on the wire.
+    /// Red if the answer were applied on top of it.
+    @Test func aKeyThatArrivesDuringTheRequestBlocksTheAnswer() async {
+        let settings = unregisteredTrial()
+        let transport = Transport()
+        transport.stub(status: 200, json: Self.body(outcome: "issued"))
+        transport.whileInFlight = { settings.licenseKey = "AUDT-PAID0-PAID0-PAID0-PAID0" }
+
+        #expect(await register(settings, transport) == false)
+        #expect(settings.licenseKey == "AUDT-PAID0-PAID0-PAID0-PAID0")
+        #expect(!settings.trialRegistered)
     }
 
     // MARK: The request

@@ -29,6 +29,14 @@ public enum TrialRegistrar {
     /// reports whether the server's record was stored, always on the main
     /// queue, including on the paths that ask nothing.
     ///
+    /// A stored key stops it too, and that guard is not redundant with the
+    /// state above: an unregistered trial holds no key of its own, so a key
+    /// sitting there can only be one the user typed — offline, or into the gate
+    /// while this request was in flight. ``TrialClock/apply(settings:startedAt:expiresAt:key:)``
+    /// would overwrite it with a trial key, replacing a paid licence with
+    /// fourteen days. Checked again when the answer lands, for the key that
+    /// arrives mid-flight.
+    ///
     /// The server's answer is applied whatever its `outcome` says. All three
     /// outcomes — a trial issued, an existing one resumed, a refused request —
     /// come back with the real dates and key of the row the server holds for
@@ -46,6 +54,7 @@ public enum TrialRegistrar {
         completion: @escaping (Bool) -> Void = { _ in }
     ) {
         guard case .active(_, _, registered: false) = TrialClock.state(settings: settings),
+              (settings.licenseKey ?? "").isEmpty,
               let startedAt = settings.trialStartedAt,
               let server = settings.licenseServerURL
         else {
@@ -71,7 +80,9 @@ public enum TrialRegistrar {
             // Parsed off the main queue; only the write and the callback hop.
             let answer = Self.parse(data: data, response: response)
             DispatchQueue.main.async {
-                guard let answer else { return completion(false) }
+                guard let answer, (settings.licenseKey ?? "").isEmpty else {
+                    return completion(false)
+                }
                 TrialClock.apply(settings: settings,
                                  startedAt: answer.startedAt,
                                  expiresAt: answer.expiresAt,

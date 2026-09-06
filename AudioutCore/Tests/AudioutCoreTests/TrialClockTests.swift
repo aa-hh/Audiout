@@ -70,6 +70,31 @@ import Testing
                 == .expired(expiresAt: expiresAt))
     }
 
+    /// Red if `hasEnded` lost either half of the question. The local dates
+    /// answer for a Mac that never reached the server; the server's reason
+    /// answers for a Mac reinstalled mid-trial, which has no dates left and
+    /// would otherwise be welcomed as a newcomer at the gate.
+    @Test func hasEndedReadsTheDatesAndTheServersReason() {
+        let running = settings()
+        TrialClock.start(settings: running, now: Self.started)
+        #expect(!TrialClock.hasEnded(settings: running, now: Self.started))
+        #expect(TrialClock.hasEnded(settings: running,
+                                    now: Self.started.addingTimeInterval(TrialClock.length)))
+
+        let reinstalled = AppSettings(defaults: isolation.makeDefaults())
+        reinstalled.licenseKey = Self.key
+        reinstalled.licenseReason = "trial_expired"
+        #expect(TrialClock.state(settings: reinstalled, now: Self.started) == .none)
+        #expect(TrialClock.hasEnded(settings: reinstalled, now: Self.started))
+
+        // Every other verdict is somebody else's story — a refunded purchase
+        // is not a trial that ran out, and the gate says different words.
+        let refunded = AppSettings(defaults: isolation.makeDefaults())
+        refunded.licenseKey = Self.key
+        refunded.licenseReason = "refunded"
+        #expect(!TrialClock.hasEnded(settings: refunded, now: Self.started))
+    }
+
     // MARK: Starting
 
     /// Red if `start` stopped being idempotent, which would let every launch

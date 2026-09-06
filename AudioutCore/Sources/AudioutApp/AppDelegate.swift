@@ -840,13 +840,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // A trial can start with no network, so the server may not know about
-        // it yet. Ask before the check-in and validate calls below: if this one
-        // lands, they pick up the trial key it stored. If it doesn't, they run
-        // on the old state and the next launch — or `TrialReachability`, when
-        // the network returns — tries again. Nothing here waits on an answer,
-        // which is how every other licence call in this block behaves.
-        TrialRegistrar.registerIfNeeded(settings: settings)
-        trialReachability = TrialReachability(settings: settings)
+        // it yet. `TrialReachability` is the whole of the asking: `NWPathMonitor`
+        // delivers the current path the moment it starts, so a trial begun on an
+        // earlier launch is announced right here, and one that has to wait for a
+        // network is announced when a usable path appears. One asker is enough:
+        // a direct call beside it posts the same registration a second time.
+        // The case the monitor cannot see — a trial started at the gate while
+        // the app is already running, which follows no path change — belongs to
+        // the gate's own pass handler.
+        //
+        // The check-in and validate calls below run on the state as it stands
+        // now: nothing waits on an answer here, so a key that arrives later is
+        // put to work by `useNewTrialKey` rather than by them.
+        trialReachability = TrialReachability(settings: settings,
+                                              onRegistered: { [weak self] in
+            self?.useNewTrialKey()
+        })
         trialReachability?.start()
 
         // Licence check-in (roadmap 054): telemetry recording device spread,
@@ -1568,6 +1577,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Same as `general.onLicenseChanged` below: a key entered at
                 // the gate registers the device now, not at the next launch.
                 LicenseCheckIn(settings: self.settings).checkInIfNeeded()
+                // A trial handed out by the gate has no key yet, and the launch
+                // path is long past — the reachability monitor watches for
+                // network CHANGES, and an already-online Mac gets none. Without
+                // this ask, such a trial stays unknown to the server until the
+                // next launch: no key on the Buy link, no device row, no event.
+                TrialRegistrar.registerIfNeeded(
+                    settings: self.settings,
+                    completion: { [weak self] registered in
+                        guard registered else { return }
+                        self?.useNewTrialKey()
+                    })
                 self.runFirstRunGateAndStartBackend()
             },
             onAbort: { [weak self] in
@@ -1576,6 +1596,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         licenseGateWindowController = gate
         gate.present()
+    }
+
+    /// What a freshly issued trial key changes, the moment it is stored.
+    ///
+    /// The key is a licence key like any other, so it takes the same three
+    /// steps a typed key takes: the device is counted against it, the server is
+    /// asked what it thinks of it, and `applyLicenseState` re-reads the app for
+    /// it — which is what puts it on the update feed's authorization header.
+    /// The Buy link needs no step of its own: `AppSettings.buyURL` composes the
+    /// trial's `?t=` when the link is opened, so it carries the key from the
+    /// moment one is stored.
+    @MainActor
+    private func useNewTrialKey() {
+        LicenseCheckIn(settings: settings).checkInIfNeeded()
+        LicenseValidator(settings: settings).validate { [weak self] _ in
+            self?.applyLicenseState()
+        }
+        applyLicenseState()
     }
 
     /// Tell the user when Gatekeeper is running us from its randomized

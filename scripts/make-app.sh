@@ -122,8 +122,12 @@ TCC_PROBE_EXECUTABLE="tcc-probe"
 # AudioutShared_AudioutField holds the emitter field's field.json (its absence
 # fatalErrored the notarized 1.0.0 at first launch, before any window —
 # Field.swift resolves Resources itself as of audiout-shared 0.8.1).
+# The two PostHog bundles arrived with posthog-ios 3.69: PostHog_PostHog holds
+# the SDK's privacy manifest, PostHog_PHPLCrashReporter the crash reporter's
+# resources. Both are resolved with Bundle.module, so leaving either out is
+# the same first-launch fatalError the field bundle once caused.
 # Names are `<PackageName>_<TargetName>.bundle`, deterministic from Package.swift.
-RESOURCE_BUNDLE_NAMES="AudioutCore_AudioutSharedUI.bundle AudioutShared_AudioutField.bundle"
+RESOURCE_BUNDLE_NAMES="AudioutCore_AudioutSharedUI.bundle AudioutShared_AudioutField.bundle PostHog_PostHog.bundle PostHog_PHPLCrashReporter.bundle"
 # A bundle the build PRODUCES but this list omits is silently left out of the
 # .app, and its consumer fatalErrors at first launch on a user's Mac — that is
 # exactly how the notarized 1.0.0 shipped broken. The per-name `test -d` below

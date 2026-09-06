@@ -510,6 +510,55 @@ import Testing
         #expect(AppSettings(defaults: defaults).installID == first)
     }
 
+    // MARK: The buy URL and the trial id it carries
+
+    private static let buyPage = URL(string: "https://audiout.app/buy")!
+    private static let trialKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+
+    private func buySettings() -> AppSettings {
+        AppSettings(defaults: defaults, buyURL: Self.buyPage)
+    }
+
+    /// Red if the trial id started riding along for someone who is not on a
+    /// trial: a paid key, or a build from source with no purchase page at all.
+    @Test func buyURLCarriesNoTrialIDWithoutATrial() {
+        let settings = buySettings()
+        settings.licenseKey = Self.trialKey
+        settings.licenseStatus = .active
+        #expect(settings.buyURL == Self.buyPage)
+
+        #expect(AppSettings(defaults: defaults).buyURL == nil,
+                "a build with no purchase page still has none")
+    }
+
+    /// Red if the checkout stopped being told which trial it is converting —
+    /// the buyer would then have to paste a key by hand.
+    @Test func buyURLCarriesTheTrialKeyWhileATrialRuns() {
+        let settings = buySettings()
+        TrialClock.apply(settings: settings,
+                         startedAt: Date(),
+                         expiresAt: Date(timeIntervalSinceNow: 9 * 86_400),
+                         key: Self.trialKey)
+        #expect(settings.buyURL
+                == URL(string: "https://audiout.app/buy?t=\(Self.trialKey)"))
+    }
+
+    /// Red if a trial that has not reached the server yet started inventing a
+    /// `t` for the checkout to look up, or if an expired trial kept sending
+    /// its dead key.
+    @Test func buyURLCarriesNoTrialIDBeforeAKeyOrAfterExpiry() {
+        let settings = buySettings()
+        TrialClock.start(settings: settings)
+        #expect(settings.buyURL == Self.buyPage, "an unregistered trial has no key to send")
+
+        let expired = AppSettings(defaults: isolation.makeDefaults(), buyURL: Self.buyPage)
+        TrialClock.apply(settings: expired,
+                         startedAt: Date(timeIntervalSinceNow: -20 * 86_400),
+                         expiresAt: Date(timeIntervalSinceNow: -6 * 86_400),
+                         key: Self.trialKey)
+        #expect(expired.buyURL == Self.buyPage, "a spent trial converts nothing")
+    }
+
     @Test func checkInURLDefaultsNilAndRoundTrips() {
         let settings = AppSettings(defaults: defaults)
         // Absent by default — this is what keeps the check-in client inert.

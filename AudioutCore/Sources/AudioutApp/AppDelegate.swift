@@ -196,6 +196,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// .onCheckForUpdates`). Nil here is the whole gate.
     private var updaterController: SPUStandardUpdaterController?
 
+    /// Watches for the network coming back so a trial that started offline can
+    /// still reach the licence server. Held here because it owns a monitor that
+    /// has to outlive `applicationDidFinishLaunching`; it cancels itself once
+    /// there is nothing left to register.
+    private var trialReachability: TrialReachability?
+
     /// The resolved backend kind (same resolution `makeBackend()` used). The
     /// first-run setup flow only presents on `.native` — the sole path that taps
     /// audio in-process and discovers under the app's own identity, so the sole
@@ -833,6 +839,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                              userDriverDelegate: nil)
         }
 
+        // A trial can start with no network, so the server may not know about
+        // it yet. `TrialReachability` is the whole of the asking: `NWPathMonitor`
+        // delivers the current path the moment it starts, so a trial begun on an
+        // earlier launch is announced right here, and one that has to wait for a
+        // network is announced when a usable path appears. One asker is enough:
+        // a direct call beside it posts the same registration a second time.
+        // The case the monitor cannot see — a trial started at the gate while
+        // the app is already running, which follows no path change — belongs to
+        // the gate's own pass handler.
+        //
+        // The check-in and validate calls below run on the state as it stands
+        // now: nothing waits on an answer here, so a key that arrives later is
+        // put to work by `useNewTrialKey` rather than by them.
+        trialReachability = TrialReachability(settings: settings,
+                                              onRegistered: { [weak self] in
+            self?.useNewTrialKey()
+        })
+        trialReachability?.start()
+
         // Licence check-in (roadmap 054): telemetry recording device spread,
         // never a gate — see `LicenseCheckIn`'s doc comment. A build run from
         // source carries no license server, so it never fires.
@@ -984,6 +1009,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let url = settings.buyURL else { return }
             Analytics.capture("license:buy_link_opened", ["source": "mixer_note"])
             NSWorkspace.shared.open(url)
+        }
+        // The trial's own two rungs of the same note slot, above the
+        // unregistered note `applyLicenseState()` drives: a Mac mid-trial is
+        // not an unregistered install. Both are asked fresh on every rebuild,
+        // so the pill follows every open with no clock of its own.
+        popoverController.trialStateProvider = { [settings] in
+            TrialClock.state(settings: settings)
+        }
+        popoverController.trialBannerOwedProvider = { [settings] in
+            TrialClock.owedBanner(settings: settings)
+        }
+        popoverController.onTrialBannerShown = { [settings] banner in
+            TrialClock.markBannerShown(banner, settings: settings)
         }
         // Metering-active gate (T-GATE): only compute/emit `.level` while the
         // popover is actually open. `backend as? MeteringControlling` is nil for
@@ -1539,6 +1577,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Same as `general.onLicenseChanged` below: a key entered at
                 // the gate registers the device now, not at the next launch.
                 LicenseCheckIn(settings: self.settings).checkInIfNeeded()
+                // A trial handed out by the gate has no key yet, and the launch
+                // path is long past — the reachability monitor watches for
+                // network CHANGES, and an already-online Mac gets none. Without
+                // this ask, such a trial stays unknown to the server until the
+                // next launch: no key on the Buy link, no device row, no event.
+                TrialRegistrar.registerIfNeeded(
+                    settings: self.settings,
+                    completion: { [weak self] registered in
+                        guard registered else { return }
+                        self?.useNewTrialKey()
+                    })
                 self.runFirstRunGateAndStartBackend()
             },
             onAbort: { [weak self] in
@@ -1547,6 +1596,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         licenseGateWindowController = gate
         gate.present()
+    }
+
+    /// What a freshly issued trial key changes, the moment it is stored.
+    ///
+    /// The key is a licence key like any other, so it takes the same three
+    /// steps a typed key takes: the device is counted against it, the server is
+    /// asked what it thinks of it, and `applyLicenseState` re-reads the app for
+    /// it — which is what puts it on the update feed's authorization header.
+    /// The Buy link needs no step of its own: `AppSettings.buyURL` composes the
+    /// trial's `?t=` when the link is opened, so it carries the key from the
+    /// moment one is stored.
+    @MainActor
+    private func useNewTrialKey() {
+        LicenseCheckIn(settings: settings).checkInIfNeeded()
+        LicenseValidator(settings: settings).validate { [weak self] _ in
+            self?.applyLicenseState()
+        }
+        applyLicenseState()
     }
 
     /// Tell the user when Gatekeeper is running us from its randomized

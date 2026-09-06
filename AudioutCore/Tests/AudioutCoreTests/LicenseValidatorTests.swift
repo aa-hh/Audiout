@@ -178,4 +178,109 @@ import Testing
         #expect(await validate(settings, transport) == .verified(.revoked))
         #expect(settings.companionToken == nil, "revocation bites")
     }
+
+    // MARK: A trial is a licence key
+
+    private static let paidKey = "AUDT-PPPPP-QQQQQ-RRRRR-SSSSS"
+    private static let trialStarted = Date(timeIntervalSince1970: 1_800_000_000)
+    private static let trialExpires = trialStarted.addingTimeInterval(TrialClock.length)
+
+    /// A registered trial, as `TrialClock.apply` leaves it: the server's two
+    /// dates and the trial key it handed back.
+    private func settingsMidTrial() -> AppSettings {
+        let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
+        TrialClock.apply(settings: settings,
+                         startedAt: Self.trialStarted,
+                         expiresAt: Self.trialExpires,
+                         key: Self.key)
+        return settings
+    }
+
+    /// An active trial's answer carries two fields a paid key's never does.
+    /// Red if either stopped being read, or if reading them cost the fields
+    /// that were already working.
+    @Test func anActiveTrialAnswerStoresTheServersExpiryAndTouchesNothingElse() async {
+        let settings = settingsMidTrial()
+        settings.licenseReason = "stale"
+        let transport = Transport()
+        // A day later than the local record: the server's date is the one that
+        // counts, so this is the answer to a clock that ran backwards.
+        let corrected = Self.trialExpires.addingTimeInterval(86_400)
+        transport.stub(status: 200,
+                       json: #"{"status":"active","key":"\#(Self.key)","max_major":1,"kind":"trial","expires_at":"2027-01-30T08:00:00.000Z","companion_token":"tok-trial"}"#)
+
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.trialExpiresAt == corrected, "the server's expiry replaces the local one")
+        #expect(settings.licenseReason == nil, "an answer with no reason clears the last one")
+        #expect(settings.licenseKey == Self.key)
+        #expect(settings.licenseMaxMajor == 1)
+        #expect(settings.companionToken == "tok-trial")
+        #expect(TrialClock.state(settings: settings, now: corrected.addingTimeInterval(-86_400))
+                == .active(daysLeft: 1, expiresAt: corrected, registered: true))
+    }
+
+    /// The server may send the expiry with or without fractional seconds. Red
+    /// if the whole-second spelling started reading as "no expiry", which
+    /// would silently end a running trial.
+    @Test func anExpiryWithoutFractionalSecondsIsStillADate() async {
+        let settings = settingsMidTrial()
+        let transport = Transport()
+        transport.stub(status: 200,
+                       json: #"{"status":"active","kind":"trial","expires_at":"2027-01-29T08:00:00Z"}"#)
+
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.trialExpiresAt == Self.trialExpires)
+    }
+
+    /// A trial converts by the server answering with the PAID key and none of
+    /// the trial fields. Red if the swap stopped reading as an ordinary paid
+    /// activation — a buyer would keep the trial pill and its countdown.
+    @Test func aConvertedTrialBecomesAnOrdinaryPaidKey() async {
+        let settings = settingsMidTrial()
+        let transport = Transport()
+        transport.stub(status: 200,
+                       json: #"{"status":"active","key":"\#(Self.paidKey)","max_major":1}"#)
+
+        #expect(await validate(settings, transport) == .verified(.active))
+        #expect(settings.licenseKey == Self.paidKey, "the paid key replaces the trial key")
+        #expect(settings.licenseStatus == .active, "the swap reads as verified, not as a fresh unknown key")
+        #expect(settings.trialExpiresAt == nil, "no expiry in the answer ⇒ this Mac is no longer on trial")
+        #expect(TrialClock.state(settings: settings, now: Self.trialStarted) == .none)
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+    }
+
+    /// A trial ends by the server saying so, and the gate is what the user
+    /// then meets. Red if the reason stopped being stored — the expired gate
+    /// cannot tell a spent trial from a refunded key without it — or if the
+    /// gate stopped coming back.
+    @Test func aSpentTrialIsRevokedWithAReasonAndTheGateReturns() async {
+        let settings = settingsMidTrial()
+        let transport = Transport()
+        transport.stub(status: 200,
+                       json: #"{"status":"revoked","key":"\#(Self.key)","reason":"trial_expired","expires_at":"2027-01-29T08:00:00Z"}"#)
+
+        #expect(await validate(settings, transport) == .verified(.revoked))
+        #expect(settings.licenseReason == "trial_expired")
+        #expect(TrialClock.state(settings: settings, now: Self.trialExpires.addingTimeInterval(1))
+                == .expired(expiresAt: Self.trialExpires))
+        #expect(LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+    }
+
+    /// The mechanism the conversion rides on, pinned here because nothing else
+    /// would fail if it changed: the validator writes the status and THEN the
+    /// server's key, so a key setter that reset the status on any new value
+    /// would turn every converted trial into an unverified key and gate the
+    /// buyer. Only clearing the key clears the verdict.
+    @Test func aDifferentKeyKeepsTheVerdictAlreadyWritten() {
+        let settings = AppSettings(defaults: defaults)
+        settings.licenseKey = Self.key
+        settings.licenseStatus = .active
+
+        settings.licenseKey = Self.paidKey
+        #expect(settings.licenseStatus == .active,
+                "the swap must read as verified and active, not as an unverified new key")
+
+        settings.licenseKey = nil
+        #expect(settings.licenseStatus == nil, "only a deleted key clears the verdict")
+    }
 }

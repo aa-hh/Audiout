@@ -372,7 +372,7 @@ same reason iOS states it — a token now stands out from body text sharing
 its line by weight alone, not by shouting.
 
 **Menu Section Headers Indent Their Entries.** A dropdown's section header
-("Output Groups", "AirPlay Devices") is an `NSMenuItem.sectionHeader` — the
+("Scenes", "This Mac", "AirPlay Speakers") is an `NSMenuItem.sectionHeader` — the
 only item AppKit documents as non-interactive, so it cannot be highlighted,
 hovered or picked. A hand-disabled plain item does not substitute: an
 `NSPopUpButton` re-points every item's action at its own cell, and while

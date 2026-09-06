@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// window-harness — programmatic verification for the Groups SCREEN's content
-// (design revamp, SPEC §9; the standalone Groups window was retired in U6).
+// window-harness — programmatic verification for the Scenes SCREEN's content
+// (design revamp, SPEC §9; the standalone Scenes window was retired in U6).
 // The screen is CONFIGURATION-ONLY: viewing or editing a group here never
 // activates it or moves audio — activation lives in the app's Mixer screen.
 //
@@ -80,7 +80,7 @@ func run() -> Int32 {
     let controller = GroupController(backend: backend, store: GroupStore(directory: tempDir()),
                                      loadPersisted: false)
     let window = MixerWindowController(groupController: controller)
-    // The real host seam: the surface marks the Groups screen visible, which
+    // The real host seam: the surface marks the Scenes screen visible, which
     // opens the B8 refresh gate — without it every `update(devices:)` below
     // only stores its snapshot and the sidebar renders empty.
     window.setHostVisible(true)
@@ -91,14 +91,14 @@ func run() -> Int32 {
     }
     window.update(devices: backend.devices)
 
-    // --- 1. Baseline sidebar: the device fleet under the pinned Groups row
+    // --- 1. Baseline sidebar: the device fleet under the pinned Scenes row
     //        (direction C — saved groups are cards in the content pane now).
     print("\n[1] Baseline sidebar (zero groups)")
     checks.expectEqual(window.test_sidebar.test_sectionTitles,
                        ["System Audio", "Speakers"],
                        "'System Audio' and 'Speakers' are the only sections — groups left the sidebar")
     checks.expect(window.test_sidebar.test_hasGroupsRow,
-                  "the pinned Groups row is present")
+                  "the pinned Scenes row is present")
     checks.expectEqual(window.test_sidebar.test_deviceRowCount, 7,
                        "all 7 devices listed (Speakers section lists every device, flat model)")
     checks.expect(!window.test_isShowingEditor, "no editor shows with zero groups")
@@ -141,7 +141,7 @@ func run() -> Int32 {
         checks.expectEqual(Set(createdGroup.memberIDs), Set([candidateA, candidateB]),
                            "created group's members are exactly the ones checked")
         checks.expect(window.test_sidebar.test_groupsRowIsSelected,
-                      "the sidebar highlights the pinned Groups row, not a row of its own")
+                      "the sidebar highlights the pinned Scenes row, not a row of its own")
         checks.expect(window.test_isShowingEditor, "editor shows the newly-created group")
         checks.expectEqual(window.test_editor.editingGroupID, createdGroup.id,
                            "editor is editing the created group")
@@ -220,7 +220,7 @@ func run() -> Int32 {
     window.test_select(nil)
     drain()
     checks.expect(window.test_isShowingOverview,
-                  "deselecting auto-selects the Groups overview")
+                  "deselecting auto-selects the Scenes overview")
     checks.expect(!window.test_isShowingEditor, "and opens no group's editor on the user's behalf")
     checks.expectEqual(window.test_overview.test_cardGroupIDs, [saved.id],
                        "the saved group has a card")
@@ -229,7 +229,7 @@ func run() -> Int32 {
     checks.expectEqual(controller.activeGroupID, nil,
                        "auto-selection does NOT activate (config-only)")
 
-    // --- 7b. A card opens its editor in place, with the Groups row still
+    // --- 7b. A card opens its editor in place, with the Scenes row still
     //         selected (the fleet must not move under the pointer).
     print("\n[7b] Clicking a card pushes that group's editor")
     window.test_overview.test_clickCard(id: saved.id)
@@ -238,10 +238,10 @@ func run() -> Int32 {
     checks.expectEqual(window.test_editor.editingGroupID, saved.id,
                        "the editor is editing the clicked card's group")
     checks.expect(window.test_sidebar.test_groupsRowIsSelected,
-                  "the Groups row stays selected throughout the push")
+                  "the Scenes row stays selected throughout the push")
     window.test_editor.test_goBack()
     drain()
-    checks.expect(window.test_isShowingOverview, "'‹ Groups' pops back to the card field")
+    checks.expect(window.test_isShowingOverview, "'‹ Scenes' pops back to the card field")
 
     // --- 8. Cancelling a presented create sheet clears it.
     print("\n[8] Cancelling the create sheet clears it")
@@ -274,7 +274,7 @@ func run() -> Int32 {
                   "deselecting auto-selects the card overview (never a blank pane)")
 
     // --- 10. Delete: removes the group, the overview returns as its own empty
-    //        canvas, the pinned Groups row stays.
+    //        canvas, the pinned Scenes row stays.
     print("\n[10] Delete group → deleteGroup, the overview's empty canvas returns")
     window.test_select(.group(id: saved.id))
     drain()
@@ -288,7 +288,7 @@ func run() -> Int32 {
     checks.expect(window.test_overview.test_isShowingEmptyCanvas,
                   "drawing its own zero-groups canvas")
     checks.expect(window.test_sidebar.test_hasGroupsRow,
-                  "the pinned Groups row stays (this screen is groups-configuration only)")
+                  "the pinned Scenes row stays (this screen is scenes-configuration only)")
 
     print("\n----------------------------------------")
     if checks.failures == 0 {

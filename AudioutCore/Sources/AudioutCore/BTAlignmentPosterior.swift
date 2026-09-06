@@ -48,7 +48,7 @@ struct BTAlignmentPosterior {
     enum Answer: Hashable {
         /// The target (the device being aligned) ticked first.
         case target
-        /// The reference (the rest of the group) ticked first.
+        /// The reference (the rest of the scene) ticked first.
         case reference
         /// The two clicks landed as one — the residual is inside the ear's
         /// fusion window, which is real evidence about where the truth is.

@@ -23,15 +23,15 @@ output. You want a single app that:
 | Decision | Your choice | Consequence |
 |---|---|---|
 | Audio source | **All system audio** | Hardest path — needs an audio-capture layer + a custom AirPlay sender. |
-| Grouping | **Save named presets** ("Whole house", "Downstairs") | Persisted groups w/ per-device volume + membership. |
+| Grouping | **Save named presets** ("Whole house", "Downstairs") | Persisted scenes w/ per-device volume + membership. |
 | Sync | **Perfect sync required** | Must use AirPlay 2's synchronized multi-room timing. The ~1–2s buffer is fine now that video is out of scope. |
 | Video | **Dropped — audio only** | Removes the hardest requirement. No low-latency mode needed. |
-| Form factor | **Menu bar + full window** | Quick menu-bar panel; richer window for groups/EQ. |
+| Form factor | **Menu bar + full window** | Quick menu-bar panel; richer window for scenes/EQ. |
 | Remote control | **Mac + iPhone (companion app)** | Bonjour discovery, server-side sync, on by default (per-phone approval gates access). |
 | Device types | **AirPlay only** | No Bluetooth/Sonos-native/wired in v1. (Sonos speakers are used *via their AirPlay 2 support*, not the Sonos API.) |
 | Distribution | **Direct download; OPEN SOURCE (decided 2026-07-13)** | ahh may redistribute → project licensed GPL-2.0-or-later (required by the vendored AirPlay-2 sender cluster from OwnTone, which is GPL; libairptp/pair_ap are MIT, evrtsp BSD — kept separately marked). No App Store. |
 | Extra controls | Per-device **mute/solo**, **master volume**, **EQ/balance** | Mixer-style UI. |
-| Power features | **Per-app routing**, **auto-reconnect** | Route Spotify→kitchen while Zoom stays local; re-activate groups when devices reappear. |
+| Power features | **Per-app routing**, **auto-reconnect** | Route Spotify→kitchen while Zoom stays local; re-activate scenes when devices reappear. |
 
 ---
 
@@ -43,13 +43,13 @@ output. You want a single app that:
 - **Synchronized** playback across selected devices.
 - Per-device **volume** + **mute/solo**; **master** volume.
 - Menu-bar panel with the device list + sliders.
-- Save/activate **named groups** with remembered volumes.
+- Save/activate **named scenes** with remembered volumes.
 
 ### v2 (the differentiators)
 - **Per-app routing** (Spotify → Kitchen while Zoom stays on the Mac): per-app
   destination pickers in the window's Applications view; overlapping routes are
   **mixed per speaker**; "This Mac (don't stream)" bypass keeps an app local.
-- **Auto-reconnect** a group when its devices come back online.
+- **Auto-reconnect** a scene when its devices come back online.
 - Full **window app** with a proper mixer, per-device **EQ / L-R balance**.
 
 ### Later / nice-to-have
@@ -94,7 +94,7 @@ See [PLAN-COMPANION-APP.md](docs/plans/PLAN-COMPANION-APP.md).
                              ▲
         ┌────────────────────┴─────────────────────┐
         │  AppKit app: NSStatusItem menu + full     │
-        │  window, groups, mixer, presets, routing  │
+        │  window, scenes, mixer, presets, routing  │
         └───────────────────────────────────────────┘
 ```
 
@@ -158,7 +158,7 @@ everything privileged is small enough to read line-by-line.**
   system audio, and (b) send synced audio to two real AirPlay 2 devices with
   independent volume. This de-risks the whole project before committing to UI.
 - **Phase 1 — Core (v1).** Capture → sender → menu-bar UI → multi-device select,
-  per-device volume/mute, master volume, saved groups.
+  per-device volume/mute, master volume, saved scenes.
 - **Phase 2 — Differentiators (v2).** Per-app routing, auto-reconnect, full
   window + mixer + EQ, video/low-latency mode.
 - **Phase 3 — Polish.** Calibration, sleep timer, fades, shortcuts.
@@ -344,14 +344,14 @@ NSPopover** (REVISED 2026-07-13, superseded 2026-08-07 — see below) · full wi
 is **sidebar + mixer** · volume is **horizontal rows**.
 
 > **REVISED 2026-08-07 — ONE SURFACE replaces five windows.** The dropdown, the
-> Groups window and the Settings window are now three **screens** of a single
+> Scenes window and the Settings window are now three **screens** of a single
 > panel, chosen by a tab-bar-style switcher in its header (ICON-ONLY tabs in
 > the Mac's toolbar-tabs idiom, ⌘1/⌘2/⌘3 — labels were built and removed on
 > 2026-09-03: the surface is a fixed width, and three translated names would
 > push the tabs into AppKit's overflow chevron, which is no place for primary
 > navigation; the tooltip, the VoiceOver label and the shortcut carry the
 > names instead): **Mixer** (the panel this section
-> describes below), **Groups**, **Settings**. Setup and About keep their own
+> describes below), **Scenes**, **Settings**. Setup and About keep their own
 > windows — the two deliberate exceptions. Authoritative record:
 > PLAN-ONE-SURFACE-032.md.
 >
@@ -363,7 +363,7 @@ is **sidebar + mixer** · volume is **horizontal rows**.
 > app stays menu-bar-only in both.
 >
 > **Sizes are per screen**, animated with the top edge anchored: Mixer keeps
-> its exact content fit, Groups opens at its designed size and remembers a
+> its exact content fit, Scenes opens at its designed size and remembers a
 > drag for the session, Settings sizes to the selected tab.
 >
 > **The menu-bar click has exactly four cases** (in order): first-run Setup is
@@ -391,37 +391,37 @@ is **sidebar + mixer** · volume is **horizontal rows**.
 > qualifies. So the dropdown becomes an **`NSStatusItem` button → `NSPopover`**
 > hosting a custom view hierarchy (Control-Center style). This unlocks:
 > animations, click-anywhere-on-row to toggle, keyboard/text (so even in-panel
-> group naming is now possible), and consistent layout. Row/group views
+> scene naming is now possible), and consistent layout. Row/group views
 > (`DeviceRowView`, `GroupRowView`) and all group/volume logic carry over
 > unchanged; only the container swaps NSMenu → NSPopover. Quick-create is no
 > longer forced by the no-keyboard-in-menu limit, but manual creation stays the
-> primary path per the group-setup section.
+> primary path per the scene-setup section.
 
 ### Menu bar extra
 | Element | AppKit API | Documented usage we follow |
 |---|---|---|
 | Status item | `NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)` | Customize only via its `button` property; the button's action runs the four-case click policy above. Provide a user setting to hide it (HIG). |
 | Status icon | `NSImage(systemSymbolName:variableValue:accessibilityDescription:)` | SF Symbol `speaker.wave.3.fill` with `variableValue` = master volume. Template rendering → correct in dark/light menu bar. |
-| Dropdown | The one surface's **Mixer screen**: an `NSPanel` anchored under the status button (unpinned) hosting the same exact-content-fit custom-view panel (no `NSScrollView`, no scrollbar — REVISED 2026-07-16, see below). Was an `NSPopover` until 2026-08-07 | Control-Center-style. Groups + devices are stacked custom views; expansion animates; click anywhere on a row toggles it. |
+| Dropdown | The one surface's **Mixer screen**: an `NSPanel` anchored under the status button (unpinned) hosting the same exact-content-fit custom-view panel (no `NSScrollView`, no scrollbar — REVISED 2026-07-16, see below). Was an `NSPopover` until 2026-08-07 | Control-Center-style. Scenes + devices are stacked custom views; expansion animates; click anywhere on a row toggles it. |
 
-### Groups in the menu (decided 2026-07-09)
+### Scenes in the menu (decided 2026-07-09)
 
-Groups are first-class in the dropdown — the menu is usable without ever opening
+Scenes are first-class in the dropdown — the menu is usable without ever opening
 the mixer window. Menu structure, top to bottom:
 
-1. **Groups section.** One row per saved group: disclosure chevron, group name,
-   numeric readout, and a **group master slider**. **REVISED 2026-07-13: EVERY
-   group row shows its master slider consistently** (not just the active one —
-   the active-only rule was confusing in practice). A non-active group's master
+1. **Scenes section.** One row per saved scene: disclosure chevron, scene name,
+   numeric readout, and a **scene master slider**. **REVISED 2026-07-13: EVERY
+   scene row shows its master slider consistently** (not just the active one —
+   the active-only rule was confusing in practice). A non-active scene's master
    sets its members' preset levels; activating it applies them.
-2. **Expansion.** **Clicking anywhere on the group header row** (not just the
+2. **Expansion.** **Clicking anywhere on the scene header row** (not just the
    chevron) toggles expansion, which **animates** open/closed (popover custom
    views — the reason for the NSMenu→NSPopover switch), revealing one indented
    device row per member (icon, name, slider, mute). Chevron state always
    reflects actual expansion.
 3. **Devices section.** Ungrouped speakers each get their own row below the
-   groups — everything on the network is reachable from the panel.
-4. **Actions.** Separator, then plain items: "Save current setup as group…",
+   scenes — everything on the network is reachable from the panel.
+4. **Actions.** Separator, then plain items: "Save current setup as scene…",
    "Open mixer…".
 
 **Interaction / routing model (REVISED 2026-07-14 — SoundSource-inspired; this is
@@ -441,7 +441,7 @@ trailing control, a device-selector dropdown as THE routing control.
      Mac's own speakers are NOT a special selector entry — the current device is
      just one more device in the set. Passthrough is DERIVED: when the selected
      set is exactly {current device}, the app captures/streams nothing.
-   - **§2 Output Groups** — the saved groups.
+   - **§2 Output Scenes** — the saved scenes.
    The Main Audio **volume = a master GAIN, not a proportional master**. It holds
    its own value; what reaches a device is `Main × Group × Device`, multiplied on
    the 0–100 scale before the dB/curve mapping. A device's own level is never
@@ -460,9 +460,9 @@ trailing control, a device-selector dropdown as THE routing control.
      AirPlay implies moving the audio there). The user may manually re-toggle
      the current device afterwards to have both (Phase 1: that re-add hits the
      local-sync block below; the gesture exists, the engine unlocks it).
-3. Groups keep expansion (animated) + per-group master; group editing stays in
-   the mixer window; "Save current setup as group" quick-create remains (now =
-   "save Selected Speakers as a group").
+3. Scenes keep expansion (animated) + per-scene master; scene editing stays in
+   the mixer window; "Save current setup as scene" quick-create remains (now =
+   "save Selected Speakers as a scene").
 4. **Applications card — SHIPPED 2026-07-16** (see PLAN-POPOVER-ROUTING.md §B
    for the full resolved-decisions record; this supersedes the prior "Future
    (v2)" note). The popover now has a third card, **rendered last**, below
@@ -470,22 +470,22 @@ trailing control, a device-selector dropdown as THE routing control.
    **always-visible** volume slider (`ControlCenterSlider`, dimmed/disabled
    while the destination is "Current device," matching `DeviceRowView`
    dimming) · a "redirect audio to…" `NSPopUpButton` with **three
-   sections: Output Groups, Current Device and AirPlay Devices** (Main Out's
-   own Output Groups entries are unaffected).
-   - **An App Exception may target a saved GROUP — REVERSAL, 2026-08-28.**
-     This supersedes the original "no Groups" rule (PLAN-POPOVER-ROUTING
-     decision 4, now struck there). A group route follows the group's LIVE
-     membership: editing the group changes what the app plays on at once, and
+   sections: Output Scenes, Current Device and AirPlay Devices** (Main Out's
+   own Output Scenes entries are unaffected).
+   - **An App Exception may target a saved SCENE — REVERSAL, 2026-08-28.**
+     This supersedes the original "no Scenes" rule (PLAN-POPOVER-ROUTING
+     decision 4, now struck there). A scene route follows the scene's LIVE
+     membership: editing the scene changes what the app plays on at once, and
      no member list is stored with the route. Speakers the main output has
      claimed drop out of the app's set and it plays on whichever members are
      left — the entry says so ("Plays on 2 of 4 — the rest are in the main
      mix"), the stored route is untouched, and those speakers rejoin the app
-     when the main output releases them; a group with no free speaker is
+     when the main output releases them; a scene with no free speaker is
      listed but greyed. Members must be AirPlay 2 (no local Mac, no AirPlay 1,
      no Bluetooth, no Cast), the same rule a single target already has.
      What reaches a member is the app's own slider × that speaker's level
-     inside the group; the group's master volume does not apply. Deleting the
-     group returns its routes to "Follows main output".
+     inside the scene; the scene's master volume does not apply. Deleting the
+     scene returns its routes to "Follows main output".
 
    A hover-revealed **✕** removes the
    route (`HoverActionButton` idiom, same discipline as other rows). A
@@ -556,37 +556,37 @@ trailing control, a device-selector dropdown as THE routing control.
   with a short note ("synced everywhere-audio arrives with the new engine") —
   because pre-engine, local can't sync with AirPlay (~2s buffer; §8.1). The
   native engine's synced localOutput lifts this.
-- Selecting a group/Selection in Main Audio maps to OwnTone's output "selected"
+- Selecting a scene/Selection in Main Audio maps to OwnTone's output "selected"
   set (Phase 1) / the native engine's active output list (Phase 2).
 
-### Group setup (REVISED 2026-07-13 — quick-create in menu, edit in window)
+### Scene setup (REVISED 2026-07-13 — quick-create in menu, edit in window)
 
 The original in-menu editor (menu swaps to a form with a name `NSTextField`) is
 **not buildable**: Apple's docs state menu item views "receive all mouse
 events … but keyboard events are not supported" — no typing during menu
 tracking (see dev/notes/p1-menu-brief.md). ahh chose **quick-create**, REFINED 2026-07-13 after using the app (two gaps
-found: no manual creation, and duplicate groups):
+found: no manual creation, and duplicate scenes):
 
-- **Manual creation is the PRIMARY path, in the window.** A "New Group"
+- **Manual creation is the PRIMARY path, in the window.** A "New Scene"
   affordance (a "+" at the bottom of the sidebar source list, standard macOS
-  pattern) opens the editor on an EMPTY group: name `NSTextField` + a checklist
+  pattern) opens the editor on an EMPTY scene: name `NSTextField` + a checklist
   of ALL discovered devices to pick members + Save/Cancel. This is how you
   define "Downstairs = these two speakers" directly. Renaming, membership
-  checkboxes, reorder, and "Delete group…" edit existing groups the same way.
-- **Menu quick-create is a SHORTCUT only:** "Save current setup as group"
+  checkboxes, reorder, and "Delete scene…" edit existing scenes the same way.
+- **Menu quick-create is a SHORTCUT only:** "Save current setup as scene"
   captures the currently selected devices + volumes, auto-named. Secondary
   convenience, not the only path.
-- **DEDUP / group identity (required):** a group is identified by its member
-  SET (order-independent). The app must NOT create a duplicate group whose
-  members equal an existing group's. Consequences:
-  - When the current active output set exactly matches a saved group's members,
-    the app recognizes THAT group as active (`activeGroupID` derived from the
+- **DEDUP / scene identity (required):** a scene is identified by its member
+  SET (order-independent). The app must NOT create a duplicate scene whose
+  members equal an existing scene's. Consequences:
+  - When the current active output set exactly matches a saved scene's members,
+    the app recognizes THAT scene as active (`activeGroupID` derived from the
     selection) — it does not treat it as a nameless ad-hoc selection.
-  - The menu's "Save current setup as group" is HIDDEN/DISABLED when the current
-    selection already equals a saved group (it's already that group); if it
+  - The menu's "Save current setup as scene" is HIDDEN/DISABLED when the current
+    selection already equals a saved scene (it's already that scene); if it
     matches partially/differently it stays available.
-  - `GroupController` gains member-set matching (find group by member set) and
-    saveCurrentSetup dedups: identical set → resolve to the existing group
+  - `GroupController` gains member-set matching (find scene by member set) and
+    saveCurrentSetup dedups: identical set → resolve to the existing scene
     (activate it), never a second copy.
 
 ### Applications routing view — main window, v2 (decided 2026-07-09)
@@ -595,8 +595,8 @@ A "Routing" section in the sidebar opens the Applications view: one row per
 running audio app — icon + name from `NSWorkspace.shared.runningApplications` /
 `NSRunningApplication.icon` (documented AppKit API) — with an `NSPopUpButton`
 (pop-up style: "choose one from a set", shows current selection) offering:
-each group, each individual speaker, and **"This Mac (don't stream)"**. A final
-"Everything else" row sets the default destination (normally the active group).
+each scene, each individual speaker, and **"This Mac (don't stream)"**. A final
+"Everything else" row sets the default destination (normally the active scene).
 
 **Routing audio model (decided with ahh):**
 - **Overlaps mix.** Every speaker receives exactly one stream: the mix of all
@@ -626,7 +626,7 @@ each group, each individual speaker, and **"This Mac (don't stream)"**. A final
 | Window chrome | `NSWindow.toolbarStyle = .unified`, `styleMask` incl. `.fullSizeContentView` | Modern unified toolbar; use `contentLayoutGuide` to keep content clear of the titlebar. (`unifiedTitleAndToolbar` mask is deprecated/no-op.) |
 | Toolbar | `NSToolbar(identifier:)` + delegate | `displayMode`, `autosavesConfiguration`. Hosts master-volume slider + presets control. |
 | Sidebar | `NSSplitViewController` + `NSSplitViewItem.sidebar(withViewController:)` | Docs: this constructor automatically applies sidebar material/vibrancy and collapse behavior (`toggleSidebar(_:)`). |
-| Sidebar list | `NSOutlineView`, source-list style | Hierarchy: saved groups → member devices, Finder-favorites style; `autosaveExpandedItems`. |
+| Sidebar list | `NSOutlineView`, source-list style | Hierarchy: saved scenes → member devices, Finder-favorites style; `autosaveExpandedItems`. |
 | Mixer pane | `NSStackView` of device rows | Same row component as the menu. Swap to `NSTableView` (`.inset` style, `usesAutomaticRowHeights`) only if the device list ever needs scrolling. |
 | Presets picker | `NSPopUpButton` with `pullsDown = false` | Docs: pop-up (not pull-down) is for "choosing one item from a set" and shows the current selection. Saving/renaming presets are separate menu/toolbar actions, not mixed into the picker (pull-down semantics). |
 | Master volume | `NSSlider`, horizontal, in toolbar | Speaker SF Symbols at both ends (HIG: icons at slider ends convey meaning). |

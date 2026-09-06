@@ -412,11 +412,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     // MARK: Companion sync-calibration run (phone-driven)
 
-    /// How fresh each Bluetooth speaker's stored alignment is — fed the
+    /// What the Mac publishes about each Bluetooth speaker's timing — fed the
     /// baseband connect edges from ``finishBTReconnect(id:outcome:)`` and the
     /// alignment instants from the companion apply/commit paths below. Its own
-    /// lock; see ``BTAlignmentFreshness``.
-    public let btAlignmentFreshness = BTAlignmentFreshness()
+    /// lock; see ``BTSpeakerTiming``.
+    ///
+    /// `var` for one reason, and assigned exactly once: its store read is a
+    /// closure back onto this object, and Swift will not let an initializer
+    /// capture `self` until every stored property already has a value. The
+    /// placeholder below is replaced at the end of `init` and reports no
+    /// stored offset for anything, which is what a backend mid-init knows.
+    public private(set) var btSpeakerTiming = BTSpeakerTiming(storedOffsetMs: { _ in nil })
 
     /// The one companion sync-calibration run or fine-tune session in flight,
     /// if any. One at a time by decision — both engage the wizard feed, which
@@ -1793,6 +1799,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             let rms = NativeCaptureCoordinator.rmsOfFloat32(buffer)
             self.emitAppLevel(bundleID: bundleID, rms: rms)
         }
+        // Every stored property has a value by here, which is what lets the
+        // read capture `self` at all. The store's own lock is taken inside the
+        // closure and never while `BTSpeakerTiming`'s lock is held.
+        btSpeakerTiming = BTSpeakerTiming(storedOffsetMs: { [weak self] uid in
+            self?.btStoredAlignmentOffsetMs(forDevice: uid)
+        })
     }
 
     // MARK: OutputBackend
@@ -3920,9 +3932,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // .onConnectionsChanged` fires on every connect/disconnect
                 // edge but carries neither an address nor a direction, so it
                 // cannot attribute a link-up to a UID and is not a second feed
-                // for this. A reconnect both restarts the settling window and
-                // stales any alignment made before it.
-                self.btAlignmentFreshness.noteConnected(uid: id)
+                // for this. A reconnect restarts the settling window and moves
+                // the row onto last time's number.
+                self.btSpeakerTiming.noteConnected(uid: id)
                 // BT-LIFECYCLE: a baseband connect is not yet audio. A SELECTED
                 // id keeps breathing until its sink renders; an UNSELECTED one
                 // goes straight to `.off` — nothing will flow to it by design,
@@ -8636,11 +8648,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                             // process asked for it — a speaker power-cycled and
                             // the OS relinked it — so `finishBTReconnect` (the
                             // manual tap's own outcome) never sees it and this
-                            // is the only place the alignment's freshness could
-                            // learn the speaker renegotiated its buffering.
-                            // A manual reconnect reaches both, and the freshness
-                            // store collapses the two reports into one link-up.
-                            btAlignmentFreshness.noteConnected(uid: id)
+                            // is the only place the timing store could learn
+                            // the speaker renegotiated its buffering.
+                            // A manual reconnect reaches both, and the store
+                            // collapses the two reports into one link-up.
+                            btSpeakerTiming.noteConnected(uid: id)
                             // BT-LIFECYCLE: the endpoint existing is not yet
                             // audio — a selected row breathes until its sink
                             // renders, exactly like a fresh select.
@@ -8650,7 +8662,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                                 setConnectionState(.off, for: id)
                             }
                         } else {
-                            btAlignmentFreshness.noteDisconnected(uid: id)
+                            btSpeakerTiming.noteDisconnected(uid: id)
                             btConnectingDeadlines[id] = nil
                             if case .failed = existing.connectionState {
                                 // keep the failure story
@@ -8677,9 +8689,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // device is the only link-up it will ever see for it: a first
                 // pairing, or a speaker already up when the app launched. Both
                 // start a settle window (owner's call, 2026-09-04); neither
-                // stales a stored tuning, because the store has no alignment
-                // instant to be earlier than (`BTAlignmentFreshness.status`).
-                if snapshot.isConnected { btAlignmentFreshness.noteConnected(uid: id) }
+                // asks anything of the user, because a stored offset survives a
+                // reconnect and is applied again (`BTSpeakerTiming.status`).
+                if snapshot.isConnected { btSpeakerTiming.noteConnected(uid: id) }
                 known[id] = device
                 order.append(id)
                 emit(.deviceAdded(device))
@@ -8688,7 +8700,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         for id in order where known[id]?.kind == .bluetooth && !seen.contains(id) {
             guard var device = known[id], device.isAvailable else { continue }
             device.isAvailable = false
-            btAlignmentFreshness.noteDisconnected(uid: id)
+            btSpeakerTiming.noteDisconnected(uid: id)
             if expectedSelected.contains(id) { desiredAvailabilityMoved = true }
             commitKnownDevice(id, device)
         }
@@ -10645,16 +10657,17 @@ public protocol BTOutputControlling: AnyObject {
 
     // MARK: Phone-driven sync calibration
 
-    /// Fired when a Bluetooth device's alignment freshness moved — a
-    /// reconnect, an alignment landing, a tuning cleared — so the wiring can
-    /// rebuild and rebroadcast the companion snapshot. Default get-nil /
-    /// set-noop, so a conformer with no freshness to report compiles unchanged.
+    /// Fired when what the Mac would publish about a Bluetooth device's
+    /// timing moved — a reconnect, an alignment landing, a tuning cleared — so
+    /// the wiring can rebuild and rebroadcast the companion snapshot. Default
+    /// get-nil / set-noop, so a conformer with no timing to report compiles
+    /// unchanged.
     var onBTAlignmentChanged: (@Sendable () -> Void)? { get set }
 
-    /// How fresh this device's stored alignment is, for the snapshot's
+    /// What the Mac publishes about this device's timing, for the snapshot's
     /// `DeviceState.alignment`. `nil` (the default) means this backend reports
     /// no alignment at all and the phone shows none.
-    func btAlignmentReport(forDevice id: String) -> BTAlignmentReport?
+    func btAlignmentReport(forDevice id: String) -> BTSpeakerTimingReport?
 
     /// Stage and play a sync-calibration run for `targetID`, measured against
     /// `referenceID` — the reference the SNAPSHOT published, passed in rather
@@ -10727,7 +10740,7 @@ extension BTOutputControlling {
         get { nil }
         set { }
     }
-    public func btAlignmentReport(forDevice id: String) -> BTAlignmentReport? { nil }
+    public func btAlignmentReport(forDevice id: String) -> BTSpeakerTimingReport? { nil }
     public func startCompanionAlignmentProbe(targetID: String, referenceID: String,
                                              onStarted: @escaping () -> Void,
                                              onFinished: @escaping () -> Void) -> String? {
@@ -10772,7 +10785,7 @@ extension NativeBackend: BTOutputControlling {
             do { try btTrimStore?.save(all) } catch { StoreRecovery.noteWriteFailure(error) }
             // A persisted nudge is an alignment, wherever it came from: the
             // Mac's ruler, the wizard's trim Keep, or the phone's fine-tune.
-            btAlignmentFreshness.noteAligned(uid: id)
+            btSpeakerTiming.noteAligned(uid: id)
         }
         captureControlQueue.async { [weak self] in
             self?.btSink?.setTrimMs(value, forDeviceUID: id)
@@ -10796,7 +10809,7 @@ extension NativeBackend: BTOutputControlling {
         // delete, which `save`/`saveLatencies` (whole-map overwrites) could
         // only express by round-tripping the maps back out again.
         do { try btTrimStore?.clearAlignment(deviceUID: id) } catch { StoreRecovery.noteWriteFailure(error) }
-        btAlignmentFreshness.clearAligned(uid: id)
+        btSpeakerTiming.clearAligned(uid: id)
         // The reference floor is a function of the slowest KNOWN latency, so
         // dropping one can move it — same ordering as the wizard's Keep: the
         // reference first, then the sink's own two terms, both hops enqueued
@@ -10936,19 +10949,24 @@ extension NativeBackend: BTOutputControlling {
     private static let companionReportTimeoutSeconds: TimeInterval = 20
 
     public var onBTAlignmentChanged: (@Sendable () -> Void)? {
-        get { btAlignmentFreshness.onChange }
-        set { btAlignmentFreshness.onChange = newValue }
+        get { btSpeakerTiming.onChange }
+        set { btSpeakerTiming.onChange = newValue }
     }
 
-    public func btAlignmentReport(forDevice id: String) -> BTAlignmentReport? {
-        btAlignmentFreshness.report(uid: id, hasStoreEntry: btHasAlignmentEntry(forDevice: id))
+    public func btAlignmentReport(forDevice id: String) -> BTSpeakerTimingReport? {
+        btSpeakerTiming.report(uid: id)
     }
 
+    /// The offset this speaker has stored, which is both halves of what
+    /// ``BTSpeakerTiming`` asks the store: whether the row is tuned at all, and
+    /// what a reported measurement is compared against.
+    ///
     /// "Tuned" is decided by whether an entry EXISTS — a speaker deliberately
     /// aligned to exactly 0 is aligned (`BTTrimStore.clearAlignment`'s whole
-    /// point). Either half counts: a measured latency, or a trim.
-    private func btHasAlignmentEntry(forDevice id: String) -> Bool {
-        btTrimLock.withLock { btLatencyMsByUID[id] != nil || btTrimsByUID[id] != nil }
+    /// point). Either half counts: a measured latency, or a trim standing in
+    /// for one on a speaker no run has measured yet.
+    private func btStoredAlignmentOffsetMs(forDevice id: String) -> Double? {
+        btTrimLock.withLock { btLatencyMsByUID[id] ?? btTrimsByUID[id] }
     }
 
     /// Whether the Bluetooth manager renders at the feed's own rate — the same
@@ -11129,36 +11147,11 @@ extension NativeBackend: BTOutputControlling {
         let range = btWizardLatencyRangeMs(forDevice: targetID)
         let corrected = BTSyncTrim.snap(applied + (offsetMs - run.staggerMs))
         let value = Swift.min(Swift.max(corrected, range.lowerBound), range.upperBound)
-        // Every measurement, whether the run offered a re-check or not: what
-        // the microphone heard (`rawOffsetMs`) with the phone's own confidence
-        // (a peak-to-sidelobe ratio: ~1 is noise, a clean arrival runs to the
-        // hundreds), what it became after the stagger and the stored latency
-        // (`correctedMs`), and what was actually kept once clamped to the
-        // sink's reachable range (`keptMs`). A `keptMs` pinned to a range edge
-        // with `clamped=1` is a measurement the range could not express — the
-        // scatter to chase separately from a low confidence, which is a
-        // recording the room or the levels spoiled. Diagnostic while the
-        // one-shot measurement is proven on hardware; drop it once it is.
-        Telemetry.log(.localPlayback, "bt_align_measurement", [
-            "uid": targetID,
-            "confidence": String(format: "%.1f", confidence),
-            "rawOffsetMs": String(format: "%.1f", offsetMs),
-            "staggerMs": String(format: "%.1f", run.staggerMs),
-            "priorLatencyMs": String(Int(applied)),
-            "correctedMs": String(format: "%.1f", corrected),
-            "keptMs": String(format: "%.1f", value),
-            "clamped": value == corrected ? "0" : "1",
-            "rangeLoMs": String(Int(range.lowerBound)),
-            "rangeHiMs": String(Int(range.upperBound)),
-            "settleRemainingS": btAlignmentReport(forDevice: targetID)?.settleRemainingSeconds
-                .map(String.init) ?? "nil",
-        ])
-        btTrimLock.withLock { companionPreMeasurementLatencyMsByUID[targetID] = applied }
         // A re-check after a measurement made while the clock was still
         // settling: how far the early number was off, and how much the clock
         // stepped in between. Gathered from real use, never acted on. Read
-        // BEFORE the apply below, which records this measurement over the mark.
-        if let jumpSumMs = btAlignmentFreshness.earlyAlignmentJumpSumMs(uid: targetID) {
+        // BEFORE the record below, which puts this measurement over the mark.
+        if let jumpSumMs = btSpeakerTiming.earlyAlignmentJumpSumMs(uid: targetID) {
             Telemetry.log(.localPlayback, "bt_align_recheck_after_early", [
                 "uid": targetID,
                 "earlyMs": String(Int(applied)),
@@ -11166,15 +11159,49 @@ extension NativeBackend: BTOutputControlling {
                 "recheckMs": String(format: "%.1f", offsetMs - run.staggerMs),
             ])
         }
-        // The Mac wizard's Keep, exactly: measured latency written, trim
+        // ADR 0001: a measurement that lands within `AlignmentThresholds
+        // .replaceMs` of what is stored leaves the stored number alone, so a
+        // re-check that agrees never moves the speaker, and the phone reads
+        // `correctedMs == 0` as "the number stood". This call also records the
+        // alignment — as the microphone's, not the ear's — which is why the
+        // Keep below records none.
+        let decision = btSpeakerTiming.recordMeasurement(uid: targetID, correctedMs: value)
+        let keptMs = decision == .replace ? value : applied
+        // Every measurement, whether the run offered a re-check or not: what
+        // the microphone heard (`rawOffsetMs`) with the phone's own confidence
+        // (a peak-to-sidelobe ratio: ~1 is noise, a clean arrival runs to the
+        // hundreds), what it became after the stagger and the stored latency
+        // (`correctedMs`), and what the speaker was left on (`keptMs`) — the
+        // measurement clamped to the sink's reachable range when it replaced
+        // the stored number, the stored number itself when it did not
+        // (`replaced=0`). A `keptMs` pinned to a range edge with `clamped=1`
+        // is a measurement the range could not express — the scatter to chase
+        // separately from a low confidence, which is a recording the room or
+        // the levels spoiled. Diagnostic while the one-shot measurement is
+        // proven on hardware; drop it once it is.
+        Telemetry.log(.localPlayback, "bt_align_measurement", [
+            "uid": targetID,
+            "confidence": String(format: "%.1f", confidence),
+            "rawOffsetMs": String(format: "%.1f", offsetMs),
+            "staggerMs": String(format: "%.1f", run.staggerMs),
+            "priorLatencyMs": String(Int(applied)),
+            "correctedMs": String(format: "%.1f", corrected),
+            "keptMs": String(format: "%.1f", keptMs),
+            "replaced": decision == .replace ? "1" : "0",
+            "clamped": value == corrected ? "0" : "1",
+            "rangeLoMs": String(Int(range.lowerBound)),
+            "rangeHiMs": String(Int(range.upperBound)),
+            "clockState": btAlignmentReport(forDevice: targetID)?.clockState.rawValue ?? "nil",
+        ])
+        btTrimLock.withLock { companionPreMeasurementLatencyMsByUID[targetID] = applied }
+        // The Mac wizard's Keep, exactly: the kept latency written, trim
         // zeroed (it was a manual stand-in for the latency just measured).
-        endBTWizardLatencyPreview(forDevice: targetID, keepMs: value)
-        btAlignmentFreshness.noteAligned(uid: targetID)
+        endBTWizardLatencyPreview(forDevice: targetID, keepMs: keptMs, recordsAlignment: false)
         // Lowers the raised Bluetooth reference and releases the holds. A run
         // already stood down did both at the tail, and both are idempotent.
         endBTWizardRun()
         return .applied(measuredMs: offsetMs - run.staggerMs,
-                        correctedMs: Swift.max(0, value) - applied)
+                        correctedMs: Swift.max(0, keptMs) - applied)
     }
 
     public func setCompanionAlignmentTick(targetID: String, active: Bool) -> String? {
@@ -11236,7 +11263,7 @@ extension NativeBackend: BTOutputControlling {
         // The session's nudges were live-only until here; ending it is what
         // writes them down.
         setBTSyncTrim(ended.liveTrimMs, forDevice: targetID, persist: true)
-        btAlignmentFreshness.noteAligned(uid: targetID)
+        btSpeakerTiming.noteAligned(uid: targetID)
     }
 
     public func nudgeCompanionAlignmentTrim(targetID: String, deltaMs: Double) -> String? {
@@ -11280,7 +11307,7 @@ extension NativeBackend: BTOutputControlling {
         endCompanionTickSession(targetID: targetID, persist: false)
         resetBTAlignment(forDevice: targetID)
         btTrimLock.withLock { _ = companionPreMeasurementLatencyMsByUID.removeValue(forKey: targetID) }
-        btAlignmentFreshness.clearAligned(uid: targetID)
+        btSpeakerTiming.clearAligned(uid: targetID)
     }
 
     public func playCompanionAlignmentDemo(targetID: String, referenceID: String?) -> String? {
@@ -11454,6 +11481,16 @@ extension NativeBackend: BTOutputControlling {
     }
 
     public func endBTWizardLatencyPreview(forDevice id: String, keepMs: Double?) {
+        endBTWizardLatencyPreview(forDevice: id, keepMs: keepMs, recordsAlignment: true)
+    }
+
+    /// `recordsAlignment` is false for the one caller that has recorded this
+    /// alignment already — the phone's apply, whose number a microphone found
+    /// (``applyCompanionAlignmentMeasurement``). Recording again here would
+    /// file the microphone's measurement under
+    /// ``BTSpeakerTiming/Source/byEar`` and rebroadcast the snapshot twice.
+    private func endBTWizardLatencyPreview(forDevice id: String, keepMs: Double?,
+                                           recordsAlignment: Bool) {
         if let keepMs {
             let value = Swift.max(0, keepMs.rounded())
             // Keep writes BOTH halves of the delay term. The trim goes to 0
@@ -11472,21 +11509,20 @@ extension NativeBackend: BTOutputControlling {
             } catch {
                 StoreRecovery.noteWriteFailure(error)
             }
-            // The Mac's own Keep is an alignment like the phone's: the row
-            // and the sheet must read it as one, and the store marks it early
-            // if the clock was still settling.
-            btAlignmentFreshness.noteAligned(uid: id)
+            // A Keep is an alignment wherever it came from, so the row and
+            // the sheet read it as one, and the store marks it early if the
+            // clock was still settling.
+            if recordsAlignment { btSpeakerTiming.noteAligned(uid: id) }
             // The run's receipt, in one line: what was measured and what the
             // nudge was left at — the two halves of the delay term Keep writes,
             // so a live report never has to infer one from the other — plus
-            // how far into the settling window it was made. UI-thread call
+            // the Mac's verdict on the clock it was made against. UI-thread call
             // site (the popover's Keep), never the render or tap thread.
             Telemetry.log(.localPlayback, "wizard_keep", [
                 "uid": id,
                 "latencyMs": String(Int(value)),
                 "trimMs": "0",
-                "settleRemainingS": btAlignmentReport(forDevice: id)?.settleRemainingSeconds
-                    .map(String.init) ?? "nil",
+                "clockState": btAlignmentReport(forDevice: id)?.clockState.rawValue ?? "nil",
             ])
             // The reference floor is a function of the slowest known latency, so
             // a new measurement can move it — and it must move FIRST: pushing a

@@ -1024,10 +1024,10 @@ import AudioToolbox
 
         let localDuringProbe = localSink.enqueued.flatMap { $0 }
         let btDuringProbe = btSink.enqueued.flatMap { $0 }
-        // Well clear of the keep-alive bed (≤ 0.015) but under the engine
-        // lane's own peak, which is deliberately the quieter of the two —
-        // `AlignmentTickInjector.probeEngineLaneScale`.
-        #expect(localDuringProbe.contains { abs($0) > 0.1 },
+        // Well clear of the keep-alive bed (≤ 0.015) but under each lane's own
+        // peak. The engine/Mac lane is the deliberately quieter of the two, at
+        // `probeAmplitude × probeEngineLaneScale`.
+        #expect(localDuringProbe.contains { abs($0) > 0.05 },
                 "the engine/Mac fan-out heard its sweep")
         #expect(btDuringProbe.contains { abs($0) > 0.1 },
                 "the Bluetooth fan-out heard its sweep")

@@ -108,6 +108,21 @@ extension SerializedSharedState {
         func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome { .ready }
     }
 
+    /// Enough of the coordinator for a phone-driven run to reach the apply
+    /// path: it renders nothing and reports the sweeps started at once.
+    private final class ProbeStagingCapture: CaptureControlling, @unchecked Sendable {
+        var onLevel: (@Sendable (_ rms: Float) -> Void)?
+        var onStateChange: (@Sendable (_ state: NativeCaptureCoordinator.State) -> Void)?
+        func start() {}
+        func stop() {}
+        func stageCompanionMicProbe(staggered: Bool, referenceOnEngine: Bool,
+                                    downWindowUID: String?, upWindowUID: String?,
+                                    onStarted: @escaping () -> Void,
+                                    onFinished: @escaping () -> Void) {
+            onStarted()
+        }
+    }
+
     private final class NoOpLogStream: LogStreamSpawning, @unchecked Sendable {
         func start(onLine: @escaping @Sendable (String) -> Void,
                    onTermination: @escaping @Sendable () -> Void) throws {}
@@ -441,7 +456,7 @@ extension SerializedSharedState {
                 "Keep logs its own line: \(keepLine ?? "none")")
         #expect(keepLine?.contains("\"latencyMs\":\"280\"") == true)
         #expect(keepLine?.contains("\"trimMs\":\"0\"") == true)
-        #expect(keepLine?.contains("\"settleRemainingS\":\"nil\"") == true,
+        #expect(keepLine?.contains("\"clockState\":\"unknown\"") == true,
                 "the Mac publishes a clock verdict, never a number of seconds")
     }
 
@@ -467,11 +482,12 @@ extension SerializedSharedState {
                 "a speaker that is not connected has had no link-up to settle from")
     }
 
-    /// The Mac's own alignment paths go through the freshness store like the
+    /// The Mac's own alignment paths go through the timing store like the
     /// phone's do: Keep, Reset and a persisted trim each move the row, a
-    /// reconnect stales a Keep made before it, and a Keep made while the clock
-    /// is still settling is marked early without any extra code at the site.
-    @Test func theMacsOwnAlignmentPathsMoveTheRowsFreshness() throws {
+    /// reconnect leaves it tuned on last time's number, and a Keep made while
+    /// the clock is still settling is marked early without any extra code at
+    /// the site.
+    @Test func theMacsOwnAlignmentPathsMoveWhatTheRowPublishes() throws {
         let (backend, bt, _, _) = makeBackend(storeDirectory: scratchDir)
         defer { backend.stop() }
         final class ChangeCount: @unchecked Sendable {
@@ -486,13 +502,13 @@ extension SerializedSharedState {
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
         let uid = btMove.id
-        func report() -> BTAlignmentReport? { backend.btAlignmentReport(forDevice: uid) }
+        func report() -> BTSpeakerTimingReport? { backend.btAlignmentReport(forDevice: uid) }
         /// Eleven advancing samples a second apart: ten stable seconds, and
         /// the store's one publish on arriving there.
         func settleTheClock() {
             let from = Date()
             for s in 0...10 {
-                backend.btAlignmentFreshness.noteClockOutcome(
+                backend.btSpeakerTiming.noteClockOutcome(
                     uid: uid, outcome: .advanced, at: from.addingTimeInterval(Double(s)))
             }
         }
@@ -501,6 +517,7 @@ extension SerializedSharedState {
         let base = changes.value
         backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 280)
         #expect(report()?.status == .tuned, "a Keep while stable is an ordinary alignment")
+        #expect(report()?.source == .byEar, "the Mac's own wizard has no microphone")
         #expect(changes.value == base + 1)
 
         // The link drops and comes back. Nobody in this process asked, so
@@ -508,15 +525,17 @@ extension SerializedSharedState {
         bt.fire([BTDeviceSnapshot(id: uid, name: btMove.name, isConnected: false)])
         waitFor { self.device(backend, uid)?.isAvailable == false }
         bt.fire([btMove])
-        waitFor { report()?.status == .stale }
-        #expect(report()?.staleReason == BTAlignmentFreshness.staleReasonReconnected)
+        waitFor { report()?.source == .fromLastTime }
+        #expect(report()?.status == .tuned, "the stored offset is applied again, so nothing is asked")
+        #expect(report()?.staleReason == nil)
         #expect(report()?.clockState == .unknown, "a new link, and no verdict on its clock yet")
         #expect(report()?.settleRemainingSeconds == nil)
         #expect(changes.value == base + 2)
 
         backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 300)
         #expect(report()?.status == .stale, "a Keep before the clock settles again is early")
-        #expect(report()?.staleReason == BTAlignmentFreshness.staleReasonMeasuredWhileSettling)
+        #expect(report()?.staleReason == BTSpeakerTiming.staleReasonMeasuredWhileSettling)
+        #expect(report()?.source == .firstPass)
         #expect(changes.value == base + 3)
 
         settleTheClock()
@@ -534,6 +553,61 @@ extension SerializedSharedState {
         #expect(changes.value == base + 7)
         backend.setBTSyncTrim(13, forDevice: uid, persist: false)
         #expect(changes.value == base + 7, "a scrub is not")
+    }
+
+    /// ADR 0001's 10 ms line, down the path the phone actually uses: a
+    /// re-measurement that disagrees replaces the stored offset, one that
+    /// agrees leaves it where it is and tells the phone nothing moved. Drop
+    /// the decision and every re-check rewrites the speaker's latency by
+    /// whatever the room's scatter was that time.
+    @Test func aReportedMeasurementReplacesTheStoredOffsetOrKeepsIt() throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).save([btMove.id: 40])
+        let (backend, bt, sink, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        backend.captureCoordinator = ProbeStagingCapture()
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { !sink.trims.isEmpty }
+        let uid = btMove.id
+        // Ten jump-free seconds first, so what follows is measured against a
+        // clock the Mac calls steady rather than filed as a first pass.
+        let from = Date()
+        for second in 0...10 {
+            backend.btSpeakerTiming.noteClockOutcome(
+                uid: uid, outcome: .advanced, at: from.addingTimeInterval(Double(second)))
+        }
+        backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 300)
+        waitFor { backend.btMeasuredLatencyMs(forDevice: uid) == 300 }
+        let capture = LineCapture()
+        Telemetry._installTestSink { capture.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        func measure(offsetMs: Double) -> CompanionAlignmentApplyResult {
+            #expect(backend.startCompanionAlignmentProbe(
+                targetID: uid, referenceID: "local", onStarted: {}, onFinished: {}) == nil)
+            return backend.applyCompanionAlignmentMeasurement(
+                targetID: uid, offsetMs: offsetMs, confidence: 40)
+        }
+
+        #expect(measure(offsetMs: 11) == .applied(measuredMs: 11, correctedMs: 11))
+        #expect(backend.btMeasuredLatencyMs(forDevice: uid) == 311)
+        #expect(backend.btAlignmentReport(forDevice: uid)?.source == .measured,
+                "the microphone found this one, not the ear")
+
+        #expect(measure(offsetMs: 9) == .applied(measuredMs: 9, correctedMs: 0),
+                "under the line the stored offset stands, and the phone is told nothing moved")
+        #expect(backend.btMeasuredLatencyMs(forDevice: uid) == 311)
+
+        waitFor { capture.lines(evt: "bt_align_measurement").count == 2 }
+        let measurements = capture.lines(evt: "bt_align_measurement")
+        #expect(measurements.first?.contains("\"replaced\":\"1\"") == true,
+                "the log says which way each measurement went: \(measurements)")
+        #expect(measurements.first?.contains("\"keptMs\":\"311.0\"") == true)
+        #expect(measurements.last?.contains("\"replaced\":\"0\"") == true)
+        #expect(measurements.last?.contains("\"keptMs\":\"311.0\"") == true)
     }
 
     /// The candidate range a run may present ignores the device's trim, because

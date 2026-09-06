@@ -2,6 +2,7 @@
 
 import Foundation
 import Testing
+import AudioutProtocol
 @testable import AudioutCore
 
 /// `CompanionSnapshotBuilder` is a pure mapper, but every field it maps has a
@@ -611,10 +612,10 @@ import Testing
 
     // MARK: The Bluetooth clock verdict
 
-    /// The Mac publishes a verdict and no number: `clockState` carries the
-    /// report's raw value, `settleRemainingSeconds` goes over as nil, and a
-    /// non-Bluetooth row carries neither.
-    @Test func aBluetoothRowCarriesTheClockVerdictOntoTheWire() async throws {
+    /// The Mac publishes a verdict and no number: `clockState` and `source`
+    /// carry the report's raw values, `settleRemainingSeconds` goes over as
+    /// nil, and a non-Bluetooth row carries none of them.
+    @Test func aBluetoothRowCarriesTheClockVerdictAndTheSourceOntoTheWire() async throws {
         let backend = try await makeBackend([
             Device(id: "local", name: "Mac", kind: .localMac, isLocalDevice: true),
             Device(id: "bt-a", name: "Kitchen", kind: .bluetooth),
@@ -632,12 +633,13 @@ import Testing
             startBufferOptionsMs: defaultStartBufferOptionsMs,
             alignmentFor: { device in
                 guard device.kind == .bluetooth else { return nil }
-                return BTAlignmentReport(status: .tuned, settleRemainingSeconds: nil,
-                                         clockState: .settling)
+                return BTSpeakerTimingReport(status: .tuned, source: .fromLastTime,
+                                             clockState: .settling)
             }
         )
         let alignment = try #require(snapshot.devices.first { $0.id == "bt-a" }?.alignment)
         #expect(alignment.clockState == "settling")
+        #expect(alignment.source == AlignmentSource.fromLastTime)
         #expect(alignment.settleRemainingSeconds == nil)
         #expect(snapshot.devices.first { $0.id == "local" }?.alignment == nil,
                 "only Bluetooth rows ever carry an alignment")

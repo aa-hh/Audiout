@@ -429,7 +429,8 @@ final class AlignmentTickInjector: @unchecked Sendable {
     ///
     /// `shape` chooses between the two layouts — see ``ProbeShape``. The
     /// default is the Mac wizard's own simultaneous pair.
-    func stageProbe(amplitude: Double = 0.35, shape: ProbeShape = .simultaneous,
+    func stageProbe(amplitude: Double = AlignmentTickInjector.probeAmplitude,
+                    shape: ProbeShape = .simultaneous,
                     engineLaneScale: Double = AlignmentTickInjector.probeEngineLaneScale) {
         func samples(_ design: SyncProbe.SweepDesign, _ amplitude: Double) -> [Int32] {
             let scale = amplitude * 32_767.0
@@ -468,6 +469,14 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// How much quieter the engine/Mac probe lane plays than the Bluetooth
     /// one — −6 dB. See ``stageProbe(amplitude:shape:engineLaneScale:)``.
     static let probeEngineLaneScale = 0.5
+
+    /// The peak amplitude both sweeps play at. Set for the room, not for the
+    /// measurement: the correlator's confidence gate is a ratio of peak to
+    /// sidelobe, so it holds far below the level someone in the room will sit
+    /// through, and a sweep loud enough to startle is the "heavy static"
+    /// complaint again. Settled by ear on a real speaker; 0.25 is the fallback
+    /// if the far lane comes back thin.
+    static let probeAmplitude = 0.175
 
     var probeStaged: Bool { !probeBTLanes.isEmpty }
 

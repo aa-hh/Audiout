@@ -1,25 +1,28 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import Foundation
+import AudioutProtocol
 
-/// How fresh a Bluetooth speaker's stored alignment is, as the phone's sync
-/// sheet renders it. Answered per device UID from two in-memory timestamps
-/// plus the one durable fact (`BTTrimStore` has an entry for this UID or it
-/// does not).
+/// What the Mac publishes about one Bluetooth speaker's timing, and the one
+/// keep-or-replace decision a reported measurement needs. Answered per device
+/// UID from two in-memory timestamps, the clock detector's standing verdict,
+/// and the one durable fact — the store holds an offset for this UID or it
+/// does not — which the owner injects as a closure so a reader passes nothing
+/// but the UID.
 ///
-/// v1 knows exactly one way an alignment goes stale: the speaker
-/// **reconnected** since it was aligned. A Bluetooth link that drops and comes
-/// back renegotiates its own buffering, so the measured latency underneath a
-/// tuning made before that link is no longer the latency in force.
+/// A reconnect does not unset the row (ADR 0001). The stored offset is pushed
+/// to the sink again on every arm, so the honest report is a tuned speaker
+/// whose number is ``Source/fromLastTime``, and the phone offers a re-check
+/// once the clock reads steady. What makes a row stale is a number that cannot
+/// be trusted at all: one made while the clock was still settling, or a clock
+/// that has stepped since.
 ///
 /// Deliberately IN-MEMORY, not persisted: a launch starts every device at
-/// "nothing has reconnected since an alignment I know about", which is the
-/// honest answer — this process watched no earlier session's link edges, so it
-/// cannot claim a tuning went stale during one. That is also why ``status``
-/// answers `.tuned` for a store entry with no ``noteAligned(uid:at:)`` behind
-/// it: with no alignment instant recorded there is nothing for a connect to be
-/// "after", and reporting stale there would put every tuned speaker into the
-/// stale banner on every launch.
+/// "no alignment I watched being made", which is the honest answer — this
+/// process saw no earlier session's link edges or Keeps. That is why a store
+/// entry with no ``noteAligned(uid:at:)`` behind it reads tuned from last
+/// time rather than measured: the number is real and applied, and this
+/// process cannot say what found it.
 ///
 /// It also carries the other half the sheet needs: ``ClockState``, the Mac's
 /// standing verdict on whether this speaker's clock has settled since its link
@@ -31,16 +34,18 @@ import Foundation
 /// Threading: a plain lock, because the writers are on different queues —
 /// `NativeBackend.stateQueue` records connects, the main actor records
 /// alignments, and the snapshot builder reads.
-public final class BTAlignmentFreshness: @unchecked Sendable {
+public final class BTSpeakerTiming: @unchecked Sendable {
 
     /// What the phone's row shows. Wire values are the raw strings
     /// (`AudioutProtocol.DeviceState.AlignmentState.status`).
     public enum Status: String, Sendable {
         /// No stored alignment at all — "Timing not set".
         case notSet
-        /// Stored, and nothing has happened to invalidate it.
+        /// Stored, applied, and nothing has happened to it the row must
+        /// mention — whatever found the number, which ``Source`` carries.
         case tuned
-        /// Stored, but the speaker reconnected after it was made.
+        /// Stored and applied, but worth re-checking: made against a clock
+        /// that had not settled, or the clock has stepped since.
         case stale
     }
 
@@ -60,13 +65,40 @@ public final class BTAlignmentFreshness: @unchecked Sendable {
         case steady
     }
 
-    /// The ``Status/stale`` reasons (`DeviceState.AlignmentState.staleReason`
-    /// on the wire). A reconnect supersedes the other two.
-    public static let staleReasonReconnected = "reconnected"
-    /// The alignment was applied while the speaker's clock was still settling.
+    /// Where the offset now in force came from, so the row can say so without
+    /// working it out. Raw values are the wire strings
+    /// (`AudioutProtocol.AlignmentSource`).
+    public enum Source: String, Sendable {
+        /// A phone measurement taken once the Mac called the clock steady.
+        case measured
+        /// A measurement or a Keep made before the clock settled: applied and
+        /// labelled at once, re-checked when the clock reads steady.
+        case firstPass
+        /// The offset this speaker had when it was last aligned, applied again
+        /// on reconnect until a new measurement replaces it.
+        case fromLastTime
+        /// Found by ear — the Mac's paired-click wizard, or a nudge someone
+        /// typed or dragged. No microphone was involved.
+        case byEar
+    }
+
+    /// What a reported measurement does to the stored offset.
+    public enum MeasurementDecision: Equatable, Sendable {
+        /// Far enough from the stored offset to be a different answer.
+        case replace
+        /// Close enough that the stored offset stands, so the sink is left
+        /// where it is and the phone is told the number agreed.
+        case keepStored
+    }
+
+    /// One of the two ``Status/stale`` reasons
+    /// (`DeviceState.AlignmentState.staleReason` on the wire): the alignment
+    /// was made while the speaker's clock was still settling. A reconnected
+    /// speaker is neither reason — it is tuned from last time.
     public static let staleReasonMeasuredWhileSettling = "measuredWhileSettling"
-    /// The speaker's clock has stepped 10 ms or more, summed, since the
-    /// alignment was applied.
+    /// The other reason, and the one published when both stand: the speaker's
+    /// clock has stepped 10 ms or more, summed, since the alignment was
+    /// applied.
     public static let staleReasonMoved = "moved"
 
     /// How long after a baseband reconnect the Mac holds its verdict open when
@@ -111,12 +143,22 @@ public final class BTAlignmentFreshness: @unchecked Sendable {
     private var seenJumpSinceLinkUIDs: Set<String> = []
     private var measuredWhileSettlingUIDs: Set<String> = []
     private var movedUIDs: Set<String> = []
+    // Whose current offset a microphone found, as opposed to somebody's ear.
+    // Nothing else in here can tell the two apart, and the row says which.
+    private var measuredUIDs: Set<String> = []
     private let floorRebroadcastDelay: TimeInterval
+    private let storedOffsetMs: @Sendable (String) -> Double?
 
+    /// - Parameter storedOffsetMs: the offset the store holds for a UID, or
+    ///   `nil` for a speaker with none. Called OUTSIDE this type's lock, on
+    ///   every read and before every decision, because it reaches into the
+    ///   owner's store behind the owner's own lock.
     /// - Parameter floorRebroadcastDelay: how long after a link-up to re-check
     ///   whether ``settleSeconds`` expired with no evidence either way. Only
     ///   the tests pass anything but the floor itself.
-    public init(floorRebroadcastDelay: TimeInterval = BTAlignmentFreshness.settleSeconds) {
+    public init(storedOffsetMs: @escaping @Sendable (String) -> Double?,
+                floorRebroadcastDelay: TimeInterval = BTSpeakerTiming.settleSeconds) {
+        self.storedOffsetMs = storedOffsetMs
         self.floorRebroadcastDelay = floorRebroadcastDelay
     }
 
@@ -179,11 +221,43 @@ public final class BTAlignmentFreshness: @unchecked Sendable {
         lock.withLock { _ = linkUpUIDs.remove(uid) }
     }
 
-    /// An alignment landed for this device — a reported measurement applied,
-    /// a by-ear fine-tune committed, or the Mac wizard's Keep.
+    /// An alignment somebody's ear landed for this device — the Mac wizard's
+    /// Keep, a fine-tune committed, a nudge typed into the field. The phone's
+    /// measurements come in through
+    /// ``recordMeasurement(uid:correctedMs:at:)`` instead, and that is the
+    /// whole difference between ``Source/byEar`` and ``Source/measured``.
+    public func noteAligned(uid: String, at date: Date = Date()) {
+        let changed = lock.withLock { () -> (@Sendable () -> Void)? in
+            measuredUIDs.remove(uid)
+            return recordAlignmentLocked(uid: uid, at: date)
+        }
+        changed?()
+    }
+
+    /// A measurement the phone reported, about to be written: keep the stored
+    /// offset or replace it, and record the alignment either way.
     ///
-    /// Decides here, not at the call sites, whether it was made too early: an
-    /// alignment made against a clock the Mac does not call steady is marked
+    /// `correctedMs` is the offset the caller is about to store, already
+    /// through its own stagger and clamp arithmetic — this type does none of
+    /// that and hands the number back untouched. Call it BEFORE the store
+    /// write, because the decision reads what is stored now. A `keepStored`
+    /// still records the alignment: the phone confirmed the number, and a
+    /// confirmed number is no longer last time's.
+    public func recordMeasurement(uid: String, correctedMs: Double,
+                                  at date: Date = Date()) -> MeasurementDecision {
+        let decision = Self.decision(correctedMs: correctedMs, storedMs: storedOffsetMs(uid))
+        let changed = lock.withLock { () -> (@Sendable () -> Void)? in
+            measuredUIDs.insert(uid)
+            return recordAlignmentLocked(uid: uid, at: date)
+        }
+        changed?()
+        return decision
+    }
+
+    /// The half both recording paths share.
+    ///
+    /// Decides here, not at the call sites, whether the alignment was made too
+    /// early: one made against a clock the Mac does not call steady is marked
     /// "measured while settling", one made against a steady clock clears that
     /// mark. It is the same verdict the phone gates its button on, so the two
     /// surfaces can never disagree about what "too early" meant — including
@@ -193,19 +267,16 @@ public final class BTAlignmentFreshness: @unchecked Sendable {
     /// from marking every alignment early forever. Either way the jump sum
     /// restarts and a standing "moved" mark clears: this alignment is the new
     /// instant to move from.
-    public func noteAligned(uid: String, at date: Date = Date()) {
-        let changed = lock.withLock { () -> (@Sendable () -> Void)? in
-            alignedAtByUID[uid] = date
-            jumpSumSinceAlignedMsByUID[uid] = 0
-            movedUIDs.remove(uid)
-            if clockStateLocked(uid, now: date) != .steady {
-                measuredWhileSettlingUIDs.insert(uid)
-            } else {
-                measuredWhileSettlingUIDs.remove(uid)
-            }
-            return _onChange
+    private func recordAlignmentLocked(uid: String, at date: Date) -> (@Sendable () -> Void)? {
+        alignedAtByUID[uid] = date
+        jumpSumSinceAlignedMsByUID[uid] = 0
+        movedUIDs.remove(uid)
+        if clockStateLocked(uid, now: date) != .steady {
+            measuredWhileSettlingUIDs.insert(uid)
+        } else {
+            measuredWhileSettlingUIDs.remove(uid)
         }
-        changed?()
+        return _onChange
     }
 
     /// This device's tuning was cleared, so there is no alignment instant left
@@ -215,6 +286,7 @@ public final class BTAlignmentFreshness: @unchecked Sendable {
         let changed = lock.withLock { () -> (@Sendable () -> Void)? in
             alignedAtByUID.removeValue(forKey: uid)
             measuredWhileSettlingUIDs.remove(uid)
+            measuredUIDs.remove(uid)
             movedUIDs.remove(uid)
             return _onChange
         }
@@ -301,29 +373,29 @@ public final class BTAlignmentFreshness: @unchecked Sendable {
 
     // MARK: Reading
 
-    /// Everything the snapshot needs for one device.
+    /// Everything the snapshot needs for one device, from the UID alone.
     ///
     /// `settleRemainingSeconds` is always `nil`: the Mac publishes `clockState`
     /// and no seconds, for the reason the type's header gives. The field stays
     /// on the wire so an older phone still decodes the snapshot.
-    public func report(uid: String, hasStoreEntry: Bool, now: Date = Date()) -> BTAlignmentReport {
-        let (connected, aligned, clock, stale) = lock.withLock {
-            (lastConnectedAtByUID[uid], alignedAtByUID[uid],
-             clockStateLocked(uid, now: now),
-             movedUIDs.contains(uid)
-                ? Self.staleReasonMoved
-                : measuredWhileSettlingUIDs.contains(uid) ? Self.staleReasonMeasuredWhileSettling : nil)
+    public func report(uid: String, now: Date = Date()) -> BTSpeakerTimingReport {
+        let hasStoredOffset = storedOffsetMs(uid) != nil
+        let (connected, aligned, clock, early, moved, measured) = lock.withLock {
+            () -> (Date?, Date?, ClockState, Bool, Bool, Bool) in
+            (lastConnectedAtByUID[uid], alignedAtByUID[uid], clockStateLocked(uid, now: now),
+             measuredWhileSettlingUIDs.contains(uid), movedUIDs.contains(uid),
+             measuredUIDs.contains(uid))
         }
-        var status = Self.status(hasStoreEntry: hasStoreEntry, lastConnectedAt: connected, alignedAt: aligned)
-        var staleReason: String?
-        if status == .stale {
-            staleReason = Self.staleReasonReconnected
-        } else if status == .tuned, let stale {
-            status = .stale
-            staleReason = stale
-        }
-        return BTAlignmentReport(status: status, settleRemainingSeconds: nil,
-                                 clockState: clock, staleReason: staleReason)
+        let status = Self.status(hasStoredOffset: hasStoredOffset, measuredEarly: early, moved: moved)
+        return BTSpeakerTimingReport(
+            status: status,
+            source: Self.source(hasStoredOffset: hasStoredOffset, lastConnectedAt: connected,
+                                alignedAt: aligned, measuredEarly: early, byEar: !measured),
+            clockState: clock,
+            staleReason: status == .stale
+                ? (moved ? Self.staleReasonMoved : Self.staleReasonMeasuredWhileSettling)
+                : nil,
+            settleRemainingSeconds: nil)
     }
 
     /// The whole clock verdict, as a pure function of the three inputs — so it
@@ -339,16 +411,42 @@ public final class BTAlignmentFreshness: @unchecked Sendable {
         return settleRemainingSeconds(lastConnectedAt: lastConnectedAt, now: now) != nil ? .unknown : .steady
     }
 
-    /// The whole staleness rule, as a pure function of the three inputs — so
-    /// it is assertable without a clock, a device, or a store.
-    public static func status(hasStoreEntry: Bool,
-                              lastConnectedAt: Date?,
-                              alignedAt: Date?) -> Status {
-        guard hasStoreEntry else { return .notSet }
-        // No alignment instant recorded (a store entry made in an earlier
-        // launch): nothing for a connect to be after. See the type's doc.
-        guard let alignedAt, let lastConnectedAt else { return .tuned }
-        return lastConnectedAt > alignedAt ? .stale : .tuned
+    /// The whole row rule, as a pure function of the store's answer and the
+    /// two marks — so it is assertable without a clock, a device, or a store.
+    /// A reconnect is not in it: the stored offset goes back on the sink, so the row stays tuned and
+    /// ``source(hasStoredOffset:lastConnectedAt:alignedAt:measuredEarly:byEar:)``
+    /// says where the number came from.
+    public static func status(hasStoredOffset: Bool, measuredEarly: Bool, moved: Bool) -> Status {
+        guard hasStoredOffset else { return .notSet }
+        return measuredEarly || moved ? .stale : .tuned
+    }
+
+    /// Where the offset in force came from, as a pure function of the same
+    /// facts. Highest precedence first: a link that came up after the
+    /// alignment — or an alignment this process never watched being made —
+    /// means the number is last time's; then a clock that had not settled,
+    /// which is a first pass whatever found the number; then the ear or the
+    /// microphone. `nil` exactly when there is no stored offset, which is the
+    /// one case ``Status/notSet`` covers.
+    public static func source(hasStoredOffset: Bool, lastConnectedAt: Date?, alignedAt: Date?,
+                              measuredEarly: Bool, byEar: Bool) -> Source? {
+        guard hasStoredOffset else { return nil }
+        guard let alignedAt else { return .fromLastTime }
+        if let lastConnectedAt, lastConnectedAt > alignedAt { return .fromLastTime }
+        if measuredEarly { return .firstPass }
+        return byEar ? .byEar : .measured
+    }
+
+    /// Keep the stored offset or replace it, from the one number that decides
+    /// it: how far the measurement about to be written lands from what is
+    /// stored. Under ``AlignmentThresholds/replaceMs`` the stored value stands,
+    /// so a re-measurement that agrees never moves the sink — the re-roll
+    /// between two links of one speaker is tens of milliseconds, and this line
+    /// is what separates that from measurement scatter (ADR 0001). A speaker
+    /// with nothing stored has nothing to keep.
+    public static func decision(correctedMs: Double, storedMs: Double?) -> MeasurementDecision {
+        guard let storedMs else { return .replace }
+        return abs(correctedMs - storedMs) >= AlignmentThresholds.replaceMs ? .replace : .keepStored
     }
 
     /// Whole seconds left in the post-connect floor, or `nil` once it has
@@ -417,29 +515,34 @@ public enum CompanionAlignmentApplyResult: Equatable {
     case refused(String)
 }
 
-/// One device's alignment freshness, as ``CompanionSnapshotBuilder`` maps it
-/// onto the wire. The reference half of the wire struct is NOT here: it is a
-/// function of the whole live device list, so the builder computes it.
-public struct BTAlignmentReport: Equatable, Sendable {
-    public let status: BTAlignmentFreshness.Status
-    /// Always `nil` from ``BTAlignmentFreshness/report(uid:hasStoreEntry:now:)``
-    /// — see its doc. The wire field is still there for an older phone to
-    /// decode.
-    public let settleRemainingSeconds: Int?
+/// One device's timing, as ``CompanionSnapshotBuilder`` maps it onto the wire.
+/// The reference half of the wire struct is NOT here: it is a function of the
+/// whole live device list, so the builder computes it.
+public struct BTSpeakerTimingReport: Equatable, Sendable {
+    public let status: BTSpeakerTiming.Status
+    /// Set exactly when `status` is anything but
+    /// ``BTSpeakerTiming/Status/notSet``.
+    public let source: BTSpeakerTiming.Source?
     /// Whether a measurement taken now would measure the speaker or its
     /// settling.
-    public let clockState: BTAlignmentFreshness.ClockState
-    /// Set exactly when `status` is ``BTAlignmentFreshness/Status/stale``:
-    /// one of the three `staleReason*` strings.
+    public let clockState: BTSpeakerTiming.ClockState
+    /// Set exactly when `status` is ``BTSpeakerTiming/Status/stale``: either
+    /// `staleReason*` string.
     public let staleReason: String?
+    /// Always `nil` from ``BTSpeakerTiming/report(uid:now:)`` — see its doc.
+    /// The wire field is still there for an older phone to decode.
+    public let settleRemainingSeconds: Int?
 
-    public init(status: BTAlignmentFreshness.Status, settleRemainingSeconds: Int?,
-                clockState: BTAlignmentFreshness.ClockState = .steady,
-                staleReason: String? = nil) {
+    public init(status: BTSpeakerTiming.Status,
+                source: BTSpeakerTiming.Source? = nil,
+                clockState: BTSpeakerTiming.ClockState = .steady,
+                staleReason: String? = nil,
+                settleRemainingSeconds: Int? = nil) {
         self.status = status
-        self.settleRemainingSeconds = settleRemainingSeconds
+        self.source = source
         self.clockState = clockState
         self.staleReason = staleReason
+        self.settleRemainingSeconds = settleRemainingSeconds
     }
 }
 

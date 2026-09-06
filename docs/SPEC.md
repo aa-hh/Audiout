@@ -441,7 +441,7 @@ trailing control, a device-selector dropdown as THE routing control.
      Mac's own speakers are NOT a special selector entry — the current device is
      just one more device in the set. Passthrough is DERIVED: when the selected
      set is exactly {current device}, the app captures/streams nothing.
-   - **§2 Output Scenes** — the saved scenes.
+   - **§2 Output Groups** — the saved scenes.
    The Main Audio **volume = a master GAIN, not a proportional master**. It holds
    its own value; what reaches a device is `Main × Group × Device`, multiplied on
    the 0–100 scale before the dB/curve mapping. A device's own level is never
@@ -470,8 +470,8 @@ trailing control, a device-selector dropdown as THE routing control.
    **always-visible** volume slider (`ControlCenterSlider`, dimmed/disabled
    while the destination is "Current device," matching `DeviceRowView`
    dimming) · a "redirect audio to…" `NSPopUpButton` with **three
-   sections: Output Scenes, Current Device and AirPlay Devices** (Main Out's
-   own Output Scenes entries are unaffected).
+   sections: Output Groups, Current Device and AirPlay Devices** (Main Out's
+   own Output Groups entries are unaffected).
    - **An App Exception may target a saved SCENE — REVERSAL, 2026-08-28.**
      This supersedes the original "no Scenes" rule (PLAN-POPOVER-ROUTING
      decision 4, now struck there). A scene route follows the scene's LIVE

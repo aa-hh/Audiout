@@ -23,15 +23,23 @@ import Foundation
 public enum Analytics {
 
     /// A capture destination: `capture` receives the event name and
-    /// properties, `consentChanged` receives the new consent value whenever
+    /// properties, `captureError` receives a failure name and properties,
+    /// `consentChanged` receives the new consent value whenever
     /// ``setConsent(_:)`` is called.
+    ///
+    /// `captureError` has no default. A sink that quietly dropped failures
+    /// would be indistinguishable from a build where nothing ever failed, so
+    /// every sink has to say what it does with them.
     public struct Sink: Sendable {
         public let capture: @Sendable (String, [String: String]) -> Void
+        public let captureError: @Sendable (String, [String: String]) -> Void
         public let consentChanged: @Sendable (Bool) -> Void
 
         public init(capture: @escaping @Sendable (String, [String: String]) -> Void,
+                    captureError: @escaping @Sendable (String, [String: String]) -> Void,
                     consentChanged: @escaping @Sendable (Bool) -> Void) {
             self.capture = capture
+            self.captureError = captureError
             self.consentChanged = consentChanged
         }
     }
@@ -73,6 +81,34 @@ public enum Analytics {
             return s.sink
         }
         snapshot?.capture(event.description, properties)
+    }
+
+    /// Report a failure the user actually felt — audio that stopped, a
+    /// settings file that would not save — to PostHog error tracking, so the
+    /// stream of what breaks in the field is visible next to what gets used.
+    /// Gated exactly like ``capture(_:_:)``: no sink or no consent, no send.
+    ///
+    /// `name` is a `StaticString` for the same reason event names are: it can
+    /// only ever be a literal written into this repo, so no runtime value can
+    /// reach PostHog as the failure's identity. `properties` carry the same
+    /// fence as every other event (PRODUCT.md Data Collection) — counts,
+    /// enum-like strings and booleans, never a speaker name, a user's bundle
+    /// id, a file path, or anything typed. Cocoa error descriptions are the
+    /// trap here: `localizedDescription` routinely embeds a full local path,
+    /// so send the domain and the code instead.
+    ///
+    /// Name failures `category:object_failed` in snake_case, matching
+    /// ``capture(_:_:)``'s event naming.
+    ///
+    /// Crashes need no call: the SDK's own `errorTrackingConfig.autoCapture`
+    /// (set in `AppDelegate.configurePostHog()`) reports the unhandled ones.
+    /// This is for the handled failures, which nothing else would ever see.
+    public static func captureError(_ name: StaticString, _ properties: [String: String] = [:]) {
+        let snapshot: Sink? = state.withLock { s in
+            guard s.consent else { return nil }
+            return s.sink
+        }
+        snapshot?.captureError(name.description, properties)
     }
 
     // MARK: - Implementation

@@ -97,6 +97,14 @@ DHEXDUMP(int severity, int domain, const unsigned char *data, int data_len, cons
 void
 engine_logger_wire_libevent(void);
 
+/* Append every line at or below AIRPLAYENGINE_LOG_LEVEL to `path`, rotating it
+ * to "<path>.1" once it reaches `cap_bytes` (0 keeps the current cap, 5 MB by
+ * default). NULL or "" closes the file and writes none. AIRPLAYENGINE_LOG_FILE,
+ * when set, overrides `path`. The shim has no default path: the host decides
+ * where its logs live (AirPlayEngine.setLogFile). Thread-safe. */
+void
+engine_logger_set_file(const char *path, long cap_bytes);
+
 #ifdef __cplusplus
 }
 #endif

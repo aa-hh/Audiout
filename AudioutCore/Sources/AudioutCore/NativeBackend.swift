@@ -5671,7 +5671,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
 
         case .failed(let error):
-            let (shouldRetry, attempt): (Bool, Int) = stateQueue.sync {
+            let (shouldRetry, attempt, noted): (Bool, Int, Bool) = stateQueue.sync {
                 let running = self.captureRunning
                 let retryable = error.isRetryable
                 if running {
@@ -5691,11 +5691,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // `DispatchWorkItem` reference.
                     self.pendingCaptureRetry?.cancel()
                     self.pendingCaptureRetry = nil
-                    return (false, 0)
+                    return (false, 0, running)
                 }
                 let attempt = self.captureRetryCount + 1
                 self.captureRetryCount = attempt
-                return (true, attempt)
+                return (true, attempt, running)
+            }
+            // Only when capture was actually wanted — the same test the note
+            // above uses. A failure with nothing selected is bookkeeping, not
+            // a user hearing silence. `kind` is the bare case name; the raw
+            // Core Audio `reason` string stays local.
+            if noted {
+                Telemetry.fail(.captureWS, "capture:whole_system_failed",
+                               local: ["reason": String(describing: error)],
+                               shared: [
+                                   "kind": error.kind,
+                                   "retrying": error.isRetryable ? "true" : "false",
+                               ])
             }
             if shouldRetry {
                 scheduleCaptureRetry(attempt: attempt)
@@ -6705,6 +6717,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                             self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
                             self.enterFailure(id, cause: .timingUnavailable)
                         }
+                        Telemetry.fail(.airplay, "airplay:connect_failed",
+                                       local: ["device": id],
+                                       shared: ["cause": "timingUnavailable"])
                         return
                     }
 
@@ -6813,6 +6828,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
                         self.enterFailure(id, cause: cause, detail: String(describing: error))
                     }
+                    // The engine error rides along locally only: its
+                    // description can name the receiver.
+                    Telemetry.fail(.airplay, "airplay:connect_failed",
+                                   local: ["device": id, "detail": String(describing: error)],
+                                   shared: ["cause": "\(cause)"])
                     return
                 }
             } else {
@@ -8250,6 +8270,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             "gap_max_ms": String(format: "%.1f", snapshot.interArrivalGap.maxMs),
         ])
 
+        // One line per content stream: was there SOUND in what we sent? On
+        // 2026-09-05 a session read "connected" with packets flowing and no
+        // sound, and nothing in the log could tell it from healthy playback.
+        // `silent_s` is the field to read first. Device ids stay local.
+        let dropped = self.engine.writeBacklogSnapshot().droppedWrites
+        for level in self.engine.streamLevelSnapshot() {
+            let devices = self.streamBindings.filter { $0.value == level.streamId }.keys.sorted()
+            Telemetry.log(.airplay, "stream_health", [
+                "stream": "\(level.streamId)",
+                "devices": devices.joined(separator: ","),
+                "peak_dbfs": String(format: "%.1f", level.peakDBFS),
+                "silent_s": String(format: "%.0f", level.silentSeconds),
+                "writes": "\(level.writes)",
+                "dropped_writes": "\(dropped)",
+            ])
+        }
+
         // Schedule the next poll (~5s). This reschedules on stateQueue, matching the
         // pattern of the wake watchdog above (stateQueue.asyncAfter with a weak self).
         let work = DispatchWorkItem { [weak self] in self?.pollSchedulingSnapshot() }
@@ -8923,15 +8960,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // telemetry until now, so a dropped session had to be inferred
                     // from the absence of other events (live debug 2026-08-29,
                     // where that inference cost an afternoon and still landed on
-                    // the wrong cause). Cleartext device id, same rationale as
-                    // `exclusion_changed`: this is what makes "why did it stop"
-                    // legible.
-                    Telemetry.log(.airplay, "engine_session_failed", [
-                        "device": id,
-                        "state": "\(state)",
-                        "cause": "\(cause)",
-                        "wasStreaming": wasStreaming ? "true" : "false",
-                    ])
+                    // the wrong cause). The device id stays local — same rationale
+                    // as `exclusion_changed`, it is what makes "why did it stop"
+                    // legible on this Mac — and only the cause shape goes out.
+                    Telemetry.fail(.airplay, "airplay:session_failed",
+                                   local: ["device": id],
+                                   shared: [
+                                       "state": "\(state)",
+                                       "cause": "\(cause)",
+                                       "wasStreaming": wasStreaming ? "true" : "false",
+                                   ])
                 }
             case .stopped:
                 device.isSelected = false
@@ -10175,12 +10213,21 @@ protocol EngineControlling: Sendable {
     /// mixer's write path, same throttled/delta-gated cadence as
     /// `writeBacklogSnapshot()`/`write_backlog_drop`.
     nonisolated func writeCadenceSnapshot() -> WriteCadenceSnapshot
+
+    /// Peak level and silence run per content stream since the last call
+    /// (mirrors `AirPlayEngine/streamLevelSnapshot()`). Polled with the
+    /// scheduling snapshot every ~5 s into the `stream_health` line. Empty by
+    /// default so a conformer that predates it compiles unchanged.
+    nonisolated func streamLevelSnapshot() -> [StreamLevelSnapshot]
 }
 
 extension EngineControlling {
     /// Default: an all-zero (healthy) snapshot, so every existing test double
     /// compiles unchanged. ``EngineAdapter`` overrides this with the real read.
     func writeBacklogSnapshot() -> WriteBacklogSnapshot { WriteBacklogSnapshot() }
+
+    /// Default: no streams, same reason as `writeBacklogSnapshot()`.
+    nonisolated func streamLevelSnapshot() -> [StreamLevelSnapshot] { [] }
 
     /// Default: legacy single-stream behavior (`streamId` 0), so a conformer
     /// that predates T2 doesn't need updating. ``EngineAdapter`` overrides this
@@ -10248,6 +10295,7 @@ struct EngineAdapter: EngineControlling {
     /// Real read of the write-path backpressure guard (T14 diagnostic).
     /// `nonisolated` on the engine, so no hop/await is needed here.
     func writeBacklogSnapshot() -> WriteBacklogSnapshot { engine.writeBacklogSnapshot() }
+    nonisolated func streamLevelSnapshot() -> [StreamLevelSnapshot] { engine.streamLevelSnapshot() }
     @discardableResult
     func updateDiscovery(_ descriptor: DeviceDescriptor) async throws -> OutputID {
         try await engine.updateDiscovery(descriptor)

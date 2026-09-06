@@ -899,6 +899,13 @@ public func makeBackend(
         // buffer. Tunable per run via AIRPLAY_START_BUFFER_MS for the gated
         // by-ear verification — see AirPlayEngine/docs/latency-analysis.md.
         let startBufferMs = nativeStartBufferMs()
+        // The sender's own log goes beside the decision log so one support
+        // bundle carries both. Off under tests, like the decision log itself.
+        if !HeadlessRuntime.isActive {
+            let logs = Telemetry.defaultDirectory
+            try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+            AirPlayEngine.setLogFile(path: logs.appendingPathComponent("engine.log").path)
+        }
         let engine = AirPlayEngine(
             config: EngineConfig(startBufferMs: startBufferMs))
         // Bundle ID → full process-object set, supplied by the caller

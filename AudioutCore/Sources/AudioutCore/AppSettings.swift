@@ -578,6 +578,14 @@ public struct AppSettings {
         trialDateFormatter.date(from: text) ?? wholeSecondDateFormatter.date(from: text)
     }
 
+    /// The other direction, for the one request that sends a date to the
+    /// licence server (``TrialRegistrar``). Same formatter the trial dates are
+    /// stored with, so the text the server reads is the text on disk — a second
+    /// spelling of a timestamp here is how the two ends start disagreeing.
+    static func serverText(from date: Date) -> String {
+        trialDateFormatter.string(from: date)
+    }
+
     /// When this Mac's 14-day trial began, or `nil` if it never started one.
     /// Written by ``TrialClock`` — locally at the start, then replaced by the
     /// licence server's own record once the trial registers.

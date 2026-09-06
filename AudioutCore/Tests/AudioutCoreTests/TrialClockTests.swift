@@ -102,6 +102,60 @@ import Testing
                 == .active(daysLeft: 14, expiresAt: serverExpires, registered: true))
     }
 
+    // MARK: The two one-time banners
+
+    /// The moment `daysAgo` days into a 14-day trial that started at `started`.
+    private func day(_ daysAgo: Double) -> Date {
+        Self.started.addingTimeInterval(daysAgo * 86_400)
+    }
+
+    /// Red if the banners started appearing early — on day one a trialist has
+    /// nothing to be warned about.
+    @Test func noBannerIsOwedEarlyInTheTrialOrOutsideOne() {
+        let settings = settings()
+        #expect(TrialClock.owedBanner(settings: settings, now: Self.started) == nil,
+                "no trial, no banner")
+
+        TrialClock.start(settings: settings, now: Self.started)
+        #expect(TrialClock.owedBanner(settings: settings, now: day(1)) == nil)
+        #expect(TrialClock.owedBanner(settings: settings, now: day(10)) == nil,
+                "four days left is still too early")
+        #expect(TrialClock.owedBanner(settings: settings, now: day(20)) == nil,
+                "a trial that is over warns about nothing")
+    }
+
+    /// Red if either banner stopped being one-time — the pair would then nag
+    /// on every open for the rest of the trial.
+    @Test func eachBannerIsOwedOnceAndThenNeverAgain() {
+        let settings = settings()
+        TrialClock.start(settings: settings, now: Self.started)
+
+        #expect(TrialClock.owedBanner(settings: settings, now: day(11)) == .threeDays)
+        TrialClock.markBannerShown(.threeDays, settings: settings)
+        #expect(TrialClock.owedBanner(settings: settings, now: day(11)) == nil)
+        #expect(TrialClock.owedBanner(settings: settings, now: day(11.5)) == nil,
+                "still the three-day window, and it is spent")
+
+        #expect(TrialClock.owedBanner(settings: settings, now: day(13.5)) == .lastDay)
+        TrialClock.markBannerShown(.lastDay, settings: settings)
+        #expect(TrialClock.owedBanner(settings: settings, now: day(13.5)) == nil)
+    }
+
+    /// Red if a Mac first opened on day 14 got the "ends in 3 days" warning
+    /// after the last-day one — the trial would appear to count backwards.
+    @Test func theLastDayBannerSpendsTheThreeDayOneToo() {
+        let settings = settings()
+        TrialClock.start(settings: settings, now: Self.started)
+
+        // Never opened between day 11 and day 14: both are due, and only the
+        // sharper one shows.
+        #expect(TrialClock.owedBanner(settings: settings, now: day(13.5)) == .lastDay)
+        TrialClock.markBannerShown(.lastDay, settings: settings)
+
+        #expect(settings.trialBannerThreeDaysShown, "the milder warning is spent unshown")
+        #expect(TrialClock.owedBanner(settings: settings, now: day(13.6)) == nil)
+    }
+
     // MARK: Clearing
 
     /// Red if deleting the licence key stopped clearing the trial fields — the

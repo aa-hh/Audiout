@@ -17,6 +17,19 @@ public enum TrialState: Equatable {
     case expired(expiresAt: Date)
 }
 
+/// A warning shown once in the life of a trial and never again.
+///
+/// The raw value is the days-left threshold that raises it, and it is what
+/// rides the `day` property of `license:banner_shown`.
+public enum TrialBanner: String, Equatable {
+
+    /// Three days left.
+    case threeDays = "3"
+
+    /// The last day. Tomorrow the welcome gate is back.
+    case lastDay = "1"
+}
+
 /// The local half of the trial: when it started, when it ends, and whether the
 /// licence server knows about it. Callers ask one question, ``state(settings:now:)``.
 ///
@@ -56,6 +69,39 @@ public enum TrialClock {
         settings.trialStartedAt = now
         settings.trialExpiresAt = now.addingTimeInterval(length)
         settings.trialRegistered = false
+    }
+
+    /// Which one-time banner this Mac is still owed, or `nil` for none.
+    ///
+    /// Only a running trial is owed one. The last-day warning wins whenever
+    /// both are due, and it is the only one a Mac gets from then on: someone
+    /// who never opened the app between day 11 and day 14 has missed the
+    /// milder warning for good, and showing it afterwards would count
+    /// backwards.
+    public static func owedBanner(settings: AppSettings, now: Date = Date()) -> TrialBanner? {
+        guard case .active(let daysLeft, _, _) = state(settings: settings, now: now) else {
+            return nil
+        }
+        if daysLeft <= 1 { return settings.trialBannerLastDayShown ? nil : .lastDay }
+        if daysLeft <= 3 { return settings.trialBannerThreeDaysShown ? nil : .threeDays }
+        return nil
+    }
+
+    /// Records that a banner has gone on screen, and reports it.
+    ///
+    /// Written the moment the banner appears rather than when it is dismissed:
+    /// a flag that waited for a dismissal would bring the banner back after a
+    /// quit. The last-day warning marks the three-day one shown too, which is
+    /// what ``owedBanner(settings:now:)`` above relies on.
+    public static func markBannerShown(_ banner: TrialBanner, settings: AppSettings) {
+        switch banner {
+        case .threeDays:
+            settings.trialBannerThreeDaysShown = true
+        case .lastDay:
+            settings.trialBannerLastDayShown = true
+            settings.trialBannerThreeDaysShown = true
+        }
+        Analytics.capture("license:banner_shown", ["day": banner.rawValue])
     }
 
     /// Records what the licence server said about this Mac's trial.

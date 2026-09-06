@@ -654,7 +654,26 @@ public struct AppSettings {
     /// `AUDIOUT_BUY_URL`). `nil` in a build that carries no such key, which
     /// is what hides every buy affordance — the Settings button and the
     /// Mixer note's action alike read this one value.
+    ///
+    /// While a trial is running it carries `?t=<trial key>`, which is what lets
+    /// the checkout mark that trial converted and activate this Mac without
+    /// anyone pasting a key. It is added HERE, not at the four places that open
+    /// the page, so no call site can forget it. Two cases deliberately get the
+    /// plain page: a trial that has not registered yet holds no key, and an
+    /// invented `t` would name nothing; and a trial that is over is no longer
+    /// converting, so its expired key has nothing to say to the checkout.
     public var buyURL: URL? {
+        guard let page = buyPageURL else { return nil }
+        guard case .active = TrialClock.state(settings: self),
+              let key = licenseKey, !key.isEmpty,
+              var components = URLComponents(url: page, resolvingAgainstBaseURL: false)
+        else { return page }
+        components.queryItems = (components.queryItems ?? []) + [URLQueryItem(name: "t", value: key)]
+        return components.url ?? page
+    }
+
+    /// The purchase page as configured, before the trial id is added.
+    private var buyPageURL: URL? {
         buyURLOverride ?? Self.bundleURL(forInfoDictionaryKey: "AudioutBuyURL")
     }
 

@@ -138,6 +138,12 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
 
     public override func loadView() {
         trialState = TrialClock.state(settings: settings)
+        if case .expired = trialState {
+            // The gate is only ever built in order to be shown, so building it
+            // IS the impression — and it is the one moment a test can reach,
+            // since nothing here may put a window on screen.
+            Analytics.capture("license:expired_gate_shown")
+        }
         field.translatesAutoresizingMaskIntoConstraints = false
 
         let mark = NSImageView()

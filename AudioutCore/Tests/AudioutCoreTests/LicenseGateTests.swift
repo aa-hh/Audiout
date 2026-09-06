@@ -610,7 +610,7 @@ import Testing
     }
 }
 
-/// The gate's one trial event, asserted on the real `Analytics` call rather
+/// The gate's trial events, asserted on the real `Analytics` calls rather
 /// than on a hook only a test can see.
 ///
 /// Nested under `SerializedSharedState` because `Analytics.install` mutates
@@ -622,30 +622,81 @@ extension SerializedSharedState {
 
         private final class Captured: @unchecked Sendable {
             private let lock = NSLock()
-            private var items: [String] = []
-            func append(_ name: String) { lock.withLock { items.append(name) } }
-            func names() -> [String] { lock.withLock { items } }
+            private var items: [(String, [String: String])] = []
+            func append(_ name: String, _ properties: [String: String] = [:]) {
+                lock.withLock { items.append((name, properties)) }
+            }
+            func names() -> [String] { lock.withLock { items }.map(\.0) }
+            func properties() -> [[String: String]] { lock.withLock { items }.map(\.1) }
         }
 
         private let isolation = TestIsolation(owner: "LicenseGateTrialAnalyticsTests")
+
+        private static let key = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+
+        private func gateSettings(_ store: UserDefaults) -> AppSettings {
+            AppSettings(defaults: store,
+                        licenseServerURL: URL(string: "https://license.example.com"))
+        }
+
+        /// Installs a sink for the body and puts `Analytics` back afterwards.
+        private func withSink(_ body: (Captured) -> Void) {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { name, props in
+                captured.append(name, props)
+            }, consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+            body(captured)
+        }
 
         /// Red if starting a trial stopped reporting it. This name is read as
         /// a string by the PostHog insight behind the trial funnel, so it is
         /// pinned here rather than left to whatever the call site says.
         @Test func startingTheTrialIsCaptured() {
-            let settings = AppSettings(
-                defaults: isolation.isolatedDefaults,
-                licenseServerURL: URL(string: "https://license.example.com"))
+            let settings = gateSettings(isolation.isolatedDefaults)
             let content = LicenseGateViewController(settings: settings,
                                                     openURL: { _ in }, onPassed: {})
-            let captured = Captured()
-            Analytics.install(Analytics.Sink(capture: { name, _ in captured.append(name) },
-                                             consentChanged: { _ in }), consent: true)
-            defer { Analytics.install(nil, consent: false) }
+            withSink { captured in
+                content.test_tapTrial()
+                #expect(captured.names() == ["license:trial_started"])
+            }
+        }
 
-            content.test_tapTrial()
+        /// Red if the gate a spent trial lands on stopped reporting itself —
+        /// that count is the denominator every conversion is measured against.
+        /// It must also stay silent on a FIRST open, or every fresh install
+        /// would land in it.
+        @Test func onlyTheExpiredGateReportsThatItWasShown() {
+            withSink { captured in
+                let firstOpen = gateSettings(isolation.makeDefaults())
+                _ = LicenseGateViewController(settings: firstOpen,
+                                              openURL: { _ in }, onPassed: {}).view
+                #expect(captured.names().isEmpty, "nobody's trial has ended here")
 
-            #expect(captured.names() == ["license:trial_started"])
+                let spent = gateSettings(isolation.makeDefaults())
+                TrialClock.apply(settings: spent,
+                                 startedAt: Date(timeIntervalSinceNow: -20 * 86_400),
+                                 expiresAt: Date(timeIntervalSinceNow: -6 * 86_400),
+                                 key: Self.key)
+                _ = LicenseGateViewController(settings: spent,
+                                              openURL: { _ in }, onPassed: {}).view
+                #expect(captured.names() == ["license:expired_gate_shown"])
+            }
+        }
+
+        /// Red if either banner stopped reporting, or if the two stopped being
+        /// told apart — the funnel could then not say which warning converts.
+        @Test func showingABannerReportsWhichDayItWas() {
+            withSink { captured in
+                let settings = gateSettings(isolation.makeDefaults())
+                TrialClock.start(settings: settings)
+                TrialClock.markBannerShown(.threeDays, settings: settings)
+                TrialClock.markBannerShown(.lastDay, settings: settings)
+
+                #expect(captured.names()
+                        == ["license:banner_shown", "license:banner_shown"])
+                #expect(captured.properties().map { $0["day"] } == ["3", "1"])
+            }
         }
     }
 }

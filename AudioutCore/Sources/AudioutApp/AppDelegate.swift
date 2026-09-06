@@ -1001,6 +1001,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Analytics.capture("license:buy_link_opened", ["source": "mixer_note"])
             NSWorkspace.shared.open(url)
         }
+        // The trial's own two rungs of the same note slot, above the
+        // unregistered note `applyLicenseState()` drives: a Mac mid-trial is
+        // not an unregistered install. Both are asked fresh on every rebuild,
+        // so the pill follows every open with no clock of its own.
+        popoverController.trialStateProvider = { [settings] in
+            TrialClock.state(settings: settings)
+        }
+        popoverController.trialBannerOwedProvider = { [settings] in
+            TrialClock.owedBanner(settings: settings)
+        }
+        popoverController.onTrialBannerShown = { [settings] banner in
+            TrialClock.markBannerShown(banner, settings: settings)
+        }
         // Metering-active gate (T-GATE): only compute/emit `.level` while the
         // popover is actually open. `backend as? MeteringControlling` is nil for
         // backends without the capability (`OwnToneBackend`), so this is a no-op

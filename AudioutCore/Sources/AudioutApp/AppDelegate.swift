@@ -196,6 +196,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// .onCheckForUpdates`). Nil here is the whole gate.
     private var updaterController: SPUStandardUpdaterController?
 
+    /// Watches for the network coming back so a trial that started offline can
+    /// still reach the licence server. Held here because it owns a monitor that
+    /// has to outlive `applicationDidFinishLaunching`; it cancels itself once
+    /// there is nothing left to register.
+    private var trialReachability: TrialReachability?
+
     /// The resolved backend kind (same resolution `makeBackend()` used). The
     /// first-run setup flow only presents on `.native` — the sole path that taps
     /// audio in-process and discovers under the app's own identity, so the sole
@@ -832,6 +838,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                              updaterDelegate: nil,
                                                              userDriverDelegate: nil)
         }
+
+        // A trial can start with no network, so the server may not know about
+        // it yet. Ask before the check-in and validate calls below: if this one
+        // lands, they pick up the trial key it stored. If it doesn't, they run
+        // on the old state and the next launch — or `TrialReachability`, when
+        // the network returns — tries again. Nothing here waits on an answer,
+        // which is how every other licence call in this block behaves.
+        TrialRegistrar.registerIfNeeded(settings: settings)
+        trialReachability = TrialReachability(settings: settings)
+        trialReachability?.start()
 
         // Licence check-in (roadmap 054): telemetry recording device spread,
         // never a gate — see `LicenseCheckIn`'s doc comment. A build run from

@@ -409,6 +409,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the wizard never rewrites the latter. Same lock, same read/write
     /// pattern, and persisted in the same file's second map.
     private var btLatencyMsByUID: [String: Double] = [:]   // btTrimLock
+    /// A small counting number per Bluetooth device UID, handed out in order
+    /// of first sighting. It is what the release analytics event names a
+    /// speaker by: the UID is derived from the MAC address, and the address
+    /// space is small enough that even a hash of one is reversible by
+    /// enumeration, while an index carries nothing but the order this install
+    /// met its speakers in. Same lock and same file as the maps above, its own
+    /// third map.
+    private var btSpeakerIndexByUID: [String: Int] = [:]   // btTrimLock
 
     // MARK: Companion sync-calibration run (phone-driven)
 
@@ -1650,6 +1658,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if let latencies = (try? btTrimStore?.loadLatencies()) ?? nil {
             self.btLatencyMsByUID = latencies.mapValues { Swift.max(0, $0) }
         }
+        if let indices = (try? btTrimStore?.loadSpeakerIndex()) ?? nil {
+            self.btSpeakerIndexByUID = indices
+        }
         self.castOffsetStore = castOffsetStore
         if let castOffsets = (try? castOffsetStore?.load()) ?? nil {
             self.castOffsetsByID = castOffsets.mapValues {
@@ -1802,9 +1813,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Every stored property has a value by here, which is what lets the
         // read capture `self` at all. The store's own lock is taken inside the
         // closure and never while `BTSpeakerTiming`'s lock is held.
-        btSpeakerTiming = BTSpeakerTiming(storedOffsetMs: { [weak self] uid in
-            self?.btStoredAlignmentOffsetMs(forDevice: uid)
-        })
+        btSpeakerTiming = BTSpeakerTiming(
+            storedOffsetMs: { [weak self] uid in self?.btStoredAlignmentOffsetMs(forDevice: uid) },
+            speakerKey: { [weak self] uid in self?.btSpeakerKey(forDevice: uid) ?? "?" },
+            deviceClassMinor: { [weak self] uid in self?.btDeviceClassMinor(forDevice: uid) })
     }
 
     // MARK: OutputBackend
@@ -8572,7 +8584,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// on the OPEN path, and `stateQueue` can be busy behind a converge.
     private var btLastUsed: [String: Date] = [:]   // btLastUsedLock
 
-    /// Guards ``btLastUsed`` alone — see that property's note.
+    /// Each known pairing's device class (``BTDeviceSnapshot/deviceClassMinor``),
+    /// stashed beside ``btLastUsed`` for the same reason: `known` is
+    /// `stateQueue`-confined, and the settle record is assembled from three
+    /// other queues, one of which is `stateQueue` itself.
+    private var btDeviceClassMinorByUID: [String: UInt32] = [:]   // btLastUsedLock
+
+    /// Guards ``btLastUsed`` and ``btDeviceClassMinorByUID`` — see those
+    /// properties' notes.
     private let btLastUsedLock = NSLock()
 
     /// The ids the enumerator's LATEST merged list contains — i.e. every BT id
@@ -8608,7 +8627,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         for snapshot in snapshots {
             let id = snapshot.id
             seen.insert(id)
-            btLastUsedLock.withLock { btLastUsed[id] = snapshot.lastUsed }
+            btLastUsedLock.withLock {
+                btLastUsed[id] = snapshot.lastUsed
+                if let minor = snapshot.deviceClassMinor { btDeviceClassMinorByUID[id] = minor }
+            }
             if let existing = known[id] {
                 var updated = existing
                 updated.name = snapshot.name
@@ -10969,6 +10991,31 @@ extension NativeBackend: BTOutputControlling {
         btTrimLock.withLock { btLatencyMsByUID[id] ?? btTrimsByUID[id] }
     }
 
+    /// What names this speaker in the release analytics event: its
+    /// ``btSpeakerIndexByUID`` entry, minted here the first time this install
+    /// is asked about the UID and written to the same file the trims live in.
+    /// Highest index plus one rather than a count, so a map that ever loses an
+    /// entry cannot hand a second speaker the first one's number.
+    private func btSpeakerKey(forDevice id: String) -> String {
+        let (index, all) = btTrimLock.withLock { () -> (Int, [String: Int]?) in
+            if let existing = btSpeakerIndexByUID[id] { return (existing, nil) }
+            let minted = (btSpeakerIndexByUID.values.max() ?? 0) + 1
+            btSpeakerIndexByUID[id] = minted
+            return (minted, btSpeakerIndexByUID)
+        }
+        if let all {
+            do { try btTrimStore?.saveSpeakerIndex(all) } catch { StoreRecovery.noteWriteFailure(error) }
+        }
+        return String(index)
+    }
+
+    /// The pairing's device class, from the stash ``applyBTSnapshots(_:)``
+    /// keeps — `known` is `stateQueue`-confined and this is read from three
+    /// other queues.
+    private func btDeviceClassMinor(forDevice id: String) -> UInt32? {
+        btLastUsedLock.withLock { btDeviceClassMinorByUID[id] }
+    }
+
     /// Whether the Bluetooth manager renders at the feed's own rate — the same
     /// question `NativeCaptureCoordinator` asks its base resampler
     /// (`SyncedLocalBaseResampler.isIdentity`), from the one input that decides
@@ -11513,6 +11560,10 @@ extension NativeBackend: BTOutputControlling {
             // the sheet read it as one, and the store marks it early if the
             // clock was still settling.
             if recordsAlignment { btSpeakerTiming.noteAligned(uid: id) }
+            // Both halves are written and the sink push is enqueued below, so
+            // the row's number is this one from here — measured, first pass or
+            // by ear, whichever the record above left it as.
+            btSpeakerTiming.noteOffsetApplied(uid: id)
             // The run's receipt, in one line: what was measured and what the
             // nudge was left at — the two halves of the delay term Keep writes,
             // so a live report never has to infer one from the other — plus

@@ -589,7 +589,7 @@ public final class GeneralSettingsViewController: NSViewController {
     /// The usage-analytics consent live hint: what sharing does or doesn't do.
     private static func consentHintLine(_ enabled: Bool) -> String {
         enabled
-            ? "Anonymous feature counts help improve Audiout."
+            ? "Anonymous feature counts and speaker timings help improve Audiout."
             : "No usage data leaves this Mac."
     }
 

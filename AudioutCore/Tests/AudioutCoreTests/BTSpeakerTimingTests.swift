@@ -532,3 +532,180 @@ import Testing
             targetID: "nobody", among: room(), isAudible: { _ in true }) == .refused("Unknown speaker."))
     }
 }
+
+/// The settle record: one per link-up, written to the local decision log with
+/// the device UID and to the release analytics event without it.
+///
+/// Nested under ``SerializedSharedState`` because both destinations are
+/// process-global test seams — `Telemetry._installTestSink(_:)` and
+/// `Analytics.install(_:consent:)`. Outside the parent they race every other
+/// suite that installs either one, and the loser reads back nothing.
+extension SerializedSharedState {
+
+@Suite final class BTSpeakerTimingTests: IsolatedSuite {
+
+    /// Looks like a real Core Audio Bluetooth UID, because half of what these
+    /// tests assert is that this string never reaches the release event.
+    private let uid = "C4-38-75-0E-BF-4A:output"
+
+    private final class LineCapture: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [String] = []
+        func append(_ line: String) { lock.withLock { lines.append(line) } }
+        func lines(evt: String) -> [String] {
+            lock.withLock { lines.filter { $0.contains("\"evt\":\"\(evt)\"") } }
+        }
+    }
+
+    private final class EventCapture: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events: [(String, [String: String])] = []
+        func append(_ name: String, _ properties: [String: String]) {
+            lock.withLock { events.append((name, properties)) }
+        }
+        func properties(of name: String) -> [[String: String]] {
+            lock.withLock { events.filter { $0.0 == name }.map(\.1) }
+        }
+    }
+
+    /// Both sinks armed for the body of one test, and taken away again
+    /// whichever way it leaves.
+    private func withSinks(_ body: (LineCapture, EventCapture) -> Void) {
+        let lines = LineCapture()
+        let events = EventCapture()
+        Telemetry._installTestSink { lines.append($0) }
+        Analytics.install(Analytics.Sink(capture: { events.append($0, $1) },
+                                         consentChanged: { _ in }), consent: true)
+        defer {
+            Analytics.install(nil, consent: false)
+            Telemetry._installTestSink(nil)
+        }
+        body(lines, events)
+    }
+
+    private func timing(storedOffsetMs: Double? = 42,
+                        speakerKey: String = "7",
+                        codec: String? = nil,
+                        deviceClassMinor: UInt32? = 5,
+                        floorRebroadcastDelay: TimeInterval = BTSpeakerTiming.settleSeconds)
+        -> BTSpeakerTiming {
+        BTSpeakerTiming(storedOffsetMs: { _ in storedOffsetMs },
+                        speakerKey: { _ in speakerKey },
+                        codec: { _ in codec },
+                        deviceClassMinor: { _ in deviceClassMinor },
+                        floorRebroadcastDelay: floorRebroadcastDelay)
+    }
+
+    /// Ten jump-free seconds, which is what the detector calls settled.
+    private func settle(_ timing: BTSpeakerTiming, uid: String, from: Date) {
+        for second in 0...10 {
+            timing.noteClockOutcome(uid: uid, outcome: .advanced,
+                                    at: from.addingTimeInterval(Double(second)))
+        }
+    }
+
+    /// The record exists to say what one connection was like, so a second copy
+    /// of it double-counts a speaker and a missing one loses the connections
+    /// that never settled — the ones worth reading. Delete the pending-set
+    /// guard and the arrival at steady emits again on every later sample.
+    @Test func oneRecordPerLinkUpAtWhicheverEndComesFirst() {
+        withSinks { lines, events in
+            let timing = self.timing()
+            let start = Date()
+            timing.noteConnected(uid: self.uid, at: start)
+            self.settle(timing, uid: self.uid, from: start)
+            SuiteWait.untilOnRunLoop("the settled link to be recorded") {
+                lines.lines(evt: "bt_link_settled").count == 1
+            }
+            #expect(events.properties(of: "bt_sync:link_settled").count == 1)
+
+            // Everything after the record for this link is silence.
+            timing.noteClockOutcome(uid: self.uid, outcome: .advanced,
+                                    at: start.addingTimeInterval(11))
+            timing.noteDisconnected(uid: self.uid)
+            #expect(events.properties(of: "bt_sync:link_settled").count == 1,
+                    "a link-up gets one record, not one per sample")
+
+            // A second link that drops before its clock ever settles is the
+            // case the drop end exists for.
+            timing.noteConnected(uid: self.uid, at: start.addingTimeInterval(20))
+            timing.noteDisconnected(uid: self.uid)
+            SuiteWait.untilOnRunLoop("the dropped link to be recorded") {
+                lines.lines(evt: "bt_link_settled").count == 2
+            }
+            #expect(events.properties(of: "bt_sync:link_settled").count == 2)
+        }
+    }
+
+    /// The consent promise the card makes is only true if the release event
+    /// cannot carry the speaker's identity, and the UID is derived from its
+    /// MAC address (`BTTrimStore`). Put the UID in the dictionary and this
+    /// goes red; so does adding a property the event vocabulary does not list.
+    @Test func theReleaseEventNamesTheSpeakerByIndexAndNeverByItsUID() {
+        withSinks { lines, events in
+            let timing = self.timing()
+            let start = Date()
+            timing.noteConnected(uid: self.uid, at: start)
+            timing.noteClockOutcome(uid: self.uid, outcome: .jumped(magnitudeMs: 30),
+                                    at: start.addingTimeInterval(1))
+            self.settle(timing, uid: self.uid, from: start.addingTimeInterval(1))
+            SuiteWait.untilOnRunLoop("the settled link to be recorded") {
+                lines.lines(evt: "bt_link_settled").count == 1
+            }
+
+            #expect(events.properties(of: "bt_sync:link_settled").first == [
+                "speaker": "7",
+                "jump_count": "1",
+                "settle_seconds_bucket": "10-29",
+                "offset_ms_bucket": "40-99",
+                "offset_source": "fromLastTime",
+                "speaker_kind": "bluetooth",
+            ])
+            // The local file is the other half of the promise: it is the one
+            // the owner joins to `bt_align_measurement`, so it keeps the UID.
+            let local = lines.lines(evt: "bt_link_settled").first
+            #expect(local?.contains("\"uid\":\"\(self.uid)\"") == true)
+            #expect(local?.contains("\"deviceClass\":\"5\"") == true)
+        }
+    }
+
+    /// The floor is a Mac that gave up waiting, not a speaker that took 60
+    /// seconds. Report the number anyway and every silent speaker lands in the
+    /// slowest bucket, which is a measurement of nothing.
+    @Test func secondsToSettleIsAbsentWhenTheFloorMadeTheVerdict() {
+        withSinks { lines, events in
+            let timing = self.timing(floorRebroadcastDelay: 0.05)
+            // Backdated so the shortened timer lands past the floor itself,
+            // which is what makes the verdict steady with no evidence at all.
+            timing.noteConnected(
+                uid: self.uid, at: Date().addingTimeInterval(-BTSpeakerTiming.settleSeconds - 1))
+            SuiteWait.untilOnRunLoop("the floor's expiry to record the link") {
+                lines.lines(evt: "bt_link_settled").count == 1
+            }
+
+            let release = events.properties(of: "bt_sync:link_settled").first
+            #expect(release?["settle_seconds_bucket"] == nil)
+            #expect(release?["jump_count"] == "0")
+            #expect(lines.lines(evt: "bt_link_settled").first?.contains("settleSeconds") == false)
+        }
+    }
+
+    /// A speaker whose number the store already holds is playing it again from
+    /// the moment its link comes up; one with nothing stored has nothing
+    /// applied and must say nothing, or the event counts speakers instead of
+    /// offsets.
+    @Test func theLinkUpReportsTheRememberedOffsetAsApplied() {
+        withSinks { _, events in
+            self.timing().noteConnected(uid: self.uid, at: Date())
+            #expect(events.properties(of: "bt_sync:offset_applied") == [
+                ["offset_source": "fromLastTime", "offset_ms_bucket": "40-99"],
+            ])
+        }
+        withSinks { _, events in
+            self.timing(storedOffsetMs: nil).noteConnected(uid: self.uid, at: Date())
+            #expect(events.properties(of: "bt_sync:offset_applied").isEmpty)
+        }
+    }
+}
+
+} // extension SerializedSharedState

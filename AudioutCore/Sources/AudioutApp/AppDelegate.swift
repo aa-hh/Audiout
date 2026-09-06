@@ -2523,6 +2523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Read per welcome, not captured once: a licence check-in that lands
         // after the server started still reaches the next phone to connect.
         companionServer.companionToken = { [settings] in settings.companionToken }
+        companionServer.serverID = { [settings] in settings.companionServerID }
         companionServer.onApprovalRequest = { [weak self] clientID, clientName, decide in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }

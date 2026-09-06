@@ -258,6 +258,36 @@ import AudioutProtocol
                 "the welcome should carry the token the wiring answered at send time")
     }
 
+    /// The join id is what lets a phone's own analytics say which Mac it was
+    /// talking to, so two phones connecting to one Mac have to read the same
+    /// value. Generate it per welcome instead of reading the persisted one and
+    /// every connection looks like a different Mac.
+    @Test func everyWelcomeCarriesTheSameJoinID() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = makeAutoApprovingServer()
+        defer { server.stop() }
+        server.serverID = { "7C7F4E2A-0D19-4C6E-9B31-9F1E5A3D2B08" }
+
+        let snapshot = makeSnapshot()
+        server.broadcast(snapshot)
+
+        func joinIDOfNextWelcome() throws -> String? {
+            let (client, log) = try connectClient(via: hub, to: server)
+            defer { client.cancel() }
+            try sendHello(over: client)
+            try #require(waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
+                         "the client was never welcomed")
+            for message in log.messages {
+                if case .welcome(_, _, _, _, let serverID) = message { return serverID }
+            }
+            return nil
+        }
+
+        #expect(try joinIDOfNextWelcome() == "7C7F4E2A-0D19-4C6E-9B31-9F1E5A3D2B08")
+        #expect(try joinIDOfNextWelcome() == "7C7F4E2A-0D19-4C6E-9B31-9F1E5A3D2B08")
+    }
+
     @Test func aTokenArrivingAfterTheWelcomeIsPushedToConnectedClients() throws {
         let hub = try makeHub()
         defer { hub.cancel() }

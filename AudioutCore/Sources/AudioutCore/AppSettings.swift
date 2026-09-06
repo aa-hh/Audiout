@@ -99,6 +99,7 @@ public struct AppSettings {
         static let licenseStatus = "license.status"
         static let licenseMaxMajor = "license.maxMajor"
         static let companionToken = "license.companionToken"
+        static let companionServerID = "companion.serverID"
         static let telemetryOptIn = "telemetry.optIn"
         static let telemetryAsked = "telemetry.asked"
         static let touchBarControls = "general.touchBarControls"
@@ -567,6 +568,23 @@ public struct AppSettings {
         }
         let generated = UUID().uuidString
         defaults.set(generated, forKey: Keys.licenseInstallID)
+        return generated
+    }
+
+    /// The join id the Mac sends each phone in its `welcome`, generated once
+    /// and kept for the life of the install.
+    ///
+    /// Deliberately its OWN random value rather than ``installID``. That one
+    /// is the analytics identity — PostHog's distinct id — and reusing it here
+    /// would put the Mac's analytics identity on the wire to every phone that
+    /// connects, where a phone could attach it to events of its own. This is a
+    /// join key and nothing more: no Apple ID, no name, no hardware serial.
+    public var companionServerID: String {
+        if let existing = defaults.string(forKey: Keys.companionServerID) {
+            return existing
+        }
+        let generated = UUID().uuidString
+        defaults.set(generated, forKey: Keys.companionServerID)
         return generated
     }
 

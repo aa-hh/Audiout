@@ -482,6 +482,47 @@ extension SerializedSharedState {
                 "a speaker that is not connected has had no link-up to settle from")
     }
 
+    /// The release event names a speaker by an index this install hands out,
+    /// because the UID is derived from the speaker's MAC address. The index
+    /// has to survive a reconnect, or one speaker's history splits in two, and
+    /// two speakers must never share one, or two histories merge. Mint it from
+    /// the map's count instead of its highest value and a cleared entry does
+    /// exactly that.
+    @Test func eachSpeakerKeepsOneIndexAndNoTwoShareIt() throws {
+        let dir = scratchDir
+        let (backend, bt, _, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        let capture = LineCapture()
+        Telemetry._installTestSink { capture.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        backend.start()
+        bt.fire([btMove, btFlip])
+        waitFor { self.device(backend, self.btMove.id) != nil
+            && self.device(backend, self.btFlip.id) != nil }
+
+        // Each link drops before its clock settles, so each closes its record
+        // on the way out.
+        backend.btSpeakerTiming.noteDisconnected(uid: btMove.id)
+        backend.btSpeakerTiming.noteConnected(uid: btMove.id)
+        backend.btSpeakerTiming.noteDisconnected(uid: btMove.id)
+        backend.btSpeakerTiming.noteDisconnected(uid: btFlip.id)
+        waitFor { capture.lines(evt: "bt_link_settled").count == 3 }
+
+        func speakerKeys(in lines: [String]) -> [String] {
+            lines.compactMap { line in
+                line.split(separator: ",")
+                    .first { $0.contains("\"speaker\":") }?
+                    .split(separator: ":").last.map { $0.replacingOccurrences(of: "\"", with: "") }
+            }
+        }
+        let keys = speakerKeys(in: capture.lines(evt: "bt_link_settled"))
+        try #require(keys.count == 3)
+        #expect(keys[0] == keys[1], "the same speaker keeps its index across two link-ups")
+        #expect(keys[2] != keys[0], "and the other speaker has one of its own")
+        #expect(try BTTrimStore(directory: dir).loadSpeakerIndex()?.count == 2,
+                "the index outlives the process that minted it")
+    }
+
     /// The Mac's own alignment paths go through the timing store like the
     /// phone's do: Keep, Reset and a persisted trim each move the row, a
     /// reconnect leaves it tuned on last time's number, and a Keep made while

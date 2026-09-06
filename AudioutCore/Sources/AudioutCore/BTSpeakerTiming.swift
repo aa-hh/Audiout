@@ -31,6 +31,13 @@ import AudioutProtocol
 /// very speakers it exists for, and the fixed floor's number promises a minute
 /// to a speaker that is ready in eleven seconds.
 ///
+/// It also writes one record per link-up, at the first of the clock verdict
+/// reaching steady and the link dropping: what the speaker was, how many times
+/// its clock stepped, how long it took to settle, and what offset it ended up
+/// playing at. Two destinations, both from here — the local decision log,
+/// which gets the UID, and the release analytics event, which cannot, because
+/// the UID is derived from the MAC address.
+///
 /// Threading: a plain lock, because the writers are on different queues —
 /// `NativeBackend.stateQueue` records connects, the main actor records
 /// alignments, and the snapshot builder reads.
@@ -141,6 +148,14 @@ public final class BTSpeakerTiming: @unchecked Sendable {
     // verdict yet". A sink rebuild loses the baseline, not the fact that this
     // link's clock jumps, so only a new link clears it.
     private var seenJumpSinceLinkUIDs: Set<String> = []
+    // How many times the detector has watched this device's clock step since
+    // its link came up. Reported once per link-up and then forgotten; the
+    // marks above are what any decision reads.
+    private var jumpsSinceLinkByUID: [String: Int] = [:]
+    // The devices whose link-up has not had its settle record yet. Membership
+    // is the exactly-once guard: whichever of the two ends arrives first takes
+    // the UID out of here and emits.
+    private var settleRecordPendingUIDs: Set<String> = []
     private var measuredWhileSettlingUIDs: Set<String> = []
     private var movedUIDs: Set<String> = []
     // Whose current offset a microphone found, as opposed to somebody's ear.
@@ -148,17 +163,42 @@ public final class BTSpeakerTiming: @unchecked Sendable {
     private var measuredUIDs: Set<String> = []
     private let floorRebroadcastDelay: TimeInterval
     private let storedOffsetMs: @Sendable (String) -> Double?
+    private let speakerKey: @Sendable (String) -> String
+    private let codec: @Sendable (String) -> String?
+    private let deviceClassMinor: @Sendable (String) -> UInt32?
 
     /// - Parameter storedOffsetMs: the offset the store holds for a UID, or
     ///   `nil` for a speaker with none. Called OUTSIDE this type's lock, on
     ///   every read and before every decision, because it reaches into the
     ///   owner's store behind the owner's own lock.
+    /// - Parameter speakerKey: what names this speaker in the release event —
+    ///   a per-install index, never the UID, which is derived from the MAC
+    ///   address. Called outside the lock, like every closure here. The
+    ///   default answers `"?"` rather than a number, so an owner that never
+    ///   supplies one reads as unknown instead of putting every speaker it
+    ///   ever saw under one index.
+    /// - Parameter codec: the Bluetooth codec this speaker negotiated, when
+    ///   something can read it.
+    /// - Parameter deviceClassMinor: the pairing's device class, which
+    ///   separates headphones from a loudspeaker from a car kit.
     /// - Parameter floorRebroadcastDelay: how long after a link-up to re-check
     ///   whether ``settleSeconds`` expired with no evidence either way. Only
     ///   the tests pass anything but the floor itself.
     public init(storedOffsetMs: @escaping @Sendable (String) -> Double?,
+                speakerKey: @escaping @Sendable (String) -> String = { _ in "?" },
+                // razor: nothing reads the codec yet. No `bluetoothaudiod` line
+                // appears in this Mac's unified log over 14 days, so the line
+                // the research note relies on is unproven. The upgrade is a
+                // tailer on the existing `LogStreamSpawning` port
+                // (`AirPlayHandoffWatcher`), once a live connection shows the
+                // line exists and is not private.
+                codec: @escaping @Sendable (String) -> String? = { _ in nil },
+                deviceClassMinor: @escaping @Sendable (String) -> UInt32? = { _ in nil },
                 floorRebroadcastDelay: TimeInterval = BTSpeakerTiming.settleSeconds) {
         self.storedOffsetMs = storedOffsetMs
+        self.speakerKey = speakerKey
+        self.codec = codec
+        self.deviceClassMinor = deviceClassMinor
         self.floorRebroadcastDelay = floorRebroadcastDelay
     }
 
@@ -182,11 +222,18 @@ public final class BTSpeakerTiming: @unchecked Sendable {
             lastAdvanceAtByUID[uid] = nil
             jumpSumSinceAlignedMsByUID[uid] = 0
             seenJumpSinceLinkUIDs.remove(uid)
+            jumpsSinceLinkByUID[uid] = 0
+            settleRecordPendingUIDs.insert(uid)
             measuredWhileSettlingUIDs.remove(uid)
             movedUIDs.remove(uid)
             return (true, _onChange)
         }
-        if recorded { scheduleFloorRebroadcast(uid: uid, linkUpAt: date) }
+        if recorded {
+            scheduleFloorRebroadcast(uid: uid, linkUpAt: date)
+            // The stored offset goes back on the sink when this link arms, so
+            // a speaker that has one is playing last time's number from here.
+            noteOffsetApplied(uid: uid)
+        }
         changed?()
     }
 
@@ -200,25 +247,34 @@ public final class BTSpeakerTiming: @unchecked Sendable {
         DispatchQueue.global(qos: .utility)
             .asyncAfter(deadline: .now() + floorRebroadcastDelay + 0.1) { [weak self] in
                 guard let self else { return }
-                let changed = self.lock.withLock { () -> (@Sendable () -> Void)? in
+                let now = Date()
+                let (changed, settle) = self.lock.withLock {
+                    () -> ((@Sendable () -> Void)?, LinkSettleFacts?) in
                     // Same link-up, not superseded; and steady by expiry
                     // rather than by ten jump-free seconds, which published
                     // for itself when it arrived.
                     guard self.lastConnectedAtByUID[uid] == linkUpAt,
                           self.stableForSecondsByUID[uid, default: 0] < BTClockStability.stableAfterSeconds,
-                          self.clockStateLocked(uid, now: Date()) == .steady
-                    else { return nil }
-                    return self._onChange
+                          self.clockStateLocked(uid, now: now) == .steady
+                    else { return (nil, nil) }
+                    return (self._onChange, self.takeLinkSettleFactsLocked(uid: uid, at: now))
                 }
+                if let settle { self.emitLinkSettled(uid: uid, facts: settle) }
                 changed?()
             }
     }
 
     /// The link for this device went away, so the next ``noteConnected(uid:)``
     /// is a new link-up rather than a second report of the one before it.
-    /// Nothing the phone can see moves, so this fires no change.
+    /// Nothing the phone can see moves, so this fires no change — but a link
+    /// that dropped before its clock ever settled is exactly the case the
+    /// settle record exists to catch, so this is the second of its two ends.
     public func noteDisconnected(uid: String) {
-        lock.withLock { _ = linkUpUIDs.remove(uid) }
+        let settle = lock.withLock { () -> LinkSettleFacts? in
+            _ = linkUpUIDs.remove(uid)
+            return takeLinkSettleFactsLocked(uid: uid, at: Date())
+        }
+        if let settle { emitLinkSettled(uid: uid, facts: settle) }
     }
 
     /// An alignment somebody's ear landed for this device — the Mac wizard's
@@ -308,12 +364,12 @@ public final class BTSpeakerTiming: @unchecked Sendable {
     /// resetting there would leave a speaker "settling" for as long as it was
     /// being measured and mark every apply early. Seen live 2026-09-03.
     public func noteClockOutcome(uid: String, outcome: BTClockStability.Outcome, at date: Date = Date()) {
-        let changed = lock.withLock { () -> (@Sendable () -> Void)? in
+        let (changed, settle) = lock.withLock { () -> ((@Sendable () -> Void)?, LinkSettleFacts?) in
             let before = clockStateLocked(uid, now: date)
             var movedInserted = false
             switch outcome {
             case .frozen:
-                return nil
+                return (nil, nil)
             case .ignored:
                 lastAdvanceAtByUID[uid] = date
             case .rebaselined:
@@ -329,6 +385,7 @@ public final class BTSpeakerTiming: @unchecked Sendable {
                 stableForSecondsByUID[uid] = 0
                 lastAdvanceAtByUID[uid] = date
                 seenJumpSinceLinkUIDs.insert(uid)
+                jumpsSinceLinkByUID[uid, default: 0] += 1
                 if alignedAtByUID[uid] != nil {
                     jumpSumSinceAlignedMsByUID[uid, default: 0] += abs(magnitudeMs)
                     // Not evaluated while the early mark stands: that row is
@@ -341,8 +398,12 @@ public final class BTSpeakerTiming: @unchecked Sendable {
                 }
             }
             let after = clockStateLocked(uid, now: date)
-            return before != after || movedInserted ? _onChange : nil
+            // The first end of the settle record: this link's clock reached a
+            // verdict of steady, whichever sample got it there.
+            let settle = after == .steady ? takeLinkSettleFactsLocked(uid: uid, at: date) : nil
+            return (before != after || movedInserted ? _onChange : nil, settle)
         }
+        if let settle { emitLinkSettled(uid: uid, facts: settle) }
         changed?()
     }
 
@@ -369,6 +430,112 @@ public final class BTSpeakerTiming: @unchecked Sendable {
         Self.clockState(stableForSeconds: stableForSecondsByUID[uid, default: 0],
                         seenJump: seenJumpSinceLinkUIDs.contains(uid),
                         lastConnectedAt: lastConnectedAtByUID[uid], now: now)
+    }
+
+    // MARK: The settle record
+
+    /// What one link-up produced, from the facts only this type holds. The
+    /// rest of the record — who the speaker is, what it is playing at, where
+    /// the number came from — is read through the injected closures outside
+    /// the lock.
+    private struct LinkSettleFacts {
+        let jumpCount: Int
+        /// How long the clock took to settle, or `nil` when it never did:
+        /// the link dropped first, or the 60 s floor produced the verdict
+        /// with no evidence either way. An invented 60 would read as a
+        /// measurement of a speaker nobody measured.
+        let secondsToSettle: Int?
+    }
+
+    /// The exactly-once guard. Returns the facts the first time one of the
+    /// two ends arrives for a link-up, `nil` every time after.
+    private func takeLinkSettleFactsLocked(uid: String, at date: Date) -> LinkSettleFacts? {
+        guard settleRecordPendingUIDs.remove(uid) != nil else { return nil }
+        var seconds: Int?
+        if isStableLocked(uid), let connectedAt = lastConnectedAtByUID[uid] {
+            seconds = Int(date.timeIntervalSince(connectedAt).rounded())
+        }
+        return LinkSettleFacts(jumpCount: jumpsSinceLinkByUID[uid, default: 0],
+                               secondsToSettle: seconds)
+    }
+
+    /// The record's two destinations, written here and nowhere else so they
+    /// can never drift apart: the local decision log gets the UID, because
+    /// that is the file the owner joins `bt_align_measurement` to; the release
+    /// event gets the speaker's per-install index instead, because the UID is
+    /// derived from the MAC address. ``Analytics/capture(_:_:)`` is already a
+    /// no-op without consent, so nothing here asks about consent.
+    ///
+    /// Called with the lock dropped, from the clock watcher's queue, the state
+    /// queue or the floor timer — never the render thread.
+    private func emitLinkSettled(uid: String, facts: LinkSettleFacts) {
+        let key = speakerKey(uid)
+        let codecName = codec(uid)
+        let offsetMs = storedOffsetMs(uid)
+        let source = report(uid: uid).source
+        let classMinor = deviceClassMinor(uid)
+
+        var local: [String: String] = [
+            "uid": uid,
+            "speaker": key,
+            "jumps": String(facts.jumpCount),
+        ]
+        if let codecName { local["codec"] = codecName }
+        if let seconds = facts.secondsToSettle { local["settleSeconds"] = String(seconds) }
+        if let offsetMs { local["offsetMs"] = String(Int(offsetMs.rounded())) }
+        if let source { local["source"] = source.rawValue }
+        if let classMinor { local["deviceClass"] = String(classMinor) }
+        Telemetry.log(.localPlayback, "bt_link_settled", local)
+
+        var release: [String: String] = [
+            "speaker": key,
+            "jump_count": String(facts.jumpCount),
+            "speaker_kind": "bluetooth",
+        ]
+        if let codecName { release["codec"] = codecName }
+        if let seconds = facts.secondsToSettle {
+            release["settle_seconds_bucket"] = Self.settleSecondsBucket(seconds)
+        }
+        if let offsetMs { release["offset_ms_bucket"] = Self.offsetBucket(offsetMs) }
+        if let source { release["offset_source"] = source.rawValue }
+        Analytics.capture("bt_sync:link_settled", release)
+    }
+
+    /// An offset is now in force on this speaker: a link came up and the
+    /// stored number went back on the sink, or a Keep just wrote a new one.
+    /// A speaker with nothing stored has nothing applied, and says nothing.
+    public func noteOffsetApplied(uid: String) {
+        guard let offsetMs = storedOffsetMs(uid), let source = report(uid: uid).source else { return }
+        Analytics.capture("bt_sync:offset_applied", [
+            "offset_source": source.rawValue,
+            "offset_ms_bucket": Self.offsetBucket(offsetMs),
+        ])
+    }
+
+    /// The offset's size in whole milliseconds, in the four bands the event
+    /// vocabulary fixes (`audiout-shared/docs/analytics-events.md`). Bucketed
+    /// because a raw millisecond figure is precise enough to tell one room
+    /// from another.
+    private static func offsetBucket(_ ms: Double) -> String {
+        switch abs(ms) {
+        case ..<10: return "0-9"
+        case ..<40: return "10-39"
+        case ..<100: return "40-99"
+        default: return "100+"
+        }
+    }
+
+    /// Seconds from link-up to a settled clock, in bands sized by the two
+    /// numbers that decide the verdict: ``BTClockStability/stableAfterSeconds``
+    /// is the fastest a speaker can be called settled, ``settleSeconds`` the
+    /// floor past which the Mac stops waiting.
+    private static func settleSecondsBucket(_ seconds: Int) -> String {
+        switch seconds {
+        case ..<10: return "0-9"
+        case ..<30: return "10-29"
+        case ..<60: return "30-59"
+        default: return "60+"
+        }
     }
 
     // MARK: Reading

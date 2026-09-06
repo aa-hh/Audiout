@@ -542,8 +542,14 @@ public final class SetupModel {
                 settings: AppSettings = AppSettings(),
                 localNetworkGated: Bool = true,
                 usageStatsAvailable: Bool = Analytics.isAvailable,
+                remoteAppAvailable: Bool? = nil,
                 bluetoothPromptTimeout: TimeInterval = 10) {
         self.usageStatsAreAvailable = usageStatsAvailable
+        // Nil means "read the switch", which is what the app wants everywhere
+        // — the EFFECTIVE Allow setting, launch option included. Tests pass a
+        // fixed value so a card's presence never depends on a real default.
+        self.remoteAppIsAvailable = remoteAppAvailable
+            ?? AppSettings.resolvedAllowRemoteControl(settings: settings)
         self.bluetoothPromptTimeout = bluetoothPromptTimeout
         self.audioProbe = audioProbe
         self.localNetwork = localNetwork
@@ -578,7 +584,8 @@ public final class SetupModel {
     public convenience init(providers: PermissionProviders,
                             settings: AppSettings = AppSettings(),
                             localNetworkGated: Bool = true,
-                            usageStatsAvailable: Bool = Analytics.isAvailable) {
+                            usageStatsAvailable: Bool = Analytics.isAvailable,
+                            remoteAppAvailable: Bool? = nil) {
         self.init(audioProbe: providers.audioProbe,
                   localNetwork: providers.localNetwork,
                   remoteControl: providers.remoteControl,
@@ -587,7 +594,8 @@ public final class SetupModel {
                   bluetoothPrimer: providers.bluetoothPrimer,
                   settings: settings,
                   localNetworkGated: localNetworkGated,
-                  usageStatsAvailable: usageStatsAvailable)
+                  usageStatsAvailable: usageStatsAvailable,
+                  remoteAppAvailable: remoteAppAvailable)
     }
 
     /// Trigger + verify the audio-capture permission. On first run this surfaces
@@ -964,6 +972,32 @@ public final class SetupModel {
     /// where the user approves (or later revokes) the PTP helper.
     public func openPTPHelperLoginItems() {
         ptpHelper.openSystemSettingsLoginItems()
+    }
+
+    // MARK: Audiout Remote
+
+    /// Whether an iPhone running Audiout Remote is connected to this Mac
+    /// right now. The Setup card's completion condition, and the only one it
+    /// accepts: a checkmark is real or it is nothing, so an approval on file
+    /// with no phone on the network does not earn one.
+    ///
+    /// Pushed by the app layer from `CompanionServer.onClientCountChanged` —
+    /// this model owns no socket.
+    public private(set) var remoteAppIsConnected = false
+
+    /// Whether the Mac will accept a phone at all: the EFFECTIVE Allow
+    /// setting, launch option included. False drops the card from the flow
+    /// rather than auto-passing it — an invitation on a Mac that refuses
+    /// phones would be a claim that is not real.
+    public let remoteAppIsAvailable: Bool
+
+    /// The app layer's push. Repaints on a real change only, so a reconnect
+    /// storm does not redraw the window per socket.
+    public func noteRemoteAppClientCount(_ count: Int) {
+        let connected = count > 0
+        guard connected != remoteAppIsConnected else { return }
+        remoteAppIsConnected = connected
+        onChange?()
     }
 
     // MARK: Usage statistics

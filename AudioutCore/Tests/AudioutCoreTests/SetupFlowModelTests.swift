@@ -125,7 +125,8 @@ import Testing
         ptpHelperManager: PTPHelperManaging? = nil,
         remoteControlTrusted: Bool = false,
         localNetworkGated: Bool = true,
-        usageStatsAvailable: Bool = false
+        usageStatsAvailable: Bool = false,
+        remoteAppAvailable: Bool = false
     ) -> SetupModel {
         SetupModel(audioProbe: CannedAudioProbe(result: audio),
                    localNetwork: localNetwork ?? CannedLocalNetwork(reachable: localNetworkReachable),
@@ -136,6 +137,7 @@ import Testing
                    settings: AppSettings(defaults: isolatedDefaults),
                    localNetworkGated: localNetworkGated,
                    usageStatsAvailable: usageStatsAvailable,
+                   remoteAppAvailable: remoteAppAvailable,
                    bluetoothPromptTimeout: bluetoothPromptTimeout)
     }
 
@@ -161,10 +163,70 @@ import Testing
     // MARK: Order + advance
 
     @Test func stepOrderIsTheSpecOrder() {
+        // The iPhone card sits after Remote Control and before Usage counts,
+        // so Usage counts stays the last card PRODUCT.md promises it is.
         #expect(SetupFlowModel.steps == [.audio, .localNetwork, .bluetooth, .speakerSync,
-                                         .remoteControl, .usageStats])
+                                         .remoteControl, .audioutRemote, .usageStats])
         #expect(SetupFlowModel.skippableSteps == [.bluetooth, .remoteControl, .speakerSync,
-                                                  .usageStats])
+                                                  .audioutRemote, .usageStats])
+    }
+
+    // MARK: The iPhone card
+
+    /// Defect this names: a card inviting the iPhone app on a Mac whose Allow
+    /// switch is off — an invitation to a thing that cannot connect — or one
+    /// auto-passed with a checkmark nobody earned.
+    @Test func theIPhoneCardIsDroppedWhenTheMacRefusesPhones() {
+        let refuses = SetupFlowModel(setup: makeSetup(remoteAppAvailable: false))
+        #expect(!refuses.steps.contains(.audioutRemote))
+
+        let accepts = SetupFlowModel(setup: makeSetup(remoteAppAvailable: true))
+        #expect(accepts.steps.contains(.audioutRemote))
+        #expect(!accepts.isComplete(.audioutRemote),
+                "an Allow switch that is on is not a phone in the room")
+    }
+
+    /// Defect this names: the card completing on an approval on file rather
+    /// than on a phone that is actually connected — a checkmark for a claim
+    /// that is not real.
+    @Test func theIPhoneCardCompletesOnlyOnALiveConnection() {
+        let setup = makeSetup(remoteAppAvailable: true)
+        let flow = SetupFlowModel(setup: setup)
+        #expect(!flow.isComplete(.audioutRemote))
+
+        setup.noteRemoteAppClientCount(1)
+        #expect(flow.isComplete(.audioutRemote))
+
+        setup.noteRemoteAppClientCount(0)
+        #expect(!flow.isComplete(.audioutRemote), "the phone left; the card is undone")
+    }
+
+    /// Defect this names: the card's Allow click being read as the
+    /// completion, or as a trip into System Settings.
+    @Test func theIPhoneCardsClickOpensThePageAndGrantsNothing() async {
+        let setup = makeSetup(remoteAppAvailable: true)
+        let flow = SetupFlowModel(setup: setup)
+        let result = await flow.allow(.audioutRemote)
+        #expect(result.outcome == .remotePageOpened)
+        #expect(result.destination == .remotePage)
+        #expect(!flow.isComplete(.audioutRemote))
+    }
+
+    /// Defect this names: the iPhone card holding Done shut. It is outside
+    /// `RequiredPermission` and must never gate the window.
+    @Test func theIPhoneCardNeverGatesDone() async {
+        let setup = makeSetup(audio: .granted, localNetworkReachable: true,
+                              ptpHelper: .enabled, remoteAppAvailable: true)
+        await prime(setup)
+        let flow = SetupFlowModel(setup: setup)
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
+        flow.skip(.audioutRemote)
+        #expect(flow.activeStep == nil)
+        #expect(!flow.isComplete(.audioutRemote))
+        await flow.runFinalCheck()
+        #expect(flow.isDoneAvailable,
+                "a skipped iPhone card is decided, and a decided card opens the gate")
     }
 
     @Test func freshFlowStartsOnSystemAudio() {
@@ -470,7 +532,8 @@ import Testing
                                localNetwork: CannedLocalNetwork(reachable: true),
                                remoteControl: CannedRemoteControl(trusted: false),
                                ptpHelper: CannedPTPHelper(status: .enabled),
-                               settings: AppSettings(defaults: isolatedDefaults))
+                               settings: AppSettings(defaults: isolatedDefaults),
+                               remoteAppAvailable: false)
         await setup.requestAudioCapture()
         await setup.primeLocalNetwork()
         await setup.refreshStatuses()   // settles the helper row, so the gate can be ready

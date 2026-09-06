@@ -118,13 +118,13 @@ import AppKit
         popover.offerBTAlignment(deviceID: id)
     }
 
-    /// Fire "Align speaker…" through real AppKit menu dispatch, found by
+    /// Fire "Align by ear…" through real AppKit menu dispatch, found by
     /// TITLE — every row now carries an "Equalizer…" door above it, so the
     /// alignment item is no longer at index 0.
     @discardableResult
     private func fireAlignItem(_ menu: NSMenu?) -> Bool {
         guard let menu,
-              let index = menu.items.firstIndex(where: { $0.title == "Align speaker…" })
+              let index = menu.items.firstIndex(where: { $0.title == "Align by ear…" })
         else { return false }
         menu.performActionForItem(at: index)
         return true
@@ -252,6 +252,57 @@ import AppKit
         btOnly.test_toggleDeviceEnabled(deviceID: "bt-b:output", on: true)
         btOnly.startBTAlignmentWizard(deviceID: "bt-a:output", door: .menu)
         #expect(btOnly.test_btWizardView()?.test_bodyText == BTAlignmentWizardView.introCopy)
+    }
+
+    // MARK: The wizard's iPhone panel (`shape-mac-invites.md` §2.2)
+
+    /// Defect this names: the page showing a QR to someone it cannot help —
+    /// a Mac whose Allow switch is off, or a user whose phone is already
+    /// connected and only needs telling what to tap. Each state is read
+    /// through the panel the user sees, not through the pushed value.
+    @Test func theIPhonePanelSaysSomethingUsefulInEveryState() {
+        let (popover, _) = makePopover()
+        showNote(popover)
+        popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
+        let wizard = popover.test_btWizardView()
+
+        #expect(wizard?.test_remotePanelHeading == "Measure with your iPhone")
+        #expect(wizard?.test_remotePanelLine == BTAlignmentWizardView.remotePanelLine)
+        #expect(wizard?.test_remoteInviteTileSide == RemoteInviteView.wizardTileSide)
+        #expect(wizard?.test_byEarPanelHeading == "Align by ear",
+                "the trailing panel names the Mac's own run")
+
+        wizard?.remoteInvite = .allowOff
+        #expect(wizard?.test_remoteInviteTileSide == nil,
+                "no code on a Mac that refuses phones")
+        #expect(wizard?.test_remotePanelLine == BTAlignmentWizardView.remoteAllowOffLine)
+
+        wizard?.remoteInvite = .connected(phoneName: "Alec's iPhone")
+        #expect(wizard?.test_remoteInviteTileSide == nil,
+                "no code where the phone is already here")
+        #expect(wizard?.test_remotePanelLine
+                == "Open Audiout Remote on Alec's iPhone and tap the tuning fork beside Move 2.")
+
+        wizard?.remoteInvite = .connected(phoneName: nil)
+        #expect(wizard?.test_remotePanelLine
+                == "Open Audiout Remote on your iPhone and tap the tuning fork beside Move 2.",
+                "several phones, or no name on file: the Mac never guesses which one")
+    }
+
+    /// Defect this names: a by-ear sheet left standing over a measurement the
+    /// phone has already taken over — the Mac runs one alignment at a time,
+    /// so the two would fight over the wizard feed.
+    @Test func aPhoneDrivenRunClosesTheSheetItSupersedes() {
+        let (popover, _) = makePopover()
+        showNote(popover)
+        popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
+        #expect(popover.test_btWizardView() != nil)
+
+        popover.noteCompanionAlignmentRunStarted(deviceID: "bt-b:output")
+        #expect(popover.test_btWizardView() != nil, "another speaker's run leaves this sheet alone")
+
+        popover.noteCompanionAlignmentRunStarted(deviceID: "bt-a:output")
+        #expect(popover.test_btWizardView() == nil)
     }
 
     /// Two BT speakers selected into one first mix, both offered.
@@ -892,7 +943,7 @@ import AppKit
         let (popover, _) = makePopover()
         let row = selectMixedBT(popover)
         let menu = row?.test_contextMenu()
-        #expect(menu?.items.map(\.title) == ["Equalizer…", "Align speaker…"],
+        #expect(menu?.items.map(\.title) == ["Equalizer…", "Align by ear…"],
                 "the discoverable route — ⌥ alone is invisible")
         #expect(fireAlignItem(menu))
         #expect(popover.test_btWizardIsOpen())
@@ -1466,7 +1517,7 @@ import AppKit
         #expect(recorder.resets == ["bt-a:output"], "one clear, for this device only")
         // A cleared BLUETOOTH speaker is never-measured again, so its chip is
         // the wizard's door once more — not a readout of nothing.
-        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "Align")
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "Align by ear")
         #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipIsDashed == true,
                 "back to the dashed invitation")
     }
@@ -1488,7 +1539,7 @@ import AppKit
         popover.test_syncDrawer?.test_fireResetClick()
         #expect(popover.test_expandedSyncDeviceID == nil,
                 "the drawer goes with the chip that opened it")
-        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "Align")
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "Align by ear")
     }
 
     @Test func resetIsNotOfferedForADeviceWithNothingStored() {
@@ -1596,7 +1647,7 @@ extension SerializedSharedState {
         @Test func theMenuDoorIsCaptured() throws {
             let popover = makePopover(tuned: false)
             let menu = try #require(popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu())
-            let index = try #require(menu.items.firstIndex { $0.title == "Align speaker…" })
+            let index = try #require(menu.items.firstIndex { $0.title == "Align by ear…" })
             let doors = doorsCaptured {
                 menu.performActionForItem(at: index)   // real AppKit menu dispatch
             }

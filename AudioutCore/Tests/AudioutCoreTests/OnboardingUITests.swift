@@ -269,6 +269,11 @@ import Testing
                            bluetoothPromptTimeout: TimeInterval = 10,
                            remoteControlTrusted: Bool = false,
                            localNetworkGated: Bool = true,
+                           // The iPhone card is OFF unless a test asks for it,
+                           // the same posture usage counts already has here: a
+                           // seventh row every gate test has to skip past
+                           // would say nothing about the gate.
+                           remoteAppAvailable: Bool = false,
                            ptpHelper: PTPHelperManaging = FakePTPHelper()) -> SetupModel {
         SetupModel(audioProbe: audioProbe ?? CannedAudioProbe(result: audio, silent: silentAudio),
                    localNetwork: localNetwork ?? CannedLocalNetwork(found: foundSpeakers),
@@ -278,6 +283,7 @@ import Testing
                    bluetoothPrimer: bluetoothPrimer ?? SimulatedBluetoothPermission(status: bluetooth),
                    settings: AppSettings(defaults: defaults),
                    localNetworkGated: localNetworkGated,
+                   remoteAppAvailable: remoteAppAvailable,
                    bluetoothPromptTimeout: bluetoothPromptTimeout)
     }
 
@@ -1456,6 +1462,47 @@ import Testing
         await vc.test_awaitFinalCheck()
 
         #expect(vc.test_checkRowAccessibilityLabel == "Everything's ready")
+    }
+
+    // MARK: The iPhone card
+
+    /// Defect this names: the card asking for something macOS raises (a
+    /// caption promising a system dialog, a Settings deep link), or drawing
+    /// anything other than the invitation the other two hosts mount.
+    @Test func theIPhoneCardStagesTheInvitationAndOpensThePage() async {
+        var opened: [URL] = []
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 3,
+                                         remoteAppAvailable: true,
+                                         ptpHelper: FakePTPHelper(status: .enabled)))
+        vc.openURL = { opened.append($0) }
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
+
+        #expect(vc.test_activeStep == .audioutRemote)
+        #expect(vc.test_heroHeadline == "Measure with your iPhone")
+        #expect(vc.test_previewFrameLabel == nil,
+                "macOS raises nothing here, so nothing may claim it does")
+        #expect(vc.test_demoRemoteInvite?.test_tileSide == RemoteInviteView.setupTileSide)
+        #expect(vc.test_ribbonButtonTitles.contains("Open audiout.app/remote"))
+
+        await vc.test_tapAllow(.audioutRemote)
+        #expect(opened.map(\.absoluteString) == [RemoteInviteView.pageURLString])
+        #expect(vc.test_activeStep == .audioutRemote,
+                "opening the page is not the completion — a phone connecting is")
+    }
+
+    /// Defect this names: the seventh row pushing the spine out of the fixed
+    /// 820×560 window — the check the brief asks for before the card lands.
+    @Test func theSpineStillFitsWithTheIPhoneCardOnIt() {
+        let vc = makeVC(model: makeModel(audio: .unknown, remoteAppAvailable: true))
+        let root = vc.test_rootView
+        root.frame = NSRect(x: 0, y: 0,
+                            width: OnboardingViewController.contentWidth,
+                            height: OnboardingViewController.contentHeight)
+        root.layoutSubtreeIfNeeded()
+        #expect(vc.test_spineStackFrame.minY >= 0,
+                "seven rows overrun the pane by \(-vc.test_spineStackFrame.minY) pt")
     }
 
     /// The fixed 820×560 fit, re-pinned on the spine: the header plus six rows

@@ -6,12 +6,17 @@ import Foundation
 /// `speakerSync` is the PTP helper's user-facing name (Login Items approval,
 /// not a TCC grant); `usageStats` is not an OS grant at all — it is Audiout's
 /// own opt-in, asked here rather than ambushing the first menu-bar click.
+/// `audioutRemote` is neither: it invites the iPhone app, and completes when a
+/// phone actually connects.
 public enum SetupStep: CaseIterable, Sendable {
     case audio
     case localNetwork
     case bluetooth
     case speakerSync
     case remoteControl
+    /// The iPhone app itself — not an OS grant and not even Audiout's own
+    /// switch, but the one card that ends setup with a phone paired.
+    case audioutRemote
     case usageStats
 }
 
@@ -56,6 +61,10 @@ public enum SetupAllowOutcome: String, Equatable, Sendable {
     /// Audiout's OWN consent sheet. The answer lands when that sheet is
     /// answered, never on the click itself.
     case consentSheetRaised = "consent_sheet_raised"
+    /// Audiout Remote's only path: the click opens audiout.app/remote in a
+    /// browser. It is the one card whose primary button is not the
+    /// completion — a phone connecting is.
+    case remotePageOpened = "remote_page_opened"
 }
 
 /// Where an Allow click sends the user, when it sends them anywhere. The flow
@@ -74,6 +83,9 @@ public enum SetupAllowDestination: Equatable, Sendable {
     /// raises is ours too — and it exists so that a click can never BE the
     /// consent, only the thing that asks for it.
     case usageStatsConsent
+    /// Open `audiout.app/remote` in the browser. Not System Settings and not
+    /// a sheet — the one destination outside this Mac.
+    case remotePage
 }
 
 /// The full answer to one Allow click.
@@ -132,7 +144,7 @@ public final class SetupFlowModel {
     /// something macOS gives Audiout, and putting that between two permission
     /// asks would blur the difference the whole window is teaching.
     public static let steps: [SetupStep] = [.audio, .localNetwork, .bluetooth, .speakerSync,
-                                            .remoteControl, .usageStats]
+                                            .remoteControl, .audioutRemote, .usageStats]
 
     /// The four steps a user may pass on. An UNDECIDED one holds Done shut:
     /// the gate waits for every card to be decided, and a skip is the decision
@@ -154,7 +166,7 @@ public final class SetupFlowModel {
     /// keeps (``SetupModel/declineUsageStats()``) and never puts back on
     /// screen. Its button says so — "No Thanks", not "Skip for now".
     public static let skippableSteps: Set<SetupStep> = [.bluetooth, .remoteControl, .speakerSync,
-                                                        .usageStats]
+                                                        .audioutRemote, .usageStats]
 
     /// Steps the user explicitly passed on. Skipped is NOT granted: such a step
     /// stays unchecked, and the app asks again the next time it genuinely needs
@@ -180,8 +192,14 @@ public final class SetupFlowModel {
 
     public init(setup: SetupModel) {
         self.setup = setup
-        let steps = setup.usageStatsAreAvailable
-            ? Self.steps : Self.steps.filter { $0 != .usageStats }
+        // Two cards are DROPPED rather than auto-passed where the thing they
+        // ask for cannot exist: usage counts in a build with no analytics
+        // sink, and the iPhone card on a Mac whose Allow switch is off. A
+        // checkmark either way would claim a state that is not real.
+        let steps = Self.steps.filter {
+            ($0 != .usageStats || setup.usageStatsAreAvailable)
+                && ($0 != .audioutRemote || setup.remoteAppIsAvailable)
+        }
         self.steps = steps
         self.startIndex = Self.firstUnmetRequiredIndex(in: setup, among: steps) ?? 0
         // An answer already given is an answer: PRODUCT.md asks once. A DECLINE
@@ -221,6 +239,10 @@ public final class SetupFlowModel {
                 || setup.ptpHelperStatus == .notFound
                 || setup.ptpHelperRegistrationFailed
         case .remoteControl: return setup.remoteControlStatus == .granted
+        // Real or nothing: a phone is connected right now, or the card is not
+        // done. An approval on file with no phone on the network is not a
+        // paired phone.
+        case .audioutRemote: return setup.remoteAppIsConnected
         // Ours, not macOS's: complete means the user said yes. Saying no is a
         // DECISION, not a completion — it lands in `skippedSteps` like every
         // other pass, and the row stays honestly unchecked.
@@ -265,7 +287,9 @@ public final class SetupFlowModel {
         // Not a privacy pane at all — approval only exists in Login Items.
         case .speakerSync: return .loginItems
         case .remoteControl: return .settingsPane(.accessibility)
-        // Not a System Settings pane at all — our own sheet.
+        // Neither is a System Settings pane: one is our own sheet, the other
+        // a page on the web.
+        case .audioutRemote: return .remotePage
         case .usageStats: return .usageStatsConsent
         }
     }
@@ -361,6 +385,12 @@ public final class SetupFlowModel {
             setup.primeRemoteControl()
             return SetupAllowResult(setup.remoteControlStatus == .granted ? .promptTriggered : .probeTimeout)
 
+        case .audioutRemote:
+            // Opens the page and completes NOTHING: this card is done when a
+            // phone connects, and the button exists so a person who would
+            // rather read on the Mac can.
+            return SetupAllowResult(.remotePageOpened, .remotePage)
+
         case .usageStats:
             // Raises a surface and grants NOTHING. Every other step's Allow
             // hands the decision to a dialog the user still has to answer, and
@@ -381,6 +411,7 @@ public final class SetupFlowModel {
         case .bluetooth: return "bluetooth"
         case .speakerSync: return "speaker_sync"
         case .remoteControl: return "remote_control"
+        case .audioutRemote: return "audiout_remote"
         case .usageStats: return "usage_stats"
         }
     }

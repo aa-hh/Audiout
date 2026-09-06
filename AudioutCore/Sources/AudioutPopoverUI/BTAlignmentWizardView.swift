@@ -172,6 +172,31 @@ public final class BTAlignmentWizardView: NSView {
     /// What the run costs, before it starts — the title line's right slot on
     /// the intro, where the click count lives once the run is under way.
     private static let introSlotText = "About 15 clicks"
+
+    // MARK: The iPhone panel (`shape-mac-invites.md` §2.2)
+
+    /// The leading panel's heading. It is not pressable and carries no gold:
+    /// Start is still the page's one primary control. The panel LEADS because
+    /// measuring from the room is the better answer, and reading order is how
+    /// the page says so — to the eye and to VoiceOver alike.
+    static let remotePanelTitle = "Measure with your iPhone"
+    /// The panel's one line, with a code and the address under it.
+    static let remotePanelLine =
+        "Audiout Remote listens from where you sit and sets the offset in seconds."
+    /// The Mac refuses phones, so the panel points at the switch instead of
+    /// showing a code that would lead nowhere.
+    static let remoteAllowOffLine =
+        "To measure with your iPhone, turn on Allow control from iPhone in "
+        + "Audiout's settings, under General."
+    /// A phone is already here: no code, just what to do on it. The phone's
+    /// name is the approval's own, the only phone identity this Mac shows.
+    static func remoteConnectedLine(phoneName: String?, target: String) -> String {
+        "Open Audiout Remote on \(phoneName.map { "\($0)" } ?? "your iPhone") "
+            + "and tap the tuning fork beside \(target)."
+    }
+    /// The trailing panel's heading — the Mac's own run, named the one thing
+    /// it is (the glossary in `audiout-shared/CONTEXT.md`).
+    static let byEarPanelTitle = "Align by ear"
     /// The sheet's TITLE, on every screen — the plain sentence-form heading a
     /// sheet gets everywhere else in the app (`GroupCreationSheetController`'s
     /// "Add scene", `Tokens.Font.bodyEmphasized` at full `label`). It replaced
@@ -210,6 +235,28 @@ public final class BTAlignmentWizardView: NSView {
         didSet {
             guard referenceOptions != oldValue else { return }
             render(session.screen)
+        }
+    }
+
+    /// What the iPhone panel says right now — pushed by the host, the way
+    /// ``referenceOptions`` is, because only the app layer can see the Allow
+    /// switch and the companion server's clients.
+    public enum RemoteInviteState: Equatable {
+        /// Allow control from iPhone resolves off (setting or launch option).
+        case allowOff
+        /// Allow is on and no phone has connected: the code and the address.
+        case notConnected
+        /// A phone is connected. The name is the approval's `lastKnownName`,
+        /// and `nil` whenever the Mac cannot say which phone it is.
+        case connected(phoneName: String?)
+    }
+
+    /// Repaints the intro when it changes — a phone connecting while the page
+    /// is up swaps the code for the sentence naming that phone.
+    public var remoteInvite: RemoteInviteState = .notConnected {
+        didSet {
+            guard remoteInvite != oldValue else { return }
+            if case .intro = session.screen { render(session.screen) }
         }
     }
 
@@ -260,6 +307,10 @@ public final class BTAlignmentWizardView: NSView {
     private static let answerPlateWidth: CGFloat = 236
     private static let answerPlateHeight: CGFloat = 88
     private static let answerPlateGap: CGFloat = 32
+    /// The intro's two panels: 236 + 32 + 236 fills the content width, the
+    /// same arithmetic the answer plates use.
+    private static let introPanelWidth: CGFloat = answerPlateWidth
+    private static let introPanelGap: CGFloat = answerPlateGap
     /// The unsettled screen's three-up: 160 × 3 + 12 × 2 also fills the width.
     private static let narrowPlateWidth: CGFloat = 160
     private static let togetherBarWidth: CGFloat = 400
@@ -644,7 +695,7 @@ public final class BTAlignmentWizardView: NSView {
             readout.stringValue = ""
             stage.lightNames = (session.targetName, session.reference?.name ?? "")
             let intro = introBody()
-            addBody(intro)
+            addIntroPanels(byEarBody: intro)
             // A CHOICE gets its own band; a STATEMENT stays tucked under the
             // sentence it qualifies (see ``addReferenceRow``).
             contentStack.setCustomSpacing(
@@ -670,7 +721,10 @@ public final class BTAlignmentWizardView: NSView {
             // ESC chip the question and proposal screens already use; there
             // is simply no Undo to put in the other corner yet.
             addCornerRow(trailing: (Self.stopTitle, #selector(stopClicked(_:)), "ESC"))
-            setAccessibilityLabel("Align \(session.targetName): \(intro)")
+            // The iPhone panel leads, so it is what VoiceOver hears first.
+            setAccessibilityLabel(
+                "Align \(session.targetName). \(Self.remotePanelTitle): \(remoteInviteLine). "
+                + "\(Self.byEarPanelTitle): \(intro)")
 
         case .question(_, let intervalMs, let answersSoFar):
             let referenceName = session.reference?.name ?? ""
@@ -892,7 +946,10 @@ public final class BTAlignmentWizardView: NSView {
     private func updateTitleRow(for screen: BTAlignmentWizardSession.Screen) {
         titleLabel.stringValue = Self.wizardTitle(target: session.targetName)
         switch screen {
-        case .intro: clickCountLabel.stringValue = Self.introSlotText
+        // The intro's title row shares the page with two panel headings, and
+        // "About 15 clicks" belongs to one of them — so it rides the by-ear
+        // panel and this slot stays empty until the run starts counting.
+        case .intro: clickCountLabel.stringValue = ""
         case .question(_, _, let answersSoFar):
             clickCountLabel.stringValue = Self.clickCountCopy(answersSoFar + 1)
         case .proposal, .kept, .unsettled, .unreachable, .macIsLate:
@@ -983,6 +1040,79 @@ public final class BTAlignmentWizardView: NSView {
         label.alignment = .center
         label.preferredMaxLayoutWidth = Self.bodyMeasure
         contentStack.addArrangedSubview(label)
+    }
+
+    /// The intro's two panels: measuring from the room on the LEADING side,
+    /// the Mac's own paired-click run on the trailing one. Neither is
+    /// pressable — Start, below both, stays the page's one primary control
+    /// and the only gold on the screen (`shape-mac-invites.md` §2.2).
+    private func addIntroPanels(byEarBody: String) {
+        let remote = NSStackView()
+        remote.orientation = .vertical
+        remote.alignment = .centerX
+        remote.spacing = Self.spacingRow
+        remote.translatesAutoresizingMaskIntoConstraints = false
+        remote.addArrangedSubview(panelHeading(Self.remotePanelTitle))
+        remote.addArrangedSubview(panelLine(remoteInviteLine))
+        // No code on a Mac that refuses phones, and none where a phone is
+        // already here: a QR either of those users scans answers nothing.
+        if case .notConnected = remoteInvite {
+            remote.addArrangedSubview(
+                RemoteInviteView(tileSide: RemoteInviteView.wizardTileSide))
+        }
+
+        let byEar = NSStackView()
+        byEar.orientation = .vertical
+        byEar.alignment = .centerX
+        byEar.spacing = Self.spacingRow
+        byEar.translatesAutoresizingMaskIntoConstraints = false
+        byEar.addArrangedSubview(panelHeading(Self.byEarPanelTitle))
+        byEar.addArrangedSubview(panelLine(byEarBody))
+        byEar.addArrangedSubview(panelLine(Self.introSlotText))
+
+        for panel in [remote, byEar] {
+            panel.widthAnchor.constraint(equalToConstant: Self.introPanelWidth).isActive = true
+        }
+        let row = NSStackView(views: [remote, byEar])
+        row.orientation = .horizontal
+        // TOP, not centre: two columns of different lengths have to start on
+        // the same line or neither heading reads as a heading.
+        row.alignment = .top
+        row.spacing = Self.introPanelGap
+        contentStack.addArrangedSubview(row)
+    }
+
+    /// The iPhone panel's one line, per state.
+    private var remoteInviteLine: String {
+        switch remoteInvite {
+        case .allowOff: return Self.remoteAllowOffLine
+        case .notConnected: return Self.remotePanelLine
+        case .connected(let phoneName):
+            return Self.remoteConnectedLine(phoneName: phoneName, target: session.targetName)
+        }
+    }
+
+    /// A panel's title — the plate voice, on the CHASSIS ink. `stageInk`
+    /// belongs to the fixed dark plate above; the band under it themes with
+    /// the window, and cream text on the light chassis is unreadable
+    /// (measured in the wizard snapshot).
+    private func panelHeading(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = Tokens.Font.plateTitle
+        label.textColor = Tokens.Color.label
+        label.alignment = .center
+        return label
+    }
+
+    /// A panel's body line — the same quiet voice `addBody` uses, on both
+    /// sides, so neither panel shouts over the other.
+    private func panelLine(_ text: String) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = Tokens.Font.detail
+        label.textColor = Tokens.Color.label2
+        label.alignment = .center
+        label.preferredMaxLayoutWidth = Self.introPanelWidth
+        return label
     }
 
     /// The reference the run compares against — intro only (spec §1). With one
@@ -1296,11 +1426,54 @@ public final class BTAlignmentWizardView: NSView {
 
     var test_screen: BTAlignmentWizardSession.Screen { session.screen }
     var test_stage: AlignmentStageView { stage }
+    /// The screen's body copy. On the INTRO that sentence lives inside the
+    /// by-ear panel; everywhere else it is the band's first label.
     var test_bodyText: String? {
-        (contentStack.arrangedSubviews.first as? NSTextField)?.stringValue
+        if let label = contentStack.arrangedSubviews.first as? NSTextField {
+            return label.stringValue
+        }
+        return byEarPanelLabels.dropFirst().first?.stringValue
     }
-    /// The title row's right slot: the intro's cost note, the live click
-    /// count, or `nil` where the run is over and the slot is empty.
+
+    /// The iPhone panel's heading, line, and whether a QR is on the page —
+    /// the four states of `shape-mac-invites.md` §2.2, read the way a user
+    /// sees them.
+    public var test_remotePanelHeading: String? {
+        introPanelLabels.first?.stringValue
+    }
+
+    public var test_remotePanelLine: String? {
+        introPanelLabels.dropFirst().first?.stringValue
+    }
+
+    /// Read off the LIVE panel rather than a stored reference, so a state
+    /// that removes the code cannot report a stale one.
+    private var remoteInviteView: RemoteInviteView? {
+        introPanelStacks.first?.arrangedSubviews.compactMap { $0 as? RemoteInviteView }.first
+    }
+
+    public var test_remoteInviteAddress: String? { remoteInviteView?.test_addressText }
+    public var test_remoteInviteTileSide: CGFloat? { remoteInviteView?.test_tileSide }
+    public var test_byEarPanelHeading: String? { byEarPanelLabels.first?.stringValue }
+
+    /// The labels of the TRAILING intro panel, in reading order.
+    private var byEarPanelLabels: [NSTextField] {
+        (introPanelStacks.last?.arrangedSubviews ?? []).compactMap { $0 as? NSTextField }
+    }
+
+    /// The labels of the LEADING intro panel, in reading order.
+    private var introPanelLabels: [NSTextField] {
+        (introPanelStacks.first?.arrangedSubviews ?? []).compactMap { $0 as? NSTextField }
+    }
+
+    private var introPanelStacks: [NSStackView] {
+        guard let row = contentStack.arrangedSubviews.first as? NSStackView else { return [] }
+        return row.arrangedSubviews.compactMap { $0 as? NSStackView }
+    }
+
+    /// The title row's right slot: the live click count, or `nil` on the
+    /// intro (whose cost note rides the by-ear panel) and once the run is
+    /// over.
     var test_clickCountText: String? {
         clickCountLabel.stringValue.isEmpty ? nil : clickCountLabel.stringValue
     }

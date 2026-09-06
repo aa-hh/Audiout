@@ -446,6 +446,11 @@ let package = Package(
                 "CastSender",
                 "CastFakeReceiver",
                 .product(name: "ProbeKit", package: "audiout-shared"),
+                // `RemoteInviteViewTests` pins the UI's `BTOffsetSource`
+                // against `AlignmentSource`, the wire's own vocabulary, so a
+                // rename in the shared package fails here rather than
+                // silently blanking every row's source line.
+                .product(name: "AudioutProtocol", package: "audiout-shared"),
                 // EmitterFieldTests reads the same defaults the shader is
                 // generated from, so a change to field.json fails a test here
                 // instead of silently forking the brand's one moving image.

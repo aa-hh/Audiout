@@ -225,41 +225,46 @@ constant.
 
 **The Accent Dial Rule.** Two positions remain: Full gold and Subtle
 (`Tokens.accentStyle`, `AccentStyle.fullGold` / `.subtle`; Follow-System was
-deleted this migration, per the owner's decision F3). The dial remaps exactly ten
+deleted this migration, per the owner's decision F3). The dial remaps exactly eleven
 tokens: the five accent instruments `gold`, `goldText`, `ember`, `emberText`,
-`glow` (via `accentDynamic`), and the five permission identity hues
+`glow` (via `accentDynamic`), and the six permission identity hues
 `permissionSystemAudio`, `permissionLocalNetwork`, `permissionRemoteControl`,
-`permissionSpeakerSync`, `permissionUsageStats` (via `permissionDynamic`,
+`permissionSpeakerSync`, `permissionUsageStats`, `permissionAudioutRemote`
+(via `permissionDynamic`,
 whose own header names `Tokens.accentStyle` as the same switch). Nothing else
 is dial-aware — `failure`/`rim`/`ring`/`muted` and `bluetoothBrand` are fixed
 in every dial position. `glow` alone has no Subtle rendering and resolves fully
-`.clear` at that dial position ("no glow shadow"); the five permission hues
+`.clear` at that dial position ("no glow shadow"); the six permission hues
 always resolve a real, muted color at Subtle, because an opaque glyph fill
 cannot go invisible the way a halo can. Changing the dial broadcasts
 `Tokens.accentStyleDidChangeNotification`; a `CALayer`-stamped instrument
 must observe it explicitly, the same way it observes appearance/Increase-
 Contrast changes.
 
-**The Permission-Hue Fence (Mac-only, not a system pattern).** Five identity
+**The Permission-Hue Fence (Mac-only, not a system pattern).** Six identity
 hues — `permissionSystemAudio` (warm slate), `permissionLocalNetwork` (dusty
 plum), `permissionRemoteControl` (muted mauve), `permissionSpeakerSync`
-(deepened brass, gold-adjacent but held below the gold/amber band), and
-`permissionUsageStats` (verdigris) — mark each first-run permission row's SF
-Symbol glyph and nothing else. Each hue is permanent per-row identity, never
+(deepened brass, gold-adjacent but held below the gold/amber band),
+`permissionUsageStats` (verdigris) and `permissionAudioutRemote` (moss green,
+~108°, the band the other five leave open between brass at ~23° and verdigris
+at ~160°) — mark each first-run Setup row's SF Symbol glyph and nothing
+else. Each hue is permanent per-row identity, never
 a state (granting a permission never recolours its glyph; the row's own
-status chip carries the granted state). All five are reserved out of the
+status chip carries the granted state). All six are reserved out of the
 gold/amber band `[28°,68°)` and the failure-red band, and are mutually
-distinguishable by ≥47° of hue — a floor recorded in `Tokens.swift`'s own
-doc comments for each of the five tokens (lines 785, 820, 842, 864, 890,
-906), not asserted by degree in any test; `OnboardingPermissionColorTests`'s
-mutual-distinctness suite only checks that the five resolved colors are
-pairwise unequal. The
-sixth glyph on the same spine, `bluetoothBrand` (the fixed Bluetooth SIG
+distinguishable by ≥47° of hue (the closest pair is moss green and verdigris,
+measured 50°) — a floor recorded in `Tokens.swift`'s own doc comments for each
+token, not asserted by degree in any test;
+`OnboardingPermissionColorTests`'s mutual-distinctness suite only checks that
+the resolved colors are pairwise unequal, and its contrast sweep holds every
+one of them to ≥3:1 against `panel` and `raised` in both dial columns and both
+appearances. The
+seventh glyph on the same spine, `bluetoothBrand` (the fixed Bluetooth SIG
 blue, ~209°), sits outside this fence entirely — it is a real-world brand
 mark, not a Warm Signal identity hue, and the same test suite deliberately
 excludes it from the distinctness check (it sits only ~1° from
 `permissionSystemAudio`'s ~208°, which is fine precisely because it is not
-part of the five-hue system being kept distinguishable). This whole fence is
+part of the six-hue system being kept distinguishable). This whole fence is
 a Mac-only exception the migration deliberately kept (decision C2) — it
 exists because six simultaneous, still-ungranted system permissions need to
 read as distinct asks at a glance, a problem the phone's single-permission
@@ -678,13 +683,60 @@ names and glyphs, `label` on the live one, pinned by
 ring and an unarmed fader fill read as one tone — a Mac-only instrument with
 no iOS equivalent (the phone has no membership rail).
 
+### QR Tile (invitations to Audiout Remote, Mac-only)
+`RemoteInviteView` (`AudioutSharedUI`) is one view hosted three times: the
+alignment wizard sheet's first page at 96 pt, Settings › General under the
+Allow switch at 72 pt, and the Setup window's iPhone card at 160 pt. It
+encodes `https://audiout.app/remote` and nothing else, generated with
+CoreImage's own QR filter at error-correction level M — a system framework,
+no dependency, and no bundled image.
+
+Black modules on a white tile, FIXED in every appearance, every accent-dial
+position and under Increase Contrast. A QR code is a print artifact a camera
+reads, not chrome, so it joins the wizard stage and the EQ scope under
+"instruments never theme" — and it is the one place outside `Tokens` where a
+literal colour is sanctioned, because `NSColor.white` is the specification.
+No corner radius, no edge, no shadow: the quiet zone is the boundary.
+
+Modules are drawn at a whole number of DEVICE pixels with interpolation off,
+so none lands on a half pixel and blurs, and the code carries at least the
+standard four-module quiet zone (the generator draws one of those itself).
+Whatever the integer scale leaves over stays white, which is more quiet zone
+and never worse. The tile is never a button and never gold: the pressable way
+to the same page is a stock push button beside it. The tile is hidden from
+accessibility and the address printed under it — `audiout.app/remote`, no
+scheme, in the surface's own caption voice — is the element, so a person who
+cannot or will not scan can type it.
+
 ### Permission Row (Onboarding, signature component, Mac-only)
 `IconTileView`'s neutral `raised` fill and hairline rim stay untouched; only
-the SF Symbol glyph carries one of the six spine hues (five dial-aware
+the SF Symbol glyph carries one of the seven spine hues (six dial-aware
 identity hues plus the fixed Bluetooth brand blue), permanently, per row.
 See the Permission-Hue Fence under Colors. The whole row is the press
 target; locked and auto-passed rows refuse silently rather than looking
 pressable.
+
+## Copy
+
+Rules for every surface that mentions the iPhone app or an offset's source.
+The words are shared with the phone, which hand-copies them, so a change here
+is a change in two apps.
+
+- The iPhone app is **"Audiout Remote"** in full at its first mention on a
+  surface, **"your iPhone"** after that. Never "the companion app", never
+  "the app".
+- The address is always **`audiout.app/remote`**, with no scheme, in caption
+  voice, beside every QR tile and in every invitation line.
+- No invitation names the App Store, a price, "free", or "download". The
+  website says what the store's state is; the Mac does not know and does not
+  guess.
+- Source words are the glossary's, verbatim: **"Measured"**, **"First pass"**,
+  **"Timing from last time"** (`BTOffsetSource` in `AudioutSharedUI` owns the
+  sentences; `AudioutProtocol.AlignmentSource` owns the wire strings).
+- **"Align by ear"** names the Mac's paired-click wizard and nothing else —
+  the untuned chip, the row menu, the wizard page's trailing panel. The
+  drawer's metronome toggle is **"Play ticks"** on the Mac and "Start the
+  ticks" / "Stop the ticks" on the phone; both apps say "ticks".
 
 ## Do's and Don'ts
 
@@ -704,7 +756,7 @@ pressable.
 - **Do** treat the alignment wizard's stage tokens and the EQ scope's tokens
   as fixed-hue instruments that never theme, matching their documented
   intent, not as a bug to "fix" toward appearance-awareness.
-- **Do** keep the five permission identity hues fenced to the first-run
+- **Do** keep the six permission identity hues fenced to the first-run
   Setup spine; a new surface needing a per-item identity hue asks for its
   own decision, it does not borrow from this set.
 

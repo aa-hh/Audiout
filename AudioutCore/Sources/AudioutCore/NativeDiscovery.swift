@@ -255,6 +255,28 @@ public final class NativeDiscovery: @unchecked Sendable {
     /// service, not one per re-announce (D6: drops are loud, but not spam).
     private var loggedSelfDrops: Set<String> = []
 
+    /// How long a sticky-AP2 device keeps its available row after its
+    /// `_airplay._tcp` advert leaves the browse results, before the loss is
+    /// surfaced as an offline (`.vanished`) transition. mDNS drops and re-adds
+    /// this advert transiently under normal network churn (Wi-Fi congestion, an
+    /// mDNSResponder cache refresh, a roam), so ONE `.removed` change is a blip,
+    /// not a departure — surfacing it at once deselects the speaker and tears
+    /// down its live stream out from under the user, then flaps back when the
+    /// advert re-resolves seconds later. A re-resolve within this window cancels
+    /// the pending transition (`handleResolve`); only a loss that outlasts it is
+    /// surfaced (`commitVanish`). Mirrors the Cast absence grace in
+    /// `NativeBackend`. Injectable so tests shrink it; never mutated after init.
+    private let vanishGrace: TimeInterval
+
+    /// The default airplay-advert-loss grace (seconds). Matches the Cast absence
+    /// grace default: one browse blip is not a departure.
+    public static let defaultVanishGrace: TimeInterval = 3
+
+    /// Per-device offline grace timers, armed when a sticky-AP2 device loses its
+    /// `_airplay._tcp` advert (`queue`). A re-resolve or a full disappear cancels
+    /// the entry; `stop()` cancels them all.
+    private var pendingVanish: [String: DispatchWorkItem] = [:]
+
     /// Per-device tracking of which service types are currently advertising it,
     /// and the best descriptor seen. De-dupe + AP1↔AP2 transitions live here.
     private struct Entry {
@@ -281,8 +303,10 @@ public final class NativeDiscovery: @unchecked Sendable {
     ///     filter (see `localHostname` above). Defaults to the system's
     ///     `SCDynamicStoreCopyLocalHostName` + ".local"; tests inject a fixture.
     public init(browser: ServiceBrowsing? = nil,
-                localHostname: String? = NativeDiscovery.systemLocalHostname()) {
+                localHostname: String? = NativeDiscovery.systemLocalHostname(),
+                vanishGrace: TimeInterval = NativeDiscovery.defaultVanishGrace) {
         self.localHostname = localHostname.map(Self.normalizedHostname)
+        self.vanishGrace = vanishGrace
         self.browser = browser ?? NetworkFrameworkBrowser()
         self.browser.onResolve = { [weak self] service in
             guard let self else { return }
@@ -317,6 +341,8 @@ public final class NativeDiscovery: @unchecked Sendable {
         queue.async {
             self.started = false
             self.known.removeAll()
+            for work in self.pendingVanish.values { work.cancel() }
+            self.pendingVanish.removeAll()
         }
     }
 
@@ -388,6 +414,14 @@ public final class NativeDiscovery: @unchecked Sendable {
         case .raop:    entry.raop = service
         }
 
+        // The `_airplay._tcp` advert is present again — cancel any offline grace
+        // armed by an earlier transient drop of it (see `handleRemove`). Only the
+        // airplay leg gates availability, so a lone raop re-resolve does not
+        // rescue a device whose airplay advert is still gone.
+        if entry.airplay != nil {
+            pendingVanish.removeValue(forKey: id)?.cancel()
+        }
+
         // Latch the sticky-AP2 bit the moment this device classifies AP2. A
         // resolve always carries a live `_airplay._tcp` advert when it classifies
         // AP2, so the device is reachable now — availability is unconditionally
@@ -441,6 +475,7 @@ public final class NativeDiscovery: @unchecked Sendable {
         }
 
         if entry.airplay == nil && entry.raop == nil {
+            pendingVanish.removeValue(forKey: id)?.cancel()
             let wasAP2 = entry.device.isAirPlay2Supported
             known[id] = nil
             onEvent?(.disappeared(id: id, wasAirPlay2Supported: wasAP2))
@@ -456,6 +491,23 @@ public final class NativeDiscovery: @unchecked Sendable {
         // (retry-on-click) row, NOT the AP1 "coming soon" popover. A device that
         // was NEVER AP2 (genuine AP1-only) is unaffected and stays available.
         let available = !(entry.hasEverBeenAP2 && entry.airplay == nil)
+
+        // A sticky-AP2 device that just lost its `_airplay._tcp` advert (raop
+        // lingers) is going offline. Hold the transition for `vanishGrace`
+        // instead of surfacing it now: mDNS drops this advert transiently, and
+        // reporting a blip at once deselects the speaker and tears down its live
+        // stream, then flaps back when the advert re-resolves. Keep the row
+        // available and arm a timer; a re-resolve within the window cancels it
+        // (`handleResolve`), so only a loss that outlasts the window is surfaced
+        // (`commitVanish`).
+        if !available && entry.device.isAvailable {
+            known[id] = entry            // record the advert loss; the row stays available
+            scheduleVanish(id)
+            return
+        }
+
+        // Any other change (a raop-leg change, an already-offline device, or a
+        // genuine AP1 that was never AP2) is surfaced immediately.
         let rebuilt = Self.buildDevice(
             id: id, outputID: entry.device.outputID, entry: entry, available: available)
         let before = entry.device
@@ -464,6 +516,33 @@ public final class NativeDiscovery: @unchecked Sendable {
         if rebuilt != before {
             onEvent?(.updated(rebuilt))
         }
+    }
+
+    /// Arm (or re-arm) the offline grace timer for `id`. When it fires,
+    /// `commitVanish` surfaces the offline transition — unless a re-resolve or a
+    /// full disappear cancelled it first. Runs on `queue`, and the timer fires on
+    /// `queue` too, so all state stays serial.
+    private func scheduleVanish(_ id: String) {
+        pendingVanish[id]?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.commitVanish(id) }
+        pendingVanish[id] = work
+        queue.asyncAfter(deadline: .now() + vanishGrace, execute: work)
+    }
+
+    /// Fires `vanishGrace` after a sticky-AP2 device lost its `_airplay._tcp`
+    /// advert. Surface the offline transition only if the advert never came back
+    /// and the row is still available; otherwise the loss was a transient blip
+    /// and nothing is emitted.
+    private func commitVanish(_ id: String) {
+        pendingVanish[id] = nil
+        guard var entry = known[id] else { return }   // disappeared during the grace
+        // A re-resolve restored the advert, or the row already moved off available.
+        guard entry.hasEverBeenAP2, entry.airplay == nil, entry.device.isAvailable else { return }
+        let rebuilt = Self.buildDevice(
+            id: id, outputID: entry.device.outputID, entry: entry, available: false)
+        entry.device = rebuilt
+        known[id] = entry
+        onEvent?(.updated(rebuilt))
     }
 
     private func handleStateChange(_ state: BrowserState) {

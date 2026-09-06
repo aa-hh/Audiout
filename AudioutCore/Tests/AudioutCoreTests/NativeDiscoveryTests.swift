@@ -395,7 +395,8 @@ import AirPlayEngine
     /// `_airplay._tcp`), NOT an AP1 downgrade — not a removal.
     @Test func dedupesDeviceAdvertisingBothServiceTypes() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        // Short grace: asserts the sustained-offline transition, not the debounce.
+        let discovery = NativeDiscovery(browser: browser, vanishGrace: 0.05)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -487,7 +488,8 @@ import AirPlayEngine
     /// NOT reclassified AP1-only. It must NOT `.disappeared` (raop still present).
     @Test func ap2LosingAirplayAdvertGoesOfflineNotAP1() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        // Short grace: asserts the sustained-offline transition, not the debounce.
+        let discovery = NativeDiscovery(browser: browser, vanishGrace: 0.05)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -523,7 +525,8 @@ import AirPlayEngine
     /// sticky bit doesn't wedge it permanently offline.
     @Test func ap2OfflineThenBackOnlineRecoversAvailable() {
         let browser = FakeBrowser()
-        let discovery = NativeDiscovery(browser: browser)
+        // Short grace: asserts the sustained-offline transition, not the debounce.
+        let discovery = NativeDiscovery(browser: browser, vanishGrace: 0.05)
         let events = EventCollector()
         discovery.onEvent = { events.append($0) }
         discovery.start()
@@ -549,6 +552,97 @@ import AirPlayEngine
         }
         #expect(back.isAirPlay2Supported)
         #expect(back.isAvailable, "an AP2 device that re-advertises airplay is reachable again")
+
+        discovery.stop()
+    }
+
+    // MARK: Airplay-advert-loss grace (mDNS churn debounce)
+
+    /// THE FLAPPING BUG: mDNS drops and re-adds a device's `_airplay._tcp` advert
+    /// transiently under normal network churn. A drop that heals within the grace
+    /// window must NOT be surfaced as an offline (`.vanished`) transition — no
+    /// event, and the row stays available — so a transient blip never deselects
+    /// the speaker or tears down its live stream. This is the regression guard
+    /// for the `connection:failed` (`vanished`) flapping storm.
+    @Test func transientAirplayDropWithinGraceEmitsNoVanish() {
+        let browser = FakeBrowser()
+        let discovery = NativeDiscovery(browser: browser, vanishGrace: 0.3)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:45"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        _ = events.wait(count: 1)
+
+        // The airplay advert blips out, then re-resolves before the grace fires.
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+
+        // No offline event ever fires (the re-resolve is an unchanged rebuild, so
+        // it is suppressed too) and the grace elapses without surfacing anything.
+        #expect(events.waitCountStaysAt(1, timeout: 0.6),
+                "a transient airplay-advert drop that heals within the grace must not emit a vanish")
+        #expect(discovery.devices.first?.isAvailable == true,
+                "the row stays available across a transient blip")
+
+        discovery.stop()
+    }
+
+    /// A sustained airplay-advert loss (no re-resolve) IS surfaced once the grace
+    /// elapses — the debounce delays a real departure, it does not swallow it. And
+    /// it fires exactly once, not on a repeat schedule.
+    @Test func sustainedAirplayDropAfterGraceEmitsVanishOnce() {
+        let browser = FakeBrowser()
+        let discovery = NativeDiscovery(browser: browser, vanishGrace: 0.05)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:46"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        _ = events.wait(count: 1)
+
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        guard case .updated(let offline)? = events.wait(count: 2).last else {
+            Issue.record("expected a vanish .updated once the grace elapses")
+            return
+        }
+        #expect(!offline.isAvailable, "a sustained airplay-advert loss surfaces as offline")
+        #expect(offline.isAirPlay2Supported, "still sticky-AP2")
+        #expect(events.waitCountStaysAt(2, timeout: 0.2), "the vanish fires once, not on a repeat schedule")
+
+        discovery.stop()
+    }
+
+    /// A device that fully disappears (loses BOTH adverts) during the airplay
+    /// grace window is reported as `.disappeared`, and the pending vanish is
+    /// cancelled — no stale offline `.updated` fires afterwards.
+    @Test func fullDisappearDuringGraceCancelsPendingVanish() {
+        let browser = FakeBrowser()
+        let discovery = NativeDiscovery(browser: browser, vanishGrace: 0.3)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:47"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        _ = events.wait(count: 1)
+
+        // Airplay drops (arms the grace), then raop drops too before it fires.
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        browser.remove(RemovedService(serviceType: .raop, deviceID: id, name: "Sonos"))
+        guard case .disappeared(let goneID, _)? = events.wait(count: 2).last else {
+            Issue.record("expected .disappeared when both adverts are gone")
+            return
+        }
+        #expect(goneID == id)
+        #expect(events.waitCountStaysAt(2, timeout: 0.6),
+                "the cancelled grace must not fire a stale offline .updated after disappear")
+        #expect(discovery.devices.isEmpty)
 
         discovery.stop()
     }

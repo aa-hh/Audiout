@@ -36,6 +36,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private let onPassed: () -> Void
 
     private let field = EmitterFieldView()
+    private let headlineLabel = NSTextField(labelWithString: "")
+    private let whyLabel = NSTextField(wrappingLabelWithString: "")
     private let keyField = NSTextField()
     private let gutterLine = NSTextField(wrappingLabelWithString: "")
     private var registerButton: ProminentButton!
@@ -44,7 +46,14 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private let lostKeyButton = NSButton()
     private let buyButton = NSButton()
     private let quitButton = NSButton()
+    private let trialButton = NSButton()
     private var didPass = false
+
+    /// Where this Mac's trial stood when the gate was built. Read ONCE, in
+    /// `loadView`: it decides the headline, the body line and whether the trial
+    /// offer exists at all, and none of those may change while the window is
+    /// up — the surface's whole contract is that nothing on it moves.
+    private var trialState: TrialState = .none
 
     /// What the shared controls currently mean. The lost-key path MORPHS this
     /// one field and one button rather than opening anything: same geometry,
@@ -83,6 +92,23 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// key plus slop is known to fit.
     private static let columnWidth: CGFloat = 320
 
+    /// The gate's trial copy, owner-verbatim from
+    /// `dev/notes/trial-spec-2026-09-05.md` § Copy. The expired pair replaces
+    /// the welcome; the offer is only ever shown to a Mac that has never
+    /// started a trial.
+    ///
+    /// The spec's caption under the offer — "No card, no email. Every feature.
+    /// Buy any time." — is NOT here: at 560 x 440 the column has room for the
+    /// button or the caption, not both (`LicenseGateTests`'
+    /// `theContentColumnClearsTheBottomButtonRow` measures it). Either the
+    /// window grows or the caption borrows the gutter, and both are the
+    /// owner's call, not this ticket's.
+    private static let expiredHeadline = "Your 14-day trial has ended."
+    private static let expiredBody =
+        "Buy Audiout for €30, once, and keep everything you set up. "
+        + "Your scenes and speaker settings are still here."
+    private static let trialTitle = "Try Audiout free for 14 days"
+
     /// Rest and lifted opacity for the bottom-edge pair. They sit under the
     /// hero's attention and rise ONCE for a user who has sat there without
     /// typing — an offer, not a nag, so it never animates twice.
@@ -111,6 +137,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override func loadView() {
+        trialState = TrialClock.state(settings: settings)
         field.translatesAutoresizingMaskIntoConstraints = false
 
         let mark = NSImageView()
@@ -132,30 +159,43 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         // `Tokens.Font.wordmark(size:)` returns system bold at 25 and the name
         // renders 1 pt taller than the rest of the line. That is the normal
         // path under `swift run`, `swift test` and the snapshot tools.
-        let headline = NSTextField(labelWithString: "Welcome to Audiout")
         let centred = NSMutableParagraphStyle()
         centred.alignment = .center
-        let line = NSMutableAttributedString(
-            string: "Welcome to ",
-            attributes: [.font: Tokens.Font.displayLarge,
-                         .foregroundColor: Tokens.Color.label])
-        line.append(NSAttributedString(
-            string: "Audiout",
-            attributes: [.font: Tokens.Font.wordmark(size: 25),
-                         .foregroundColor: Tokens.Color.label]))
+        let line: NSMutableAttributedString
+        if case .expired = trialState {
+            // The expired headline names no product, so it has no wordmark run
+            // and stays one plain run at the same size.
+            line = NSMutableAttributedString(
+                string: Self.expiredHeadline,
+                attributes: [.font: Tokens.Font.displayLarge,
+                             .foregroundColor: Tokens.Color.label])
+        } else {
+            line = NSMutableAttributedString(
+                string: "Welcome to ",
+                attributes: [.font: Tokens.Font.displayLarge,
+                             .foregroundColor: Tokens.Color.label])
+            line.append(NSAttributedString(
+                string: "Audiout",
+                attributes: [.font: Tokens.Font.wordmark(size: 25),
+                             .foregroundColor: Tokens.Color.label]))
+        }
         line.addAttribute(.paragraphStyle, value: centred,
                           range: NSRange(location: 0, length: line.length))
-        headline.attributedStringValue = line
-        headline.alignment = .center
-        headline.setAccessibilityRole(.staticText)
-        headline.setAccessibilitySubrole(NSAccessibility.Subrole(rawValue: "AXHeading"))
+        headlineLabel.attributedStringValue = line
+        headlineLabel.alignment = .center
+        headlineLabel.setAccessibilityRole(.staticText)
+        headlineLabel.setAccessibilitySubrole(NSAccessibility.Subrole(rawValue: "AXHeading"))
 
-        let why = NSTextField(wrappingLabelWithString:
-            "It takes one key to open. Yours is in your receipt email, starting with AUDT.")
-        why.font = Tokens.Font.titleLarge
-        why.textColor = Tokens.Color.label2
-        why.alignment = .center
-        why.preferredMaxLayoutWidth = Self.columnWidth
+        if case .expired = trialState {
+            whyLabel.stringValue = Self.expiredBody
+        } else {
+            whyLabel.stringValue =
+                "It takes one key to open. Yours is in your receipt email, starting with AUDT."
+        }
+        whyLabel.font = Tokens.Font.titleLarge
+        whyLabel.textColor = Tokens.Color.label2
+        whyLabel.alignment = .center
+        whyLabel.preferredMaxLayoutWidth = Self.columnWidth
 
         keyField.stringValue = settings.licenseKey ?? ""
         keyField.placeholderString = LicenseCopy.keyFormatHint
@@ -228,23 +268,40 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         quitButton.alphaValue = Self.quietRestAlpha
         quitButton.translatesAutoresizingMaskIntoConstraints = false
 
+        // The offer for someone who has no key and never had one. Shown ONLY
+        // from `.none`: a trial already running, or already spent, has nothing
+        // left to offer, and a second one is not a thing this app has. Bordered
+        // rather than gold so it reads as the other road out of this window
+        // without competing with Register for the eye.
+        trialButton.title = Self.trialTitle
+        trialButton.bezelStyle = .rounded
+        trialButton.controlSize = .large
+        trialButton.target = self
+        trialButton.action = #selector(trialTapped)
+        trialButton.isHidden = trialState != .none
+        trialButton.translatesAutoresizingMaskIntoConstraints = false
+
         let quietLinks = NSStackView(views: [pasteKeyButton, lostKeyButton])
         quietLinks.orientation = .horizontal
         quietLinks.alignment = .centerY
         quietLinks.spacing = 16
         quietLinks.translatesAutoresizingMaskIntoConstraints = false
 
-        let column = NSStackView(views: [mark, headline, why, keyField, buttonSlot,
-                                         gutter, quietLinks])
+        // The trial offer is last and DETACHES when hidden (the stack view's
+        // default), so a Mac with a trial behind it gets the same column, to
+        // the pixel, as one with no trial offer at all.
+        let column = NSStackView(views: [mark, headlineLabel, whyLabel, keyField, buttonSlot,
+                                         gutter, quietLinks, trialButton])
         column.orientation = .vertical
         column.alignment = .centerX
         column.spacing = 10
         column.setCustomSpacing(14, after: mark)
-        column.setCustomSpacing(6, after: headline)
-        column.setCustomSpacing(22, after: why)
+        column.setCustomSpacing(6, after: headlineLabel)
+        column.setCustomSpacing(22, after: whyLabel)
         column.setCustomSpacing(12, after: keyField)
         column.setCustomSpacing(14, after: buttonSlot)
         column.setCustomSpacing(6, after: gutter)
+        column.setCustomSpacing(14, after: quietLinks)
         column.translatesAutoresizingMaskIntoConstraints = false
 
         let root = NSView()
@@ -320,13 +377,15 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     }
 
     /// Authored rather than inferred from frames: field, the commit button,
-    /// the two links, then the two bottom-edge buttons, and back.
+    /// the two links, the trial offer where there is one, then the two
+    /// bottom-edge buttons, and back.
     private func applyTabOrder() {
         let commit: NSButton = mode == .resend ? resendButton : registerButton
         keyField.nextKeyView = commit
         commit.nextKeyView = pasteKeyButton
         pasteKeyButton.nextKeyView = lostKeyButton
-        lostKeyButton.nextKeyView = buyButton
+        lostKeyButton.nextKeyView = trialButton.isHidden ? buyButton : trialButton
+        trialButton.nextKeyView = buyButton
         buyButton.nextKeyView = quitButton
         quitButton.nextKeyView = keyField
     }
@@ -432,6 +491,20 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
 
     @objc private func quitTapped() {
         NSApp?.terminate(nil)
+    }
+
+    /// Start the trial and get out of the way in the same breath.
+    ///
+    /// Nothing here waits on the network: the trial's dates are written
+    /// locally, and telling the licence server about them is a later, silent
+    /// job (`TrialRegistrar`) that runs with the app already open. A start that
+    /// blocked on a server would put the one wall this window exists to remove
+    /// back in front of a user who has not even seen the app yet.
+    @objc private func trialTapped() {
+        guard trialState == .none else { return }
+        TrialClock.start(settings: settings)
+        Analytics.capture("license:trial_started")
+        pass(afterBeat: false)
     }
 
     /// The lost-key detour, both ways: the SAME field and the SAME button ask
@@ -663,6 +736,36 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     public func test_tapBuy() {
         _ = view
         buyTapped()
+    }
+
+    /// Invoke the trial offer as a click would.
+    public func test_tapTrial() {
+        _ = view
+        trialTapped()
+    }
+
+    /// Whether the trial offer is on screen at all.
+    public var test_trialIsVisible: Bool {
+        _ = view
+        return !trialButton.isHidden
+    }
+
+    /// The trial button's title, as drawn.
+    public var test_trialTitle: String {
+        _ = view
+        return trialButton.title
+    }
+
+    /// The headline, flattened out of its two type runs.
+    public var test_headlineText: String {
+        _ = view
+        return headlineLabel.attributedStringValue.string
+    }
+
+    /// The line under the headline.
+    public var test_bodyText: String {
+        _ = view
+        return whyLabel.stringValue
     }
 
     /// Arrival, without the on-screen half of `viewDidAppear`.

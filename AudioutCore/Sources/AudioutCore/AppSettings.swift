@@ -98,6 +98,7 @@ public struct AppSettings {
         static let licenseCheckInURL = "license.checkInURL"
         static let licenseStatus = "license.status"
         static let licenseMaxMajor = "license.maxMajor"
+        static let licenseReason = "license.reason"
         static let companionToken = "license.companionToken"
         static let trialStartedAt = "trial.startedAt"
         static let trialExpiresAt = "trial.expiresAt"
@@ -483,6 +484,7 @@ public struct AppSettings {
             defaults.set(newValue, forKey: Keys.licenseKey)
             if newValue == nil {
                 licenseStatus = nil
+                licenseReason = nil
                 companionToken = nil
                 clearTrial()
             }
@@ -525,6 +527,17 @@ public struct AppSettings {
         nonmutating set { defaults.set(newValue, forKey: Keys.licenseMaxMajor) }
     }
 
+    /// Why the server gave the verdict it gave, in the server's own words —
+    /// `nil` unless the answer carried one. `trial_expired` is the only value
+    /// the server sends today, and it is what separates a trial that ran out
+    /// from a key that was refunded: both come back `revoked`, and the gate
+    /// has different words for them. Written on every verified answer, so an
+    /// answer with no reason clears the one before it.
+    public var licenseReason: String? {
+        get { defaults.string(forKey: Keys.licenseReason) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.licenseReason) }
+    }
+
     /// The opaque licence-server token for the companion server to forward
     /// to approved iPhones in `welcome`, so the iOS app can unlock offline.
     /// Written only by ``LicenseValidator``. `nil` when never issued, or
@@ -546,6 +559,25 @@ public struct AppSettings {
         return formatter
     }()
 
+    /// A whole-second twin of ``trialDateFormatter``. `ISO8601DateFormatter`
+    /// matches its options exactly, so one formatter reads one spelling.
+    private static let wholeSecondDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
+
+    /// Reads a timestamp the licence server sent, with or without the
+    /// fractional seconds. Both spellings are ordinary ISO 8601 and the server
+    /// is free to send either; a date this refused would read to the caller as
+    /// "this key has no expiry", which is a wrong answer rather than a missing
+    /// one. Only the server's text goes through here — this type's own storage
+    /// is always written by ``trialDateFormatter`` and reads back with it.
+    static func date(fromServerText text: String) -> Date? {
+        trialDateFormatter.date(from: text) ?? wholeSecondDateFormatter.date(from: text)
+    }
+
     /// When this Mac's 14-day trial began, or `nil` if it never started one.
     /// Written by ``TrialClock`` — locally at the start, then replaced by the
     /// licence server's own record once the trial registers.
@@ -557,7 +589,9 @@ public struct AppSettings {
     }
 
     /// When the trial ends. Set once when the trial starts and moved only by
-    /// the licence server's own record; nothing else may extend it.
+    /// the licence server's own record; nothing else may extend it. A verified
+    /// answer that carries no expiry clears it, which is how a trial that has
+    /// been bought stops reading as one.
     public var trialExpiresAt: Date? {
         get { defaults.string(forKey: Keys.trialExpiresAt).flatMap(Self.trialDateFormatter.date(from:)) }
         nonmutating set {

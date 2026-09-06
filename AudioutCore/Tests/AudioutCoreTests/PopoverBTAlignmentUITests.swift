@@ -1552,6 +1552,44 @@ import AppKit
         popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
         #expect(popover.test_syncDrawer?.test_resetVisible == false)
     }
+
+    // MARK: T16 — the live offset source and the over-40 notice
+
+    /// Defect this names: `btOffsetSourceProvider` sat unwired since T16 (its
+    /// own doc comment said so, waiting on T14) — the drawer caption stayed
+    /// blank no matter what the backend reported. Fails if the provider stops
+    /// being asked, or the wire-to-caption mapping for any of the four
+    /// sources drifts.
+    @Test func theDrawerCaptionReadsWhicheverSourceTheProviderReports() {
+        for source in BTOffsetSource.allCases {
+            let (popover, _) = makePopover()
+            popover.btOffsetSourceProvider = { $0 == "bt-a:output" ? source : nil }
+            popover.update(devices: [local(), airplay(), bt()])
+            popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+            #expect(popover.test_syncDrawer?.test_captionText == source.drawerCaption,
+                    "source \(source) should print its own caption")
+        }
+    }
+
+    /// Defect this names: `noteAlignmentMovedSinceLastTime` was a stub
+    /// nothing called, so a re-measurement that moved a stored offset past
+    /// the ADR's 40 ms line never reached the drawer. Fails if the note stops
+    /// overriding the caption, or survives the drawer closing.
+    @Test func theOverFortyNoticeReplacesTheCaptionUntilTheDrawerCloses() {
+        let (popover, _) = makePopover()
+        popover.btOffsetSourceProvider = { $0 == "bt-a:output" ? .measured : nil }
+        popover.update(devices: [local(), airplay(), bt()])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_syncDrawer?.test_captionText == BTOffsetSource.measured.drawerCaption)
+
+        popover.noteAlignmentMovedSinceLastTime(deviceID: "bt-a:output", byMs: 46.4)
+        #expect(popover.test_syncDrawer?.test_captionText == BTOffsetSource.movedNotice(byMs: 46.4))
+
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")   // closes — clears the notice
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")   // reopens
+        #expect(popover.test_syncDrawer?.test_captionText == BTOffsetSource.measured.drawerCaption,
+                "the notice does not survive the drawer closing")
+    }
 }
 
 /// The wizard's four doors, asserted on the REAL `bt_sync:wizard_started`

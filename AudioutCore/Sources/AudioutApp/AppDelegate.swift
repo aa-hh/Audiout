@@ -1113,6 +1113,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? BTOutputControlling)?
                 .endBTWizardLatencyPreview(forDevice: deviceID, keepMs: keepMs)
         }
+        // T16: the drawer caption and the chip tooltip read where the applied
+        // offset came from off the same report `btAlignmentReport` already
+        // answers for the companion snapshot — no second read of the timing
+        // store. `BTSpeakerTiming.Source` and `BTOffsetSource` share their
+        // case names by construction (`RemoteInviteViewTests` pins both to
+        // `AudioutProtocol.AlignmentSource`), so the rawValue round-trip never
+        // fails for a source this Mac actually publishes.
+        popoverController.btOffsetSourceProvider = { [weak self] deviceID in
+            guard let source = (self?.backend as? BTOutputControlling)?
+                .btAlignmentReport(forDevice: deviceID)?.source else { return nil }
+            return BTOffsetSource(rawValue: source.rawValue)
+        }
         // CAST-SYNC: a Cast row gets the same SYNC chip and drawer, over its
         // own store. Capability-gated like the Bluetooth hooks above, so a
         // mock/dev popover keeps every Cast chip on "Not set" and only the
@@ -2793,6 +2805,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             correctedMs: correctedMs,
                             source: bt.btAlignmentReport(forDevice: targetID)?.source?.rawValue,
                             to: clientID)
+                    }
+                    // T16: `correctedMs` already carries how far this
+                    // measurement moved the stored latency — 0 when it left
+                    // it unchanged — so its size is the same fact
+                    // `recordMeasurement`'s replace/keep decision turns on,
+                    // without asking the backend a second question. Fires
+                    // whether or not a phone is still attached to read it.
+                    if abs(correctedMs) >= AlignmentThresholds.tellUserMs {
+                        self.popoverController?.noteAlignmentMovedSinceLastTime(
+                            deviceID: targetID, byMs: correctedMs)
                     }
                     return nil
                 }

@@ -348,6 +348,13 @@ func run() async -> Int32 {
                        world: SnapshotWorld(bluetooth: .granted, ptpHelper: .enabled,
                                             allow: [.audio, .localNetwork, .remoteControl]),
                        outDir: outDir)
+        // The iPhone card: no macOS dialog to rehearse, so the stage is the
+        // invitation itself — the code at 160 pt with the address under it.
+        await snapshot(appearanceName: name, label: "\(tag)-step6-audioutremote",
+                       world: SnapshotWorld(remoteControlTrusted: true,
+                                            bluetooth: .granted, ptpHelper: .enabled,
+                                            allow: [.audio, .localNetwork, .remoteControl]),
+                       outDir: outDir)
         // A DECIDED row opened for reading: the hero shows the pane its switch
         // lives on, resting already ON, with the quiet way back to it.
         await snapshot(appearanceName: name, label: "\(tag)-browse-granted",

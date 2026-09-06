@@ -2832,6 +2832,8 @@ public final class PopoverController: NSObject {
                       syncTrimMs: btSyncTrim(for: device),
                       syncTrimIsSet: btSyncTrimIsSet(for: device),
                       syncMeasuredLatencyMs: device.isBluetooth ? btMeasuredLatency(for: device.id) : nil,
+                      alignmentSource: btOffsetSourceProvider?(device.id),
+                      movedSinceLastTimeMs: btMovedNoticeMsByID[device.id],
                       syncDrawerExpanded: expandedSyncDeviceID == device.id,
                       isEQShaped: deviceEQIsShaped?(device.id) ?? false)
             return
@@ -2889,6 +2891,8 @@ public final class PopoverController: NSObject {
                   syncTrimMs: btSyncTrim(for: device),
                   syncTrimIsSet: btSyncTrimIsSet(for: device),
                   syncMeasuredLatencyMs: device.isBluetooth ? btMeasuredLatency(for: device.id) : nil,
+                  alignmentSource: btOffsetSourceProvider?(device.id),
+                  movedSinceLastTimeMs: btMovedNoticeMsByID[device.id],
                   syncDrawerExpanded: expandedSyncDeviceID == device.id,
                   // The offer stands only while the device is genuinely OUT —
                   // re-joining the mix (undo, or a re-select from anywhere)
@@ -3048,7 +3052,37 @@ public final class PopoverController: NSObject {
                              usableRangeMs: btUsableTrimRange(for: device.id),
                              alignTickActive: alignTickDeviceID == device.id,
                              canReset: canResetAlignment(for: device),
-                             canAlignAgain: !device.isCast)
+                             canAlignAgain: !device.isCast,
+                             offsetSource: btOffsetSourceProvider?(device.id),
+                             movedSinceLastTimeMs: btMovedNoticeMsByID[device.id])
+    }
+
+    /// What the wizard's iPhone panel says — asked of the app layer, which is
+    /// the only place that can see the Allow switch and the companion
+    /// server's clients. Unset (a headless build, the harnesses) reads as
+    /// "Allow is on, no phone here", the state that shows the code.
+    public var remoteInviteStateProvider:
+        (() -> BTAlignmentWizardView.RemoteInviteState)?
+
+    /// Where a speaker's applied offset came from, asked of the app layer on
+    /// every push. Unset until T14 publishes a source, and the drawer's
+    /// caption line is then empty and still reserved.
+    public var btOffsetSourceProvider: ((String) -> BTOffsetSource?)?
+
+    /// The over-40 ms notice, per device. Session state, exactly like the
+    /// first-join note: the drawer closing clears it and nothing is written
+    /// down. T14's apply path is what puts a number in here.
+    private var btMovedNoticeMsByID: [String: Double] = [:]
+
+    /// Record that a re-measurement moved this speaker's stored offset far
+    /// enough to say so. Shows on the drawer's caption line and in the chip's
+    /// tooltip until the drawer next closes.
+    public func noteAlignmentMovedSinceLastTime(deviceID: String, byMs: Double) {
+        btMovedNoticeMsByID[deviceID] = byMs
+        refreshDeviceRows()
+        if mountedSyncDrawerID == deviceID, let device = devicesByID[deviceID] {
+            pushSyncDrawerState(device)
+        }
     }
 
     /// Whether this device has anything STORED for Reset to clear: a trim entry
@@ -3064,8 +3098,11 @@ public final class PopoverController: NSObject {
     }
 
     private func unmountSyncDrawer(animated: Bool) {
-        guard mountedSyncDrawerID != nil else { return }
+        guard let closing = mountedSyncDrawerID else { return }
         mountedSyncDrawerID = nil
+        // The notice stands until the drawer next CLOSES (ADR 0001) — this is
+        // that moment, and it is the only thing that ends it.
+        btMovedNoticeMsByID.removeValue(forKey: closing)
         panel.removeRow(syncDrawer, animated: animated)
     }
 
@@ -4637,7 +4674,7 @@ extension PopoverController: DeviceRowView.Delegate {
         toggleSyncDrawer(deviceID: id, animated: true)
     }
 
-    /// The row's two direct doors into the guided wizard: the "Align speaker…"
+    /// The row's two direct doors into the guided wizard: the "Align by ear…"
     /// context-menu item, and the untuned Bluetooth chip.
     public func deviceRow(_ row: DeviceRowView,
                           didRequestAlignmentWizardFor id: String,
@@ -4743,6 +4780,7 @@ extension PopoverController: DeviceRowView.Delegate {
             }
             // Before the mount, so the sheet measures the finished layout.
             view.referenceOptions = btWizardReferenceOptions(excluding: id)
+            view.remoteInvite = remoteInviteState()
             let sheet = AlignmentWizardViewController(wizardView: view)
             view.onContentSizeChange = { [weak sheet] in sheet?.fitToContent() }
             btWizardView = view
@@ -4768,7 +4806,26 @@ extension PopoverController: DeviceRowView.Delegate {
         }
         if let id = btWizardDeviceID, btWizardSession != nil, let view = btWizardView {
             view.referenceOptions = btWizardReferenceOptions(excluding: id)
+            view.remoteInvite = remoteInviteState()
         }
+    }
+
+    private func remoteInviteState() -> BTAlignmentWizardView.RemoteInviteState {
+        remoteInviteStateProvider?() ?? .notConnected
+    }
+
+    /// Repaint the wizard's iPhone panel — the app layer calls this when a
+    /// phone connects or leaves, or the Allow switch moves.
+    public func refreshRemoteInviteState() {
+        btWizardView?.remoteInvite = remoteInviteState()
+    }
+
+    /// A phone-driven measurement just started on this speaker. If the by-ear
+    /// sheet is open on the same one, it closes: the Mac runs one alignment at
+    /// a time, and the page's whole job was to get the phone to take over.
+    public func noteCompanionAlignmentRunStarted(deviceID: String) {
+        guard btWizardDeviceID == deviceID else { return }
+        finishBTWizard()
     }
 
     /// Whether this device's note belongs on screen: it was offered, the user
@@ -4792,7 +4849,7 @@ extension PopoverController: DeviceRowView.Delegate {
 
     /// Open the wizard for `deviceID` through one of its four doors — the
     /// untuned row chip, the first-join note, the drawer's "Align again…", or
-    /// the row's "Align speaker…" menu item. Builds the session over the row's
+    /// the row's "Align by ear…" menu item. Builds the session over the row's
     /// freshest trim and mounts the sheet. Refused only for a target that is
     /// GONE (unpaired, powered off) — a speaker that is merely out of the mix
     /// is put into it, see below.

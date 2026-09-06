@@ -25,6 +25,7 @@ or `GroupController`.
 - `Tokens.Color.muted` is fenced to the device row's engaged mute button; a second consumer fails a test.
 - `setContent`'s `defaultSize:` seeds only the first mount of a content controller.
 - `ControlPanelBackingView` is an approved custom-drawn exception; NSPanel has no arrow.
+- `RemoteInviteView`'s tile is FIXED white with black modules in every appearance, dial position and Increase Contrast: a QR code is a print artifact a camera reads, not chrome, so it is the one sanctioned literal colour outside `Tokens`.
 - `Tokens.Color.shadow`'s three real consumers are flat and clipped, never an
   `NSShadow`: `WarmFaderCell` (here), `AlignmentPlateCell` (`AudioutPopoverUI`),
   and `GroupedSectionView`'s `.well` style (`AudioutWindowUI`, the device
@@ -40,3 +41,4 @@ or `GroupController`.
 - `PopoverColumnGrid` → named column geometry for every row.
 - `ControlPanelBackingView` → custom-drawn panel background with the menu-bar beak.
 - `ProminentButton` → the gold call-to-action button, `inkOnFill` ink.
+- `RemoteInviteView` → the one QR-and-address invitation, hosted by three surfaces.

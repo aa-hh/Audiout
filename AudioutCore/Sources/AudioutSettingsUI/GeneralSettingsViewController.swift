@@ -72,6 +72,13 @@ public final class GeneralSettingsViewController: NSViewController {
     private let phoneListContainer = BorderedListView()
     private static let phoneRowHeight: CGFloat = 28
 
+    // The invitation to Audiout Remote, mounted directly under the Allow
+    // switch and only while that switch is on.
+    private var remoteControlRow: NSView?
+    private var remoteInviteRow: NSStackView?
+    private var remoteInviteTile: RemoteInviteView?
+    private let remoteInviteButton = NSButton()
+
     /// Resolved once at init (the env var, if any, can't change for the life of
     /// this process) — what the switch must honestly reflect: the EFFECTIVE
     /// state, not the raw persisted ``AppSettings/allowRemoteControl`` (FIX-C).
@@ -216,8 +223,10 @@ public final class GeneralSettingsViewController: NSViewController {
         remoteControlSwitch.setAccessibilityLabel("Allow control from iPhone on this network")
         let remoteControlRow = SettingsForm.row(
             title: "Allow control from iPhone on this network",
-            subtitle: "Lets the Audiout companion app on your iPhone see and control this Mac's speakers.",
+            subtitle: "Lets Audiout Remote on your iPhone control this Mac's speakers "
+                + "and measure their timing from the room.",
             control: remoteControlSwitch)
+        self.remoteControlRow = remoteControlRow
 
         // Same idiom as the Audio pane's `AIRPLAY_START_BUFFER_MS` override
         // note: `.warning`-colored caption, wrapping, explicit
@@ -231,6 +240,8 @@ public final class GeneralSettingsViewController: NSViewController {
         remoteControlOverrideNote.lineBreakMode = .byWordWrapping
         remoteControlOverrideNote.maximumNumberOfLines = 0
         remoteControlOverrideNote.preferredMaxLayoutWidth = SettingsForm.contentWidth - 40
+
+        buildRemoteInviteRow()
 
         // Anonymous usage analytics (opt-in, off by default) — the Settings ›
         // General toggle for the consent `AppSettings.telemetryOptIn` gates.
@@ -336,6 +347,9 @@ public final class GeneralSettingsViewController: NSViewController {
         if remoteControlResolution.isForced {
             rows.append(remoteControlOverrideNote)
         }
+        if remoteControlSwitch.state == .on, let remoteInviteRow {
+            rows.append(remoteInviteRow)
+        }
         if approvals != nil {
             rows.append(contentsOf: makePhoneListViews())
         }
@@ -361,6 +375,7 @@ public final class GeneralSettingsViewController: NSViewController {
         view = SettingsForm.paneView(rows: rows)
         paneStack = launchRow.superview as? NSStackView
         rebuildPhoneList()
+        applyRemoteInviteVisibility()
         // Claimed here (single-assignment, like the app layer's claims on
         // this pane's own callbacks): a prompt answered or a phone revoked
         // while the window is open repaints the list live.
@@ -489,6 +504,90 @@ public final class GeneralSettingsViewController: NSViewController {
         Analytics.capture("settings:reconnect_at_launch_toggled", ["enabled": enabled ? "true" : "false"])
     }
 
+    /// "Get Audiout Remote for iPhone": the pane's own invitation, one row
+    /// under the switch that enables it. The QR tile is the trailing
+    /// control and the address is a stock push button under the subtitle —
+    /// this pane has no hyperlink idiom, every link in it is a button, and the
+    /// button routes through the injected ``openURL`` so a test never launches
+    /// a browser.
+    ///
+    /// Not `SettingsForm.row`: that row centres a SHORT control on the title's
+    /// baseline and puts nothing under the subtitle, and this row needs both
+    /// a 72 pt control and a button below the text.
+    private func buildRemoteInviteRow() {
+        let title = SettingsForm.label("Get Audiout Remote for iPhone")
+        title.font = Tokens.Font.body
+
+        let subtitle = SettingsForm.label(
+            "Scan with your iPhone's camera, or open \(RemoteInviteView.pageAddress).")
+        subtitle.font = Tokens.Font.caption
+        subtitle.textColor = Tokens.Color.label2
+        subtitle.lineBreakMode = .byWordWrapping
+        subtitle.maximumNumberOfLines = 0
+        subtitle.preferredMaxLayoutWidth =
+            SettingsForm.contentWidth - SettingsForm.horizontalPadding * 2
+                - RemoteInviteView.settingsTileSide - 16
+
+        remoteInviteButton.title = "Open \(RemoteInviteView.pageAddress)"
+        remoteInviteButton.bezelStyle = .rounded
+        remoteInviteButton.controlSize = .small
+        remoteInviteButton.target = self
+        remoteInviteButton.action = #selector(remoteInviteLinkTapped)
+        remoteInviteButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        // The button hugs its title; a bare stack row would stretch it across
+        // the column.
+        let buttonRow = NSStackView(views: [remoteInviteButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.alignment = .centerY
+
+        let text = NSStackView(views: [title, subtitle, buttonRow])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 6
+        text.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let tile = RemoteInviteView(tileSide: RemoteInviteView.settingsTileSide)
+        remoteInviteTile = tile
+
+        let row = NSStackView(views: [text, tile])
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.spacing = 16
+        row.translatesAutoresizingMaskIntoConstraints = false
+        remoteInviteRow = row
+    }
+
+    /// Mount or unmount the invitation, and drop its QR once a phone is
+    /// remembered. Hidden-in-place for the TILE (a stack collapses an arranged
+    /// subview it is told to hide) and mounted/unmounted for the ROW, the same
+    /// two idioms the Login Items approval row and the phone list already use.
+    private func applyRemoteInviteVisibility() {
+        guard isViewLoaded, let row = remoteInviteRow,
+              let stack = paneStack else { return }
+        remoteInviteTile?.isHidden = !(approvals?.approvals.isEmpty ?? true)
+        let wanted = remoteControlSwitch.state == .on
+        if wanted, row.superview == nil {
+            let after = stack.arrangedSubviews.firstIndex(where: { $0 === remoteControlNoteAnchor })
+            stack.insertArrangedSubview(row, at: (after ?? 1) + 1)
+            // `removeFromSuperview` dropped the width pin `paneView` gave it.
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        } else if !wanted, row.superview != nil {
+            stack.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+    }
+
+    /// The row the invitation sits under: the override note when one is in
+    /// force, otherwise the switch's own row.
+    private var remoteControlNoteAnchor: NSView? {
+        remoteControlResolution.isForced ? remoteControlOverrideNote : remoteControlRow
+    }
+
+    @objc private func remoteInviteLinkTapped() {
+        openURL(RemoteInviteView.pageURL)
+    }
+
     /// The "Remembered iPhones" section (T24): a caption + bordered
     /// `name · decision · remove` list, the Audio pane's excluded-apps idiom
     /// compacted. Both views are hidden (not unmounted) while the list is
@@ -524,6 +623,9 @@ public final class GeneralSettingsViewController: NSViewController {
         let isEmpty = approvals.approvals.isEmpty
         phoneListHeading.isHidden = isEmpty
         phoneListContainer.isHidden = isEmpty
+        // A house with a phone already on file still needs the address for a
+        // second one, but not the code taking up the pane.
+        applyRemoteInviteVisibility()
         for approval in approvals.approvals {
             phoneListStack.addArrangedSubview(makePhoneRow(approval))
         }
@@ -667,6 +769,8 @@ public final class GeneralSettingsViewController: NSViewController {
             return
         }
         settings.allowRemoteControl = remoteControlSwitch.state == .on
+        // A Mac that refuses phones must not invite one.
+        applyRemoteInviteVisibility()
         onAllowRemoteControlChanged?()
     }
 
@@ -864,6 +968,34 @@ public final class GeneralSettingsViewController: NSViewController {
     public var test_allowRemoteControlOverrideNoteTextColor: NSColor {
         _ = view
         return remoteControlOverrideNote.textColor ?? .clear
+    }
+
+    // MARK: Test-support hooks (Audiout Remote invitation)
+
+    /// Whether the invitation row is in the pane at all. It is mounted, never
+    /// hidden in place: a Mac that refuses phones should not invite one.
+    public var test_remoteInviteRowIsMounted: Bool {
+        _ = view
+        return remoteInviteRow?.superview != nil
+    }
+
+    /// Whether the QR tile is on screen. It drops once a phone is remembered,
+    /// leaving the row its title, subtitle and button.
+    public var test_remoteInviteQRIsVisible: Bool {
+        _ = view
+        return remoteInviteTile.map { !$0.isHidden } ?? false
+    }
+
+    public var test_remoteInviteButtonTitle: String? {
+        _ = view
+        return remoteInviteButton.title
+    }
+
+    /// Click "Open audiout.app/remote" the way a user would — through the
+    /// injected `openURL`, so nothing launches a browser.
+    public func test_tapRemoteInviteLink() {
+        _ = view
+        remoteInviteLinkTapped()
     }
 
     /// Drive the switch to `on`/`off` and run the same action a real click

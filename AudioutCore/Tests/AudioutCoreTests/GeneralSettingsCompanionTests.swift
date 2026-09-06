@@ -214,6 +214,61 @@ import AppKit
         #expect(try CompanionApprovalStore(directory: scratchDir).load()?.map(\.clientID) == [Self.guestID])
     }
 
+    // MARK: The invitation to Audiout Remote
+
+    /// Defect this names: the invitation stays in the pane after the switch
+    /// goes off, so a Mac that refuses phones goes on inviting one.
+    @Test func theInvitationIsMountedOnlyWhileTheSwitchIsOn() throws {
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.allowRemoteControl = true
+        let pane = GeneralSettingsViewController(loginItem: FakeLoginItem(),
+                                                 settings: settings, environment: [:],
+                                                 approvals: try makeController(records: []))
+        #expect(pane.test_remoteInviteRowIsMounted)
+
+        pane.test_toggleAllowRemoteControl(false)
+        #expect(!pane.test_remoteInviteRowIsMounted)
+
+        pane.test_toggleAllowRemoteControl(true)
+        #expect(pane.test_remoteInviteRowIsMounted, "turning it back on re-mounts the row")
+    }
+
+    /// Defect this names: the QR keeps taking up the pane once a phone is
+    /// already remembered, where only the address is still useful.
+    @Test func theQRDropsOnceAPhoneIsRemembered() throws {
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.allowRemoteControl = true
+        let controller = try makeController(records: [])
+        controller.presentPrompt = { _, respond in respond(true) }
+        let pane = GeneralSettingsViewController(loginItem: FakeLoginItem(),
+                                                 settings: settings, environment: [:],
+                                                 approvals: controller)
+        #expect(pane.test_remoteInviteQRIsVisible)
+
+        controller.handleRequest(clientID: Self.ownerID, clientName: "Owner's iPhone") { _ in }
+
+        #expect(!pane.test_remoteInviteQRIsVisible)
+        #expect(pane.test_remoteInviteRowIsMounted,
+                "the row stays — a second phone in the house still needs the address")
+    }
+
+    /// Defect this names: the link launching a real browser out of a test
+    /// run, or pointing somewhere other than the invitation's own page.
+    @Test func theLinkOpensThePageThroughTheInjectedSeam() throws {
+        var opened: [URL] = []
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.allowRemoteControl = true
+        let pane = GeneralSettingsViewController(loginItem: FakeLoginItem(),
+                                                 settings: settings, environment: [:],
+                                                 openURL: { opened.append($0) },
+                                                 approvals: try makeController(records: []))
+        #expect(pane.test_remoteInviteButtonTitle == "Open audiout.app/remote")
+
+        pane.test_tapRemoteInviteLink()
+
+        #expect(opened.map(\.absoluteString) == [RemoteInviteView.pageURLString])
+    }
+
     /// A phone approved WHILE the window is open (the prompt path) appears
     /// live — the pane claims the controller's `onChange`.
     @Test func aNewDecisionAppearsInTheOpenList() throws {

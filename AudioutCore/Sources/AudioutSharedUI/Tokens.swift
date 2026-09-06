@@ -1017,6 +1017,33 @@ public enum Tokens {
                                                    light: 0x5A6A65, lightHighContrast: 0x314E45))
         }
 
+        /// Audiout Remote's hue — a "moss green," the SIXTH member of the
+        /// family and the second that is not a macOS permission (the card
+        /// invites the iPhone app and completes when a phone connects). Hue
+        /// 107.5-110.0° in every column/appearance, MEASURED rather than
+        /// picked by eye: the Permission-Hue Fence leaves one band with room,
+        /// roughly 100° to 115°, between Speaker Sync's terracotta (~23°) and
+        /// Usage Statistics' verdigris (~160°). Clear of both reserved bands
+        /// (gold/amber `[28°,68°)`, failure-red `[0°,12°)∪[350°,360°)`) and
+        /// ≥50° from the other five (~208°/~271°/~320°/~23°/~160°; the
+        /// nearest is Usage Statistics at 50°). CONTRAST RATIONALE (measured,
+        /// all four appearance cells, against `canvas` and `panel` — and
+        /// `raised`/`well`, the two other surfaces the family is held to):
+        /// Full dark `#569347` = 5.33:1 vs `canvas` / 4.84:1 vs `panel` /
+        /// 4.25:1 vs `raised`; Full light `#2D7C19` = 5.02:1 vs the flat
+        /// ground / 4.35:1 vs `well`. Subtle (authored, not derived): dark
+        /// `#64775F` = 4.09 / 3.72 / 3.26; light `#5B6F57` = 5.22:1 / 4.52:1.
+        /// IC variants: Full dark `#81BE72` = 8.99 / 8.16 / 7.16, Full light
+        /// `#1F5A10` = 7.96:1 / 6.90:1; Subtle dark `#859880` = 6.41 / 5.82 /
+        /// 5.10, Subtle light `#3E4D3B` = 8.64:1 / 7.49:1.
+        public static var permissionAudioutRemote: NSColor {
+            permissionDynamic(name: "permissionAudioutRemote",
+                              full: WarmVariants(dark: 0x569347, darkHighContrast: 0x81BE72,
+                                                 light: 0x2D7C19, lightHighContrast: 0x1F5A10),
+                              subtle: WarmVariants(dark: 0x64775F, darkHighContrast: 0x859880,
+                                                   light: 0x5B6F57, lightHighContrast: 0x3E4D3B))
+        }
+
         /// Bluetooth SIG brand blue `#0082FC` — the Bluetooth setup row's
         /// glyph tint (owner's call, 2026-08-23: the rune wears its official
         /// colour). A BRAND MARK, so one fixed hex in every appearance/contrast

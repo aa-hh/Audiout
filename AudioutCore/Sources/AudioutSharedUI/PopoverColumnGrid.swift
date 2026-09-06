@@ -709,7 +709,7 @@ public enum PopoverColumnGrid {
     //
     // The panel that opens underneath a Bluetooth row: ONE horizontal band,
     //
-    //     [⑂ Align again…] [♪ Align by ear] [Reset alignment]   hold ⇧ for 10 ms   [ − | −414 ms | + ]
+    //     [⑂ Align again…] [♪ Play ticks] [Reset alignment]   hold ⇧ for 10 ms   [ − | −414 ms | + ]
     //
     // The two alignment doors and Reset sit at the far LEADING edge,
     // deliberately as far as the band allows from the steppers, so Reset
@@ -733,8 +733,10 @@ public enum PopoverColumnGrid {
     /// Width of the "Align again…" push button that leads the band — fits the
     /// title with its leading tuning-fork glyph at ``Tokens/Font/caption``.
     public static let syncDrawerAlignAgainButtonWidth: CGFloat = 104
-    /// Width of the align-by-ear toggle — fits "Align by ear" with its leading
-    /// metronome glyph at ``Tokens/Font/caption``.
+    /// Width of the tick toggle — fits "Play ticks" with its leading
+    /// metronome glyph at ``Tokens/Font/caption``, with room to spare (the
+    /// title measures 49.7 pt where the "Align by ear" it replaced measured
+    /// 62.1).
     public static let syncDrawerAlignButtonWidth: CGFloat = 104
     /// Width of the "Reset alignment" push button — it spells out what it
     /// clears, which is longer than either alignment door beside it.
@@ -755,11 +757,19 @@ public enum PopoverColumnGrid {
     /// `−` crowding the digits made the minus read as part of the NUMBER rather
     /// than as a button (live-found).
     public static let syncDrawerStepperToValueGap: CGFloat = 8
-    /// The drawer's total height: one band plus the top and bottom insets.
-    /// `PopoverController` (T7) grows the popover by exactly this on expand and
-    /// shrinks back by it on collapse.
+    /// Gap between the band and the caption line under it.
+    public static let syncDrawerCaptionGap: CGFloat = 4
+    /// Height reserved for the caption line under the band — one line of
+    /// ``Tokens/Font/caption``. RESERVED even when the line is empty (a
+    /// never-measured speaker has no source to name), so the band never jumps
+    /// as a source arrives.
+    public static let syncDrawerCaptionHeight: CGFloat = 14
+    /// The drawer's total height: one band, the caption line under it, plus
+    /// the top and bottom insets. `PopoverController` (T7) grows the popover
+    /// by exactly this on expand and shrinks back by it on collapse.
     public static var syncDrawerHeight: CGFloat {
         syncDrawerVerticalInset * 2 + syncDrawerControlHeight
+            + syncDrawerCaptionGap + syncDrawerCaptionHeight
     }
 
     // MARK: Inter-column gaps

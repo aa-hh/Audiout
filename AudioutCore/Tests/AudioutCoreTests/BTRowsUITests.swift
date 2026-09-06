@@ -388,7 +388,11 @@ import AppKit
     @Test func anUntunedBluetoothChipReadsAlignAndOpensTheWizard() {
         let spy = SpyDelegate()
         let row = makeRow(btDevice(), delegate: spy, syncTrimIsSet: false)
-        #expect(row.test_syncChipTitle == "Align")
+        #expect(row.test_syncChipTitle == "Align by ear")
+        // Defect this names: a longer door title than the 84 pt column holds,
+        // which AppKit truncates silently rather than reporting.
+        #expect(row.test_syncChipFittingWidth <= PopoverColumnGrid.syncChipWidth,
+                "the chip's door title needs \(row.test_syncChipFittingWidth) pt of \(PopoverColumnGrid.syncChipWidth)")
         #expect(row.test_syncChipTitleColor == Tokens.Color.label)
         #expect(row.test_syncChipIsDashed, "still the invitation")
         #expect(row.test_syncChipAXLabel == "Align Sonos Move 2")
@@ -602,14 +606,14 @@ import AppKit
                 "…and ends clear of the value cluster — \(placement)")
     }
 
-    @Test func contextMenuCarriesAlignSpeakerOnBTRowsThroughRealMenuDispatch() throws {
+    @Test func contextMenuCarriesAlignByEarOnBTRowsThroughRealMenuDispatch() throws {
         let spy = SpyDelegate()
         let row = makeRow(btDevice(), delegate: spy)
         let menu = row.test_contextMenu()
         // "Equalizer…" leads on every non-local row (owner decision
         // 2026-08-22); alignment is the Bluetooth-only item under it.
-        #expect(menu?.items.map(\.title) == ["Equalizer…", "Align speaker…"])
-        let alignIndex = try #require(menu?.items.firstIndex { $0.title == "Align speaker…" })
+        #expect(menu?.items.map(\.title) == ["Equalizer…", "Align by ear…"])
+        let alignIndex = try #require(menu?.items.firstIndex { $0.title == "Align by ear…" })
         #expect(menu?.items[alignIndex].isEnabled == true)
         menu?.performActionForItem(at: alignIndex)   // real AppKit menu dispatch
         #expect(spy.wizardRequests.map(\.id) == [btDevice().id])
@@ -625,7 +629,7 @@ import AppKit
     @Test func contextMenuAlignItemDisablesOnAGreyedRow() throws {
         let row = makeRow(btDevice(available: false), delegate: SpyDelegate())
         let menu = try #require(row.test_contextMenu())
-        let align = try #require(menu.items.first { $0.title == "Align speaker…" })
+        let align = try #require(menu.items.first { $0.title == "Align by ear…" })
         #expect(align.isEnabled == false, "no wizard offer over a silent target")
     }
 }
@@ -821,7 +825,7 @@ import AppKit
                                  bt("bt-b:output", name: "Speaker B")])
 
         let never = popover.test_deviceRow(for: "bt-a:output")
-        #expect(never?.test_syncChipTitle == "Align")
+        #expect(never?.test_syncChipTitle == "Align by ear")
         #expect(never?.test_syncChipIsDashed == true)
 
         let tunedToZero = popover.test_deviceRow(for: "bt-b:output")

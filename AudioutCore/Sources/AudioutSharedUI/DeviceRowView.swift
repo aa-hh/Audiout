@@ -60,7 +60,7 @@ public final class DeviceRowView: NSView {
         /// it never edits selection. Default no-op for non-BT hosts.
         func deviceRowDidRequestReconnect(_ row: DeviceRowView)
         /// The user asked for the guided alignment wizard on this Bluetooth
-        /// row — the "Align speaker…" context-menu item, or the untuned row's
+        /// row — the "Align by ear…" context-menu item, or the untuned row's
         /// own chip. `door` says which, so the host's telemetry can tell them
         /// apart. Default no-op for hosts without the wizard.
         func deviceRow(_ row: DeviceRowView, didRequestAlignmentWizardFor id: String,
@@ -372,6 +372,13 @@ public final class DeviceRowView: NSView {
     /// user's nudge — because that is the delay the speaker is actually
     /// carrying; the tooltip and VoiceOver spell the two halves apart.
     private var syncMeasuredLatencyMs: Double?
+    /// Where the applied offset came from, pushed by the host — `nil` on a
+    /// speaker that has never been measured, and on every host that does not
+    /// publish a source yet.
+    private var alignmentSource: BTOffsetSource?
+    /// How far the last re-measurement moved the stored offset, when that was
+    /// far enough to tell the user (ADR 0001). Session state the host clears.
+    private var movedSinceLastTimeMs: Double?
     /// Whether this row's drawer is currently open (host-owned, D2) — drives
     /// the chevron direction, the engaged fill, and `accessibilityExpanded`.
     private var syncDrawerExpanded = false
@@ -509,6 +516,8 @@ public final class DeviceRowView: NSView {
                       syncTrimMs: Double = 0,
                       syncTrimIsSet: Bool = false,
                       syncMeasuredLatencyMs: Double? = nil,
+                      alignmentSource: BTOffsetSource? = nil,
+                      movedSinceLastTimeMs: Double? = nil,
                       syncDrawerExpanded: Bool = false,
                       removalUndoOffered: Bool = false,
                       volumePendingApply: Bool = false,
@@ -753,6 +762,8 @@ public final class DeviceRowView: NSView {
             self.syncTrimMs = BTSyncTrim.clamp(syncTrimMs, rangeMs: syncRangeMs)
             self.syncTrimIsSet = syncTrimIsSet
             self.syncMeasuredLatencyMs = syncMeasuredLatencyMs
+            self.alignmentSource = alignmentSource
+            self.movedSinceLastTimeMs = movedSinceLastTimeMs
             self.syncDrawerExpanded = syncDrawerExpanded
             syncChipButton.isEnabled = device.isAvailable
             updateSyncChip()
@@ -1896,10 +1907,20 @@ public final class DeviceRowView: NSView {
     /// the module's one copy: ``BTSyncDrawerView`` reads it rather than
     /// re-authoring the sentence.
     static let alignTooltip =
-        "Play alignment ticks on this speaker and the rest of the scene. Adjust sync until they land as one"
+        "Play alignment ticks on this speaker and the other speakers. "
+        + "Adjust the offset until they land as one."
 
     /// What the chip says on a never-measured Bluetooth speaker, where it is
-    /// the wizard's door rather than a value.
+    /// the wizard's door rather than a value. "Align by ear" names the
+    /// paired-click wizard and only that (the glossary in
+    /// `audiout-shared/CONTEXT.md`): the phone's tuning fork MEASURES, this
+    /// door asks the listener. The drawer's tick toggle is "Play ticks".
+    public static let chipAlignTitle = "Align by ear"
+
+    /// The row menu's door to the same wizard. Keeps the ellipsis every
+    /// sheet-opening item in this app carries ("Equalizer…", "Align again…").
+    static let alignMenuItemTitle = "Align by ear…"
+
     static let chipAlignTooltip =
         "This speaker plays a little behind the others until it’s aligned. Click to align it."
 
@@ -1979,7 +2000,7 @@ public final class DeviceRowView: NSView {
         // same glyph the phone's row carries. Every other row (tuned, Cast,
         // this Mac) keeps the value chip and its drawer.
         let offersWizard = chipOffersWizard
-        let title = offersWizard ? "Align" : (tuned ? Self.syncChipValueText(syncChipValueMs) : "Not set")
+        let title = offersWizard ? Self.chipAlignTitle : (tuned ? Self.syncChipValueText(syncChipValueMs) : "Not set")
         let color: NSColor
         if engaged {
             color = Tokens.Color.engagedChrome
@@ -2029,7 +2050,7 @@ public final class DeviceRowView: NSView {
         } else if device.isCast {
             syncChipButton.toolTip = "\(syncChipHelp) \(Self.castSyncHelpCopy)"
         } else {
-            syncChipButton.toolTip = syncChipHelp + syncMeasuredSplitCopy
+            syncChipButton.toolTip = syncChipHelp + syncMeasuredSplitCopy + sourceSentence
         }
         syncChipButton.setNeedsDisplay(syncChipButton.bounds)
     }
@@ -2052,6 +2073,18 @@ public final class DeviceRowView: NSView {
     /// run read as "0 ms" on the row.
     private var syncChipValueMs: Double {
         syncTrimMs + (syncMeasuredLatencyMs ?? 0)
+    }
+
+    /// Where the number came from, for hover and VoiceOver — one sentence,
+    /// appended after the split. The over-40 ms notice stands in the source's
+    /// place for as long as the drawer's caption line carries it, so hover and
+    /// the line say the same thing. Empty until a source is pushed.
+    private var sourceSentence: String {
+        if let movedSinceLastTimeMs {
+            return " " + BTOffsetSource.movedNotice(byMs: movedSinceLastTimeMs)
+        }
+        guard let alignmentSource else { return "" }
+        return " " + alignmentSource.chipSentence
     }
 
     /// The split behind that number, for hover and VoiceOver. Empty when the
@@ -2154,7 +2187,7 @@ public final class DeviceRowView: NSView {
             menu.addItem(eq)
         }
         if supportsAlignmentWizard {
-            let align = NSMenuItem(title: "Align speaker…",
+            let align = NSMenuItem(title: Self.alignMenuItemTitle,
                                    action: #selector(alignSpeakerMenuItemSelected(_:)),
                                    keyEquivalent: "")
             align.target = self
@@ -2830,6 +2863,13 @@ public final class DeviceRowView: NSView {
 
     /// The colour the chip's label is actually drawn in — the de-emphasis an
     /// untuned chip and the accent an engaged one must both show.
+    /// What the chip's glyph and title actually need, so a longer title than
+    /// ``PopoverColumnGrid/syncChipWidth`` fails a test instead of truncating
+    /// on someone's row.
+    public var test_syncChipFittingWidth: CGFloat {
+        syncChipButton.intrinsicContentSize.width
+    }
+
     public var test_syncChipTitleColor: NSColor? {
         guard showsSyncControls, syncChipButton.attributedTitle.length > 0 else { return nil }
         return syncChipButton.attributedTitle
@@ -3366,7 +3406,7 @@ public final class DeviceRowView: NSView {
             syncChipButton.setAccessibilityLabel("Sync offset for \(device.name)")
             syncChipButton.setAccessibilityValue(
                 syncTrimIsSet || syncMeasuredLatencyMs != nil
-                    ? BTSyncTrim.spokenOffset(syncChipValueMs) + syncMeasuredSplitCopy
+                    ? BTSyncTrim.spokenOffset(syncChipValueMs) + syncMeasuredSplitCopy + sourceSentence
                     : "not set")
             syncChipButton.setAccessibilityExpanded(syncDrawerExpanded)
         }

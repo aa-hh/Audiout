@@ -84,21 +84,21 @@ import AppKit
     @Test func bluetoothRowMenuOffersEqualizerThenAlign() {
         let (popover, _) = makePopover()
         let menu = popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()
-        #expect(titles(menu) == ["Equalizer…", "Align speaker…"],
+        #expect(titles(menu) == ["Equalizer…", "Align by ear…"],
                 "tone first, alignment second — and no separator between two items")
     }
 
     @Test func thisMacRowMenuOffersAlignmentButNeverEqualizer() {
         // Roadmap 060: the Mac's own row carries the SAME sync affordances as a
-        // Bluetooth row — including "Align speaker…" — but it is still not an
+        // Bluetooth row — including "Align by ear…" — but it is still not an
         // Equalizer target (per-device EQ covers AirPlay and Bluetooth outputs).
         let (popover, _) = makePopover()
         let row = popover.test_deviceRow(for: "mac")
         #expect(row != nil)
-        #expect(titles(row?.test_contextMenu()) == ["Align speaker…"],
+        #expect(titles(row?.test_contextMenu()) == ["Align by ear…"],
                 "alignment yes, tone no — This Mac is not an EQ target")
         #expect(row?.test_iconIsMenuTrigger == true)
-        #expect(titles(row?.test_clickIcon()) == ["Align speaker…"],
+        #expect(titles(row?.test_clickIcon()) == ["Align by ear…"],
                 "the icon pops the same menu")
     }
 

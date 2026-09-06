@@ -331,6 +331,9 @@ final class DemoPaneView: NSView {
             // The one ask whose surface is OURS, so the rehearsal is the real
             // view rather than a drawing of one.
             case .usageStats:    return DemoConsentCardMockView()
+            // No dialog to rehearse: this ask raises a page on the user's
+            // PHONE, so the stage is the code that gets them there.
+            case .audioutRemote: return DemoRemoteInviteMockView()
             default:             return DemoPromptMockView(step: step)
             }
         // Every retry lands on the pane itself — Remote Control's included, now
@@ -428,6 +431,11 @@ final class DemoPaneView: NSView {
     /// Whether the mock on stage rests with its switch already on (a browse of
     /// a granted step).
     var test_restingSwitchOn: Bool { (mock as? DemoSettingsMockView)?.test_switchRestsOn ?? false }
+    /// The invitation on stage, when the iPhone card is the one showing —
+    /// `nil` for every other rehearsal.
+    var test_remoteInvite: RemoteInviteView? {
+        (mock as? DemoRemoteInviteMockView)?.test_invite
+    }
     /// Whether what's on stage is a read-only browse.
     var test_isBrowse: Bool { isBrowse }
     var test_isLooping: Bool { (mock as? DemoMockView)?.isLooping ?? false }
@@ -1095,7 +1103,7 @@ final class DemoPromptMockView: DemoMockView {
         // DIALOG'S icon — the one a separate system process reads out of Launch
         // Services, not this process's own fresher `NSApp.applicationIconImage`
         // (see `demoIconAsAThirdPartyProcessSeesIt`).
-        case .remoteControl, .speakerSync, .usageStats:
+        case .remoteControl, .speakerSync, .usageStats, .audioutRemote:
             let icon = NSImageView()
             icon.image = demoIconAsAThirdPartyProcessSeesIt()
             icon.imageScaling = .scaleProportionallyUpOrDown
@@ -1671,7 +1679,7 @@ final class DemoSettingsMockView: DemoMockView {
         case .speakerSync:   return "Login Items"
         // Never reached: Usage Statistics has no System Settings pane to land
         // on, so nothing ever asks this mock to draw one for it.
-        case .usageStats:    return "General"
+        case .usageStats, .audioutRemote: return "General"
         }
     }
 
@@ -3143,4 +3151,64 @@ extension NSView {
         let marked = demoButtons.filter(\.isMarked)
         return marked.count == 1 ? marked[0].buttonTitle : nil
     }
+}
+
+// MARK: - The iPhone card's stage
+
+/// Audiout Remote's rehearsal: the invitation itself, at 160 pt on a
+/// `raised` tile with the address in caption under it.
+///
+/// Every other stage draws the DIALOG a click raises. This ask raises no
+/// dialog — the next surface is a page on the user's phone — so the stage
+/// shows the one thing that gets them there. Static under every motion
+/// setting: there is no gesture to rehearse and a code that moves is a code
+/// nobody can scan.
+final class DemoRemoteInviteMockView: DemoMockView {
+
+    private let invite = RemoteInviteView(tileSide: RemoteInviteView.setupTileSide)
+    private let tilePadding: CGFloat = 24
+    private let tileCornerRadius: CGFloat = 12
+
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        addSubview(invite)
+        NSLayoutConstraint.activate([
+            invite.topAnchor.constraint(equalTo: topAnchor, constant: tilePadding),
+            invite.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -tilePadding),
+            invite.leadingAnchor.constraint(equalTo: leadingAnchor, constant: tilePadding),
+            invite.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -tilePadding),
+        ])
+        // The `raised` fill and its edge are drawn, not stamped, so they
+        // re-resolve on every pass; this is the other half of the trigger —
+        // Increase Contrast fires no appearance change of its own.
+        redrawOnAccessibilityDisplayChange()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// The rehearsal takes no clicks, exactly as the consent card's does not.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let tile = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: tileCornerRadius, yRadius: tileCornerRadius)
+        Tokens.Color.raised.setFill()
+        tile.fill()
+        Tokens.Color.containerEdge.setStroke()
+        tile.lineWidth = 1
+        tile.stroke()
+    }
+
+    // MARK: Test-support hooks
+
+    /// The invitation the card really carries, so a test can prove the stage
+    /// and the other two hosts mount the same view.
+    var test_invite: RemoteInviteView { invite }
 }

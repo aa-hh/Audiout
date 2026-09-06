@@ -336,6 +336,50 @@ import AppKit
         #expect(spy.alignToggles.isEmpty, "an external push repositions state, it isn't a user gesture")
     }
 
+    // MARK: The caption line — where the applied offset came from
+
+    /// Defect this names: the toggle keeps the wizard's name, so "Align by
+    /// ear" would mean two different things one button apart.
+    @Test func theTickToggleSaysWhatItPlays() {
+        let (drawer, _) = makeDrawer()
+        #expect(drawer.test_alignTitle == "Play ticks")
+    }
+
+    /// Defect this names: the line printing the wrong source, or printing
+    /// something on a speaker nobody has measured — and the reserved height
+    /// going away with it, which makes the band jump when a source lands.
+    @Test func theCaptionNamesTheSourceAndStaysReservedWithoutOne() {
+        let (drawer, _) = makeDrawer()
+        #expect(drawer.test_captionText.isEmpty, "no source, no sentence")
+
+        for (source, expected) in [(BTOffsetSource.measured, "Measured with your iPhone"),
+                                   (.fromLastTime, "Timing from last time"),
+                                   (.byEar, "Aligned by ear on this Mac")] {
+            drawer.configure(deviceName: "Move 2", trimMs: 24, isSet: true,
+                             usableRangeMs: -500...500, alignTickActive: false,
+                             offsetSource: source)
+            #expect(drawer.test_captionText == expected)
+        }
+        drawer.configure(deviceName: "Move 2", trimMs: 24, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false,
+                         offsetSource: .firstPass)
+        #expect(drawer.test_captionText
+                    == "First pass. Your iPhone checks again once the speaker has settled.",
+                "a first pass keeps the clause that promises the re-check")
+        #expect(drawer.test_captionTextColor == Tokens.Color.label2,
+                "the line is a note, never a failure")
+    }
+
+    /// Defect this names: the over-40 ms notice never reaching the user
+    /// because the source sentence sits on the line it needs.
+    @Test func theMovedNoticeTakesTheLineFromTheSource() {
+        let (drawer, _) = makeDrawer()
+        drawer.configure(deviceName: "Move 2", trimMs: 24, isSet: true,
+                         usableRangeMs: -500...500, alignTickActive: false,
+                         offsetSource: .measured, movedSinceLastTimeMs: 46)
+        #expect(drawer.test_captionText.hasPrefix("Moved 46 ms since last time."))
+    }
+
     // MARK: Escape — drawer-level close vs field-level revert don't collide
 
     @Test func escapeOnTheDrawerRequestsClose() {

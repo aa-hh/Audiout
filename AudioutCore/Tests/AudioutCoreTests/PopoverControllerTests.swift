@@ -3478,6 +3478,137 @@ import AudioutProtocol
         #expect(popover.test_systemAirPlayNoteText == nil, "the note clears once a key is in place")
     }
 
+    // MARK: Trial pill + the two one-time banners (M6)
+
+    /// Wires a popover to a trial that has `daysLeft` days to run, and returns
+    /// the banners it raised. `daysLeft: nil` means no trial at all.
+    private func wireTrial(_ popover: PopoverController,
+                           daysLeft: Int?,
+                           owed: TrialBanner? = nil) -> Raised {
+        let raised = Raised()
+        popover.trialStateProvider = {
+            guard let daysLeft else { return .none }
+            return .active(daysLeft: daysLeft,
+                           expiresAt: Date(timeIntervalSinceNow: Double(daysLeft) * 86_400),
+                           registered: true)
+        }
+        popover.trialBannerOwedProvider = { raised.owedNow(owed) }
+        popover.onTrialBannerShown = { raised.append($0) }
+        return raised
+    }
+
+    /// The banners a wired popover raised, and the one-shot rule the host's
+    /// persisted flag enforces in production: once raised, never owed again.
+    private final class Raised {
+        private(set) var banners: [TrialBanner] = []
+        func append(_ banner: TrialBanner) { banners.append(banner) }
+        func owedNow(_ owed: TrialBanner?) -> TrialBanner? {
+            banners.isEmpty ? owed : nil
+        }
+    }
+
+    /// The pill takes the note slot from day one of a trial, says how long is
+    /// left, and offers the purchase page. Red if it stopped appearing, stopped
+    /// counting, or stopped outranking the unregistered note — a trialist would
+    /// then be told they are running an unregistered copy.
+    @Test func trialPillShowsDaysLeftAndOutranksTheUnregisteredNote() async throws {
+        let (popover, _, _) = try await makePopover()
+        var buyTaps = 0
+        popover.onBuyAudiout = { buyTaps += 1 }
+        popover.setUnregisteredNoteActive(true)
+
+        _ = wireTrial(popover, daysLeft: 9)
+        popover.rebuild()
+
+        #expect(popover.test_systemAirPlayNoteText == "Trial · 9 days left")
+        #expect(popover.test_systemAirPlayNoteHasActionButton)
+        popover.test_tapSystemAirPlayNoteAction()
+        #expect(buyTaps == 1, "the pill opens the purchase page through the host")
+    }
+
+    /// Red if the pill lost its singular on the last day ("Trial · 1 days
+    /// left"), which is the one day the number is not plural.
+    @Test func trialPillReadsSingularOnTheLastDay() async throws {
+        let (popover, _, _) = try await makePopover()
+        _ = wireTrial(popover, daysLeft: 1)
+        popover.rebuild()
+        #expect(popover.test_systemAirPlayNoteText == "Trial · 1 day left")
+    }
+
+    /// Red if the pill outlived the trial: a Mac that never started one, or one
+    /// whose trial is spent, must fall back to the unregistered note rather
+    /// than count days that no longer exist.
+    @Test func noPillWithoutARunningTrial() async throws {
+        let (popover, _, _) = try await makePopover()
+        popover.setUnregisteredNoteActive(true)
+
+        _ = wireTrial(popover, daysLeft: nil)
+        popover.rebuild()
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredNoteText,
+                "no trial, so the standing unregistered note has the slot")
+
+        // Expired reads the same way here — the gate, not the popover, is what
+        // a spent trial meets (M3).
+        popover.trialStateProvider = { .expired(expiresAt: Date(timeIntervalSinceNow: -86_400)) }
+        popover.rebuild()
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredNoteText)
+    }
+
+    /// A one-time banner outranks the pill, is reported to the host the moment
+    /// it is raised (not when it is dismissed), and is raised exactly once.
+    /// Red if a rebuild mid-open re-raised it, which would report one banner
+    /// several times over.
+    @Test func aOneTimeBannerOutranksThePillAndIsRaisedOnce() async throws {
+        let (popover, _, backend) = try await makePopover()
+        let raised = wireTrial(popover, daysLeft: 3, owed: .threeDays)
+
+        popover.rebuild()
+        #expect(popover.test_systemAirPlayNoteText
+                == "Your trial ends in 3 days. €30 once keeps everything, including updates.")
+        #expect(raised.banners == [.threeDays], "reported as it goes up")
+
+        popover.update(devices: backend.devices)
+        popover.rebuild()
+        #expect(raised.banners == [.threeDays], "a rebuild does not re-raise it")
+
+        // It is spent by the close, and the pill has the slot on the next open.
+        popover.surfaceDidHide()
+        popover.test_isShownOverride = true
+        popover.rebuildForOpen()
+        #expect(popover.test_systemAirPlayNoteText == "Trial · 3 days left")
+    }
+
+    /// Red if the last-day banner stopped being the one a Mac sees when both
+    /// are due — someone opening the app for the first time on day 14 would
+    /// read "ends in 3 days" on the day it ends.
+    @Test func theLastDayBannerIsTheOneRaisedWhenBothAreDue() async throws {
+        let (popover, _, _) = try await makePopover()
+        // What `TrialClock.owedBanner` answers with both flags unset on day 14.
+        let raised = wireTrial(popover, daysLeft: 1, owed: .lastDay)
+
+        popover.rebuild()
+        #expect(popover.test_systemAirPlayNoteText
+                == "Last day of your trial. Tomorrow Audiout asks for a key.")
+        #expect(raised.banners == [.lastDay])
+    }
+
+    /// Red if a trial nudge started outranking something actually happening
+    /// right now — the single note slot's whole precedence rule.
+    @Test func aLiveWarningTakesTheSlotFromATrialNudge() async throws {
+        let (popover, _, _) = try await makePopover()
+        _ = wireTrial(popover, daysLeft: 2, owed: .lastDay)
+        popover.rebuild()
+
+        popover.setRoutingBlockedNeedsDefault(true)
+        #expect(popover.test_systemAirPlayNoteText
+                == PopoverController.routingBlockedNeedsDefaultText)
+
+        popover.setRoutingBlockedNeedsDefault(false)
+        #expect(popover.test_systemAirPlayNoteText
+                == "Last day of your trial. Tomorrow Audiout asks for a key.",
+                "the banner is handed straight back")
+    }
+
     // MARK: Routing-blocked warning (Wave 3 T-UI)
 
     /// The "Audiout isn't your output device" warning: shows the verbatim copy

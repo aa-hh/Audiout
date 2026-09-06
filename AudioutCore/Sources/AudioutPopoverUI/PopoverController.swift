@@ -1207,14 +1207,15 @@ public final class PopoverController: NSObject {
     // PRECEDENCE, highest first: capture-failed (WARNING — the tap is dead, so every
     // speaker is silent while its row still says Connected) outranks routing-blocked
     // (T-UI, WARNING — audio is dead right now), which outranks the takeover status,
-    // which outranks the double-path guard note, which outranks the unregistered-build
+    // which outranks the double-path guard note, which outranks a one-time trial
+    // banner, which outranks the trial pill, which outranks the unregistered-build
     // note (lowest — it is a standing condition, never something happening right now);
     // each lower note reappears underneath the instant the one above it clears. Each
     // condition keeps its own idempotence-check state var (`captureFailureMessage` /
     // `routingBlockedNeedsDefault` / `takeoverStatus` / `systemAirPlayNoteActive` /
-    // `unregisteredNoteActive`); `applyNoteSlot()` is the one place that resolves
-    // precedence and actually pushes to the panel, called by every setter and by the
-    // tail of `rebuild()`.
+    // `raisedTrialBanner` / `trialDaysLeft` / `unregisteredNoteActive`);
+    // `applyNoteSlot()` is the one place that resolves precedence and actually
+    // pushes to the panel, called by every setter and by the tail of `rebuild()`.
 
     /// The exact note copy from PLAN-RELIABILITY Wave 3's "System-AirPlay guard"
     /// bullet: non-blocking, informational — this never changes what's actually
@@ -1298,6 +1299,82 @@ public final class PopoverController: NSObject {
         applyNoteSlot()
     }
 
+    // MARK: Trial pill + the two one-time trial banners
+    //
+    // Both take the SAME single note slot as everything above, at their own
+    // rungs of the PRECEDENCE list: a one-time banner outranks the standing
+    // pill, and the pill outranks the unregistered-build note — a Mac on day 9
+    // of its trial is not an unregistered install and must never be told it is.
+    // Anything actually happening right now still outranks all three.
+
+    /// Where this Mac's trial stands, asked fresh on every `rebuild()` — so the
+    /// pill follows every open with no clock of its own. `nil` — the default,
+    /// and what the tests and the snapshot tools leave it at — means this build
+    /// has no trial to talk about, so no headless render can grow a note.
+    public var trialStateProvider: (() -> TrialState)?
+
+    /// The one-time banner this Mac is still owed, asked only while the trial
+    /// is running. `nil` (either the closure or its answer) means none is due.
+    public var trialBannerOwedProvider: (() -> TrialBanner?)?
+
+    /// A one-time banner just went on screen. The host writes its flag down
+    /// immediately — the banner is spent by being SHOWN, not by being dismissed,
+    /// or a quit before reading it would bring it back — and reports it.
+    public var onTrialBannerShown: ((TrialBanner) -> Void)?
+
+    /// Days left in the running trial as of the last `rebuild()`, or `nil` when
+    /// none is running. Recorded rather than re-derived, so the pinned note and
+    /// the pill the last build rendered can never disagree.
+    private var trialDaysLeft: Int?
+
+    /// The one-time banner raised during THIS open. Session state, exactly like
+    /// the first-join alignment note: nothing is written down here — the host
+    /// persisted the flag the instant the banner was raised, and that is what
+    /// stops it coming back on the next open.
+    private var raisedTrialBanner: TrialBanner?
+
+    /// The pill's copy. Singular on the last day: the spec's example reads
+    /// "Trial · 9 days left", and "1 days left" is not English.
+    static func trialPillText(daysLeft: Int) -> String {
+        "Trial · \(daysLeft) day\(daysLeft == 1 ? "" : "s") left"
+    }
+
+    /// Each banner's copy, verbatim from the trial spec's § Copy.
+    static func trialBannerText(for banner: TrialBanner) -> String {
+        switch banner {
+        case .threeDays:
+            return "Your trial ends in 3 days. €30 once keeps everything, including updates."
+        case .lastDay:
+            return "Last day of your trial. Tomorrow Audiout asks for a key."
+        }
+    }
+
+    /// Re-read the trial and raise a one-time banner if one is owed. Runs from
+    /// the tail of `rebuild()`, which is the same cycle every open already goes
+    /// through — a pill a few hours stale until the next open is the whole
+    /// accuracy this needs, and a countdown timer would be a second clock for
+    /// nothing.
+    private func refreshTrialNudge() {
+        guard case .active(let daysLeft, _, _)? = trialStateProvider?() else {
+            trialDaysLeft = nil
+            raisedTrialBanner = nil
+            return
+        }
+        trialDaysLeft = daysLeft
+        guard raisedTrialBanner == nil, let owed = trialBannerOwedProvider?() else { return }
+        raisedTrialBanner = owed
+        onTrialBannerShown?(owed)
+    }
+
+    /// The trial nudges' action button — the same remedy the unregistered note
+    /// offers, through the same host closure, under the spec's own words.
+    private var trialBuyAction: SystemAirPlayNoteBannerView.Action {
+        SystemAirPlayNoteBannerView.Action(
+            title: "Buy Audiout",
+            accessibilityLabel: "Buy an Audiout license",
+            handler: { [weak self] in self?.onBuyAudiout?() })
+    }
+
     /// Show or clear the "double-path audio" note
     /// (`BackendEvent.systemDefaultIsAirPlayActive`). Called by the host
     /// (`AppDelegate`) directly — a whole-app condition with no home on `Device`,
@@ -1335,13 +1412,14 @@ public final class PopoverController: NSObject {
     /// capture-failed (WARNING — the tap is dead, so the speakers are silent
     /// behind rows that still read Connected) outranks routing-blocked (T-UI,
     /// WARNING — audio is dead right now), which outranks a takeover status
-    /// (T6), which outranks the double-path guard (W3-T3), which outranks the
-    /// unregistered-build note; none active means no note. `action` is non-nil
-    /// for routing-blocked (the "Use <productName>" button), for the takeover
-    /// strip's `.needsApproval` (state 1) and `.timedOut` (state 4, "Try
-    /// Again"), and for the unregistered note ("Buy…") — the states with an
-    /// actual remedy a button can offer. The capture-failure message names
-    /// its own remedy in prose, so it has none.
+    /// (T6), which outranks the double-path guard (W3-T3), which outranks a
+    /// one-time trial banner, then the trial pill, then the unregistered-build
+    /// note; none active means no note. `action` is non-nil for routing-blocked
+    /// (the "Use <productName>" button), for the takeover strip's
+    /// `.needsApproval` (state 1) and `.timedOut` (state 4, "Try Again"), for
+    /// both trial nudges ("Buy Audiout") and for the unregistered note
+    /// ("Buy…") — the states with an actual remedy a button can offer. The
+    /// capture-failure message names its own remedy in prose, so it has none.
     private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?, severity: SystemAirPlayNoteBannerView.Severity) {
         if let captureFailureMessage {
             return (captureFailureMessage, nil, .warning)
@@ -1359,6 +1437,12 @@ public final class PopoverController: NSObject {
         }
         if systemAirPlayNoteActive {
             return (Self.systemAirPlayNoteText, nil, .info)
+        }
+        if let raisedTrialBanner {
+            return (Self.trialBannerText(for: raisedTrialBanner), trialBuyAction, .info)
+        }
+        if let trialDaysLeft {
+            return (Self.trialPillText(daysLeft: trialDaysLeft), trialBuyAction, .info)
         }
         if unregisteredNoteActive {
             return (Self.unregisteredNoteText, unregisteredNoteAction, .info)
@@ -1779,6 +1863,9 @@ public final class PopoverController: NSObject {
         // Re-pin the note slot (T-UI routing-blocked / T6 takeover strip / W3-T3
         // double-path guard) the same way — resolved through the same PRECEDENCE
         // `applyNoteSlot()` uses, so a rebuild mid-condition restores the right one.
+        // The trial's own two rungs are re-read first: this is the cycle the pill
+        // follows, and the one that raises a one-time banner.
+        refreshTrialNudge()
         let note = resolvedSystemAirPlayNote
         panel.setSystemAirPlayNote(note.text, action: note.action, severity: note.severity)
         // The device list this rebuild just re-mounted is a fresh scrolling card,
@@ -5499,6 +5586,9 @@ extension PopoverController: AppRowView.Delegate {
         btConnectAttemptIDs.removeAll()
         // The search grace belongs to an open, like everything else here.
         cancelSpeakerSearchGrace()
+        // So does a raised one-time trial banner: it is spent, the host wrote
+        // that down when it went up, and the next open must not re-show it.
+        raisedTrialBanner = nil
     }
 
     // MARK: - Live level dispatch (task T5)

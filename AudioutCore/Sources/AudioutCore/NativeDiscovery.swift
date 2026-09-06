@@ -214,6 +214,7 @@ public enum BrowserState: Sendable, Equatable {
     case setup
     case ready
     case failed(String)   // description of the underlying error
+    case waiting(String)  // description of the condition being waited on
     case cancelled
 }
 
@@ -545,7 +546,17 @@ public final class NativeDiscovery: @unchecked Sendable {
         // terminal in Network.framework and never self-recovers, unlike
         // `.waiting`) — we don't tear down `known` on a transient `.failed`
         // (that would spuriously drop every device). `.cancelled` follows an
-        // explicit `stop()`, already handled.
+        // explicit `stop()`, already handled. The state is logged so a reader
+        // can tell a browser that went quiet from one that never started.
+        let name: String
+        switch state {
+        case .setup: name = "setup"
+        case .ready: name = "ready"
+        case .waiting: name = "waiting"
+        case .failed: name = "failed"
+        case .cancelled: name = "cancelled"
+        }
+        Telemetry.log(.discovery, "browser_state", ["state": name])
     }
 
     // MARK: Building & classification (pure, static — easy to unit-test)
@@ -867,7 +878,7 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
             case .waiting(let err):
                 // `.waiting` self-recovers inside Network.framework once the
                 // underlying condition clears — no recreate needed here.
-                self.onStateChange?(.failed("waiting: \(err)"))
+                self.onStateChange?(.waiting("\(err)"))
             @unknown default:
                 break
             }

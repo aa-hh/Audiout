@@ -1896,7 +1896,7 @@ public final class DeviceRowView: NSView {
     /// the module's one copy: ``BTSyncDrawerView`` reads it rather than
     /// re-authoring the sentence.
     static let alignTooltip =
-        "Play alignment ticks on this speaker and the rest of the group. Adjust sync until they land as one"
+        "Play alignment ticks on this speaker and the rest of the scene. Adjust sync until they land as one"
 
     /// What the chip says on a never-measured Bluetooth speaker, where it is
     /// the wizard's door rather than a value.

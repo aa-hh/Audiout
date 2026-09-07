@@ -487,9 +487,11 @@ public final class OnboardingViewController: NSViewController {
         // async audio probe resolving, the Bluetooth prompt being answered —
         // repaints the rows.
         model.onChange = { [weak self] in self?.refresh() }
-        // Register the PTP helper daemon once, at load: unlike the probes,
+        // Register the PTP helper daemon at load: unlike the probes,
         // registering shows no system prompt of its own, so it's safe to run
-        // unconditionally rather than waiting for a tap.
+        // unconditionally rather than waiting for a tap. Every return to the
+        // front registers again (`appDidBecomeActive`) — approval in Login
+        // Items is what lets the next register succeed and load the daemon.
         model.registerPTPHelper()
         // Reflect real current state up front — without this the Bluetooth row
         // paints undetermined even when the grant is already in place
@@ -584,12 +586,20 @@ public final class OnboardingViewController: NSViewController {
     /// it finds — "we looked; nothing changed" stops the spinner honestly.
     /// Otherwise this is just the ordinary catching-up activation, so it does
     /// the plain silent re-read as before.
+    ///
+    /// Both paths REGISTER the PTP helper again before the re-read, not on the
+    /// poll's tick (``SetupModel/reregisterPTPHelperOnReturn()``): the switch
+    /// the user flips in Login Items — reached through our trip or through the
+    /// "Background Items Added" notice, which is no trip of ours — approves
+    /// the registration, and the next `register()` is what loads the daemon.
+    /// A still-unapproved helper just lands on `.requiresApproval` again.
     public func appDidBecomeActive() {
         // Back in front — the polls have somewhere to land again.
         startRemoteControlPoll()
         startPTPHelperPoll()
         if settingsTripDeparted {
             settingsReturnTask = Task { @MainActor in
+                await model.reregisterPTPHelperOnReturn()
                 await model.refreshStatuses()
                 cancelSettingsTripTimer()
                 settingsTripStep = nil
@@ -597,7 +607,10 @@ public final class OnboardingViewController: NSViewController {
                 refresh(animated: false)
             }
         } else {
-            refreshStatuses()
+            Task { @MainActor in
+                await model.reregisterPTPHelperOnReturn()
+                await model.refreshStatuses()
+            }
         }
     }
 
@@ -750,13 +763,14 @@ public final class OnboardingViewController: NSViewController {
                 detail: "Your speakers share one clock, through a small "
                     + "helper. Approve it once in Login Items.",
                 heroHeadline: "Keep speakers on one shared clock",
-                whyLine: "A small helper shares one clock so your speakers never drift.",
+                whyLine: "Audiout needs this helper to keep your speakers in time. "
+                    + "Approve it once in Login Items.",
                 allowTitle: "Turn on at login",
-                // Skippable (P0-1): approval lives in Login Items, where macOS
-                // can simply refuse — and without an exit an unapproved helper
-                // locked the gate with nothing to press. The why line above
-                // already names what a skip forfeits (speakers may drift).
-                isSkippable: true,
+                // Required (owner decision 2026-09-07): without the helper the
+                // app cannot keep speakers in time, so there is no way past.
+                // Approval in Login Items is the only exit; `.notFound` (no
+                // daemon to approve) the only auto-pass.
+                isSkippable: false,
                 spineAskTitle: "Keep speakers in time",
                 spineDoneTitle: "Speakers stay in time")
         case .remoteControl:
@@ -978,12 +992,12 @@ public final class OnboardingViewController: NSViewController {
         if step == .audio, model.audioStatus == .unsupported {
             return .autoPassed(note: Self.audioAutoPassNote)
         }
-        // Same shape for Speaker Sync's two unfixable states: the daemon isn't
-        // in the bundle, or registering it threw. `SetupFlowModel.isComplete`
-        // is what routes those here — the row auto-passes so the gate can open,
-        // and the note is the whole explanation.
-        if step == .speakerSync,
-           model.ptpHelperStatus == .notFound || model.ptpHelperRegistrationFailed {
+        // Same shape for Speaker Sync's one unfixable state: the daemon isn't
+        // in the bundle. `SetupFlowModel.isComplete` is what routes it here —
+        // the row auto-passes so the gate can open, and the note is the whole
+        // explanation. A `register()` that threw is NOT this: on a first run
+        // it throws into `.requiresApproval`, which the gate waits for.
+        if step == .speakerSync, model.ptpHelperStatus == .notFound {
             return .autoPassed(note: Self.speakerSyncAutoPassNote)
         }
         return .completed
@@ -1306,14 +1320,14 @@ public final class OnboardingViewController: NSViewController {
     static let localNetworkUnansweredStatus = "Nothing has answered yet. If the permission "
         + "dialog is open, choose Allow, or try again."
     /// Speaker Sync's recovery, for a trip to Login Items that came back with
-    /// the switch still off. The status names the place people actually go
-    /// looking; the body repeats the step's own explanation and then names the
-    /// cost of skipping, since a skip is now on offer here.
-    static let speakerSyncRecoveryStatus = "It isn't on yet. The switch is in Login Items, "
-        + "not Privacy & Security."
+    /// the switch still off. The status says the helper is required and names
+    /// the place people actually go looking; the body repeats the step's own
+    /// explanation and, like the denied path, promises the row will tick
+    /// itself — there is no skip on offer here.
+    static let speakerSyncRecoveryStatus = "It isn't on yet. Audiout needs it to keep your "
+        + "speakers in time — the switch is in Login Items, not Privacy & Security."
     static let speakerSyncRecoveryBody = "Your speakers share one clock, through a small "
-        + "helper. Approve it once in Login Items. You can skip this for now, but without it "
-        + "your speakers may drift apart."
+        + "helper. Approve it once in Login Items, then come back. This row ticks itself."
     static let alertSymbol = "exclamationmark.triangle.fill"
     /// The gate's CTA (owner copy 2026-08-11: closing setup is what starts the
     /// deferred audio engine, so the button names that). Named once — a browse
@@ -1410,16 +1424,17 @@ public final class OnboardingViewController: NSViewController {
         }
 
         // Speaker Sync came back from Login Items still unapproved — the state
-        // that had no words at all (P0-1). It says where the switch really is
-        // (users look for it under Privacy & Security, where it isn't), offers
-        // the trip again, and offers the way past.
+        // that once had no words at all. It says where the switch really is
+        // (users look for it under Privacy & Security, where it isn't), that
+        // the helper is required, and offers the trip again. No skip: the
+        // step is not skippable (`content(for:)`), so the way past is the
+        // switch.
         if step == .speakerSync, didTripLoginItems,
            model.ptpHelperStatus == .requiresApproval {
             content.status = (Self.alertSymbol, Self.speakerSyncRecoveryStatus,
                               Tokens.Color.label2, false)
             content.body = Self.ribbonBody(Self.speakerSyncRecoveryBody)
             content.primary = ("Open Login Items…", .prominent)
-            content.showsSkip = true
             return content
         }
 
@@ -2014,6 +2029,9 @@ public final class OnboardingViewController: NSViewController {
     }
 
     private func skipTapped(_ step: SetupStep) {
+        // A required step has no skip to press; refusing here keeps the
+        // announcement honest for the one way in that is not a button.
+        guard SetupFlowModel.skippableSteps.contains(step) else { return }
         flow.skip(step)
         announce("Skipped. \(Self.content(for: step).spineTitle(for: .skipped))")
         // Skipping is UI-initiated, and `SetupFlowModel` has no change hook of

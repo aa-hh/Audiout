@@ -1070,9 +1070,10 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         #expect(vc.test_activeStep == .speakerSync)
-        #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Turn on at login"])
+        #expect(vc.test_ribbonButtonTitles == ["Turn on at login"], "required: no skip on offer")
         #expect(vc.test_heroHeadline == "Keep speakers on one shared clock")
-        #expect(vc.test_heroWhy == "A small helper shares one clock so your speakers never drift.")
+        #expect(vc.test_heroWhy == "Audiout needs this helper to keep your speakers in time. "
+                + "Approve it once in Login Items.")
 
         await vc.test_tapAllow(.speakerSync)
 
@@ -1102,14 +1103,33 @@ import Testing
 
         #expect(!vc.test_rowIsWaiting(.speakerSync))
         #expect(vc.test_hasCheckmark(.speakerSync))
+        #expect(helper.registerCount == 2,
+                "the return registers again — approval alone does not load the daemon")
     }
 
-    // MARK: Speaker Sync's un-rehearsed states (P0-1)
+    /// The approval can land without any trip of ours (the "Background Items
+    /// Added" notice opens Login Items itself), so the plain catching-up
+    /// activation registers again too. Turns red if that path goes back to a
+    /// status-only read.
+    @Test func aPlainReturnToTheFrontRegistersTheHelperAgainWhileUnapproved() async {
+        let helper = FakePTPHelper(status: .requiresApproval)
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2, bluetooth: .granted,
+                                         ptpHelper: helper))
+        await vc.test_awaitInitialStatuses()
+        #expect(helper.registerCount == 1, "the load-time register")
+
+        vc.appDidBecomeActive()
+        await waitUntil { helper.registerCount == 2 }
+
+        #expect(helper.registerCount == 2)
+    }
+
+    // MARK: Speaker Sync's un-rehearsed states
 
     /// …and the trip that comes back with the switch STILL off — the state that
-    /// used to re-draw the untouched first ask and leave the gate shut forever.
-    /// It now says where the switch really is, offers the trip again, and offers
-    /// the way past.
+    /// used to re-draw the untouched first ask. It says where the switch really
+    /// is, that the helper is required, and offers the trip again — and only
+    /// that: the step is not skippable, so a skip goes nowhere.
     @Test func speakerSyncSaysWhereTheSwitchIsWhenLoginItemsCameBackStillOff() async {
         let helper = FakePTPHelper(status: .requiresApproval)
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2, bluetooth: .granted,
@@ -1124,11 +1144,12 @@ import Testing
 
         #expect(vc.test_ribbonStatusText == OnboardingViewController.speakerSyncRecoveryStatus)
         #expect(vc.test_ribbonBodyText == OnboardingViewController.speakerSyncRecoveryBody)
-        #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Open Login Items\u{2026}"])
+        #expect(vc.test_ribbonButtonTitles == ["Open Login Items\u{2026}"])
 
-        vc.test_ribbonTapSkip()
+        vc.test_tapSkip(.speakerSync)
 
-        #expect(vc.test_isSkipped(.speakerSync), "and the way past really goes through")
+        #expect(!vc.test_isSkipped(.speakerSync), "required: the flow cannot be talked out of it")
+        #expect(vc.test_activeStep == .speakerSync)
     }
 
     /// The daemon isn't in the bundle: there is no switch anywhere, so the row

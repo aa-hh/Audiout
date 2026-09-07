@@ -990,6 +990,30 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// debounce would leave a departed receiver listed as available forever.
     public static let defaultCastAbsenceGrace: TimeInterval = 3
 
+    /// Watches the Mac's own network path; fires the re-kick when it recovers.
+    /// Injectable so tests drive the recovery signal by hand; never mutated after init.
+    private let pathRecoveryMonitor: NetworkPathRecoveryObserving
+
+    /// How long the path must stay quiet before the re-kick fires. Injectable so
+    /// tests shrink it; never mutated after init.
+    private let pathRecoverySettle: TimeInterval
+
+    /// The armed path-recovery settle timer. Confined to `stateQueue`.
+    private var pathRecoverySettleWork: DispatchWorkItem?
+
+    /// Ids whose path recovery arrived while their converge was in flight, so the
+    /// re-kick had no attempt of its own to run. The converge slot release clears
+    /// the park for each of them and its own requeue check runs the attempt.
+    /// Confined to `stateQueue`.
+    private var pathRecoveryPending: Set<String> = []
+
+    /// The default path-recovery settle (seconds), a trailing edge: each recovery
+    /// signal re-arms it, so the sub-second satisfied/unsatisfied flicker a Wi-Fi
+    /// association produces collapses into one attempt. One second also keeps a
+    /// hand toggle (roughly 3 to 5 seconds) plus a 1 to 3 second reconnect inside
+    /// the 10 second silence watchdog, so the common case never shows the banner.
+    public static let defaultPathRecoverySettle: TimeInterval = 1
+
     /// The armed silence-watchdog countdown. Cancelled when a desired device
     /// reconnects, the intent clears, on a sleep/wake cycle, or on `stop()`.
     private var silenceWatchdog: SilenceWatchdogToken?
@@ -1040,6 +1064,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// engine state-stream transition for the id, or by an explicit user re-toggle
     /// to `on` after the in-flight op settled (root cause 4: no permanent wedge).
     private var failedGate: Set<String> = []
+
+    /// on stateQueue. Park `id` and record why. Logs only when the set actually
+    /// changed, so a repeated park of an already-parked id stays silent. The row
+    /// carries no device id or name (the privacy fence in PRODUCT.md).
+    private func parkLocked(_ id: String, reason: String) {
+        guard failedGate.insert(id).inserted else { return }
+        Telemetry.log(.airplay, "park_set", ["reason": reason, "parked_count": "\(failedGate.count)"])
+    }
+
+    /// on stateQueue. Clear `id`'s park and record why, under the same rules as
+    /// `parkLocked`.
+    private func unparkLocked(_ id: String, reason: String) {
+        guard failedGate.remove(id) != nil else { return }
+        Telemetry.log(.airplay, "park_cleared", ["reason": reason, "parked_count": "\(failedGate.count)"])
+    }
 
     /// App-side mute (Q4): the engine has no mute field, so mute is realized as
     /// volume 0 with the prior value stashed. Same shim as
@@ -1580,6 +1619,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `syncedLocalSettleWindow` and `syncedLocalTransitionHorizon` are test seams
     /// that shrink the synced-local settle timing the same way; every production
     /// call site (the convenience init included) gets the defaults.
+    /// `pathRecoveryMonitor`/`pathRecoverySettle` are the same kind of seam for the
+    /// Mac's own network path: tests inject a fake they can fire by hand and shrink
+    /// the settle, while production gets a real `NWPathMonitor` and one second.
     init(
         engineControl: EngineControlling,
         discoverySource: DiscoverySource,
@@ -1609,6 +1651,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
         castAbsenceGrace: TimeInterval = NativeBackend.defaultCastAbsenceGrace,
+        pathRecoveryMonitor: NetworkPathRecoveryObserving? = nil,
+        pathRecoverySettle: TimeInterval = NativeBackend.defaultPathRecoverySettle,
         systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = NativeBackend.currentDefaultOutputIsAirPlayClass,
         defaultOutputSwitcher: DefaultOutputSwitcher? = nil,
         aggregateControl: AggregateDeviceControlling = CoreAudioAggregateDeviceControl(),
@@ -1631,6 +1675,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             ?? DispatchSilenceWatchdogScheduler(queue: DispatchQueue(label: "NativeBackend.silenceWatchdog"))
         self.silenceFallbackDelay = silenceFallbackDelay
         self.castAbsenceGrace = castAbsenceGrace
+        self.pathRecoveryMonitor = pathRecoveryMonitor ?? NetworkPathRecoveryMonitor()
+        self.pathRecoverySettle = pathRecoverySettle
         self.engine = engineControl
         self.discovery = discoverySource
         self.btEnumerator = btEnumerator
@@ -1930,6 +1976,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         //    local Mac output is never fed (it isn't a discovered receiver).
         discovery.onEvent = { [weak self] event in self?.handleDiscovery(event) }
 
+        // 1b. The Mac's own network path. A Bonjour browser reports nothing when
+        //     this end's Wi-Fi drops and returns, so a speaker parked by that blip
+        //     has no other signal to un-park it.
+        pathRecoveryMonitor.onRecovered = { [weak self] in
+            self?.stateQueue.async { self?.schedulePathRecoveryRekick() }
+        }
+
         // 1a. Bluetooth outputs (BT-ENUM) flow through the SAME add/update/emit
         //     path as AirPlay rows, from their own enumerator. Started here, not
         //     inside the engine Task below: BT rows don't depend on the AirPlay
@@ -2219,6 +2272,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             //    engine.
             self.discovery.start()
 
+            // 4a. Start watching the Mac's own path alongside the browse, on the
+            //     queue that owns `started`. A `stop()` that races this start puts
+            //     its own `pathRecoveryMonitor.stop()` on `stateQueue` behind this
+            //     block, so the `started` check below is what stops a
+            //     backend that has already been stopped from starting the monitor
+            //     and leaving a live NWPathMonitor behind with nothing to stop it.
+            self.stateQueue.async {
+                guard self.started else { return }
+                self.pathRecoveryMonitor.start()
+            }
+
             // 5. WIRE the capture pipeline's metering (real path only) so its RMS
             //    fans out as `.level` for selected, unmuted devices — but do NOT
             //    start capture here. The tap mutes the Mac's own speakers while it
@@ -2445,6 +2509,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // T2: stop the scheduling snapshot polling.
             self.schedulingSnapshotPollWork?.cancel()
             self.schedulingSnapshotPollWork = nil
+            // Drop any settle still counting down towards a path-recovery re-kick,
+            // and the recoveries waiting on a converge release that will not come.
+            self.pathRecoverySettleWork?.cancel()
+            self.pathRecoverySettleWork = nil
+            self.pathRecoveryPending.removeAll()
+            // Stop the path monitor here, not on the caller thread: `start()`
+            // enqueues its own monitor start on this queue, so only a stop
+            // enqueued the same way is ordered after it.
+            self.pathRecoveryMonitor.onRecovered = nil
+            self.pathRecoveryMonitor.stop()
             // `captureControlQueue` gets the last word — and, since the eager
             // caller-thread stop is gone (C1), it is now the ONLY stop. A bare
             // caller-thread stop would be unordered against a start still queued from
@@ -2475,7 +2549,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.expectedSelected.removeAll()
             self.desiredOn.removeAll()
             self.converging.removeAll()
-            self.failedGate.removeAll()
+            for id in Array(self.failedGate) { self.unparkLocked(id, reason: "stop") }
             self.fedDescriptors.removeAll()
             self.muted.removeAll()
             self.stashedVolume.removeAll()
@@ -3325,7 +3399,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // autonomous zero-backoff retry storm (live, 2026-08-06). The
                 // deliberate same-membership retry ("Try again") now travels
                 // its own entry point, `retryOutput(_:)`.
-                if previous != wantOn { self.failedGate.remove(id) }
+                if previous != wantOn { self.unparkLocked(id, reason: "membership_edge") }
 
                 // Connection-status brief §1/§3 semantics (mirrors OwnToneBackend's
                 // `setOutputSet`): a device newly desired ON goes `.connecting`
@@ -3628,7 +3702,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // THE explicit un-park site for a same-membership retry: `setOutputSet`
             // only clears the park on a genuine membership edge now (storm fix,
             // 2026-08-06), so "Try again" clears it here — for THIS id only.
-            self.failedGate.remove(id)
+            self.unparkLocked(id, reason: "retry")
             self.desiredOn[id] = true
             // Eager `.connecting`, mirroring `setOutputSet`'s newly-desired-ON arm:
             // the spinner is immediate, and the fresh `.failed → .connecting` edge
@@ -6563,6 +6637,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     private func releaseConvergingAndRequeueIfNeeded(id: String) -> ConvergeReleaseAction {
+        // A path recovery landed while this converge held the slot. The attempt it
+        // landed on ran against the path the blip broke, and its failure parks the
+        // id, so clear that park here: the requeue check below is the attempt the
+        // recovery is owed.
+        if self.pathRecoveryPending.remove(id) != nil {
+            self.unparkLocked(id, reason: "path_recovery")
+        }
         self.converging.remove(id)
         // Never requeue into a suspension. `convergeDevice` has no `suspended` guard
         // of its own, so a slot released mid-sleep would otherwise kick a loop that
@@ -6701,7 +6782,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     guard await ensurePTPTakeover(telemetryDeviceID: id) else {
                         stateQueue.sync {
                             self.removeFromAddedLocked(id)
-                            self.failedGate.insert(id)
+                            self.parkLocked(id, reason: "ptp_gate")
                             self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
                             self.enterFailure(id, cause: .timingUnavailable)
                         }
@@ -6809,7 +6890,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     if case AirPlayEngineError.opTimedOut = error { cause = .timedOut }
                     stateQueue.sync {
                         self.removeFromAddedLocked(id)
-                        self.failedGate.insert(id)
+                        self.parkLocked(id, reason: "add_output_threw")
                         self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
                         self.enterFailure(id, cause: cause, detail: String(describing: error))
                     }
@@ -7278,7 +7359,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// re-add so it can be retried, mirroring `setOutputSet`.
     private func convergeToTarget(id: String, outputID: OutputID, on target: Bool) async {
         let shouldDrive: Bool = stateQueue.sync {
-            if target { self.failedGate.remove(id) } // re-add clears a park (retryable)
+            if target { self.unparkLocked(id, reason: "converge_readd") } // re-add clears a park (retryable)
             self.desiredOn[id] = target
             // Reflect intent immediately, same as setOutputSet's eager set.
             self.setConnectionState(target ? .connecting : .off, for: id)
@@ -7423,6 +7504,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.pendingRebindRecoveries.removeAll()
         for deviceID in self.rebindConverging {
             self.converging.remove(deviceID)
+            // A pending path recovery rides on the converging slot: no slot, no entry.
+            self.pathRecoveryPending.remove(deviceID)
             self.emit(.streamHealth(id: deviceID, recovering: false))
         }
         self.rebindConverging.removeAll()
@@ -7627,7 +7710,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 guard let outputID = self.outputIDs[id] else { continue }
                 // A sleep is not a device failure — clear any park so the re-add isn't
                 // gated, mirroring a user re-toggle.
-                self.failedGate.remove(id)
+                self.unparkLocked(id, reason: "wake")
                 self.setConnectionState(.connecting, for: id)
                 if !self.converging.contains(id) {
                     self.converging.insert(id)
@@ -7663,6 +7746,61 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Discovery nudge: a receiver that changed address / dropped during sleep
         // needs re-resolving. `NativeDiscovery` has no explicit refresh seam today
         // (sibling task B9 makes discovery self-healing) — noted, not forced here.
+    }
+
+    // MARK: Network path recovery (Wi-Fi blip, 2026-09-06)
+
+    /// on stateQueue. The Mac's path came back: arm the settle, re-arming it if one
+    /// is already counting down. A Wi-Fi association flickers between usable and
+    /// unusable several times inside a second, and one attempt per flicker is the
+    /// retry storm this trailing edge exists to avoid.
+    private func schedulePathRecoveryRekick() {
+        guard started else { return }
+        pathRecoverySettleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.firePathRecoveryRekick() }
+        pathRecoverySettleWork = work
+        stateQueue.asyncAfter(deadline: .now() + pathRecoverySettle, execute: work)
+    }
+
+    /// on stateQueue. The path has been quiet for the settle: un-park every desired
+    /// device the blip parked and run one reconnect attempt each. Asleep or mid-
+    /// handoff must not re-grab sessions, same guards as `handleSystemDidWake`.
+    ///
+    /// Deliberately NO eager `.connecting` write, unlike the wake loop: that edge
+    /// would resurrect a diagnosis panel the user already dismissed
+    /// (`PopoverController` treats a fresh `→ .failed` as a new diagnosis). This
+    /// follows `addOrUpdate`'s autonomous recovery shape instead: success lands
+    /// `.connected` via the add path, failure leaves the resting `.failed` alone.
+    ///
+    /// An id whose converge is in flight is noted in `pathRecoveryPending` instead,
+    /// because that attempt owns the id's engine ops and its failure re-parks the id.
+    private func firePathRecoveryRekick() {
+        pathRecoverySettleWork = nil
+        guard started, !suspended, !handoffReleased else { return }
+        let desiredIDs = order.filter { desiredOn[$0] == true }
+        let parked = desiredIDs.filter { failedGate.contains($0) }
+        for id in parked {
+            // The in-flight attempt was issued against the path that just came
+            // back, so it is not the recovery's attempt. Un-parking here would be
+            // undone by its failure, and the requeue check it releases through
+            // refuses a parked id. Hand the recovery to that release instead.
+            if converging.contains(id) {
+                pathRecoveryPending.insert(id)
+                continue
+            }
+            unparkLocked(id, reason: "path_recovery")
+            guard let outputID = outputIDs[id], !added.contains(id) else { continue }
+            converging.insert(id)
+            Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
+        }
+        // Logged on every settled recovery, `parked_count` 0 included: the row is
+        // the proof the path observation reached the backend at all, which is
+        // exactly what the live session could not tell.
+        Telemetry.log(.airplay, "path_recovery_rekick", [
+            "parked_count": "\(parked.count)",
+            "desired_count": "\(desiredIDs.count)",
+            "settle_ms": "\(Int(pathRecoverySettle * 1000))",
+        ])
     }
 
     // MARK: Generalized silence watchdog (Wave 2 W2-T2, closes R11)
@@ -8130,7 +8268,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let desiredIDs = self.order.filter { self.desiredOn[$0] == true }
         for id in desiredIDs {
             guard let outputID = self.outputIDs[id] else { continue }
-            self.failedGate.remove(id)
+            self.unparkLocked(id, reason: "handoff_resume")
             self.setConnectionState(.connecting, for: id)
             if !self.converging.contains(id) {
                 self.converging.insert(id)
@@ -8373,6 +8511,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // row rather than losing its AP2 identity. A genuine AP1 receiver reports
         // `isAvailable == true`, so it IS streamable and its descriptor is kept.
         let streamableNow = discovered.isAvailable
+        // Sampled before the block below rewrites the descriptor memo and the
+        // park, so the discovery rows at the tail of this method can report
+        // what actually changed. A Mac-side Wi-Fi drop (live, 2026-09-06) left
+        // no trace in the log at all; these rows are that trace.
+        let previousDescriptor = self.lastDescriptors[id]
+        let wasParked = self.failedGate.contains(id)
         if streamableNow {
             // Availability recovery (root cause 4), EDGE-GATED (storm fix,
             // 2026-08-06): clear a terminal-failure park only when this
@@ -8396,7 +8540,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 !Self.descriptorsEqual($0, discovered.descriptor)
             } ?? true
             self.lastDescriptors[id] = discovered.descriptor
-            if cameBack { self.failedGate.remove(id) }
+            if cameBack { self.unparkLocked(id, reason: "came_back") }
         } else {
             self.lastDescriptors[id] = nil
             // The AP2 advert is gone (downgrade) or the device went offline: the
@@ -8406,6 +8550,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
 
         let mapped = mapDiscovered(discovered)
+        let isFirstSighting = known[id] == nil
         if let existing = known[id] {
             let merged = merge(existing: existing, discovered: mapped)
             if merged != existing {
@@ -8419,6 +8564,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             known[id] = mapped
             order.append(id)
             emit(.deviceAdded(mapped))
+        }
+
+        if isFirstSighting {
+            Telemetry.log(.discovery, "appeared", ["available": streamableNow ? "true" : "false"])
+        } else {
+            let descriptorChanged: Bool
+            switch (previousDescriptor, self.lastDescriptors[id]) {
+            case (nil, nil): descriptorChanged = false
+            case let (before?, after?): descriptorChanged = !Self.descriptorsEqual(before, after)
+            default: descriptorChanged = true
+            }
+            Telemetry.log(.discovery, "updated", [
+                "available": streamableNow ? "true" : "false",
+                "descriptor_changed": descriptorChanged ? "true" : "false",
+                "parked": wasParked ? "true" : "false",
+            ])
         }
 
         // Availability recovery (root cause 4): if this device is still desired-on
@@ -8532,7 +8693,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // clear there would not fire for it; this is the drop-off-and-return arm
         // of the storm fix, 2026-08-06). The descriptor memo stays: it's what
         // `removeEngineDiscovery` reconstructs the deregistration from.
-        self.failedGate.remove(id)
+        let wasParked = self.failedGate.contains(id)
+        self.unparkLocked(id, reason: "disappeared")
+        // A device that vanished mid-converge has nothing to re-attempt: drop the
+        // note so its release does not kick a session at a receiver that is gone.
+        self.pathRecoveryPending.remove(id)
+        Telemetry.log(.discovery, "disappeared", ["parked": wasParked ? "true" : "false"])
         guard var device = known[id] else { return }
         var changed = false
         if device.isAvailable { device.isAvailable = false; changed = true }
@@ -8868,7 +9034,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.added.insert(id)
                 // Recovery (root cause 4): a good transition clears any failure
                 // park so the device is re-enableable / stays converged.
-                self.failedGate.remove(id)
+                self.unparkLocked(id, reason: "engine_good")
                 // A (re)connect the engine reported out-of-band — e.g. an
                 // auto-recovery it drove itself — never went through convergeDevice's
                 // add path, so it too lands at engine volume 0 = ≈ −30 dB (silent).
@@ -8903,7 +9069,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 let wasStreaming = self.added.remove(id) != nil
                 eqNeedsReconcile = wasStreaming
                 if self.desiredOn[id] == true {
-                    self.failedGate.insert(id)
+                    self.parkLocked(id, reason: "engine_failed")
                     // `.passwordRequired` is the one engine failure with a KNOWN,
                     // actionable cause — don't flatten it to `.unknown` (live
                     // 2026-08-06: an auth-blocked receiver was debugged blind

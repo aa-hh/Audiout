@@ -6,3 +6,6 @@ contact_links:
   - name: Audiout Remote for iPhone
     url: https://audiout.app/remote
     about: The iPhone companion is a separate app and isn't tracked in this repository.
+  - name: Security vulnerability
+    url: https://github.com/aa-hh/Audiout/security/policy
+    about: Please don't open a public issue — see the security policy.

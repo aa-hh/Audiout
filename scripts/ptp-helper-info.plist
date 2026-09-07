@@ -5,13 +5,26 @@
   __info_plist` linker section (see scripts/make-app.sh). SMAppService requires a
   standalone-executable LaunchDaemon to carry an embedded Info.plist with a
   CFBundleIdentifier; without it, register() will not launch the daemon
-  (ptp-helper-design.md §2.2). CFBundleIdentifier MUST match the daemon's Label
-  (com.audiout.Audiout.ptphelper) and the LaunchDaemons plist filename.
+  (ptp-helper-design.md §2.2).
+
+  THIS FILE IS A TEMPLATE, not the file that ships. CFBundleIdentifier MUST
+  equal the daemon's launchd Label and the LaunchDaemons plist filename
+  (BUNDLE_ID + ".ptphelper"), and codesign derives the helper's signing
+  Identifier from it too — so it carries the same placeholder token as
+  scripts/ptp-helper.plist (BUNDLE underscore ID, doubled underscores each
+  side) and scripts/make-app.sh renders it with the real BUNDLE_ID (default
+  com.audiout.Audiout) right before the link step. It used to hardcode
+  com.audiout.Audiout.ptphelper, which meant every non-default build (.dev,
+  .staging, a fresh handover id) shipped a helper whose embedded identity
+  disagreed with its own Label and MachServices name — a plausible source of
+  SMAppService.register() refusing those ids (2026-09-07). Never edit the
+  identifier here; scripts/verify-bundle.sh fails any build whose embedded
+  identifier does not match the Label.
 -->
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.audiout.Audiout.ptphelper</string>
+    <string>__BUNDLE_ID__.ptphelper</string>
     <key>CFBundleName</key>
     <string>ptp-helper</string>
     <key>CFBundleExecutable</key>

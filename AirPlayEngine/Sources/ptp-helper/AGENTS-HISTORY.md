@@ -102,6 +102,18 @@ plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
   __info_plist`, done in `scripts/make-app.sh`), not a bundle resource —
   `SMAppService` requires a standalone-executable LaunchDaemon to carry one.
   `CFBundleIdentifier` must match the daemon's launchd `Label`.
+  **2026-09-07:** `scripts/ptp-helper-info.plist` is a `__BUNDLE_ID__`
+  template now, rendered by `make-app.sh` (locally into the build dir, on the
+  remote compile into `.remote-products/`) before the link. Until then it
+  hardcoded `com.audiout.Audiout.ptphelper` while `Label`/`MachServices` were
+  `BUNDLE_ID`-derived, so every `.dev`/`.staging`/handover build shipped a
+  helper whose embedded identifier — and, since codesign derives the signing
+  Identifier from it, its signature — named the DEFAULT daemon. Suspected
+  contributor to `SMAppService.register()` throwing
+  `SMAppServiceErrorDomain Code=1` on non-default ids. The helper is now also
+  signed with an explicit `--identifier` equal to the label, and
+  `scripts/verify-bundle.sh` check 8 refuses a bundle whose embedded id and
+  Label differ.
 - **The launchd `Label`/plist filename are `BUNDLE_ID`-derived**, not
   hardcoded, so side-by-side dev builds under different `BUNDLE_ID`s get
   independent daemon identities (a same-label collision previously caused a

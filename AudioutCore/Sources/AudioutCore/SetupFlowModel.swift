@@ -134,27 +134,26 @@ public final class SetupFlowModel {
     public static let steps: [SetupStep] = [.audio, .localNetwork, .bluetooth, .speakerSync,
                                             .remoteControl, .usageStats]
 
-    /// The four steps a user may pass on. An UNDECIDED one holds Done shut:
+    /// The three steps a user may pass on. An UNDECIDED one holds Done shut:
     /// the gate waits for every card to be decided, and a skip is the decision
     /// that clears it (see ``isDoneAvailable``).
     ///
     /// Bluetooth and Remote Control are outside ``RequiredPermission`` entirely,
-    /// so their permissions never held Done shut either. **Speaker Sync is
-    /// different** and deliberately so: it stays a `RequiredPermission` and is
-    /// still audited whenever it was ever enabled, because a helper that was
-    /// approved and then switched off is a real regression. What the skip buys
-    /// is an EXIT — approval lives in Login Items, macOS can refuse it outright,
-    /// and without a skip an unapproved helper locked this gate forever with
-    /// nothing on screen to press. ``unmetRequiredSteps()`` is what filters a
-    /// skipped Speaker Sync out of the gate.
+    /// so their permissions never held Done shut either. **Speaker Sync is NOT
+    /// here** (owner decision 2026-09-07): without the helper the app cannot
+    /// keep speakers in time, so there is no way past it — the step holds the
+    /// gate until Login Items says `.enabled`, and its only auto-pass is a
+    /// `.notFound` daemon (see ``isComplete(_:)``). It was skippable once, as a
+    /// workaround for a first-run `register()` throw that was misread as an
+    /// unfixable fault; ``SetupModel/registerPTPHelper()`` now reads that
+    /// throw for what it is, so the exit is no longer needed.
     ///
-    /// **Usage Statistics is skippable in a fourth sense again:** its skip is
+    /// **Usage Statistics is skippable in a different sense:** its skip is
     /// the DECLINE, not a deferral. PRODUCT.md's rule for that stream is
     /// "asked once, never re-nagged", so passing on it is an answer the app
     /// keeps (``SetupModel/declineUsageStats()``) and never puts back on
     /// screen. Its button says so — "No Thanks", not "Skip for now".
-    public static let skippableSteps: Set<SetupStep> = [.bluetooth, .remoteControl, .speakerSync,
-                                                        .usageStats]
+    public static let skippableSteps: Set<SetupStep> = [.bluetooth, .remoteControl, .usageStats]
 
     /// Steps the user explicitly passed on. Skipped is NOT granted: such a step
     /// stays unchecked, and the app asks again the next time it genuinely needs
@@ -213,13 +212,12 @@ public final class SetupFlowModel {
         case .localNetwork: return setup.localNetworkStatus == .granted || !setup.isLocalNetworkGated
         case .bluetooth: return setup.bluetoothStatus == .granted
         // Same auto-pass posture as `.unsupported` audio two lines up: a
-        // `.notFound` daemon (missing from the bundle) and a `register()` that
-        // threw are packaging/signing faults, not user decisions, so no
-        // approval exists to demand and a hard gate must not demand one.
+        // `.notFound` daemon (launchd does not know the label) is a packaging
+        // fault, not a user decision, so no approval exists to demand and a
+        // hard gate must not demand one. `.requiresApproval` is NOT that — it
+        // is a switch the user can flip, and the gate waits for it.
         case .speakerSync:
-            return setup.ptpHelperStatus == .enabled
-                || setup.ptpHelperStatus == .notFound
-                || setup.ptpHelperRegistrationFailed
+            return setup.ptpHelperStatus == .enabled || setup.ptpHelperStatus == .notFound
         case .remoteControl: return setup.remoteControlStatus == .granted
         // Ours, not macOS's: complete means the user said yes. Saying no is a
         // DECISION, not a completion — it lands in `skippedSteps` like every
@@ -391,11 +389,6 @@ public final class SetupFlowModel {
     public func skip(_ step: SetupStep) {
         guard Self.skippableSteps.contains(step) else { return }
         skippedSteps.insert(step)
-        // Remember it beyond this window: the wake audit must stop reading an
-        // unapproved helper as "something got turned off in Login Items".
-        // `reopen(_:)` needs no counterpart — the flag only re-arms on a real
-        // `.enabled`.
-        if step == .speakerSync { setup.noteSpeakerSyncSkipped() }
         // The one skip that is a final ANSWER rather than a deferral: record
         // it so the ask is spent and no later presentation re-offers it, and
         // so a sink installed at launch is opted out rather than left as-is.
@@ -442,14 +435,9 @@ public final class SetupFlowModel {
     }
 
     /// The required steps still standing in the gate's way — the required
-    /// permissions that aren't granted, MINUS a Speaker Sync the user has
-    /// explicitly skipped. The skip is the exit: without this filter the step
-    /// would be skippable in name only, since its permission would keep the
-    /// gate shut from the other side.
+    /// permissions that aren't granted, as steps.
     private func unmetRequiredSteps() -> [SetupStep] {
-        setup.requiredPermissionsNotGranted()
-            .map(Self.step(for:))
-            .filter { !($0 == .speakerSync && skippedSteps.contains(.speakerSync)) }
+        setup.requiredPermissionsNotGranted().map(Self.step(for:))
     }
 
     /// Backing store for ``finalCheckState``. The public read derives

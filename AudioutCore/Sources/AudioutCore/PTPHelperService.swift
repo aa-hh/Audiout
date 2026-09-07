@@ -28,6 +28,16 @@ public enum PTPHelperStatus: Equatable, Sendable {
     /// decision. There is nothing the approval UX can do about it, same
     /// posture as ``PermissionStatus/unsupported``.
     case notFound
+
+    /// Stable short token for a telemetry line (the enum has no raw value).
+    var telemetryName: String {
+        switch self {
+        case .notRegistered: return "notRegistered"
+        case .requiresApproval: return "requiresApproval"
+        case .enabled: return "enabled"
+        case .notFound: return "notFound"
+        }
+    }
 }
 
 /// The app-side seam for the PTP helper's `SMAppService` daemon registration —
@@ -499,28 +509,28 @@ public struct PTPHelperReconciler: Sendable {
         switch cycle.outcome {
         case .unregisterThrew:
             Telemetry.log(.airplay, "ptp_zombie_heal", [
-                "before": Self.telemetryStatus(status),
+                "before": status.telemetryName,
                 "result": "heal_failed",
             ])
             return .healFailed
         case .drainNeverObserved:
             Telemetry.log(.airplay, "ptp_zombie_heal", [
-                "before": Self.telemetryStatus(status),
+                "before": status.telemetryName,
                 "result": "heal_failed",
                 "drain_polls": String(cycle.drainPolls),
             ])
             return .healFailed
         case .registerExhausted:
             Telemetry.log(.airplay, "ptp_zombie_heal", [
-                "before": Self.telemetryStatus(status),
+                "before": status.telemetryName,
                 "result": "heal_failed",
                 "register_attempts": String(cycle.registerAttempts),
             ])
             return .healFailed
         case .registered(let newStatus):
             Telemetry.log(.airplay, "ptp_zombie_heal", [
-                "before": Self.telemetryStatus(status),
-                "after": Self.telemetryStatus(newStatus),
+                "before": status.telemetryName,
+                "after": newStatus.telemetryName,
                 "drain_polls": String(cycle.drainPolls),
             ])
             return .healed(newStatus)
@@ -574,16 +584,6 @@ public struct PTPHelperReconciler: Sendable {
             }
         }
         return (.registerExhausted, drainPolls, attemptsUsed)
-    }
-
-    /// Stable short tokens for the telemetry line (the enum has no raw value).
-    private static func telemetryStatus(_ status: PTPHelperStatus) -> String {
-        switch status {
-        case .notRegistered: return "notRegistered"
-        case .requiresApproval: return "requiresApproval"
-        case .enabled: return "enabled"
-        case .notFound: return "notFound"
-        }
     }
 
     /// razor: the real probe is an untested-by-design system-integration ceiling

@@ -1,62 +1,55 @@
-# Handoff: Audiout Remote release, 2026-09-10
+# Handoff: Audiout Remote release, 2026-09-10 (evening)
 
-Every task an agent could do in `docs/plans/PLAN-REMOTE-RELEASE.md` is built, merged, verified and sitting in five draft pull requests. What remains is the owner's: a simulator runtime, signing, a database migration, a log capture, a listen, and the release itself.
+Every agent task in `docs/plans/PLAN-REMOTE-RELEASE.md` is built, merged into its branch, tested on a machine, and sitting in six draft pull requests that all merge cleanly against `main` as of 23:15. What remains is the owner's: the merges, App Store Connect, TestFlight, one session at the speakers, and the release itself. The first pass of this note (morning) got three things wrong; they are corrected below.
 
 ## Where everything is
 
-| Repo | Branch | Pull request | State |
-|---|---|---|---|
-| audiout-shared | `main` at tag 0.9.0 (pushed) | [#9](https://github.com/aa-hh/audiout-shared/pull/9), docs only | 65 tests green |
-| audiout-remote (phone) | `claude/remote-release` | [#21](https://github.com/aa-hh/audiout-remote/pull/21) | app and test-target builds green; tests never ran |
-| Audiout (Mac) | `claude/remote-release` | [#162](https://github.com/aa-hh/Audiout/pull/162) | full suite green, last 3,691 tests |
-| audiout-website | `claude/remote-release` | [#36](https://github.com/aa-hh/audiout-website/pull/36) | 40 pages build in both states, guard green in both |
-| audiout-license-server | `claude/remote-release` | [#4](https://github.com/aa-hh/audiout-license-server/pull/4) | 56 tests green |
+| Repo | Branch | Pull request | Head | Proof |
+|---|---|---|---|---|
+| audiout-shared | `claude/ftu-optimization-differentiation-5b027d` | [#9](https://github.com/aa-hh/audiout-shared/pull/9), docs only | 81040da | 65 tests green; tag 0.9.0 already on `main` |
+| audiout-remote (phone) | `claude/remote-release` | [#21](https://github.com/aa-hh/audiout-remote/pull/21) | 8f9612c | 278 unit tests + the UI walk pass on the second Mac's iPhone 17 Pro Max simulator, iOS 26.4 |
+| Audiout (Mac) | `claude/remote-release` | [#162](https://github.com/aa-hh/Audiout/pull/162) | 0e8742bc | full suite, 3,761 tests, green under the commit guard |
+| Audiout (Mac) | `claude/test-false-failures` | [#165](https://github.com/aa-hh/Audiout/pull/165), infra | 10ad248e | three false-failure fixes, see below |
+| audiout-website | `claude/remote-release` | [#36](https://github.com/aa-hh/audiout-website/pull/36) | 2e9fce1 | builds and `guard:production` pass in both launch states |
+| audiout-license-server | `claude/remote-release` | [#4](https://github.com/aa-hh/audiout-license-server/pull/4) | c29f844 | 109 tests green |
 
-Each repo keeps an integration worktree at `<repo>/.worktrees/integration` checked out on that branch. The Mac repo's is at `/Users/alechenderson/Projects/AirPlay Controller/.worktrees/integration`. The main checkouts of the site, server and Mac hold the owner's own uncommitted work; do not edit there.
+Integration worktrees: `<repo>/.worktrees/integration` on the branch, in every repo. The Mac's is `/Users/alechenderson/Projects/AirPlay Controller/.worktrees/integration`. Main checkouts still hold the owner's own uncommitted work; do not edit there.
 
-Specs and tickets: one spec issue per repo (shared #4, Mac #152, phone #11, site #21) with one ticket per task, all labelled `ready-for-agent`. The Mac spec has a correction comment on the first-pass status rule; read it with the spec.
+Merge order: shared #9, server #4, site #36, Mac #162, phone #21. #165 is independent. Merging changes nothing live: the site stays in its pre-launch state until `PUBLIC_APP_STORE_URL` is set, and the Mac release is a separate `scripts/release.sh` run.
 
-The reasoning: the plan, the two ADRs (`docs/adr/0001-remembered-offset-on-reconnect.md` here, `docs/adr/0001-quieter-sweeps.md` in the shared package), the glossary `audiout-shared/CONTEXT.md`, the research note `dev/notes/bt-latency-stability-research-2026-09-05.md`, and eight design reviews and briefs in `dev/notes/remote-release-2026-09-05/`.
+## What changed today
+
+- Every branch merged `main` back in. The Mac side took the 14-day free trial (five conflicts, resolved by union: the setup flow now has four skippable steps, and the consent card names both the settle timing and the diagnostic log). The site side had two implementations of the iPhone launch switch; the owner ruled the branch's `src/lib/remote.ts` wins and main's `REMOTE_LIVE` in `checkout.ts` is gone. The email-me signup form from main stays and reads the branch's switch.
+- The phone's five never-run suites ran for the first time and found two app defects: a refused run reporting "Stopped." because a cancelled recording re-entered the completion, and the shell's top strip drawing over each tab's header so the Apps tab's add button took no taps. Both fixed. A read-only review then found the analytics opt-out switch left the PostHog SDK running (fixed: `config.optOut`, no feature-flag preload, the toggle calls opt in/out), `speaker_kind` reporting AirPlay speakers as Bluetooth (fixed via `SpeakerTransport.of`), a refused verdict carrying a fake "0-9" bucket (fixed: both properties optional), about 25 literals bypassing the String Catalog (wrapped), and the Demo badge drawn twice on Settings (row's copy removed).
+- Owner rulings applied: "Diagnose" stays on the failed row; "Add app" stays; `sync:by_ear_nudged` fires once per slider nudge (phone capture moved to `SyncSheetModel.nudge`, vocabulary doc row rewritten on shared #9); a by-ear Keep while settling stays a first pass; the phone shares the Mac's PostHog project, token in `Info.plist`, EU host; the home headline keeps "measured with your iPhone"; the Settings row's connection lamp is now a flat 8 pt `WarmSignal.wire` dot 4 pt before the word "Connected", only while live, Settings row only; the two sync sheet sentences say "on last time's timing".
+- Mac: the four `remote_invite:*` events the vocabulary doc names are captured (the doc lists four, not five). Review screenshots of the wizard page, Settings row and seventh card were rendered, not committed.
+- Site: /remote's three measurement FAQs hide until launch; the App Store badge has 16 px above and below like the pill; the dead `.feat-cell h3 .soon-pill` rule is gone; the phone mockup in the features cell was redrawn (Settings is the fourth tab, no Connection tab); /remote no longer says the demo lives on a Connection tab; two `.env` comments corrected.
+- Infra (#165): `scripts/run-tests.sh` exited 1 after a passing local run (the exit trap's `kill` on a reaped process group), `CompanionServerTests` raced by sending a command before `welcome`, and `scripts/lib/remote.sh` probed the second Mac with a bare `xcrun --show-sdk-platform-path`, which that Mac's stray Command Line Tools SDK fails; the probe now names the macOS SDK and runs route to the second Mac again.
+
+## Corrections to the morning note
+
+- Migration `0005_remote_signups.sql` was already applied to production D1 on 2026-09-05 (and 0006 for the trial on 09-06). The release script's gate passes.
+- The simulator runtime on the owner's Mac was deleted on purpose (7.5 GB). Phone tests run on the second Mac: from the Mac repo, `AUDIOUT_IOS_REMOTE_ONLY=1 bash scripts/ios.sh test --root <phone worktree>` (needs #165's probe fix, or run it from that worktree). The physical iPhone is still the only place the app counts as verified.
+- The signing team is a command-line override documented in the phone's `AGENTS.md`; nothing to set in the project.
 
 ## Owner steps, in order
 
-1. Install an iOS simulator runtime (`xcrun simctl list runtimes` is empty on Xcode 27.0), then run the phone suite on the integration branch. Expect first-run failures: every phone test is compile-verified only. `SyncSheetModelTests`, `AnalyticsTests`, `EmptyStateRuleTests`, `IntroCardsTests` and the rewritten `CompanionSmokeUITests` have never executed.
-2. Fill the PostHog key placeholder `REPLACE_WITH_POSTHOG_PROJECT_API_KEY` in the phone's `Info.plist`. The sink refuses to start while the placeholder stands.
-3. Set the phone's `DEVELOPMENT_TEAM` or pass it per `AGENTS.md:118-124`; TestFlight per `docs/companion-app-store.md`.
-4. Apply licence-server migration `0005_remote_signups.sql` to production D1. `scripts/release.sh` refuses to cut a Mac release until then.
-5. Listen to the quieter sweeps on a real speaker. The Mac stages them at 0.175 (was 0.35); the fallback named in the code is 0.25.
-6. Connect one Bluetooth speaker with `log stream --predicate 'process == "bluetoothaudiod"'` open and paste the codec line into the settle record's codec closure in `BTSpeakerTiming`, or strike codec. It sends nil today.
-7. Reconnect the Sonos Move 2, the Sony and a third speaker twenty times each; review `~/Library/Logs/Audiout/` (`bt_link_settled` joined to `bt_align_measurement` on `uid`) against the 10 ms threshold (T23).
-8. Cut the Mac release (T19), TestFlight (T22), submit (T24). Launch day on the site is the runbook in the website's `HANDOFF-releases-2026-08-27.md`: generate `public/appstore-qr.svg`, set `PUBLIC_APP_STORE_URL`, one commit, `npm run guard:production`, `CONFIRM_PROD=yes npm run deploy:production`.
+1. Merge the six pull requests in the order above (local `git merge` plus the GitHub merge, per the Mac repo's rule).
+2. Phone on the iPhone 15 Pro: `scripts/ios.sh device --root <phone checkout>`. Judge on the device: Skip on the intro cards (bare text vs a panel), the QR at 96 pt on the Mac's seventh card, the Settings row dot, and the shell strip over the tabs (a layout change that only ran in the simulator).
+3. App Store Connect record, `DEVELOPMENT_TEAM=TGT8D69RZ4` archive, TestFlight to three outside phones (T22), per `docs/companion-app-store.md`.
+4. One session at the speakers with the Mac dev build (`APP_NAME="Audiout Dev" BUNDLE_ID="com.audiout.Audiout.dev"`, slot held) and a fresh bundle id for the onboarding card: listen to the sweeps at 0.175 (`AlignmentTickInjector.probeAmplitude`, fallback 0.25); connect one Bluetooth speaker with `log stream --predicate 'process == "bluetoothaudiod"'` open and paste the codec line into the settle record's codec closure in `BTSpeakerTiming`; one full measurement with the before-and-after; a reconnect for "Timing from last time"; a measure-while-settling for "First pass. Check again"; then twenty reconnects each on the Sonos Move 2, the Sony and a third speaker (`brew install blueutil` makes the loop scriptable), and the log join `bt_link_settled` to `bt_align_measurement` on `uid` against the 10 ms threshold (T23). Confirm in PostHog project "Audiout" that the phone's nine events and the Mac's settle event arrive with no device names.
+5. Cut the Mac release (T19), submit (T24). Launch day on the site is the runbook in the website's `HANDOFF-releases-2026-08-27.md`: generate `public/appstore-qr.svg`, set `PUBLIC_APP_STORE_URL`, one commit, `npm run guard:production`, `CONFIRM_PROD=yes npm run deploy:production`.
 
-## Decisions still open, with the default that shipped
+## Open, not blocking
 
-- Bluetooth is named in every sync claim except the home page headline. The owner never answered this one; D3 records it as assumed.
-- "Diagnose" became "Details" on the failed speaker row, and Apps' empty state gained an "Add app" button. Both were the brief's assumptions.
-- `sync:by_ear_nudged` fires when a run cannot get a confident answer, per the vocabulary doc, not on each slider nudge. The design review had read it the other way.
-- A by-ear Keep made while the speaker is still settling publishes a first pass, so the phone row says "First pass. Check again" for it. Consistent with the stale rule; the ADR did not say it.
-- Skip on the intro cards is a bare quiet text word over the field. The brief's author wanted a panel behind it. Judge on a device.
-- QR symbol sizes: the integer-scale rule gives 54 pt of code at both the 72 and 96 pt tiles. If the 96 looks thin, retune the three nominal sizes, not the scale rule.
+- `SyncInviteCard.swift` has a sentence with "timing from last time" and two code comments use the phrase; the owner's ruling named only the two sync sheet sentences.
+- The Mac's `endCompanionTickSession` still records a by-ear Keep's alignment twice (harmless, noted by the T14 agent).
+- `CompanionEndToEndTests` show six timeouts under a heavily loaded full parallel run on this Mac only; a separate session was spawned for it. The Bluetooth speaker list for T23 and the three TestFlight testers were never named.
 
 ## Things that will bite the next agent
 
-- **The Mac repo's write guard.** `~/.claude/hooks/protect-main-checkout.py` asks before any Edit or Write inside the Mac repo that is not under `.claude/worktrees/` or `.worktrees/`. Bypass-permissions mode does not silence it. Create a worktree under one of those two folders before any agent writes.
-- **Agent worktree isolation follows the shell's cwd.** Spawning an agent with `isolation: "worktree"` gives it a worktree of whatever repo the parent shell was last in. Three agents were lost to this. Either reset cwd first or have the agent make its own worktree with `git worktree add`.
-- **Mac commits go through three guards.** Guard 7 refuses any commit staging Swift until `scripts/self-review.sh` has run against those exact bytes; Guard 4 runs the affected suites (the full suite on a merge); build and test only through `scripts/build.sh` and `scripts/run-tests.sh`, never bare `swift build` or `swift test`. `run-tests.sh` can exit non-zero after printing a pass when the remote build Mac is busy, which makes Guard 7 print a spurious refusal; retry.
-- **Two Mac tests are flaky under the parallel shared-slot fallback**: `AggregateOutputDeviceTests.blockedAttemptLineReleases` and `NativeBackendTests.stopStopsCapture`. They pass alone and in every gate run. Not touched.
-- **Site and server builds in a worktree** need `node_modules`; a symlink to the main checkout's works (`ln -sfn ../../node_modules node_modules`) but remove it before committing, since the ignore pattern only matches a real directory. The server's `scripts/remote-run.sh npm test` fails on the remote (no vitest there); run `../../node_modules/.bin/vitest run` locally instead.
-- **The production guard greps built HTML for the pill's class name once the store URL is set**, so a stylesheet selector that names `soon-pill` counts as a survivor. `/thanks` was caught this way once.
-- **Phone tests cannot run on this Mac** until a simulator runtime exists. "Compile-verified" is the ceiling every phone report claims, and it is the truth.
-
-## Not done, and why
-
-- Crowd registry on the licence server: deferred until the owner's own settle log says a per-model median would help.
-- `bluetoothDeviceClassMinor` is in the local settle record and log line only, not the release event, because the vocabulary doc lists no such property.
-- The five Mac invite analytics events the brief proposed (`remote_invite:*`) are in the vocabulary doc but not sent; adding them is a small Mac change.
-- The `endCompanionTickSession` path on the Mac records an alignment twice (a by-ear Keep), the same shape as the defect fixed for phone measurements. Out of scope, harmless, noted by the T14 agent.
-- The T16 screenshots of the wizard, Settings row and seventh card were rendered by the snapshot tools but not committed (16 MB). Regenerate with `onboarding-snapshot` and the wizard and settings snapshot renderers.
-- The site's "Main Out" mentions outside BRAND-VOICE rule 12 (site `PRODUCT.md:28, 35, 280`, `BRAND-VOICE.md:55, 131, 258`) still say Main Out; the brief called that a separate owner pass.
-
-## If the plan is picked up again
-
-Read the plan's task table for the file anchors, the brief named in each row for copy and layout, and the ticket for verify and dependencies. Every ticket is closed by its repo's pull request when merged. After merging, delete the integration worktrees (`git worktree remove .worktrees/integration`) and the per-repo `claude/remote-release` branches; the shared package's session branch `claude/ftu-optimization-differentiation-5b027d` can go once #9 merges.
+- The Mac repo's write guard asks before any Edit or Write outside `.claude/worktrees/` or `.worktrees/`; the merge hook asks before any `git merge` (subagents in bypass mode get through; a non-interactive session may not).
+- `ios.sh` reads `audiout.remoteHost` from the git config of the current directory: run it from a Mac repo worktree with `--root` pointing at the phone checkout.
+- Two xcodebuild runs on the same second-Mac simulator at once reset each other's app state and look like a flaky UI test. Serialize them.
+- The in-app browser pane does not paint while hidden; screenshots of the built site come from headless Chrome (`scratchpad/shot-grid.mjs` pattern: DevTools protocol, scroll in steps so the reveal observers fire).
+- Site and server builds in a worktree need a `node_modules` symlink to the main checkout's, removed before committing.

@@ -21,7 +21,9 @@
 #   AUDIOUT_TEST_NO_LOCK=1 run immediately, no lock (for a deliberate
 #                            foreground run when you know the machine is idle)
 #   AUDIOUT_TEST_NO_CACHE=1 always run, never consult or write the cache
-#   AUDIOUT_TEST_LOCK_TIMEOUT  seconds to wait for the lock (default 1800)
+#   AUDIOUT_TEST_LOCK_TIMEOUT  seconds to wait for a local permit before
+#                            proceeding uncapped (default 600) — an alias for
+#                            AUDIOUT_CAPACITY_TIMEOUT, see scripts/lib/remote.sh
 set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
@@ -94,7 +96,10 @@ case "$selected_devdir" in
         ;;
 esac
 
-lock_timeout=${AUDIOUT_TEST_LOCK_TIMEOUT:-1800}
+# Alias: AUDIOUT_TEST_LOCK_TIMEOUT is this script's older name for the same
+# setting scripts/lib/remote.sh's capacity_acquire reads as AUDIOUT_CAPACITY_TIMEOUT.
+[ -n "${AUDIOUT_TEST_LOCK_TIMEOUT:-}" ] && : "${AUDIOUT_CAPACITY_TIMEOUT:=$AUDIOUT_TEST_LOCK_TIMEOUT}"
+
 # How many suite runs may proceed at once, machine-wide. Configurable the same
 # way remote_slots is (see lib/remote.sh) — `git config --local
 # audiout.localSlots N` takes effect on every worktree's next run with no
@@ -183,8 +188,8 @@ run_remote() {
 
 # Lock and cache live in /tmp on purpose: they must be shared by EVERY worktree
 # and every clone on this machine, so they cannot live under $repo_root (each
-# worktree has its own) or under .git (ditto).
-lock_file=${AUDIOUT_TEST_LOCK_FILE:-/tmp/audiout-suite.lock}
+# worktree has its own) or under .git (ditto). The lock path itself is resolved
+# by capacity_lock_base in lib/remote.sh (same AUDIOUT_TEST_LOCK_FILE override).
 cache_dir=${AUDIOUT_TEST_CACHE_DIR:-/tmp/audiout-suite-cache}
 
 # --- content key ------------------------------------------------------------
@@ -261,92 +266,56 @@ if [ "$try_remote_first" -eq 1 ] && [ "$remote_tried" -eq 0 ]; then
 fi
 
 # --- lock -------------------------------------------------------------------
-# shlock(1) is the macOS base-system answer to flock(1), which is NOT installed
-# here. It writes our PID atomically and, critically, reclaims the lock if the
-# recorded PID is gone — so an agent killed mid-run cannot wedge the machine.
-#
-# NOT a hard mutex — a COUNTING semaphore of `slots` permits, implemented as
-# `slots` independent shlock files where a run takes the first one it can get.
-#
-# Why not one exclusive lock (the obvious first design, and what this was):
-# the suite is WAIT-bound (timers, expectations), not CPU-bound — see the slot
-# comment above for the current measurement. Two or three concurrent runs
-# genuinely do overlap, so serialising to exactly one would idle most of the
-# machine AND make four agents queue behind each other for no reason. The cap
-# exists to stop unbounded pile-up, not to enforce single-file.
-acquired=0
-slot_file=""
-if [ "${AUDIOUT_TEST_NO_LOCK:-0}" = "1" ]; then
-    echo "  suite: AUDIOUT_TEST_NO_LOCK=1 — not limiting concurrency." >&2
-else
-    waited=0
-    announced=0
-    while :; do
-        n=1
-        while [ "$n" -le "$slots" ]; do
-            if /usr/bin/shlock -f "${lock_file}.$n" -p $$; then
-                slot_file="${lock_file}.$n"
-                break
-            fi
-            n=$((n + 1))
-        done
-        [ -n "$slot_file" ] && break
-        # OVERFLOW: rather than idle in a queue, hand this run to the remote Mac
-        # if one is configured and awake. Tried ONCE, on first contention only —
-        # re-probing a sleeping host every 5s would add latency to every wait.
-        if [ "$announced" -eq 0 ] && [ -n "$remote_host" ] && [ "$remote_tried" -eq 0 ]; then
-            remote_tried=1
-            # "$@" forwards the caller's own flags (e.g. --filter Foo) into the
-            # function; a bare `run_remote` would see the function's empty
-            # argument list instead of the script's.
-            # `|| rrc=$?` because `set -e` would otherwise abort on the non-zero
-            # "fall back locally" signal.
-            rrc=0
-            run_remote "$@" || rrc=$?
-            if [ "$rrc" -eq 0 ]; then
-                # A remote PASS is a real pass of these exact sources, so record
-                # it — otherwise the very next commit re-runs the whole suite and
-                # the cache silently does nothing for every overflowed run.
-                if [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ]; then
-                    mkdir -p "$cache_dir"
-                    : > "$stamp"
-                fi
-                # Nothing local was started, so there is no slot or trap to unwind.
-                exit 0
-            fi
-            # rrc 1 (unusable) and rrc 2 (ran, failed -> confirm locally) both
-            # fall through into the normal local path below.
-        fi
-        if [ "$announced" -eq 0 ]; then
-            echo "  suite: all $slots test slots busy — waiting for one to free." >&2
-            announced=1
-        fi
-        if [ "$waited" -ge "$lock_timeout" ]; then
-            # Degrade, do NOT fail. This runner's job is to keep the machine
-            # usable, not to gate correctness — Guard 4 calls it to decide
-            # whether a commit is safe, and failing a commit because some OTHER
-            # worktree is busy would block legitimate work for a reason the
-            # committer cannot see or fix. Falling through runs unlocked, i.e.
-            # exactly the pre-runner behaviour, so the worst case is the old
-            # contention rather than a wedged agent.
-            echo "  suite: all slots busy for ${lock_timeout}s — proceeding UNCAPPED." >&2
-            echo "  (expect contention; check ${lock_file}.N pids if this repeats)" >&2
-            timed_out=1
-            break
-        fi
-        sleep 5
-        waited=$((waited + 5))
+# The local permit semaphore (shlock-based counting cap, sweep of stale
+# holders, degrade-to-uncapped past the ceiling) now lives in capacity_acquire
+# (scripts/lib/remote.sh), shared with build.sh, make-app.sh and ios.sh so
+# "N jobs at once" describes the whole machine, not just this script's own
+# runs. See capacity_acquire's own comment for why a COUNTING semaphore, not
+# one exclusive lock, is the right shape — this file just used to carry that
+# reasoning inline.
+if [ "${AUDIOUT_TEST_NO_LOCK:-0}" != "1" ] && [ "$remote_tried" -eq 0 ]; then
+    # OVERFLOW: on first local contention, hand this run to the remote Mac once
+    # before joining capacity_acquire's wait — re-probing a sleeping host on
+    # every tick would add latency to every wait later. Non-blocking probe:
+    # sweep stale permits, then check whether every slot file still names a
+    # live holder (existence is enough — capacity_sweep already removed any
+    # dead one, so a survivor is a real occupant, not a race to actually take).
+    capacity_sweep
+    busy=1
+    n=1
+    while [ "$n" -le "$slots" ]; do
+        [ -f "$(capacity_lock_base).$n" ] || { busy=0; break; }
+        n=$((n + 1))
     done
-    # Only install the release trap if we actually HOLD a slot. On the timeout
-    # path `slot_file` is empty; removing someone else's slot file would hand a
-    # permit to a third process and break the cap.
-    if [ "${timed_out:-0}" -eq 0 ] && [ -n "$slot_file" ]; then
-        acquired=1
-        # Release on ANY exit path, including the failure exit below and a
-        # signal — a held slot outliving its holder permanently shrinks the cap.
-        trap 'rm -f "$slot_file"' EXIT HUP INT TERM
+    if [ "$busy" -eq 1 ] && [ -n "$remote_host" ]; then
+        remote_tried=1
+        # `|| rrc=$?` because `set -e` would otherwise abort on the non-zero
+        # "fall back locally" signal.
+        rrc=0
+        run_remote "$@" || rrc=$?
+        if [ "$rrc" -eq 0 ]; then
+            # A remote PASS is a real pass of these exact sources, so record
+            # it — otherwise the very next commit re-runs the whole suite and
+            # the cache silently does nothing for every overflowed run.
+            if [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ]; then
+                mkdir -p "$cache_dir"
+                : > "$stamp"
+            fi
+            # Nothing local was started, so there is no permit to unwind.
+            exit 0
+        fi
+        echo "  suite: all $slots test slots busy — waiting for one to free." >&2
     fi
 fi
+
+# AUDIOUT_CAPACITY_NO_TRAP=1: this script re-traps around the compiler process
+# group below, and letting capacity_acquire install its own trap here would
+# get silently clobbered by that later one — install ours instead, right away,
+# so an interrupt during the cold-checkout/reap steps below still releases.
+AUDIOUT_CAPACITY_NO_TRAP=1 capacity_acquire suite
+acquired=0
+[ -n "$capacity_slot_file" ] && acquired=1
+trap 'capacity_release' EXIT HUP INT TERM
 
 # --- serial vs parallel -----------------------------------------------------
 # Swift Testing runs tests concurrently inside one process whether or not
@@ -364,7 +333,7 @@ case "$mode" in
 esac
 
 if [ "$acquired" -eq 1 ]; then
-    echo "  suite: slot $(basename "$slot_file") of $slots — $test_args." >&2
+    echo "  suite: $test_args." >&2
 fi
 
 # --- cold checkouts: resolve solo first --------------------------------------
@@ -399,7 +368,7 @@ set +e
 set -m
 ( cd "$core" && swift test $test_args "$@" ) >&2 &
 swift_pgid=$!
-trap 'kill -- -"$swift_pgid" 2>/dev/null; rm -f "$slot_file" 2>/dev/null' EXIT HUP INT TERM
+trap 'kill -- -"$swift_pgid" 2>/dev/null; capacity_release' EXIT HUP INT TERM
 wait "$swift_pgid"
 status=$?
 set +m

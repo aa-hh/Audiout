@@ -341,5 +341,9 @@ elif [ -n "$remote_only" ]; then
     refuse_local "no remote was chosen (audiout.remoteHost unset, or audiout.testPrefer is 'local')"
 fi
 
+# Remote path (remote_run) already takes a mule permit inside remote.sh.
+# Only the local path needs a local capacity permit here.
+capacity_acquire ios
 cd "$root"
 eval "$local_cmd"
+capacity_release

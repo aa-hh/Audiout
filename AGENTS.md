@@ -176,6 +176,16 @@ repo. `AudioutCore` pins it by version.
   pushed), `touch .claude/worktrees/<slug>/.prunable` and let the system
   collect it. The flag is a request, not a command — a dirty or unpushed
   worktree is refused with the reason printed.
+- **Every compile and test takes one capacity permit from a machine-wide pool.**
+  Local pool (this machine): `git config audiout.localSlots` (set to 2).
+  Mule pool (remote M3 Air): `git config audiout.remoteSlots` (set to 3).
+  Entry points: `scripts/run-tests.sh`, `scripts/build.sh`, `scripts/make-app.sh`,
+  `scripts/ios.sh`, `scripts/run-app.sh`, and pre-commit Guard 6 all acquire a
+  permit before work starts. Mule-full falls back to local at once (no wait).
+  Local-full waits up to 600s, printing progress; ceiling reached → proceeds
+  uncapped with a loud warning (never refuses). Sweep on acquire reclaims stale
+  permits (dead holder, unrecognised job, or held >45 min). `bash scripts/capacity.sh status`
+  shows local and mule permits; `bash scripts/test-capacity.sh` self-tests the pool.
 - **Hold the live-test slot before building or launching the shared dev id.**
   Only one native Audiout can run at a time (the PTP helper binds UDP 319/320
   exclusively) and the dev loop reuses one bundle id,

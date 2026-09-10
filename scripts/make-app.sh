@@ -400,6 +400,17 @@ for b in $RESOURCE_BUNDLE_NAMES; do cp -R \"\$BIN/\$b\" .remote-products/ || exi
 fi
 
 if [ "$REMOTE_BUILT" -eq 0 ]; then
+# A release build takes one machine-wide permit like any other job (owner's
+# call, 2026-09-10). The remote path takes its permit inside remote_run; this
+# local compile took none. NO_TRAP=1 because the remote block may have left
+# its STAGE-cleanup trap live (compiled there, fetch failed) and
+# capacity_acquire's own trap would clobber it — so compose by hand.
+AUDIOUT_CAPACITY_NO_TRAP=1 capacity_acquire make-app
+if [ -n "$(trap -p EXIT)" ]; then
+  trap 'rm -rf "$STAGE"; capacity_release' EXIT HUP INT TERM
+else
+  trap 'capacity_release' EXIT HUP INT TERM
+fi
 echo "==> Building $EXECUTABLE (release)"
 # Build engine: the SwiftPM default (swiftbuild). These commands used to pin the
 # old `native` engine, because swiftbuild did not forward a C target's cSettings
@@ -440,6 +451,7 @@ swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --product "$HELPER_E
 HELPER_BIN_DIR="$(swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_HELPER="$HELPER_BIN_DIR/$HELPER_EXECUTABLE"
 test -x "$BUILT_HELPER" || { echo "error: built helper not found at $BUILT_HELPER" >&2; exit 1; }
+capacity_release
 fi  # REMOTE_BUILT
 
 # Whichever machine compiled them, the three products must now exist here — the

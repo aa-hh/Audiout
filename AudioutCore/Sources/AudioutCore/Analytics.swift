@@ -32,13 +32,19 @@ public enum Analytics {
         /// attributes. Defaults to a no-op so a sink that only captures
         /// events still compiles.
         public let log: @Sendable (String, [String: String]) -> Void
+        /// `capture` with the moment the event really happened. Only the
+        /// pre-consent buffer flush uses it (see ``capture(_:_:)``); a sink
+        /// that leaves it nil sends those events stamped at flush time.
+        public let captureAt: (@Sendable (String, [String: String], Date) -> Void)?
 
         public init(capture: @escaping @Sendable (String, [String: String]) -> Void,
                     consentChanged: @escaping @Sendable (Bool) -> Void,
-                    log: @escaping @Sendable (String, [String: String]) -> Void = { _, _ in }) {
+                    log: @escaping @Sendable (String, [String: String]) -> Void = { _, _ in },
+                    captureAt: (@Sendable (String, [String: String], Date) -> Void)? = nil) {
             self.capture = capture
             self.consentChanged = consentChanged
             self.log = log
+            self.captureAt = captureAt
         }
     }
 
@@ -49,6 +55,7 @@ public enum Analytics {
         state.withLock { s in
             s.sink = sink
             s.consent = consent
+            s.pending.removeAll()
         }
     }
 
@@ -63,22 +70,53 @@ public enum Analytics {
     /// Updates the consent flag, then forwards the new value to the
     /// installed sink's `consentChanged` — the user's actual opt-in/out
     /// decision (Settings › General toggle, or the one-time ask).
+    ///
+    /// Granting consent also sends everything ``capture(_:_:)`` held back
+    /// while it was off, in order and with their original times,
+    /// so the first-run steps that happen BEFORE the usage-statistics card
+    /// still reach the onboarding funnel. A decline drops them.
     public static func setConsent(_ granted: Bool) {
-        let sink: Sink? = state.withLock { s in
+        let (sink, held): (Sink?, [Held]) = state.withLock { s in
             s.consent = granted
-            return s.sink
+            defer { s.pending.removeAll() }
+            return (s.sink, granted ? s.pending : [])
         }
-        sink?.consentChanged(granted)
+        guard let sink else { return }
+        sink.consentChanged(granted)
+        for h in held {
+            if let captureAt = sink.captureAt { captureAt(h.event, h.properties, h.at) }
+            else { sink.capture(h.event, h.properties) }
+        }
     }
 
-    /// No-op unless a sink is installed AND consent is true; otherwise calls
-    /// the sink's `capture` synchronously on the caller's thread.
+    /// No-op without a sink. With a sink and consent, calls the sink's
+    /// `capture` synchronously on the caller's thread. With a sink but no
+    /// consent yet, holds the event in memory — never on disk, never sent —
+    /// so a consent granted before the app quits can send it (``setConsent``).
+    /// Quitting drops the buffer; so does a decline.
     public static func capture(_ event: StaticString, _ properties: [String: String] = [:]) {
         let snapshot: Sink? = state.withLock { s in
-            guard s.consent else { return nil }
+            guard s.sink != nil else { return nil }
+            guard s.consent else {
+                // razor: a flat cap; the buffer only has to outlive first-run setup.
+                if s.pending.count < pendingCap {
+                    s.pending.append(Held(event: event.description, properties: properties, at: Date()))
+                }
+                return nil
+            }
             return s.sink
         }
         snapshot?.capture(event.description, properties)
+    }
+
+    /// Events held while consent was off. A first run is a few dozen; the
+    /// cap exists so a session that never opts in cannot grow unbounded.
+    private static let pendingCap = 200
+
+    private struct Held: Sendable {
+        let event: String
+        let properties: [String: String]
+        let at: Date
     }
 
     /// Forwards one ``Telemetry`` line as a diagnostic log, under the same
@@ -106,6 +144,7 @@ public enum Analytics {
     private struct State: Sendable {
         var sink: Sink?
         var consent = false
+        var pending: [Held] = []
     }
 
     /// Minimal `NSLock`-guarded box — same pattern as ``Telemetry``'s

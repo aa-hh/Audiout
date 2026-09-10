@@ -52,6 +52,59 @@ extension SerializedSharedState {
             #expect(events.first?.1 == ["k": "v"])
         }
 
+        @Test func eventsBeforeConsentAreHeldAndSentInOrderOnceGranted() {
+            let captured = Captured()
+            let dated = Captured()
+            Analytics.install(Analytics.Sink(capture: { name, props in
+                captured.append(name, props)
+            }, consentChanged: { _ in }, captureAt: { name, props, _ in
+                dated.append(name, props)
+            }), consent: false)
+            defer { Analytics.install(nil, consent: false) }
+
+            Analytics.capture("first", ["step": "audio"])
+            Analytics.capture("second", ["step": "local_network"])
+            #expect(captured.events().isEmpty)
+            #expect(dated.events().isEmpty)
+
+            Analytics.setConsent(true)
+
+            #expect(dated.events().map(\.0) == ["first", "second"])
+            #expect(dated.events().first?.1 == ["step": "audio"])
+            #expect(captured.events().isEmpty)
+
+            // The buffer is spent: a second grant sends nothing twice.
+            Analytics.setConsent(true)
+            #expect(dated.events().count == 2)
+        }
+
+        @Test func heldEventsFallBackToPlainCaptureWithoutADatedSink() {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { name, props in
+                captured.append(name, props)
+            }, consentChanged: { _ in }), consent: false)
+            defer { Analytics.install(nil, consent: false) }
+
+            Analytics.capture("held")
+            Analytics.setConsent(true)
+
+            #expect(captured.events().map(\.0) == ["held"])
+        }
+
+        @Test func declinedConsentDropsHeldEvents() {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { name, props in
+                captured.append(name, props)
+            }, consentChanged: { _ in }), consent: false)
+            defer { Analytics.install(nil, consent: false) }
+
+            Analytics.capture("held")
+            Analytics.setConsent(false)
+            Analytics.setConsent(true)
+
+            #expect(captured.events().isEmpty)
+        }
+
         @Test func logIsConsentGatedAndStripsDeviceFields() {
             let captured = Captured()
             Analytics.install(Analytics.Sink(capture: { _, _ in }, consentChanged: { _ in }, log: { body, attrs in

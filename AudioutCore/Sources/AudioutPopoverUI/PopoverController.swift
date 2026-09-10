@@ -3465,7 +3465,13 @@ public final class PopoverController: NSObject {
                 // what keeps a mid-episode dismissal honored — a still-`.failed`
                 // re-report breaks here, so the panel never pops back.
                 guard !previous.isFailedState else { break }
-                if case .failed(let failure) = current {
+                // Only a speaker the user asked for is worth an event. The
+                // backend fails every speaker it can see, wanted or not, so
+                // ungated this bills an install for the whole network's mDNS
+                // churn: one install sent 357 `connection:failed` on
+                // 2026-09-09, 356 of them `vanished`, in bursts of 16 inside
+                // 20 ms, with no user action anywhere near them.
+                if case .failed(let failure) = current, wantsAudio(device.id) {
                     Analytics.capture("connection:failed", ["kind": device.kind.rawValue,
                                                               "cause": String(describing: failure.cause)])
                 }
@@ -3476,7 +3482,10 @@ public final class PopoverController: NSObject {
                 dismissedDiagnosisIDs.remove(device.id)
                 openDiagnosisIDs.insert(device.id)
             case .connected, .off:
-                if current == .connected && previous != .connected && !device.isLocalDevice {
+                // Same `wantsAudio` gate as the failure above, for the same
+                // reason: a speaker nobody asked for is the backend's business.
+                if current == .connected && previous != .connected && !device.isLocalDevice
+                    && wantsAudio(device.id) {
                     Analytics.capture("connection:connected", ["kind": device.kind.rawValue])
                 }
                 // Leaving `.failed` ends the episode — clear both the open intent

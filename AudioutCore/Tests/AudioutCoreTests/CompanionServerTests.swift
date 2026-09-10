@@ -332,6 +332,11 @@ import AudioutProtocol
         let (client, log) = try connectClient(via: hub, to: server)
         defer { client.cancel() }
         try sendHello(over: client)
+        // Wait for promotion before the first command. Approval reaches the
+        // server as two queued jobs; a command frame that lands between them
+        // is dropped as "command before hello" and the reply never comes.
+        try #require(waitUntil { server.test_clientNames().contains("phone") },
+                     "the client was never promoted")
         sendText(try CompanionEnvelope(message: .command(requestID: "req-1", command: .setDeviceVolume(id: "dev-1", volume: 40))).encoded(), over: client)
 
         #expect(waitUntil { log.contains(.commandResult(requestID: "req-1", applied: false, refusalReason: "no such device", autoSwappedCurrentDevice: true)) },
@@ -705,6 +710,9 @@ import AudioutProtocol
 
         let (client, log) = try connectClient(via: hub, to: server)
         try sendHello(over: client)
+        // Same race as commandRoundTripDeliversTheReply: wait for promotion, then command.
+        try #require(waitUntil { server.test_clientNames().contains("phone") },
+                     "the client was never promoted")
         sendText(try CompanionEnvelope(message: .command(requestID: "r1", command: .setMainOutMuted(muted: true))).encoded(), over: client)
         try #require(waitUntil { log.contains(.commandResult(requestID: "r1", applied: true, refusalReason: nil, autoSwappedCurrentDevice: false)) },
                      "the command never completed")

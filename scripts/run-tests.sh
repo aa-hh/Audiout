@@ -368,7 +368,12 @@ set +e
 set -m
 ( cd "$core" && swift test $test_args "$@" ) >&2 &
 swift_pgid=$!
-trap 'kill -- -"$swift_pgid" 2>/dev/null; capacity_release' EXIT HUP INT TERM
+# `|| true`: by the time this trap fires the group is usually already reaped
+# by the `wait` below, so kill fails with "no such process" -- and under
+# `set -e` a failing trap command aborts the rest of the trap (skipping the
+# release) and overrides the exit code, turning a pass into a false failure.
+# Same fix as PR #165; carried here because this line changed too.
+trap 'kill -- -"$swift_pgid" 2>/dev/null || true; capacity_release' EXIT HUP INT TERM
 wait "$swift_pgid"
 status=$?
 set +m

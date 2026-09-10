@@ -18,6 +18,8 @@ import Foundation
 /// key with no verdict as registered (the soft-check posture), so a key
 /// accepted while the server was unreachable passes the gate and gets verified
 /// by the normal launch validation on a later run.
+///
+/// A running trial passes it too — see `trialIsRunningWithoutAKey`.
 public enum LicenseGate {
 
     public static func shouldPresent(
@@ -28,8 +30,29 @@ public enum LicenseGate {
         case .forceShow: return true
         case .forceHide: return false
         case .auto:
-            return settings.licenseServerURL != nil && settings.licenseUnregistered
+            guard settings.licenseServerURL != nil, settings.licenseUnregistered else {
+                return false
+            }
+            return !trialIsRunningWithoutAKey(settings: settings)
         }
+    }
+
+    /// A trial running on this Mac that the licence server has not yet handed a
+    /// key back for.
+    ///
+    /// A trial IS a licence key, so once `TrialRegistrar` has the key the
+    /// ordinary rule already passes such a Mac (a stored key with no verdict is
+    /// registered) and already gates it again when the server answers
+    /// `revoked`. The window this covers is the one before that key arrives:
+    /// there is nothing stored for ``AppSettings/licenseUnregistered`` to read,
+    /// and without this clause a Mac on day one of its trial would meet the
+    /// gate at every launch. An `.expired` trial needs no clause of its own —
+    /// no key, so the ordinary rule gates it, which is what the trial ending
+    /// means.
+    private static func trialIsRunningWithoutAKey(settings: AppSettings) -> Bool {
+        guard (settings.licenseKey ?? "").isEmpty else { return false }
+        if case .active = TrialClock.state(settings: settings) { return true }
+        return false
     }
 }
 

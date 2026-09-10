@@ -205,6 +205,9 @@ extension SerializedSharedState {
         var statusAfterRegister: PTPHelperStatus = .requiresApproval
         /// What `register()` throws, if anything (default: succeeds).
         var registerError: Error?
+        /// What `.status` reports after `unregister()`, if it should move at
+        /// all (default: unchanged — the fake never drained anything).
+        var statusAfterUnregister: PTPHelperStatus?
         /// What `.status` reports BEFORE `register()` has been called.
         var status: PTPHelperStatus = .notRegistered
         var registerCount: Int { lock.withLock { _registerCount } }
@@ -217,7 +220,10 @@ extension SerializedSharedState {
             status = statusAfterRegister
         }
         func openSystemSettingsLoginItems() { lock.withLock { _openSettingsCount += 1 } }
-        func unregister() async throws { lock.withLock { _unregisterCount += 1 } }
+        func unregister() async throws {
+            lock.withLock { _unregisterCount += 1 }
+            if let statusAfterUnregister { status = statusAfterUnregister }
+        }
     }
 
     /// Counts `onChange` fires (reference type so the escaping closure mutates it).
@@ -679,6 +685,136 @@ extension SerializedSharedState {
         #expect(model.ptpHelperStatus == .notFound)
     }
 
+    /// The first-run shape on current macOS: `register()` throws "Operation not
+    /// permitted" while the Background Items notice is up, and the status
+    /// afterwards is `.requiresApproval`. That is the user's switch to flip,
+    /// not a fault — reading the throw as one auto-passed the step and left a
+    /// dead end. Turns red if a throw is again taken as a failure on its own.
+    @Test func aThrowIntoRequiresApprovalIsNotARegistrationFailure() {
+        struct OperationNotPermitted: Error {}
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.registerError = OperationNotPermitted()
+        ptpHelper.status = .requiresApproval
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+
+        model.registerPTPHelper()
+
+        #expect(!model.ptpHelperRegistrationFailed)
+        #expect(model.ptpHelperStatus == .requiresApproval)
+        #expect(model.requiredPermissionsNotGranted().contains(.ptpHelper), "the gate waits for the switch")
+    }
+
+    /// …and the flag is not sticky: once the approval lands and the next
+    /// register goes through, it reads clean. Turns red if a later success
+    /// stops clearing it.
+    @Test func aLaterSuccessfulRegisterClearsTheFailureFlag() {
+        struct Boom: Error {}
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.registerError = Boom()
+        ptpHelper.status = .notFound
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        model.registerPTPHelper()
+        #expect(model.ptpHelperRegistrationFailed)
+
+        ptpHelper.registerError = nil
+        ptpHelper.statusAfterRegister = .enabled
+        model.registerPTPHelper()
+
+        #expect(!model.ptpHelperRegistrationFailed)
+        #expect(model.ptpHelperStatus == .enabled)
+    }
+
+    // MARK: The return-to-front re-register
+
+    /// Approval alone does not load the daemon: the register AFTER the user
+    /// flips the switch is what does. Turns red if a return goes back to a
+    /// status-only read while the helper is still unapproved.
+    @Test func returningWhileUnapprovedRegistersAgain() async {
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.statusAfterRegister = .requiresApproval
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        model.registerPTPHelper()
+        #expect(model.ptpHelperStatus == .requiresApproval)
+
+        ptpHelper.statusAfterRegister = .enabled      // the switch was flipped meanwhile
+        await model.reregisterPTPHelperOnReturn()
+
+        #expect(ptpHelper.registerCount == 2)
+        #expect(model.ptpHelperStatus == .enabled)
+    }
+
+    /// A step that was settled when the user left costs no launchd round-trip
+    /// on the way back. Turns red if every activation registers regardless.
+    @Test func returningOnceEnabledDoesNotRegisterAgain() async {
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.statusAfterRegister = .enabled
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        model.registerPTPHelper()
+
+        await model.reregisterPTPHelperOnReturn()
+
+        #expect(ptpHelper.registerCount == 1)
+    }
+
+    /// The helper was approved once (the ratchet says so) and the label has
+    /// since gone unknown — Background Task Management was reset. Only the
+    /// unregister→drain→register cycle brings the entry back. Turns red if the
+    /// return no longer recycles a once-approved `.notFound` helper.
+    @Test func returningWithAnOnceApprovedHelperGoneMissingRecyclesIt() async {
+        struct Boom: Error {}
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.registerError = Boom()
+        ptpHelper.status = .notFound
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        model.registerPTPHelper()
+        #expect(model.ptpHelperStatus == .notFound)
+        AppSettings(defaults: defaults).speakerSyncWasEnabled = true
+        model.ptpHelperRecycleRetryDelay = 0
+
+        ptpHelper.registerError = nil
+        ptpHelper.statusAfterUnregister = .notRegistered   // the drain is observable
+        ptpHelper.statusAfterRegister = .enabled
+        await model.reregisterPTPHelperOnReturn()
+
+        #expect(ptpHelper.unregisterCount == 1)
+        #expect(ptpHelper.registerCount == 2)
+        #expect(model.ptpHelperStatus == .enabled)
+        #expect(!model.ptpHelperRegistrationFailed)
+    }
+
+    /// A `.notFound` that was NEVER approved is the plain packaging fault, and
+    /// the cycle would be spent on nothing. Turns red if the recycle stops
+    /// reading the ratchet.
+    @Test func returningWithANeverApprovedMissingHelperDoesNotRecycle() async {
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.statusAfterRegister = .notFound
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        model.registerPTPHelper()
+
+        await model.reregisterPTPHelperOnReturn()
+
+        #expect(ptpHelper.unregisterCount == 0)
+        #expect(ptpHelper.registerCount == 1)
+    }
+
+    /// One cycle per model: a `.notFound` that survives it must not be recycled
+    /// on every return. Turns red if the once-guard goes.
+    @Test func aRecycleThatDoesNotHelpIsNotRepeated() async {
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.statusAfterRegister = .notFound
+        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
+        model.registerPTPHelper()
+        AppSettings(defaults: defaults).speakerSyncWasEnabled = true
+        model.ptpHelperRecycleRetryDelay = 0
+        model.ptpHelperRecycleRetryAttempts = 1
+
+        await model.reregisterPTPHelperOnReturn()   // unregister never drains: `.notFound` stays
+        await model.reregisterPTPHelperOnReturn()
+
+        #expect(ptpHelper.unregisterCount == 1)
+        #expect(model.ptpHelperStatus == .notFound)
+    }
+
     @Test func openPTPHelperLoginItemsDelegatesToTheSeam() {
         let ptpHelper = FakePTPHelper()
         let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
@@ -1095,23 +1231,6 @@ extension SerializedSharedState {
         #expect(model.unmetRequiredPermissions() == [])
     }
 
-    /// A skip takes the ratchet back down, so passing on Speaker Sync is not
-    /// re-litigated at every wake.
-    @Test func noteSpeakerSyncSkippedDisarmsTheWakeAudit() async {
-        let ptpHelper = FakePTPHelper()
-        ptpHelper.statusAfterRegister = .enabled
-        let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
-        model.registerPTPHelper()                       // → .enabled, arming the ratchet
-        ptpHelper.status = .requiresApproval
-        await model.refreshPTPHelperStatus()
-        #expect(model.unmetRequiredPermissions() == [.ptpHelper], "armed, as a sanity check")
-
-        model.noteSpeakerSyncSkipped()
-
-        #expect(model.unmetRequiredPermissions() == [])
-        #expect(!AppSettings(defaults: defaults).speakerSyncWasEnabled, "and it persists")
-    }
-
     @Test func unmetRequiredPermissionsNeverFlagsNotRegisteredPTPHelper() {
         // Pre-registration is handled by the app's launch-time registration
         // attempt, not a permission-lost nag.
@@ -1209,12 +1328,13 @@ extension SerializedSharedState {
         #expect(model.unmetRequiredPermissions() == [], "and it never nags on wake either")
     }
 
-    /// Same for a `register()` that threw: nothing got registered, so there is
-    /// nothing to approve, and the flag says so.
-    @Test func aFailedRegistrationIsRecordedAndNeverHoldsTheGate() {
+    /// Same for a `register()` that threw INTO `.notFound`: launchd does not
+    /// know the label, so there is nothing to approve, and the flag says so.
+    @Test func aRegistrationThatThrewIntoNotFoundIsRecordedAndNeverHoldsTheGate() {
         struct RegistrationFailed: Error {}
         let ptpHelper = FakePTPHelper()
         ptpHelper.registerError = RegistrationFailed()
+        ptpHelper.status = .notFound
         let (model, _, _, _) = makeModel(audio: .granted, ptpHelper: ptpHelper)
         #expect(!model.ptpHelperRegistrationFailed, "nothing has been tried yet")
 

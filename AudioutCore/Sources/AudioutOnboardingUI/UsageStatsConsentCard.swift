@@ -150,9 +150,10 @@ final class UsageStatsConsentCard: NSView {
     /// location enrichment resolves to postal-code precision.
     static let bodyText = "No account, no name. Just a random ID for this copy of "
         + "Audiout. It counts which features get used, times how long each Bluetooth speaker "
-        + "takes to settle and how far out its timing is, and notes your Mac, macOS version, "
-        + "city, and whether Audiout is licensed. What you play, and what your speakers are "
-        + "called, never leave this Mac."
+        + "takes to settle and how far out its timing is, notes your Mac, macOS version, "
+        + "city, and whether Audiout is licensed, and sends the app's own diagnostic log "
+        + "so bugs can be found. What you play, and what your speakers are called, never "
+        + "leave this Mac."
 
     /// The stage's copy: out of the accessibility tree, and inert.
     ///

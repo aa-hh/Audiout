@@ -52,6 +52,38 @@ extension SerializedSharedState {
             #expect(events.first?.1 == ["k": "v"])
         }
 
+        @Test func logIsConsentGatedAndStripsDeviceFields() {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { _, _ in }, consentChanged: { _ in }, log: { body, attrs in
+                captured.append(body, attrs)
+            }), consent: false)
+            defer { Analytics.install(nil, consent: false) }
+
+            Analytics.log("cast", "cast_launch_ok", ["device": "abc", "lead_ms": "40"])
+            #expect(captured.events().isEmpty, "no consent, no log")
+
+            Analytics.setConsent(true)
+            Analytics.log("cast", "cast_launch_ok", ["device": "abc", "name": "Kitchen", "lead_ms": "40"])
+            let events = captured.events()
+            #expect(events.count == 1)
+            #expect(events.first?.0 == "cast.cast_launch_ok")
+            #expect(events.first?.1 == ["category": "cast", "lead_ms": "40"], "device and name fields never leave the Mac")
+        }
+
+        @Test func telemetryForwardsDecisionLinesButNotPerSecondSamples() {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { _, _ in }, consentChanged: { _ in }, log: { body, attrs in
+                captured.append(body, attrs)
+            }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+
+            Telemetry.log(.cast, "cast_media_status", ["device": "abc", "state": "PLAYING"])
+            Telemetry.log(.cast, "cast_session_state", ["device": "abc", "state": "connected"])
+
+            let events = captured.events()
+            #expect(events.map(\.0) == ["cast.cast_session_state"])
+        }
+
         @Test func setConsentForwardsToConsentChangedAndGatesSubsequentCaptures() {
             let captured = Captured()
             let consentChanges = ConsentChanges()

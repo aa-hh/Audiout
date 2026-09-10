@@ -122,8 +122,12 @@ TCC_PROBE_EXECUTABLE="tcc-probe"
 # AudioutShared_AudioutField holds the emitter field's field.json (its absence
 # fatalErrored the notarized 1.0.0 at first launch, before any window —
 # Field.swift resolves Resources itself as of audiout-shared 0.8.1).
+# The two PostHog bundles arrived with posthog-ios 3.69: PostHog_PostHog holds
+# the SDK's privacy manifest, PostHog_PHPLCrashReporter the crash reporter's
+# resources. Both are resolved with Bundle.module, so leaving either out is
+# the same first-launch fatalError the field bundle once caused.
 # Names are `<PackageName>_<TargetName>.bundle`, deterministic from Package.swift.
-RESOURCE_BUNDLE_NAMES="AudioutCore_AudioutSharedUI.bundle AudioutShared_AudioutField.bundle"
+RESOURCE_BUNDLE_NAMES="AudioutCore_AudioutSharedUI.bundle AudioutShared_AudioutField.bundle PostHog_PostHog.bundle PostHog_PHPLCrashReporter.bundle"
 # A bundle the build PRODUCES but this list omits is silently left out of the
 # .app, and its consumer fatalErrors at first launch on a user's Mac — that is
 # exactly how the notarized 1.0.0 shipped broken. The per-name `test -d` below
@@ -199,8 +203,34 @@ LAUNCH_DAEMONS_DIR="$CONTENTS/Library/LaunchDaemons"
 HELPER_PLIST_SOURCE="$SCRIPT_DIR/ptp-helper.plist"
 # Info.plist embedded into the ptp-helper Mach-O as a __TEXT,__info_plist
 # section at link time (SMAppService requires a standalone-executable daemon to
-# carry an embedded CFBundleIdentifier — see the file's header comment).
-HELPER_INFO_PLIST="$SCRIPT_DIR/ptp-helper-info.plist"
+# carry an embedded CFBundleIdentifier — see the file's header comment). A
+# TEMPLATE, like the launchd plist above: its CFBundleIdentifier is
+# `__BUNDLE_ID__.ptphelper`, rendered to HELPER_INFO_PLIST (in the build dir,
+# next to the .app) by render_bundle_plist just before the link. Both plists
+# carry the same token and go through the same substitution so the embedded
+# identity, the launchd Label and the MachServices name can never disagree —
+# they did until 2026-09-07, when the Info.plist hardcoded the default id and
+# every .dev/.staging/handover build shipped a helper whose CFBundleIdentifier
+# (and therefore its codesign Identifier) named ANOTHER daemon's label.
+HELPER_INFO_PLIST_SOURCE="$SCRIPT_DIR/ptp-helper-info.plist"
+HELPER_INFO_PLIST="$OUTPUT_DIR/ptp-helper-info.plist"
+
+# render_bundle_plist <template> <output>: substitute __BUNDLE_ID__ with the
+# real BUNDLE_ID. The ONE substitution both helper plists go through locally;
+# the remote compile below inlines the identical sed so a remotely linked
+# helper embeds exactly what a local one would. Refuses to leave a token
+# behind, and refuses an output that does not name the label, so a template
+# edit that breaks the token fails here rather than at SMAppService time.
+render_bundle_plist() {
+  test -f "$1" || { echo "error: plist template not found at $1" >&2; exit 1; }
+  mkdir -p "$(dirname "$2")"
+  sed "s/__BUNDLE_ID__/$BUNDLE_ID/g" "$1" > "$2"
+  if grep -q '__BUNDLE_ID__' "$2"; then
+    echo "error: __BUNDLE_ID__ survived rendering $1 → $2" >&2; exit 1
+  fi
+  grep -q "<string>$HELPER_LABEL</string>" "$2" \
+    || { echo "error: rendered $2 does not carry $HELPER_LABEL" >&2; exit 1; }
+}
 # Flattened 1024 "Default" (light) render exported from Icon Composer. See the
 # app-icon step below for why we bake a classic .icns from this instead of
 # compiling the .icon bundle directly.
@@ -292,14 +322,24 @@ if [ "${AUDIOUT_BUILD_LOCAL:-0}" != "1" ] &&
   # remote's --show-bin-path output would bake in an architecture triple.
   # \$ escapes keep PWD/BIN/HBIN for the remote shell; $EXECUTABLE and friends
   # expand here.
+  #
+  # The helper's Info.plist is rendered ON THE REMOTE, into .remote-products/
+  # (created first, for that reason), with the same sed render_bundle_plist
+  # runs here. Rendering locally and relying on the rsync would tie the link
+  # to whether OUTPUT_DIR happens to sit inside the synced tree — it does not
+  # when a caller passes one elsewhere — whereas scripts/ is always synced.
+  # $BUNDLE_ID expands here, so the remote embeds this build's id, not the
+  # remote checkout's idea of a default.
   REMOTE_CMD="R=\$PWD; \
 swift build --package-path AudioutCore -c release --product $EXECUTABLE && \
 swift build --package-path AudioutCore -c release --product $TCC_PROBE_EXECUTABLE && \
 BIN=\$(swift build --package-path AudioutCore -c release --show-bin-path) && \
-swift build --package-path AirPlayEngine -c release --product $HELPER_EXECUTABLE \
-  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker \"\$R/scripts/ptp-helper-info.plist\" && \
-HBIN=\$(swift build --package-path AirPlayEngine -c release --show-bin-path) && \
 rm -rf .remote-products && mkdir -p .remote-products && \
+sed \"s/__BUNDLE_ID__/$BUNDLE_ID/g\" \"\$R/scripts/ptp-helper-info.plist\" > \"\$R/.remote-products/ptp-helper-info.plist\" && \
+grep -q \"<string>$HELPER_LABEL</string>\" \"\$R/.remote-products/ptp-helper-info.plist\" && \
+swift build --package-path AirPlayEngine -c release --product $HELPER_EXECUTABLE \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker \"\$R/.remote-products/ptp-helper-info.plist\" && \
+HBIN=\$(swift build --package-path AirPlayEngine -c release --show-bin-path) && \
 cp \"\$BIN/$EXECUTABLE\" \"\$BIN/$TCC_PROBE_EXECUTABLE\" \"\$HBIN/$HELPER_EXECUTABLE\" .remote-products/ && \
 for b in $RESOURCE_BUNDLE_NAMES; do cp -R \"\$BIN/\$b\" .remote-products/ || exit 1; done && \
 { N=\$(ls \"\$BIN\" | grep -c '\\.bundle\$' || true); [ \"\$N\" = $RESOURCE_BUNDLE_COUNT ] || { echo \"error: this build produced \$N SwiftPM resource bundles but make-app.sh ships $RESOURCE_BUNDLE_COUNT — add the new one to RESOURCE_BUNDLE_NAMES or it fatalErrors at first launch\" >&2; exit 1; }; }"
@@ -388,11 +428,13 @@ test -x "$BUILT_TCC_PROBE" || { echo "error: built binary not found at $BUILT_TC
 echo "==> Building $HELPER_EXECUTABLE (release)"
 # -sectcreate __TEXT __info_plist bakes the daemon's Info.plist (CFBundleIdentifier
 # etc.) into the Mach-O — mandatory for a standalone-executable SMAppService
-# LaunchDaemon (§ HELPER_INFO_PLIST above). Absolute path so it resolves
-# regardless of the linker's working directory. Only this bundled/signed build
-# carries the section; plain `swift build --product ptp-helper` (dev/tests) omits
-# it, which is fine — the section only matters to SMAppService registration.
-test -f "$HELPER_INFO_PLIST" || { echo "error: helper Info.plist not found at $HELPER_INFO_PLIST" >&2; exit 1; }
+# LaunchDaemon (§ HELPER_INFO_PLIST above). Rendered from the template with
+# this build's BUNDLE_ID first — the embedded CFBundleIdentifier must equal
+# HELPER_LABEL. Absolute path so it resolves regardless of the linker's working
+# directory. Only this bundled/signed build carries the section; plain `swift
+# build --product ptp-helper` (dev/tests) omits it, which is fine — the section
+# only matters to SMAppService registration.
+render_bundle_plist "$HELPER_INFO_PLIST_SOURCE" "$HELPER_INFO_PLIST"
 swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --product "$HELPER_EXECUTABLE" \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$HELPER_INFO_PLIST"
 HELPER_BIN_DIR="$(swift build --package-path "$ENGINE_PACKAGE_DIR" -c release --show-bin-path)"
@@ -465,9 +507,7 @@ test -f "$RESOURCES_DIR/ClashDisplay-Semibold.otf" || { echo "ERROR: ClashDispla
 # filename here MUST equal Label + ".plist"; SMAppService.daemon(plistName:)
 # resolves the plist by that exact name, not by content.
 echo "==> Installing LaunchDaemons plist"
-test -f "$HELPER_PLIST_SOURCE" || { echo "error: helper plist not found at $HELPER_PLIST_SOURCE" >&2; exit 1; }
-mkdir -p "$LAUNCH_DAEMONS_DIR"
-sed "s/__BUNDLE_ID__/$BUNDLE_ID/g" "$HELPER_PLIST_SOURCE" > "$LAUNCH_DAEMONS_DIR/$HELPER_LABEL.plist"
+render_bundle_plist "$HELPER_PLIST_SOURCE" "$LAUNCH_DAEMONS_DIR/$HELPER_LABEL.plist"
 
 # --- Bundle Homebrew dylibs (opt-in) ---------------------------------------
 # The executable currently links Homebrew dylibs (libevent, libsodium,
@@ -1188,9 +1228,18 @@ fi
 # by reading AirPlayEngine/Sources/ptp-helper/main.c: it only calls
 # airptp_daemon_bind/airptp_daemon_start/airptp_end plus libc signal/socket
 # calls. Do not add entitlements to this binary speculatively.
+#
+# --identifier "$HELPER_LABEL", explicitly: without it codesign takes the
+# Identifier from the embedded __info_plist's CFBundleIdentifier, which the
+# render step above already set to the same string — so for a correct build
+# this changes nothing, and for a broken render it makes the disagreement fail
+# the post-sign assert below instead of shipping a daemon whose signing
+# identity names a different label than its launchd plist.
 echo "==> Codesigning ptp-helper (identity: $CODESIGN_IDENTITY, inside-out, before the app)"
-codesign --force $TIMESTAMP_FLAG --options runtime --sign "$CODESIGN_IDENTITY" "$MACOS_DIR/$HELPER_EXECUTABLE"
+codesign --force $TIMESTAMP_FLAG --options runtime --identifier "$HELPER_LABEL" --sign "$CODESIGN_IDENTITY" "$MACOS_DIR/$HELPER_EXECUTABLE"
 codesign --verify --strict "$MACOS_DIR/$HELPER_EXECUTABLE"
+SIGNED_HELPER_ID="$(codesign --display --verbose=2 "$MACOS_DIR/$HELPER_EXECUTABLE" 2>&1 | sed -n 's/^Identifier=//p' || true)"
+[ "$SIGNED_HELPER_ID" = "$HELPER_LABEL" ] || { echo "ERROR: ptp-helper signed as Identifier '$SIGNED_HELPER_ID', expected the launchd label '$HELPER_LABEL'" >&2; exit 1; }
 
 # tcc-probe is the same shape as ptp-helper above: a second Mach-O directly in
 # Contents/MacOS, so --deep on the outer app wouldn't reach it either — sign it

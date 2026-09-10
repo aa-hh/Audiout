@@ -242,12 +242,16 @@ remote_run() {
     # by a hung job or by a recycled PID, and either shrinks that pool until
     # someone notices. Exit 98 stays immediate — when the mule is genuinely full
     # the work comes straight back here (no mule wait, owner's call, 2026-09-10).
-    # -tt ties the remote command's life to this connection: with a tty, sshd
-    # HUPs the remote process group the moment the local side dies — even
-    # SIGKILL, since the kernel still closes the socket. Without it an
-    # interrupted caller strands its run on the remote, where it holds the
-    # package build lock (see remote_sweep_orphans). The tty's price is CRLF
-    # line endings, stripped right below before anything parses $_out.
+    # -tt allocates a tty on the mule. It does NOT hang the remote job up when
+    # the local side dies, which is what this comment used to claim. Measured
+    # on this pair of Macs 2026-09-11: SIGKILL of the local ssh client, and
+    # SIGTERM of it, both left the remote wrapper running — reparented to pid 1,
+    # its own EXIT/HUP/INT/TERM trap never firing, still holding the permit file
+    # and SwiftPM's build lock. What ends an orphaned run is the pair of
+    # watchers below: a local one that kills this ssh as soon as the runner
+    # process is gone, and a remote one that sees its own parent become pid 1
+    # and kills the job's process group. The tty's price is CRLF line endings,
+    # stripped right below before anything parses $_out.
     # SDKROOT is pinned to the selected Xcode's macOS SDK before the toolchain
     # probe. Found 2026-09-10: the mule runs macOS 26.5 with only the Xcode 27
     # beta installed, and with no SDK matching the OS version a bare `xcrun`
@@ -256,7 +260,10 @@ remote_run() {
     # An explicit `--sdk macosx` resolves correctly; exporting its answer makes
     # the probe and the compile agree. If the lookup fails SDKROOT stays empty
     # and the probe below reports it as it always did.
-    _out=$(ssh -tt -o BatchMode=yes -o LogLevel=QUIET \
+    # $$ inside remote_run is the RUNNER's pid: this file is sourced, never run.
+    _rr_pid=$$
+    _rr_out=$(mktemp -t audiout-remote-out)
+    ssh -tt -o BatchMode=yes -o LogLevel=QUIET \
         -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
         "$remote_host" \
         "export PATH=/opt/homebrew/bin:\$PATH; \
@@ -273,13 +280,21 @@ remote_run() {
                  if [ -n \"\$_p\" ] && kill -0 \"\$_p\" 2>/dev/null; then \
                      _c=\$(ps -o command= -p \"\$_p\" 2>/dev/null); \
                      _a=\$(( \$(date +%s) - \$(stat -f %m \"\$_f\" 2>/dev/null || date +%s) )); \
-                     case \"\$_c\" in \
-                         *run-tests.sh*|*build.sh*|*make-app.sh*|*ios.sh*|*run-app.sh*|*pre-commit*|*swift*|*xcodebuild*|*xctest*) \
-                             if [ \$_a -gt 2700 ]; then rm -f \"\$_f\"; \
-                                 echo \"  remote: reclaimed mule permit \$_n held by pid \$_p (held \${_a}s > ceiling)\" >&2; fi;; \
-                         *) rm -f \"\$_f\"; \
-                             echo \"  remote: reclaimed mule permit \$_n held by pid \$_p (not a recognised job)\" >&2;; \
-                     esac; \
+                     _pp=\$(ps -o ppid= -p \"\$_p\" 2>/dev/null | tr -d ' '); \
+                     if [ \"\$_pp\" = 1 ]; then \
+                         _g=\$(ps -o pgid= -p \"\$_p\" 2>/dev/null | tr -d ' '); \
+                         [ -n \"\$_g\" ] && kill -KILL -- \"-\$_g\" 2>/dev/null; \
+                         rm -f \"\$_f\"; \
+                         echo \"  remote: reclaimed mule permit \$_n held by pid \$_p (its ssh session is gone; killed its process group)\" >&2; \
+                     else \
+                         case \"\$_c\" in \
+                             *run-tests.sh*|*build.sh*|*make-app.sh*|*ios.sh*|*run-app.sh*|*pre-commit*|*swift*|*xcodebuild*|*xctest*) \
+                                 if [ \$_a -gt 2700 ]; then rm -f \"\$_f\"; \
+                                     echo \"  remote: reclaimed mule permit \$_n held by pid \$_p (held \${_a}s > ceiling)\" >&2; fi;; \
+                             *) rm -f \"\$_f\"; \
+                                 echo \"  remote: reclaimed mule permit \$_n held by pid \$_p (not a recognised job)\" >&2;; \
+                         esac; \
+                     fi; \
                  fi; \
              fi; \
              _n=\$((_n + 1)); \
@@ -292,9 +307,35 @@ remote_run() {
              _n=\$((_n + 1)); \
          done; \
          [ -n \"\$_s\" ] || exit 98; \
-         trap 'rm -f \"\$_s\"' EXIT HUP INT TERM; \
-         $* ; echo \"REMOTE_EXIT:\$?\"" 2>&1)
+         _me=\$\$; _pg=\$(ps -o pgid= -p \$\$ 2>/dev/null | tr -d ' '); \
+         ( while :; do sleep 5; \
+               case \"\$(ps -o ppid= -p \$_me 2>/dev/null | tr -d ' ')\" in \
+                   '') exit 0;; \
+                   1) rm -f \"\$_s\"; kill -KILL -- \"-\$_pg\" 2>/dev/null; exit 0;; \
+               esac; \
+           done ) & \
+         _w=\$!; \
+         trap 'rm -f \"\$_s\"; kill \$_w 2>/dev/null' EXIT HUP INT TERM; \
+         $* ; echo \"REMOTE_EXIT:\$?\"" >"$_rr_out" 2>&1 </dev/null &
+    _rr_ssh=$!
+    # macOS has no parent-death signal, so poll for one. A trap cannot cover
+    # this: the runner is often SIGKILLed (a torn-down agent session), and traps
+    # do not run then. Observed 2026-09-11: the ssh client was reparented to
+    # launchd and held the connection open for 27 minutes after its runner was
+    # gone, so sshd never even started tearing the session down and the mule sat
+    # on a permit and the build lock the whole time.
+    ( while kill -0 "$_rr_pid" 2>/dev/null; do sleep 3; done; \
+      kill -TERM "$_rr_ssh" 2>/dev/null ) &
+    _rr_watch=$!
+    wait "$_rr_ssh"
     _rc=$?
+    # `wait` after the kill, stderr discarded: without it the shell announces the
+    # watcher's death ("Terminated: 15 ( while kill -0 ... )") on every single
+    # remote run, in the middle of a pre-commit guard's output.
+    kill -TERM "$_rr_watch" 2>/dev/null || true
+    wait "$_rr_watch" 2>/dev/null || true
+    _out=$(cat "$_rr_out" 2>/dev/null || true)
+    rm -f "$_rr_out"
     _out=$(printf '%s' "$_out" | tr -d '\r')
     # `|| true` on both greps: a grep that matches nothing exits 1, and callers
     # run with `set -e` (make-app.sh adds `pipefail`), so a remote command whose

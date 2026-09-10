@@ -3936,6 +3936,7 @@ extension SerializedSharedState {
         private func captured(_ body: () -> Void) -> Captured {
             let captured = Captured()
             Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             captureError: { _, _ in },
                                              consentChanged: { _ in }), consent: true)
             defer { Analytics.install(nil, consent: false) }
             body()

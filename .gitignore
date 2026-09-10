@@ -26,6 +26,14 @@ AudioutCore/.swiftpm/
 dev/audiocap/.build/
 dev/audiocap/.swiftpm/
 
+# Root-level build and tooling scratch: a top-level SwiftPM build directory, the
+# worktree parking spot some scripts use, and Wrangler's local state. Hand-added
+# entries in .git/info/exclude hid these until 2026-09-10, which made
+# release.sh's clean-tree gate pass for the wrong reason.
+.build/
+.worktrees/
+.wrangler/
+
 # Xcode / SwiftPM local state, in case anyone opens this via Xcode.
 xcuserdata/
 *.xcodeproj/xcuserdata/

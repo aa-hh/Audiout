@@ -155,6 +155,33 @@ Helper-cycling must ALWAYS go through `PTPHelperReconciler.unregisterDrainAndRer
 **The first-run `register()` throw is not a failure (2026-09-07):**
 On current macOS the FIRST `SMAppService.register()` for a daemon normally THROWS (`SMAppServiceErrorDomain` code 1, "Operation not permitted") while the "Background Items Added" notice is shown, and `status` afterwards reads `.requiresApproval` — the user finishes it in Login Items. `SetupModel.registerPTPHelper()` used to take ANY throw as a packaging fault (sticky `ptpHelperRegistrationFailed`), which auto-passed the onboarding step on every first run and left the helper unregistered. The status AFTER the throw decides now: only `.notFound` is the fault. Approval alone does not load the daemon either — the next `register()` after it does — so the Setup window registers again on every return to the front (`SetupModel.reregisterPTPHelperOnReturn()`), never from the status poll, and a once-approved helper that reads `.notFound` (BTM reset) gets one drain-safe recycle through the reconciler.
 
+**The decision log stopped going to PostHog (2026-09-10):**
+1.1.1 shipped `54cdfea8`, which forwarded every `Telemetry.log` line to PostHog
+Logs under the usage-stats opt-in and stripped only six field names (`device`,
+`deviceID`, `uid`, `name`, `host`, `address`). A denylist was the wrong shape:
+live records carried app bundle ids (`org.mozilla.firefox`,
+`com.spotify.client`), speaker names rendered by
+`NativeBackend.telemetryDeviceList`, and raw error strings such as
+`processNotYetAudible(bundleID:)` — all of it forbidden by PRODUCT.md "Data
+Collection". The owner deleted the forward rather than lengthen the strip list.
+The rule is an allowlist now, with one implementation:
+`Telemetry.fail(category, event, local:, shared:)` writes both field sets to the
+local file at `level:error` and sends only `shared` to
+`Analytics.captureError`. Ordinary `Telemetry.log` lines never leave the Mac;
+the user ships them by hand through Settings › About › Save diagnostics. Never
+put a forward back into the private `write(...)` helper that `log` and `fail`
+share — that is precisely how `local:` fields would start leaking again.
+
+TRAP: an error report from `fail` has no usable stack trace. The send runs on
+the telemetry writer's queue, so the trace the PostHog SDK builds describes that
+queue and never the code that failed. The exception type (the event name) is the
+only locator; the detail is in the local `telemetry.jsonl` line.
+
+Four documents state what leaves the Mac, and a change to any one of them moves
+all four: `PRODUCT.md` "Data Collection", `UsageStatsConsentCard.bodyText`, the
+website's privacy page and its support page about usage statistics, and
+`audiout-shared/docs/analytics-events.md`.
+
 ## Architecture
 
 ```mermaid

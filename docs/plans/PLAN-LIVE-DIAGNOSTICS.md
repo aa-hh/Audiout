@@ -3,6 +3,14 @@
 Status: DRAFT, scoped 2026-09-05 from a real failure. Decisions in §D are owed
 before slices S3 and S5 start; S1, S2 and S4 can start now.
 
+2026-09-10: S1 to S4 are built and merged into
+`claude/resolve-handover-conflicts-31aa60` at `bf3b3d22`. The merge drops main's
+forward of the decision log to PostHog Logs (owner's ruling the same day), so
+only `Telemetry.fail`'s `shared` fields leave the Mac. PR #148 is superseded by
+that branch. Every live check is still owed —
+[`dev/notes/handover-diagnostics-direction-2026-09-10.md`](../../dev/notes/handover-diagnostics-direction-2026-09-10.md)
+carries them and the unattended recipe.
+
 ## A. The case that scoped this
 
 2026-09-05, Audiout 1.0.0 (5), macOS 27.0. Spotify playing to the Sonos Move

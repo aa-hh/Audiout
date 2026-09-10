@@ -62,7 +62,8 @@ print_local_permit() {
     # a live run-tests.sh shown as STALE).
     _cmd=$(trim80 "$_cmd")
     echo "  local permit $_n: pid $_pid, $_alive, age ${_age}s, cmd: $_cmd$_stale"
-    return 0
+    # A dead holder is not "held": shlock hands that file to the next acquire.
+    [ "$_alive" = "alive" ]
 }
 
 echo "local ($(hostname -s 2>/dev/null || hostname)):"
@@ -77,7 +78,7 @@ while [ "$_n" -le "$_slots" ]; do
     fi
     _n=$((_n + 1))
 done
-echo "  held $_held of $_slots"
+echo "  held $_held of $_slots (dead holders not counted; the next acquire takes them)"
 
 echo "mule:"
 if ! remote_configured; then
@@ -107,7 +108,7 @@ _mule_out=$(ssh -o BatchMode=yes -o ConnectTimeout="$remote_probe_timeout" \
 if [ -z "$_mule_out" ]; then
     _held=0
 else
-    _held=$(printf '%s\n' "$_mule_out" | grep -c .)
+    _held=$(printf '%s\n' "$_mule_out" | awk -F'\t' '$3=="alive"' | grep -c .)
 fi
 printf '%s\n' "$_mule_out" | while IFS="$(printf '\t')" read -r _n _pid _alive _age _cmd; do
     [ -n "$_n" ] || continue

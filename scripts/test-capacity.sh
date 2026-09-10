@@ -109,6 +109,78 @@ else
   fail "capacity_release with nothing held returned nonzero"
 fi
 
+# --- (d) remote_permits_win routes to the side with more free permits --------
+# remote.sh is already sourced (case c). The mule half is stubbed: no ssh, no
+# reachability probe, just a fixed permit table, so these cases test the
+# comparison and nothing else.
+remote_reachable() { return 0; }
+remote_mule_permits() { printf '%s\n' "$MULE_TABLE"; }
+remote_slots=3
+remote_host=fake
+
+TAB=$'\t'
+alive_line() { printf '%s\t%s\talive\t10\tswift test' "$1" "$((10000 + $1))"; }
+
+# A live process whose ps command line contains "run-tests.sh". The lock files
+# below must name one: remote_permits_win sweeps before counting, and the sweep
+# reclaims any permit held by a command it does not recognise — so a permit
+# naming this test script's own pid would be gone before it was counted.
+SLEEPER="$TMP_DIR/run-tests.sh.sleeper"
+printf '#!/bin/sh\nsleep 60\n' > "$SLEEPER"
+chmod +x "$SLEEPER"
+
+# $1 = mule table, $2 = local permits to hold, $3 = "mule"|"local", $4 = message
+check_route() {
+  MULE_TABLE="$1"
+  rm -f "${LOCK_BASE}".*
+  held_pids=""
+  i=1
+  while [ "$i" -le "$2" ]; do
+    "$SLEEPER" & held_pids="$held_pids $!"
+    echo "$!" > "${LOCK_BASE}.$i"
+    i=$((i + 1))
+  done
+  if remote_permits_win 2>/dev/null; then got=mule; else got=local; fi
+  for p in $held_pids; do kill -TERM "$p" 2>/dev/null; done
+  wait 2>/dev/null
+  if [ "$got" = "$3" ]; then
+    echo "  ok — $4"
+  else
+    fail "$4 (routed to $got)"
+  fi
+  rm -f "${LOCK_BASE}".*
+}
+
+# Catches: a comparison that never picks the mule (an inverted rule, or one
+# that treats this machine's free permits as always winning).
+check_route "" 1 mule "mule 3 free vs local 1 free — mule"
+
+# Catches: sending work to a mule with nothing free, which costs a full sync
+# and round trip only to come back on exit 98.
+check_route "$(alive_line 1)
+$(alive_line 2)
+$(alive_line 3)" 0 local "mule 0 free vs local 2 free — local"
+
+# Catches: a strict greater-than that sends a tie to this machine, the one also
+# running the agents, the editor and any app under live test.
+check_route "$(alive_line 1)
+$(alive_line 2)" 1 mule "mule 1 free vs local 1 free — tie goes to the mule"
+
+# Catches: a comparison inverted, or one that treats any free mule permit as a win.
+check_route "$(alive_line 1)
+$(alive_line 2)" 0 local "mule 1 free vs local 2 free — local"
+
+# Catches: counting orphaned holders as held, which would hide a mule that is
+# actually idle (the next remote run reclaims those permits).
+check_route "1${TAB}10001${TAB}orphaned${TAB}10${TAB}swift test
+2${TAB}10002${TAB}orphaned${TAB}10${TAB}swift test
+3${TAB}10003${TAB}orphaned${TAB}10${TAB}swift test" 0 mule "3 orphaned mule permits don't count — mule"
+
+# Catches: an unaskable mule reading as a win — a failed probe must mean
+# local, never a guess.
+remote_mule_permits() { return 1; }
+check_route "" 0 local "mule permit table unavailable — local"
+
 if [ "$FAILURES" -gt 0 ]; then
   echo "$FAILURES capacity test(s) FAILED" >&2
   exit 1

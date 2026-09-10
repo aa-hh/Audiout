@@ -20,8 +20,20 @@
 # Config (git config, NOT a committed file or a shell export — see the
 # audiout.remoteHost note in AudioutCore/AGENTS.md for why):
 #   git config --local audiout.remoteHost 'user@host.local'
-#   git config --local audiout.testPrefer cpu     # local (default) | remote | cpu
+#   git config --local audiout.testPrefer permits # local (default) | remote | cpu | permits
 #   git config --local audiout.testRemoteBias 40  # cpu mode only
+#
+# What each testPrefer value means:
+#   local   — never offer the work to the other Mac.
+#   remote  — always offer it there first; it comes back only when every remote
+#             permit is held (remote_run's exit 98).
+#   cpu     — compare load average per core. Kept for compatibility only: this
+#             suite is wait-bound, so load average misreports it (see the
+#             remote_slots comment below) and the comparison throttles an idle
+#             machine or waves through a busy one.
+#   permits — send the job to whichever machine has more FREE capacity permits,
+#             ties to the mule. Measures the thing that actually matters, how
+#             many jobs are resident on each side.
 
 remote_host=${AUDIOUT_TEST_REMOTE_HOST:-$(git config --get audiout.remoteHost 2>/dev/null || true)}
 remote_pref=${AUDIOUT_TEST_PREFER:-$(git config --get audiout.testPrefer 2>/dev/null || echo local)}
@@ -89,12 +101,96 @@ remote_remote_load_pct() {
         "n=\$(sysctl -n hw.ncpu); set -- \$(sysctl -n vm.loadavg | tr -d '{}'); awk -v l=\"\$1\" -v n=\"\$n\" 'BEGIN{printf \"%d\", (l/n)*100}'" 2>/dev/null
 }
 
+# Print the mule's permit table, one tab-separated `n pid state age cmd` line
+# per HELD permit, state one of alive|orphaned|dead. Nothing is printed for a
+# free permit, so an empty table means the mule is idle.
+#
+# Shared because two callers need the identical table and the identical
+# classification: scripts/capacity.sh prints it for a human, and
+# remote_mule_free_count below counts it for the routing decision. Two copies
+# of this ssh body would drift, and the drift would show up as the status
+# command and the router disagreeing about how busy the mule is.
+#
+# Does NOT probe reachability itself — the caller decides whether an
+# unreachable mule is worth a message or is simply "no". Returns ssh's own exit
+# status, so a caller under `set -e` must guard it (`|| true`) exactly as
+# remote_wins does with remote_remote_load_pct.
+remote_mule_permits() {
+    ssh -o BatchMode=yes -o ConnectTimeout="$remote_probe_timeout" \
+        -o StrictHostKeyChecking=accept-new "$remote_host" \
+        "_n=1; while [ \$_n -le $remote_slots ]; do \
+             _f=/tmp/audiout-remote-work.lock.\$_n; \
+             if [ -f \"\$_f\" ]; then \
+                 _p=\$(cat \"\$_f\" 2>/dev/null | tr -d ' '); \
+                 _age=\$(( \$(date +%s) - \$(stat -f %m \"\$_f\" 2>/dev/null || date +%s) )); \
+                 if [ -n \"\$_p\" ] && kill -0 \"\$_p\" 2>/dev/null; then \
+                     _c=\$(ps -o command= -p \"\$_p\" 2>/dev/null); \
+                     _pp=\$(ps -o ppid= -p \"\$_p\" 2>/dev/null | tr -d ' '); \
+                     if [ \"\$_pp\" = 1 ]; then \
+                         echo \"\$_n	\$_p	orphaned	\$_age	\$_c\"; \
+                     else \
+                         echo \"\$_n	\$_p	alive	\$_age	\$_c\"; \
+                     fi; \
+                 else \
+                     echo \"\$_n	\$_p	dead	\$_age	(process gone)\"; \
+                 fi; \
+             fi; \
+             _n=\$((_n + 1)); \
+         done" 2>/dev/null
+}
+
+# How many mule permits are free. Orphaned and dead holders do not count as
+# held — the next remote run reclaims both — which is the same rule
+# scripts/capacity.sh prints. Returns non-zero (printing nothing) when the mule
+# could not be asked, so the caller can tell "idle" from "no answer".
+remote_mule_free_count() {
+    _mf_out=$(remote_mule_permits) || return 1
+    if [ -z "$_mf_out" ]; then
+        _mf_held=0
+    else
+        _mf_held=$(printf '%s\n' "$_mf_out" | awk -F'\t' '$3=="alive"' | grep -c . || true)
+    fi
+    _mf_free=$((remote_slots - _mf_held))
+    [ "$_mf_free" -lt 0 ] && _mf_free=0
+    echo "$_mf_free"
+}
+
+# "permits" mode: whichever machine has more free capacity permits gets the job.
+remote_permits_win() {
+    # No separate remote_reachable probe: the permit-table ssh carries the same
+    # short connect timeout, so a sleeping host fails just as fast and one
+    # round trip does the work of two. `|| true` under `set -e`, for the same
+    # reason remote_wins guards the cpu probe: an unreachable host must fall
+    # back locally, not kill the caller.
+    _rf=$(remote_mule_free_count || true)
+    [ -n "$_rf" ] || return 1
+    # Sweep first: a permit held by a dead or unrecognised job would otherwise
+    # count against this machine and push work to the mule for no reason.
+    # Under AUDIOUT_TEST_NO_LOCK=1 no permit files exist at all, so this
+    # machine always reads as fully free and work stays here -- fine for a
+    # debug escape hatch.
+    capacity_sweep
+    _lf=$(( $(capacity_slots) - $(capacity_held_count) ))
+    [ "$_lf" -lt 0 ] && _lf=0
+    echo "  remote: permit check — local ${_lf} free of $(capacity_slots), mule ${_rf} free of ${remote_slots}." >&2
+    [ "$_rf" -gt 0 ] || return 1
+    # Ties go to the mule on purpose, the same reasoning as the remote_bias
+    # comment above: this Mac also carries the agents, the editor and any app
+    # under live test, so its spare permit is worth more than the mule's.
+    #
+    # Two jobs deciding at the same moment can both read "1 free" and both go.
+    # That race is fine: the mule's own permit loop is atomic, so the loser gets
+    # exit 98 from remote_run and comes straight back here to the local pool.
+    [ "$_rf" -ge "$_lf" ]
+}
+
 # Returns 0 when the work should be offered to the remote BEFORE trying locally.
 # Never fails the caller: an unconfigured, asleep or unmeasurable remote simply
 # returns 1 and everything proceeds locally.
 remote_wins() {
     remote_configured || return 1
     [ "$remote_pref" = "remote" ] && return 0
+    [ "$remote_pref" = "permits" ] && { remote_permits_win; return $?; }
     [ "$remote_pref" = "cpu" ] || return 1
     # `|| true` matters under `set -e`: an unreachable host makes ssh exit
     # non-zero, and a bare command substitution would propagate that straight
@@ -445,6 +541,28 @@ capacity_slots() {
 # is silently doubled.
 capacity_lock_base() {
     echo "${AUDIOUT_TEST_LOCK_FILE:-/tmp/audiout-suite.lock}"
+}
+
+# How many local permits are held right now. A dead holder does not count: the
+# next capacity_acquire takes that file atomically via shlock, the same rule
+# scripts/capacity.sh prints. Reads only — never sweeps, so a caller that wants
+# stale permits released must call capacity_sweep first.
+capacity_held_count() {
+    _hc_base=$(capacity_lock_base)
+    _hc_slots=$(capacity_slots)
+    _hc_held=0
+    _hc_n=1
+    while [ "$_hc_n" -le "$_hc_slots" ]; do
+        _hc_f="${_hc_base}.${_hc_n}"
+        if [ -f "$_hc_f" ]; then
+            _hc_pid=$(cat "$_hc_f" 2>/dev/null | tr -d ' ')
+            if [ -n "$_hc_pid" ] && kill -0 "$_hc_pid" 2>/dev/null; then
+                _hc_held=$((_hc_held + 1))
+            fi
+        fi
+        _hc_n=$((_hc_n + 1))
+    done
+    echo "$_hc_held"
 }
 
 # Free permits whose holder is alive but is not the job it claims to be, or has

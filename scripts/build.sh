@@ -67,5 +67,9 @@ if [ "${AUDIOUT_BUILD_LOCAL:-0}" != "1" ] && remote_wins; then
     fi
 fi
 
+# Remote path (remote_run) already takes a mule permit inside remote.sh.
+# Only the local path needs a local capacity permit here.
+capacity_acquire build
 # shellcheck disable=SC2086
 ( cd "$repo_root/$package" && swift build "$@" )
+capacity_release

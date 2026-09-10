@@ -38,7 +38,7 @@ Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4/6**
 bash scripts/build.sh
 
 # Offline UI work (no hardware, no TCC):
-AIRPLAY_BACKEND=mock swift run --package-path AudioutCore AudioutApp
+bash scripts/run-app.sh
 
 # Real hardware (needs a signed .app and TCC grant first):
 bash scripts/make-app.sh
@@ -137,11 +137,7 @@ bash scripts/run-tests.sh --filter PopoverControllerTests
 bash scripts/run-tests.sh
 ```
 
-**Always go through `run-tests.sh` / `build.sh`, never a bare `swift test` or
-`swift build`** — filtered runs included. These wrappers are the ONLY things
-that know about the second Mac, the machine-wide concurrency cap and the
-unchanged-sources cache; typing the bare command opts out of all three and pins
-the work to this machine, which is also the one running every other agent.
+**Always go through `run-tests.sh` / `build.sh` / `make-app.sh` / `ios.sh` / `run-app.sh`, never a bare `swift test`, `swift build`, `swift run`, `xcodebuild`, or `swift package`** — filtered runs included. The Claude Code hook denies these bare commands; the wrapper scripts are the ONLY things that know about the machine-wide capacity permit pool, the second Mac, and the unchanged-sources cache; typing the bare command opts out of all three and pins the work to this machine, which is also the one running every other agent.
 
 Both Macs' selected developer directory must be a full Xcode install, not
 Command Line Tools — check with `xcode-select -p`; a path under
@@ -151,6 +147,10 @@ a mysterious build failure, and its message names the exact command for the
 Xcode it finds: `sudo xcode-select -s
 /Applications/<Xcode>.app/Contents/Developer`. `AUDIOUT_TEST_MODE=serial`
 runs the suite strictly one test at a time, for flake hunting.
+
+**Capacity.** Every compile and test run — local or on the mule — takes one capacity permit from a machine-wide pool. Local pool: `git config audiout.localSlots` (set to 2 on 2026-09-10). Mule pool: `git config audiout.remoteSlots` (set to 3 the same day; the M3 Air has more memory and carries nothing else). When the mule is full, work falls back to local immediately (no wait). When the local pool is full, the runner waits up to 600 seconds, printing progress; if the ceiling is reached, it proceeds uncapped with a loud warning (never refuses a commit). `bash scripts/capacity.sh status` shows who holds which permit on both machines. `bash scripts/test-capacity.sh` tests the permit pool itself. Commands typed in a terminal outside Claude Code bypass the hook but not the permits, which live in the scripts.
+
+The mule runs macOS 26.5 with only the Xcode 27 beta installed, so `remote_run` pins `SDKROOT` explicitly before the toolchain probe; if mule runs start reporting "environment not usable", that pin is the first thing to check.
 
 ## Critical workflow rules
 

@@ -400,10 +400,11 @@ public final class SetupFlowModel {
         }
     }
 
-    /// Stable step name for ``Telemetry`` — explicit, so a future added case is
-    /// a compile error here rather than a silently unlabeled log line (same
-    /// posture as `PermissionStatus.telemetryDescription`).
-    private static func telemetryName(_ step: SetupStep) -> String {
+    /// Stable step name for ``Telemetry`` and the `step` property of the
+    /// `onboarding:step_granted` / `onboarding:step_skipped` events — explicit,
+    /// so a future added case is a compile error here rather than a silently
+    /// unlabeled log line (same posture as `PermissionStatus.telemetryDescription`).
+    public static func telemetryName(_ step: SetupStep) -> String {
         switch step {
         case .audio: return "audio"
         case .localNetwork: return "local_network"
@@ -421,6 +422,7 @@ public final class SetupFlowModel {
     public func skip(_ step: SetupStep) {
         guard Self.skippableSteps.contains(step) else { return }
         skippedSteps.insert(step)
+        Analytics.capture("onboarding:step_skipped", ["step": Self.telemetryName(step)])
         // The one skip that is a final ANSWER rather than a deferral: record
         // it so the ask is spent and no later presentation re-offers it, and
         // so a sink installed at launch is opted out rather than left as-is.

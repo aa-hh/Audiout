@@ -884,6 +884,14 @@ public final class OnboardingViewController: NSViewController {
         // choreography happens somewhere the user can see it. A permission that
         // was already in place when the window opened is not that.
         if !newlyCompleted.isEmpty, initialStatusesSettled { returnToFront() }
+        // One funnel event per step the user just got through — the same edge
+        // the choreography fires on, so a grant already in place at opening
+        // is not counted as a step completed here.
+        if initialStatusesSettled {
+            for step in flow.steps where newlyCompleted.contains(step) {
+                Analytics.capture("onboarding:step_granted", ["step": SetupFlowModel.telemetryName(step)])
+            }
+        }
         if let snapBackStep, flow.isComplete(snapBackStep) { self.snapBackStep = nil }
 
         // A browse is a reading position on a DECIDED row, and it yields to

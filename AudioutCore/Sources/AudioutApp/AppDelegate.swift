@@ -1143,6 +1143,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Roadmap 056 Part A: a Bluetooth run measures the speaker's own
         // LATENCY (the Mac is the zero), stored beside the trim rather than
         // overwriting it.
+        popoverController.remoteInviteStateProvider = { [weak self] in
+            self?.remoteInviteState() ?? .notConnected
+        }
         popoverController.btLatencyProvider = { [weak self] deviceID in
             (self?.backend as? BTOutputControlling)?.btMeasuredLatencyMs(forDevice: deviceID)
         }
@@ -1157,6 +1160,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onBTWizardEndLatencyPreview = { [weak self] deviceID, keepMs in
             (self?.backend as? BTOutputControlling)?
                 .endBTWizardLatencyPreview(forDevice: deviceID, keepMs: keepMs)
+        }
+        // T16: the drawer caption and the chip tooltip read where the applied
+        // offset came from off the same report `btAlignmentReport` already
+        // answers for the companion snapshot — no second read of the timing
+        // store. `BTSpeakerTiming.Source` and `BTOffsetSource` share their
+        // case names by construction (`RemoteInviteViewTests` pins both to
+        // `AudioutProtocol.AlignmentSource`), so the rawValue round-trip never
+        // fails for a source this Mac actually publishes.
+        popoverController.btOffsetSourceProvider = { [weak self] deviceID in
+            guard let source = (self?.backend as? BTOutputControlling)?
+                .btAlignmentReport(forDevice: deviceID)?.source else { return nil }
+            return BTOffsetSource(rawValue: source.rawValue)
         }
         // CAST-SYNC: a Cast row gets the same SYNC chip and drawer, over its
         // own store. Capability-gated like the Bluetooth hooks above, so a
@@ -1742,10 +1757,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isAuditingRequiredPermissions else { return }
         if let cooldownUntil = permissionAuditCooldownUntil, Date() < cooldownUntil { return }
 
-        let model = permissionAuditModel ?? SetupModel(
-            providers: permissionProviders,
-            settings: settings,
-            localNetworkGated: SetupModel.osGatesLocalNetwork)
+        let model = permissionAuditModel ?? makeSetupModel()
         permissionAuditModel = model
 
         isAuditingRequiredPermissions = true
@@ -1759,6 +1771,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.log("Required permission(s) turned off since setup completed: \(unmet) — reopening setup")
             self.presentSetup(reason: .permissionLost(unmet), model: model)
         }
+    }
+
+    /// One construction site for the permission model, so the iPhone card
+    /// starts from the live phone count wherever Setup is built. Whether the
+    /// card exists at all is the model's own read of the Allow switch.
+    @MainActor
+    private func makeSetupModel() -> SetupModel {
+        let model = SetupModel(
+            providers: permissionProviders,
+            settings: settings,
+            localNetworkGated: SetupModel.osGatesLocalNetwork)
+        model.noteRemoteAppClientCount(companionClientCount)
+        return model
     }
 
     /// Present the friendly `.firstRun` Setup window in response to an
@@ -1902,10 +1927,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settings.localNetworkWasGranted = true
         }
 
-        let model = providedModel ?? SetupModel(
-            providers: permissionProviders,
-            settings: settings,
-            localNetworkGated: SetupModel.osGatesLocalNetwork)
+        let model = providedModel ?? makeSetupModel()
         permissionAuditModel = model
         let controller = OnboardingWindowController(model: model, reason: reason) { [weak self] in
             guard let self else { return }
@@ -2432,7 +2454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alignmentActions: makeCompanionAlignmentActions())
 
         // A reconnect (or an alignment landing) changes what the phone's
-        // speaker row says, and nothing else broadcasts for it — the freshness
+        // speaker row says, and nothing else broadcasts for it — the timing
         // store is the only thing that saw the edge.
         (backend as? BTOutputControlling)?.onBTAlignmentChanged = { [weak self] in
             DispatchQueue.main.async {
@@ -2539,7 +2561,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // schedule carries it.
                 // The alignment family is asynchronous for the same reason:
                 // what a run or a commit changes in the snapshot lands through
-                // the backend's own queues and the freshness store's callback,
+                // the backend's own queues and the timing store's callback,
                 // so an immediate rebuild is guaranteed to carry the state
                 // from before the command.
                 let effectIsAsynchronous: Bool
@@ -2567,6 +2589,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Out drag bracket this used to close is gone with the volume
         // decoupling; Main is a stateless set now). FIX-B2 finding 4: gated
         // on `isTerminating` like the command path.
+        // The Setup card and the wizard's iPhone panel both read "is a phone
+        // here right now", and this callback is the only place that knows.
+        // Hops to the main actor — the server fires on its own queue.
+        companionServer.onClientCountChanged = { [weak self] count in
+            DispatchQueue.main.async { self?.noteCompanionClientCount(count) }
+        }
         companionServer.onClientDisconnected = { [weak self] clientID in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
@@ -2600,6 +2628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Read per welcome, not captured once: a licence check-in that lands
         // after the server started still reaches the next phone to connect.
         companionServer.companionToken = { [settings] in settings.companionToken }
+        companionServer.serverID = { [settings] in settings.companionServerID }
         companionServer.onApprovalRequest = { [weak self] clientID, clientName, decide in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
@@ -2666,6 +2695,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             companionServer.stop(reason: CompanionGoodbyeReason.disabled)
             log("companion server stopped")
         }
+    }
+
+    /// How many phones are connected right now, mirrored off
+    /// `CompanionServer.onClientCountChanged` — the server exposes the edge,
+    /// not a count anyone can read back.
+    private var companionClientCount = 0
+
+    /// A phone arrived or left: the Setup card's completion and the alignment
+    /// wizard's iPhone panel both turn on it.
+    @MainActor
+    private func noteCompanionClientCount(_ count: Int) {
+        companionClientCount = count
+        permissionAuditModel?.noteRemoteAppClientCount(count)
+        popoverController?.refreshRemoteInviteState()
+    }
+
+    /// What the alignment wizard's iPhone panel says, per
+    /// `shape-mac-invites.md` §2.2. The phone's name is the approval's own —
+    /// the only phone identity this Mac ever shows — and it is named only
+    /// when there is exactly one phone connected and exactly one on file, so
+    /// the Mac never guesses which one is in the room.
+    @MainActor
+    private func remoteInviteState() -> BTAlignmentWizardView.RemoteInviteState {
+        guard AppSettings.resolvedAllowRemoteControl(settings: settings) else { return .allowOff }
+        guard companionClientCount > 0 else { return .notConnected }
+        let approved = companionApprovals.approvals.filter { $0.decision == .approved }
+        let name = (companionClientCount == 1 && approved.count == 1)
+            ? approved[0].lastKnownName : nil
+        return .connected(phoneName: name)
     }
 
     /// Coalesce every snapshot-affecting trigger into one build ~50 ms out.
@@ -2815,9 +2873,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // reply is, so it reaches the phone first — but the phone
                     // does not lean on that order.
                     if let clientID {
+                        // Read back rather than returned: the row's source is
+                        // the timing module's to decide, and reading it here
+                        // is what keeps this message and the snapshot that
+                        // follows it saying the same thing.
                         self.companionServer.sendAlignmentApplied(
                             deviceID: targetID, measuredMs: measuredMs,
-                            correctedMs: correctedMs, to: clientID)
+                            correctedMs: correctedMs,
+                            source: bt.btAlignmentReport(forDevice: targetID)?.source?.rawValue,
+                            to: clientID)
+                    }
+                    // T16: `correctedMs` already carries how far this
+                    // measurement moved the stored latency — 0 when it left
+                    // it unchanged — so its size is the same fact
+                    // `recordMeasurement`'s replace/keep decision turns on,
+                    // without asking the backend a second question. Fires
+                    // whether or not a phone is still attached to read it.
+                    if abs(correctedMs) >= AlignmentThresholds.tellUserMs {
+                        self.popoverController?.noteAlignmentMovedSinceLastTime(
+                            deviceID: targetID, byMs: correctedMs)
                     }
                     return nil
                 }
@@ -2882,6 +2956,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, !self.isTerminating,
                   let clientID = self.companionAlignmentClientByDeviceID[targetID] else { return }
             if started {
+                // The Mac runs one alignment at a time, so a by-ear sheet
+                // open on this same speaker has been superseded.
+                self.popoverController?.noteCompanionAlignmentRunStarted(deviceID: targetID)
                 self.companionServer.sendAlignmentProbeStarted(deviceID: targetID, to: clientID)
             } else {
                 self.companionServer.sendAlignmentProbeFinished(deviceID: targetID, to: clientID)

@@ -104,6 +104,14 @@ public struct BTTrimStore: Sendable {
         /// user's `trims` nudge on top of it. Optional so a file holding only
         /// trims still decodes; no schema bump needed.
         var latencyMs: [String: Double]?
+        /// A small counting number per Bluetooth device UID, handed out in
+        /// order of first sighting and never reused. It is what the release
+        /// analytics event names a speaker by, because the UID itself is
+        /// derived from the MAC address and a hash of one is reversible by
+        /// enumerating the address space. An index carries nothing but "this
+        /// install's second speaker". Optional for the same reason
+        /// `latencyMs` is: a file without it still decodes, so no schema bump.
+        var speakerIndex: [String: Int]?
     }
 
     /// Bump when the on-disk shape changes in a way old readers can't parse.
@@ -153,6 +161,20 @@ public struct BTTrimStore: Sendable {
         try loadEnvelope()?.latencyMs
     }
 
+    /// The saved per-install speaker indices. Missing file, or a file written
+    /// before this map existed → `nil`.
+    public func loadSpeakerIndex() throws -> [String: Int]? {
+        try loadEnvelope()?.speakerIndex
+    }
+
+    /// Overwrite the saved speaker indices, preserving every other map
+    /// (read-modify-write, same as every other writer here).
+    public func saveSpeakerIndex(_ index: [String: Int]) throws {
+        var envelope = existingEnvelope()
+        envelope.speakerIndex = index
+        try write(envelope)
+    }
+
     /// Overwrite the saved latencies, preserving trims and dismissals
     /// (read-modify-write, same as every other writer here).
     public func saveLatencies(_ latencies: [String: Double]) throws {
@@ -166,6 +188,10 @@ public struct BTTrimStore: Sendable {
     /// alignment"). Deleting rather than saving 0 is the whole point: "tuned"
     /// is decided by whether an entry EXISTS, so a stored 0 would leave the row
     /// reading "0 ms" forever instead of returning it to "Not set".
+    ///
+    /// The speaker's index is deliberately left alone: resetting a speaker's
+    /// timing does not make it a different speaker, and a second index would
+    /// split one speaker's history in two.
     public func clearAlignment(deviceUID: String) throws {
         var envelope = existingEnvelope()
         envelope.trims.removeValue(forKey: deviceUID)
@@ -179,7 +205,7 @@ public struct BTTrimStore: Sendable {
     private func existingEnvelope() -> Envelope {
         var envelope = ((try? loadEnvelope()) ?? nil)
             ?? Envelope(schemaVersion: Self.currentSchemaVersion, trims: [:],
-                        latencyMs: nil)
+                        latencyMs: nil, speakerIndex: nil)
         envelope.schemaVersion = Self.currentSchemaVersion
         return envelope
     }

@@ -128,6 +128,14 @@ public final class CompanionServer: @unchecked Sendable {
     /// and the phone stays locked — an unlicensed Mac unlocks nothing.
     public var companionToken: (@Sendable () -> String?)?
 
+    /// The join id this Mac sends every phone in its `welcome`
+    /// (`AppSettings.companionServerID`), so a phone's own analytics can say
+    /// which Mac it was talking to. A random per-install value and nothing
+    /// else: not the PostHog distinct id, not the licence install id, and
+    /// nothing the machine identifies itself by. Left nil, the `welcome`
+    /// carries no id at all and the phone simply has none to attach.
+    public var serverID: (@Sendable () -> String?)?
+
     // MARK: - State (queue-confined)
 
     private let log = Logger(subsystem: "com.audiout.Audiout", category: "companion")
@@ -483,12 +491,16 @@ public final class CompanionServer: @unchecked Sendable {
 
     /// What the Mac made of the phone's measurement, sent only to the client
     /// that staged the run — it is the verdict that client is waiting to show.
+    /// `source` is the same `AudioutProtocol.AlignmentSource` value the next
+    /// snapshot will carry for this speaker, sent here too so the verdict is
+    /// labelled the moment it lands.
     public func sendAlignmentApplied(deviceID: String, measuredMs: Double,
-                                     correctedMs: Double, to clientID: UUID) {
+                                     correctedMs: Double, source: String?,
+                                     to clientID: UUID) {
         queue.async { [weak self] in
             guard let self, let client = self.clients[clientID], client.isWelcomed else { return }
             self.send(.alignmentApplied(deviceID: deviceID, measuredMs: measuredMs,
-                                        correctedMs: correctedMs), to: client)
+                                        correctedMs: correctedMs, source: source), to: client)
         }
     }
 
@@ -896,7 +908,7 @@ public final class CompanionServer: @unchecked Sendable {
     private func sendWelcome(_ snapshot: Snapshot, to client: Client) {
         client.isWelcomed = true
         send(.welcome(serverName: snapshot.serverName, protoVersion: CompanionProto.version, snapshot: snapshot,
-                      companionToken: companionToken?()), to: client)
+                      companionToken: companionToken?(), serverID: serverID?()), to: client)
     }
 
     private func send(_ message: CompanionMessage, to client: Client, whenDone: (@Sendable () -> Void)? = nil) {

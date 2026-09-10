@@ -12,6 +12,7 @@ import AudioutSharedUI
 import AudioutOnboardingUI
 import PostHog
 import Sparkle
+import UniformTypeIdentifiers
 
 /// Writes `message` to `STDERR_FILENO` with a raw `write(2)`, retrying on
 /// `EINTR` and otherwise ignoring failures.
@@ -103,6 +104,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.errorTrackingConfig.autoCapture = true
         config.captureScreenViews = false
         config.optOut = !settings.telemetryOptIn
+        // The SDK's /flags request fires on setup() regardless of optOut, carrying
+        // the install id, bundle id, OS and app version — and this project has no
+        // feature flags to preload, so there is nothing for it to fetch.
+        config.preloadFeatureFlags = false
         let installID = settings.installID
         config.getAnonymousId = { UUID(uuidString: installID) ?? $0 }
         PostHogSDK.shared.setup(config)
@@ -117,6 +122,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         PostHogSDK.shared.register([Self.geoipDisableKey: true])
         Analytics.install(Analytics.Sink(
             capture: { PostHogSDK.shared.capture($0, properties: $1) },
+            captureError: { name, properties in
+                // A plain `NSError` reaches PostHog's error tracking with its
+                // DOMAIN as the exception type and its localized description
+                // as the value, so the domain is what groups these in the
+                // issue list — hence the literal name straight from
+                // `Analytics.captureError`, and a fixed description rather
+                // than a Cocoa one (those carry local file paths).
+                let error = NSError(domain: name, code: 0, userInfo: [
+                    NSLocalizedDescriptionKey: name,
+                ])
+                PostHogSDK.shared.captureException(error, properties: properties)
+            },
             consentChanged: { granted in
                 guard granted else { PostHogSDK.shared.optOut(); return }
                 PostHogSDK.shared.optIn()
@@ -125,7 +142,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // fires here instead. Without this, anyone who opts in from
                 // the Setup card would never contribute one.
                 Self.captureCoarseLocationOnce()
-            }
+            },
+            captureAt: { PostHogSDK.shared.capture($0, properties: $1, timestamp: $2) }
         ), consent: settings.telemetryOptIn)
         if settings.telemetryOptIn { Self.captureCoarseLocationOnce() }
     }
@@ -195,6 +213,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the "Check for Updates…" button (`GeneralSettingsViewController
     /// .onCheckForUpdates`). Nil here is the whole gate.
     private var updaterController: SPUStandardUpdaterController?
+
+    /// Watches for the network coming back so a trial that started offline can
+    /// still reach the licence server. Held here because it owns a monitor that
+    /// has to outlive `applicationDidFinishLaunching`; it cancels itself once
+    /// there is nothing left to register.
+    private var trialReachability: TrialReachability?
 
     /// The resolved backend kind (same resolution `makeBackend()` used). The
     /// first-run setup flow only presents on `.native` — the sole path that taps
@@ -788,6 +812,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `StoreRecovery` deliberately knows no UI, and this target is the only
         // place that has any.
         StoreRecovery.onWriteFailure = { [weak self] error in
+            // The same reason the alert below is generic: the Cocoa
+            // description can carry a local file path, so only the domain and
+            // the code (e.g. NSCocoaErrorDomain 640, "disk full") go out.
+            let ns = error as NSError
+            Telemetry.fail(.settings, "settings:save_failed",
+                           local: ["detail": error.localizedDescription],
+                           shared: ["domain": ns.domain, "code": String(ns.code)])
             DispatchQueue.main.async {
                 // Never ship a raw Cocoa error description in the visible
                 // alert — it can carry a local file path. Log the detail,
@@ -811,6 +842,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async { [weak self] in
             let quarantined = StoreRecovery.quarantinedFileNames
             guard !quarantined.isEmpty else { return }
+            // The filenames are this app's own fixed names, not the user's
+            // content, so they are safe to send and are the only thing that
+            // says WHICH settings corruption is showing up in the field.
+            Telemetry.fail(.settings, "settings:file_corrupt",
+                           shared: ["files": quarantined.sorted().joined(separator: ",")])
             self?.presentStoreDataAlertOnce(
                 message: "Some of Audiout's saved settings couldn't be read",
                 info: "The unreadable settings were set aside so nothing is lost: \(Self.describeQuarantinedFiles(quarantined)). They're back to their defaults. Everything else is untouched.")
@@ -832,6 +868,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                              updaterDelegate: nil,
                                                              userDriverDelegate: nil)
         }
+
+        // A trial can start with no network, so the server may not know about
+        // it yet. `TrialReachability` is the whole of the asking: `NWPathMonitor`
+        // delivers the current path the moment it starts, so a trial begun on an
+        // earlier launch is announced right here, and one that has to wait for a
+        // network is announced when a usable path appears. One asker is enough:
+        // a direct call beside it posts the same registration a second time.
+        // The case the monitor cannot see — a trial started at the gate while
+        // the app is already running, which follows no path change — belongs to
+        // the gate's own pass handler.
+        //
+        // The check-in and validate calls below run on the state as it stands
+        // now: nothing waits on an answer here, so a key that arrives later is
+        // put to work by `useNewTrialKey` rather than by them.
+        trialReachability = TrialReachability(settings: settings,
+                                              onRegistered: { [weak self] in
+            self?.useNewTrialKey()
+        })
+        trialReachability?.start()
 
         // Licence check-in (roadmap 054): telemetry recording device spread,
         // never a gate — see `LicenseCheckIn`'s doc comment. A build run from
@@ -985,6 +1040,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Analytics.capture("license:buy_link_opened", ["source": "mixer_note"])
             NSWorkspace.shared.open(url)
         }
+        // The trial's own two rungs of the same note slot, above the
+        // unregistered note `applyLicenseState()` drives: a Mac mid-trial is
+        // not an unregistered install. Both are asked fresh on every rebuild,
+        // so the pill follows every open with no clock of its own.
+        popoverController.trialStateProvider = { [settings] in
+            TrialClock.state(settings: settings)
+        }
+        popoverController.trialBannerOwedProvider = { [settings] in
+            TrialClock.owedBanner(settings: settings)
+        }
+        popoverController.onTrialBannerShown = { [settings] banner in
+            TrialClock.markBannerShown(banner, settings: settings)
+        }
         // Metering-active gate (T-GATE): only compute/emit `.level` while the
         // popover is actually open. `backend as? MeteringControlling` is nil for
         // backends without the capability (`OwnToneBackend`), so this is a no-op
@@ -1095,6 +1163,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Roadmap 056 Part A: a Bluetooth run measures the speaker's own
         // LATENCY (the Mac is the zero), stored beside the trim rather than
         // overwriting it.
+        popoverController.remoteInviteStateProvider = { [weak self] in
+            self?.remoteInviteState() ?? .notConnected
+        }
         popoverController.btLatencyProvider = { [weak self] deviceID in
             (self?.backend as? BTOutputControlling)?.btMeasuredLatencyMs(forDevice: deviceID)
         }
@@ -1109,6 +1180,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onBTWizardEndLatencyPreview = { [weak self] deviceID, keepMs in
             (self?.backend as? BTOutputControlling)?
                 .endBTWizardLatencyPreview(forDevice: deviceID, keepMs: keepMs)
+        }
+        // T16: the drawer caption and the chip tooltip read where the applied
+        // offset came from off the same report `btAlignmentReport` already
+        // answers for the companion snapshot — no second read of the timing
+        // store. `BTSpeakerTiming.Source` and `BTOffsetSource` share their
+        // case names by construction (`RemoteInviteViewTests` pins both to
+        // `AudioutProtocol.AlignmentSource`), so the rawValue round-trip never
+        // fails for a source this Mac actually publishes.
+        popoverController.btOffsetSourceProvider = { [weak self] deviceID in
+            guard let source = (self?.backend as? BTOutputControlling)?
+                .btAlignmentReport(forDevice: deviceID)?.source else { return nil }
+            return BTOffsetSource(rawValue: source.rawValue)
         }
         // CAST-SYNC: a Cast row gets the same SYNC chip and drawer, over its
         // own store. Capability-gated like the Bluetooth hooks above, so a
@@ -1539,6 +1622,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Same as `general.onLicenseChanged` below: a key entered at
                 // the gate registers the device now, not at the next launch.
                 LicenseCheckIn(settings: self.settings).checkInIfNeeded()
+                // A trial handed out by the gate has no key yet, and the launch
+                // path is long past — the reachability monitor watches for
+                // network CHANGES, and an already-online Mac gets none. Without
+                // this ask, such a trial stays unknown to the server until the
+                // next launch: no key on the Buy link, no device row, no event.
+                TrialRegistrar.registerIfNeeded(
+                    settings: self.settings,
+                    completion: { [weak self] registered in
+                        guard registered else { return }
+                        self?.useNewTrialKey()
+                    })
                 self.runFirstRunGateAndStartBackend()
             },
             onAbort: { [weak self] in
@@ -1547,6 +1641,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         licenseGateWindowController = gate
         gate.present()
+    }
+
+    /// What a freshly issued trial key changes, the moment it is stored.
+    ///
+    /// The key is a licence key like any other, so it takes the same three
+    /// steps a typed key takes: the device is counted against it, the server is
+    /// asked what it thinks of it, and `applyLicenseState` re-reads the app for
+    /// it — which is what puts it on the update feed's authorization header.
+    /// The Buy link needs no step of its own: `AppSettings.buyURL` composes the
+    /// trial's `?t=` when the link is opened, so it carries the key from the
+    /// moment one is stored.
+    @MainActor
+    private func useNewTrialKey() {
+        LicenseCheckIn(settings: settings).checkInIfNeeded()
+        LicenseValidator(settings: settings).validate { [weak self] _ in
+            self?.applyLicenseState()
+        }
+        applyLicenseState()
     }
 
     /// Tell the user when Gatekeeper is running us from its randomized
@@ -1665,10 +1777,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isAuditingRequiredPermissions else { return }
         if let cooldownUntil = permissionAuditCooldownUntil, Date() < cooldownUntil { return }
 
-        let model = permissionAuditModel ?? SetupModel(
-            providers: permissionProviders,
-            settings: settings,
-            localNetworkGated: SetupModel.osGatesLocalNetwork)
+        let model = permissionAuditModel ?? makeSetupModel()
         permissionAuditModel = model
 
         isAuditingRequiredPermissions = true
@@ -1682,6 +1791,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.log("Required permission(s) turned off since setup completed: \(unmet) — reopening setup")
             self.presentSetup(reason: .permissionLost(unmet), model: model)
         }
+    }
+
+    /// One construction site for the permission model, so the iPhone card
+    /// starts from the live phone count wherever Setup is built. Whether the
+    /// card exists at all is the model's own read of the Allow switch.
+    @MainActor
+    private func makeSetupModel() -> SetupModel {
+        let model = SetupModel(
+            providers: permissionProviders,
+            settings: settings,
+            localNetworkGated: SetupModel.osGatesLocalNetwork)
+        model.noteRemoteAppClientCount(companionClientCount)
+        return model
     }
 
     /// Present the friendly `.firstRun` Setup window in response to an
@@ -1825,10 +1947,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settings.localNetworkWasGranted = true
         }
 
-        let model = providedModel ?? SetupModel(
-            providers: permissionProviders,
-            settings: settings,
-            localNetworkGated: SetupModel.osGatesLocalNetwork)
+        let model = providedModel ?? makeSetupModel()
         permissionAuditModel = model
         let controller = OnboardingWindowController(model: model, reason: reason) { [weak self] in
             guard let self else { return }
@@ -2023,7 +2142,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func makeSettingsRoot() -> SettingsRootViewController {
         let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem(),
                                                     settings: settings,
-                                                    approvals: companionApprovals)
+                                                    approvals: companionApprovals,
+                                                    saveDiagnostics: { [weak self] in self?.saveDiagnostics() })
         // The way back in for `audiout://register` — weak because the surface
         // owns both for as long as the Settings screen exists.
         generalSettingsController = general
@@ -2355,7 +2475,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alignmentActions: makeCompanionAlignmentActions())
 
         // A reconnect (or an alignment landing) changes what the phone's
-        // speaker row says, and nothing else broadcasts for it — the freshness
+        // speaker row says, and nothing else broadcasts for it — the timing
         // store is the only thing that saw the edge.
         (backend as? BTOutputControlling)?.onBTAlignmentChanged = { [weak self] in
             DispatchQueue.main.async {
@@ -2462,7 +2582,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // schedule carries it.
                 // The alignment family is asynchronous for the same reason:
                 // what a run or a commit changes in the snapshot lands through
-                // the backend's own queues and the freshness store's callback,
+                // the backend's own queues and the timing store's callback,
                 // so an immediate rebuild is guaranteed to carry the state
                 // from before the command.
                 let effectIsAsynchronous: Bool
@@ -2490,6 +2610,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Out drag bracket this used to close is gone with the volume
         // decoupling; Main is a stateless set now). FIX-B2 finding 4: gated
         // on `isTerminating` like the command path.
+        // The Setup card and the wizard's iPhone panel both read "is a phone
+        // here right now", and this callback is the only place that knows.
+        // Hops to the main actor — the server fires on its own queue.
+        companionServer.onClientCountChanged = { [weak self] count in
+            DispatchQueue.main.async { self?.noteCompanionClientCount(count) }
+        }
         companionServer.onClientDisconnected = { [weak self] clientID in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
@@ -2523,6 +2649,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Read per welcome, not captured once: a licence check-in that lands
         // after the server started still reaches the next phone to connect.
         companionServer.companionToken = { [settings] in settings.companionToken }
+        companionServer.serverID = { [settings] in settings.companionServerID }
         companionServer.onApprovalRequest = { [weak self] clientID, clientName, decide in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
@@ -2589,6 +2716,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             companionServer.stop(reason: CompanionGoodbyeReason.disabled)
             log("companion server stopped")
         }
+    }
+
+    /// How many phones are connected right now, mirrored off
+    /// `CompanionServer.onClientCountChanged` — the server exposes the edge,
+    /// not a count anyone can read back.
+    private var companionClientCount = 0
+
+    /// A phone arrived or left: the Setup card's completion and the alignment
+    /// wizard's iPhone panel both turn on it.
+    @MainActor
+    private func noteCompanionClientCount(_ count: Int) {
+        companionClientCount = count
+        permissionAuditModel?.noteRemoteAppClientCount(count)
+        popoverController?.refreshRemoteInviteState()
+    }
+
+    /// What the alignment wizard's iPhone panel says, per
+    /// `shape-mac-invites.md` §2.2. The phone's name is the approval's own —
+    /// the only phone identity this Mac ever shows — and it is named only
+    /// when there is exactly one phone connected and exactly one on file, so
+    /// the Mac never guesses which one is in the room.
+    @MainActor
+    private func remoteInviteState() -> BTAlignmentWizardView.RemoteInviteState {
+        guard AppSettings.resolvedAllowRemoteControl(settings: settings) else { return .allowOff }
+        guard companionClientCount > 0 else { return .notConnected }
+        let approved = companionApprovals.approvals.filter { $0.decision == .approved }
+        let name = (companionClientCount == 1 && approved.count == 1)
+            ? approved[0].lastKnownName : nil
+        return .connected(phoneName: name)
     }
 
     /// Coalesce every snapshot-affecting trigger into one build ~50 ms out.
@@ -2738,9 +2894,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // reply is, so it reaches the phone first — but the phone
                     // does not lean on that order.
                     if let clientID {
+                        // Read back rather than returned: the row's source is
+                        // the timing module's to decide, and reading it here
+                        // is what keeps this message and the snapshot that
+                        // follows it saying the same thing.
                         self.companionServer.sendAlignmentApplied(
                             deviceID: targetID, measuredMs: measuredMs,
-                            correctedMs: correctedMs, to: clientID)
+                            correctedMs: correctedMs,
+                            source: bt.btAlignmentReport(forDevice: targetID)?.source?.rawValue,
+                            to: clientID)
+                    }
+                    // T16: `correctedMs` already carries how far this
+                    // measurement moved the stored latency — 0 when it left
+                    // it unchanged — so its size is the same fact
+                    // `recordMeasurement`'s replace/keep decision turns on,
+                    // without asking the backend a second question. Fires
+                    // whether or not a phone is still attached to read it.
+                    if abs(correctedMs) >= AlignmentThresholds.tellUserMs {
+                        self.popoverController?.noteAlignmentMovedSinceLastTime(
+                            deviceID: targetID, byMs: correctedMs)
                     }
                     return nil
                 }
@@ -2805,6 +2977,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, !self.isTerminating,
                   let clientID = self.companionAlignmentClientByDeviceID[targetID] else { return }
             if started {
+                // The Mac runs one alignment at a time, so a by-ear sheet
+                // open on this same speaker has been superseded.
+                self.popoverController?.noteCompanionAlignmentRunStarted(deviceID: targetID)
                 self.companionServer.sendAlignmentProbeStarted(deviceID: targetID, to: clientID)
             } else {
                 self.companionServer.sendAlignmentProbeFinished(deviceID: targetID, to: clientID)
@@ -3241,6 +3416,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func log(_ message: String) {
         audioutEmergencyWriteStderr("[Audiout] \(message)\n")
+    }
+
+    // MARK: - Diagnostics bundle (Settings › About › Save diagnostics…)
+
+    /// Asks where to save, writes the bundle there, reveals it, and offers a
+    /// mail draft. A mail link cannot attach a file, so the draft's body says
+    /// to attach the one just saved. Nothing leaves the Mac from here.
+    @MainActor
+    private func saveDiagnostics() {
+        let info = AboutInfo.current()
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyyMMdd-HHmm"
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        let fileName = "Audiout-diagnostics-\(stamp.string(from: Date())).zip"
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = fileName
+        panel.directoryURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+        panel.allowedContentTypes = [.zip]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+
+        let snapshot = DiagnosticsBundle.StateSnapshot(
+            settings: settings,
+            app: info.appName, version: info.version, build: info.build,
+            backend: String(describing: type(of: backend)),
+            ptpHelper: "\(permissionProviders.ptpHelper.status)",
+            devices: backend.devices)
+        do {
+            try DiagnosticsBundle.write(to: destination, snapshot: snapshot)
+        } catch {
+            log("diagnostics bundle failed: \(error)")
+            let alert = NSAlert()
+            alert.messageText = "Audiout couldn’t save the diagnostics file"
+            alert.informativeText = "Try a different folder, or check that the disk isn’t full."
+            alert.runModal()
+            return
+        }
+        Analytics.capture("support:diagnostics_saved")
+        NSWorkspace.shared.activateFileViewerSelecting([destination])
+
+        let alert = NSAlert()
+        alert.messageText = "Diagnostics saved"
+        alert.informativeText = "Attach \(destination.lastPathComponent) to your email and describe what happened."
+        alert.addButton(withTitle: "Email support")
+        alert.addButton(withTitle: "Done")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        var components = URLComponents()
+        components.scheme = "mailto"
+        components.path = "support@audiout.app"
+        components.queryItems = [
+            URLQueryItem(name: "subject", value: "Audiout \(info.version) (\(info.build)) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString)"),
+            URLQueryItem(name: "body", value: "Please attach \(destination.lastPathComponent) (saved to \(destination.deletingLastPathComponent().lastPathComponent)) and describe what happened.\n\n"),
+        ]
+        if let url = components.url { NSWorkspace.shared.open(url) }
     }
 }
 

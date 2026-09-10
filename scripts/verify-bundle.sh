@@ -158,4 +158,39 @@ for macho in "$CONTENTS/MacOS/AudioutApp" "$CONTENTS/MacOS/ptp-helper" "$CONTENT
   done
 done
 
-echo "    bundle content gate PASSED (1 sanctioned launchd plist, no scripts, no dev tooling, no launchctl/LaunchAgents in the binaries)"
+# --- 8. the helper's embedded identity is the daemon it ships as ------------
+# ptp-helper carries its Info.plist as a __TEXT,__info_plist section (linked in
+# by make-app.sh from the scripts/ptp-helper-info.plist TEMPLATE). SMAppService
+# checks the daemon it launches against the launchd Label, and codesign takes
+# the helper's signing Identifier from this very CFBundleIdentifier — so the
+# embedded id, the Label and the plist filename must all be one string. They
+# were not until 2026-09-07: the template hardcoded the default id, and every
+# .dev/.staging/handover build shipped a helper claiming to be another
+# daemon. This check makes that class of drift a refused build.
+#
+# Read as raw bytes (grep -a), same reasoning as check 7: -sectcreate copies
+# the XML in verbatim, so the key/value pair is literal text inside the
+# Mach-O, and the section's presence is confirmed separately through the load
+# commands. This runs BEFORE codesigning, so the signed Identifier cannot be
+# read here — make-app.sh asserts that one right after it signs.
+HELPER_MACHO="$CONTENTS/MacOS/ptp-helper"
+otool -l "$HELPER_MACHO" 2>/dev/null | grep -q 'sectname __info_plist' \
+  || fail "ptp-helper carries no __TEXT,__info_plist section — SMAppService will not launch a daemon without an embedded Info.plist" "$HELPER_MACHO"
+# `|| true` on each grep: no match exits 1 under `set -e`; the empty result is
+# still the answer and is judged below.
+EMBEDDED_IDS="$(grep -a -A1 '<key>CFBundleIdentifier</key>' "$HELPER_MACHO" | grep -a -o '<string>[^<]*</string>' | sed 's/<[^>]*>//g' || true)"
+[ -n "$EMBEDDED_IDS" ] || fail "ptp-helper's embedded Info.plist carries no CFBundleIdentifier" "$HELPER_MACHO"
+[ "$(printf '%s\n' "$EMBEDDED_IDS" | wc -l | tr -d ' ')" -eq 1 ] \
+  || fail "ptp-helper embeds more than one CFBundleIdentifier — cannot tell which daemon it claims to be" "$EMBEDDED_IDS"
+case "$EMBEDDED_IDS" in
+  *__BUNDLE_ID__*) fail "ptp-helper embeds an UNRENDERED template id — make-app.sh linked scripts/ptp-helper-info.plist without substituting __BUNDLE_ID__" "$EMBEDDED_IDS" ;;
+esac
+[ "$EMBEDDED_IDS" = "$SANCTIONED_LABEL" ] \
+  || fail "ptp-helper's embedded CFBundleIdentifier '$EMBEDDED_IDS' is not its launchd Label '$SANCTIONED_LABEL' — the daemon would claim one identity to SMAppService/codesign and another to launchd; an unrendered or stale template is the usual cause" "$HELPER_MACHO"
+# The launchd plist itself must be fully rendered too — a leftover token there
+# would pass check 2 (the Label line is asserted separately) and still hand
+# launchd a MachServices name no client ever connects to.
+! grep -q '__BUNDLE_ID__' "$SANCTIONED_PLIST" \
+  || fail "the sanctioned daemon plist still carries an unrendered __BUNDLE_ID__ token" "$SANCTIONED_PLIST"
+
+echo "    bundle content gate PASSED (1 sanctioned launchd plist, helper identity = $SANCTIONED_LABEL, no scripts, no dev tooling, no launchctl/LaunchAgents in the binaries)"

@@ -173,7 +173,7 @@ let package = Package(
         // records which tag it is actually on. 0.6.0 is the floor because
         // that is the tag `CompanionMessage.alignmentApplied` landed in, and
         // the companion server sends it on every applied measurement.
-        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.8.1"),
+        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.9.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.
@@ -446,6 +446,11 @@ let package = Package(
                 "CastSender",
                 "CastFakeReceiver",
                 .product(name: "ProbeKit", package: "audiout-shared"),
+                // `RemoteInviteViewTests` pins the UI's `BTOffsetSource`
+                // against `AlignmentSource`, the wire's own vocabulary, so a
+                // rename in the shared package fails here rather than
+                // silently blanking every row's source line.
+                .product(name: "AudioutProtocol", package: "audiout-shared"),
                 // EmitterFieldTests reads the same defaults the shader is
                 // generated from, so a change to field.json fails a test here
                 // instead of silently forking the brand's one moving image.

@@ -81,9 +81,10 @@ system-audio-recording TCC permission granted to the app.
   attempting a live `native` run; don't wing it with a bare `swift run`, the
   TCC grant won't reliably stick to an unstable binary identity.
 - AP1-only devices (this repo's `fake-speakers.sh` receiver included) are
-  discovered and shown by `NativeDiscovery`/`NativeBackend` but never driven
-  as an output yet — the AirPlay 1 sender is deferred (PLAN-PHASE-2B.md D6).
-  The popover renders them dimmed with a "coming soon" explanation.
+  discovered, selectable, and driven through the same engine as AirPlay 2 —
+  the D6 gate that once dimmed them is gone (`NativeBackend.swift:39-48`). The
+  one thing still false for them is `supportsAirPlay2`, which now means only
+  "no perfect multi-room sync", not "unsupported".
 
 ---
 

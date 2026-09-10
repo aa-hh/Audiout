@@ -233,7 +233,14 @@ import AudioutProtocol
     /// condition it exists to satisfy would never become true (self-deadlock).
     /// `await Task.sleep` actually suspends, freeing the executor between
     /// polls.
-    nonisolated private func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) async -> Bool {
+    ///
+    /// The default is `SuiteWait.timeout`, not a number of its own: the
+    /// welcome needs that same main-actor hop, and under a full parallel run
+    /// it sat behind the main-actor queue for 6.0s, past what a private few-
+    /// second deadline was measuring the code for. `CompanionServerTests`'
+    /// twin helper got this fix in 46897218; this copy was missed. An
+    /// explicit `timeout:` still means "I meant this expiry".
+    nonisolated private func waitUntil(timeout: TimeInterval = SuiteWait.timeout, _ condition: () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return true }
@@ -364,15 +371,17 @@ import AudioutProtocol
         let hub = try await makeHub()
         defer { hub.cancel() }
 
-        let (client, log) = try await connectClient(via: hub, to: rig.server)
+        // hello must leave from the nonisolated harness right after the
+        // handshake. Sent from this @MainActor body instead, it followed a
+        // main-actor hop that took 6s under a full run, past the server's 5s
+        // pre-hello cutoff, so the connection was already cancelled and no
+        // welcome could ever arrive.
+        let (client, log) = try await connectAndWelcome(via: hub, to: rig.server, name: "phone")
         defer { client.cancel() }
-        try sendHello(over: client)
 
         let expected = rig.buildSnapshot()
         #expect(expected.devices.count == [Device].demoFleet.count, "sanity: the fleet is really in the snapshot")
-        #expect(await waitUntil {
-            log.contains(.welcome(serverName: Rig.serverName, protoVersion: CompanionProto.version, snapshot: expected, companionToken: nil))
-        }, "the client never received a welcome carrying the correct full snapshot")
+        #expect(log.contains(.welcome(serverName: Rig.serverName, protoVersion: CompanionProto.version, snapshot: expected, companionToken: nil)), "the welcome did not carry the correct full snapshot")
     }
 
     // MARK: 2 — client A's setDeviceSelected applies + both clients see the state broadcast

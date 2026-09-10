@@ -1,12 +1,12 @@
 # Release runbook
 
-How a build goes from source to the notarised, distributable zip that Paddle
-sells and Sparkle updates deliver. Related: roadmap 054 (paid distribution,
-Ardour model — see `PRODUCT.md` § Business Model on `origin/main`).
+How a build goes from source on `main` to the notarised DMG a buyer downloads
+and Sparkle updates deliver. Related: roadmap 054 (paid distribution, Ardour
+model — see `PRODUCT.md` § Business Model on `origin/main`).
 
-**Nothing described here is public yet.** No download exists, no Paddle
-product exists, no appcast has a real release item. This is the pipeline for
-when that changes, not a claim that it has.
+Live since 2026-09-05: 1.0.0 is published, sold through Paddle, and served by
+`license.audiout.app`. Every release after it replaces a version people are
+already running.
 
 ## Purchase terms (state once, exactly)
 
@@ -16,20 +16,66 @@ next major release.**
 Any other copy about price or what it includes (site, receipts, support
 replies) restates this, not a variant of it.
 
-## Pipeline command sequence
+## Cutting a release
 
 ```bash
-# 1. Bump the version/build number for this release, then run the pipeline:
-APP_VERSION=1.0.0 BUILD_NUMBER=3 \
-AUDIOUT_LICENSE_URL="https://<license-server>" \
-AUDIOUT_BUY_URL="https://<site>/buy" \
-SPARKLE_ED_PUBLIC_KEY="<public key from Sparkle's generate_keys>" \
-scripts/make-release.sh
-
-# Produces build/Audiout-1.0.0.zip (notarised, stapled) and prints its
-# shasum -a 256. scripts/make-release.sh requires APP_VERSION and BUILD_NUMBER
-# to be set — it errors out immediately otherwise.
+scripts/release.sh 1.0.1
 ```
+
+That is the whole thing. Run it from the **main checkout, on `main`** — it
+refuses anywhere else. It builds, signs, notarises, staples, wraps the app in a
+notarised DMG, signs the DMG with Sparkle's `sign_update`, writes
+`latest-v1.json` and `appcast-v1.xml`, and uploads all three to the live R2
+bucket, which is what publishing means. Expect two Apple notary waits of a few
+minutes each.
+
+Pass a live licence key to have it re-download the published artifact through
+`/download` and check it the way a buyer's Mac will — Gatekeeper's verdict, the
+stapled ticket, the `/Applications` drag target, the plist's licence URL:
+
+```bash
+VERIFY_KEY=AUDT-XXXXX-XXXXX-XXXXX-XXXXX scripts/release.sh 1.0.1
+```
+
+`release.sh` supplies the two values that define a live release
+(`AUDIOUT_LICENSE_URL=https://license.audiout.app`,
+`R2_BUCKET=audiout-releases-live`) and derives `BUILD_NUMBER` from the commit
+count on `main`, so it can neither repeat nor go backwards. Typing those three
+by hand is what went wrong on the first live release.
+
+Before it builds anything it refuses on: a dirty tree, a branch that is not
+`main`, a `main` that disagrees with `origin/main`, and any migration still
+unapplied on the production D1 database — the deployed Worker writes columns
+those migrations add, so a purchase would take the money and fail to issue a
+key.
+
+Two things stay manual, and neither is optional:
+
+1. `scripts/verify-standalone-app.sh build/Audiout.app` — proves the bundle
+   launches on a Mac with no Homebrew. It moves this machine's real Homebrew
+   directories, so it is never run automatically.
+2. Download through `/download?key=<a real key>` and open the app once from
+   `/Applications`. `VERIFY_KEY` does the download half; opening it is yours.
+
+### The layers underneath
+
+`release.sh` publishes nothing itself. It is the gate in front of
+`make-staging.sh`, which is and stays the only publish pipeline — a production
+release is that same pipeline pointed at the live server and bucket.
+`make-staging.sh` in turn calls `make-release.sh` (build → notarise → staple →
+zip), which calls `make-app.sh` (compile → assemble → sign). Change how a
+release is *built* in those; `release.sh` only decides whether one may run.
+
+Running `make-staging.sh` bare is the staging rehearsal: same pipeline, staging
+licence server, staging bucket, never the production one. `SKIP_NOTARIZE=1` and
+`SKIP_DMG=1` cut the waits for fast iteration on the upload path.
+
+`make-app.sh` counts the SwiftPM resource bundles the compile produced and
+refuses if that count differs from `RESOURCE_BUNDLE_NAMES`. A bundle the build
+emits but that list omits is left out of the `.app` silently, and its consumer
+`fatalError`s at first launch on a user's Mac — that is how the notarised 1.0.0
+shipped and crashed before drawing a window. Add a new one to the list; do not
+delete the check.
 
 ### Build-time env vars
 
@@ -70,22 +116,18 @@ The one manual proof this runbook does call for —
 `scripts/verify-standalone-app.sh` — is a Homebrew-less *launch* check, not a
 live-testing session; do it, then don't keep using that copy.
 
-## Staging rehearsal
-
-`APP_VERSION=… BUILD_NUMBER=… scripts/make-staging.sh` runs the same pipeline
-against the staging license server and then goes further: wraps the stapled
-app in a notarised, stapled DMG, signs it with `sign_update`, writes
-`latest-vN.json` + `appcast-vN.xml`, and uploads everything to the
-`audiout-releases-staging` R2 bucket. `SKIP_NOTARIZE=1` and `SKIP_DMG=1`
-skip those steps for fast iteration. It never touches the production bucket.
-
 ## What the pipeline does *not* do
 
-- No DMG. The zip `make-release.sh` produces is what both Paddle's file
-  delivery and Sparkle's updater consume directly.
-- No automatic upload anywhere. Paddle and the appcast are both manual steps
-  below, on purpose — this pipeline builds and proves the artifact; it doesn't
-  publish it.
+- **No GitHub Release asset, ever.** The paid model rests on `/download` being
+  gated on a key. Assets on a public repo are public, and on a private repo one
+  visibility change from it — an attached DMG routes around the gate
+  permanently and cannot be un-published once mirrored. Cut a tag or a release
+  for the *notes* if you want a record; never attach the artifact.
+- **No notarisation in CI.** It would mean exporting the Developer ID `.p12`
+  and an app-specific password into repo secrets. The keychain that holds them
+  is on this Mac; the command runs here.
+- **No test run.** The merge that put the commit on `main` already ran the full
+  suite (Guard 4). Re-running proves the same thing and costs ~15 minutes.
 
 ---
 
@@ -121,48 +163,54 @@ appleid.apple.com; it is not your account password.
 Sparkle 2 signs each update archive with an EdDSA key pair, generated by the
 `generate_keys` tool that ships in the Sparkle distribution (see
 `AudioutCore/Package.swift`'s Sparkle dependency for the pinned version).
-The **private key stays in your keychain** — it never leaves this Mac and
-never enters the repo. The **public key** is a build input: pass it as
-`SPARKLE_ED_PUBLIC_KEY` (see Pipeline command sequence above), which
-`make-app.sh` embeds as `SUPublicEDKey` in Info.plist so every shipped copy of
-the app can verify update signatures against it.
+**Done — the key pair exists and 1.0.0 shipped against it. Never run bare
+`generate_keys` again.** It would mint a new pair, and every copy already
+installed verifies updates against the old public key baked into its
+Info.plist; those copies could never be updated again. The public half is
+`pTDAl+JJHH5ryMLZdPbUfSh0Ugq488O+Vjc1FURssQk=`.
+
+The **private key stays in the login keychain** — it never leaves this Mac and
+never enters the repo. The **public key** is a build input, `SPARKLE_ED_PUBLIC_KEY`,
+which `make-app.sh` embeds as `SUPublicEDKey`. You do not normally pass it:
+`make-staging.sh` derives it from the keychain with `generate_keys -p`, which
+reads the existing pair rather than creating one.
 
 ### d. Paddle account + product setup
 
-- Create the Paddle product: **€30, one-time**, matching the purchase terms
-  stated above exactly.
-- Upload each release's distributable zip (`build/Audiout-<version>.zip`
-  from `make-release.sh`) as the thing Paddle delivers on purchase, or wire
-  Paddle's delivery to fetch it from wherever it's hosted.
-- No Paddle SDK or checkout script lives in either repo yet — the marketing
-  site's buy button is still a placeholder link until this step is done.
+Done and live. **Paddle never holds the artifact** — it takes the money and
+tells the license server to issue a key; the buyer downloads from
+`/download?key=…`. So a release changes nothing on the Paddle side, and no
+release step belongs there.
 
-### e. Per-release: sign the archive and upload it to the license server's R2
+Paddle lives entirely in the license server (private repo
+`aa-hh/audiout-license-server`). Neither this repo nor the app carries a Paddle
+SDK.
+
+### e. Per-release: publishing to R2
+
+`scripts/release.sh` does all of this. Kept here because the rules still bite
+anyone who reaches for `wrangler` by hand.
 
 The download and the update feed are both served by the license server
-(`~/Projects/Audiout License Server`, README there is the contract), gated on
-a key — so publishing a release is an upload to its R2 bucket, not an edit to
-the website. For every release meant to reach existing users via Sparkle, with
-`N` the major version:
+(`~/Projects/Audiout License Server`, README there is the contract), gated on a
+key — so publishing is an upload to its R2 bucket, not an edit to the website.
+Three objects, with `N` the major version: `releases/Audiout-<version>.dmg`,
+`releases/latest-vN.json` (`{"version": …, "file": "releases/…"}` — the pointer
+`/download` reads, so writing it IS publishing), and `appcast-vN.xml`. Put the
+artifact and the pointer before the appcast: if the appcast put fails, new
+buyers still get a working download and nobody's installed copy is broken.
 
-1. Sign the distributable zip with Sparkle's `sign_update` tool (same
-   distribution as `generate_keys` above), using the private key from step c.
-2. Write `appcast-vN.xml` listing only the N.x releases, each `<item>` carrying
-   the version and the signature `sign_update` printed. Enclosure URLs are
-   simply `<PUBLIC_BASE_URL>/download` — Sparkle sends the key as a bearer
-   header on the enclosure fetch too, and the server resolves which file that
-   key is entitled to.
-3. Write `latest-vN.json`: `{"version": "<version>", "file": "releases/Audiout-<version>.zip"}`.
-4. Upload all three. `--remote` and `-J eu` are both required: without
-   `--remote` wrangler writes to the local simulator and still says "Upload
-   complete", and the buckets live in the EU jurisdiction.
+`--remote` and `-J eu` are both required on every put. Without `--remote`
+wrangler writes to the local simulator and still prints "Upload complete", so
+the release silently never leaves this Mac; the only tell is a
+"Resource location: local" line. Both buckets live in the EU jurisdiction, and
+without `-J eu` the bytes land in a bucket the Worker cannot read.
 
-
-   ```bash
-   wrangler r2 object put audiout-releases-live/releases/Audiout-1.0.0.zip --file build/Audiout-1.0.0.zip -J eu --remote
-   wrangler r2 object put audiout-releases-live/releases/latest-v1.json --file latest-v1.json -J eu --remote
-   wrangler r2 object put audiout-releases-live/appcast-v1.xml --file appcast-v1.xml -J eu --remote
-   ```
+Do not try to confirm an upload with `wrangler r2 object get`. This Mac's
+Cloudflare OAuth token has no `r2` scope and reports the permission failure as
+"The specified key does not exist" — a successful upload reads back as a
+missing one. `r2 bucket list` still works, which makes it more convincing.
+Prove it through the Worker instead: `/download?key=…` with a real key.
 
 ### f. Choose the license server's public URL
 

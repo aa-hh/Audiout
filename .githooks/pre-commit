@@ -312,11 +312,11 @@ fi
 # pays for an AirPlayEngine run it didn't need, and vice versa. A commit
 # touching both packages runs both suites.
 #
-# AirPlayEngine's suite is small (~144 tests, ~2s) — no lock/queue/pass-cache
-# machinery like scripts/run-tests.sh; a plain `swift test` inline is fast
-# enough that the machinery would cost more than it saves. For the same reason
-# it kept running in full when Guard 4 went filtered on 2026-09-04: two seconds
-# is not worth narrowing.
+# AirPlayEngine's suite is small (~144 tests) and needs none of Guard 4's
+# queue/pass-cache machinery for itself — but "~2s" was only ever true warm; a
+# cold compile of the vendored C sender is a real job, so it now takes a
+# capacity permit from the same pool everything else in the hook uses
+# (owner's call, 2026-09-10).
 #
 # Escape hatch: `git commit --no-verify`, same as Guard 4. Missing `swift`
 # toolchain => skip.
@@ -326,16 +326,34 @@ if [ -n "$staged_airplayengine" ] && command -v swift >/dev/null 2>&1; then
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
     echo "" >&2
     echo "  Guard 6: AirPlayEngine Swift changed — running its test suite" >&2
-    echo "  before commit. ~2s; --no-verify to skip." >&2
+    echo "  before commit. --no-verify to skip." >&2
+    # Same resolution order as run-tests.sh above: this worktree's own copy of
+    # the library first, else the primary checkout's via hook_root. Missing
+    # entirely => run exactly as before this permit existed, uncapped — a hook
+    # that errors on an older branch or another machine is worse than no hook
+    # (see Guard 2's note above).
+    hook_root=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
+    remote_lib=""
+    if [ -f "$repo_root/scripts/lib/remote.sh" ]; then
+        remote_lib="$repo_root/scripts/lib/remote.sh"
+    elif [ -n "$hook_root" ] && [ -f "$hook_root/scripts/lib/remote.sh" ]; then
+        remote_lib="$hook_root/scripts/lib/remote.sh"
+    fi
+    if [ -n "$remote_lib" ]; then
+        . "$remote_lib"
+        capacity_acquire guard6
+    fi
     if ! ( cd "$repo_root/AirPlayEngine" \
              && env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE \
                 swift test >&2 ); then
+        [ -n "$remote_lib" ] && capacity_release
         echo "" >&2
         echo "  REFUSED: AirPlayEngine test suite failed. Fix the failures" >&2
         echo "  (or 'git commit --no-verify' for a real emergency)." >&2
         echo "" >&2
         exit 1
     fi
+    [ -n "$remote_lib" ] && capacity_release
     echo "  Guard 6: AirPlayEngine suite passed." >&2
 fi
 

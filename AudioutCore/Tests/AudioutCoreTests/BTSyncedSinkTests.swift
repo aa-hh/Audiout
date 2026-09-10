@@ -551,6 +551,9 @@ import Testing
 
         // Empty, not stale: the next capture plays from its own first frame.
         let fresh = Self.enqueueRamp(into: manager, atSec: Self.anchorSec + 2)
+        // The re-anchor posts lock-holding work to `graphQueue`; render takes the
+        // state lock with `try()` and would produce silence while that runs.
+        sink.test_waitForPendingRebuild()
         let next = Self.renderCycle(sink, at: Self.anchorNanos + 1_200_000_000)
         #expect(next.produced)
         #expect(next.samples[0] == fresh[0])

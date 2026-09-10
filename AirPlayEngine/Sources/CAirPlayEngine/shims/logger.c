@@ -24,6 +24,10 @@
 #include <ctype.h>
 #include <os/log.h>
 #include <event2/event.h>
+#include <pthread.h>
+#include <time.h>
+
+static const char *domain_label(int domain);
 
 /* seam-map §3.2: default to E_LOG. Overridable via env for bring-up. */
 static int
@@ -59,24 +63,126 @@ mirror_to_stderr(int severity)
   return forced || severity <= E_WARN;
 }
 
-/* Optional append-to-file sink, opened once from AIRPLAYENGINE_LOG_FILE. Unlike
- * stderr (swallowed when the app is launched via `open`/LaunchServices) and
- * os_log (a custom subsystem from an ad-hoc-signed bundle isn't reliably
- * persisted), a plain file is readable from a bundled, TCC-correct live session —
- * the only way to observe a real receiver session's logs. NULL when unset. */
-static FILE *
-log_file(void)
+/* Append-to-file sink. Unlike stderr (swallowed when the app is launched via
+ * `open`/LaunchServices) and os_log (nothing from the notarised app reached
+ * `log show` for a whole session on 2026-09-05), a plain file is readable
+ * after the fact from any live session — it is what a support bundle carries
+ * (docs/plans/PLAN-LIVE-DIAGNOSTICS.md C2).
+ *
+ * The path comes from ONE of two places, env first: AIRPLAYENGINE_LOG_FILE when
+ * set (dev tooling, make-app.sh passes it through), else whatever the host
+ * handed engine_logger_set_file(). This shim deliberately has no default path
+ * of its own — the package knows no app, so it cannot know ~/Library/Logs/
+ * <app>/; the Swift wrapper's setLogFile() is where that decision lives, and a
+ * host that never calls it (tests, engine-probe) writes no file.
+ *
+ * Size-bounded like the host's decision log: when the active file reaches
+ * `cap_bytes` it is renamed to "<path>.1" (replacing the previous one) and a
+ * fresh file is opened, so the footprint is at most 2 × cap. All file state is
+ * behind one mutex: DPRINTF runs on the engine thread AND on ptpd/event
+ * threads, and a rotation racing another thread's write would be a use of a
+ * closed FILE*. */
+static pthread_mutex_t file_lock = PTHREAD_MUTEX_INITIALIZER;
+static FILE *file_handle = NULL;
+static char file_path[1024] = "";
+static long file_cap = 5L * 1024 * 1024;
+static int  file_resolved = 0; /* env consulted once */
+
+/* Caller holds file_lock. */
+static void
+file_open_locked(void)
 {
-  static FILE *f = NULL;
-  static int tried = 0;
-  if (!tried)
+  if (file_handle || !file_path[0])
+    return;
+  file_handle = fopen(file_path, "a");
+}
+
+/* Caller holds file_lock. */
+static void
+file_resolve_locked(void)
+{
+  const char *env;
+  if (file_resolved)
+    return;
+  file_resolved = 1;
+  env = getenv("AIRPLAYENGINE_LOG_FILE");
+  if (env && env[0])
     {
-      const char *path = getenv("AIRPLAYENGINE_LOG_FILE");
-      tried = 1;
-      if (path && path[0])
-        f = fopen(path, "a");
+      if (file_handle) { fclose(file_handle); file_handle = NULL; }
+      snprintf(file_path, sizeof(file_path), "%s", env);
     }
-  return f;
+  file_open_locked();
+}
+
+/* Caller holds file_lock. Rotate when the active file has reached the cap. */
+static void
+file_rotate_if_full_locked(void)
+{
+  long size;
+  char backup[sizeof(file_path) + 2];
+
+  if (!file_handle || file_cap <= 0)
+    return;
+  size = ftell(file_handle);
+  if (size < file_cap)
+    return;
+  fclose(file_handle);
+  file_handle = NULL;
+  snprintf(backup, sizeof(backup), "%s.1", file_path);
+  rename(file_path, backup); /* replaces the previous backup */
+  file_open_locked();
+}
+
+void
+engine_logger_set_file(const char *path, long cap_bytes)
+{
+  pthread_mutex_lock(&file_lock);
+  if (file_handle) { fclose(file_handle); file_handle = NULL; }
+  if (path && path[0])
+    snprintf(file_path, sizeof(file_path), "%s", path);
+  else
+    file_path[0] = '\0';
+  if (cap_bytes > 0)
+    file_cap = cap_bytes;
+  file_resolved = 0; /* env still wins if set; re-checked on next line */
+  pthread_mutex_unlock(&file_lock);
+}
+
+/* "2026-09-05T21:34:39.539Z " — the same ISO-8601 UTC shape the host's
+ * decision log uses, so the two files interleave by eye. */
+static void
+format_timestamp(char *out, size_t n)
+{
+  struct timespec ts;
+  struct tm tm;
+  char date[32];
+
+  clock_gettime(CLOCK_REALTIME, &ts);
+  gmtime_r(&ts.tv_sec, &tm);
+  strftime(date, sizeof(date), "%Y-%m-%dT%H:%M:%S", &tm);
+  snprintf(out, n, "%s.%03ldZ", date, ts.tv_nsec / 1000000L);
+}
+
+static void
+file_emit(int domain, const char *msg)
+{
+  char stamp[40];
+  size_t n;
+
+  pthread_mutex_lock(&file_lock);
+  file_resolve_locked();
+  file_open_locked(); /* a directory that appears (or returns) later still gets the file */
+  if (file_handle)
+    {
+      format_timestamp(stamp, sizeof(stamp));
+      n = strlen(msg);
+      fprintf(file_handle, "%s [%s] %s", stamp, domain_label(domain), msg);
+      if (n == 0 || msg[n - 1] != '\n')
+        fputc('\n', file_handle);
+      fflush(file_handle); /* flush every line: a live capture must not lose the tail */
+      file_rotate_if_full_locked();
+    }
+  pthread_mutex_unlock(&file_lock);
 }
 
 static const char *
@@ -136,15 +242,7 @@ emit(int severity, int domain, const char *msg)
         fputc('\n', stderr);
     }
 
-  FILE *lf = log_file();
-  if (lf)
-    {
-      size_t n = strlen(msg);
-      fprintf(lf, "[%s] %s", domain_label(domain), msg);
-      if (n == 0 || msg[n - 1] != '\n')
-        fputc('\n', lf);
-      fflush(lf); // flush every line: a live capture must not lose the tail
-    }
+  file_emit(domain, msg);
 }
 
 void

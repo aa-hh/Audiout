@@ -542,8 +542,14 @@ public final class SetupModel {
                 settings: AppSettings = AppSettings(),
                 localNetworkGated: Bool = true,
                 usageStatsAvailable: Bool = Analytics.isAvailable,
+                remoteAppAvailable: Bool? = nil,
                 bluetoothPromptTimeout: TimeInterval = 10) {
         self.usageStatsAreAvailable = usageStatsAvailable
+        // Nil means "read the switch", which is what the app wants everywhere
+        // — the EFFECTIVE Allow setting, launch option included. Tests pass a
+        // fixed value so a card's presence never depends on a real default.
+        self.remoteAppIsAvailable = remoteAppAvailable
+            ?? AppSettings.resolvedAllowRemoteControl(settings: settings)
         self.bluetoothPromptTimeout = bluetoothPromptTimeout
         self.audioProbe = audioProbe
         self.localNetwork = localNetwork
@@ -578,7 +584,8 @@ public final class SetupModel {
     public convenience init(providers: PermissionProviders,
                             settings: AppSettings = AppSettings(),
                             localNetworkGated: Bool = true,
-                            usageStatsAvailable: Bool = Analytics.isAvailable) {
+                            usageStatsAvailable: Bool = Analytics.isAvailable,
+                            remoteAppAvailable: Bool? = nil) {
         self.init(audioProbe: providers.audioProbe,
                   localNetwork: providers.localNetwork,
                   remoteControl: providers.remoteControl,
@@ -587,7 +594,8 @@ public final class SetupModel {
                   bluetoothPrimer: providers.bluetoothPrimer,
                   settings: settings,
                   localNetworkGated: localNetworkGated,
-                  usageStatsAvailable: usageStatsAvailable)
+                  usageStatsAvailable: usageStatsAvailable,
+                  remoteAppAvailable: remoteAppAvailable)
     }
 
     /// Trigger + verify the audio-capture permission. On first run this surfaces
@@ -911,59 +919,167 @@ public final class SetupModel {
     /// safe to call: registering an `SMAppService` daemon shows NO system
     /// prompt of its own (see ``PTPHelperManaging/register()``'s doc comment) —
     /// it just adds a disabled entry to Login Items. The user-facing step is
-    /// the *approval* afterwards, which `.requiresApproval` surfaces. Called
-    /// once, at onboarding load (mirrors the design doc's "at first launch").
-    /// Idempotent — safe to call again (e.g. "Open Setup…").
+    /// the *approval* afterwards, which `.requiresApproval` surfaces. Called at
+    /// onboarding load and again on every return to the front
+    /// (``reregisterPTPHelperOnReturn()``). Idempotent — `register()` on a
+    /// daemon that is already registered is a no-op.
     ///
-    /// NOTE (Developer-ID gating): under this branch's ad-hoc signing,
-    /// `register()` cannot validate and this will not progress past
-    /// `.notRegistered`/reach `.enabled` — see ``PTPHelperManaging``'s doc
-    /// comment and PROGRESS.md T5/T6. Real end-to-end verification is blocked
-    /// until Developer ID signing ships.
+    /// A throw is NOT by itself a failure. On current macOS the FIRST
+    /// `register()` for a daemon normally throws (`SMAppServiceErrorDomain`
+    /// code 1, "Operation not permitted") while the "Background Items Added"
+    /// notice is up, and the status afterwards reads `.requiresApproval`: the
+    /// ordinary awaiting-approval path, which the user finishes in Login Items.
+    /// So the status AFTER the throw decides — only `.notFound` (launchd does
+    /// not know the label at all) is a packaging fault
+    /// (``ptpHelperRegistrationFailed``). Treating every throw as one used to
+    /// auto-pass the step on a first run and leave nothing to press.
     public func registerPTPHelper() {
+        var registerError: Error?
         do {
             try ptpHelper.register()
-            ptpHelperRegistrationFailed = false
         } catch {
-            // Nothing the user can fix — so it must not hold the gate shut
-            // (``requiredPermissionsNotGranted()``), and the failure has to
-            // reach somewhere a support ticket can quote: `Telemetry` writes to
-            // `~/Library/Logs/Audiout/`, the stderr line stays for a dev run.
-            ptpHelperRegistrationFailed = true
-            Telemetry.log(.permission, "ptp_register_failed", ["error": String(describing: error)])
-            FileHandle.standardError.write(
-                Data("[Audiout] PTP helper registration failed: \(error)\n".utf8))
+            registerError = error
         }
-        setPTPHelperStatus(ptpHelper.status)
+        let status = ptpHelper.status
+        ptpHelperRegistrationFailed = registerError != nil && status == .notFound
+        if let registerError {
+            // The failure has to reach somewhere a support ticket can quote:
+            // `Telemetry` writes to `~/Library/Logs/Audiout/`, the stderr line
+            // stays for a dev run. The status that followed is what says
+            // whether this was the awaiting-approval throw or a real fault.
+            Telemetry.log(.permission, "ptp_register_failed", [
+                "error": String(describing: registerError),
+                "status_after": status.telemetryName,
+            ])
+            FileHandle.standardError.write(Data(
+                ("[Audiout] PTP helper registration failed: \(registerError) "
+                 + "(status now \(status.telemetryName))\n").utf8))
+        }
+        setPTPHelperStatus(status)
         onChange?()
     }
 
-    /// Whether the launch-time ``registerPTPHelper()`` threw. Like
-    /// ``PTPHelperStatus/notFound`` it is a packaging/signing fault rather than
-    /// a user decision, so the Speaker Sync step auto-passes on it instead of
-    /// asking for an approval that can never be given.
+    /// Whether the last ``registerPTPHelper()`` threw AND left the label
+    /// unknown (`.notFound`) — a packaging/signing fault rather than a user
+    /// decision. Recomputed on every register, so a later success clears it.
+    /// It never stands without ``ptpHelperStatus`` reading `.notFound`, which
+    /// is what the Speaker Sync gate reads; this flag is the witness that
+    /// separates "register threw into nothing" from a plain `.notFound` read,
+    /// for a log or a test.
     public private(set) var ptpHelperRegistrationFailed = false
+
+    /// The return-to-front half of registration — what the Setup window runs
+    /// when the app comes back (from Login Items or anywhere else) instead of
+    /// the poll's status-only read. Approval alone does not load the daemon:
+    /// once the user has flipped the switch, the NEXT `register()` is what
+    /// succeeds and bootstraps it, and the poll never registers. Decides on the
+    /// LAST KNOWN status, so a step that was already settled when the user
+    /// left costs no launchd round-trip, and a `.requiresApproval` that is
+    /// still unapproved simply throws into the same `.requiresApproval` again —
+    /// no loop, one register per return.
+    ///
+    /// `.notFound` cannot be registered into, with one exception: the ratchet
+    /// says the helper WAS approved once (``AppSettings/speakerSyncWasEnabled``)
+    /// and the label has since gone unknown — Background Task Management was
+    /// reset — where only the unregister→drain→register cycle brings the entry
+    /// back. That goes through
+    /// ``PTPHelperReconciler/unregisterDrainAndReregister(helper:registerRetryDelay:registerRetryAttempts:)``,
+    /// the one sanctioned cycle (a naked pair manufactures a doomed
+    /// registration — see its call site), and runs at most once per model so
+    /// a `.notFound` that survives it never spins.
+    public func reregisterPTPHelperOnReturn() async {
+        switch ptpHelperStatus {
+        case .enabled:
+            return
+        case .notRegistered, .requiresApproval:
+            registerPTPHelper()
+        case .notFound:
+            guard settings.speakerSyncWasEnabled, !didRecyclePTPHelper else { return }
+            didRecyclePTPHelper = true
+            let cycle = await PTPHelperReconciler.unregisterDrainAndReregister(
+                helper: ptpHelper,
+                registerRetryDelay: ptpHelperRecycleRetryDelay,
+                registerRetryAttempts: ptpHelperRecycleRetryAttempts)
+            Telemetry.log(.permission, "ptp_register_recycled", [
+                "result": Self.telemetryName(cycle.outcome),
+                "drain_polls": String(cycle.drainPolls),
+                "register_attempts": String(cycle.registerAttempts),
+            ])
+            await refreshPTPHelperStatus()
+            // The cycle's own register decides the flag now, the same way a
+            // direct register does: clean if the label came back, else still
+            // the fault it was.
+            ptpHelperRegistrationFailed = ptpHelperStatus == .notFound
+        }
+    }
+
+    /// Whether ``reregisterPTPHelperOnReturn()`` has spent its one recycle.
+    private var didRecyclePTPHelper = false
+
+    /// Pacing for the recycle's drain poll and register retries — the
+    /// reconciler's own launch-time defaults. Overridable so a test can run
+    /// the cycle against a fake without waiting out the real drain budget.
+    var ptpHelperRecycleRetryDelay: TimeInterval = 0.5
+    var ptpHelperRecycleRetryAttempts = 10
+
+    private static func telemetryName(_ outcome: PTPHelperReconciler.RegistrationCycleOutcome) -> String {
+        switch outcome {
+        case .registered: return "registered"
+        case .unregisterThrew: return "unregister_threw"
+        case .drainNeverObserved: return "drain_never_observed"
+        case .registerExhausted: return "register_exhausted"
+        }
+    }
 
     /// The one place ``ptpHelperStatus`` is written, so the "was it ever really
     /// on?" ratchet cannot be bypassed by a new assignment site. Reaching
     /// `.enabled` — however it is reached — is what arms the wake audit's
-    /// Login Items nag; only an explicit skip
-    /// (``noteSpeakerSyncSkipped()``) disarms it again.
+    /// Login Items nag, and nothing disarms it: the step cannot be skipped, so
+    /// an approved helper that later reads `.requiresApproval` really was
+    /// switched off.
     private func setPTPHelperStatus(_ next: PTPHelperStatus) {
         ptpHelperStatus = next
         if next == .enabled { settings.speakerSyncWasEnabled = true }
     }
 
-    /// Remember that the user passed on Speaker Sync, so the wake audit stops
-    /// treating an unapproved helper as something that got turned off.
-    public func noteSpeakerSyncSkipped() {
-        settings.speakerSyncWasEnabled = false
+    /// Adopt a fresh status read, repainting only on an actual transition so
+    /// idle polling doesn't churn the UI.
+    private func publishPTPHelperStatus(_ next: PTPHelperStatus) {
+        guard next != ptpHelperStatus else { return }
+        setPTPHelperStatus(next)
+        onChange?()
     }
 
     /// Deep-link to System Settings › General › Login Items & Extensions,
     /// where the user approves (or later revokes) the PTP helper.
     public func openPTPHelperLoginItems() {
         ptpHelper.openSystemSettingsLoginItems()
+    }
+
+    // MARK: Audiout Remote
+
+    /// Whether an iPhone running Audiout Remote is connected to this Mac
+    /// right now. The Setup card's completion condition, and the only one it
+    /// accepts: a checkmark is real or it is nothing, so an approval on file
+    /// with no phone on the network does not earn one.
+    ///
+    /// Pushed by the app layer from `CompanionServer.onClientCountChanged` —
+    /// this model owns no socket.
+    public private(set) var remoteAppIsConnected = false
+
+    /// Whether the Mac will accept a phone at all: the EFFECTIVE Allow
+    /// setting, launch option included. False drops the card from the flow
+    /// rather than auto-passing it — an invitation on a Mac that refuses
+    /// phones would be a claim that is not real.
+    public let remoteAppIsAvailable: Bool
+
+    /// The app layer's push. Repaints on a real change only, so a reconnect
+    /// storm does not redraw the window per socket.
+    public func noteRemoteAppClientCount(_ count: Int) {
+        let connected = count > 0
+        guard connected != remoteAppIsConnected else { return }
+        remoteAppIsConnected = connected
+        onChange?()
     }
 
     // MARK: Usage statistics
@@ -1026,10 +1142,7 @@ public final class SetupModel {
     /// Only the compare-and-publish comes back here.
     public func refreshPTPHelperStatus() async {
         let helper = ptpHelper
-        let next = await Task.detached { helper.status }.value
-        guard next != ptpHelperStatus else { return }
-        setPTPHelperStatus(next)
-        onChange?()
+        publishPTPHelperStatus(await Task.detached { helper.status }.value)
     }
 
     /// Re-check ONLY Remote Control via the silent `AXIsProcessTrusted()` read —
@@ -1067,8 +1180,7 @@ public final class SetupModel {
     ///   helper the user did once approve (``AppSettings/speakerSyncWasEnabled``
     ///   — the ratchet set the first time the status reads `.enabled`). That is
     ///   the real "turned off in Login Items" case, and the only one worth
-    ///   re-opening the window for. A helper that was never approved, or that
-    ///   the user explicitly skipped (which clears the flag), is not a
+    ///   re-opening the window for. A helper that was never approved is not a
     ///   regression; `.notFound` is a packaging bug the user cannot fix;
     ///   `.notRegistered` is the pre-registration state (handled by the app's
     ///   launch-time registration attempt, not a nag here); `.enabled` is fine.
@@ -1105,11 +1217,13 @@ public final class SetupModel {
     /// - Audio capture: granted only on `.granted` — `.unsupported` is excluded
     ///   (pre-14.2 OS; no grant can fix it, so nagging about it would mislead).
     /// - Local Network: granted only on `.granted`.
-    /// - PTP helper: granted on `.enabled`, and treated as granted on the two
-    ///   states no approval can fix — `.notFound` (the daemon is missing from
-    ///   the bundle) and a `register()` that threw
-    ///   (``ptpHelperRegistrationFailed``). Holding the Done gate shut on a
-    ///   packaging bug would leave the user with nothing to press.
+    /// - PTP helper: granted on `.enabled`, and treated as granted on the one
+    ///   state no approval can fix — `.notFound` (launchd does not know the
+    ///   label: the daemon is missing from the bundle). Holding the Done gate
+    ///   shut on a packaging bug would leave the user with nothing to press.
+    ///   Every other state holds it: `.requiresApproval` is a switch the user
+    ///   can still flip, and a `register()` that threw into it is the normal
+    ///   first-run path (``registerPTPHelper()``), not a fault.
     public func requiredPermissionsNotGranted() -> [RequiredPermission] {
         var notGranted: [RequiredPermission] = []
         if audioStatus != .granted, audioStatus != .unsupported {
@@ -1118,7 +1232,7 @@ public final class SetupModel {
         if localNetworkStatus != .granted {
             notGranted.append(.localNetwork)
         }
-        if ptpHelperStatus != .enabled, ptpHelperStatus != .notFound, !ptpHelperRegistrationFailed {
+        if ptpHelperStatus != .enabled, ptpHelperStatus != .notFound {
             notGranted.append(.ptpHelper)
         }
         return notGranted

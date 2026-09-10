@@ -20,7 +20,7 @@ RTSP, no audio, nothing else belongs here.
 - No daemonize call: launchd owns backgrounding, and the main thread only polls for idleness.
 - Idleness is not measured until a peer has appeared or the startup grace expires.
 - The clock-id seed is derived from `gethostuuid()`, never hardcoded, so it is stable per host.
-- Info.plist is embedded through a linker section, and `CFBundleIdentifier` must match the launchd label.
+- Info.plist is embedded through a linker section from a `__BUNDLE_ID__` template, so `CFBundleIdentifier` equals the launchd label; never hardcode it (2026-09-07).
 - The launchd label is derived from the bundle id, so side-by-side dev builds stay independent.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 

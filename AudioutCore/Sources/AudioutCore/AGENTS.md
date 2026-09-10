@@ -17,8 +17,11 @@ everything up to the `OutputBackend` seam and never imports AppKit.
 - A Bluetooth trim is a ring seek and must never clear session state: the anchor and ring survive.
 - A Bluetooth EQ change bakes a new processor on `graphQueue`, never re-parameterizing a live one.
 - The PTP activation wait must strictly exceed the helper's bind-retry budget, or a late success goes unseen.
+- A PTP `register()` throw is first-run normal; only `.notFound` after it is a fault.
 - The "Taking audio back" strip follows the helper's clock, not a macOS AirPlay session.
-- Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
+- A failure the user felt goes through `Telemetry.fail(category, event, local:, shared:)`; only `shared` leaves the Mac, so device ids and error text go in `local`. Ordinary `Telemetry.log` lines never leave the Mac at all (owner's ruling 2026-09-10: the every-line forward leaked bundle ids and speaker names).
+- The sender's own log is `engine.log` beside `telemetry.jsonl`, set once where the engine is built; when a session "connected" but went silent, read `stream_health`'s `silent_s` first, then both files.
+- Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it first.
 
 ## Map
 

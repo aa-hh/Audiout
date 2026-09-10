@@ -15,8 +15,13 @@
      daemon identity, and the loser's register() silently no-op'd instead of
      throwing). The MachServices/EnvironmentVariables tokens below are
      substituted by the same global sed pass, so they carry the same
-     per-BUNDLE_ID isolation. Never edit this in place without mirroring the
-     substitution in make-app.sh.
+     per-BUNDLE_ID isolation — and so is the helper's embedded Info.plist,
+     scripts/ptp-helper-info.plist, whose CFBundleIdentifier carries the same
+     token (it hardcoded the default label until 2026-09-07, so every
+     non-default build shipped a helper whose embedded identity named another
+     daemon's Label). Never edit either in place without mirroring the
+     substitution in make-app.sh; scripts/verify-bundle.sh refuses a build
+     whose embedded identifier and Label disagree.
 
      On-demand shape (T3): the helper no longer runs from boot. RunAtLoad is
      gone and KeepAlive is scoped to SuccessfulExit=false — launchd respawns

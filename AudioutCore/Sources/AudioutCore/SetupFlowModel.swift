@@ -6,12 +6,17 @@ import Foundation
 /// `speakerSync` is the PTP helper's user-facing name (Login Items approval,
 /// not a TCC grant); `usageStats` is not an OS grant at all — it is Audiout's
 /// own opt-in, asked here rather than ambushing the first menu-bar click.
+/// `audioutRemote` is neither: it invites the iPhone app, and completes when a
+/// phone actually connects.
 public enum SetupStep: CaseIterable, Sendable {
     case audio
     case localNetwork
     case bluetooth
     case speakerSync
     case remoteControl
+    /// The iPhone app itself — not an OS grant and not even Audiout's own
+    /// switch, but the one card that ends setup with a phone paired.
+    case audioutRemote
     case usageStats
 }
 
@@ -56,6 +61,10 @@ public enum SetupAllowOutcome: String, Equatable, Sendable {
     /// Audiout's OWN consent sheet. The answer lands when that sheet is
     /// answered, never on the click itself.
     case consentSheetRaised = "consent_sheet_raised"
+    /// Audiout Remote's only path: the click opens audiout.app/remote in a
+    /// browser. It is the one card whose primary button is not the
+    /// completion — a phone connecting is.
+    case remotePageOpened = "remote_page_opened"
 }
 
 /// Where an Allow click sends the user, when it sends them anywhere. The flow
@@ -74,6 +83,9 @@ public enum SetupAllowDestination: Equatable, Sendable {
     /// raises is ours too — and it exists so that a click can never BE the
     /// consent, only the thing that asks for it.
     case usageStatsConsent
+    /// Open `audiout.app/remote` in the browser. Not System Settings and not
+    /// a sheet — the one destination outside this Mac.
+    case remotePage
 }
 
 /// The full answer to one Allow click.
@@ -132,29 +144,29 @@ public final class SetupFlowModel {
     /// something macOS gives Audiout, and putting that between two permission
     /// asks would blur the difference the whole window is teaching.
     public static let steps: [SetupStep] = [.audio, .localNetwork, .bluetooth, .speakerSync,
-                                            .remoteControl, .usageStats]
+                                            .remoteControl, .audioutRemote, .usageStats]
 
     /// The four steps a user may pass on. An UNDECIDED one holds Done shut:
     /// the gate waits for every card to be decided, and a skip is the decision
     /// that clears it (see ``isDoneAvailable``).
     ///
     /// Bluetooth and Remote Control are outside ``RequiredPermission`` entirely,
-    /// so their permissions never held Done shut either. **Speaker Sync is
-    /// different** and deliberately so: it stays a `RequiredPermission` and is
-    /// still audited whenever it was ever enabled, because a helper that was
-    /// approved and then switched off is a real regression. What the skip buys
-    /// is an EXIT — approval lives in Login Items, macOS can refuse it outright,
-    /// and without a skip an unapproved helper locked this gate forever with
-    /// nothing on screen to press. ``unmetRequiredSteps()`` is what filters a
-    /// skipped Speaker Sync out of the gate.
+    /// so their permissions never held Done shut either. **Speaker Sync is NOT
+    /// here** (owner decision 2026-09-07): without the helper the app cannot
+    /// keep speakers in time, so there is no way past it — the step holds the
+    /// gate until Login Items says `.enabled`, and its only auto-pass is a
+    /// `.notFound` daemon (see ``isComplete(_:)``). It was skippable once, as a
+    /// workaround for a first-run `register()` throw that was misread as an
+    /// unfixable fault; ``SetupModel/registerPTPHelper()`` now reads that
+    /// throw for what it is, so the exit is no longer needed.
     ///
-    /// **Usage Statistics is skippable in a fourth sense again:** its skip is
+    /// **Usage Statistics is skippable in a different sense:** its skip is
     /// the DECLINE, not a deferral. PRODUCT.md's rule for that stream is
     /// "asked once, never re-nagged", so passing on it is an answer the app
     /// keeps (``SetupModel/declineUsageStats()``) and never puts back on
     /// screen. Its button says so — "No Thanks", not "Skip for now".
-    public static let skippableSteps: Set<SetupStep> = [.bluetooth, .remoteControl, .speakerSync,
-                                                        .usageStats]
+    public static let skippableSteps: Set<SetupStep> = [.bluetooth, .remoteControl,
+                                                        .audioutRemote, .usageStats]
 
     /// Steps the user explicitly passed on. Skipped is NOT granted: such a step
     /// stays unchecked, and the app asks again the next time it genuinely needs
@@ -180,8 +192,14 @@ public final class SetupFlowModel {
 
     public init(setup: SetupModel) {
         self.setup = setup
-        let steps = setup.usageStatsAreAvailable
-            ? Self.steps : Self.steps.filter { $0 != .usageStats }
+        // Two cards are DROPPED rather than auto-passed where the thing they
+        // ask for cannot exist: usage counts in a build with no analytics
+        // sink, and the iPhone card on a Mac whose Allow switch is off. A
+        // checkmark either way would claim a state that is not real.
+        let steps = Self.steps.filter {
+            ($0 != .usageStats || setup.usageStatsAreAvailable)
+                && ($0 != .audioutRemote || setup.remoteAppIsAvailable)
+        }
         self.steps = steps
         self.startIndex = Self.firstUnmetRequiredIndex(in: setup, among: steps) ?? 0
         // An answer already given is an answer: PRODUCT.md asks once. A DECLINE
@@ -213,14 +231,17 @@ public final class SetupFlowModel {
         case .localNetwork: return setup.localNetworkStatus == .granted || !setup.isLocalNetworkGated
         case .bluetooth: return setup.bluetoothStatus == .granted
         // Same auto-pass posture as `.unsupported` audio two lines up: a
-        // `.notFound` daemon (missing from the bundle) and a `register()` that
-        // threw are packaging/signing faults, not user decisions, so no
-        // approval exists to demand and a hard gate must not demand one.
+        // `.notFound` daemon (launchd does not know the label) is a packaging
+        // fault, not a user decision, so no approval exists to demand and a
+        // hard gate must not demand one. `.requiresApproval` is NOT that — it
+        // is a switch the user can flip, and the gate waits for it.
         case .speakerSync:
-            return setup.ptpHelperStatus == .enabled
-                || setup.ptpHelperStatus == .notFound
-                || setup.ptpHelperRegistrationFailed
+            return setup.ptpHelperStatus == .enabled || setup.ptpHelperStatus == .notFound
         case .remoteControl: return setup.remoteControlStatus == .granted
+        // Real or nothing: a phone is connected right now, or the card is not
+        // done. An approval on file with no phone on the network is not a
+        // paired phone.
+        case .audioutRemote: return setup.remoteAppIsConnected
         // Ours, not macOS's: complete means the user said yes. Saying no is a
         // DECISION, not a completion — it lands in `skippedSteps` like every
         // other pass, and the row stays honestly unchecked.
@@ -265,7 +286,9 @@ public final class SetupFlowModel {
         // Not a privacy pane at all — approval only exists in Login Items.
         case .speakerSync: return .loginItems
         case .remoteControl: return .settingsPane(.accessibility)
-        // Not a System Settings pane at all — our own sheet.
+        // Neither is a System Settings pane: one is our own sheet, the other
+        // a page on the web.
+        case .audioutRemote: return .remotePage
         case .usageStats: return .usageStatsConsent
         }
     }
@@ -361,6 +384,12 @@ public final class SetupFlowModel {
             setup.primeRemoteControl()
             return SetupAllowResult(setup.remoteControlStatus == .granted ? .promptTriggered : .probeTimeout)
 
+        case .audioutRemote:
+            // Opens the page and completes NOTHING: this card is done when a
+            // phone connects, and the button exists so a person who would
+            // rather read on the Mac can.
+            return SetupAllowResult(.remotePageOpened, .remotePage)
+
         case .usageStats:
             // Raises a surface and grants NOTHING. Every other step's Allow
             // hands the decision to a dialog the user still has to answer, and
@@ -371,16 +400,18 @@ public final class SetupFlowModel {
         }
     }
 
-    /// Stable step name for ``Telemetry`` — explicit, so a future added case is
-    /// a compile error here rather than a silently unlabeled log line (same
-    /// posture as `PermissionStatus.telemetryDescription`).
-    private static func telemetryName(_ step: SetupStep) -> String {
+    /// Stable step name for ``Telemetry`` and the `step` property of the
+    /// `onboarding:step_granted` / `onboarding:step_skipped` events — explicit,
+    /// so a future added case is a compile error here rather than a silently
+    /// unlabeled log line (same posture as `PermissionStatus.telemetryDescription`).
+    public static func telemetryName(_ step: SetupStep) -> String {
         switch step {
         case .audio: return "audio"
         case .localNetwork: return "local_network"
         case .bluetooth: return "bluetooth"
         case .speakerSync: return "speaker_sync"
         case .remoteControl: return "remote_control"
+        case .audioutRemote: return "audiout_remote"
         case .usageStats: return "usage_stats"
         }
     }
@@ -391,11 +422,7 @@ public final class SetupFlowModel {
     public func skip(_ step: SetupStep) {
         guard Self.skippableSteps.contains(step) else { return }
         skippedSteps.insert(step)
-        // Remember it beyond this window: the wake audit must stop reading an
-        // unapproved helper as "something got turned off in Login Items".
-        // `reopen(_:)` needs no counterpart — the flag only re-arms on a real
-        // `.enabled`.
-        if step == .speakerSync { setup.noteSpeakerSyncSkipped() }
+        Analytics.capture("onboarding:step_skipped", ["step": Self.telemetryName(step)])
         // The one skip that is a final ANSWER rather than a deferral: record
         // it so the ask is spent and no later presentation re-offers it, and
         // so a sink installed at launch is opted out rather than left as-is.
@@ -442,14 +469,9 @@ public final class SetupFlowModel {
     }
 
     /// The required steps still standing in the gate's way — the required
-    /// permissions that aren't granted, MINUS a Speaker Sync the user has
-    /// explicitly skipped. The skip is the exit: without this filter the step
-    /// would be skippable in name only, since its permission would keep the
-    /// gate shut from the other side.
+    /// permissions that aren't granted, as steps.
     private func unmetRequiredSteps() -> [SetupStep] {
-        setup.requiredPermissionsNotGranted()
-            .map(Self.step(for:))
-            .filter { !($0 == .speakerSync && skippedSteps.contains(.speakerSync)) }
+        setup.requiredPermissionsNotGranted().map(Self.step(for:))
     }
 
     /// Backing store for ``finalCheckState``. The public read derives

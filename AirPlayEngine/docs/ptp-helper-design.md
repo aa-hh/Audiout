@@ -147,8 +147,12 @@ names.
 
 ### 2.2 The launchd plist (shape)
 
-Shipped verbatim as `scripts/ptp-helper.plist`, installed by
-`scripts/make-app.sh` at `Contents/Library/LaunchDaemons/<Label>.plist`:
+Shipped from the `scripts/ptp-helper.plist` template, installed by
+`scripts/make-app.sh` at `Contents/Library/LaunchDaemons/<Label>.plist`. The
+values below show the default `BUNDLE_ID`; the template carries `__BUNDLE_ID__`
+where they appear, and so does the helper's embedded Info.plist
+(`scripts/ptp-helper-info.plist`, `CFBundleIdentifier`), rendered with the same
+substitution so a non-default build's daemon identity is consistent everywhere:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>

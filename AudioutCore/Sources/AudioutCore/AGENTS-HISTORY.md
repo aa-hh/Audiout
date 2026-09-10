@@ -11,7 +11,7 @@ Archived verbatim from AGENTS.md on 2026-09-02 when that file was trimmed to the
 This is the actual source folder for the `AudioutCore` library target — the
 UI-agnostic routing/session core: device discovery, output backends, capture
 (whole-system + per-app), the routing "brain" (Selected Devices/Main Out/
-groups/per-app redirects), local playback, persistence, and the first-run
+scenes/per-app redirects), local playback, persistence, and the first-run
 setup/permissions flow. It owns everything up to the `OutputBackend` protocol
 seam; it never imports AppKit and knows nothing about windows, popovers, or
 views (those live in `AudioutSharedUI`/UI targets, one level up). The
@@ -118,7 +118,7 @@ so with its own reason.** Its audio comes from `AppRouteMixer`, never through th
 whole-system EQ stage, so `reconcileEQPlan` sets `eqBypassReason =
 .perAppRouting` for a claimed device with a non-flat stored EQ — a different
 sentence from `.streamBudget`, because sending the user to delete other speakers'
-tone would not help. The Equalizer page (Groups screen)
+tone would not help. The Equalizer page (Scenes screen)
 carries the honesty — the popover shows no tone state at all.
 
 **A Bluetooth trim change must NEVER rebuild a sink.** The delay is physically
@@ -151,6 +151,42 @@ The strip is triggered by the helper's clock not being ready — NOT by a macOS 
 
 **Helper-cycling self-heal path:**
 Helper-cycling must ALWAYS go through `PTPHelperReconciler.unregisterDrainAndReregister` — never re-derive the unregister→register sequence. A register() call before the drain completes is a proven failure mode producing a doomed registration.
+
+**The first-run `register()` throw is not a failure (2026-09-07):**
+On current macOS the FIRST `SMAppService.register()` for a daemon normally THROWS (`SMAppServiceErrorDomain` code 1, "Operation not permitted") while the "Background Items Added" notice is shown, and `status` afterwards reads `.requiresApproval` — the user finishes it in Login Items. `SetupModel.registerPTPHelper()` used to take ANY throw as a packaging fault (sticky `ptpHelperRegistrationFailed`), which auto-passed the onboarding step on every first run and left the helper unregistered. The status AFTER the throw decides now: only `.notFound` is the fault. Approval alone does not load the daemon either — the next `register()` after it does — so the Setup window registers again on every return to the front (`SetupModel.reregisterPTPHelperOnReturn()`), never from the status poll, and a once-approved helper that reads `.notFound` (BTM reset) gets one drain-safe recycle through the reconciler.
+
+**The decision log stopped going to PostHog (2026-09-10):**
+1.1.1 shipped `54cdfea8`, which forwarded every `Telemetry.log` line to PostHog
+Logs under the usage-stats opt-in and stripped only six field names (`device`,
+`deviceID`, `uid`, `name`, `host`, `address`). A denylist was the wrong shape:
+live records carried app bundle ids (`org.mozilla.firefox`,
+`com.spotify.client`), speaker names rendered by
+`NativeBackend.telemetryDeviceList`, and raw error strings such as
+`processNotYetAudible(bundleID:)` — all of it forbidden by PRODUCT.md "Data
+Collection". The owner deleted the forward rather than lengthen the strip list.
+The rule is an allowlist now, with one implementation:
+`Telemetry.fail(category, event, local:, shared:)` writes both field sets to the
+local file at `level:error` and sends only `shared` to
+`Analytics.captureError`. Ordinary `Telemetry.log` lines never leave the Mac;
+the user ships them by hand through Settings › About › Save diagnostics. Never
+put a forward back into the private `write(...)` helper that `log` and `fail`
+share — that is precisely how `local:` fields would start leaking again.
+
+TRAP: an error report from `fail` has no usable stack trace. The send runs on
+the telemetry writer's queue, so the trace the PostHog SDK builds describes that
+queue and never the code that failed. The exception type (the event name) is the
+only locator; the detail is in the local `telemetry.jsonl` line.
+
+TRAP: `scripts/run-tests.sh` exited 1 after fully green runs, because its EXIT
+trap killed an already-finished process group with a bare `kill` and `set -e`
+lets a command failing inside an EXIT trap replace the script's exit status.
+Guard 4 read those green suites as failures. Fixed by adding `|| true` to the
+kill.
+
+Four documents state what leaves the Mac, and a change to any one of them moves
+all four: `PRODUCT.md` "Data Collection", `UsageStatsConsentCard.bodyText`, the
+website's privacy page and its support page about usage statistics, and
+`audiout-shared/docs/analytics-events.md`.
 
 ## Architecture
 
@@ -238,7 +274,7 @@ Redirecting one app to a specific device:
 | Per-app capture/mix | `PerAppCaptureCoordinator`, `AppRouteMixer`, `LeveledAppInjector` |
 | Shared capture infra | `DefaultOutputDeviceMonitor`, `TapRebuildLifecycle` (`TapRebuildCoalescer`, `TapReanchor`) |
 | Routing brain | `GroupController`, `AppRoutingController`, `PhaseController` |
-| Repaint gating | `StructuralStateGate` — has selection/groups moved since the surfaces were last painted? `onStateDidChange` fires for EVERY model change (a volume-key hold included) while the repaints it can trigger are full sweeps, so the coordinator gates them on this. |
+| Repaint gating | `StructuralStateGate` — has selection/scenes moved since the surfaces were last painted? `onStateDidChange` fires for EVERY model change (a volume-key hold included) while the repaints it can trigger are full sweeps, so the coordinator gates them on this. |
 | Persistence | `AppRouteStore`, `RoutingStore`, `GroupStore`, `AppSettings`, `ExcludedAppsStore`, `ExcludedAppsController`, `DeviceIconStore`, `DeviceEQStore` |
 | Tone shaping | `DeviceEQ`, `EQStreamTopology`, `EQProcessor` |
 | Mic-probe calibration (064) | `MicProbeSession`, `BuiltInMicRecorder`, `MicCapturePermission` (license-clean; hardware-free). The DSP itself — `SyncProbe`, `SyncProbeCorrelator` — moved out to the `ProbeKit` package in [audiout-shared](https://github.com/aa-hh/audiout-shared), which the iPhone companion also links |

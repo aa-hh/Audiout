@@ -4206,7 +4206,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         backend.setOutputSet([device.id])
         backend.stop()
-        await pollUntil { !capture.isCapturing }
+        // An op log that is still EMPTY satisfies `!capture.isCapturing`, so a
+        // wait on that returns before the queued start has even landed.
+        await pollUntil { capture.ops.last == "stop" }
         #expect(!(capture.isCapturing), "stop() must leave the tap stopped, whichever way it raced the queued start")
         #expect(capture.ops.last == "stop")
     }

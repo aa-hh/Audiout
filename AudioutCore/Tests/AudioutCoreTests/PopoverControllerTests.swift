@@ -564,17 +564,25 @@ import AudioutProtocol
 
     /// Poll the backend until `id`'s connection state satisfies `predicate`
     /// (the scripted choreography runs on the mock's own queue).
+    ///
+    /// `SuiteWait.timeout` is a hang-stop, not a measure of how fast this
+    /// machine is, so no caller brings a deadline of its own. Expiry is silent
+    /// there and recorded here instead, after one more read of the predicate: a
+    /// main-actor hop that lands late leaves the state satisfied a moment past
+    /// the deadline, and calling that a timeout blames the wrong code.
     private func waitForConnectionState(
-        _ backend: MockBackend, id: String, timeout: TimeInterval = 3,
+        _ backend: MockBackend, id: String,
+        sourceLocation: SourceLocation = #_sourceLocation,
         _ predicate: (ConnectionState) -> Bool
     ) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if let device = backend.devices.first(where: { $0.id == id }),
-               predicate(device.connectionState) { return }
-            try await Task.sleep(nanoseconds: 20_000_000)
+        func holds() -> Bool {
+            guard let device = backend.devices.first(where: { $0.id == id }) else { return false }
+            return predicate(device.connectionState)
         }
-        Issue.record("timed out waiting for \(id)'s connection state")
+        await SuiteWait.until(timeout: SuiteWait.timeout, sourceLocation: sourceLocation, holds)
+        guard !holds() else { return }
+        Issue.record("timed out waiting for \(id)'s connection state",
+                     sourceLocation: sourceLocation)
     }
 
     private func isFailed(_ state: ConnectionState) -> Bool {
@@ -806,11 +814,8 @@ import AudioutProtocol
         let homepodDevice = try #require(backend.devices.first { $0.id == "homepod-bed" })
         #expect(homepodDevice.connectionState == .connecting, "the in-flight device was not disturbed by the retry's setOutputSet")
 
-        // Timeouts widened to stay above the new 3.0s/6.0s scripted delays
-        // (plus contention headroom) — these calls poll every 20ms until the
-        // predicate holds, so a bigger ceiling is free in the fast path.
-        try await waitForConnectionState(backend, id: "office", timeout: 8) { $0 == .connected }
-        try await waitForConnectionState(backend, id: "homepod-bed", timeout: 12) { $0 == .connected }
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        try await waitForConnectionState(backend, id: "homepod-bed") { $0 == .connected }
         popover.update(devices: backend.devices)
         #expect(popover.test_deviceRow(for: "office")?.test_statusKind == .connected)
         #expect(popover.test_deviceRow(for: "homepod-bed")?.test_statusKind == .connected)
@@ -3478,6 +3483,137 @@ import AudioutProtocol
         #expect(popover.test_systemAirPlayNoteText == nil, "the note clears once a key is in place")
     }
 
+    // MARK: Trial pill + the two one-time banners (M6)
+
+    /// Wires a popover to a trial that has `daysLeft` days to run, and returns
+    /// the banners it raised. `daysLeft: nil` means no trial at all.
+    private func wireTrial(_ popover: PopoverController,
+                           daysLeft: Int?,
+                           owed: TrialBanner? = nil) -> Raised {
+        let raised = Raised()
+        popover.trialStateProvider = {
+            guard let daysLeft else { return .none }
+            return .active(daysLeft: daysLeft,
+                           expiresAt: Date(timeIntervalSinceNow: Double(daysLeft) * 86_400),
+                           registered: true)
+        }
+        popover.trialBannerOwedProvider = { raised.owedNow(owed) }
+        popover.onTrialBannerShown = { raised.append($0) }
+        return raised
+    }
+
+    /// The banners a wired popover raised, and the one-shot rule the host's
+    /// persisted flag enforces in production: once raised, never owed again.
+    private final class Raised {
+        private(set) var banners: [TrialBanner] = []
+        func append(_ banner: TrialBanner) { banners.append(banner) }
+        func owedNow(_ owed: TrialBanner?) -> TrialBanner? {
+            banners.isEmpty ? owed : nil
+        }
+    }
+
+    /// The pill takes the note slot from day one of a trial, says how long is
+    /// left, and offers the purchase page. Red if it stopped appearing, stopped
+    /// counting, or stopped outranking the unregistered note — a trialist would
+    /// then be told they are running an unregistered copy.
+    @Test func trialPillShowsDaysLeftAndOutranksTheUnregisteredNote() async throws {
+        let (popover, _, _) = try await makePopover()
+        var buyTaps = 0
+        popover.onBuyAudiout = { buyTaps += 1 }
+        popover.setUnregisteredNoteActive(true)
+
+        _ = wireTrial(popover, daysLeft: 9)
+        popover.rebuild()
+
+        #expect(popover.test_systemAirPlayNoteText == "Trial · 9 days left")
+        #expect(popover.test_systemAirPlayNoteHasActionButton)
+        popover.test_tapSystemAirPlayNoteAction()
+        #expect(buyTaps == 1, "the pill opens the purchase page through the host")
+    }
+
+    /// Red if the pill lost its singular on the last day ("Trial · 1 days
+    /// left"), which is the one day the number is not plural.
+    @Test func trialPillReadsSingularOnTheLastDay() async throws {
+        let (popover, _, _) = try await makePopover()
+        _ = wireTrial(popover, daysLeft: 1)
+        popover.rebuild()
+        #expect(popover.test_systemAirPlayNoteText == "Trial · 1 day left")
+    }
+
+    /// Red if the pill outlived the trial: a Mac that never started one, or one
+    /// whose trial is spent, must fall back to the unregistered note rather
+    /// than count days that no longer exist.
+    @Test func noPillWithoutARunningTrial() async throws {
+        let (popover, _, _) = try await makePopover()
+        popover.setUnregisteredNoteActive(true)
+
+        _ = wireTrial(popover, daysLeft: nil)
+        popover.rebuild()
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredNoteText,
+                "no trial, so the standing unregistered note has the slot")
+
+        // Expired reads the same way here — the gate, not the popover, is what
+        // a spent trial meets (M3).
+        popover.trialStateProvider = { .expired(expiresAt: Date(timeIntervalSinceNow: -86_400)) }
+        popover.rebuild()
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.unregisteredNoteText)
+    }
+
+    /// A one-time banner outranks the pill, is reported to the host the moment
+    /// it is raised (not when it is dismissed), and is raised exactly once.
+    /// Red if a rebuild mid-open re-raised it, which would report one banner
+    /// several times over.
+    @Test func aOneTimeBannerOutranksThePillAndIsRaisedOnce() async throws {
+        let (popover, _, backend) = try await makePopover()
+        let raised = wireTrial(popover, daysLeft: 3, owed: .threeDays)
+
+        popover.rebuild()
+        #expect(popover.test_systemAirPlayNoteText
+                == "Your trial ends in 3 days. €30 once keeps everything, including updates.")
+        #expect(raised.banners == [.threeDays], "reported as it goes up")
+
+        popover.update(devices: backend.devices)
+        popover.rebuild()
+        #expect(raised.banners == [.threeDays], "a rebuild does not re-raise it")
+
+        // It is spent by the close, and the pill has the slot on the next open.
+        popover.surfaceDidHide()
+        popover.test_isShownOverride = true
+        popover.rebuildForOpen()
+        #expect(popover.test_systemAirPlayNoteText == "Trial · 3 days left")
+    }
+
+    /// Red if the last-day banner stopped being the one a Mac sees when both
+    /// are due — someone opening the app for the first time on day 14 would
+    /// read "ends in 3 days" on the day it ends.
+    @Test func theLastDayBannerIsTheOneRaisedWhenBothAreDue() async throws {
+        let (popover, _, _) = try await makePopover()
+        // What `TrialClock.owedBanner` answers with both flags unset on day 14.
+        let raised = wireTrial(popover, daysLeft: 1, owed: .lastDay)
+
+        popover.rebuild()
+        #expect(popover.test_systemAirPlayNoteText
+                == "Last day of your trial. Tomorrow Audiout asks for a key.")
+        #expect(raised.banners == [.lastDay])
+    }
+
+    /// Red if a trial nudge started outranking something actually happening
+    /// right now — the single note slot's whole precedence rule.
+    @Test func aLiveWarningTakesTheSlotFromATrialNudge() async throws {
+        let (popover, _, _) = try await makePopover()
+        _ = wireTrial(popover, daysLeft: 2, owed: .lastDay)
+        popover.rebuild()
+
+        popover.setRoutingBlockedNeedsDefault(true)
+        #expect(popover.test_systemAirPlayNoteText
+                == PopoverController.routingBlockedNeedsDefaultText)
+
+        popover.setRoutingBlockedNeedsDefault(false)
+        #expect(popover.test_systemAirPlayNoteText
+                == "Last day of your trial. Tomorrow Audiout asks for a key.",
+                "the banner is handed straight back")
+    }
+
     // MARK: Routing-blocked warning (Wave 3 T-UI)
 
     /// The "Audiout isn't your output device" warning: shows the verbatim copy
@@ -3738,5 +3874,122 @@ import AudioutProtocol
         popover.applyRoutedAppRunning(bundleID: "com.example.music", isRunning: false)
         assertSameRGBA(popover.test_cardHeaderTitleColor(title: "App Routing"),
                        Tokens.Color.label2, "the app quit, the route stops sounding")
+    }
+}
+
+/// `connection:failed` and `connection:connected` describe a speaker the USER
+/// asked for, and are gated accordingly. Delete the gate and every speaker the
+/// backend can see bills the install for its mDNS churn; narrow it back to the
+/// Selected set alone and a playing group's members go unreported.
+///
+/// Nested under `SerializedSharedState` because `Analytics.install` mutates
+/// process-global state — the rule in `SerializedSharedStateSuite.swift`. Only
+/// these six cases pay for the global sink.
+extension SerializedSharedState {
+    @MainActor
+    @Suite struct PopoverConnectionAnalyticsTests {
+
+        private final class Captured: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [(String, [String: String])] = []
+            func append(_ name: String, _ props: [String: String]) {
+                lock.withLock { items.append((name, props)) }
+            }
+            /// The properties of every capture under `event`, in order.
+            func properties(of event: String) -> [[String: String]] {
+                lock.withLock { items.filter { $0.0 == event }.map(\.1) }
+            }
+        }
+
+        private func fleet(office: ConnectionState) -> [Device] {
+            [Device(id: "local-mac", name: "This Mac", kind: .localMac, isLocalDevice: true),
+             Device(id: "office", name: "Office", kind: .homePod, connectionState: office)]
+        }
+
+        private func tempDirectory() -> URL {
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent("PopoverConnectionAnalytics-\(UUID().uuidString)",
+                                        isDirectory: true)
+        }
+
+        /// Why the user does or does not want audio on "office" — the axis both
+        /// tests run over. `playingGroupMember` is the case Selected Devices
+        /// alone cannot see: Main Out targets a saved group holding "office"
+        /// while "office" itself is never checked in Selected Devices.
+        enum Intent: CaseIterable {
+            case selected
+            case playingGroupMember
+            case unwanted
+        }
+
+        /// A popover holding `.off` for both devices, with "office" wanted the
+        /// way `intent` names. Whatever snapshot the test pushes next is
+        /// therefore a real edge out of `.off`.
+        private func makePopover(intent: Intent) throws -> PopoverController {
+            let backend = MockBackend(fleet: fleet(office: .off), staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            backend.test_settle()
+            let controller = GroupController(backend: backend,
+                                             store: GroupStore(directory: tempDirectory()),
+                                             routingStore: RoutingStore(directory: tempDirectory()),
+                                             loadPersisted: false)
+            let popover = PopoverController()
+            popover.configure(groupController: controller)
+            popover.test_isShownOverride = true
+            popover.update(devices: fleet(office: .off))
+            switch intent {
+            case .selected:
+                _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+            case .playingGroupMember:
+                let group = try controller.createGroup(name: "Kitchen + Office",
+                                                       memberIDs: ["office"]).group
+                controller.setMainOut(.group(id: group.id))
+            case .unwanted:
+                break
+            }
+            try #require(controller.isSpeakerSelected("office") == (intent == .selected),
+                         "only the selected case reaches the gate through Selected Devices")
+            try #require(controller.isMainOutMember("office") == (intent != .unwanted),
+                         "the fixture really is in the wanted/unwanted state under test")
+            return popover
+        }
+
+        /// Runs `body` with a consenting sink installed and hands back what it saw.
+        private func captured(_ body: () -> Void) -> Captured {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             captureError: { _, _ in },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+            body()
+            return captured
+        }
+
+        /// Drop the gate on the failure capture and the `unwanted` case turns
+        /// red: an unwanted speaker losing its Bonjour advert is the backend's
+        /// business, not the user's. Narrow the gate to Selected Devices and
+        /// `playingGroupMember` turns red instead.
+        @Test(arguments: Intent.allCases)
+        func aFailureIsCapturedOnlyForAWantedSpeaker(intent: Intent) throws {
+            let popover = try makePopover(intent: intent)
+            let seen = captured {
+                popover.update(devices: fleet(office: .failed(ConnectionFailure(cause: .vanished))))
+            }
+            #expect(seen.properties(of: "connection:failed")
+                    == (intent == .unwanted ? [] : [["kind": "homePod", "cause": "vanished"]]))
+        }
+
+        /// The same two gate breakages on the connect capture. A speaker the
+        /// user selected still reports its connect exactly once.
+        @Test(arguments: Intent.allCases)
+        func aConnectIsCapturedOnlyForAWantedSpeaker(intent: Intent) throws {
+            let popover = try makePopover(intent: intent)
+            let seen = captured {
+                popover.update(devices: fleet(office: .connected))
+            }
+            #expect(seen.properties(of: "connection:connected")
+                    == (intent == .unwanted ? [] : [["kind": "homePod"]]))
+        }
     }
 }

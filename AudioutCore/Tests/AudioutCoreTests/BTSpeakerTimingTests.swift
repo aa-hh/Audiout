@@ -575,6 +575,7 @@ extension SerializedSharedState {
         let events = EventCapture()
         Telemetry._installTestSink { lines.append($0) }
         Analytics.install(Analytics.Sink(capture: { events.append($0, $1) },
+                                         captureError: { _, _ in },
                                          consentChanged: { _ in }), consent: true)
         defer {
             Analytics.install(nil, consent: false)

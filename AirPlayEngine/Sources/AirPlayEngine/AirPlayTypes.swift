@@ -369,3 +369,24 @@ public struct WriteSchedulingSnapshot: Sendable, Equatable {
         self.interArrivalGap = interArrivalGap
     }
 }
+
+/// What one content stream carried since the previous snapshot: the loudest
+/// sample in the window as dBFS, and how long the stream has been silent in a
+/// row (`silentSeconds`, running across windows until a write above −60 dBFS
+/// resets it). A stream "connected" with packets flowing and `silentSeconds`
+/// climbing is exactly the shape that could not be told apart from healthy
+/// playback on 2026-09-05 (docs/plans/PLAN-LIVE-DIAGNOSTICS.md C3).
+/// `peakDBFS` floors at −120 for an all-zero window.
+public struct StreamLevelSnapshot: Sendable, Equatable {
+    public var streamId: UInt32
+    public var peakDBFS: Double
+    public var silentSeconds: Double
+    public var writes: UInt64
+
+    public init(streamId: UInt32, peakDBFS: Double, silentSeconds: Double, writes: UInt64) {
+        self.streamId = streamId
+        self.peakDBFS = peakDBFS
+        self.silentSeconds = silentSeconds
+        self.writes = writes
+    }
+}

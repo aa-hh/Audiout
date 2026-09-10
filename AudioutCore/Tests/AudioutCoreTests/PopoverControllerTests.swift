@@ -564,17 +564,25 @@ import AudioutProtocol
 
     /// Poll the backend until `id`'s connection state satisfies `predicate`
     /// (the scripted choreography runs on the mock's own queue).
+    ///
+    /// `SuiteWait.timeout` is a hang-stop, not a measure of how fast this
+    /// machine is, so no caller brings a deadline of its own. Expiry is silent
+    /// there and recorded here instead, after one more read of the predicate: a
+    /// main-actor hop that lands late leaves the state satisfied a moment past
+    /// the deadline, and calling that a timeout blames the wrong code.
     private func waitForConnectionState(
-        _ backend: MockBackend, id: String, timeout: TimeInterval = 3,
+        _ backend: MockBackend, id: String,
+        sourceLocation: SourceLocation = #_sourceLocation,
         _ predicate: (ConnectionState) -> Bool
     ) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if let device = backend.devices.first(where: { $0.id == id }),
-               predicate(device.connectionState) { return }
-            try await Task.sleep(nanoseconds: 20_000_000)
+        func holds() -> Bool {
+            guard let device = backend.devices.first(where: { $0.id == id }) else { return false }
+            return predicate(device.connectionState)
         }
-        Issue.record("timed out waiting for \(id)'s connection state")
+        await SuiteWait.until(timeout: SuiteWait.timeout, sourceLocation: sourceLocation, holds)
+        guard !holds() else { return }
+        Issue.record("timed out waiting for \(id)'s connection state",
+                     sourceLocation: sourceLocation)
     }
 
     private func isFailed(_ state: ConnectionState) -> Bool {
@@ -806,11 +814,8 @@ import AudioutProtocol
         let homepodDevice = try #require(backend.devices.first { $0.id == "homepod-bed" })
         #expect(homepodDevice.connectionState == .connecting, "the in-flight device was not disturbed by the retry's setOutputSet")
 
-        // Timeouts widened to stay above the new 3.0s/6.0s scripted delays
-        // (plus contention headroom) — these calls poll every 20ms until the
-        // predicate holds, so a bigger ceiling is free in the fast path.
-        try await waitForConnectionState(backend, id: "office", timeout: 8) { $0 == .connected }
-        try await waitForConnectionState(backend, id: "homepod-bed", timeout: 12) { $0 == .connected }
+        try await waitForConnectionState(backend, id: "office") { $0 == .connected }
+        try await waitForConnectionState(backend, id: "homepod-bed") { $0 == .connected }
         popover.update(devices: backend.devices)
         #expect(popover.test_deviceRow(for: "office")?.test_statusKind == .connected)
         #expect(popover.test_deviceRow(for: "homepod-bed")?.test_statusKind == .connected)
@@ -3869,5 +3874,122 @@ import AudioutProtocol
         popover.applyRoutedAppRunning(bundleID: "com.example.music", isRunning: false)
         assertSameRGBA(popover.test_cardHeaderTitleColor(title: "App Routing"),
                        Tokens.Color.label2, "the app quit, the route stops sounding")
+    }
+}
+
+/// `connection:failed` and `connection:connected` describe a speaker the USER
+/// asked for, and are gated accordingly. Delete the gate and every speaker the
+/// backend can see bills the install for its mDNS churn; narrow it back to the
+/// Selected set alone and a playing group's members go unreported.
+///
+/// Nested under `SerializedSharedState` because `Analytics.install` mutates
+/// process-global state — the rule in `SerializedSharedStateSuite.swift`. Only
+/// these six cases pay for the global sink.
+extension SerializedSharedState {
+    @MainActor
+    @Suite struct PopoverConnectionAnalyticsTests {
+
+        private final class Captured: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [(String, [String: String])] = []
+            func append(_ name: String, _ props: [String: String]) {
+                lock.withLock { items.append((name, props)) }
+            }
+            /// The properties of every capture under `event`, in order.
+            func properties(of event: String) -> [[String: String]] {
+                lock.withLock { items.filter { $0.0 == event }.map(\.1) }
+            }
+        }
+
+        private func fleet(office: ConnectionState) -> [Device] {
+            [Device(id: "local-mac", name: "This Mac", kind: .localMac, isLocalDevice: true),
+             Device(id: "office", name: "Office", kind: .homePod, connectionState: office)]
+        }
+
+        private func tempDirectory() -> URL {
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent("PopoverConnectionAnalytics-\(UUID().uuidString)",
+                                        isDirectory: true)
+        }
+
+        /// Why the user does or does not want audio on "office" — the axis both
+        /// tests run over. `playingGroupMember` is the case Selected Devices
+        /// alone cannot see: Main Out targets a saved group holding "office"
+        /// while "office" itself is never checked in Selected Devices.
+        enum Intent: CaseIterable {
+            case selected
+            case playingGroupMember
+            case unwanted
+        }
+
+        /// A popover holding `.off` for both devices, with "office" wanted the
+        /// way `intent` names. Whatever snapshot the test pushes next is
+        /// therefore a real edge out of `.off`.
+        private func makePopover(intent: Intent) throws -> PopoverController {
+            let backend = MockBackend(fleet: fleet(office: .off), staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            backend.test_settle()
+            let controller = GroupController(backend: backend,
+                                             store: GroupStore(directory: tempDirectory()),
+                                             routingStore: RoutingStore(directory: tempDirectory()),
+                                             loadPersisted: false)
+            let popover = PopoverController()
+            popover.configure(groupController: controller)
+            popover.test_isShownOverride = true
+            popover.update(devices: fleet(office: .off))
+            switch intent {
+            case .selected:
+                _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+            case .playingGroupMember:
+                let group = try controller.createGroup(name: "Kitchen + Office",
+                                                       memberIDs: ["office"]).group
+                controller.setMainOut(.group(id: group.id))
+            case .unwanted:
+                break
+            }
+            try #require(controller.isSpeakerSelected("office") == (intent == .selected),
+                         "only the selected case reaches the gate through Selected Devices")
+            try #require(controller.isMainOutMember("office") == (intent != .unwanted),
+                         "the fixture really is in the wanted/unwanted state under test")
+            return popover
+        }
+
+        /// Runs `body` with a consenting sink installed and hands back what it saw.
+        private func captured(_ body: () -> Void) -> Captured {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             captureError: { _, _ in },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+            body()
+            return captured
+        }
+
+        /// Drop the gate on the failure capture and the `unwanted` case turns
+        /// red: an unwanted speaker losing its Bonjour advert is the backend's
+        /// business, not the user's. Narrow the gate to Selected Devices and
+        /// `playingGroupMember` turns red instead.
+        @Test(arguments: Intent.allCases)
+        func aFailureIsCapturedOnlyForAWantedSpeaker(intent: Intent) throws {
+            let popover = try makePopover(intent: intent)
+            let seen = captured {
+                popover.update(devices: fleet(office: .failed(ConnectionFailure(cause: .vanished))))
+            }
+            #expect(seen.properties(of: "connection:failed")
+                    == (intent == .unwanted ? [] : [["kind": "homePod", "cause": "vanished"]]))
+        }
+
+        /// The same two gate breakages on the connect capture. A speaker the
+        /// user selected still reports its connect exactly once.
+        @Test(arguments: Intent.allCases)
+        func aConnectIsCapturedOnlyForAWantedSpeaker(intent: Intent) throws {
+            let popover = try makePopover(intent: intent)
+            let seen = captured {
+                popover.update(devices: fleet(office: .connected))
+            }
+            #expect(seen.properties(of: "connection:connected")
+                    == (intent == .unwanted ? [] : [["kind": "homePod"]]))
+        }
     }
 }

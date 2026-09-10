@@ -140,14 +140,16 @@ public final class GeneralSettingsViewController: NSViewController {
                 environment: [String: String] = ProcessInfo.processInfo.environment,
                 aboutInfo: AboutInfo = .current(),
                 openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
-                approvals: CompanionApprovalController? = nil) {
+                approvals: CompanionApprovalController? = nil,
+                saveDiagnostics: (() -> Void)? = nil) {
         self.loginItem = loginItem
         self.settings = settings
         self.approvals = approvals
         self.remoteControlResolution = AppSettings.resolvedAllowRemoteControlWithSource(
             environment: environment, settings: settings)
         self.openURL = openURL
-        self.aboutWindowController = AboutWindowController(info: aboutInfo, openURL: openURL)
+        self.aboutWindowController = AboutWindowController(info: aboutInfo, openURL: openURL,
+                                                           saveDiagnostics: saveDiagnostics)
         super.init(nibName: nil, bundle: nil)
         title = "General"
     }
@@ -692,7 +694,7 @@ public final class GeneralSettingsViewController: NSViewController {
     /// The usage-analytics consent live hint: what sharing does or doesn't do.
     private static func consentHintLine(_ enabled: Bool) -> String {
         enabled
-            ? "Anonymous feature counts and speaker timings help improve Audiout."
+            ? "Anonymous feature counts, speaker timings and crash reports help improve Audiout."
             : "No usage data leaves this Mac."
     }
 

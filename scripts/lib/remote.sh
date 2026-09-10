@@ -234,9 +234,14 @@ remote_run() {
     # confusion this function exists to prevent.
     # Two probes guard it, because one is not enough: /usr/bin/swift exists
     # under Command Line Tools, so `command -v` cannot see a CLT-selected
-    # remote. `xcrun --show-sdk-platform-path` is what SwiftPM calls before
-    # running any test bundle, and it fails under CLT — the remote twin of
-    # run-tests.sh's exit-78 check.
+    # remote. `xcrun --sdk macosx --show-sdk-platform-path` is what SwiftPM
+    # calls before running any test bundle, and it fails under CLT — the
+    # remote twin of run-tests.sh's exit-78 check. `--sdk macosx` is not
+    # decoration: without it xcrun resolves the DEFAULT SDK, and a Mac that
+    # has Command Line Tools installed beside Xcode can hold a CLT SDK newer
+    # than the selected Xcode accepts. That is how the second Mac reported
+    # "not usable" for a day (2026-09-10) while Xcode, simulators and
+    # xcodebuild were all healthy, and every run fell back to this machine.
     # -tt ties the remote command's life to this connection: with a tty, sshd
     # HUPs the remote process group the moment the local side dies — even
     # SIGKILL, since the kernel still closes the socket. Without it an
@@ -250,7 +255,7 @@ remote_run() {
          cd \"$_rdir\" || exit 97; \
          touch .last-used; \
          command -v $remote_toolchain >/dev/null 2>&1 || exit 97; \
-         xcrun --show-sdk-platform-path >/dev/null 2>&1 || exit 97; \
+         xcrun --sdk macosx --show-sdk-platform-path >/dev/null 2>&1 || exit 97; \
          _s=''; _n=1; \
          while [ \$_n -le $remote_slots ]; do \
              if /usr/bin/shlock -f /tmp/audiout-remote-work.lock.\$_n -p \$\$; then \

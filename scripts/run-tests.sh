@@ -399,7 +399,12 @@ set +e
 set -m
 ( cd "$core" && swift test $test_args "$@" ) >&2 &
 swift_pgid=$!
-trap 'kill -- -"$swift_pgid" 2>/dev/null; rm -f "$slot_file" 2>/dev/null' EXIT HUP INT TERM
+# On HUP/INT/TERM the kill is what stops a running suite. On a normal exit
+# the group is already gone after `wait`, so the kill fails, and `set -e` is
+# on again by then: without `|| true` the trap itself failed and overrode the
+# real status from `exit "$status"` below, so a passing suite handed the
+# caller a 1 and Guard 4 refused green commits.
+trap 'kill -- -"$swift_pgid" 2>/dev/null || true; rm -f "$slot_file" 2>/dev/null' EXIT HUP INT TERM
 wait "$swift_pgid"
 status=$?
 set +m
@@ -409,11 +414,13 @@ if [ "$status" -eq 0 ] && [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ]; then
     mkdir -p "$cache_dir"
     : > "$stamp"
 else
-    # Say it in our own voice, last. The exit code below is correct and always
-    # has been, but a caller who writes `run-tests.sh | tail -15` gets TAIL's
-    # exit code — 0, always — and then reads a green status over a red suite.
-    # (That is exactly how this script got accused of swallowing failures.) One
-    # unmistakable line survives any tail, so the transcript cannot look green.
+    # Say it in our own voice, last. The exit code below is honest now -- it
+    # used to lie on a pass, because the EXIT trap's kill failed after `wait`
+    # and clobbered it under `set -e` (fixed above) -- but a caller who writes
+    # `run-tests.sh | tail -15` still gets TAIL's exit code, 0 always, and
+    # reads a green status over a red suite. (That is exactly how this script
+    # got accused of swallowing failures.) One unmistakable line survives any
+    # tail, so the transcript cannot look green.
     [ "$status" -eq 0 ] || echo "  suite: FAILED — swift test exited $status." >&2
 fi
 

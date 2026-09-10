@@ -396,10 +396,13 @@ set +e
 # Ctrl-C leaves the compiler running, holding SwiftPM's per-`.build` lock, and
 # every later build queues behind it silently -- the failure looks like a slow
 # build and cost hours on 2026-09-04. `wait` still yields the real exit status.
+# `|| true` on the kill: under `set -e` a command that fails inside an EXIT
+# trap replaces the script's own exit status, so once the group had already
+# finished a fully green run exited 1 and Guard 4 refused it as a failure.
 set -m
 ( cd "$core" && swift test $test_args "$@" ) >&2 &
 swift_pgid=$!
-trap 'kill -- -"$swift_pgid" 2>/dev/null; rm -f "$slot_file" 2>/dev/null' EXIT HUP INT TERM
+trap 'kill -- -"$swift_pgid" 2>/dev/null || true; rm -f "$slot_file" 2>/dev/null' EXIT HUP INT TERM
 wait "$swift_pgid"
 status=$?
 set +m

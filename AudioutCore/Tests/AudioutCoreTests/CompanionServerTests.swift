@@ -329,9 +329,17 @@ import AudioutProtocol
             }
         }
 
+        server.broadcast(makeSnapshot())
+
         let (client, log) = try connectClient(via: hub, to: server)
         defer { client.cancel() }
         try sendHello(over: client)
+        // Wait for the promotion to land before sending the command — the
+        // server takes two hops on its own queue between hello and
+        // `clients[id]` existing, and a command that beats that window gets
+        // its connection cancelled instead of a reply.
+        try #require(waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
+                     "the client was never welcomed")
         sendText(try CompanionEnvelope(message: .command(requestID: "req-1", command: .setDeviceVolume(id: "dev-1", volume: 40))).encoded(), over: client)
 
         #expect(waitUntil { log.contains(.commandResult(requestID: "req-1", applied: false, refusalReason: "no such device", autoSwappedCurrentDevice: true)) },
@@ -703,8 +711,16 @@ import AudioutProtocol
             disconnectedIDs.withLock { $0.append(id) }
         }
 
+        server.broadcast(makeSnapshot())
+
         let (client, log) = try connectClient(via: hub, to: server)
         try sendHello(over: client)
+        // Wait for the promotion to land before sending the command — the
+        // server takes two hops on its own queue between hello and
+        // `clients[id]` existing, and a command that beats that window gets
+        // its connection cancelled instead of a reply.
+        try #require(waitUntil { log.messages.contains { if case .welcome = $0 { return true } else { return false } } },
+                     "the client was never welcomed")
         sendText(try CompanionEnvelope(message: .command(requestID: "r1", command: .setMainOutMuted(muted: true))).encoded(), over: client)
         try #require(waitUntil { log.contains(.commandResult(requestID: "r1", applied: true, refusalReason: nil, autoSwappedCurrentDevice: false)) },
                      "the command never completed")

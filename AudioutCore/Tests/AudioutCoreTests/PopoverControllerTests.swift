@@ -3871,3 +3871,101 @@ import AudioutProtocol
                        Tokens.Color.label2, "the app quit, the route stops sounding")
     }
 }
+
+/// `connection:failed` and `connection:connected` describe a speaker the USER
+/// asked for, so both are gated on `wantsAudio`. Ungated, the whole network's
+/// mDNS churn arrives as user events: one install sent 357 `connection:failed`
+/// on 2026-09-09, 356 of them `vanished`, in bursts of 16 inside 20 ms, with no
+/// user action anywhere near them.
+///
+/// Nested under `SerializedSharedState` because `Analytics.install` mutates
+/// process-global state — the rule in `SerializedSharedStateSuite.swift`. Only
+/// these four cases pay for the global sink.
+extension SerializedSharedState {
+    @MainActor
+    @Suite struct PopoverConnectionAnalyticsTests {
+
+        private final class Captured: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [(String, [String: String])] = []
+            func append(_ name: String, _ props: [String: String]) {
+                lock.withLock { items.append((name, props)) }
+            }
+            /// The properties of every capture under `event`, in order.
+            func properties(of event: String) -> [[String: String]] {
+                lock.withLock { items.filter { $0.0 == event }.map(\.1) }
+            }
+        }
+
+        private func fleet(office: ConnectionState) -> [Device] {
+            [Device(id: "local-mac", name: "This Mac", kind: .localMac, isLocalDevice: true),
+             Device(id: "office", name: "Office", kind: .homePod, connectionState: office)]
+        }
+
+        private func tempDirectory() -> URL {
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent("PopoverConnectionAnalytics-\(UUID().uuidString)",
+                                        isDirectory: true)
+        }
+
+        /// A popover holding `.off` for both devices, with "office" in Selected
+        /// Devices iff `wanted`. Whatever snapshot the test pushes next is
+        /// therefore a real edge out of `.off`.
+        private func makePopover(wanted: Bool) throws -> PopoverController {
+            let backend = MockBackend(fleet: fleet(office: .off), staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            backend.test_settle()
+            let controller = GroupController(backend: backend,
+                                             store: GroupStore(directory: tempDirectory()),
+                                             routingStore: RoutingStore(directory: tempDirectory()),
+                                             loadPersisted: false)
+            let popover = PopoverController()
+            popover.configure(groupController: controller)
+            popover.test_isShownOverride = true
+            popover.update(devices: fleet(office: .off))
+            if wanted {
+                _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+            }
+            try #require(controller.isSpeakerSelected("office") == wanted,
+                         "the fixture really is in the wanted/unwanted state under test")
+            return popover
+        }
+
+        /// Runs `body` with a consenting sink installed and hands back what it saw.
+        private func captured(_ body: () -> Void) -> Captured {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+            body()
+            return captured
+        }
+
+        /// Drop the `wantsAudio` gate on the failure capture and the unselected
+        /// case turns red: an unwanted speaker losing its Bonjour advert is the
+        /// backend's business, not the user's.
+        @Test(arguments: [true, false])
+        func aFailureIsCapturedOnlyForAWantedSpeaker(wanted: Bool) throws {
+            let popover = try makePopover(wanted: wanted)
+            let seen = captured {
+                popover.update(devices: fleet(office: .failed(ConnectionFailure(cause: .vanished))))
+            }
+            #expect(seen.properties(of: "connection:failed")
+                    == (wanted ? [["kind": "homePod", "cause": "vanished"]] : []))
+        }
+
+        /// Drop the same gate on the connect capture and the unselected case turns
+        /// red. The `true` case is also the no-regression half: a speaker the user
+        /// selected still reports its connect exactly once.
+        @Test(arguments: [true, false])
+        func aConnectIsCapturedOnlyForAWantedSpeaker(wanted: Bool) throws {
+            let popover = try makePopover(wanted: wanted)
+            let seen = captured {
+                popover.update(devices: fleet(office: .connected))
+            }
+            #expect(seen.properties(of: "connection:connected")
+                    == (wanted ? [["kind": "homePod"]] : []))
+        }
+    }
+}

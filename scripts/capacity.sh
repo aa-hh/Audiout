@@ -98,7 +98,12 @@ _mule_out=$(ssh -o BatchMode=yes -o ConnectTimeout="$remote_probe_timeout" \
              _age=\$(( \$(date +%s) - \$(stat -f %m \"\$_f\" 2>/dev/null || date +%s) )); \
              if [ -n \"\$_p\" ] && kill -0 \"\$_p\" 2>/dev/null; then \
                  _c=\$(ps -o command= -p \"\$_p\" 2>/dev/null); \
-                 echo \"\$_n	\$_p	alive	\$_age	\$_c\"; \
+                 _pp=\$(ps -o ppid= -p \"\$_p\" 2>/dev/null | tr -d ' '); \
+                 if [ \"\$_pp\" = 1 ]; then \
+                     echo \"\$_n	\$_p	orphaned	\$_age	\$_c\"; \
+                 else \
+                     echo \"\$_n	\$_p	alive	\$_age	\$_c\"; \
+                 fi; \
              else \
                  echo \"\$_n	\$_p	dead	\$_age	(process gone)\"; \
              fi; \
@@ -113,7 +118,14 @@ fi
 printf '%s\n' "$_mule_out" | while IFS="$(printf '\t')" read -r _n _pid _alive _age _cmd; do
     [ -n "$_n" ] || continue
     _stale=""
-    if [ "$_alive" = "alive" ]; then
+    # ppid 1 means the ssh session that started this job is gone. The job cannot
+    # be finished or reported by anyone, so it is dead however young it is and
+    # however plausible its command line — the next remote run reclaims the
+    # permit and kills the process group. Reported, never reclaimed here: this
+    # script is read-only by design.
+    if [ "$_alive" = "orphaned" ]; then
+        _stale=" STALE (ssh session gone; the next remote run reclaims it)"
+    elif [ "$_alive" = "alive" ]; then
         case "$_cmd" in
             *run-tests.sh*|*build.sh*|*make-app.sh*|*ios.sh*|*run-app.sh*|*pre-commit*|*swift*|*xcodebuild*|*xctest*)
                 [ "$_age" -gt "$max_age" ] && _stale=" STALE (age > ${max_age}s)" ;;
@@ -122,6 +134,6 @@ printf '%s\n' "$_mule_out" | while IFS="$(printf '\t')" read -r _n _pid _alive _
     fi
     echo "  mule permit $_n: pid $_pid, $_alive, age ${_age}s, cmd: $(trim80 "$_cmd")$_stale"
 done
-echo "  held $_held of $remote_slots"
+echo "  held $_held of $remote_slots (dead and orphaned holders not counted)"
 
 exit 0

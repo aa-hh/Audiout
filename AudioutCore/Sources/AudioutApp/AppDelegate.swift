@@ -142,7 +142,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // fires here instead. Without this, anyone who opts in from
                 // the Setup card would never contribute one.
                 Self.captureCoarseLocationOnce()
-            }
+            },
+            captureAt: { PostHogSDK.shared.capture($0, properties: $1, timestamp: $2) }
         ), consent: settings.telemetryOptIn)
         if settings.telemetryOptIn { Self.captureCoarseLocationOnce() }
     }

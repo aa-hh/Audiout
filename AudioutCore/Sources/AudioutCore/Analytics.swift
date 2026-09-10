@@ -34,13 +34,19 @@ public enum Analytics {
         public let capture: @Sendable (String, [String: String]) -> Void
         public let captureError: @Sendable (String, [String: String]) -> Void
         public let consentChanged: @Sendable (Bool) -> Void
+        /// `capture` with the moment the event really happened. Only the
+        /// pre-consent buffer flush uses it (see ``capture(_:_:)``); a sink
+        /// that leaves it nil sends those events stamped at flush time.
+        public let captureAt: (@Sendable (String, [String: String], Date) -> Void)?
 
         public init(capture: @escaping @Sendable (String, [String: String]) -> Void,
                     captureError: @escaping @Sendable (String, [String: String]) -> Void,
-                    consentChanged: @escaping @Sendable (Bool) -> Void) {
+                    consentChanged: @escaping @Sendable (Bool) -> Void,
+                    captureAt: (@Sendable (String, [String: String], Date) -> Void)? = nil) {
             self.capture = capture
             self.captureError = captureError
             self.consentChanged = consentChanged
+            self.captureAt = captureAt
         }
     }
 
@@ -51,6 +57,7 @@ public enum Analytics {
         state.withLock { s in
             s.sink = sink
             s.consent = consent
+            s.pending.removeAll()
         }
     }
 
@@ -65,28 +72,59 @@ public enum Analytics {
     /// Updates the consent flag, then forwards the new value to the
     /// installed sink's `consentChanged` — the user's actual opt-in/out
     /// decision (Settings › General toggle, or the one-time ask).
+    ///
+    /// Granting consent also sends everything ``capture(_:_:)`` held back
+    /// while it was off, in order and with their original times,
+    /// so the first-run steps that happen BEFORE the usage-statistics card
+    /// still reach the onboarding funnel. A decline drops them.
     public static func setConsent(_ granted: Bool) {
-        let sink: Sink? = state.withLock { s in
+        let (sink, held): (Sink?, [Held]) = state.withLock { s in
             s.consent = granted
-            return s.sink
+            defer { s.pending.removeAll() }
+            return (s.sink, granted ? s.pending : [])
         }
-        sink?.consentChanged(granted)
+        guard let sink else { return }
+        sink.consentChanged(granted)
+        for h in held {
+            if let captureAt = sink.captureAt { captureAt(h.event, h.properties, h.at) }
+            else { sink.capture(h.event, h.properties) }
+        }
     }
 
-    /// No-op unless a sink is installed AND consent is true; otherwise calls
-    /// the sink's `capture` synchronously on the caller's thread.
+    /// No-op without a sink. With a sink and consent, calls the sink's
+    /// `capture` synchronously on the caller's thread. With a sink but no
+    /// consent yet, holds the event in memory — never on disk, never sent —
+    /// so a consent granted before the app quits can send it (``setConsent``).
+    /// Quitting drops the buffer; so does a decline.
     public static func capture(_ event: StaticString, _ properties: [String: String] = [:]) {
         let snapshot: Sink? = state.withLock { s in
-            guard s.consent else { return nil }
+            guard s.sink != nil else { return nil }
+            guard s.consent else {
+                // razor: a flat cap; the buffer only has to outlive first-run setup.
+                if s.pending.count < pendingCap {
+                    s.pending.append(Held(event: event.description, properties: properties, at: Date()))
+                }
+                return nil
+            }
             return s.sink
         }
         snapshot?.capture(event.description, properties)
     }
 
+    /// Events held while consent was off. A first run is a few dozen; the
+    /// cap exists so a session that never opts in cannot grow unbounded.
+    private static let pendingCap = 200
+
+    private struct Held: Sendable {
+        let event: String
+        let properties: [String: String]
+        let at: Date
+    }
+
     /// Report a failure the user actually felt — audio that stopped, a
     /// settings file that would not save — to PostHog error tracking, so the
     /// stream of what breaks in the field is visible next to what gets used.
-    /// Gated exactly like ``capture(_:_:)``: no sink or no consent, no send.
+    /// No sink or no consent, no send.
     ///
     /// `name` is a `StaticString` for the same reason event names are: it can
     /// only ever be a literal written into this repo, so no runtime value can
@@ -103,6 +141,10 @@ public enum Analytics {
     /// Crashes need no call: the SDK's own `errorTrackingConfig.autoCapture`
     /// (set in `AppDelegate.configurePostHog()`) reports the unhandled ones.
     /// This is for the handled failures, which nothing else would ever see.
+    ///
+    /// One difference from ``capture(_:_:)``: a failure that happens before
+    /// the user answers the consent ask is dropped, not held for a later
+    /// grant. Only events are buffered.
     public static func captureError(_ name: StaticString, _ properties: [String: String] = [:]) {
         let snapshot: Sink? = state.withLock { s in
             guard s.consent else { return nil }
@@ -116,6 +158,7 @@ public enum Analytics {
     private struct State: Sendable {
         var sink: Sink?
         var consent = false
+        var pending: [Held] = []
     }
 
     /// Minimal `NSLock`-guarded box — same pattern as ``Telemetry``'s

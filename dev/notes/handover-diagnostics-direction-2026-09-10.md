@@ -6,7 +6,8 @@ folder, `HANDOVER-posthog-connection-errors.md` on
 `HANDOFF-posthog-logs-2026-09-10.md` in the website repo. Read this one.
 
 Mac branch `claude/resolve-handover-conflicts-31aa60`, worktree
-`.claude/worktrees/resolve-handover-conflicts-31aa60`, at `bf3b3d22`.
+`.claude/worktrees/resolve-handover-conflicts-31aa60`. The branch map below
+carries the commits.
 Plan: [`docs/plans/PLAN-LIVE-DIAGNOSTICS.md`](../../docs/plans/PLAN-LIVE-DIAGNOSTICS.md).
 Roadmap entry 037.
 
@@ -52,6 +53,7 @@ Three sub-rulings came with it:
 | Website | PR #38 | privacy and support pages |
 | audiout-shared | PR #11 | `docs/analytics-events.md` |
 | Licence server | PR #6 | its own logging docs |
+| Mac | PR #166, `3b47af5d` | review follow-up and three test fixes, open |
 | Mac | PR #148 | superseded by `bf3b3d22`, close it |
 
 The three PR numbers came with the handover and were not re-checked from this
@@ -104,8 +106,8 @@ which was never on main on its own.
 
 ## Live checks owed
 
-Nothing here has run on hardware. The first one runs unattended; the rest need
-the owner.
+The unattended settings-corruption check ran on 2026-09-10 and passed. Nothing
+else has run on hardware, and the rest need the owner.
 
 Unattended recipe for the settings-corruption path, verified by discovery on
 2026-09-10:
@@ -129,16 +131,32 @@ blocks in a modal alert, so wait out the SDK's 30-second flush and then
 `settings:file_corrupt` with `$app_version = 99.0.0`, and zero `audiout-mac` log
 records at that version. Release the slot with `bash scripts/livetest.sh done`.
 
+DONE, 2026-09-10 at 20:27 UTC. The recipe ran from build `0c6197da` as
+`Audiout Dev` 99.0.0 under `com.audiout.Audiout.dev`. The planted `groups.json`
+produced one local line,
+`"cat":"settings","evt":"settings:file_corrupt","level":"error","files":"groups.json"`.
+PostHog error tracking received exactly one `$exception` at that version, with
+`$exception_types = ["settings:file_corrupt"]`, `files = groups.json` and
+`$app_namespace = com.audiout.Audiout.dev`. Its only non-SDK properties were
+`files` and `license_status`, `$device_name` was `Mac`, and no speaker name,
+bundle id, path or free text appeared anywhere on it. PostHog Logs received zero
+`audiout-mac` records at `service.version` 99.0.0 and zero from 1.1.1 in the
+same six-minute window; the service holds 1,074 records over the prior seven
+days, so that zero is a real absence and not a broken query. The dev id's
+Application Support folder and the live-test slot were both restored.
+
 Still owed after that:
 
-1. One `$exception` in PostHog error tracking from a notarised build. The unit
-   test proves only that the sink is called.
-2. `engine.log` appears beside `telemetry.jsonl` after a session, with a `[raop]`
-   line per connect. It does not exist on this Mac today.
-3. `stream_health` shows a real peak and `silent_s` at 0 while music plays.
-4. Save diagnostics produces a zip that opens, with `snapshot.json` naming the
-   selected speakers.
-5. A selected speaker dropping still captures `connection:failed`, and an
+1. DONE with the run above. One `$exception` reached PostHog error tracking from
+   a real signed build, a Developer ID dev build rather than a notarised one.
+   The unit test proved only that the sink is called.
+2. Owner. `engine.log` appears beside `telemetry.jsonl` after a session, with a
+   `[raop]` line per connect. It does not exist on this Mac today.
+3. Owner. `stream_health` shows a real peak and `silent_s` at 0 while music
+   plays.
+4. Owner. Save diagnostics produces a zip that opens, with `snapshot.json`
+   naming the selected speakers.
+5. Owner. A selected speaker dropping still captures `connection:failed`, and an
    unselected one does not.
 
 ## Owner only
@@ -185,6 +203,21 @@ Still owed after that:
   with `AUDIOUT_TEST_MODE=serial`.
 - Computer-use tools cannot see this app: it is menu-bar only, so
   `request_access` rejects it. Ask the owner what the panel shows.
+- `PopoverConnectionAnalyticsTests` installs a process-wide analytics sink and
+  asserts an exact list of captured events, while `PopoverControllerTests` runs
+  in parallel and fires the same events, so a stray event can land in the array
+  it checks. The fix is nesting `PopoverControllerTests` under
+  `SerializedSharedState`, which changes the timing of the whole run, so it is
+  the owner's call rather than a drive-by edit.
+- `CompanionEndToEndTests` timed out six times on the localhost welcome
+  handshake during one heavily loaded run, and passed on its own afterwards.
+  Not investigated.
+- `scripts/run-tests.sh` used to exit 1 after a fully green run. Its EXIT trap
+  killed the test process group with a bare `kill`, which fails once that group
+  has already finished, and under `set -e` a command that fails inside an EXIT
+  trap replaces the script's exit status. Guard 4 refused green suites at least
+  four times on 2026-09-10. Fixed on this branch by adding `|| true` to the
+  kill, which also stops the concurrency slot file leaking on every run.
 
 ## Still true elsewhere
 

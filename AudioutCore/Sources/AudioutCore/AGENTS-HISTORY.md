@@ -177,6 +177,12 @@ the telemetry writer's queue, so the trace the PostHog SDK builds describes that
 queue and never the code that failed. The exception type (the event name) is the
 only locator; the detail is in the local `telemetry.jsonl` line.
 
+TRAP: `scripts/run-tests.sh` exited 1 after fully green runs, because its EXIT
+trap killed an already-finished process group with a bare `kill` and `set -e`
+lets a command failing inside an EXIT trap replace the script's exit status.
+Guard 4 read those green suites as failures. Fixed by adding `|| true` to the
+kill.
+
 Four documents state what leaves the Mac, and a change to any one of them moves
 all four: `PRODUCT.md` "Data Collection", `UsageStatsConsentCard.bodyText`, the
 website's privacy page and its support page about usage statistics, and

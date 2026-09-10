@@ -4878,6 +4878,8 @@ extension PopoverController: DeviceRowView.Delegate {
             // reference and drive the view through the test hooks instead.
             if let host = panel.viewIfLoaded?.window, host.isVisible {
                 panel.presentAsSheet(sheet)
+                Analytics.capture("remote_invite:sheet_shown",
+                                  ["state": Self.remoteInviteAnalyticsState(view.remoteInvite)])
             }
         }
     }
@@ -4899,6 +4901,18 @@ extension PopoverController: DeviceRowView.Delegate {
 
     private func remoteInviteState() -> BTAlignmentWizardView.RemoteInviteState {
         remoteInviteStateProvider?() ?? .notConnected
+    }
+
+    /// `remote_invite:sheet_shown`'s `state` property, per the vocabulary doc's
+    /// three allowed values.
+    private static func remoteInviteAnalyticsState(
+        _ state: BTAlignmentWizardView.RemoteInviteState
+    ) -> String {
+        switch state {
+        case .allowOff: return "allow_off"
+        case .notConnected: return "qr"
+        case .connected: return "connected"
+        }
     }
 
     /// Repaint the wizard's iPhone panel — the app layer calls this when a

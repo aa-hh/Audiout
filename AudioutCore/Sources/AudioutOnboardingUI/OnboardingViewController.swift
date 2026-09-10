@@ -156,6 +156,10 @@ public final class OnboardingViewController: NSViewController {
     /// Same idea for refusals: a denial is announced when it first becomes
     /// visible, not on every repaint that still shows it.
     private var deniedAtLastRefresh: Set<SetupStep> = []
+    /// The step whose card the hero pane last displayed (active or browsed) —
+    /// the edge `remote_invite:setup_card_shown` fires on, so a repaint that
+    /// leaves the same card up does not recount it.
+    private var lastHeroDisplayedStep: SetupStep?
     private var announcedCheckPassed = false
     private var announcedSnapBack: SetupStep?
     /// Flips true once the load-time silent status read has LANDED. Before that,
@@ -923,6 +927,13 @@ public final class OnboardingViewController: NSViewController {
     /// The hero pane's two halves: which rehearsal is on stage, and whether the
     /// stage is standing back for a real dialog.
     private func refreshHero(active: SetupStep?, animated: Bool) {
+        let displayedStep = browseStep ?? active
+        if displayedStep != lastHeroDisplayedStep {
+            lastHeroDisplayedStep = displayedStep
+            if displayedStep == .audioutRemote {
+                Analytics.capture("remote_invite:setup_card_shown")
+            }
+        }
         if let browsed = browseStep {
             // Two steps whose browse is NOT the Settings pane. Usage
             // Statistics has no such pane at all, so it re-shows its own card.
@@ -2054,7 +2065,9 @@ public final class OnboardingViewController: NSViewController {
         // OURS in the sense that matters here too: no level yield and no
         // `onWillOpenSystemSettings`, because System Settings is not what
         // comes forward.
-        case .remotePage: openURL(RemoteInviteView.pageURL)
+        case .remotePage:
+            openURL(RemoteInviteView.pageURL)
+            Analytics.capture("remote_invite:setup_link_opened")
         case .settingsPane(let pane):
             onWillOpenSystemSettings?()
             onOpenSettings(pane)

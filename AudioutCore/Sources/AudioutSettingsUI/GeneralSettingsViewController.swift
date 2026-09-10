@@ -586,6 +586,7 @@ public final class GeneralSettingsViewController: NSViewController {
 
     @objc private func remoteInviteLinkTapped() {
         openURL(RemoteInviteView.pageURL)
+        Analytics.capture("remote_invite:settings_link_opened")
     }
 
     /// The "Remembered iPhones" section (T24): a caption + bordered

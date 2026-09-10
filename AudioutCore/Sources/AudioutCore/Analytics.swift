@@ -23,22 +23,24 @@ import Foundation
 public enum Analytics {
 
     /// A capture destination: `capture` receives the event name and
-    /// properties, `consentChanged` receives the new consent value whenever
+    /// properties, `captureError` receives a failure name and properties,
+    /// `consentChanged` receives the new consent value whenever
     /// ``setConsent(_:)`` is called.
+    ///
+    /// `captureError` has no default. A sink that quietly dropped failures
+    /// would be indistinguishable from a build where nothing ever failed, so
+    /// every sink has to say what it does with them.
     public struct Sink: Sendable {
         public let capture: @Sendable (String, [String: String]) -> Void
+        public let captureError: @Sendable (String, [String: String]) -> Void
         public let consentChanged: @Sendable (Bool) -> Void
-        /// Receives one diagnostic log line (PostHog Logs): message and
-        /// attributes. Defaults to a no-op so a sink that only captures
-        /// events still compiles.
-        public let log: @Sendable (String, [String: String]) -> Void
 
         public init(capture: @escaping @Sendable (String, [String: String]) -> Void,
-                    consentChanged: @escaping @Sendable (Bool) -> Void,
-                    log: @escaping @Sendable (String, [String: String]) -> Void = { _, _ in }) {
+                    captureError: @escaping @Sendable (String, [String: String]) -> Void,
+                    consentChanged: @escaping @Sendable (Bool) -> Void) {
             self.capture = capture
+            self.captureError = captureError
             self.consentChanged = consentChanged
-            self.log = log
         }
     }
 
@@ -81,25 +83,33 @@ public enum Analytics {
         snapshot?.capture(event.description, properties)
     }
 
-    /// Forwards one ``Telemetry`` line as a diagnostic log, under the same
-    /// consent gate as ``capture(_:_:)``. The message is `category.event`;
-    /// the fields become attributes, minus anything that names a device —
-    /// PRODUCT.md's promise is that device and speaker identifiers never
-    /// leave the Mac, and the local telemetry file keeps them anyway.
-    public static func log(_ category: String, _ event: String, _ fields: [String: String]) {
+    /// Report a failure the user actually felt — audio that stopped, a
+    /// settings file that would not save — to PostHog error tracking, so the
+    /// stream of what breaks in the field is visible next to what gets used.
+    /// Gated exactly like ``capture(_:_:)``: no sink or no consent, no send.
+    ///
+    /// `name` is a `StaticString` for the same reason event names are: it can
+    /// only ever be a literal written into this repo, so no runtime value can
+    /// reach PostHog as the failure's identity. `properties` carry the same
+    /// fence as every other event (PRODUCT.md Data Collection) — counts,
+    /// enum-like strings and booleans, never a speaker name, a user's bundle
+    /// id, a file path, or anything typed. Cocoa error descriptions are the
+    /// trap here: `localizedDescription` routinely embeds a full local path,
+    /// so send the domain and the code instead.
+    ///
+    /// Name failures `category:object_failed` in snake_case, matching
+    /// ``capture(_:_:)``'s event naming.
+    ///
+    /// Crashes need no call: the SDK's own `errorTrackingConfig.autoCapture`
+    /// (set in `AppDelegate.configurePostHog()`) reports the unhandled ones.
+    /// This is for the handled failures, which nothing else would ever see.
+    public static func captureError(_ name: StaticString, _ properties: [String: String] = [:]) {
         let snapshot: Sink? = state.withLock { s in
             guard s.consent else { return nil }
             return s.sink
         }
-        guard let sink = snapshot else { return }
-        var attributes = fields.filter { !Self.deviceKeys.contains($0.key) }
-        attributes["category"] = category
-        sink.log("\(category).\(event)", attributes)
+        snapshot?.captureError(name.description, properties)
     }
-
-    /// Field names ``Telemetry`` callers use for a device, speaker or
-    /// network identifier. Stripped before a line leaves the Mac.
-    static let deviceKeys: Set<String> = ["device", "deviceID", "uid", "name", "host", "address"]
 
     // MARK: - Implementation
 

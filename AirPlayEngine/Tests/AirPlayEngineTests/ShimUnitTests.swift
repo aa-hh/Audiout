@@ -239,6 +239,47 @@ extension SerializedEngineState {
         event_set_log_callback(nil)
     }
 
+    // MARK: - Engine log file (PLAN-LIVE-DIAGNOSTICS.md C2)
+    //
+    // The defects this catches: a line written without the ISO timestamp the
+    // host's decision log uses (the two files could no longer interleave by
+    // eye), or a file that grows past its cap because rotation never fires or
+    // fires without reopening (the tail of a live session would be lost).
+    @Test func engineLogFileStampsLinesAndRotatesAtTheCap() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("engine-log-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer {
+            engine_logger_set_file(nil, 0)
+            try? FileManager.default.removeItem(at: dir)
+        }
+        let active = dir.appendingPathComponent("engine.log")
+        let backup = dir.appendingPathComponent("engine.log.1")
+
+        // `DPRINTF` is C-variadic, which Swift cannot call; `DVPRINTF` is the
+        // same path one step in.
+        func emit(_ fmt: String, _ args: CVarArg...) {
+            withVaList(args) { DVPRINTF(E_LOG, L_RAOP, fmt, $0) }
+        }
+
+        // A cap two lines wide: the third line lands in a fresh file.
+        engine_logger_set_file(active.path, 120)
+        emit("first %d\n", 1)
+        let firstLine = try String(contentsOf: active, encoding: .utf8)
+        let stamp = try #require(firstLine.split(separator: " ").first)
+        #expect(stamp.wholeMatch(of: #/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/#) != nil,
+                "expected an ISO-8601 UTC stamp, got \(stamp)")
+        #expect(firstLine.contains("[raop] first 1"))
+
+        emit("second, long enough to cross one hundred and twenty bytes of cap\n")
+        emit("third\n")
+        #expect(FileManager.default.fileExists(atPath: backup.path), "reaching the cap must rotate")
+        let rotated = try String(contentsOf: backup, encoding: .utf8)
+        #expect(rotated.contains("first 1") && rotated.contains("second"))
+        let fresh = try String(contentsOf: active, encoding: .utf8)
+        #expect(fresh.contains("third") && !fresh.contains("first 1"), "the active file restarts after rotation")
+    }
+
     // MARK: - SIGPIPE masking (first-light backlog #2)
     //
     // OwnTone's main() sets SIGPIPE to SIG_IGN process-wide before spawning any

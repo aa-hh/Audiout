@@ -1568,6 +1568,7 @@ extension SerializedSharedState {
         private func doorsCaptured(_ body: () -> Void) -> [String?] {
             let captured = Captured()
             Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             captureError: { _, _ in },
                                              consentChanged: { _ in }), consent: true)
             defer { Analytics.install(nil, consent: false) }
             body()

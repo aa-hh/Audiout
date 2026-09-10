@@ -686,7 +686,7 @@ extension SerializedSharedState {
             let captured = Captured()
             Analytics.install(Analytics.Sink(capture: { name, props in
                 captured.append(name, props)
-            }, consentChanged: { _ in }), consent: true)
+            }, captureError: { _, _ in }, consentChanged: { _ in }), consent: true)
             defer { Analytics.install(nil, consent: false) }
             body(captured)
         }

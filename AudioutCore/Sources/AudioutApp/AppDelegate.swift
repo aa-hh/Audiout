@@ -104,6 +104,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.errorTrackingConfig.autoCapture = true
         config.captureScreenViews = false
         config.optOut = !settings.telemetryOptIn
+        // The SDK's /flags request fires on setup() regardless of optOut, carrying
+        // the install id, bundle id, OS and app version — and this project has no
+        // feature flags to preload, so there is nothing for it to fetch.
+        config.preloadFeatureFlags = false
         let installID = settings.installID
         config.getAnonymousId = { UUID(uuidString: installID) ?? $0 }
         PostHogSDK.shared.setup(config)

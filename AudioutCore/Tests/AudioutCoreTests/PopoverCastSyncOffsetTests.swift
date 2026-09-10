@@ -213,7 +213,7 @@ import AppKit
         let (popover, _, _) = makePopover(isolation)
         let titles = popover.test_deviceRow(for: "cast-tv")?.test_contextMenu()?
             .items.map(\.title) ?? []
-        #expect(!titles.contains("Align speaker…"),
+        #expect(!titles.contains("Align by ear…"),
                 "a Cast receiver plays seconds behind live; no ±500 ms bisection reaches it")
         #expect(titles.contains("Equalizer…"), "…but tone is unaffected")
     }

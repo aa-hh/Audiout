@@ -104,6 +104,11 @@ neither appears.
 The branch also carries `ae0f5e66`, handled failures to PostHog error tracking,
 which was never on main on its own.
 
+Main's remote-release work was merged into this branch on 2026-09-11. The Setup
+card keeps the short wording by the owner's ruling: main's Bluetooth-timing and
+diagnostic-log sentences are not on the card, though the Bluetooth timing events
+themselves ship and are now written up in PRODUCT.md and on the website.
+
 ## Live checks owed
 
 The unattended settings-corruption check ran on 2026-09-10 and passed. Nothing
@@ -211,13 +216,15 @@ Still owed after that:
   the owner's call rather than a drive-by edit.
 - `CompanionEndToEndTests` timed out six times on the localhost welcome
   handshake during one heavily loaded run, and passed on its own afterwards.
-  Not investigated.
+  FIXED on main in `00b452da`: the suite took the shared 30-second hang-stop and
+  now sends its hello off the main actor.
 - `scripts/run-tests.sh` used to exit 1 after a fully green run. Its EXIT trap
   killed the test process group with a bare `kill`, which fails once that group
   has already finished, and under `set -e` a command that fails inside an EXIT
   trap replaces the script's exit status. Guard 4 refused green suites at least
-  four times on 2026-09-10. Fixed on this branch by adding `|| true` to the
-  kill, which also stops the concurrency slot file leaking on every run.
+  four times on 2026-09-10. FIXED on main in `6fb240bd`, the same `|| true` plus
+  the capacity-permit release; main's version of the script is the one kept in
+  the 2026-09-11 merge, and this branch's own copy of the fix was dropped.
 
 ## Still true elsewhere
 

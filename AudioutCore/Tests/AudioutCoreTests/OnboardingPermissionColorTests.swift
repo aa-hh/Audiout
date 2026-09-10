@@ -7,9 +7,10 @@ import AppKit
 @testable import AudioutOnboardingUI
 @testable import AudioutSharedUI
 
-/// T3 (colour-return pass, decisions Q1-Q6/NEW-1): the five permission-row
+/// T3 (colour-return pass, decisions Q1-Q6/NEW-1): the six permission-row
 /// identity tokens — `Tokens.Color.permissionSystemAudio` / `permissionLocalNetwork`
 /// / `permissionRemoteControl` / `permissionSpeakerSync` / `permissionUsageStats`
+/// / `permissionAudioutRemote`
 /// — stay mutually
 /// DISTINCT in both accent-dial columns (Q1), each clears the same >=3:1
 /// own-theme contrast floor every other `Tokens.Color` instrument is held to
@@ -93,7 +94,7 @@ extension SerializedSharedState {
         #expect(abs(a.blueComponent - b.blueComponent) <= 0.02, "blue: \(message)")
     }
 
-    /// The five permission tokens, named for failure messages. A computed
+    /// The permission tokens, named for failure messages. A computed
     /// property (not a stored snapshot) so every call site gets a fresh
     /// access — irrelevant for correctness (each dynamic `NSColor`'s
     /// provider closure re-reads `Tokens.accentStyle` at RESOLUTION time
@@ -107,7 +108,10 @@ extension SerializedSharedState {
          // The fifth is not a macOS permission — the Setup card for Audiout's
          // own usage-statistics opt-in — but it wears a family hue and is held
          // to every rule the other four are.
-         ("permissionUsageStats", Tokens.Color.permissionUsageStats)]
+         ("permissionUsageStats", Tokens.Color.permissionUsageStats),
+         // Nor is the sixth: the card that invites Audiout Remote. Same
+         // fence, same floors.
+         ("permissionAudioutRemote", Tokens.Color.permissionAudioutRemote)]
     }
 
     private func assertMutuallyDistinct(appearance: NSAppearance.Name,
@@ -140,7 +144,7 @@ extension SerializedSharedState {
     /// Checked against BOTH `panel` and `raised` (the two own-theme surfaces
     /// T1's doc comments measure against for every one of these
     /// tokens), across `.fullGold`/`.subtle` and `.darkAqua`/`.aqua` — the
-    /// full 5 tokens x 2 columns x 2 appearances x 2 surfaces sweep.
+    /// full tokens x 2 columns x 2 appearances x 2 surfaces sweep.
     @Test func contrastFloorClearsInBothDialColumnsBothAppearancesBothSurfaces() {
         let floor: CGFloat = 3.0
         for style: AccentStyle in [.fullGold, .subtle] {

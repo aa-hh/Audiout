@@ -38,7 +38,7 @@ Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4/6**
 bash scripts/build.sh
 
 # Offline UI work (no hardware, no TCC):
-AIRPLAY_BACKEND=mock swift run --package-path AudioutCore AudioutApp
+bash scripts/run-app.sh
 
 # Real hardware (needs a signed .app and TCC grant first):
 bash scripts/make-app.sh
@@ -137,11 +137,7 @@ bash scripts/run-tests.sh --filter PopoverControllerTests
 bash scripts/run-tests.sh
 ```
 
-**Always go through `run-tests.sh` / `build.sh`, never a bare `swift test` or
-`swift build`** — filtered runs included. These wrappers are the ONLY things
-that know about the second Mac, the machine-wide concurrency cap and the
-unchanged-sources cache; typing the bare command opts out of all three and pins
-the work to this machine, which is also the one running every other agent.
+**Always go through `run-tests.sh` / `build.sh` / `make-app.sh` / `ios.sh` / `run-app.sh`, never a bare `swift test`, `swift build`, `swift run`, `xcodebuild`, or `swift package`** — filtered runs included. The Claude Code hook denies these bare commands; the wrapper scripts are the ONLY things that know about the machine-wide capacity permit pool, the second Mac, and the unchanged-sources cache; typing the bare command opts out of all three and pins the work to this machine, which is also the one running every other agent.
 
 Both Macs' selected developer directory must be a full Xcode install, not
 Command Line Tools — check with `xcode-select -p`; a path under
@@ -151,6 +147,10 @@ a mysterious build failure, and its message names the exact command for the
 Xcode it finds: `sudo xcode-select -s
 /Applications/<Xcode>.app/Contents/Developer`. `AUDIOUT_TEST_MODE=serial`
 runs the suite strictly one test at a time, for flake hunting.
+
+**Capacity.** Every compile and test run — local or on the mule — takes one capacity permit from a machine-wide pool. Local pool: `git config audiout.localSlots` (set to 2 on 2026-09-10). Mule pool: `git config audiout.remoteSlots` (set to 3 the same day; the M3 Air has more memory and carries nothing else). When the mule is full, work falls back to local immediately (no wait). When the local pool is full, the runner waits up to 600 seconds, printing progress; if the ceiling is reached, it proceeds uncapped with a loud warning (never refuses a commit). `bash scripts/capacity.sh status` shows who holds which permit on both machines. `bash scripts/test-capacity.sh` tests the permit pool itself. Commands typed in a terminal outside Claude Code bypass the hook but not the permits, which live in the scripts.
+
+The mule runs macOS 26.5 with only the Xcode 27 beta installed, so `remote_run` pins `SDKROOT` explicitly before the toolchain probe; if mule runs start reporting "environment not usable", that pin is the first thing to check.
 
 ## Critical workflow rules
 
@@ -174,6 +174,7 @@ runs the suite strictly one test at a time, for flake hunting.
 
 Feature usage is tracked through `AudioutCore/Sources/AudioutCore/Analytics.swift`, a consent-gated facade. PostHog itself is linked ONLY to the `AudioutApp` target (same scoping as Sparkle) — never `import PostHog` anywhere else. Event names are an external contract: PostHog insights reference them by string, so treat every `Analytics.capture("...")` name like a public API.
 
+- **The full event list lives in `audiout-shared`.** `docs/analytics-events.md` in that repository is the one table of every event both this app and the iPhone app send, with properties and allowed values. Add a new event there before sending it from here.
 - **Don't silently break tracking.** When you move, refactor, or delete code containing an `Analytics.capture` call, the call moves with the behavior — same event name, same properties, still success-gated (fire only after the action actually happened, never before its guard). If a feature is removed outright, say so in the task report so the event's dashboard owner knows the stream ends.
 - **New user-facing features get instrumented.** Any new user action (button, toggle, gesture, funnel step) gets an `Analytics.capture` at its choke point, named `category:object_action` in snake_case (e.g. `scene:created`, `bt_sync:wizard_finished`). Grep `Analytics.capture` for the live event list and match its style.
 - **Privacy fence (PRODUCT.md "Data Collection"):** properties never carry speaker/device names, bundle IDs, network identifiers, audio content, license keys, or free-text user input. Counts, enum-like strings, and booleans only.

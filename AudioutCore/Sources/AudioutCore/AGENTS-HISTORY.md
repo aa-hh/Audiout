@@ -11,7 +11,7 @@ Archived verbatim from AGENTS.md on 2026-09-02 when that file was trimmed to the
 This is the actual source folder for the `AudioutCore` library target — the
 UI-agnostic routing/session core: device discovery, output backends, capture
 (whole-system + per-app), the routing "brain" (Selected Devices/Main Out/
-groups/per-app redirects), local playback, persistence, and the first-run
+scenes/per-app redirects), local playback, persistence, and the first-run
 setup/permissions flow. It owns everything up to the `OutputBackend` protocol
 seam; it never imports AppKit and knows nothing about windows, popovers, or
 views (those live in `AudioutSharedUI`/UI targets, one level up). The
@@ -118,7 +118,7 @@ so with its own reason.** Its audio comes from `AppRouteMixer`, never through th
 whole-system EQ stage, so `reconcileEQPlan` sets `eqBypassReason =
 .perAppRouting` for a claimed device with a non-flat stored EQ — a different
 sentence from `.streamBudget`, because sending the user to delete other speakers'
-tone would not help. The Equalizer page (Groups screen)
+tone would not help. The Equalizer page (Scenes screen)
 carries the honesty — the popover shows no tone state at all.
 
 **A Bluetooth trim change must NEVER rebuild a sink.** The delay is physically
@@ -274,7 +274,7 @@ Redirecting one app to a specific device:
 | Per-app capture/mix | `PerAppCaptureCoordinator`, `AppRouteMixer`, `LeveledAppInjector` |
 | Shared capture infra | `DefaultOutputDeviceMonitor`, `TapRebuildLifecycle` (`TapRebuildCoalescer`, `TapReanchor`) |
 | Routing brain | `GroupController`, `AppRoutingController`, `PhaseController` |
-| Repaint gating | `StructuralStateGate` — has selection/groups moved since the surfaces were last painted? `onStateDidChange` fires for EVERY model change (a volume-key hold included) while the repaints it can trigger are full sweeps, so the coordinator gates them on this. |
+| Repaint gating | `StructuralStateGate` — has selection/scenes moved since the surfaces were last painted? `onStateDidChange` fires for EVERY model change (a volume-key hold included) while the repaints it can trigger are full sweeps, so the coordinator gates them on this. |
 | Persistence | `AppRouteStore`, `RoutingStore`, `GroupStore`, `AppSettings`, `ExcludedAppsStore`, `ExcludedAppsController`, `DeviceIconStore`, `DeviceEQStore` |
 | Tone shaping | `DeviceEQ`, `EQStreamTopology`, `EQProcessor` |
 | Mic-probe calibration (064) | `MicProbeSession`, `BuiltInMicRecorder`, `MicCapturePermission` (license-clean; hardware-free). The DSP itself — `SyncProbe`, `SyncProbeCorrelator` — moved out to the `ProbeKit` package in [audiout-shared](https://github.com/aa-hh/audiout-shared), which the iPhone companion also links |

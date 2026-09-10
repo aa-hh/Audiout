@@ -137,9 +137,11 @@ final class UsageStatsConsentCard: NSView {
     }
 
     static let headlineText = "Share anonymous usage counts?"
-    /// The promise, in the user's words, and the ONLY place the app makes it in
-    /// full. Keep it in step with what is actually sent — audited against a
-    /// real ingested event on 2026-08-29, not against intent.
+    /// The promise, in the user's words, and the only place the APP makes it —
+    /// a summary the owner keeps short on purpose, with the itemised version on
+    /// the website's privacy and support pages. Keep it in step with what is
+    /// actually sent — audited against a real ingested event on 2026-08-29, not
+    /// against intent.
     ///
     /// The failure half was added 2026-09-05 with `Analytics.captureError`.
     /// The SDK had been reporting unhandled crashes since the first analytics

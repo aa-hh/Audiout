@@ -78,7 +78,10 @@ extension SerializedSharedState {
                    bluetoothPrimer: SimulatedBluetoothPermission(status: .granted),
                    settings: settings ?? AppSettings(defaults: isolatedDefaults),
                    localNetworkGated: true,
-                   usageStatsAvailable: usageStatsAvailable)
+                   usageStatsAvailable: usageStatsAvailable,
+                   // This suite is about the usage-counts card being LAST; a
+                   // seventh row in front of it would say nothing about that.
+                   remoteAppAvailable: false)
     }
 
     /// The card is asked LAST — after every real OS grant — and it is a card,

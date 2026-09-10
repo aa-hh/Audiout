@@ -44,7 +44,6 @@ print_local_permit() {
     if kill -0 "$_pid" 2>/dev/null; then
         _alive="alive"
         _cmd=$(ps -o command= -p "$_pid" 2>/dev/null)
-        _cmd=$(trim80 "$_cmd")
     else
         _alive="dead"
         _cmd="(process gone)"
@@ -58,6 +57,10 @@ print_local_permit() {
             *) _stale=" STALE (unrecognised command)" ;;
         esac
     fi
+    # Trim for display only, AFTER classifying: a worktree path alone can run
+    # past 80 characters and push the script name off the end (seen 2026-09-10,
+    # a live run-tests.sh shown as STALE).
+    _cmd=$(trim80 "$_cmd")
     echo "  local permit $_n: pid $_pid, $_alive, age ${_age}s, cmd: $_cmd$_stale"
     return 0
 }

@@ -399,12 +399,7 @@ set +e
 set -m
 ( cd "$core" && swift test $test_args "$@" ) >&2 &
 swift_pgid=$!
-# `|| true`: the process group is already gone by the time this trap fires
-# (wait below has already reaped it), so kill routinely fails with "no such
-# process" -- and under `set -e`, a failing trap command both aborts the rest
-# of the trap (skipping the rm) and overrides the exit code this script is
-# about to report, turning a passing run into a false failure.
-trap 'kill -- -"$swift_pgid" 2>/dev/null || true; rm -f "$slot_file" 2>/dev/null' EXIT HUP INT TERM
+trap 'kill -- -"$swift_pgid" 2>/dev/null; rm -f "$slot_file" 2>/dev/null' EXIT HUP INT TERM
 wait "$swift_pgid"
 status=$?
 set +m

@@ -144,15 +144,19 @@ final class UsageStatsConsentCard: NSView {
     /// The failure half was added 2026-09-05 with `Analytics.captureError`.
     /// The SDK had been reporting unhandled crashes since the first analytics
     /// commit (`errorTrackingConfig.autoCapture`) without this string ever
-    /// saying so; the handled failures joined them, and now it does. Both
-    /// carry a stack trace of Audiout's own code and nothing the user typed.
+    /// saying so; the handled failures joined them, and now it does. A crash
+    /// carries a stack trace of Audiout's own code; a handled failure does not
+    /// — it is reported from the telemetry writer's own queue, so the trace the
+    /// SDK attaches shows that queue rather than the code that failed. Neither
+    /// carries anything the user typed.
     ///
     /// It leads with the thing that makes this not tracking (the owner's call):
     /// there is no identity to attach anything to. Then it is specific, because
     /// the autocaptured payload is wider than an earlier draft claimed — that
-    /// draft promised "never your network" and "never your licence key" while
-    /// the SDK was sending both, which is the failure mode this string exists
-    /// to prevent. "City" rather than "region" is deliberate too: PostHog's
+    /// draft promised "never your network" while the SDK was sending it. The
+    /// licence KEY is never sent, only whether the copy is licensed
+    /// (`license_status`), which is why the string says "licensed" and not
+    /// more. "City" rather than "region" is deliberate too: PostHog's
     /// location enrichment resolves to postal-code precision.
     static let bodyText = "No account, no name. Just a random ID for this copy of "
         + "Audiout. It counts which features get used, reports crashes and failures like "

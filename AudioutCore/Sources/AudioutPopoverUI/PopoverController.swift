@@ -3465,13 +3465,18 @@ public final class PopoverController: NSObject {
                 // what keeps a mid-episode dismissal honored — a still-`.failed`
                 // re-report breaks here, so the panel never pops back.
                 guard !previous.isFailedState else { break }
-                // Only a speaker the user asked for is worth an event. The
-                // backend fails every speaker it can see, wanted or not, so
-                // ungated this bills an install for the whole network's mDNS
-                // churn: one install sent 357 `connection:failed` on
+                // Only a speaker the user asked for is worth an event —
+                // selected, a redirect target, or a member of the playing
+                // group. The backend fails every speaker it can see, wanted or
+                // not, so ungated this bills an install for the whole network's
+                // mDNS churn: one install sent 357 `connection:failed` on
                 // 2026-09-09, 356 of them `vanished`, in bursts of 16 inside
-                // 20 ms, with no user action anywhere near them.
-                if case .failed(let failure) = current, wantsAudio(device.id) {
+                // 20 ms, with no user action anywhere near them. `wantsAudio`
+                // covers the first two; the group membership is the read it
+                // deliberately lacks, and narrowing to it alone would silence a
+                // group member that never appears in Selected Devices.
+                if case .failed(let failure) = current,
+                   wantsAudio(device.id) || (groupController?.isMainOutMember(device.id) ?? false) {
                     Analytics.capture("connection:failed", ["kind": device.kind.rawValue,
                                                               "cause": String(describing: failure.cause)])
                 }
@@ -3482,10 +3487,10 @@ public final class PopoverController: NSObject {
                 dismissedDiagnosisIDs.remove(device.id)
                 openDiagnosisIDs.insert(device.id)
             case .connected, .off:
-                // Same `wantsAudio` gate as the failure above, for the same
-                // reason: a speaker nobody asked for is the backend's business.
+                // Same gate as the failure above, for the same reason: a
+                // speaker nobody asked for is the backend's business.
                 if current == .connected && previous != .connected && !device.isLocalDevice
-                    && wantsAudio(device.id) {
+                    && (wantsAudio(device.id) || (groupController?.isMainOutMember(device.id) ?? false)) {
                     Analytics.capture("connection:connected", ["kind": device.kind.rawValue])
                 }
                 // Leaving `.failed` ends the episode — clear both the open intent

@@ -798,17 +798,12 @@ public final class OnboardingViewController: NSViewController {
                 activeTitle: "Share anonymous usage counts",
                 completedTitle: "Audiout counts feature use, anonymously",
                 detail: "Audiout counts which features get used. No audio, "
-                    + "speaker names or license key ever leave your Mac.",
+                    + "speaker names or your license key are ever part of it.",
                 // What the button gets: not a capability for the user, and the
                 // copy doesn't pretend otherwise. This is the one card where
                 // the person being helped is the one who wrote the app, and
                 // saying so plainly is what earns the yes.
                 heroHeadline: "Help make Audiout better",
-                // This is the ONLY place the never-sent promise is made now
-                // that the card below is a two-button dialog rather than an
-                // itemised ledger. The deleted-body rule still holds — the
-                // picture shows the SHAPE of the decision and cannot show its
-                // terms, so the terms ride the why line.
                 // The WHY, not the terms: the card this ask raises carries the
                 // privacy fence in full, and it appears directly under this
                 // line on the stage — saying it in both read as a stutter.

@@ -2085,6 +2085,36 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } == [false], "a settable output must leave the keys to macOS")
     }
 
+    /// The "Speakers unreachable. Playing on your Mac" fallback leaves the aggregate
+    /// as the default output, so we still own the volume throughout it. A drop here
+    /// would take both volume-key interception AND the Touch Bar strip away at the
+    /// exact moment the user reaches for them, with macOS's own controls still dead.
+    @Test func unreachableSpeakerFallbackKeepsVolumeOwnership() async {
+        let scheduler = ManualWatchdogScheduler()
+        let (backend, engine, discovery) = makeBackend(
+            systemVolume: FakeSystemVolume(volume: 50, muted: false),
+            watchdogScheduler: scheduler,
+            currentDefaultOutputUID: { AggregateOutputDevice.productUID })
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:71", name: "Unreachable Speaker")
+        await connectAP2(backend, engine, discovery, device)
+        await pollUntil { capture.isCapturing }
+
+        // The speaker drops out; intent is kept, so the countdown arms.
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { scheduler.hasPending }
+
+        let events = await collect(from: backend) {
+            $0.contains { if case .localFallbackActive(true) = $0 { return true } else { return false } }
+        } after: { scheduler.fireAll() }
+
+        #expect(!events.contains {
+            if case .systemVolumeOwnershipChanged(let owned) = $0 { return !owned } else { return false }
+        }, "the aggregate is still the default output, so the fallback must not hand the volume back")
+    }
+
     /// A DEFAULT-DEVICE SWITCH (speakers → AirPods) also reports a fresh volume/mute,
     /// but that's the new device's pre-existing state — not a user gesture. It must
     /// still sync the row's MUTE (and relabel its name), but never its volume — that

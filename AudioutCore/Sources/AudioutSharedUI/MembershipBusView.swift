@@ -94,10 +94,6 @@ public final class MembershipBusView: NSView {
     /// column x appearance x Increase-Contrast cell is swept by
     /// `TokenContrastMatrixTests.dimmedNodeSeatSeparatesFromBothRimTones`.
     private var dimmed = false
-    /// Whether the `.origin` hook draws GOLD (the Main Audio spine is armed —
-    /// connected members are feeding it) vs the quiet `ember` idle tone (v4
-    /// §Call-1 rail-segment tone). Ignored for every non-origin node.
-    private var originGold = false
     /// Whether this row's rail is ARMED — audio is (or would be) flowing through
     /// it. Gold is the LIVE color everywhere in Audiout, so an idle context
     /// (the Groups editor showing a group that is NOT the active Main Out — pure
@@ -158,11 +154,9 @@ public final class MembershipBusView: NSView {
 
     /// Point the bus at a rendering. Idempotent — safe to re-apply on every row
     /// repaint.
-    public func apply(node: Node, dimmed: Bool = false, originGold: Bool = false,
-                      armed: Bool = true) {
+    public func apply(node: Node, dimmed: Bool = false, armed: Bool = true) {
         self.node = node
         self.dimmed = dimmed
-        self.originGold = originGold
         self.armed = armed
         needsDisplay = true
     }

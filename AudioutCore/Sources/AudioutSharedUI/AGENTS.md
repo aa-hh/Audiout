@@ -21,6 +21,8 @@ or `GroupController`.
 - The row's Equalizer button is a DOOR plus one mark; the row edits and stores no tone.
 - The identity stack yields the Equalizer slot on EVERY row, so names truncate alike.
 - Instruments reconcile accessibility-display changes live; the accent dial is a third trigger.
+- No rail, no ring: `BusRailOverlayView.railReaches` decides both, and a failed room is never reached.
+- A node can fill with the checkbox off: `localFallbackOutput` draws the Mac as a rail member while the engine plays on it, and edits no selection.
 - Warm ink and gold wash mean `isRouteArmed`; cool means silent. Instruments are flat, no `CALayer` blooms.
 - `Tokens.Color.muted` is fenced to the device row's engaged mute button; a second consumer fails a test.
 - `setContent`'s `defaultSize:` seeds only the first mount of a content controller.

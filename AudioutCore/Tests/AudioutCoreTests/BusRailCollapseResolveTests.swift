@@ -68,6 +68,53 @@ import Testing
         let plan = RailPlan.resolve(input)
         #expect(plan.signalTerminusIndex == nil, "no member ⇒ no wire to draw")
         #expect(plan.stops.count == 4, "…but every node is still there to click")
+        #expect(!plan.isLive, "no member ⇒ no rail at all")
+        // The hook used to be drawn whenever the Main Audio card was expanded,
+        // leaving a gold stub curving out of the ring with nothing under it.
+        #expect(BusRailOverlayView().wireRuns(for: plan).isEmpty,
+                "nothing to reach ⇒ not even the origin hook is stroked")
+    }
+
+    /// Same emptiness with the origin at a COLLAPSED section's header: the small
+    /// gutter dot is the hook's stand-in, so it goes when the hook does.
+    @Test func aCollapsedOriginWithNoMembersDrawsNoDotEither() {
+        var input = expandedInput()
+        input.stops = input.stops.map { .init(y: $0.y, node: .nonMember) }
+        input.originSectionCollapsed = true
+        input.originClipBand = 558...560          // ring clipped away → header dot
+        let plan = RailPlan.resolve(input)
+        #expect(plan.origin == .headerDot(y: 560), "the fixture must be the header-dot origin")
+        #expect(!plan.isLive, "no member ⇒ no rail, whichever end it would start from")
+        #expect(BusRailOverlayView().wireRuns(for: plan).isEmpty,
+                "a header-dot origin with nothing under it draws no line")
+    }
+
+    /// A FAILED room is not reached: the wire stops at the member above it, and
+    /// the failed row gets no run of its own. Its red node and red gutter rim
+    /// are what state the failure — a line running down to it said the signal
+    /// arrives there, which is the one thing that is not happening.
+    @Test func theWireStopsAboveAFailedRoom() {
+        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.member, .failed]))
+        #expect(plan.signalTerminusIndex == 0, "the lowest room the wire REACHES is the member")
+        let runs = BusRailOverlayView().wireRuns(for: plan)
+        #expect(runs.count == 2, "hook + the one segment into the member; nothing below it")
+        // The failed stop sits at y = 380; no run may be stroked down to it.
+        let lowest = runs.flatMap { run -> [CGFloat] in
+            (0..<run.path.elementCount).map { i -> CGFloat in
+                var points = [NSPoint](repeating: .zero, count: 3)
+                run.path.element(at: i, associatedPoints: &points)
+                return points[0].y
+            }
+        }.min() ?? .greatestFiniteMagnitude
+        #expect(lowest > 390, "no ink reaches the failed row's node at y = 380")
+    }
+
+    /// A band whose ONLY on-spine room has failed has no rail at all — the
+    /// failed node keeps its own red rim, and nothing curves out of Main Audio.
+    @Test func aBandOfNothingButAFailedRoomHasNoRail() {
+        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.nonMember, .failed]))
+        #expect(plan.signalTerminusIndex == nil, "a failed room is never the wire's terminus")
+        #expect(BusRailOverlayView().wireRuns(for: plan).isEmpty, "nothing reached ⇒ no rail")
     }
 
     // MARK: Dormancy is ONE flag for the whole path

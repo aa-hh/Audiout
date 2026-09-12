@@ -1162,6 +1162,10 @@ public final class PopoverController: NSObject {
             panel.setBanner(active ? Self.localFallbackBannerText : nil,
                             action: active ? localFallbackRetryAction : nil)
             panel.panelContentDidChangeHeight(animated: true)
+            // The Mac's row joins or leaves the rail on this edge, and the Main
+            // Audio row is re-applied with it, so the ring re-resolves too.
+            refreshDeviceRows()
+            refreshMainOutRow()
         }
         // When not shown, the next `rebuildForOpen()` re-applies it from
         // `localFallbackActive` (see the tail of `rebuild()`).
@@ -2415,7 +2419,7 @@ public final class PopoverController: NSObject {
                          master: controller.mainOutMasterVolume,
                          isMuted: controller.isMainOutMuted,
                          connectionState: mainOutConnectionState(controller),
-                         restingArmed: mainOutIsLocalOnlyArmed(controller),
+                         localOnlyArmed: mainOutIsLocalOnlyArmed(controller),
                          // S5 (spec §4.7 FINAL): the bus origin stub dims only
                          // under a GENUINELY-DIVERGING group target — in the
                          // derived-identity case the whole bus (origin included)
@@ -2703,30 +2707,36 @@ public final class PopoverController: NSObject {
         return anyConnecting ? .connecting : .off
     }
 
-    /// The Main Audio ring's RESTING form predicate (ring-resting-state task,
-    /// separate from `mainOutConnectionState` above — which stays untouched):
-    /// true iff the local device is AMONG the active target's members and the
-    /// master is unmuted. This is exactly the case where audio is genuinely
-    /// playing (locally, through the Mac) but there's no remote AirPlay
-    /// handshake for `mainOutConnectionState` to report, so it correctly falls
-    /// through to `.off` — leaving the rail's curve into the ring with nothing
-    /// to land on unless the ring renders its resting form.
+    /// The rail's ARMED predicate for local playback (separate from
+    /// `mainOutConnectionState` above — which stays untouched): true iff the
+    /// local device is AMONG the active target's members and the master is
+    /// unmuted. This is exactly the case where audio is genuinely playing
+    /// (locally, through the Mac) but there's no remote AirPlay handshake for
+    /// `mainOutConnectionState` to report, so it correctly falls through to
+    /// `.off` while the wire — and the ring it lands on — must still read gold.
+    /// Whether that ring is drawn at ALL is a different question, answered by
+    /// the rail's own reach (`updateRailRows`).
     ///
     /// AMONG, not "all of": the mixed set {local, AirPlay…} is reachable
     /// (`GroupController.setDeviceSelected` auto-swaps the Mac out only when it
     /// is the SOLE member), and the Mac keeps rendering audio in it. Requiring
-    /// every member to be local hid the ring for the whole time a speaker sat
-    /// selected-but-not-connected beside the Mac — the rail curved up into
-    /// nothing, which is the exact failure this form exists to prevent. When a
-    /// member does connect, `mainOutConnectionState` reports `.connected` and
-    /// the connected form wins regardless of what this returns.
+    /// every member to be local dropped the wire to its idle tone for the whole
+    /// time a speaker sat selected-but-not-connected beside the Mac, while the
+    /// Mac was audibly playing. When a member does connect,
+    /// `mainOutConnectionState` reports `.connected` and the armed term above
+    /// covers it regardless of what this returns.
     private func mainOutIsLocalOnlyArmed(_ controller: GroupController) -> Bool {
         let memberIDs: [String]
         switch controller.mainOut {
         case .selectedDevices: memberIDs = Array(controller.selectedDeviceIDs)
         case .group(let id):   memberIDs = controller.groups.first { $0.id == id }?.memberIDs ?? []
         }
-        guard memberIDs.contains(where: { devicesByID[$0]?.isLocalDevice == true })
+        // The fallback is the same condition arriving from the other side: the
+        // engine is playing through the Mac even though the Mac is not in the
+        // target set, so the wire into its row — and the ring above it — read
+        // gold for as long as the banner stands.
+        guard localFallbackActive
+                || memberIDs.contains(where: { devicesByID[$0]?.isLocalDevice == true })
         else { return false }
         return !controller.isMainOutMuted
     }
@@ -2990,7 +3000,11 @@ public final class PopoverController: NSObject {
                   volumePendingApply: castVolumePendingIDs.contains(device.id)
                       && device.castVolumeLagSeconds != nil
                       && device.connectionState == .connected,
-                  isEQShaped: deviceEQIsShaped?(device.id) ?? false)
+                  isEQShaped: deviceEQIsShaped?(device.id) ?? false,
+                  // The Mac's row draws as a rail member while the engine is
+                  // falling back to it, so the wire shows where audio actually
+                  // comes out. Nothing about the selection changes.
+                  localFallbackOutput: localFallbackActive && device.isLocalDevice)
     }
 
     /// A trimmable row's current Sync trim: the session cache first (the
@@ -3298,6 +3312,14 @@ public final class PopoverController: NSObject {
                           deviceCardTitle: Self.outputDevicesCardTitle,
                           cutSubsectionTitle: cutSubsectionTitle,
                           dormant: devicesCardDivergence() != nil)
+        // Whether there is a rail at all, decided ONCE here and read by both
+        // ends of it: the wire resolves the same rule against the stops it
+        // draws (`RailPlan.isLive`), the Main Audio ring takes it from this
+        // push. A room hidden inside a collapsed subsection still counts — the
+        // rail cuts to that fold's dot rather than vanishing.
+        mainOutRow.setRailLive(
+            cutSubsectionTitle != nil
+                || railRows.contains { $0.railNode.map(BusRailOverlayView.railReaches) ?? false })
     }
 
     // MARK: Output Devices "+" menu (BT-UI / BT-LIST)

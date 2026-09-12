@@ -26,19 +26,16 @@ import AudioutCore
 ///   (26 px, Warm Signal v4.1 item 2), both themes.
 /// - `.failed` → **red solid ring**, `failure` token, stroke ~1.8 pt (heavier so
 ///   the failed row wins the scan beside flickering meters).
-/// - **`.resting`** (Main Audio only, ring-resting-state task) — audio is
-///   genuinely playing to the local Mac and unmuted, but `connectionState` is
-///   `.off` because there's no remote AirPlay handshake to track (the
-///   `mainOutConnectionState` fallthrough is correct and untouched). Without
-///   this form the rail's curve into the ring (`BusRailOverlayView`) lands on
-///   a hidden ring and reads as unfinished. Renders the SHARED cool
-///   `rim` token at the SHARED `haloRingConnectedStroke` (1.6 pt) —
-///   deliberately thinner than Main Audio's bespoke gold/ember
-///   `mainAudioRingConnectedStroke` (2 pt, matched to the rail's own
-///   `busLineWidth`) and never recolored via `connectedSpineArmed`/
-///   `connectedStrokeWidthOverride` (those apply to `.connected` only), so a
-///   quiet thin neutral ring is visually distinct from any real remote
-///   `.connected` ring, which always wears the gold/ember override.
+/// - **`.resting`** (Main Audio only) — a rail exists (speakers are selected
+///   and not failed) but no member has connected, so `connectionState` is
+///   `.off` (the `mainOutConnectionState` fallthrough is correct and
+///   untouched). Without this form the rail's curve into the ring
+///   (`BusRailOverlayView`) lands on a hidden ring and reads as unfinished.
+///   Wears the rail's own ink through `connectedSpineArmed`, exactly as
+///   `.connected` does, at the SHARED `haloRingConnectedStroke` (1.6 pt) —
+///   thinner than Main Audio's bespoke `mainAudioRingConnectedStroke` (2 pt,
+///   matched to the rail's `busLineWidth`), so the STROKE is what separates it
+///   from a real remote `.connected` ring, never the colour.
 ///
 /// Geometry comes from `PopoverColumnGrid` NAMED CONSTANTS (`haloRingDiameter`,
 /// stroke widths, dash lengths, breathing timing) so a future density setting
@@ -73,11 +70,10 @@ public final class HaloRingView: NSView {
         case connected
         /// `.failed` — solid red ring, `failure`, heavier stroke.
         case failed
-        /// Main Audio only: armed local-only playback with no remote target
-        /// to track (`state == .off && restingArmed == true`) — solid quiet
-        /// ring at the shared `rim` hue and shared (thinner)
-        /// `haloRingConnectedStroke`, never the Main Audio gold/ember
-        /// override, so it reads as distinct from a real `.connected` ring.
+        /// Main Audio only: the rail exists but nothing has connected
+        /// (`state == .off && restingArmed == true`) — the rail's own ink at
+        /// the shared (thinner) `haloRingConnectedStroke`, so the stroke is
+        /// what distinguishes it from a real `.connected` ring.
         case resting
     }
 
@@ -195,8 +191,9 @@ public final class HaloRingView: NSView {
     /// retired corner dot used).
     /// - Parameter restingArmed: Main Audio's host-computed bit (default
     ///   `false`, a no-op everywhere else): when `state == .off`, `true` here
-    ///   renders the `.resting` form instead of hiding the ring. Every device
-    ///   row call site omits this, so their `.off` handling is unchanged.
+    ///   renders the `.resting` form instead of hiding the ring — the caller
+    ///   passes whether a rail exists at all. Every device row call site omits
+    ///   this, so their `.off` handling is unchanged.
     public func apply(_ state: ConnectionState, restingArmed: Bool = false) {
         self.state = state
         self.restingArmed = restingArmed
@@ -256,14 +253,14 @@ public final class HaloRingView: NSView {
             width = PopoverColumnGrid.haloRingFailedStroke
             dashed = false
         case .resting:
-            // Deliberately NOT `connectedSpineArmed`/
-            // `connectedStrokeWidthOverride` — those exist so a real
-            // `.connected` ring can match the rail's gold/ember + matched
-            // stroke. `.resting` stays the shared cool `rim` at the
-            // shared (thinner) stroke so it never wears that combination —
-            // the one visual signature Main Audio's real connected ring
-            // always carries.
-            strokeToken = Tokens.Color.rim
+            // The resting ring appears exactly when the rail does, so it wears
+            // the rail's own ink — the same resolution the `.connected` branch
+            // above uses. A grey rim here while the wire curving into it was
+            // gold read as two unrelated things touching. The THINNER stroke is
+            // what still separates resting from connected; only the colour is
+            // shared.
+            strokeToken = connectedSpineArmed.map(Tokens.Color.spineTone(armed:))
+                ?? Tokens.Color.rim
             width = PopoverColumnGrid.haloRingConnectedStroke
             dashed = false
         }

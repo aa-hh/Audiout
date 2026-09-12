@@ -5,6 +5,7 @@ import Foundation
 import Testing
 @testable import AudioutCore
 @testable import AudioutOnboardingUI
+@testable import AudioutSharedUI
 
 /// The sixth Setup card — usage statistics — which is the only one that is not
 /// a macOS permission: no prompt, no probe, no System Settings pane. The answer
@@ -226,6 +227,18 @@ extension SerializedSharedState {
                 "asked once means the pass is an answer, not a 'Skip for now'")
     }
 
+    /// Resolve a dynamic token to comparable components: two accesses of a
+    /// provider-backed colour are distinct instances whose `isEqual` is not
+    /// documented to see through the provider.
+    private func resolvedSRGB(_ color: NSColor?) -> NSColor? {
+        guard let color else { return nil }
+        var resolved: NSColor?
+        NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
+            resolved = color.usingColorSpace(.sRGB)
+        }
+        return resolved
+    }
+
     /// The rehearsal is a DRAWING of the sheet, never the sheet itself (owner
     /// ruling 2026-09-12): a preview carrying the verbatim promise reads as the
     /// ask, and the button then raises a second, identical-looking surface.
@@ -251,6 +264,14 @@ extension SerializedSharedState {
                                                 UsageStatsConsentCard.shareTitle])
         #expect(stage.test_demoMarkedButtonTitle == UsageStatsConsentCard.shareTitle,
                 "and the rehearsal says which of the two to press")
+
+        // In the real button's GOLD, not the grey the macOS mocks mark with.
+        // That grey exists to correct a system dialog's emphasis; this sheet is
+        // ours, its Share is a `ProminentButton`, and a grey miniature would
+        // drop the card's one identity cue.
+        let marked = try #require(views.compactMap { $0 as? DemoPushButtonView }
+            .first { $0.isMarked })
+        #expect(resolvedSRGB(marked.test_fill) == resolvedSRGB(Tokens.Color.gold))
         #expect(stage.hitTest(NSPoint(x: 10, y: 10)) == nil, "it takes no clicks")
 
         // And the question FITS. It is the one line of real text on a card

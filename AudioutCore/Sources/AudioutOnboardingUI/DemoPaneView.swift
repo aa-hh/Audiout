@@ -1830,7 +1830,8 @@ final class DemoSettingsHandoffMockView: DemoMockView {
 ///
 /// Four parts, top to bottom: the step's own identity tile, its real headline,
 /// four greeked body lines with a short last one, and the two buttons under
-/// their real labels with Share MARKED. The surface is a CARD, not a macOS
+/// their real labels — Share in the real button's GOLD, because that is how
+/// this sheet marks its answer. The surface is a CARD, not a macOS
 /// titled window — no traffic lights, no title bar — because this one is
 /// Audiout's, which is also what the frame's caption band says.
 ///
@@ -1887,7 +1888,7 @@ final class DemoConsentCardMockView: DemoMockView {
                                          height: Self.buttonHeight,
                                          cornerRadius: Self.buttonCornerRadius)
         shareButton = DemoPushButtonView(title: UsageStatsConsentCard.shareTitle,
-                                         emphasis: .correct,
+                                         emphasis: .prominent,
                                          height: Self.buttonHeight,
                                          cornerRadius: Self.buttonCornerRadius)
         let buttons = NSStackView(views: [decline, shareButton])
@@ -2540,16 +2541,25 @@ final class DemoWindowSurfaceView: NSView {
 
 /// How a drawn dialog button is marked.
 ///
-/// The rehearsal's job is to say WHICH button to press, so the two cases are
-/// not "how macOS fills this button" any more — they are right answer and wrong
-/// answer. That is the one place the mock deliberately departs from the real
-/// surface: on the real Accessibility alert the refusal is the accent-filled
-/// DEFAULT, and drawing that faithfully emphasised exactly the button the user
-/// must not press.
+/// The rehearsal's job is to say WHICH button to press, so the cases are not
+/// "how macOS fills this button" any more — they are right answer and wrong
+/// answer. On a macOS surface that is the one place the mock deliberately
+/// departs from the real thing: on the real Accessibility alert the refusal is
+/// the accent-filled DEFAULT, and drawing that faithfully emphasised exactly
+/// the button the user must not press.
+///
+/// The exception is a surface AUDIOUT owns, where there is no macOS emphasis to
+/// correct and the real right answer is already the gold CTA — see
+/// ``prominent``.
 enum DemoButtonEmphasis {
-    /// The button this step wants pressed: a slightly brighter fill and a thin
-    /// ring around it.
+    /// The button this step wants pressed on a macOS surface: a slightly
+    /// brighter fill and a thin ring around it.
     case correct
+    /// The button this step wants pressed on one of OURS. It wears what the
+    /// real button wears — `ProminentButton`'s gold, `inkOnFill` label, no rim
+    /// — because the gold IS how that sheet says "this is the answer", and a
+    /// miniature that greyed it would undersell the surface it previews.
+    case prominent
     /// Every other button: a ghost — no fill, just a hairline, so it still
     /// reads as a button without competing.
     case ghost
@@ -2573,8 +2583,8 @@ final class DemoPushButtonView: NSView {
     private let emphasis: DemoButtonEmphasis
     private let cornerRadius: CGFloat
 
-    /// Whether this is the button the step wants pressed.
-    var isMarked: Bool { emphasis == .correct }
+    /// Whether this is the button the step wants pressed — either marking.
+    var isMarked: Bool { emphasis != .ghost }
 
     init(title: String,
          emphasis: DemoButtonEmphasis = .ghost,
@@ -2593,7 +2603,11 @@ final class DemoPushButtonView: NSView {
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 12)
         label.alignment = .center
-        label.textColor = emphasis == .correct ? .labelColor : .secondaryLabelColor
+        switch emphasis {
+        case .correct: label.textColor = .labelColor
+        case .prominent: label.textColor = Tokens.Color.inkOnFill
+        case .ghost: label.textColor = .secondaryLabelColor
+        }
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
         NSLayoutConstraint.activate([
@@ -2609,17 +2623,40 @@ final class DemoPushButtonView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        let isCorrect = emphasis == .correct
-        layer?.backgroundColor = isCorrect ? DemoSystemColor.markedButton.cgColor
-                                           : NSColor.clear.cgColor
-        // One hairline either way, so a ghost keeps a button's outline and the
-        // marked one gets its ring — the difference is the fill behind it.
-        layer?.borderWidth = 1
-        layer?.borderColor = (isCorrect ? DemoSystemColor.markedButtonRim
-                                        : DemoSystemColor.ghostButtonRim).cgColor
+        layer?.backgroundColor = fill.cgColor
+        switch emphasis {
+        // The real gold button carries no border, so neither does its
+        // miniature — the fill alone is the marking.
+        case .prominent:
+            layer?.borderWidth = 0
+        // One hairline on both of the macOS markings, so a ghost keeps a
+        // button's outline and the marked one gets its ring — the difference
+        // between them is the fill behind it.
+        case .correct:
+            layer?.borderWidth = 1
+            layer?.borderColor = DemoSystemColor.markedButtonRim.cgColor
+        case .ghost:
+            layer?.borderWidth = 1
+            layer?.borderColor = DemoSystemColor.ghostButtonRim.cgColor
+        }
         layer?.cornerRadius = cornerRadius
         layer?.cornerCurve = .continuous
     }
+
+    /// The fill this button paints, unresolved.
+    private var fill: NSColor {
+        switch emphasis {
+        case .correct: return DemoSystemColor.markedButton
+        case .prominent: return Tokens.Color.gold
+        case .ghost: return .clear
+        }
+    }
+
+    // MARK: Test-support hooks
+
+    /// What the button is filled with — so a test can prove Audiout's own
+    /// surface keeps the real CTA's gold rather than the macOS mocks' grey.
+    var test_fill: NSColor { fill }
 }
 
 /// The privacy PADLOCK the system alert leads with.

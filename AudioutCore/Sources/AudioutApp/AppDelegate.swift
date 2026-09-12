@@ -120,6 +120,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // allows it (owner's call, 2026-08-29: "get the geoip on load or something,
         // not with every event").
         PostHogSDK.shared.register([Self.geoipDisableKey: true])
+        // Owner's Macs mark themselves once with
+        //   mkdir -p ~/Library/Application\ Support/Audiout && touch ~/Library/Application\ Support/Audiout/internal
+        // and every build on that machine — any bundle id, any install id —
+        // then stamps `internal: true` on its events, so PostHog's test-account
+        // filter can exclude them. A machine-level file, not a defaults key,
+        // because each bundle id has its own defaults domain and install ids
+        // churn with every fresh test build.
+        let internalMarker = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent("Audiout/internal")
+        if let internalMarker, FileManager.default.fileExists(atPath: internalMarker.path) {
+            PostHogSDK.shared.register(["internal": true])
+        }
         Analytics.install(Analytics.Sink(
             capture: { PostHogSDK.shared.capture($0, properties: $1) },
             captureError: { name, properties in

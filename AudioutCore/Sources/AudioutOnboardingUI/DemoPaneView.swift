@@ -328,8 +328,8 @@ final class DemoPaneView: NSView {
         case .prompt:
             switch step {
             case .remoteControl: return DemoSettingsHandoffMockView(step: step)
-            // The one ask whose surface is OURS, so the rehearsal is the real
-            // view rather than a drawing of one.
+            // The one ask whose surface is OURS — drawn like all the rest, so
+            // the rehearsal cannot be mistaken for the sheet itself.
             case .usageStats:    return DemoConsentCardMockView()
             // No dialog to rehearse: this ask raises a page on the user's
             // PHONE, so the stage is the code that gets them there.
@@ -1072,7 +1072,7 @@ final class DemoPromptMockView: DemoMockView {
     /// the slot are identical either way; only the tile's contents change.
     /// `.remoteControl`, `.speakerSync` and `.usageStats` never reach this mock
     /// (the first raises the Accessibility alert, the second has no dialog at
-    /// all, and the third draws its own real card — `DemoConsentCardMockView`)
+    /// all, and the third draws Audiout's own card — `DemoConsentCardMockView`)
     /// and keep the app icon as the safe default for a branch nothing takes.
     private static func iconView(for step: SetupStep) -> NSView {
         switch step {
@@ -1818,54 +1818,138 @@ final class DemoSettingsHandoffMockView: DemoMockView {
 
 // MARK: - Usage-statistics consent card
 
-/// Usage Statistics' stage: the REAL ``UsageStatsConsentCard``, inert, with the
-/// pointer gliding to Share and pressing it.
+/// Usage Statistics' stage: a miniature of Audiout's own Share / Don't Share
+/// card, with the pointer gliding to Share and pressing it.
 ///
-/// Every other mock in this file is a drawing of a surface macOS owns, which is
-/// the best that can be done for something another process renders. This step's
-/// surface is Audiout's, so the rehearsal is not a drawing at all — it is the
-/// same view the sheet presents, built by the same initialiser, with its two
-/// buttons switched off. There is nothing to keep in step and nothing to get
-/// subtly wrong (owner: "why can't you make it look exactly like your
-/// mock-up").
+/// A rehearsal that shows the sheet's exact words reads as the ask itself, not
+/// as a preview of one — and the button then raises a surface that looks
+/// identical to it (owner ruling 2026-09-12). So this stage is a drawing, in
+/// the same grammar as every other rehearsal here: anatomy true, prose greeked,
+/// and only the words that TEACH kept real. ``UsageStatsConsentCard/bodyText``
+/// must never appear on it.
+///
+/// Four parts, top to bottom: the step's own identity tile, its real headline,
+/// four greeked body lines with a short last one, and the two buttons under
+/// their real labels with Share MARKED. The surface is a CARD, not a macOS
+/// titled window — no traffic lights, no title bar — because this one is
+/// Audiout's, which is also what the frame's caption band says.
 ///
 /// The pass ends where it started, like every other ask: the card at rest with
 /// nothing pressed, because that is how the user will FIND it.
 final class DemoConsentCardMockView: DemoMockView {
 
-    private let card = UsageStatsConsentCard()
-    private let cursor = DemoCursorView(pointerHeight: 22)
+    /// A miniature, not the sheet's 380 pt. The width floor is the headline on
+    /// ONE line at 12 pt, which is the smallest this file lets real text be.
+    static let size = NSSize(width: 280, height: 192)
+    private static let padding: CGFloat = 18
+    private static let tileSide: CGFloat = 38
+    private static var contentWidth: CGFloat { size.width - padding * 2 }
 
-    /// Where the pointer waits: bottom-left, level with the buttons and clear
-    /// of every line of copy. A cursor resting on top of text reads as a
-    /// drawing mistake rather than a pointer.
-    private let cursorParkLeading: CGFloat = 34
-    private let cursorParkAboveBottom: CGFloat = 34
+    private let cursor = DemoCursorView(pointerHeight: 22)
+    private var shareButton: DemoPushButtonView!
 
     init() {
         super.init(frame: .zero)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
-        card.makeDecorative()
-        addSubview(card)
-        addSubview(cursor)
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalTo: card.widthAnchor),
-            heightAnchor.constraint(equalTo: card.heightAnchor),
-            card.leadingAnchor.constraint(equalTo: leadingAnchor),
-            card.topAnchor.constraint(equalTo: topAnchor),
-            cursor.leadingAnchor.constraint(equalTo: leadingAnchor, constant: cursorParkLeading),
-            cursor.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -cursorParkAboveBottom),
-        ])
+        build()
         applySettledState()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// The rehearsal takes no clicks. Its buttons are real, undimmed AppKit
-    /// controls — that is what makes it accurate — so the refusal has to be
-    /// here, or a pointer over the stage would light up a hover state on a
-    /// button that answers nobody.
+    private func build() {
+        // The step's identity tile, exactly as the sheet and the spine row
+        // build one: the neutral well every step wears, with only the glyph
+        // carrying this step's hue.
+        let tile = IconTileView(symbolName: "chart.bar.xaxis",
+                                accessibility: "Usage counts",
+                                color: Tokens.Color.permissionUsageStats,
+                                side: Self.tileSide,
+                                pointSize: 18)
+
+        // The headline stays REAL: it is the question being asked, and a
+        // greeked question asks nothing. 12 pt is one of this window's
+        // ledgered sizes and clears the legibility floor.
+        let headline = NSTextField(labelWithString: UsageStatsConsentCard.headlineText)
+        headline.font = .systemFont(ofSize: 12, weight: .semibold)
+        headline.textColor = Tokens.Color.label
+        headline.translatesAutoresizingMaskIntoConstraints = false
+
+        // The promise, as bars. It is four lines in the sheet with a short
+        // last one, so it is four bars here with a short last one — the shape
+        // of the paragraph is what the preview owes the user, not its words.
+        let body = demoGistBlock(widths: [Self.contentWidth, Self.contentWidth,
+                                          Self.contentWidth, Self.contentWidth * 0.52],
+                                 height: 4, spacing: 7)
+
+        let decline = DemoPushButtonView(title: UsageStatsConsentCard.declineTitle,
+                                         height: Self.buttonHeight,
+                                         cornerRadius: Self.buttonCornerRadius)
+        shareButton = DemoPushButtonView(title: UsageStatsConsentCard.shareTitle,
+                                         emphasis: .correct,
+                                         height: Self.buttonHeight,
+                                         cornerRadius: Self.buttonCornerRadius)
+        let buttons = NSStackView(views: [decline, shareButton])
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        buttons.distribution = .fillEqually
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+
+        // Audiout's card, so its ground is `panel` — the sheet's own fill —
+        // rather than the greys the macOS mimics paint with. The shadow is
+        // what separates it from the preview frame's well, which is the job
+        // the sheet's rim does on a window.
+        let sheet = DemoWindowSurfaceView(fill: Tokens.Color.panel,
+                                          radius: Tokens.Layout.Radius.row)
+        for view in [tile, headline, body, buttons] { sheet.addSubview(view) }
+        addSubview(sheet)
+        addSubview(cursor)
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: Self.size.width),
+            heightAnchor.constraint(equalToConstant: Self.size.height),
+
+            sheet.leadingAnchor.constraint(equalTo: leadingAnchor),
+            sheet.trailingAnchor.constraint(equalTo: trailingAnchor),
+            sheet.topAnchor.constraint(equalTo: topAnchor),
+            sheet.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            tile.leadingAnchor.constraint(equalTo: sheet.leadingAnchor, constant: Self.padding),
+            tile.topAnchor.constraint(equalTo: sheet.topAnchor, constant: Self.padding),
+
+            headline.leadingAnchor.constraint(equalTo: tile.leadingAnchor),
+            headline.trailingAnchor.constraint(equalTo: sheet.trailingAnchor,
+                                               constant: -Self.padding),
+            headline.topAnchor.constraint(equalTo: tile.bottomAnchor, constant: 14),
+
+            body.leadingAnchor.constraint(equalTo: headline.leadingAnchor),
+            body.topAnchor.constraint(equalTo: headline.bottomAnchor, constant: 8),
+            // The bars take the slack, never run into the buttons.
+            body.bottomAnchor.constraint(lessThanOrEqualTo: buttons.topAnchor, constant: -14),
+
+            buttons.leadingAnchor.constraint(equalTo: headline.leadingAnchor),
+            buttons.trailingAnchor.constraint(equalTo: headline.trailingAnchor),
+            buttons.bottomAnchor.constraint(equalTo: sheet.bottomAnchor,
+                                            constant: -Self.padding),
+
+            // The pointer's rest: bottom-left, in the card's own margin beside
+            // the button row, so it never sits on a line of copy. The timeline
+            // moves it by TRANSFORM; the arrow's TIP is the anchor, so the
+            // view's top-left is the hot spot.
+            cursor.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            cursor.bottomAnchor.constraint(equalTo: buttons.bottomAnchor, constant: 6),
+        ])
+    }
+
+    /// The sheet's buttons are `.rounded` bezels rather than the privacy
+    /// dialog's full capsules, so the drawing follows: shorter than the mocks'
+    /// default and squared off at the same rung the real ones are.
+    private static let buttonHeight: CGFloat = 24
+    private static let buttonCornerRadius: CGFloat = 6
+
+    /// The rehearsal takes no clicks — the same refusal every drawn mock makes,
+    /// so a pointer crossing the stage can never light something up.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override var timelineDuration: TimeInterval { DemoBeat.loop }
@@ -1894,16 +1978,23 @@ final class DemoConsentCardMockView: DemoMockView {
     /// How far the pointer's TIP has to travel to the Share button's middle.
     private func travelToShare() -> CGPoint {
         let from = cursor.convert(cursor.tipPoint, to: self)
-        let button = card.shareButton
-        let to = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: self)
+        let to = shareButton.convert(NSPoint(x: shareButton.bounds.midX,
+                                             y: shareButton.bounds.midY), to: self)
         return CGPoint(x: to.x - from.x, y: to.y - from.y)
     }
 
     // MARK: Test-support hooks
 
-    /// The card the sheet would show, so a test can prove the two are the same
-    /// view rather than two drawings that happen to agree.
-    var test_card: UsageStatsConsentCard { card }
+    /// Where the press lands, and the target it has to land in — both in this
+    /// view's own coordinates, so a test can prove the glide still ends on
+    /// Share rather than merely that it moves.
+    var test_pressPoint: NSPoint {
+        let tip = cursor.convert(cursor.tipPoint, to: self)
+        let travel = travelToShare()
+        return NSPoint(x: tip.x + travel.x, y: tip.y + travel.y)
+    }
+
+    var test_shareButtonFrame: NSRect { shareButton.convert(shareButton.bounds, to: self) }
 }
 
 // MARK: - Settled mock
@@ -2406,8 +2497,10 @@ final class DemoSettledMockView: NSView {
 
 // MARK: - Drawn parts
 
-/// A macOS window body: opaque, rounded, no border, with the wide soft drop
-/// shadow a real alert or Settings window casts.
+/// A window body: opaque, rounded, no border, with the wide soft drop shadow a
+/// real alert or Settings window casts. Audiout's own consent card borrows it
+/// too, passing `panel` and its own corner — the shadow is what lifts any of
+/// these surfaces off the stage.
 ///
 /// Deliberately NOT an `NSVisualEffectView`, even though both real surfaces are
 /// vibrant: vibrancy samples the app's own window behind the mock and instantly

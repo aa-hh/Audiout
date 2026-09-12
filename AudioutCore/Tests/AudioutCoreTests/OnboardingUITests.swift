@@ -2405,6 +2405,7 @@ import Testing
             DemoSettingsMockView(step: .localNetwork, metricScale: 1.35),
             DemoSettingsHandoffMockView(step: .remoteControl),
             DemoSystemAlertMockView(step: .remoteControl),
+            DemoConsentCardMockView(),
         ]
         for mock in mocks {
             mock.layoutSubtreeIfNeeded()

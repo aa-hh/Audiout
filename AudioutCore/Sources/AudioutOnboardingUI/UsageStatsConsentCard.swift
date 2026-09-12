@@ -7,14 +7,13 @@ import AudioutSharedUI
 /// Audiout's own Share / Don't Share card — the surface the Usage Statistics
 /// step's ask raises, and the ONE definition of it.
 ///
-/// It is built once and hosted twice: live, inside
-/// ``UsageStatsConsentViewController`` as a sheet on the Setup window; and at
-/// rest, inside ``DemoConsentCardMockView`` on the rehearsal stage. That is the
-/// whole point of the type existing — every other stage in this window
-/// rehearses a surface macOS draws, which we can only ever approximate, but
-/// this one is OURS, so the rehearsal can be the same view rather than a
-/// drawing of it. The two cannot drift, because there is nothing to keep in
-/// step (owner: "why can't you make it look exactly like your mock-up").
+/// It appears in one place only: live, inside
+/// ``UsageStatsConsentViewController`` as a sheet on the Setup window. The
+/// rehearsal on the Setup stage is a DRAWING of it
+/// (``DemoConsentCardMockView``), like every other rehearsal in that window —
+/// a preview carrying the real copy read as the ask itself (owner ruling
+/// 2026-09-12). What the two share is this file's strings: ``headlineText``,
+/// ``shareTitle`` and ``declineTitle`` are the words the drawing keeps real.
 ///
 /// It is Warm Signal rather than a system mimic — `Tokens`, the step's own
 /// identity tile, and the same button pair the ribbon uses — because it is an
@@ -33,14 +32,11 @@ final class UsageStatsConsentCard: NSView {
     let shareButton: NSButton
     let declineButton: NSButton
 
-    /// - Parameter target/action: `nil` builds the card INERT, for the stage.
-    ///   The buttons are still real controls drawn by AppKit — that is what
-    ///   makes the rehearsal accurate — they simply answer to nobody.
     init(target: AnyObject? = nil,
          shareAction: Selector? = nil,
          declineAction: Selector? = nil) {
-        shareButton = ProminentButton(title: "Share", target: target, action: shareAction)
-        declineButton = NSButton(title: "Don't Share", target: target, action: declineAction)
+        shareButton = ProminentButton(title: Self.shareTitle, target: target, action: shareAction)
+        declineButton = NSButton(title: Self.declineTitle, target: target, action: declineAction)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
@@ -137,6 +133,11 @@ final class UsageStatsConsentCard: NSView {
     }
 
     static let headlineText = "Share anonymous usage counts?"
+    /// The two answers. Named because the rehearsal on the stage draws its own
+    /// buttons and carries these same words on them — a mock never fakes a
+    /// button label, and two copies of the string would be free to drift.
+    static let shareTitle = "Share"
+    static let declineTitle = "Don't Share"
     /// The promise, in the user's words, and the only place the APP makes it —
     /// a summary the owner keeps short on purpose, with the itemised version on
     /// the website's privacy and support pages. Keep it in step with what is
@@ -164,27 +165,10 @@ final class UsageStatsConsentCard: NSView {
         + "Audiout. It counts which features get used, reports crashes and failures like "
         + "audio stopping, and notes your Mac, macOS version, city, and whether Audiout is "
         + "licensed. What you play, and what your speakers are called, never leave this Mac."
-
-    /// The stage's copy: out of the accessibility tree, and inert.
-    ///
-    /// It is NOT disabled. A disabled button greys its own title however the
-    /// view's alpha is set, and this card's whole job on the stage is to look
-    /// exactly like the one that is about to appear. It is inert because it was
-    /// built with no target and no action, and because its host refuses hit
-    /// testing — so there is nothing to press rather than something visibly
-    /// unpressable.
-    func makeDecorative() {
-        for view in [self] + subviewsRecursively {
-            view.setAccessibilityElement(false)
-            view.setAccessibilityChildren([])
-        }
-    }
 }
 
 /// The live sheet: ``UsageStatsConsentCard`` on a Warm Signal panel, presented
-/// on the Setup window. Nothing here but the card and the answer it reports —
-/// the card owns every pixel, so the rehearsal on the stage is the same view
-/// with its buttons switched off.
+/// on the Setup window. Nothing here but the card and the answer it reports.
 final class UsageStatsConsentViewController: NSViewController {
 
     private let onAnswer: (Bool) -> Void

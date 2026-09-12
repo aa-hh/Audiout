@@ -1231,11 +1231,9 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             kAudioAggregateDeviceMainSubDeviceKey as String: outputUID,
             kAudioAggregateDeviceIsPrivateKey as String:     true,
             kAudioAggregateDeviceIsStackedKey as String:     false,
-            // Keep auto-start here: the mixer's meters share this coordinator,
-            // and a meter tap that never idles is a coreaudiod loop per listed
-            // app. Only the whole-system tap must run from start (see
-            // `CoreAudioSystemTap.createAggregate()`); a routed app that has
-            // never played can still drop its speaker at ~30 s.
+            // Keep auto-start: an idle speaker session is fed by the sender
+            // shim's silence fill (AirPlayEngine, shims/outputs.c), not by
+            // keeping a tap awake.
             kAudioAggregateDeviceTapAutoStartKey as String:  true,
             kAudioAggregateDeviceSubDeviceListKey as String: [
                 [ kAudioSubDeviceUIDKey as String: outputUID ]

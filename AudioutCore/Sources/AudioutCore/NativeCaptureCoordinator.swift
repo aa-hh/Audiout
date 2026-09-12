@@ -2692,9 +2692,6 @@ public protocol SystemAudioTap: AnyObject {
     /// Create the tap, read its REAL format, build the aggregate device, register
     /// the IOProc, and start it. Returns the tap's real captured format. Throws
     /// ``NativeCaptureError`` on failure (most commonly TCC not granted).
-    /// Once this returns, `onBuffer` fires at the output device's block cadence
-    /// continuously — silence included — until ``teardown()``. The tap never
-    /// idles: AirPlay receivers close a session that goes ~30 s without packets.
     /// - Parameter excludedProcessObjectIDs: Core Audio process objects to leave
     ///   OUT of the whole-system mix (T4 — apps individually routed elsewhere, or
     ///   user-excluded via Settings). Already resolved to the FULL per-bundle
@@ -3571,12 +3568,12 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             kAudioAggregateDeviceMainSubDeviceKey as String: outputUID,
             kAudioAggregateDeviceIsPrivateKey as String:     true,
             kAudioAggregateDeviceIsStackedKey as String:     false,
-            // No `kAudioAggregateDeviceTapAutoStartKey`: that key makes
-            // `AudioDeviceStart` wait for the first tapped process to produce
-            // audio, so a speaker selected while nothing plays received no
-            // packets and hung up ~30 s later (Sonos Move, every build up to
-            // 2026-09-11). Without it the IOProc runs from start and delivers
-            // silence, which is what keeps a session alive.
+            // `kAudioAggregateDeviceTapAutoStartKey` makes `AudioDeviceStart`
+            // wait until a tapped process actually plays, which is deliberate
+            // here for CPU. An idle speaker session is kept alive by the
+            // sender shim's silence fill (AirPlayEngine, shims/outputs.c),
+            // never by keeping this tap awake.
+            kAudioAggregateDeviceTapAutoStartKey as String:  true,
             kAudioAggregateDeviceSubDeviceListKey as String: [
                 [ kAudioSubDeviceUIDKey as String: outputUID ]
             ],

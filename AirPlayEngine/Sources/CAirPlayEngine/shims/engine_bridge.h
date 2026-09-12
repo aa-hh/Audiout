@@ -154,6 +154,21 @@ airplay_test_master_session_count(void);
 void
 airplay_test_master_sessions_reset(void);
 
+/* [idle session fill 2026-09-12] TEST/DIAGNOSTIC SEAM for the shim's idle
+ * silence fill (shims/outputs.c). In production an 8 ms timer on evbase_player
+ * drives the fill; headless test mode has no event base, so a test runs one
+ * cycle at a time of its own choosing and reads back what the fill delivered.
+ * NOT part of the shipping API. Production Swift never calls these.
+ *
+ *   _tick_for_test     : run one fill cycle as if the clock read `now`,
+ *                        returning the sample frames written this cycle.
+ *   _end_pts_for_test  : the end of the last audio delivered for `stream_id`
+ *                        (zero if the fill knows nothing about that stream). */
+int
+outputs_idle_fill_tick_for_test(struct timespec now);
+struct timespec
+outputs_idle_fill_end_pts_for_test(uint32_t stream_id);
+
 /* [AirPlayEngine vendored change 2026-07-19] P2b TEST/DIAGNOSTIC SEAM for the
  * RAOP/AirPlay-1 sender — mirror of the airplay_test_master_session_* accessors
  * above (defined in sender/raop.c). Expose the otherwise-static RAOP

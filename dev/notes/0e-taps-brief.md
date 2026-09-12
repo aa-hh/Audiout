@@ -153,8 +153,7 @@ let description: [String: Any] = [
     kAudioAggregateDeviceMainSubDeviceKey: outputUID,
     kAudioAggregateDeviceIsPrivateKey:     true,     // don't publish device system-wide
     kAudioAggregateDeviceIsStackedKey:     false,
-    // kAudioAggregateDeviceTapAutoStartKey — OMITTED in Audiout: it makes AudioDeviceStart wait for
-    // the first tapped process to play, and an AirPlay receiver hangs up after ~30 s without packets.
+    kAudioAggregateDeviceTapAutoStartKey:  true,   // keep: the tap sleeps until an app plays; an idle speaker session is fed silence by the sender shim (AirPlayEngine shims/outputs.c), which is what keeps the receiver from hanging up at ~30 s
     kAudioAggregateDeviceSubDeviceListKey: [
         [ kAudioSubDeviceUIDKey: outputUID ]
     ],

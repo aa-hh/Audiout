@@ -1231,7 +1231,9 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             kAudioAggregateDeviceMainSubDeviceKey as String: outputUID,
             kAudioAggregateDeviceIsPrivateKey as String:     true,
             kAudioAggregateDeviceIsStackedKey as String:     false,
-            kAudioAggregateDeviceTapAutoStartKey as String:  true,
+            // No `kAudioAggregateDeviceTapAutoStartKey` — same reason as
+            // `CoreAudioSystemTap.createAggregate()`: the IOProc must run from
+            // start so a routed-but-silent app still feeds its speaker.
             kAudioAggregateDeviceSubDeviceListKey as String: [
                 [ kAudioSubDeviceUIDKey as String: outputUID ]
             ],

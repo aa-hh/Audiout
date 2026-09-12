@@ -427,6 +427,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// HAL access to a BT speaker's own volume. `nil` (most tests) keeps the
     /// whole BT-HW-VOL path inert: no uid ever enters hardware control.
     private let btHardwareVolumeControl: BTHardwareVolumeControlling?
+    /// Reads a speaker's cached AVRCP SDP record for the category-2
+    /// (absolute-volume) claim — see ``BTAbsoluteVolumeSDP``. `nil` result
+    /// (no grant, no record) is NOT a denial: the gate then falls back to the
+    /// settable-only check alone, same as before this claim existed.
+    private let btAbsoluteVolumeClaim: (@Sendable (String) -> Bool?)?
+    /// Definitive (`true`/`false`) SDP verdicts, cached for the process
+    /// lifetime once a probe returns one. On `stateQueue`.
+    private var btSDPClaimByUID: [String: Bool] = [:]
+    /// UIDs already probed within the current link session, so a `nil`
+    /// verdict (no cached record yet) isn't re-queried on every reevaluation;
+    /// cleared on disconnect so the next connect retries. On `stateQueue`.
+    private var btSDPProbedUIDs: Set<String> = []
+    /// Runs the SDP claim off `stateQueue` — IOBluetooth may block — and off
+    /// `btHardwareWriteQueue`, which is a different, unrelated HAL path.
+    private let btSDPQueue = DispatchQueue(label: "com.audiout.Audiout.bt-sdp")
     /// UIDs whose per-device slider currently writes hardware volume:
     /// connected, toggle enabled, property settable, no failed write this
     /// session. Their device term leaves ``btSinkGain(forUID:)``'s software
@@ -1582,6 +1597,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             castOffsetStore: BTTrimStore(fileName: BTTrimStore.castFileName),
             btHardwareVolumeStore: BTHardwareVolumeStore(),
             btHardwareVolumeControl: BTHardwareVolume(),
+            btAbsoluteVolumeClaim: { BTAbsoluteVolumeSDP.claim(forUID: $0) },
             eqStore: DeviceEQStore(),
             processResolver: processResolver,
             defaultOutputSwitcher: DefaultOutputSwitcher())
@@ -1630,6 +1646,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         castOffsetStore: BTTrimStore? = nil,
         btHardwareVolumeStore: BTHardwareVolumeStore? = nil,
         btHardwareVolumeControl: BTHardwareVolumeControlling? = nil,
+        btAbsoluteVolumeClaim: (@Sendable (String) -> Bool?)? = nil,
         eqStore: DeviceEQStore? = nil,
         dacpEndpoint: DACPEndpoint = DACPServer(),
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
@@ -1690,6 +1707,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
         self.btHardwareVolumeStore = btHardwareVolumeStore
         self.btHardwareVolumeControl = btHardwareVolumeControl
+        self.btAbsoluteVolumeClaim = btAbsoluteVolumeClaim
         self.castOffsetStore = castOffsetStore
         if let castOffsets = (try? castOffsetStore?.load()) ?? nil {
             self.castOffsetsByID = castOffsets.mapValues {
@@ -2978,11 +2996,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// (Re)decide whether `uid`'s slider writes hardware volume, on any input
-    /// change: connect/disconnect, the detail-pane toggle, a failed write.
-    /// Entering control adopts the SPEAKER's current level — a read, never a
-    /// write, so a stored level cannot blast a loud speaker on connect — and
-    /// starts the device-side watch; leaving control returns the device term
-    /// to the software product. On `stateQueue`.
+    /// change: connect/disconnect, the detail-pane toggle, a failed write, or
+    /// a just-returned SDP verdict. Entering control adopts the SPEAKER's
+    /// current level — a read, never a write, so a stored level cannot blast
+    /// a loud speaker on connect — and starts the device-side watch; leaving
+    /// control returns the device term to the software product.
+    ///
+    /// Capability now requires the cached AVRCP SDP record's category-2 claim
+    /// (``BTAbsoluteVolumeSDP``) IN ADDITION TO the property being settable —
+    /// settable alone doesn't distinguish a real fader from a driver's
+    /// software-shim volume. A missing SDP verdict (`nil`: no grant, no
+    /// record yet) falls back to the settable-only gate rather than blocking
+    /// on it, so the interim window before a probe returns still admits
+    /// control. On `stateQueue`.
     private func reevaluateBTHardwareControlLocked(_ uid: String) {
         guard let control = btHardwareVolumeControl else { return }
         let connected = known[uid]?.isBluetooth == true && known[uid]?.isAvailable == true
@@ -2992,11 +3018,28 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // disconnect keeps the last verdict rather than resetting to unknown.
         var capableDeviceID: AudioObjectID?
         if connected, let deviceID = liveBTDeviceIDLocked(uid) {
-            let capable = control.isControllable(deviceID) && !btHardwareFailedUIDs.contains(uid)
+            let sdpAllows = btSDPClaimByUID[uid] ?? true
+            let capable = sdpAllows && control.isControllable(deviceID) && !btHardwareFailedUIDs.contains(uid)
             capableDeviceID = capable ? deviceID : nil
             if known[uid]?.btHardwareVolumeCapable != capable {
                 applyLocal(uid) { $0.btHardwareVolumeCapable = capable }
             }
+            if let claim = btAbsoluteVolumeClaim, btSDPClaimByUID[uid] == nil,
+               btSDPProbedUIDs.insert(uid).inserted {
+                btSDPQueue.async { [weak self] in
+                    guard let verdict = claim(uid) else { return }
+                    self?.stateQueue.async {
+                        guard let self else { return }
+                        self.btSDPClaimByUID[uid] = verdict
+                        self.reevaluateBTHardwareControlLocked(uid)
+                    }
+                }
+            }
+        }
+        if !connected {
+            // Not connected: drop the probed marker so the next connect
+            // retries a device whose SDP cache wasn't populated yet.
+            btSDPProbedUIDs.remove(uid)
         }
         guard let deviceID = capableDeviceID,
               btHardwareVolumeStore?.isEnabled(uid: uid) ?? true else {

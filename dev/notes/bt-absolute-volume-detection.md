@@ -62,6 +62,38 @@ The private driver properties that would answer directly (`kBluetoothAudioDevice
   tearing down every audio device on the machine. **Do not ship anything that touches
   these selectors.**
 
+#### Crash verdict: a driver bug, not a probe mistake
+
+Diagnosed afterwards from the three crash reports and the plugin's own machine code, with
+no further probing (reports: `coreaudiod-2026-09-12-222127.ips`, `-222146.ips`,
+`-222222.ips`).
+
+- All three are null-pointer reads (`EXC_BAD_ACCESS`, `KERN_INVALID_ADDRESS at 0x0`) on
+  the device's own event queue, `com.apple.audio.device.<MAC>:output.event`. Two share a
+  stack; the third differs.
+- Crashes 1 and 2 (`BTAudioHALPlugin+0x3b5f4`, reached for selector `'dvsf'`): the plugin
+  reads an 8-byte floating-point number straight out of the caller's qualifier pointer,
+  with no check that a qualifier was passed. The probe passed none, so the pointer was
+  null. Passing one would not have made the call correct: `AudioServerPlugIn.h:291-296`
+  allows only three qualifier types (none, a CFString, a property list), and none of them
+  is a raw number. No call that follows the documented rules can satisfy that read.
+- Crash 3 (`BTAudioHALPlugin+0x6aa68`): the plugin loads one of its own internal objects,
+  finds it null, and calls through it. Nothing the caller passes is involved.
+- Verdict: **not preventable by calling more carefully.** Reading undocumented selectors on
+  this driver can kill coreaudiod however the call is shaped. The rule above is a fact about
+  the driver, not about probe hygiene.
+- No lasting damage. coreaudiod is restarted by the system each time; the three reports
+  carry three different process ids, which shows it came back between crashes. The cost is
+  the moment of teardown: every audio device disappears and is published again, and any
+  program holding a Core Audio device id from before the crash now holds a stale one.
+- What a person hears (inferred, not measured): all sound from the Mac stops at once, on
+  every output, for as long as coreaudiod takes to restart. Apps then either resume on
+  their own or stay silent until paused and played again, depending on how each one
+  handles its device disappearing. A Bluetooth speaker's audio link drops with it. The
+  length of the gap was not recorded.
+- Audiout's shipping code never reads these selectors, so its users are not exposed to
+  this crash. It only happens to a program that probes them.
+
 ### 3. Quantization signature: verified positive, unverified negative
 
 AVRCP absolute volume is a 7-bit value, 0x00–0x7F = 0–127 steps (AVRCP 1.6.2 §6.13; the

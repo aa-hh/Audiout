@@ -162,7 +162,8 @@ import CoreAudio
     // MARK: Helpers
 
     private func makeBackend(hardware: FakeBTHardwareVolume,
-                             store: BTHardwareVolumeStore? = nil)
+                             store: BTHardwareVolumeStore? = nil,
+                             sdpClaim: (@Sendable (String) -> Bool?)? = nil)
         -> (NativeBackend, FakeBTEnumerator, SpyBTSink) {
         let bt = FakeBTEnumerator()
         let backend = NativeBackend(
@@ -171,6 +172,7 @@ import CoreAudio
             btEnumerator: bt,
             btHardwareVolumeStore: store,
             btHardwareVolumeControl: hardware,
+            btAbsoluteVolumeClaim: sdpClaim,
             dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: NoOpSystemVolume(),
             aggregateControl: NoOpAggregateControl())
@@ -188,6 +190,14 @@ import CoreAudio
 
     private func device(_ backend: NativeBackend, _ id: String) -> Device? {
         backend.devices.first { $0.id == id }
+    }
+
+    /// Locked call counter for the `sdpClaim` seam in ``sdpVerdictIsCachedPerDevice``.
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func increment() { lock.withLock { count += 1 } }
+        var value: Int { lock.withLock { count } }
     }
 
     private let speaker = BTDeviceSnapshot(
@@ -327,5 +337,69 @@ import CoreAudio
         backend.setVolume(25, for: speaker.id)
         waitFor { self.device(backend, self.speaker.id)?.volume == 25 }
         #expect(hardware.writes.count == writesBefore)
+    }
+
+    /// A category-2 SDP denial blocks hardware control even though the
+    /// property reads settable. The defect this pins: trusting "settable"
+    /// alone admits devices whose settable HAL property is a driver's
+    /// software-shim volume, not a real hardware fader.
+    @Test func sdpCategoryTwoDeniedBlocksHardwareControl() {
+        let hardware = FakeBTHardwareVolume()
+        hardware.controllable = true
+        let (backend, bt, sink) = makeBackend(hardware: hardware, sdpClaim: { _ in false })
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([speaker])
+        waitFor { self.device(backend, self.speaker.id)?.btHardwareVolumeCapable == false }
+
+        backend.setOutputSet([speaker.id])
+        waitFor { sink.calls.contains("start") }
+        backend.setVolume(30, for: speaker.id)
+        waitFor { hardware.unwatched.contains(self.speaker.id) }
+        waitFor { sink.lastGain(for: self.speaker.id) == 0.3 }
+        #expect(device(backend, speaker.id)?.volume == 30)
+        #expect(hardware.writes.isEmpty, "a denied claim must never reach the HAL write")
+    }
+
+    /// A missing SDP record (`nil`) falls back to the settable-only gate
+    /// instead of blocking. The defect this pins: making the SDP read a hard
+    /// dependency would block every speaker whose SDP cache is empty, even
+    /// ones a real hardware fader.
+    @Test func missingSDPRecordFallsBackToSettableGate() {
+        let hardware = FakeBTHardwareVolume()
+        let (backend, bt, _) = makeBackend(hardware: hardware, sdpClaim: { _ in nil })
+        defer { backend.stop() }
+        connect(backend, bt, hardware)
+
+        waitFor { self.device(backend, self.speaker.id)?.btHardwareVolumeCapable == true }
+        backend.setVolume(30, for: speaker.id)
+        waitFor { hardware.writes.contains { $0.level == 30 && $0.uid == self.speaker.id } }
+    }
+
+    /// A reconnect reads the cached SDP verdict, not a fresh probe. The
+    /// defect this pins: re-reading SDP on every reconnect turns each link
+    /// session into an IOBluetooth round trip for a verdict already known.
+    @Test func sdpVerdictIsCachedPerDevice() {
+        let callCount = CallCounter()
+        let hardware = FakeBTHardwareVolume()
+        let (backend, bt, _) = makeBackend(hardware: hardware, sdpClaim: { _ in
+            callCount.increment()
+            return true
+        })
+        defer { backend.stop() }
+        connect(backend, bt, hardware)
+        waitFor { hardware.hasWatch(self.speaker.id) }
+        waitFor { callCount.value == 1 }
+        SuiteWait.settle(0.3)  // let the verdict land in the cache
+
+        // Disconnect clears the probed marker, so only the cache can stop a
+        // second probe on the reconnect.
+        bt.fire([BTDeviceSnapshot(id: speaker.id, name: speaker.name, isConnected: false)])
+        waitFor { hardware.unwatched.contains(self.speaker.id) }
+        bt.fire([speaker])
+        waitFor { hardware.hasWatch(self.speaker.id) }
+        SuiteWait.settle(0.3)  // give a second probe time to run if one was queued
+
+        #expect(callCount.value == 1)
     }
 }

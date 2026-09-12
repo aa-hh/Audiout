@@ -114,6 +114,15 @@ struct output_device
   unsigned busy:1;
   unsigned resurrect:1;
 
+  /* [idle session fill 2026-09-12] Shim-owned, not from OwnTone. Set when the
+   * device's teardown starts (outputs_device_stop) and cleared when a fresh
+   * session attaches (outputs_device_session_add). The idle silence fill skips
+   * a suppressed device, so it never writes into a session that is being torn
+   * down — a window neither `session` nor `state` alone closes, because both
+   * lag the teardown (the session is freed only at the end, and the stopped
+   * state arrives through a deferred callback). */
+  unsigned idle_fill_suppressed:1;
+
   const char *password;
   char *auth_key;
 

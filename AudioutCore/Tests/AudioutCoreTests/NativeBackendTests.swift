@@ -408,6 +408,7 @@ private final class ScriptedPTPHelperActivator: PTPHelperActivating, @unchecked 
 private final class ScriptedBrowser: ServiceBrowsing, @unchecked Sendable {
     var onResolve: (@Sendable (ResolvedService) -> Void)?
     var onRemove: (@Sendable (RemovedService) -> Void)?
+    var onReappear: (@Sendable (RemovedService) -> Void)?
     var onStateChange: (@Sendable (BrowserState) -> Void)?
     func start() {}
     func stop() {}

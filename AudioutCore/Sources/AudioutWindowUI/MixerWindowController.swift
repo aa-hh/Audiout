@@ -119,6 +119,7 @@ public final class MixerWindowController {
     public init(groupController: GroupController,
                deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false),
                appRouting: AppRoutingController? = nil,
+               btHardwareVolumeStore: BTHardwareVolumeStore? = nil,
                settings: AppSettings = AppSettings()) {
         self.groupController = groupController
         self.deviceIconController = deviceIconController
@@ -133,6 +134,9 @@ public final class MixerWindowController {
         sidebarViewController.deviceIconController = deviceIconController
         editorViewController.deviceIconController = deviceIconController
         detailViewController.deviceIconController = deviceIconController
+        // Nil-tolerant: without a store the detail pane simply hides its
+        // "Control speaker volume" slot (see `DeviceDetailViewController`).
+        detailViewController.btHardwareVolumeStore = btHardwareVolumeStore
         overviewViewController.deviceIconController = deviceIconController
         overviewViewController.appRouting = appRouting
 

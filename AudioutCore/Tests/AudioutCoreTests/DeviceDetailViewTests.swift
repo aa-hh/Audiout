@@ -178,6 +178,44 @@ import AppKit
         }
     }
 
+    // MARK: "Control speaker volume" (Bluetooth only)
+
+    private func detailWithVolumeStore() -> (DeviceDetailViewController, BTHardwareVolumeStore) {
+        let store = BTHardwareVolumeStore(directory: tempDirectory())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.btHardwareVolumeStore = store
+        // The checkbox's target/action is wired in `loadView`; a click before
+        // the view exists would silently no-op.
+        _ = detail.view
+        return (detail, store)
+    }
+
+    /// The row is Bluetooth-only: an AirPlay speaker has no hardware volume
+    /// this app can drive, so offering the toggle there promises something
+    /// that cannot happen.
+    @Test func speakerVolumeRowIsBluetoothOnly() {
+        let (detail, _) = detailWithVolumeStore()
+        detail.show(device: makeDevice(kind: .bluetooth))
+        #expect(detail.test_speakerVolumeRowShown)
+        detail.show(device: makeDevice(kind: .sonos))
+        #expect(detail.test_speakerVolumeRowShown == false)
+    }
+
+    /// Default ON, and a click writes through: a checkbox that renders from
+    /// nothing, or flips only on screen, is a setting that silently resets.
+    @Test func speakerVolumeCheckboxRendersAndWritesTheStore() {
+        let (detail, store) = detailWithVolumeStore()
+        detail.show(device: makeDevice(id: "bt-1", kind: .bluetooth))
+        #expect(detail.test_speakerVolumeEnabled)
+
+        detail.test_clickSpeakerVolumeCheckbox()
+        #expect(store.isEnabled(uid: "bt-1") == false)
+
+        detail.show(device: makeDevice(id: "bt-1", kind: .bluetooth))
+        #expect(detail.test_speakerVolumeEnabled == false)
+    }
+
     // MARK: "In groups" membership text
 
     @Test func groupMembershipTextIsNoneWhenDeviceIsInNoGroup() {

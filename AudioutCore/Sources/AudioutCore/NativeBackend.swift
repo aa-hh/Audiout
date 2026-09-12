@@ -418,6 +418,44 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// third map.
     private var btSpeakerIndexByUID: [String: Int] = [:]   // btTrimLock
 
+    // MARK: Bluetooth hardware volume (BT-HW-VOL)
+
+    /// Persistence for the per-device "Control speaker volume" opt-out.
+    /// Public because the Groups detail pane owns the toggle and must share
+    /// this instance. `nil` (most tests) = every uid reads as enabled.
+    public let btHardwareVolumeStore: BTHardwareVolumeStore?
+    /// HAL access to a BT speaker's own volume. `nil` (most tests) keeps the
+    /// whole BT-HW-VOL path inert: no uid ever enters hardware control.
+    private let btHardwareVolumeControl: BTHardwareVolumeControlling?
+    /// Reads a speaker's cached AVRCP SDP record for the category-2
+    /// (absolute-volume) claim — see ``BTAbsoluteVolumeSDP``. `nil` result
+    /// (no grant, no record) is NOT a denial: the gate then falls back to the
+    /// settable-only check alone, same as before this claim existed.
+    private let btAbsoluteVolumeClaim: (@Sendable (String) -> Bool?)?
+    /// Definitive (`true`/`false`) SDP verdicts, cached for the process
+    /// lifetime once a probe returns one. On `stateQueue`.
+    private var btSDPClaimByUID: [String: Bool] = [:]
+    /// UIDs already probed within the current link session, so a `nil`
+    /// verdict (no cached record yet) isn't re-queried on every reevaluation;
+    /// cleared on disconnect so the next connect retries. On `stateQueue`.
+    private var btSDPProbedUIDs: Set<String> = []
+    /// Runs the SDP claim off `stateQueue` — IOBluetooth may block — and off
+    /// `btHardwareWriteQueue`, which is a different, unrelated HAL path.
+    private let btSDPQueue = DispatchQueue(label: "com.audiout.Audiout.bt-sdp")
+    /// UIDs whose per-device slider currently writes hardware volume:
+    /// connected, toggle enabled, property settable, no failed write this
+    /// session. Their device term leaves ``btSinkGain(forUID:)``'s software
+    /// product — the speaker itself holds it. On `stateQueue`.
+    private var btHardwareControlledUIDs: Set<String> = []
+    /// UIDs whose hardware write failed once — advertised-but-not-delivered
+    /// (the PLAN-AIRPLAY-COEXISTENCE.md `vmvc` trap). Software gain carries
+    /// them for the rest of the session. On `stateQueue`.
+    private var btHardwareFailedUIDs: Set<String> = []
+    /// HAL volume writes leave `stateQueue` the same way the local row's
+    /// system-volume writes do: a synchronous HAL set under the state lock
+    /// would let a slow coreaudiod stall every backend mutation.
+    private let btHardwareWriteQueue = DispatchQueue(label: "com.audiout.Audiout.bt-hw-volume")
+
     // MARK: Companion sync-calibration run (phone-driven)
 
     /// What the Mac publishes about each Bluetooth speaker's timing — fed the
@@ -1557,6 +1595,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             castOutputManager: CastOutputManager(),
             btTrimStore: BTTrimStore(),
             castOffsetStore: BTTrimStore(fileName: BTTrimStore.castFileName),
+            btHardwareVolumeStore: BTHardwareVolumeStore(),
+            btHardwareVolumeControl: BTHardwareVolume(),
+            btAbsoluteVolumeClaim: { BTAbsoluteVolumeSDP.claim(forUID: $0) },
             eqStore: DeviceEQStore(),
             processResolver: processResolver,
             defaultOutputSwitcher: DefaultOutputSwitcher())
@@ -1603,6 +1644,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         castOutputManager: CastOutputControlling? = nil,
         btTrimStore: BTTrimStore? = nil,
         castOffsetStore: BTTrimStore? = nil,
+        btHardwareVolumeStore: BTHardwareVolumeStore? = nil,
+        btHardwareVolumeControl: BTHardwareVolumeControlling? = nil,
+        btAbsoluteVolumeClaim: (@Sendable (String) -> Bool?)? = nil,
         eqStore: DeviceEQStore? = nil,
         dacpEndpoint: DACPEndpoint = DACPServer(),
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
@@ -1661,6 +1705,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if let indices = (try? btTrimStore?.loadSpeakerIndex()) ?? nil {
             self.btSpeakerIndexByUID = indices
         }
+        self.btHardwareVolumeStore = btHardwareVolumeStore
+        self.btHardwareVolumeControl = btHardwareVolumeControl
+        self.btAbsoluteVolumeClaim = btAbsoluteVolumeClaim
         self.castOffsetStore = castOffsetStore
         if let castOffsets = (try? castOffsetStore?.load()) ?? nil {
             self.castOffsetsByID = castOffsets.mapValues {
@@ -1817,6 +1864,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             storedOffsetMs: { [weak self] uid in self?.btStoredAlignmentOffsetMs(forDevice: uid) },
             speakerKey: { [weak self] uid in self?.btSpeakerKey(forDevice: uid) ?? "?" },
             deviceClassMinor: { [weak self] uid in self?.btDeviceClassMinor(forDevice: uid) })
+        // The detail-pane toggle (BT-HW-VOL): a flip re-decides that uid's
+        // write path on `stateQueue`, like every other input to the decision.
+        btHardwareVolumeStore?.onChange = { [weak self] uid, _ in
+            guard let self else { return }
+            self.stateQueue.async { self.reevaluateBTHardwareControlLocked(uid) }
+        }
     }
 
     // MARK: OutputBackend
@@ -2658,7 +2711,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     self.applyLocal(id) { $0.volume = clamped }
                 } else {
                     self.applyLocal(id) { $0.volume = clamped }
-                    self.pushBTSinkGainLocked(id)
+                    // A hardware-controlled uid's device term lives on the
+                    // speaker (BT-HW-VOL); everyone else composes in software.
+                    if self.btHardwareControlledUIDs.contains(id) {
+                        self.pushBTHardwareVolumeLocked(id, level: clamped)
+                    } else {
+                        self.pushBTSinkGainLocked(id)
+                    }
                 }
                 return
             }
@@ -2720,6 +2779,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     let intended = self.stashedVolume[id] ?? self.known[id]?.volume ?? 0
                     self.stashedVolume[id] = nil
                     self.applyLocal(id) { $0.isMuted = false; $0.volume = intended }
+                    // Mute never touched the speaker's own level (BT-HW-VOL:
+                    // the software 0 is the mute), but the stash may have
+                    // moved while muted — a slider drag, or the speaker's own
+                    // buttons — so unmute settles hardware on the level owed.
+                    if self.btHardwareControlledUIDs.contains(id) {
+                        self.pushBTHardwareVolumeLocked(id, level: intended)
+                    }
                 }
                 self.pushBTSinkGainLocked(id)
                 return
@@ -2897,6 +2963,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `stateQueue`.
     private func btSinkGain(forUID uid: String) -> Float {   // on stateQueue
         if btWizardHeldUIDs.contains(uid) || muted.contains(uid) { return 0 }
+        // A hardware-controlled uid's device term is on the speaker itself
+        // (BT-HW-VOL), so the software product carries Main alone.
+        if btHardwareControlledUIDs.contains(uid) { return Float(masterGainFraction) }
         let level = known[uid]?.volume ?? 100
         return Float(masterGainFraction * Double(level.clampedToVolume) / 100.0)
     }
@@ -2915,6 +2984,122 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// a sink transition to apply on `captureControlQueue`. On `stateQueue`.
     private func btSinkGains(forUIDs uids: [String]) -> [String: Float] {   // on stateQueue
         Dictionary(uniqueKeysWithValues: uids.map { ($0, btSinkGain(forUID: $0)) })
+    }
+
+    // MARK: Bluetooth hardware volume decisions (BT-HW-VOL)
+
+    /// UID → live `AudioObjectID` at USE time, never cached: BT object ids go
+    /// stale across a disconnect/rejoin while UIDs don't (see
+    /// ``btDeviceIDForUID``). On `stateQueue`.
+    private func liveBTDeviceIDLocked(_ uid: String) -> AudioObjectID? {
+        btDeviceIDForUID?(uid) ?? aggregateControl.resolveDeviceID(forUID: uid)
+    }
+
+    /// (Re)decide whether `uid`'s slider writes hardware volume, on any input
+    /// change: connect/disconnect, the detail-pane toggle, a failed write, or
+    /// a just-returned SDP verdict. Entering control adopts the SPEAKER's
+    /// current level — a read, never a write, so a stored level cannot blast
+    /// a loud speaker on connect — and starts the device-side watch; leaving
+    /// control returns the device term to the software product.
+    ///
+    /// Capability now requires the cached AVRCP SDP record's category-2 claim
+    /// (``BTAbsoluteVolumeSDP``) IN ADDITION TO the property being settable —
+    /// settable alone doesn't distinguish a real fader from a driver's
+    /// software-shim volume. A missing SDP verdict (`nil`: no grant, no
+    /// record yet) falls back to the settable-only gate rather than blocking
+    /// on it, so the interim window before a probe returns still admits
+    /// control. On `stateQueue`.
+    private func reevaluateBTHardwareControlLocked(_ uid: String) {
+        guard let control = btHardwareVolumeControl else { return }
+        let connected = known[uid]?.isBluetooth == true && known[uid]?.isAvailable == true
+        // Capability is decided independently of the toggle, so a speaker that
+        // cannot deliver reads `false` even while opted out — it is what hides
+        // the detail pane's toggle. Only decidable while connected; a
+        // disconnect keeps the last verdict rather than resetting to unknown.
+        var capableDeviceID: AudioObjectID?
+        if connected, let deviceID = liveBTDeviceIDLocked(uid) {
+            let sdpAllows = btSDPClaimByUID[uid] ?? true
+            let capable = sdpAllows && control.isControllable(deviceID) && !btHardwareFailedUIDs.contains(uid)
+            capableDeviceID = capable ? deviceID : nil
+            if known[uid]?.btHardwareVolumeCapable != capable {
+                applyLocal(uid) { $0.btHardwareVolumeCapable = capable }
+            }
+            if let claim = btAbsoluteVolumeClaim, btSDPClaimByUID[uid] == nil,
+               btSDPProbedUIDs.insert(uid).inserted {
+                btSDPQueue.async { [weak self] in
+                    guard let verdict = claim(uid) else { return }
+                    self?.stateQueue.async {
+                        guard let self else { return }
+                        self.btSDPClaimByUID[uid] = verdict
+                        self.reevaluateBTHardwareControlLocked(uid)
+                    }
+                }
+            }
+        }
+        if !connected {
+            // Not connected: drop the probed marker so the next connect
+            // retries a device whose SDP cache wasn't populated yet.
+            btSDPProbedUIDs.remove(uid)
+        }
+        guard let deviceID = capableDeviceID,
+              btHardwareVolumeStore?.isEnabled(uid: uid) ?? true else {
+            if btHardwareControlledUIDs.remove(uid) != nil {
+                control.unwatch(uid: uid)
+                pushBTSinkGainLocked(uid)
+            }
+            return
+        }
+        guard btHardwareControlledUIDs.insert(uid).inserted else { return }
+        if let level = control.read(deviceID) {
+            if muted.contains(uid) {
+                stashedVolume[uid] = level.clampedToVolume
+            } else {
+                applyLocal(uid) { $0.volume = level.clampedToVolume }
+            }
+        }
+        pushBTSinkGainLocked(uid)
+        control.watch(deviceID: deviceID, uid: uid) { [weak self] level in
+            guard let self else { return }
+            self.stateQueue.async { self.noteBTHardwareVolumeChangedLocked(uid, level: level) }
+        }
+    }
+
+    /// A DEVICE-side change (the speaker's own buttons): the same knob as the
+    /// slider, so it lands exactly where a drag would — the row's level, or
+    /// the mute stash while the software 0 covers it. The `applyLocal` emit is
+    /// all the propagation a drag gets too: saved-group member levels are
+    /// snapshots of `Device.volume` taken at save time. On `stateQueue`.
+    private func noteBTHardwareVolumeChangedLocked(_ uid: String, level: Int) {
+        guard btHardwareControlledUIDs.contains(uid) else { return }
+        if muted.contains(uid) {
+            stashedVolume[uid] = level.clampedToVolume
+        } else {
+            applyLocal(uid) { $0.volume = level.clampedToVolume }
+        }
+    }
+
+    /// Write one uid's level to the speaker itself, off `stateQueue` (a slow
+    /// coreaudiod must not stall backend mutations — same discipline as the
+    /// local row's system-volume writes). A failed write is the real
+    /// "advertised but does not deliver" signal the settable check can't give:
+    /// the uid falls back to software gain for the session, and the re-push
+    /// carries the level the drag was owed. On `stateQueue`.
+    private func pushBTHardwareVolumeLocked(_ uid: String, level: Int) {
+        guard let control = btHardwareVolumeControl,
+              let deviceID = liveBTDeviceIDLocked(uid) else { return }
+        btHardwareWriteQueue.async { [weak self] in
+            guard !control.write(level, to: deviceID, uid: uid) else { return }
+            self?.stateQueue.async { self?.noteBTHardwareWriteFailedLocked(uid) }
+        }
+    }
+
+    /// On `stateQueue`.
+    private func noteBTHardwareWriteFailedLocked(_ uid: String) {
+        guard btHardwareControlledUIDs.contains(uid),
+              btHardwareFailedUIDs.insert(uid).inserted else { return }
+        Telemetry.fail(.localPlayback, "bt_volume:hardware_write_failed",
+                       local: ["uid": uid], shared: [:])
+        reevaluateBTHardwareControlLocked(uid)
     }
 
     /// One Cast receiver's composed level: `Main × Group × Device` as 0.0…1.0,
@@ -8729,6 +8914,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                                 setConnectionState(.off, for: id)
                             }
                         }
+                        // Availability is an input to the hardware-volume
+                        // decision (BT-HW-VOL): a link-up re-enters control
+                        // with a fresh device id, a link-down drops the watch.
+                        reevaluateBTHardwareControlLocked(id)
                     }
                 }
             } else {
@@ -8754,6 +8943,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 known[id] = device
                 order.append(id)
                 emit(.deviceAdded(device))
+                if snapshot.isConnected { reevaluateBTHardwareControlLocked(id) }
             }
         }
         for id in order where known[id]?.kind == .bluetooth && !seen.contains(id) {
@@ -8762,6 +8952,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             btSpeakerTiming.noteDisconnected(uid: id)
             if expectedSelected.contains(id) { desiredAvailabilityMoved = true }
             commitKnownDevice(id, device)
+            reevaluateBTHardwareControlLocked(id)
         }
         // BT-BACKEND: a SELECTED BT id's availability is its audible fact for
         // the silence fallback (`desiredDeviceAudibleLocked` — BT ids never

@@ -167,6 +167,60 @@ extension SerializedSharedState {
             Analytics.capture("after_opt_out")
             #expect(captured.events().count == 1, "capture must be gated off again after opting out")
         }
+
+        /// `applyLicenseState()` re-syncs consent on every validator answer, so
+        /// an unchanged grant reaches `setConsent` repeatedly. Each forward
+        /// costs one duplicate launch/location event, so it must forward once.
+        @Test func repeatedGrantForwardsToConsentChangedOnlyOnce() {
+            let consentChanges = ConsentChanges()
+            Analytics.install(Analytics.Sink(capture: { _, _ in },
+                                             captureError: { _, _ in },
+                                             consentChanged: { consentChanges.append($0) }),
+                              consent: false)
+            defer { Analytics.install(nil, consent: false) }
+
+            Analytics.setConsent(true)
+            Analytics.setConsent(true)
+            Analytics.setConsent(true)
+
+            #expect(consentChanges.values() == [true])
+        }
+
+        /// `streaming:daily_active` answers "on how many days did audio reach a
+        /// real speaker", so it is one event per local day, and only while
+        /// something other than this Mac is connected.
+        @Test(arguments: [
+            (lastDay: nil as String?, connected: 2, local: 0, expected: 2 as Int?),
+            (lastDay: "2026-09-12", connected: 2, local: 0, expected: nil),
+            (lastDay: "2026-09-11", connected: 2, local: 0, expected: 2),
+            (lastDay: nil, connected: 0, local: 1, expected: nil),
+        ])
+        func dailyActiveLatchFiresOncePerDayAndIgnoresTheMacsOwnOutput(
+            row: (lastDay: String?, connected: Int, local: Int, expected: Int?)
+        ) {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: "UTC")!
+            let now = calendar.date(from: DateComponents(year: 2026, month: 9, day: 12, hour: 10))!
+
+            let devices = (0..<row.connected).map { streamingDevice(id: "remote-\($0)", local: false) }
+                + (0..<row.local).map { streamingDevice(id: "local-\($0)", local: true) }
+
+            let due = DailyActiveLatch.due(devices: devices,
+                                           lastDay: row.lastDay,
+                                           now: now,
+                                           calendar: calendar)
+
+            #expect(due?.speakerCount == row.expected)
+            if row.expected != nil { #expect(due?.day == "2026-09-12") }
+        }
+
+        private func streamingDevice(id: String, local: Bool) -> Device {
+            Device(id: id,
+                   name: id,
+                   kind: local ? .localMac : .generic,
+                   isLocalDevice: local,
+                   connectionState: .connected)
+        }
     }
 }
 

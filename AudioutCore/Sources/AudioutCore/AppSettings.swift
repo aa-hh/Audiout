@@ -108,6 +108,8 @@ public struct AppSettings {
         static let trialBannerLastDayShown = "trial.bannerLastDayShown"
         static let telemetryOptIn = "telemetry.optIn"
         static let telemetryAsked = "telemetry.asked"
+        static let telemetryConversionAskShown = "telemetry.conversionAskShown"
+        static let telemetryDailyActiveDay = "telemetry.dailyActiveDay"
         static let touchBarControls = "general.touchBarControls"
         static let mixerMembershipHintDismissed = "mixer.membershipHintDismissed"
         static let installMoveUnreported = "install.moveUnreported"
@@ -724,9 +726,10 @@ public struct AppSettings {
         return generated
     }
 
-    /// Opt-in usage analytics consent (PRODUCT.md Data Collection stream 1).
-    /// Defaults to `false` — off by default, and only ever flipped on by the
-    /// user's own answer to the one-time ask (``telemetryAsked``).
+    /// The user's stored ANSWER to the usage-analytics ask (PRODUCT.md Data
+    /// Collection stream 1). Only meaningful once ``telemetryAsked`` is true —
+    /// before that it is an unset `false`, not a decline. Never read this to
+    /// decide whether to send: ``telemetryEnabled`` is what gates sending.
     public var telemetryOptIn: Bool {
         get { defaults.bool(forKey: Keys.telemetryOptIn) }
         nonmutating set { defaults.set(newValue, forKey: Keys.telemetryOptIn) }
@@ -737,6 +740,38 @@ public struct AppSettings {
     public var telemetryAsked: Bool {
         get { defaults.bool(forKey: Keys.telemetryAsked) }
         nonmutating set { defaults.set(newValue, forKey: Keys.telemetryAsked) }
+    }
+
+    /// What consent defaults to while the ask is still unanswered: ON for an
+    /// install with no key yet (first launch, licence gate showing,
+    /// unregistered trial) and for any install carrying a trial expiry (an
+    /// active trial, or one that expired without converting); OFF for a stored
+    /// key with no trial expiry, which is a paid install — those are asked
+    /// before anything is collected.
+    public var telemetryDefaultOn: Bool {
+        (licenseKey ?? "").isEmpty || trialExpiresAt != nil
+    }
+
+    /// Whether usage analytics may be sent right now. The user's own answer
+    /// always wins once they have given one; before that, ``telemetryDefaultOn``
+    /// decides.
+    public var telemetryEnabled: Bool {
+        telemetryAsked ? telemetryOptIn : telemetryDefaultOn
+    }
+
+    /// Whether the one-time ask shown to a trial user who has just converted to
+    /// a paid key has already been presented. Set at presentation, not at
+    /// answer, so a dismissed alert is never re-raised. Defaults to `false`.
+    public var telemetryConversionAskShown: Bool {
+        get { defaults.bool(forKey: Keys.telemetryConversionAskShown) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.telemetryConversionAskShown) }
+    }
+
+    /// The local-calendar day (`yyyy-MM-dd`) the `streaming:daily_active` event
+    /// was last spent on. `nil` until the first one fires.
+    public var telemetryDailyActiveDay: String? {
+        get { defaults.string(forKey: Keys.telemetryDailyActiveDay) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.telemetryDailyActiveDay) }
     }
 
     /// Set by the copy that just moved itself into `/Applications`, read and

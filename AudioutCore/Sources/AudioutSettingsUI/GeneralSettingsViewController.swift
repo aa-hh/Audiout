@@ -245,17 +245,19 @@ public final class GeneralSettingsViewController: NSViewController {
 
         buildRemoteInviteRow()
 
-        // Anonymous usage analytics (opt-in, off by default) — the Settings ›
-        // General toggle for the consent `AppSettings.telemetryOptIn` gates.
+        // Anonymous usage analytics — the Settings › General toggle for what
+        // `AppSettings.telemetryEnabled` gates. It shows what is happening now,
+        // which before the user has answered is the trial-phase default, not
+        // the unset `telemetryOptIn`.
         consentSwitch.target = self
         consentSwitch.action = #selector(consentToggled)
-        consentSwitch.state = settings.telemetryOptIn ? .on : .off
+        consentSwitch.state = settings.telemetryEnabled ? .on : .off
         consentSwitch.setAccessibilityLabel("Share anonymous usage statistics")
         let consentRow = SettingsForm.row(
             title: "Share anonymous usage statistics",
             subtitleLabel: consentHint,
             control: consentSwitch)
-        consentHint.stringValue = Self.consentHintLine(settings.telemetryOptIn)
+        consentHint.stringValue = Self.consentHintLine(settings.telemetryEnabled)
 
         // License (roadmap 054, Ardour model): entirely optional — the app is
         // fully functional with no key at all. NO inline key field: entry is a

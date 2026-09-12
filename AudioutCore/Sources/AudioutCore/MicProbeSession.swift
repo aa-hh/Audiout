@@ -60,24 +60,81 @@ public protocol MicProbeRecording {
 /// collapse this feature exists to avoid (PLAN-UNIVERSAL-SYNC risk R-A2DP/HFP).
 public final class BuiltInMicRecorder: MicProbeRecording {
 
-    public enum RecorderError: Error { case noBuiltInMicrophone }
+    public enum RecorderError: Error { case noBuiltInMicrophone, sampleRateChanged }
 
     private let engine = AVAudioEngine()
     private let lock = NSLock()
     private var samples: [Float] = []
 
-    public init() {}
+    /// Every touch of `engine` happens on this queue, including the
+    /// configuration-change observer's restart.
+    private let recorderQueue = DispatchQueue(label: "mic-probe-recorder")
+    private var configChangeObserver: NSObjectProtocol?
+    /// Recorder queue only.
+    private var sampleRate: Double = 0
+    /// Recorder queue only.
+    private var stopped = false
+
+    public init() {
+        // AVAudioEngine stops itself on a configuration change, and macOS can
+        // fire one shortly after the mic starts (observed 42 ms after the
+        // first start following a fresh TCC grant, live 2026-09-12). Without
+        // an observer nothing restarts it and the probe silently captures
+        // nothing (`capturedSeconds 0.0`).
+        configChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [weak self] _ in
+            self?.recorderQueue.async { self?.restartAfterConfigurationChange() }
+        }
+    }
+
+    deinit {
+        if let configChangeObserver { NotificationCenter.default.removeObserver(configChangeObserver) }
+    }
 
     public func start() throws -> Double {
+        try recorderQueue.sync {
+            let format = try tapAndStart(expectedRate: nil)
+            sampleRate = format.sampleRate
+            return sampleRate
+        }
+    }
+
+    public func stop() -> [Float] {
+        recorderQueue.sync {
+            stopped = true
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
+        lock.lock(); defer { lock.unlock() }
+        return samples
+    }
+
+    /// Recorder queue only. Resolves the built-in mic, taps it, and starts
+    /// the engine; returns the format it tapped with. `expectedRate` is
+    /// non-nil on a restart: if the hardware now reports a different rate,
+    /// refuse rather than silently mixing two sample rates into `samples`.
+    private func tapAndStart(expectedRate: Double?) throws -> AVAudioFormat {
         guard let mic = Self.builtInMicrophoneID() else {
             throw RecorderError.noBuiltInMicrophone
         }
-        try engine.inputNode.auAudioUnit.setDeviceID(mic)
+        // The first start always pins: an un-pinned input unit can report the
+        // built-in mic only because it is the current default input, and would
+        // follow a later default-input change onto a Bluetooth mic. A restart
+        // pins only when the device moved, because re-pinning the SAME device
+        // can itself fire another configuration change (see
+        // LocalPlaybackEngine.swift).
+        if expectedRate == nil || engine.inputNode.auAudioUnit.deviceID != mic {
+            try engine.inputNode.auAudioUnit.setDeviceID(mic)
+        }
         // Pinning the device updates `inputFormat` but leaves `outputFormat`
         // reporting the PREVIOUS device's rate, and a tap installed with that
         // stale format (`format: nil` takes it) makes `start()` throw -10868
         // from InitializeActiveNodesInInputChain. Tap with the hardware format.
         let format = engine.inputNode.inputFormat(forBus: 0)
+        if let expectedRate, format.sampleRate != expectedRate {
+            throw RecorderError.sampleRateChanged
+        }
         engine.inputNode.installTap(onBus: 0, bufferSize: 4_096, format: format) { [self] buffer, _ in
             let frames = Int(buffer.frameLength)
             guard frames > 0, let data = buffer.floatChannelData else { return }
@@ -94,14 +151,38 @@ public final class BuiltInMicRecorder: MicProbeRecording {
         }
         engine.prepare()
         try engine.start()
-        return format.sampleRate
+        return format
     }
 
-    public func stop() -> [Float] {
+    /// Recorder queue only. Restarts the tap after macOS stopped the engine
+    /// out from under us. `engine.isRunning` coalesces a burst of
+    /// notifications after one successful restart into a single attempt.
+    private func restartAfterConfigurationChange() {
+        guard !stopped, sampleRate > 0, !engine.isRunning else { return }
+        // A second installTap on a bus that still has one traps.
         engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        lock.lock(); defer { lock.unlock() }
-        return samples
+        do {
+            _ = try tapAndStart(expectedRate: sampleRate)
+            // `start()` can return without error yet leave the engine stopped
+            // after a configuration change (see LocalPlaybackEngine.swift). A
+            // later notification, if one comes, retries through this path.
+            guard engine.isRunning else {
+                Telemetry.log(.localPlayback, "mic_probe_recorder_restart_failed",
+                              ["error": "engine not running after start"])
+                return
+            }
+            let capturedSeconds: Double = {
+                lock.lock(); defer { lock.unlock() }
+                return Double(samples.count) / sampleRate
+            }()
+            Telemetry.log(.localPlayback, "mic_probe_recorder_restarted",
+                          ["capturedSeconds": String(format: "%.1f", capturedSeconds)])
+        } catch {
+            // Leave the engine stopped; already-captured samples are kept
+            // for stop().
+            Telemetry.log(.localPlayback, "mic_probe_recorder_restart_failed",
+                          ["error": String(describing: error)])
+        }
     }
 
     /// The first built-in device with input channels — nil on a Mac without

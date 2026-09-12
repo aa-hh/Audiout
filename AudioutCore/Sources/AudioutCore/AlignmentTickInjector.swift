@@ -341,6 +341,16 @@ final class AlignmentTickInjector: @unchecked Sendable {
         tickEpochFrame = cursor + beatFrames
     }
 
+    /// Undo an arm that landed before a late-staged mic probe could ride it.
+    /// The gate opened and armed the tick grid before the probe finished
+    /// staging; the sweeps must not play under a running tick, so this clears
+    /// the arm and the probe's own completion handoff calls `armTicks()` again
+    /// a clean interval after the sweeps — same as the normal stage-before-arm
+    /// path. Pacer-queue-only, like `armTicks()`.
+    func disarmTicks() {
+        tickEpochFrame = -1
+    }
+
     /// Change the beat interval mid-run (search → blocks). The grid is
     /// re-derived from the LAST TICK ALREADY LAID DOWN, so the next one is a
     /// full NEW interval after it and can never crowd the tick the user has

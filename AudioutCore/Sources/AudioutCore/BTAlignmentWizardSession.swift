@@ -182,7 +182,8 @@ public final class BTAlignmentWizardSession {
     ///     the first question — the zero-click path for a device that has been
     ///     measured before. Deliberately NOT kept: ``tryAgain()`` means "that
     ///     value was wrong", so re-offering it would be the one useless thing
-    ///     a restart could do.
+    ///     a restart could do. A mic measurement landing before the user has
+    ///     judged it (``offerMeasuredProposal(valueMs:)``) replaces it.
     ///   - applyPreviewTrim: live, non-persisting trim push (absolute ms),
     ///     carrying the belief's current half-width for the run's telemetry.
     ///   - endPreview: commit (`keepMs`) or restore (`nil`) — see
@@ -305,13 +306,25 @@ public final class BTAlignmentWizardSession {
 
     /// A mic-probe measurement landing mid-run (roadmap 064): present it as
     /// the proposal to confirm by ear. `valueMs` is in VALUE space (a
-    /// Bluetooth run's measured latency in ms). Meaningful only while
-    /// questions are running — a run already proposing, ended, or still on the
-    /// intro keeps its state, and the probe result is simply dropped (the
-    /// by-ear machinery owes it nothing). The estimator's belief is untouched:
-    /// the measurement feeds the proposal, never the prior.
+    /// Bluetooth run's measured latency in ms). Meaningful while questions are
+    /// running, and ALSO while the run is still showing its OPENING proposal
+    /// (the stored value, unjudged) — a measurement replaces that one number
+    /// because the user has not weighed in on it yet. A proposal the run
+    /// earned from answers, or an earlier measurement, is never shoved aside;
+    /// a run ended or still on the intro keeps its state, and the probe result
+    /// is simply dropped (the by-ear machinery owes it nothing). The
+    /// estimator's belief is untouched: the measurement feeds the proposal,
+    /// never the prior.
     public func offerMeasuredProposal(valueMs: Double) {
-        guard case .question = screen, !ended else { return }
+        guard !ended else { return }
+        switch screen {
+        case .question:
+            break
+        case .proposal:
+            guard estimator.openingProposalStands else { return }
+        default:
+            return
+        }
         let estimate = invertsEstimate ? baseValueMs - valueMs : valueMs - baseValueMs
         estimator.offerProposal(estimate)
         Telemetry.log(.localPlayback, "wizard_mic_proposal", [

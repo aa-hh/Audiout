@@ -163,6 +163,11 @@ struct BTAlignmentPosterior {
     /// Every answer this run has taken, undone ones excluded — the number the
     /// bow-out rules and the telemetry count.
     private(set) var answerCount = 0
+    /// Whether the CURRENT proposal is still the opening one (the stored
+    /// value, never judged) — the one proposal a measurement may still
+    /// replace. Cleared the moment the run moves past it: accepted,
+    /// rejected, or replaced by a fresh ``offerProposal(_:)``.
+    private(set) var openingProposalStands: Bool
 
     /// Every presented level is clamped into this — past it the sink's own
     /// ≥ 0 delay clamp eats the change and the trial would present a
@@ -236,6 +241,7 @@ struct BTAlignmentPosterior {
         // `nextLevelMs()` reads the finished belief, so every stored property
         // — `phase` included — has to hold something before it can be called.
         phase = .asking(candidateMs: 0)
+        openingProposalStands = openingProposalMs != nil
         if let openingProposalMs {
             phase = .proposing(valueMs: Swift.min(Swift.max(openingProposalMs, range.lowerBound),
                                                   range.upperBound).rounded())
@@ -317,6 +323,7 @@ struct BTAlignmentPosterior {
         guard case .proposing(let valueMs) = phase else { return }
         foldFusedJudgment(atLevel: valueMs, fused: true)
         phase = .converged(resultMs: valueMs)
+        openingProposalStands = false
     }
 
     /// An externally MEASURED value arriving mid-run (the mic probe, roadmap
@@ -324,12 +331,25 @@ struct BTAlignmentPosterior {
     /// jumps to proposing it, and the belief stays exactly what the answers so
     /// far made it. A measurement feeds the PROPOSAL, never the prior (the
     /// flat-prior fence); its rejection then folds in as evidence through the
-    /// ordinary ``rejectProposal()``. Only meaningful while asking — a run
-    /// already proposing, or ended, keeps its state.
+    /// ordinary ``rejectProposal()``. Meaningful while asking, and ALSO while
+    /// the current proposal is still the OPENING one (``openingProposalStands``)
+    /// — the one proposal a measurement may still replace, because it is the
+    /// stored value the user has not yet judged, not a proposal this run
+    /// earned from answers or an earlier measurement. A run already
+    /// converged, unsettled, unreachable, or past the opening proposal keeps
+    /// its state.
     mutating func offerProposal(_ valueMs: Double) {
-        guard case .asking = phase else { return }
+        switch phase {
+        case .asking:
+            break
+        case .proposing:
+            guard openingProposalStands else { return }
+        default:
+            return
+        }
         phase = .proposing(valueMs: Swift.min(Swift.max(valueMs, range.lowerBound),
                                               range.upperBound).rounded())
+        openingProposalStands = false
     }
 
     /// "Still off": the opposite evidence, which widens the belief around the
@@ -340,6 +360,7 @@ struct BTAlignmentPosterior {
         guard case .proposing(let valueMs) = phase else { return }
         foldFusedJudgment(atLevel: valueMs, fused: false)
         rejections += 1
+        openingProposalStands = false
         // The rejection is not an ANSWER, so it is not undoable: it becomes the
         // floor the next stretch of answers refolds from.
         baseBelief = belief

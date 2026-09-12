@@ -558,6 +558,32 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         session.cancel()
     }
 
+    /// `offerMeasuredProposal` guarded on `.question`, so a measurement
+    /// landing on the opening proposal was dropped and the user judged the
+    /// stale stored value.
+    @Test func aMeasurementLandingOnTheOpeningProposalReplacesIt() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 424,
+                                           candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           openingProposalMs: 424)
+        session.start()
+
+        session.offerMeasuredProposal(valueMs: 459.86)
+        #expect(session.screen == .proposal(valueMs: 460), "got \(session.screen)")
+        #expect(recorder.previews == [424, 460], "what the user hears follows the number")
+        #expect(recorder.ticks == [true])
+
+        session.offerMeasuredProposal(valueMs: 300)
+        #expect(session.screen == .proposal(valueMs: 460),
+                "the replacement is judged like any other proposal")
+        #expect(recorder.previews == [424, 460])
+
+        session.acceptProposal()
+        #expect(session.screen == .kept(valueMs: 460))
+        #expect(recorder.ends == [460])
+    }
+
     /// Try again means "that value was wrong", so a restart must never
     /// re-offer it.
     @Test func tryAgainNeverReOffersTheOpeningProposal() {

@@ -1,6 +1,6 @@
 # 08 — Fold roadmap 062 into this effort
 
-Status: ready-for-agent
+Status: resolved (done 2026-09-12 in the grilling session: 062 dropped, roadmap 085 added, trim-spec note updated)
 
 Roadmap 062 (reconnect-survival measurement via band-split chirps, still
 `planned`) is superseded (decision 12): the reconnect trigger in ticket 03

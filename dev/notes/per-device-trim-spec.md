@@ -115,6 +115,9 @@ known holes, one measurement:
   offset is stable (within a few ms), stored trims persist silently and
   nothing more ships. If not, an aligned device that reconnects gets a
   re-align prompt (wizard entry point) — never silently plays misaligned.
+  *2026-09-12: superseded (roadmap 062 dropped) — the passive drift tracker
+  re-measures on reconnect from the music itself; see
+  `.scratch/passive-drift-tracking/spec.md` (roadmap 085).*
 - **(c) Delete `BTDriftCorrector`.** Inert (Part 0 above); it reads as a
   safety net but corrects nothing. Removing it simplifies BTSyncedSink and
   kills a false signal for future readers.

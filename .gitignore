@@ -58,3 +58,7 @@ __pycache__/
 # at assembly (scripts/fetch-wordmark-font.sh). Never commit a copy.
 *.otf
 ClashDisplay-*
+
+# Impeccable ships a platform-specific engine binary; the launcher fetches
+# and checksum-verifies the right one per platform.
+.claude/skills/impeccable/scripts/bin/

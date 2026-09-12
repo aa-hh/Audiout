@@ -80,36 +80,23 @@ while [ "$_n" -le "$_slots" ]; do
 done
 echo "  held $_held of $_slots (dead holders not counted; the next acquire takes them)"
 
+# Which way new work is routed, so a reader can tell an idle mule from an unused
+# one. See the testPrefer block at the top of scripts/lib/remote.sh. Printed on
+# every path out of this script, including the two unreachable ones below.
+print_routing() { echo "routing: audiout.testPrefer = $remote_pref"; }
+
 echo "mule:"
 if ! remote_configured; then
     echo "  mule: unreachable"
+    print_routing
     exit 0
 fi
 if ! remote_reachable; then
     echo "  mule: unreachable"
+    print_routing
     exit 0
 fi
-_mule_out=$(ssh -o BatchMode=yes -o ConnectTimeout="$remote_probe_timeout" \
-    -o StrictHostKeyChecking=accept-new "$remote_host" \
-    "_n=1; while [ \$_n -le $remote_slots ]; do \
-         _f=/tmp/audiout-remote-work.lock.\$_n; \
-         if [ -f \"\$_f\" ]; then \
-             _p=\$(cat \"\$_f\" 2>/dev/null | tr -d ' '); \
-             _age=\$(( \$(date +%s) - \$(stat -f %m \"\$_f\" 2>/dev/null || date +%s) )); \
-             if [ -n \"\$_p\" ] && kill -0 \"\$_p\" 2>/dev/null; then \
-                 _c=\$(ps -o command= -p \"\$_p\" 2>/dev/null); \
-                 _pp=\$(ps -o ppid= -p \"\$_p\" 2>/dev/null | tr -d ' '); \
-                 if [ \"\$_pp\" = 1 ]; then \
-                     echo \"\$_n	\$_p	orphaned	\$_age	\$_c\"; \
-                 else \
-                     echo \"\$_n	\$_p	alive	\$_age	\$_c\"; \
-                 fi; \
-             else \
-                 echo \"\$_n	\$_p	dead	\$_age	(process gone)\"; \
-             fi; \
-         fi; \
-         _n=\$((_n + 1)); \
-     done" 2>/dev/null)
+_mule_out=$(remote_mule_permits)
 if [ -z "$_mule_out" ]; then
     _held=0
 else
@@ -135,5 +122,7 @@ printf '%s\n' "$_mule_out" | while IFS="$(printf '\t')" read -r _n _pid _alive _
     echo "  mule permit $_n: pid $_pid, $_alive, age ${_age}s, cmd: $(trim80 "$_cmd")$_stale"
 done
 echo "  held $_held of $remote_slots (dead and orphaned holders not counted)"
+
+print_routing
 
 exit 0

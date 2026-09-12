@@ -2268,7 +2268,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = mixerWindowController ?? MixerWindowController(
             groupController: groupController,
             deviceIconController: deviceIconController,
-            appRouting: appRouting)
+            appRouting: appRouting,
+            // The SAME instance the backend decides with (BT-HW-VOL): the
+            // toggle's write is the backend's re-decide trigger.
+            btHardwareVolumeStore: (backend as? NativeBackend)?.btHardwareVolumeStore)
         mixerWindowController = controller
         // The two Equalizer seams. This screen owns no backend (its own
         // AGENTS.md); the tone it reports is applied here, at the one place

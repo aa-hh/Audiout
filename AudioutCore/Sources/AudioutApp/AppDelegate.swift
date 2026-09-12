@@ -1515,7 +1515,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openLicenseSheet(registering: key)
         }
 
-        warnIfTranslocated()
+        offerMoveToApplicationsIfTranslocated()
     }
 
     /// The launch step the licence gate defers: the first-run Setup gate
@@ -1661,25 +1661,149 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyLicenseState()
     }
 
-    /// Tell the user when Gatekeeper is running us from its randomized
+    /// Offer to fix it when Gatekeeper is running us from its randomized
     /// read-only mount ("app translocation") — what happens when a downloaded
     /// app is opened straight out of Downloads or a mounted disk image.
     ///
     /// It matters because the path changes on every launch and the bundle
     /// cannot be written: "Launch at login" registers a location that will not
     /// exist next time, and the PTP helper's registration is pinned the same
-    /// way. The honest, small fix is to say so and name the remedy — there is
-    /// deliberately no move-the-bundle implementation here, and no
-    /// "don't show again" flag, because a translocated launch is transient by
-    /// nature: moving the app to Applications ends it permanently.
+    /// way. The default button copies the running bundle into `/Applications`,
+    /// strips quarantine from the copy so it is never translocated again, then
+    /// quits this process and reopens the copy. There is no "don't show again"
+    /// flag, because a translocated launch is transient by nature: moving the
+    /// app to Applications ends it permanently.
     ///
     /// The check never fires for a dev build (`swift run`, or an app run from
     /// the build directory) — translocation only applies to a quarantined
     /// bundle.
     @MainActor
-    private func warnIfTranslocated() {
-        guard Bundle.main.bundleURL.path.contains("/AppTranslocation/") else { return }
+    private func offerMoveToApplicationsIfTranslocated() {
+        guard AppTranslocation.isTranslocated(bundleURL: Bundle.main.bundleURL) else { return }
         NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Audiout is running from a temporary location"
+        alert.informativeText = """
+            macOS is running Audiout from a temporary read-only location, so \
+            \u{201C}Launch at login\u{201D} and speaker sync can\u{2019}t keep \
+            working. Move Audiout to your Applications folder now? Audiout \
+            will quit and reopen from there.
+            """
+        alert.addButton(withTitle: "Move to Applications")
+        alert.addButton(withTitle: "Not now")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        moveToApplicationsAndRelaunch()
+    }
+
+    /// Copies the running (translocated) bundle into `/Applications`, strips
+    /// quarantine from the copy, then quits this process so the copy can
+    /// relaunch in its place. Every failure branch falls back to the plain
+    /// "move it yourself" alert and leaves this process running untouched.
+    ///
+    /// The copy is made under a staging name in `/Applications` first and only
+    /// renamed into place once it is complete: a copy that fails (no admin
+    /// rights, full disk) must not have already cost the user the working
+    /// install that was there. The rename is atomic because staging and
+    /// destination sit on the same volume.
+    ///
+    /// The relaunch waits for this process to fully exit before reopening the
+    /// copy. `AppRelaunchCommand.shellInvocation` builds that wait, and its own
+    /// doc comment explains why the new copy must not start until this process
+    /// has exited.
+    @MainActor
+    private func moveToApplicationsAndRelaunch() {
+        let destination = AppTranslocation.applicationsDestination(for: Bundle.main.bundleURL)
+
+        if let bundleID = Bundle.main.bundleIdentifier {
+            let myPID = ProcessInfo.processInfo.processIdentifier
+            let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+                .filter { $0.processIdentifier != myPID }
+            guard others.isEmpty else {
+                log("Move to Applications: another copy of \(bundleID) is already running; not replacing it")
+                presentMoveFallbackAlert()
+                return
+            }
+        }
+
+        let staging = destination.deletingLastPathComponent()
+            .appendingPathComponent(destination.lastPathComponent + ".audiout-incoming")
+        try? FileManager.default.removeItem(at: staging)
+
+        do {
+            try FileManager.default.copyItem(at: Bundle.main.bundleURL, to: staging)
+        } catch {
+            log("Move to Applications: copy failed: \(error.localizedDescription)")
+            try? FileManager.default.removeItem(at: staging)
+            presentMoveFallbackAlert()
+            return
+        }
+
+        let stripQuarantine = Process()
+        stripQuarantine.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+        stripQuarantine.arguments = ["-d", "-r", "com.apple.quarantine", staging.path]
+        do {
+            try stripQuarantine.run()
+            stripQuarantine.waitUntilExit()
+            guard stripQuarantine.terminationStatus == 0 else {
+                log("Move to Applications: xattr exited \(stripQuarantine.terminationStatus)")
+                try? FileManager.default.removeItem(at: staging)
+                presentMoveFallbackAlert()
+                return
+            }
+        } catch {
+            log("Move to Applications: xattr failed to launch: \(error.localizedDescription)")
+            try? FileManager.default.removeItem(at: staging)
+            presentMoveFallbackAlert()
+            return
+        }
+
+        if FileManager.default.fileExists(atPath: destination.path) {
+            do {
+                try FileManager.default.trashItem(at: destination, resultingItemURL: nil)
+            } catch {
+                log("Move to Applications: failed to trash existing \(destination.path): \(error.localizedDescription)")
+                try? FileManager.default.removeItem(at: staging)
+                presentMoveFallbackAlert()
+                return
+            }
+        }
+
+        do {
+            try FileManager.default.moveItem(at: staging, to: destination)
+        } catch {
+            log("""
+                Move to Applications: renaming \(staging.path) to \(destination.path) failed: \
+                \(error.localizedDescription). The previous copy is in the Trash and the new \
+                one is left at \(staging.path), so it stays the only usable copy.
+                """)
+            presentMoveFallbackAlert()
+            return
+        }
+
+        let relaunch = Process()
+        let invocation = AppRelaunchCommand.shellInvocation(
+            pid: ProcessInfo.processInfo.processIdentifier,
+            bundlePath: destination.path
+        )
+        relaunch.executableURL = URL(fileURLWithPath: invocation[0])
+        relaunch.arguments = Array(invocation.dropFirst())
+        do {
+            try relaunch.run()
+        } catch {
+            log("Move to Applications: relaunch failed to start: \(error.localizedDescription)")
+            presentMoveFallbackAlert()
+            return
+        }
+
+        log("Moved to Applications; quitting so the copy at \(destination.path) can take over")
+        NSApp.terminate(nil)
+    }
+
+    /// The original "move it yourself" wording, shown whenever the automatic
+    /// move can't proceed (another copy running, copy or quarantine-strip
+    /// failure, relaunch failure).
+    @MainActor
+    private func presentMoveFallbackAlert() {
         let alert = NSAlert()
         alert.messageText = "Audiout is running from a temporary location"
         alert.informativeText = """

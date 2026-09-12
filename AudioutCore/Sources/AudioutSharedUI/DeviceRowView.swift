@@ -170,6 +170,13 @@ public final class DeviceRowView: NSView {
     /// mirrors `selectionDimmed` for a bus row, where dimming is a node TINT, not
     /// the checkbox alpha (§4.7 "dim via tint … checkbox at full alpha").
     private var busNodeDimmed = false
+    /// Whether the engine is playing through THIS device because the selected
+    /// speakers went unreachable (`BackendEvent.localFallbackActive`) — only the
+    /// Mac's own row is ever told this. It fills the node so the rail draws the
+    /// path audio is really taking. Presentation only: the checkbox and the
+    /// stored selection are untouched, and the node goes back on its own when
+    /// the speakers resume.
+    private var localFallbackOutput = false
     private let iconView = MenuTriggerImageView()
     /// The connection **halo ring** (Warm Signal v3 §3.2, 2026-07-22): a ring
     /// drawn AROUND the icon carrying the connection lifecycle, driven off
@@ -501,6 +508,11 @@ public final class DeviceRowView: NSView {
     ///     Defaults to `nil`, in which case the row behaves exactly as before —
     ///     `device.kind.symbolName` is used directly. Existing callers all omit
     ///     this, so their behavior is byte-for-byte unchanged.
+    ///   - localFallbackOutput: whether the engine is playing through THIS
+    ///     device because the selected speakers went unreachable — the host
+    ///     passes it on the Mac's own row only. Fills the bus node without
+    ///     touching `selected`, so the rail draws the path audio is really
+    ///     taking while the stored selection stays as the user left it.
     public func apply(_ device: Device,
                       selected: Bool,
                       controllable: Bool = false,
@@ -521,10 +533,12 @@ public final class DeviceRowView: NSView {
                       syncDrawerExpanded: Bool = false,
                       removalUndoOffered: Bool = false,
                       volumePendingApply: Bool = false,
-                      isEQShaped: Bool = false) {
+                      isEQShaped: Bool = false,
+                      localFallbackOutput: Bool = false) {
         self.device = device
         self.isEQShaped = isEQShaped
         self.isSelectedInSet = selected
+        self.localFallbackOutput = localFallbackOutput
         self.energizePending = energizePending
         self.removalUndoOffered = removalUndoOffered
         // Any model refresh (select OR deselect) clears a transient hover so the
@@ -831,6 +845,13 @@ public final class DeviceRowView: NSView {
             case .failed:                    node = .failed
             case .connected, .off:           node = .member
             }
+        } else if localFallbackOutput {
+            // The speakers are unreachable and the engine dropped audio back to
+            // this Mac. The rail shows the REAL path, so the Mac's node fills
+            // like any member for as long as that lasts — the user's selection
+            // is unchanged underneath, and the node falls back to the branch
+            // below the moment the speakers resume.
+            node = .member
         } else {
             node = .nonMember            // §4.4 hollow node, line detours
         }

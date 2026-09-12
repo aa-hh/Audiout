@@ -3343,14 +3343,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItemController.update(devices: devices,
                                     liveRoutedAppNames: routedAppNamesByDeviceID,
                                     isMainOutMuted: groupController.isMainOutMuted)
-        // Our Touch Bar is only worth taking while audio is ACTUALLY leaving
-        // the Mac. This is the launch-independent signal for that: `.level`
-        // events are gated on the popover being open, so they can't answer it.
-        if hasTouchBar {
-            touchBarFullBar.setStreaming(
-                MenuBarStatus.isStreaming(devices: devices,
-                                          liveRoutedAppNames: routedAppNamesByDeviceID))
-        }
         // Keep the Groups screen in lockstep with the same snapshot. Nil until
         // that tab has been visited, and its own hidden-means-idle gate drops
         // the rebuild whenever the user is looking at another screen — so a

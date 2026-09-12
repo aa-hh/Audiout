@@ -850,8 +850,11 @@ import AudioutProtocol
         #expect(popover.test_mainOutRow.test_ringForm == .connected, "≥1 live member ⇒ the Main Out connected ring, even while another is still connecting")
     }
 
-    /// No selected member is connecting/connected ⇒ the Main Out shows no ring.
-    @Test func mainOutRingIsNoneWhenTargetIdle() async throws {
+    /// A selected room that has not connected still draws a rail, so the ring it
+    /// curves into is drawn too — in the RESTING form, never `.none`. Red if the
+    /// ring goes back to following the connection state alone: the wire was
+    /// already there, landing on nothing.
+    @Test func mainOutRingRestsWhileASelectedRoomHasNotConnected() async throws {
         let (popover, _, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         var devices = backend.devices
@@ -859,7 +862,8 @@ import AudioutProtocol
             devices[i].connectionState = .off
         }
         popover.update(devices: devices)
-        #expect(popover.test_mainOutRow.test_ringForm == .none, "an idle target leaves the Main Out ring off")
+        #expect(popover.test_mainOutRow.test_ringForm == .resting,
+                "a rail that reaches a selected room always has a ring to land on")
     }
 
     // MARK: Main Out halo ring — resting form (ring-resting-state task)
@@ -876,28 +880,45 @@ import AudioutProtocol
         #expect(popover.test_mainOutRow.test_ringForm == .resting, "local-only armed playback shows the quiet resting ring")
     }
 
-    /// Muting the local-only target drops `restingArmed` (the predicate requires
-    /// unmuted) — the ring falls back to no ring, exactly like any other idle
-    /// target.
-    @Test func mainOutRingIsNoneWhenLocalOnlyTargetMuted() async throws {
+    /// Muting does not un-select anything, so the rail (and the ring) stay —
+    /// what changes is the TONE: both drop from gold to the idle ember.
+    @Test func mutingTheLocalOnlyTargetKeepsTheRingAndDropsItToTheIdleTone() async throws {
         let (popover, controller, backend) = try await makePopover()
         controller.setMainOutMuted(true)
         popover.update(devices: backend.devices)
-        #expect(popover.test_mainOutRow.test_ringForm == .none, "a muted local-only target is not 'armed' — no resting ring")
+        #expect(popover.test_mainOutRow.test_ringForm == .resting,
+                "a muted room is still selected — the wire is still drawn, so the ring is too")
+        let ink = popover.test_mainOutRow.test_ringStrokeColor?.usingColorSpace(.sRGB)
+        let idle = Tokens.Color.spineTone(armed: false).usingColorSpace(.sRGB)
+        #expect(abs((ink?.redComponent ?? -1) - (idle?.redComponent ?? 0)) <= 0.02
+                && abs((ink?.greenComponent ?? -1) - (idle?.greenComponent ?? 0)) <= 0.02
+                && abs((ink?.blueComponent ?? -1) - (idle?.blueComponent ?? 0)) <= 0.02,
+                "muted ⇒ the idle spine tone on the ring, matching the wire")
     }
 
-    /// An idle NON-local target (a selected AirPlay device that hasn't connected
-    /// yet) must still show `.none`, never `.resting` — with the Mac out of the
-    /// set nothing is playing, so there is nothing for the ring to rest on.
-    @Test func mainOutRingStaysNoneForIdleNonLocalTarget() async throws {
-        let (popover, _, backend) = try await makePopover()
+    /// A FAILED room is not reached by the wire, so a mix of nothing but failed
+    /// rooms has no rail and no ring — the row's own red halo and red gutter rim
+    /// carry the failure. This is the ONLY way the popover reaches the no-rail
+    /// state: `GroupController.setDeviceSelected` keeps a current-device floor,
+    /// so an empty mix cannot be built from here.
+    @Test func mainOutRingIsNoneWhenTheOnlySelectedRoomHasFailed() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        let localID = try #require(backend.devices.first(where: \.isLocalDevice)?.id)
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        _ = controller.setDeviceSelected(localID, false)
         var devices = backend.devices
         if let i = devices.firstIndex(where: { $0.id == "office" }) {
-            devices[i].connectionState = .off
+            devices[i].connectionState = .failed(ConnectionFailure(cause: .timedOut))
         }
         popover.update(devices: devices)
-        #expect(popover.test_mainOutRow.test_ringForm == .none, "an idle non-local target shows no ring, not the local-only resting form")
+        popover.test_applyExactFitSize()
+        #expect(popover.test_deviceRow(for: "office")?.test_busNode == .failed,
+                "the fixture must actually render the failed node")
+        #expect(popover.test_mainOutRow.test_ringForm == .none,
+                "a failed room is never reached — no wire, no ring")
+        let plan = try #require(popover.test_railPlan())
+        #expect(plan.signalTerminusIndex == nil, "…and nothing on the wire reaches down to it")
+        #expect(!plan.isLive, "no rail at all — not even the hook out of the ring")
     }
 
     /// The Mac mixed with a speaker that is selected but not yet connected: the
@@ -3241,6 +3262,52 @@ import AudioutProtocol
 
         popover.setLocalFallbackActive(false)
         #expect(popover.test_localFallbackBannerText == nil, "reconnect clears the banner")
+    }
+
+    /// Owner ruling 2026-09-12: while the banner stands, the rail must draw the
+    /// path audio is REALLY taking — the Mac's row fills as a member, the wire
+    /// runs up to Main Audio and the ring it lands on is drawn in the gold spine
+    /// tone. Red if the rail keeps following the stored selection alone: the
+    /// user hears the Mac while the popover draws no path at all.
+    @Test func theMacRowJoinsTheRailWhileTheFallbackPlaysOnIt() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        let localID = try #require(backend.devices.first(where: \.isLocalDevice)?.id)
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        _ = controller.setDeviceSelected(localID, false)
+        var devices = backend.devices
+        if let i = devices.firstIndex(where: { $0.id == "office" }) {
+            devices[i].connectionState = .failed(ConnectionFailure(cause: .timedOut))
+        }
+        popover.update(devices: devices)
+        popover.test_applyExactFitSize()
+        #expect(popover.test_deviceRow(for: localID)?.test_busNode == .nonMember,
+                "the fixture starts with the Mac out of the mix and the speaker failed")
+
+        popover.setLocalFallbackActive(true)
+        popover.test_applyExactFitSize()
+        #expect(popover.test_deviceRow(for: localID)?.test_busNode == .member,
+                "audio is on the Mac, so the Mac's node fills")
+        #expect(!controller.selectedDeviceIDs.contains(localID),
+                "…and the stored selection is untouched — this is presentation, not a selection edit")
+        #expect(try #require(popover.test_railPlan()).isLive,
+                "the wire reaches the Mac's row")
+        #expect(popover.test_mainOutRow.test_ringForm == .resting,
+                "…so the ring the wire curves into is drawn")
+        let ink = popover.test_mainOutRow.test_ringStrokeColor?.usingColorSpace(.sRGB)
+        let gold = Tokens.Color.spineTone(armed: true).usingColorSpace(.sRGB)
+        #expect(abs((ink?.redComponent ?? -1) - (gold?.redComponent ?? 0)) <= 0.02
+                && abs((ink?.greenComponent ?? -1) - (gold?.greenComponent ?? 0)) <= 0.02
+                && abs((ink?.blueComponent ?? -1) - (gold?.blueComponent ?? 0)) <= 0.02,
+                "the Mac is audibly playing, so the ring wears the armed spine tone")
+
+        popover.setLocalFallbackActive(false)
+        popover.test_applyExactFitSize()
+        #expect(popover.test_deviceRow(for: localID)?.test_busNode == .nonMember,
+                "audio left the Mac — the row goes back to the user's real selection")
+        #expect(!(try #require(popover.test_railPlan())).isLive,
+                "…nothing but a failed speaker is left, so there is no rail")
+        #expect(popover.test_mainOutRow.test_ringForm == .none,
+                "…and no ring either")
     }
 
     /// P2-8: the banner states a problem, so it must offer a way out of it.

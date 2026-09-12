@@ -16,9 +16,10 @@ import AppKit
 /// **One wire, one tone.** The rail is a single stroked line — no channel, no
 /// pad, nothing under it: gold while the spine is armed, ember while it idles,
 /// one quiet tone end to end while it is dormant. It runs from the origin hook
-/// to its terminus, the LOWEST ON-SPINE node, detouring around every off-spine
+/// to its terminus, the LOWEST node it REACHES, detouring around every off-spine
 /// node it passes on the way. Rows below the terminus draw their node disc and
-/// no line.
+/// no line — a FAILED room is one of them, never reached. With nothing to reach
+/// there is no wire and no hook at all.
 ///
 /// **Division of labour:** this overlay draws the line, the detour ARCS around
 /// bypassed non-member nodes, and the origin HOOK. The NODE discs/rings stay
@@ -300,7 +301,7 @@ public final class BusRailOverlayView: NSView {
         let cx = PopoverColumnGrid.railGutterCenterX
         let originColor = Self.originColor(for: plan)
 
-        if case let .headerDot(y) = plan.origin {
+        if case let .headerDot(y) = plan.origin, plan.isLive {
             // The origin section (System Audio) is collapsed: the Main Audio ring
             // is hidden, so the rail simply BEGINS at that collapsed header with a
             // small gutter dot (behavior 2 — the origin moves up to the header).
@@ -339,6 +340,10 @@ public final class BusRailOverlayView: NSView {
         let cx = PopoverColumnGrid.railGutterCenterX
         let originColor = Self.originColor(for: plan)
         var runs: [WireRun] = []
+        // Nothing selected, or nothing left but failed rooms: there is no rail,
+        // so there is no hook either — a hook with no line under it reads as a
+        // gold stub curving out of the ring into nothing.
+        guard plan.isLive else { return runs }
 
         if case let .ring(ringCenterY, ringCenterX, ringRadius) = plan.origin {
             // Origin hook (Warm Signal nitpicks — "rail into the ring"): the rail
@@ -357,8 +362,8 @@ public final class BusRailOverlayView: NSView {
             runs.append(WireRun(path: hook, color: originColor))
         }
 
-        // How far the line reaches: its natural terminus is the lowest on-spine
-        // node — below that, nothing. A collapsed/clipping device section
+        // How far the line reaches: its natural terminus is the lowest node it
+        // reaches — below that, nothing. A collapsed/clipping device section
         // overrides that, running the line down to the cut dot instead (what lies
         // below is hidden, not absent).
         var currentY = plan.railTopY
@@ -447,10 +452,33 @@ public final class BusRailOverlayView: NSView {
     /// Whether a node sits ON the spine (rail runs through it) vs OFF it (the
     /// line detours around it). Members and members-in-transition are on-spine;
     /// genuine non-members are detoured.
+    ///
+    /// This is also `MembershipBusView`'s node-SIZE and hover rule, so it is not
+    /// the test for how far the wire travels — see ``railReaches(_:)``.
     static func onSpine(_ node: MembershipBusView.Node) -> Bool {
         switch node {
         case .member, .connecting, .failed, .origin: return true
         case .nonMember:                             return false
+        }
+    }
+
+    /// Whether the wire REACHES a node — the one rule for "is there a rail at
+    /// all", and the only place it is written down. A stop reaches when it is a
+    /// member the signal can run to; a FAILED speaker is not reached (the red
+    /// node and its red gutter rim carry the failure, and the wire stops above
+    /// it), and a non-member is passed by, never reached.
+    ///
+    /// Two readers, one rule, so the wire and the Main Audio ring can never
+    /// disagree about whether the rail exists: ``RailPlan/resolve(_:)`` applies
+    /// it to the stops it draws (giving `signalTerminusIndex` and
+    /// ``RailPlan/isLive``), and the HOST applies it to the same rows' nodes to
+    /// decide whether the ring is drawn at all (`PopoverController.updateRailRows`).
+    /// Deliberately NOT ``onSpine(_:)``: that one also sizes the node discs and
+    /// drives their hover, so a failed node must keep answering `true` there.
+    public static func railReaches(_ node: MembershipBusView.Node) -> Bool {
+        switch node {
+        case .member, .connecting, .origin: return true
+        case .failed, .nonMember:           return false
         }
     }
 
@@ -875,14 +903,23 @@ public struct RailPlan: Equatable {
     /// of the terminus dot (behaviors 1 + 3); `nil` when the rail ends naturally
     /// at its lowest selected node.
     public var terminusDotY: CGFloat?
-    /// Index into `stops` of the line's natural terminus — the lowest on-spine
-    /// node, the last place the wire reaches. `nil` when no on-spine node is
-    /// visible, i.e. no line is drawn through the band at all.
+    /// Index into `stops` of the line's natural terminus — the lowest node the
+    /// wire REACHES (``BusRailOverlayView/railReaches(_:)``), the last place it
+    /// travels to. `nil` when it reaches nothing in the band.
     public var signalTerminusIndex: Int?
     /// The dormant-divergent condition (spec §4.7), resolved ONCE for the whole
     /// rail so the wire takes one tone end to end instead of a per-stop patchwork.
     public var dormant: Bool
     public var gold: Bool
+
+    /// Whether there is a rail at all: the wire reaches a member somewhere in
+    /// the band, or a fold is hiding one below the cut. Nothing is drawn when
+    /// this is false — no hook out of the Main Audio ring, no origin dot, no
+    /// segments. A hook with nothing under it was the whole reason the Main
+    /// Audio ring had to render a resting form; the ring now follows the same
+    /// rule (``BusRailOverlayView/railReaches(_:)``), so the two appear and
+    /// vanish together.
+    public var isLive: Bool { signalTerminusIndex != nil || terminusDotY != nil }
 
     /// Plain-number inputs read from live frames by `BusRailOverlayView`.
     ///
@@ -998,7 +1035,7 @@ public struct RailPlan: Equatable {
             // wasn't before" on a section toggle. Fully collapsed, the members are
             // themselves below the floor, so a real cut still lands at the header.
             let hidesAMember = input.stops[drawnStops.count...]
-                .contains { BusRailOverlayView.onSpine($0.node) }
+                .contains { BusRailOverlayView.railReaches($0.node) }
                 || input.dropsHiddenRows
             if hidesAMember {
                 // Never let the cut ride ABOVE where the rail started (a degenerate
@@ -1009,7 +1046,7 @@ public struct RailPlan: Equatable {
             drawnStops = input.stops
         }
 
-        let signalTerminusIndex = drawnStops.lastIndex { BusRailOverlayView.onSpine($0.node) }
+        let signalTerminusIndex = drawnStops.lastIndex { BusRailOverlayView.railReaches($0.node) }
 
         return RailPlan(origin: origin, railTopY: railTopY, stops: drawnStops,
                         terminusDotY: terminusDotY, signalTerminusIndex: signalTerminusIndex,

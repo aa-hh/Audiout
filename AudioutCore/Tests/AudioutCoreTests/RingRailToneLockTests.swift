@@ -45,8 +45,19 @@ extension SerializedSharedState {
 
     // MARK: Harness
 
-    /// A laid-out Main Audio row + the panel-level rail overlay wired to it,
-    /// under an explicit appearance — the real pair, in the real relationship.
+    /// One selected room under the Main Audio row. The rail only exists while it
+    /// reaches a room, so the pair needs a member stop for there to be any ink
+    /// to sample at all.
+    private final class MemberStop: NSView, RailNodeProviding {
+        var railNode: MembershipBusView.Node? { .member }
+        var railDeviceID: String? { "member" }
+        var railNodeView: NSView { self }
+        var railNodeBounds: NSRect { bounds }
+    }
+
+    /// A laid-out Main Audio row + one member row + the panel-level rail overlay
+    /// wired to both, under an explicit appearance — the real trio, in the real
+    /// relationship.
     private func makePair(appearanceName: NSAppearance.Name)
         -> (container: NSView, row: MainOutRowView, overlay: BusRailOverlayView) {
         let appearance = NSAppearance(named: appearanceName)
@@ -57,30 +68,44 @@ extension SerializedSharedState {
         row.frame = NSRect(x: 0, y: 60, width: 360, height: MainOutRowView.rowHeight)
         container.addSubview(row)
 
+        let member = MemberStop(frame: NSRect(x: 0, y: 20, width: 360, height: 28))
+        container.addSubview(member)
+
         let overlay = BusRailOverlayView()
         overlay.frame = container.bounds
         container.addSubview(overlay)
         overlay.mainOutRow = row
+        overlay.deviceRows = [member]
 
         container.layoutSubtreeIfNeeded()
         return (container, row, overlay)
     }
 
-    private func apply(_ row: MainOutRowView, armed: Bool) {
+    /// Apply the row the way the host does: the liveness push first (a member is
+    /// mounted), then the model. `.off` with `localOnlyArmed` is the state the
+    /// rail exists in with nothing connected yet — the ring's `.resting` form.
+    private func apply(_ row: MainOutRowView, armed: Bool,
+                       connectionState: ConnectionState = .connected,
+                       localOnlyArmed: Bool = false) {
         // Armed = connected ∧ unmuted; a muted connected target is the ember
         // half of the same pair (the ring still renders its `.connected` form).
+        // Local-only playback is unmuted by definition, so it never mutes here.
+        row.setRailLive(true)
         row.apply(options: [.init(title: "Selected Devices (1)", target: .selectedDevices,
                                   buttonTitle: "Selected (1)")],
-                  current: .selectedDevices, master: 50, isMuted: !armed,
-                  connectionState: .connected)
+                  current: .selectedDevices, master: 50,
+                  isMuted: !armed && !localOnlyArmed,
+                  connectionState: connectionState,
+                  localOnlyArmed: localOnlyArmed)
         row.layoutSubtreeIfNeeded()
     }
 
     /// The rail's ACTUAL drawn ink: render the overlay offscreen (the same
     /// `cacheDisplay` idiom `GroupsWindowTextColorLockTests` uses) and take the
-    /// most opaque pixel. With no device rows the only thing `drawPlan` paints
-    /// is the origin hook — the very curve that has to match the ring — so this
-    /// needs no geometry assumptions beyond "the hook is on screen".
+    /// most opaque pixel. The only things `drawPlan` paints here are the origin
+    /// hook — the very curve that has to match the ring — and the one segment
+    /// under it, which wears the same tone, so this needs no geometry
+    /// assumptions beyond "the hook is on screen".
     private func sampledRailInk(of overlay: BusRailOverlayView) throws -> NSColor {
         guard let rep = overlay.bitmapImageRepForCachingDisplay(in: overlay.bounds) else {
             throw TestEnvironmentLimitation(description: "no bitmap rep available in this environment")
@@ -134,28 +159,42 @@ extension SerializedSharedState {
     // MARK: 1 — the sweep: every dial position x appearance x armed/ember
 
     /// The whole matrix. For each accent-dial position and each appearance, the
-    /// ring's stamped connected stroke must equal the rail's drawn ink — for
-    /// the armed (gold) tone AND the unarmed (ember) tone.
+    /// ring's stamped stroke must equal the rail's drawn ink — for the armed
+    /// (gold) tone AND the unarmed (ember) tone, and for the RESTING ring as
+    /// well as the connected one. The resting ring used to be stamped a flat
+    /// grey `rim` while the wire curving into it was gold.
     @Test func ringStrokeMatchesRailInkAcrossEveryDialPositionAndAppearance() throws {
+        // (connection state, armed, local-only armed) — the last pairing is the
+        // resting ring: a rail exists, nothing has connected, the Mac is playing.
+        let cases: [(ConnectionState, Bool, Bool)] = [
+            (.connected, true, false),
+            (.connected, false, false),
+            (.off, false, true),
+        ]
         for style in AccentStyle.allCases {
             Tokens.accentStyle = style
             for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
-                for armed in [true, false] {
+                for (state, armed, localOnly) in cases {
                     let (_, row, overlay) = makePair(appearanceName: appearanceName)
-                    apply(row, armed: armed)
+                    apply(row, armed: armed, connectionState: state, localOnlyArmed: localOnly)
+                    if state == .off {
+                        #expect(row.test_ringForm == .resting,
+                                "the resting fixture must actually render the resting ring")
+                    }
 
                     let plan = try #require(overlay.test_resolvePlan(),
                                             "the overlay must resolve a plan from the laid-out row")
-                    #expect(plan.gold == armed,
+                    let live = armed || localOnly
+                    #expect(plan.gold == live,
                             "the rail's own armed bit must track the row's (\(style)/\(appearanceName.rawValue))")
 
                     let railInk = try sampledRailInk(of: overlay)
                     expectSameInk(railInk, row.test_ringStrokeColor,
-                                  "\(style)/\(appearanceName.rawValue)/armed=\(armed): the hook and the ring it lands on must be one colour")
+                                  "\(style)/\(appearanceName.rawValue)/armed=\(live): the hook and the ring it lands on must be one colour")
 
                     // …and both must be THE shared spine tone, not a coincidence.
-                    expectSameInk(railInk, resolved(Tokens.Color.spineTone(armed: armed), appearanceName),
-                                  "\(style)/\(appearanceName.rawValue)/armed=\(armed): the drawn ink must be Tokens.Color.spineTone")
+                    expectSameInk(railInk, resolved(Tokens.Color.spineTone(armed: live), appearanceName),
+                                  "\(style)/\(appearanceName.rawValue)/armed=\(live): the drawn ink must be Tokens.Color.spineTone")
                 }
             }
         }

@@ -813,10 +813,12 @@ public final class OnboardingViewController: NSViewController {
                 whyLine: "Audiout Remote listens from where you sit and sets each "
                     + "speaker's timing in seconds. Scan to get it.",
                 // The one card whose primary button is not the completion: a
-                // phone connecting is. It exists so a person who would rather
-                // read on the Mac can, and so the ribbon keeps its shape.
-                allowTitle: "Open \(RemoteInviteView.pageAddress)",
-                isSkippable: true,
+                // phone connecting is. The primary moves setup on rather than
+                // sending anyone out of it (owner decision 2026-09-12); the
+                // page stays one quiet link away. Continue IS the skip, so no
+                // second Skip button beside it.
+                allowTitle: "Continue",
+                isSkippable: false,
                 spineAskTitle: "iPhone remote",
                 spineDoneTitle: "iPhone remote")
         case .usageStats:
@@ -1544,6 +1546,7 @@ public final class OnboardingViewController: NSViewController {
         content.primary = (copy.allowTitle, .prominent)
         content.showsSkip = copy.isSkippable
         content.skipTitle = Self.skipTitle(for: step)
+        if step == .audioutRemote { content.quietLink = "Open \(RemoteInviteView.pageAddress)" }
         return content
     }
 
@@ -1889,6 +1892,9 @@ public final class OnboardingViewController: NSViewController {
         // would have left the button on screen doing nothing.
         if flow.isDoneAvailable { doneTapped(); return }
         guard let step = displayedActiveStep else { return }
+        // Continue: the card completes only when a phone connects, so moving
+        // on is a skip.
+        if step == .audioutRemote { skipTapped(step); return }
         allowTapped(step)
     }
 
@@ -1903,6 +1909,7 @@ public final class OnboardingViewController: NSViewController {
     private func ribbonQuietLinkTapped() {
         if let browsed = browseStep { openSettings(for: browsed); return }
         guard let step = displayedActiveStep else { return }
+        if step == .audioutRemote { openDestination(.remotePage); return }
         settingsLinkTapped(step)
     }
 

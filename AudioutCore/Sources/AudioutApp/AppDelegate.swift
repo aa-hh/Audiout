@@ -103,7 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let config = PostHogConfig(projectToken: projectToken, host: host)
         config.errorTrackingConfig.autoCapture = true
         config.captureScreenViews = false
-        config.optOut = !settings.telemetryOptIn
+        config.optOut = !settings.telemetryEnabled
         // The SDK's /flags request fires on setup() regardless of optOut, carrying
         // the install id, bundle id, OS and app version — and this project has no
         // feature flags to preload, so there is nothing for it to fetch.
@@ -144,8 +144,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Self.captureCoarseLocationOnce()
             },
             captureAt: { PostHogSDK.shared.capture($0, properties: $1, timestamp: $2) }
-        ), consent: settings.telemetryOptIn)
-        if settings.telemetryOptIn { Self.captureCoarseLocationOnce() }
+        ), consent: settings.telemetryEnabled)
+        if settings.telemetryEnabled { Self.captureCoarseLocationOnce() }
     }
 
     /// PostHog's per-event escape hatch from server-side GeoIP enrichment.
@@ -1956,7 +1956,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let model = SetupModel(
             providers: permissionProviders,
             settings: settings,
-            localNetworkGated: SetupModel.osGatesLocalNetwork)
+            // Only an install that is NOT default-on gets the usage-statistics
+            // card — a paid buyer. Trial and first-launch installs collect by
+            // default and are asked later, if they convert, so the card would
+            // contradict what is already happening.
+            localNetworkGated: SetupModel.osGatesLocalNetwork,
+            usageStatsAvailable: Analytics.isAvailable && !settings.telemetryDefaultOn)
         model.noteRemoteAppClientCount(companionClientCount)
         return model
     }
@@ -2528,7 +2533,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 PostHogSDK.shared.register(["license_status": status?.rawValue ?? "none"])
                 PostHogSDK.shared.unregister("license_max_major")
             }
+            // The licence answer is what moves consent: a paid key landing on an
+            // install that has never been asked turns collection off here, and a
+            // trial keeps its default-on across every answer. Safe to call every
+            // time — `setConsent` ignores an unchanged value.
+            Analytics.setConsent(settings.telemetryEnabled)
+            presentConversionConsentAskIfDue()
         }
+    }
+
+    /// The one-time ask a trial user gets right after their paid key is
+    /// accepted: collection was on by default through the trial, and a paid
+    /// install only keeps it with an explicit yes.
+    ///
+    /// Spent at presentation, not at answer, so a dismissed alert is never
+    /// raised twice.
+    @MainActor
+    private func presentConversionConsentAskIfDue() {
+        guard !HeadlessRuntime.isActive,
+              settings.licenseStatus == .active,
+              !(settings.licenseKey ?? "").isEmpty,
+              settings.trialStartedAt != nil,
+              settings.trialExpiresAt == nil,
+              !settings.telemetryAsked,
+              !settings.telemetryConversionAskShown
+        else { return }
+        settings.telemetryConversionAskShown = true
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        // Same words as the Setup window's usage-counts card, which is the same
+        // ask a direct buyer sees.
+        alert.messageText = "Share anonymous usage counts"
+        alert.informativeText = "Audiout counts which features get used. "
+            + "No audio, speaker names or your license key are ever part of it."
+        alert.addButton(withTitle: "Share Usage Counts")
+        alert.addButton(withTitle: "No Thanks")
+        let granted = alert.runModal() == .alertFirstButtonReturn
+
+        settings.telemetryAsked = true
+        settings.telemetryOptIn = granted
+        Analytics.setConsent(granted)
+        if granted { Analytics.capture("license:conversion_consent_opted_in") }
     }
 
     /// Gives graceful AirPlay teardown a bounded window before the process exits
@@ -3498,6 +3544,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItemController.update(devices: devices,
                                     liveRoutedAppNames: routedAppNamesByDeviceID,
                                     isMainOutMuted: groupController.isMainOutMuted)
+        // One "audio reached a speaker today" event per local day. Spent even
+        // when consent is off — `capture` buffers or no-ops on its own rules,
+        // and a latch that waited for consent would fire a stale day later.
+        if let due = DailyActiveLatch.due(devices: devices,
+                                          lastDay: settings.telemetryDailyActiveDay) {
+            settings.telemetryDailyActiveDay = due.day
+            Analytics.capture("streaming:daily_active", ["speaker_count": String(due.speakerCount)])
+        }
         // Keep the Groups screen in lockstep with the same snapshot. Nil until
         // that tab has been visited, and its own hidden-means-idle gate drops
         // the rebuild whenever the user is looking at another screen — so a

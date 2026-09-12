@@ -50,6 +50,47 @@ import Testing
         #expect(AppSettings(defaults: defaults).telemetryAsked == true)
     }
 
+    /// `telemetryEnabled` is what gates every send, so each row here is a real
+    /// failure: a paid install defaulting ON leaks data nobody agreed to, a
+    /// trial install defaulting OFF loses the trial-phase visibility this
+    /// default exists for, and an answer the default overrides makes the
+    /// Settings toggle a lie.
+    @Test(arguments: [
+        // key,     trialExpiry, asked, optIn, expected
+        (nil,       false,       false, false, true),   // first launch, nothing stored
+        ("TRIAL-1", true,        false, false, true),   // trial running, or expired unconverted
+        ("PAID-1",  false,       false, false, false),  // paid, not asked yet
+        ("PAID-1",  false,       true,  true,  true),   // paid, said yes
+        ("TRIAL-1", true,        true,  false, false),  // trial, turned it off in Settings
+        (nil,       false,       true,  false, false),  // no key, turned it off in Settings
+    ] as [(key: String?, trialExpiry: Bool, asked: Bool, optIn: Bool, expected: Bool)])
+    func telemetryEnabledCombinesTheAnswerWithTheTrialDefault(
+        row: (key: String?, trialExpiry: Bool, asked: Bool, optIn: Bool, expected: Bool)
+    ) {
+        let settings = AppSettings(defaults: defaults)
+        // Key first: its setter clears every trial field when set to nil.
+        settings.licenseKey = row.key
+        settings.trialExpiresAt = row.trialExpiry ? Date() : nil
+        settings.telemetryAsked = row.asked
+        settings.telemetryOptIn = row.optIn
+
+        #expect(settings.telemetryEnabled == row.expected)
+    }
+
+    @Test func telemetryConversionAskShownRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.telemetryConversionAskShown == false)
+        settings.telemetryConversionAskShown = true
+        #expect(AppSettings(defaults: defaults).telemetryConversionAskShown == true)
+    }
+
+    @Test func telemetryDailyActiveDayRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.telemetryDailyActiveDay == nil)
+        settings.telemetryDailyActiveDay = "2026-09-12"
+        #expect(AppSettings(defaults: defaults).telemetryDailyActiveDay == "2026-09-12")
+    }
+
     @Test func unknownStoredValueFallsBack() {
         defaults.set("chartreuse", forKey: "appearance.theme")
         #expect(AppSettings(defaults: defaults).theme == .system)

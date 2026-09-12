@@ -3,8 +3,10 @@
 
 import Foundation
 
-/// Opt-in, anonymous per-install usage-analytics facade (PRODUCT.md Data
-/// Collection stream 1). Foundation-only by design: PostHog is deliberately
+/// Anonymous per-install usage-analytics facade (PRODUCT.md Data
+/// Collection stream 1). On by default through the free trial; a paid install
+/// is asked once before anything is collected, and the Settings toggle can
+/// turn it off at any time. Foundation-only by design: PostHog is deliberately
 /// linked ONLY to the `AudioutApp` executable (`AudioutCore/Package.swift`),
 /// so UI/library modules must never import it — every capture call in this
 /// package routes through here instead, and `AppDelegate` is the one place
@@ -13,10 +15,11 @@ import Foundation
 /// Callable from any thread but NEVER from the real-time IOProc/render path
 /// (the same rule as ``Telemetry``).
 ///
-/// Consent itself is persisted in ``AppSettings`` (`telemetryOptIn`); this
-/// type only holds the in-memory flag that gates ``capture(_:_:)`` and
-/// forwards changes to the installed sink's `consentChanged` so it can
-/// opt the underlying SDK in or out.
+/// Consent itself is decided in ``AppSettings`` — `telemetryEnabled`, which
+/// combines the user's stored answer with the trial-phase default; this type
+/// only holds the in-memory flag that gates ``capture(_:_:)`` and forwards
+/// changes to the installed sink's `consentChanged` so it can opt the
+/// underlying SDK in or out.
 ///
 /// A `nil` sink is the off state — no queue, no disk, no `HeadlessRuntime`
 /// read. Only `AppDelegate` and tests ever install one.
@@ -79,6 +82,15 @@ public enum Analytics {
     /// still reach the onboarding funnel. A decline drops them.
     public static func setConsent(_ granted: Bool) {
         let (sink, held): (Sink?, [Held]) = state.withLock { s in
+            // No change, nothing to tell the sink. `applyLicenseState()` re-syncs
+            // consent on every licence answer; without this an unchanged grant
+            // would re-fire `consentChanged` and send a duplicate launch/location
+            // event each time. A repeated "off" still drops what was held: no
+            // consent means nothing kept, whether or not the value moved.
+            guard s.consent != granted else {
+                if !granted { s.pending.removeAll() }
+                return (nil, [])
+            }
             s.consent = granted
             defer { s.pending.removeAll() }
             return (s.sink, granted ? s.pending : [])
@@ -175,4 +187,33 @@ public enum Analytics {
     }
 
     private static let state = Locked(State())
+}
+
+/// Decides whether today's `streaming:daily_active` event is still owed.
+///
+/// One event per local-calendar day on which audio actually reached a real
+/// speaker, so the answer needs both the day already spent and the fleet.
+/// Pure: the caller persists the returned day.
+public enum DailyActiveLatch {
+
+    /// `nil` when today is already spent or nothing is streaming; otherwise the
+    /// number of connected non-local speakers and the day string to store.
+    public static func due(devices: [Device],
+                           lastDay: String?,
+                           now: Date = Date(),
+                           calendar: Calendar = .current) -> (speakerCount: Int, day: String)? {
+        let today = day(of: now, calendar: calendar)
+        guard today != lastDay else { return nil }
+        // The Mac's own output is not a speaker Audiout sent audio to.
+        let count = devices.filter { $0.connectionState == .connected && !$0.isLocalDevice }.count
+        guard count > 0 else { return nil }
+        return (count, today)
+    }
+
+    /// `yyyy-MM-dd` in the given calendar — built from components rather than a
+    /// `DateFormatter` so no locale can reshape it.
+    static func day(of date: Date, calendar: Calendar) -> String {
+        let c = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
 }

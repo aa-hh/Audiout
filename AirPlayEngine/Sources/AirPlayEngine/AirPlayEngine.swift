@@ -1192,6 +1192,10 @@ public actor AirPlayEngine {
         // is charged back via `recordRefused` (below), so the cumulative deficit
         // still equals wall time minus audio actually DELIVERED — the receiver
         // anchor slide — instead of crediting refused audio as delivered.
+        // That equality holds only for host writes: while the shim's idle
+        // silence fill is running (shims/outputs.c), the receiver is also being
+        // fed from below this layer, so the cumulative deficit then measures the
+        // host's own shortfall, not what the receiver is missing.
         // Allocation-free, never gates the write.
         let firstSamples = entries.first.map { $0.pcm.count / bytesPerSample }
         if let firstSamples {

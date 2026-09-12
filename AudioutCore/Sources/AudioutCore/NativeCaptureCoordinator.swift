@@ -3568,6 +3568,11 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             kAudioAggregateDeviceMainSubDeviceKey as String: outputUID,
             kAudioAggregateDeviceIsPrivateKey as String:     true,
             kAudioAggregateDeviceIsStackedKey as String:     false,
+            // `kAudioAggregateDeviceTapAutoStartKey` makes `AudioDeviceStart`
+            // wait until a tapped process actually plays, which is deliberate
+            // here for CPU. An idle speaker session is kept alive by the
+            // sender shim's silence fill (AirPlayEngine, shims/outputs.c),
+            // never by keeping this tap awake.
             kAudioAggregateDeviceTapAutoStartKey as String:  true,
             kAudioAggregateDeviceSubDeviceListKey as String: [
                 [ kAudioSubDeviceUIDKey as String: outputUID ]

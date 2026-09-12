@@ -4258,6 +4258,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             for (uid, ms) in latencies {
                 sink.setOffsetMs(Int(ms.rounded()), forDeviceUID: uid)
             }
+            // Silence keep-alive (roadmap 085 ticket 04), re-read from settings
+            // on every enable so a changed preference lands on the next connect
+            // — the connect-volume precedent, no live push mid-session.
+            sink.setKeepAliveWindow(
+                nanos: Int64(AppSettings().btKeepAliveMinutes) * 60 * 1_000_000_000)
             // Composed gains (`btSinkGain`: user volume × masters, 0 while
             // held/muted) land BEFORE the device set, so a sink created by
             // `setDevices` below starts at the user's level — or already muted
@@ -11959,10 +11964,15 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// above. Same default-no-op posture as `setTrimMs`.
     func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec,
                  forDeviceUIDs uids: [String])
+    /// Silence keep-alive window (roadmap 085 ticket 04) — see
+    /// ``BTSyncedSink/setKeepAliveWindow(nanos:)``. Same default-no-op posture
+    /// as `setTrimMs`.
+    func setKeepAliveWindow(nanos: Int64)
 }
 
 extension BTSyncedSinkControlling {
     func anchoredDeviceUIDs() -> Set<String>? { nil }
+    func setKeepAliveWindow(nanos: Int64) {}
     func setTrimMs(_ ms: Double, forDeviceUID uid: String) {}
     func reanchorAll(cause: String) {}
     func setOffsetMs(_ ms: Int, forDeviceUID uid: String) {}

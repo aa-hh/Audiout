@@ -1,6 +1,6 @@
 # 03 — Mac-mic sampling loop + attribution from baseline
 
-Status: ready-for-agent
+Status: resolved (built + reviewed 2026-09-13; lifecycle + trigger wiring land with ticket 05; live check owed)
 Blocked by: 02
 
 The tracking loop on the Mac: capture short windows, run the passive correlator,
@@ -17,6 +17,13 @@ attribute peaks to speakers, decide whether alignment moved.
   moved → that speaker jumped. Several moved → best guess (likeliest assignment),
   schedule a verify window, swap the assignment if the verify disagrees
   (decision 7).
+- AirPlay/Cast anchors (decision 13): a peak attributed to an AirPlay or Cast
+  device is READ-ONLY — those devices are scheduled against the room reference
+  clock and do not drift. Never emit an observation that would correct one.
+  Instead, use such a peak the way the chirp probe uses its reference lane:
+  its deviation from the expected delay is the mic's own offset (mic moved, or
+  capture-path change), so subtract it from every Bluetooth peak's deviation
+  before emitting observations, and fold it into the re-baseline logic.
 - Mic-moved guard: all peaks shifted by a similar amount → re-baseline the mic
   constant, do not correct (decision 8; the Mac has no motion sensor, this
   heuristic is the only guard here).

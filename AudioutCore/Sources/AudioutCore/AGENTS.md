@@ -22,6 +22,7 @@ everything up to the `OutputBackend` seam and never imports AppKit.
 - A failure the user felt goes through `Telemetry.fail(category, event, local:, shared:)`; only `shared` leaves the Mac, so device ids and error text go in `local`. Ordinary `Telemetry.log` lines never leave the Mac at all (owner's ruling 2026-09-10: the every-line forward leaked bundle ids and speaker names).
 - Both capture taps keep `kAudioAggregateDeviceTapAutoStartKey`: they sleep until an app plays, on purpose. A speaker session that would starve is fed silence by the sender shim (AirPlayEngine, shims/outputs.c), never by keeping a tap awake; a receiver closes a session that goes ~30 s without packets.
 - The sender's own log is `engine.log` beside `telemetry.jsonl`, set once where the engine is built; when a session "connected" but went silent, read `stream_health`'s `silent_s` first, then both files.
+- An AirPlay or Cast arrival in a `PassiveDriftSampler` window is read-only: those receivers run on the room reference clock, so a peak off baseline measures the MIC, never that speaker.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it first.
 
 ## Map

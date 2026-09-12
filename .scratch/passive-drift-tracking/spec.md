@@ -50,6 +50,7 @@ low confidence = discard the window, never act on it.
 | 10 | iOS re-sync button: records ~5–10 s of the playing music, streams the capture to the Mac (which holds the reference bytes) for correlation. On low confidence: show the manual by-ear paddles, with the chirp probe as an offered option. |
 | 11 | Every sample is logged locally — doubles as the field data that confirms or kills the mid-playback-creep theory and tunes the thresholds. |
 | 12 | Roadmap 062 (reconnect-survival band-split chirps) folds into this: the reconnect trigger in decision 2 covers its goal without audible chirps. |
+| 13 | (2026-09-12, after wave 1) AirPlay and Cast receivers are fixed points: they run scheduled built-in delays against the shared room reference clock and do not drift, so the tracker NEVER adjusts them. Corrections apply to Bluetooth devices only, measured against that same reference clock — the clock is the authority, never a neighboring speaker. A measured AirPlay/Cast arrival is read-only: use it to calibrate the mic's own unknown offset against the reference, exactly as the chirp probe's reference lane does today. |
 
 ## What already exists (verified against code 2026-09-12)
 

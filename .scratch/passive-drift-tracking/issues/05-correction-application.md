@@ -1,6 +1,6 @@
 # 05 — Apply corrections: gaps first, slew for residuals, thresholds
 
-Status: ready-for-agent
+Status: claimed (decision core built + reviewed 2026-09-12; wiring + slew + analytics remain)
 Blocked by: 03
 
 Turn attributed observations into delay-line changes without audible artifacts.
@@ -28,3 +28,20 @@ Turn attributed observations into delay-line changes without audible artifacts.
 Done when: fake-speaker test shows a mid-window delta applied at the next gap,
 a residual slewn without discontinuity in the output samples, and the ≥40 ms
 path surfacing its notice.
+
+- Bluetooth only (decision 13): corrections are generated for Bluetooth device
+  UIDs and nothing else. AirPlay/Cast run fixed scheduled delays against the
+  room reference clock and are never adjusted; the integration layer must not
+  feed their observations into the policy as correctable devices.
+
+## Comments
+
+- 2026-09-12: wave 1 review fix pass applied findings 1–3 — the swap/re-correct path
+  now moves only group members still off by at least the ignore threshold.
+- 2026-09-12 review pass 3, ruled immaterial for wave 1 but MUST fix before ticket 06
+  logs action kinds: a stored guess group never empties (it always keeps its own
+  device), so a lone stale-group re-correction is emitted as `.swapAndRecorrect([x])`
+  instead of `.correct` — same move, wrong label; a field log counting swap events as
+  wrong-attribution would miscount ordinary drift. Fix: drop the device from its own
+  stored group too, or treat a `[self]` group as no group
+  (`DriftCorrectionPolicy.swift:226` area).

@@ -1,6 +1,6 @@
 # 02 — Passive correlator: mic capture vs retained program audio
 
-Status: ready-for-agent
+Status: resolved (built in audiout-shared 0.10.0, 2026-09-12; live-music validation owed)
 Blocked by: 01
 
 Extend ProbeKit (audiout-shared) to correlate a mic recording against an arbitrary

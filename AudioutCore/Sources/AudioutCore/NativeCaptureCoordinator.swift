@@ -1904,6 +1904,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // render process is excluded from this tap
         // (``resolveExcludedProcessObjectIDs()``) so their delayed output
         // can't loop back as an echo.
+        // Reference retention (roadmap 085 ticket 01): the Bluetooth-bound
+        // variant of this block, kept for passive-drift correlation. While
+        // nothing has armed the ring this is one atomic word read and a
+        // return — no lock, so a reader's copy can never stall delivery.
+        referenceRing.append(btPCM ?? pcm, pts: pts)
+
         if let btSink = snapshot.btSink, let btResampler = snapshot.btBaseResampler {
             if let btSweepFreePCM, btResampler.isIdentity {
                 Self.fanOutSplitToBT(sweep: btPCM ?? pcm, sweepFree: btSweepFreePCM,
@@ -2119,6 +2125,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     }
 
     private let feedGap = FeedGapTracker()
+
+    /// Rolling history of the Bluetooth-bound outgoing audio (roadmap 085
+    /// ticket 01): the correlation reference for passive drift tracking.
+    /// Disarmed by default — ``deliver`` feeds it one lock-free flag read per
+    /// block until a tracker or re-sync capture arms it.
+    let referenceRing = ReferenceAudioRing()
 
     /// Beyond this the hole is not a tap rebuild's — something else broke, and a
     /// fill that large would flood the downstream rings (``BTFrameRing`` drops

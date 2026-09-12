@@ -51,6 +51,16 @@ public protocol MicProbeRecording {
     func start() throws -> Double
     /// Stop and hand back everything captured, mono.
     func stop() -> [Float]
+    /// The monotonic instant of the FIRST captured sample, nil until one has
+    /// arrived. Passive drift tracking measures every delay from the instant
+    /// shared by the capture and the retained program, so it cannot work
+    /// without this; the chirp wizard measures one arrival against another
+    /// inside the same capture and never asks.
+    var firstSampleHostNanos: Int64? { get }
+}
+
+public extension MicProbeRecording {
+    var firstSampleHostNanos: Int64? { nil }
 }
 
 /// Captures the Mac's BUILT-IN microphone, pinned by device ID.
@@ -65,8 +75,14 @@ public final class BuiltInMicRecorder: MicProbeRecording {
     private let engine = AVAudioEngine()
     private let lock = NSLock()
     private var samples: [Float] = []
+    private var firstSampleNanos: Int64?
 
     public init() {}
+
+    public var firstSampleHostNanos: Int64? {
+        lock.lock(); defer { lock.unlock() }
+        return firstSampleNanos
+    }
 
     public func start() throws -> Double {
         guard let mic = Self.builtInMicrophoneID() else {
@@ -78,7 +94,8 @@ public final class BuiltInMicRecorder: MicProbeRecording {
         // stale format (`format: nil` takes it) makes `start()` throw -10868
         // from InitializeActiveNodesInInputChain. Tap with the hardware format.
         let format = engine.inputNode.inputFormat(forBus: 0)
-        engine.inputNode.installTap(onBus: 0, bufferSize: 4_096, format: format) { [self] buffer, _ in
+        lock.lock(); samples = []; firstSampleNanos = nil; lock.unlock()
+        engine.inputNode.installTap(onBus: 0, bufferSize: 4_096, format: format) { [self] buffer, when in
             let frames = Int(buffer.frameLength)
             guard frames > 0, let data = buffer.floatChannelData else { return }
             let channels = Int(buffer.format.channelCount)
@@ -90,7 +107,21 @@ public final class BuiltInMicRecorder: MicProbeRecording {
                 let inverse = 1 / Float(channels)
                 for i in 0..<frames { mono[i] *= inverse }
             }
-            lock.lock(); samples.append(contentsOf: mono); lock.unlock()
+            lock.lock()
+            if firstSampleNanos == nil {
+                // Nothing is kept until a buffer carries a valid host time:
+                // `firstSampleHostNanos` names the instant of `samples[0]`, so
+                // appending earlier frames would date the capture to a later
+                // instant than it began and bias every delay measured from it
+                // by one buffer (~85 ms at this tap size). Dropped, not guessed.
+                guard when.isHostTimeValid else { lock.unlock(); return }
+                // The same mach → CLOCK_MONOTONIC rebase the capture pts ride,
+                // so the mic and the retained program share one timeline.
+                firstSampleNanos = SyncTiming.monotonicNanos(
+                    CoreAudioSystemTap.timespec(fromHostTime: when.hostTime))
+            }
+            samples.append(contentsOf: mono)
+            lock.unlock()
         }
         engine.prepare()
         try engine.start()

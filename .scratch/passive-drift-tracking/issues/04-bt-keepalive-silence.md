@@ -1,6 +1,6 @@
 # 04 — Keep the Bluetooth stream alive through silence
 
-Status: ready-for-agent
+Status: resolved (built + reviewed 2026-09-12; live check owed)
 
 Prevent the biggest jump instead of correcting it: a stream restart after silence
 rolls a fresh 20–90 ms latency (`bt-latency-stability-research-2026-09-05.md:141-146`).
@@ -22,3 +22,13 @@ stream never restarts.
 Done when: with keep-alive on, a silence gap shorter than the timeout produces no
 latency re-roll on resume (fake-speaker test asserting the sink saw continuous
 frames); with it off or timed out, the resume edge fires the sampler trigger.
+
+## Comments
+
+- 2026-09-12 (wave 1 review fix pass): the Settings surface shipped as a bare-number
+  minutes popup — the house pattern, following the wake-restore precedent — so the
+  "no preset list" line above is superseded.
+- The suspend mechanism (the `isSilence` flag) and the claim that keeping the stream
+  up avoids a latency re-roll are both UNVERIFIED against real hardware; they are
+  owed to the live real-music test.
+- The silence→audio resume trigger is deferred to ticket 03.

@@ -110,6 +110,7 @@ public struct AppSettings {
         static let telemetryAsked = "telemetry.asked"
         static let touchBarControls = "general.touchBarControls"
         static let mixerMembershipHintDismissed = "mixer.membershipHintDismissed"
+        static let installMoveUnreported = "install.moveUnreported"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -736,6 +737,15 @@ public struct AppSettings {
     public var telemetryAsked: Bool {
         get { defaults.bool(forKey: Keys.telemetryAsked) }
         nonmutating set { defaults.set(newValue, forKey: Keys.telemetryAsked) }
+    }
+
+    /// Set by the copy that just moved itself into `/Applications`, read and
+    /// cleared by the copy that launches there, so the "moved to Applications"
+    /// analytics event is sent from a process where consent can exist.
+    /// Defaults to `false`.
+    public var installMoveUnreported: Bool {
+        get { defaults.bool(forKey: Keys.installMoveUnreported) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.installMoveUnreported) }
     }
 
     /// The licence check-in endpoint (``LicenseCheckIn``). Normally DERIVED —

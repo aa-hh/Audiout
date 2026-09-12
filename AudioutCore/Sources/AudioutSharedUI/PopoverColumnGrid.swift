@@ -344,6 +344,22 @@ public enum PopoverColumnGrid {
     /// Gap length between connecting-ring dashes.
     public static let haloRingDashGap: CGFloat = 2.6
 
+    /// Polar angle (radians, `HaloRingView`'s own y-up layer space) at the
+    /// center of the ring's permanent gap — ported from the iOS ring treatment
+    /// so the gold route-armed dot sits in a break in the ring rather than
+    /// nearly touching its stroke. The dot's center sits `statusDotInset`
+    /// (3 pt) in from the 26 pt icon box's bottom-right corner, i.e. (+10, +10)
+    /// from the ring's own center toward the visual bottom-right — which is
+    /// −45° from the +x axis in this non-flipped layer.
+    public static let haloRingGapCenterAngle: CGFloat = -.pi / 4
+    /// Total angular width (radians) of the ring's permanent gap. 70° puts
+    /// each arc stop 8.8 pt (device-row ring, radius 15) / 9.8 pt (Main Audio
+    /// ring, radius 17) from the dot's center — 3.3 / 4.3 pt clear of its
+    /// punch-out rim at both sizes. Fixed across every drawn ring form
+    /// (connected, connecting-dashed, failed, resting); stays far from the
+    /// rail's join at the Main Audio ring's LEFT edge (180°).
+    public static let haloRingGapWidth: CGFloat = .pi * 70 / 180
+
     /// Extra headroom (Warm Signal v4.1 item 2) added to the halo ring's own
     /// host box past `iconWidth`, on each side, so the enlarged
     /// `haloRingDiameter` (26 pt) ring has drawing room without being cramped

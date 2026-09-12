@@ -197,3 +197,17 @@ When writing or modifying license-server code that integrates with Paddle:
 - For destructive account changes (updating prices, archiving products, canceling subscriptions), ask for explicit confirmation before calling the `paddle-sandbox` or `paddle-live` MCP server.
 - Use `paddle-sandbox` by default — nothing is live yet. Only call `paddle-live` when the prompt explicitly mentions live, production, or real customer data.
 - API keys and webhook secrets live in environment variables — never inline credentials into code.
+
+## Agent skills
+
+### Issue tracker
+
+Local markdown under `.scratch/<feature-slug>/`: `spec.md` plus one file per ticket in `issues/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary, recorded as a `Status:` line in each ticket file. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` at the root (not yet written) plus `docs/adr/`. See `docs/agents/domain.md`.

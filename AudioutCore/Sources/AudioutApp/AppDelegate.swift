@@ -716,6 +716,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // First, before the licence gate, Setup, or any permission prompt:
+        // if the user takes the move, this process quits here and the
+        // /Applications copy runs the whole launch itself, so nobody sees
+        // onboarding twice (owner's call, 2026-09-12).
+        offerMoveToApplicationsIfTranslocated()
+
         configurePostHog()
 
         // T1 diagnostic (`AUDIOUT_TCC_DIAG=1`, off by default): starts a
@@ -1514,8 +1520,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pendingLicenseKeyFromURL = nil
             openLicenseSheet(registering: key)
         }
-
-        offerMoveToApplicationsIfTranslocated()
     }
 
     /// The launch step the licence gate defers: the first-run Setup gate
@@ -1673,6 +1677,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// quits this process and reopens the copy. There is no "don't show again"
     /// flag, because a translocated launch is transient by nature: moving the
     /// app to Applications ends it permanently.
+    ///
+    /// Runs as the first thing in `applicationDidFinishLaunching`, before the
+    /// licence gate and Setup, so a user who takes the move never sees a
+    /// permission prompt from the copy that is about to quit. Quitting this
+    /// early is safe: `applicationShouldTerminate` stops a backend that was
+    /// never started, which is a no-op.
     ///
     /// The check never fires for a dev build (`swift run`, or an app run from
     /// the build directory) — translocation only applies to a quarantined

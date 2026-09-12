@@ -55,6 +55,21 @@ plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
   privilege boundary (design doc §4). This is a hard ceiling, not a start:
   never grow it into a general IPC channel — that would put a message parser
   in the one root process.
+- **The unified-log level is what keeps a shipping helper free** (2026-09-12).
+  libairptp narrates every ANNOUNCE/SIGNALING/SYNC packet through the
+  `logmsg` callback — measured at ~1,100 lines a minute from one running
+  helper, and at the DEFAULT level every one of them is persisted to the
+  on-disk log store, so `logd` burns real CPU forever writing text nobody
+  reads. The callbacks (`ptp_helper_library_logmsg`, `ptp_helper_hexdump`)
+  therefore tee at DEBUG, which logd drops unless something asks for it; the
+  helper's own lifecycle lines keep DEFAULT and its three failures use
+  `ptp_helper_os_log_error()`. Nothing was deleted — dev reads the same lines
+  off stderr unprivileged, with `log stream --level debug --process
+  ptp-helper` live, or after the fact once `sudo log config --mode
+  "level:debug" --subsystem com.audiout.ptp-helper` is set. The trap when
+  reading back: a beta macOS build often has debug capture on system-wide, so
+  a plain `log show` there prints DEBUG lines and the split looks like it did
+  not land — check `messageType` in the output rather than the line count.
 - **XPC, libdispatch, and os_log are all libSystem, so none add a linked
   library** — the Library Validation constraint below is unaffected. `otool
   -L` on the built helper must keep showing `libSystem.B.dylib` and nothing
@@ -126,8 +141,8 @@ plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
    test-path overrides before anything binds or publishes.
 2. `airptp_callbacks_register()` — wires `logmsg`/`hexdump`/`thread_name_set`
    to stderr (visible unprivileged in dev) and tees the same text to the
-   unified log via `os_log()` (`log show --predicate 'process ==
-   "ptp-helper"'`) — the plist sets no `StandardErrorPath`, so launchd does
+   unified log at the DEBUG level (`log stream --level debug --process
+   ptp-helper`) — the plist sets no `StandardErrorPath`, so launchd does
    NOT redirect stderr to a file on its own.
 3. Install SIGTERM/SIGINT handlers — **before** the bind retry, so a signal
    arriving while the ports are contended is not ignored for the whole budget.

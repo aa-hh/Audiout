@@ -14,6 +14,8 @@ RTSP, no audio, nothing else belongs here.
 - `airptp_daemon_bind(NULL)` binds all interfaces on purpose; the loopback test daemon is a different thing.
 - The Mach service carries one boolean, a release trigger; never grow it into an IPC channel.
 - XPC, dispatch and os_log are libSystem: a second linked library is a release blocker.
+- Log level is the dev/production split: libairptp's per-packet narration tees at DEBUG,
+  the helper's own lifecycle lines at DEFAULT, its failures at ERROR (2026-09-12).
 - The port and shm-name overrides let the path run unprivileged; a test copy needs its own shm name.
 - A dead-man's watchdog backstops idle exit, because the master loop has wedged while holding the ports.
 - libevent is statically linked because Library Validation refuses an ad-hoc dylib in this daemon.

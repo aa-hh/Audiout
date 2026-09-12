@@ -17,9 +17,12 @@
 //      library's own diagnostics reach stderr (visible directly when
 //      launched unprivileged for dev/test — the bundled plist sets no
 //      StandardErrorPath, so launchd does NOT capture it to a file on its
-//      own) and are teed to the unified log via os_log(), queryable with
-//      `log show --predicate 'process == "ptp-helper"'` no matter how the
-//      process was started.
+//      own) and are teed to the unified log, queryable with `log show
+//      --predicate 'process == "ptp-helper"'` no matter how the process was
+//      started. Those two callbacks are the per-packet firehose, so they tee
+//      at the DEBUG level and a shipping build persists none of it; add
+//      --debug (see "Unified log (os_log) tee" below) to read them. The
+//      helper's own lifecycle lines and failures stay at DEFAULT/ERROR.
 //   3. Check in on the launchd Mach service, if one was handed to us (see
 //      "On-demand lifecycle" below).
 //   4. Derive a real per-host clock-id seed from gethostuuid() (§6.1: "feed a
@@ -144,9 +147,26 @@ ptp_helper_signal_handler(int signum)
 // binary is launched directly for dev/test). os_log() itself requires a
 // compile-time literal format string, so a dynamic fmt/va_list (as arrives
 // here from every fprintf(stderr, ...) call site in this file) is formatted
-// into a buffer first and handed to os_log() as one "%{public}s" argument —
-// %{public} because none of this diagnostic text is privacy-sensitive and it
-// must not be redacted in `log show`.
+// into a buffer first and handed to os_log_with_type() as one "%{public}s"
+// argument — %{public} because none of this diagnostic text is
+// privacy-sensitive and it must not be redacted in `log show`.
+//
+// THREE LEVELS, and which one a line gets is the whole difference between a
+// helper that costs a shipping Mac nothing and one that does not
+// (2026-09-12): logd persists DEFAULT and ERROR to the on-disk store, but
+// drops DEBUG unless something has asked for it.
+//
+//   ptp_helper_note()            DEFAULT — the helper's own lifecycle lines,
+//                                a handful per session: start, bind, idle
+//                                exit, shutdown.
+//   ptp_helper_os_log_error()    ERROR   — the failures, so they stay
+//                                findable once the chatter around them is
+//                                gone: `log show --predicate 'process ==
+//                                "ptp-helper" AND messageType == error'`.
+//   ptp_helper_library_logmsg()  DEBUG   — libairptp's own narration, one
+//   ptp_helper_hexdump()                   line per PTP packet. Read it with
+//                                `log stream --level debug --process
+//                                ptp-helper`, or unprivileged off stderr.
 
 static os_log_t
 ptp_helper_log_handle(void)
@@ -162,12 +182,17 @@ ptp_helper_log_handle(void)
 }
 
 static void
-ptp_helper_os_log_v(const char *fmt, va_list ap)
+ptp_helper_os_log_v(os_log_type_t type, const char *fmt, va_list ap)
 {
   char buf[512];
 
+  // os_log_with_type() drops a line whose level is not enabled, but the
+  // vsnprintf() below runs either way, so a DEBUG caller still pays one
+  // 512-byte stack format per line on a Mac where nothing captures it.
+  // That is the cheap half. The expensive half - logd waking, compressing
+  // and writing the line into the on-disk store - is what the level avoids.
   vsnprintf(buf, sizeof(buf), fmt, ap);
-  os_log(ptp_helper_log_handle(), "%{public}s", buf);
+  os_log_with_type(ptp_helper_log_handle(), type, "%{public}s", buf);
 }
 
 static void
@@ -176,7 +201,27 @@ ptp_helper_os_log(const char *fmt, ...)
   va_list ap;
 
   va_start(ap, fmt);
-  ptp_helper_os_log_v(fmt, ap);
+  ptp_helper_os_log_v(OS_LOG_TYPE_DEFAULT, fmt, ap);
+  va_end(ap);
+}
+
+static void
+ptp_helper_os_log_debug(const char *fmt, ...)
+{
+  va_list ap;
+
+  va_start(ap, fmt);
+  ptp_helper_os_log_v(OS_LOG_TYPE_DEBUG, fmt, ap);
+  va_end(ap);
+}
+
+static void
+ptp_helper_os_log_error(const char *fmt, ...)
+{
+  va_list ap;
+
+  va_start(ap, fmt);
+  ptp_helper_os_log_v(OS_LOG_TYPE_ERROR, fmt, ap);
   va_end(ap);
 }
 
@@ -187,7 +232,7 @@ ptp_helper_os_log(const char *fmt, ...)
 // alone is not enough) and tees the same text to the unified log.
 
 static void
-ptp_helper_logmsg(const char *fmt, ...)
+ptp_helper_note(const char *fmt, ...)
 {
   va_list ap;
 
@@ -197,7 +242,38 @@ ptp_helper_logmsg(const char *fmt, ...)
   fputc('\n', stderr);
 
   va_start(ap, fmt);
-  ptp_helper_os_log_v(fmt, ap);
+  ptp_helper_os_log_v(OS_LOG_TYPE_DEFAULT, fmt, ap);
+  va_end(ap);
+}
+
+// The library's own logmsg callback, and the only high-rate writer here: at a
+// steady state libairptp narrates every ANNOUNCE/SIGNALING/SYNC packet it
+// sends, which measured ~1,100 lines a minute per running helper. At the
+// DEFAULT level each of those is persisted to the on-disk log store, so a
+// shipping build made logd do that work forever for text no user will ever
+// read. DEBUG is dropped unless something explicitly asks for it, which keeps
+// every line available for development without charging production for it:
+//
+//   stderr, unprivileged dev run          — unchanged, always printed
+//   log stream --level debug --process ptp-helper   — live, no setup
+//   sudo log config --mode "level:debug" --subsystem com.audiout.ptp-helper
+//                                         — post-hoc, until reset
+//
+// The helper's own lifecycle lines (ptp_helper_note) stay at DEFAULT, so a
+// shipping build still records start/bind/idle-exit/shutdown, and its
+// failures go to ptp_helper_os_log_error.
+static void
+ptp_helper_library_logmsg(const char *fmt, ...)
+{
+  va_list ap;
+
+  va_start(ap, fmt);
+  vfprintf(stderr, fmt, ap);
+  va_end(ap);
+  fputc('\n', stderr);
+
+  va_start(ap, fmt);
+  ptp_helper_os_log_v(OS_LOG_TYPE_DEBUG, fmt, ap);
   va_end(ap);
 }
 
@@ -211,7 +287,7 @@ ptp_helper_hexdump(const char *msg, uint8_t *data, size_t data_len)
   if (msg)
   {
     fprintf(stderr, "%s\n", msg);
-    ptp_helper_os_log("%s", msg);
+    ptp_helper_os_log_debug("%s", msg);
   }
 
   for (i = 0; i < data_len; i++)
@@ -220,14 +296,14 @@ ptp_helper_hexdump(const char *msg, uint8_t *data, size_t data_len)
     line_len += (size_t)snprintf(line + line_len, sizeof(line) - line_len, "%02x ", data[i]);
     if ((i + 1) % 16 == 0)
     {
-      ptp_helper_os_log("%s", line);
+      ptp_helper_os_log_debug("%s", line);
       line_len = 0;
     }
   }
   if (data_len % 16 != 0)
   {
     fputc('\n', stderr);
-    ptp_helper_os_log("%s", line);
+    ptp_helper_os_log_debug("%s", line);
   }
 }
 
@@ -242,7 +318,7 @@ ptp_helper_thread_name_set(const char *name)
 static struct airptp_callbacks ptp_helper_callbacks = {
   .thread_name_set = ptp_helper_thread_name_set,
   .hexdump = ptp_helper_hexdump,
-  .logmsg = ptp_helper_logmsg,
+  .logmsg = ptp_helper_library_logmsg,
 };
 
 // MARK: - AUDIOUT_PTP_PORTS override (unprivileged CI/test path)
@@ -413,7 +489,7 @@ ptp_helper_watchdog_start(void)
     if (stale_for < threshold_secs)
       return;
 
-    ptp_helper_logmsg("ptp-helper: watchdog - service loop has not proven progress for %lds (threshold %lds) - "
+    ptp_helper_note("ptp-helper: watchdog - service loop has not proven progress for %lds (threshold %lds) - "
                        "it is wedged, hard-exiting so launchd starts a fresh copy",
                        (long)stale_for, threshold_secs);
     fflush(stderr);
@@ -456,7 +532,7 @@ ptp_helper_mach_checkin(void)
   {
     // Not fatal: the clock is still worth running for whoever started us.
     fprintf(stderr, "ptp-helper: could not create a Mach service listener for \"%s\" - continuing without check-in\n", name);
-    ptp_helper_os_log("ptp-helper: could not create a Mach service listener for \"%s\" - continuing without check-in", name);
+    ptp_helper_os_log_error("ptp-helper: could not create a Mach service listener for \"%s\" - continuing without check-in", name);
     return;
   }
 
@@ -470,7 +546,7 @@ ptp_helper_mach_checkin(void)
       if (xpc_get_type(event) == XPC_TYPE_DICTIONARY &&
           xpc_dictionary_get_bool(event, "release"))
       {
-        ptp_helper_logmsg("ptp-helper: release requested - exiting so the PTP ports are freed");
+        ptp_helper_note("ptp-helper: release requested - exiting so the PTP ports are freed");
         ptp_helper_should_run = 0;
       }
     });
@@ -479,7 +555,7 @@ ptp_helper_mach_checkin(void)
 
   xpc_connection_resume(ptp_helper_mach_listener);
 
-  ptp_helper_logmsg("ptp-helper: checked in on Mach service \"%s\"", name);
+  ptp_helper_note("ptp-helper: checked in on Mach service \"%s\"", name);
 }
 
 // MARK: - Per-host clock-id seed
@@ -568,7 +644,7 @@ ptp_helper_bind_with_retry(void)
     if (hdl)
     {
       if (attempt > 0)
-        ptp_helper_logmsg("ptp-helper: bound the PTP ports on attempt %ld", attempt + 1);
+        ptp_helper_note("ptp-helper: bound the PTP ports on attempt %ld", attempt + 1);
       return hdl;
     }
 
@@ -626,7 +702,7 @@ ptp_helper_wait_until_idle_or_signal(struct airptp_handle *hdl)
       // - a genuine internal failure, so exit non-zero and let launchd's
       // KeepAlive={SuccessfulExit:false} respawn.
       fprintf(stderr, "ptp-helper: airptp_peer_active_count() no longer reports a running daemon - aborting\n");
-      ptp_helper_os_log("ptp-helper: airptp_peer_active_count() no longer reports a running daemon - aborting");
+      ptp_helper_os_log_error("ptp-helper: airptp_peer_active_count() no longer reports a running daemon - aborting");
       return 1;
     }
 
@@ -648,7 +724,7 @@ ptp_helper_wait_until_idle_or_signal(struct airptp_handle *hdl)
 
     if (time(NULL) - idle_since >= idle_secs)
     {
-      ptp_helper_logmsg("ptp-helper: no active PTP peers for %lds - exiting so the PTP ports are released", idle_secs);
+      ptp_helper_note("ptp-helper: no active PTP peers for %lds - exiting so the PTP ports are released", idle_secs);
       return 0;
     }
   }
@@ -679,7 +755,7 @@ main(void)
   ptp_helper_mach_checkin();
 
   clock_id_seed = ptp_helper_clock_id_seed_get();
-  ptp_helper_logmsg("ptp-helper: starting (clock-id seed 0x%016llx)", (unsigned long long)clock_id_seed);
+  ptp_helper_note("ptp-helper: starting (clock-id seed 0x%016llx)", (unsigned long long)clock_id_seed);
 
   hdl = ptp_helper_bind_with_retry();
   if (!hdl)
@@ -688,7 +764,7 @@ main(void)
     // nqptp, a corporate PTP daemon) still owns the ports. Exit 0 so
     // KeepAlive={SuccessfulExit:false} does not respawn us into a storm - the
     // next connect click demand-starts a fresh attempt.
-    ptp_helper_logmsg("ptp-helper: could not bind the PTP ports - exiting (status 0, see the exit-code contract)");
+    ptp_helper_note("ptp-helper: could not bind the PTP ports - exiting (status 0, see the exit-code contract)");
     return 0;
   }
 
@@ -696,12 +772,12 @@ main(void)
   if (ret < 0)
   {
     fprintf(stderr, "ptp-helper: airptp_daemon_start() failed: %s\n", airptp_errmsg_get());
-    ptp_helper_os_log("ptp-helper: airptp_daemon_start() failed: %s", airptp_errmsg_get());
+    ptp_helper_os_log_error("ptp-helper: airptp_daemon_start() failed: %s", airptp_errmsg_get());
     airptp_end(hdl);
     return 1;
   }
 
-  ptp_helper_logmsg("ptp-helper: running (shared daemon, clock state published)");
+  ptp_helper_note("ptp-helper: running (shared daemon, clock state published)");
 
   // Arm the dead-man's watchdog now: it watches ptp_helper_wait_until_idle_or_
   // signal()'s loop below, so there is nothing to watch before this point.
@@ -713,7 +789,7 @@ main(void)
   // thread just watches for idleness or a signal.
   ret = ptp_helper_wait_until_idle_or_signal(hdl);
 
-  ptp_helper_logmsg("ptp-helper: shutting down");
+  ptp_helper_note("ptp-helper: shutting down");
   airptp_end(hdl);
 
   return ret;

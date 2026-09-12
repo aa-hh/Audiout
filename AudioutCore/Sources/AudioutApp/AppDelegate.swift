@@ -724,6 +724,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         configurePostHog()
 
+        // The copy that just moved itself into /Applications set this before
+        // quitting (`moveToApplicationsAndRelaunch()`); this is that copy's
+        // first launch, so send the event now, where consent can actually
+        // exist. With no sink yet (a dev run without a PostHog token) the
+        // flag waits for a later launch; with a sink but no consent yet,
+        // Analytics holds the event until Setup's opt-in in this process,
+        // and a decline drops it, which is correct.
+        if settings.installMoveUnreported, analyticsAvailable {
+            Analytics.capture("onboarding:moved_to_applications")
+            settings.installMoveUnreported = false
+        }
+
         // T1 diagnostic (`AUDIOUT_TCC_DIAG=1`, off by default): starts a
         // once-per-second raw-bucket poll as early as possible so a fresh
         // `open`-launch is captured before any permission prompt can fire.
@@ -1680,9 +1692,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// Runs as the first thing in `applicationDidFinishLaunching`, before the
     /// licence gate and Setup, so a user who takes the move never sees a
-    /// permission prompt from the copy that is about to quit. Quitting this
-    /// early is safe: `applicationShouldTerminate` stops a backend that was
-    /// never started, which is a no-op.
+    /// permission prompt from the copy that is about to quit. The move path
+    /// ends in a hard `exit(0)` rather than the normal quit, because
+    /// `applicationShouldTerminate` dereferences objects that are not built yet
+    /// at this point in launch (see `moveToApplicationsAndRelaunch()`).
     ///
     /// The check never fires for a dev build (`swift run`, or an app run from
     /// the build directory) — translocation only applies to a quarantined
@@ -1806,7 +1819,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         log("Moved to Applications; quitting so the copy at \(destination.path) can take over")
-        NSApp.terminate(nil)
+        settings.installMoveUnreported = true
+        // Nothing has been built yet at this point in launch: no backend
+        // started, no group controller, no Touch Bar ownership, no companion
+        // server. The normal quit path would tear down objects that don't
+        // exist yet. `applicationShouldTerminate` dereferences the
+        // not-yet-assigned `groupController`, which crashed a live test on
+        // 2026-09-12. The relaunch shell only needs this pid to disappear,
+        // which a hard exit satisfies.
+        exit(0)
     }
 
     /// The original "move it yourself" wording, shown whenever the automatic
@@ -3787,7 +3808,8 @@ extension AppDelegate {
         // three probe instances outlived their own terminate call), and a
         // leftover instance fights the live app over the default output.
         // Mock mode holds no aggregate device, so a hard exit backstop is
-        // safe here — and only here.
+        // safe here. The other hard exit is the move-to-Applications path
+        // in `moveToApplicationsAndRelaunch()`, where nothing has started yet.
         after(17.0) {
             note("probe exit backstop")
             exit(0)

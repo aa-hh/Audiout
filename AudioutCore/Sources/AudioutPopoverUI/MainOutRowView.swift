@@ -114,12 +114,21 @@ public final class MainOutRowView: NSView {
     /// Whether the Main Audio spine is LIVE — the continuous rail overlay reads
     /// this to tone the origin hook AND the member segments below it, gold vs
     /// ember. Live = the armed target (connected ∧ unmuted) **or** the
-    /// local-only `restingArmed` case, where audio genuinely plays through the
+    /// local-only armed case, where audio genuinely plays through the
     /// Mac and no remote handshake exists for `connectionState` to report. Both
     /// carry real audio to a member node, so both must read live: the hook's
     /// corner and the rail leaving it are one stroke, and a truth that covers
     /// only the remote case draws them in two tones.
     private var isSpineLive = false
+    /// Whether a rail exists at all — the host pushes it through
+    /// ``setRailLive(_:)``, resolved from the same rule the wire itself draws by
+    /// (`BusRailOverlayView.railReaches`). The ring is drawn exactly when the
+    /// rail is, so the curve landing on it always has a ring to land on and the
+    /// ring never floats with no wire under it.
+    private var railIsLive = false
+    /// The last applied aggregate connection state, kept so a liveness push can
+    /// re-resolve the ring's form without the host re-applying the whole row.
+    private var lastConnectionState: ConnectionState = .off
     /// The System Audio row's item title — **"Main Audio"** (Warm Signal v4
     /// §Call-1), filling the shared name column so it aligns
     /// with the device rows below.
@@ -194,23 +203,23 @@ public final class MainOutRowView: NSView {
     /// set) — the derived-identity case keeps the origin at full ink. `nil`
     /// (legacy callers/tests) falls back to the transitional any-group-target
     /// derivation.
-    /// `restingArmed` (ring-resting-state task) is the host-computed bit
-    /// deciding the ring's `.resting` form: true iff the active target's
-    /// members are all the local device (non-empty) and unmuted — the
-    /// local-only-playback case where a genuine AirPlay handshake never
-    /// happens, so `connectionState` correctly falls through to `.off`
-    /// (`PopoverController.mainOutConnectionState` is untouched) but the
-    /// rail's curve into the ring still needs something to land on. Defaults
-    /// to `false` (legacy callers/tests render exactly as before).
+    /// `localOnlyArmed` is the host-computed bit that makes the rail (and with
+    /// it the ring) read GOLD with no remote handshake: the local device is
+    /// among the active target's members and the master is unmuted, so audio
+    /// genuinely plays through the Mac while `connectionState` correctly falls
+    /// through to `.off` (`PopoverController.mainOutConnectionState` is
+    /// untouched). It decides the TONE only — whether the ring is drawn at all
+    /// follows ``setRailLive(_:)``.
     public func apply(options: [Option], current: MainOutTarget, master: Int, isMuted: Bool = false,
                       connectionState: ConnectionState = .off,
-                      restingArmed: Bool = false,
+                      localOnlyArmed: Bool = false,
                       busOriginDimmed: Bool? = nil) {
         self.options = options
         isMasterMuted = isMuted
         muteButton.state = isMuted ? .on : .off
         updateMuteTint()
-        haloRingView.apply(connectionState, restingArmed: restingArmed)
+        lastConnectionState = connectionState
+        haloRingView.apply(connectionState, restingArmed: railIsLive)
 
         // Route-armed dot (spec §3.3, Main Out variant): armed = the active
         // target has ≥1 CONNECTED member (the aggregate ring state, which
@@ -219,7 +228,7 @@ public final class MainOutRowView: NSView {
         let isConnected: Bool
         if case .connected = connectionState { isConnected = true } else { isConnected = false }
         let armed = isConnected && !isMuted
-        isSpineLive = armed || restingArmed
+        isSpineLive = armed || localOnlyArmed
         // The ring's CONNECTED stroke wears the rail's own SPINE TONE (Warm
         // Signal nitpicks, "rail into the ring"), so the join reads as one
         // continuous line, not a gold line touching a hue-neutral ring. The
@@ -227,7 +236,7 @@ public final class MainOutRowView: NSView {
         // tone through the same `Tokens.Color.spineTone` the rail overlay
         // uses, at stamp time, so the two cannot drift and the accent dial
         // moves both.
-        haloRingView.connectedSpineArmed = armed
+        haloRingView.connectedSpineArmed = isSpineLive
         armedDotView.apply(armed: armed)
         // The master fader's engaged (gold) fill reuses the EXACT same armed
         // predicate the dot renders — one armed truth, two instruments.
@@ -256,8 +265,7 @@ public final class MainOutRowView: NSView {
         // that omit `busOriginDimmed` keep the old any-group-target derivation.
         let isGroupTarget: Bool
         if case .group = current { isGroupTarget = true } else { isGroupTarget = false }
-        busOriginView.apply(node: .origin, dimmed: busOriginDimmed ?? isGroupTarget,
-                            originGold: armed)
+        busOriginView.apply(node: .origin, dimmed: busOriginDimmed ?? isGroupTarget)
         groupGlowView.isHidden = !isGroupTarget
 
         let menu = destinationPopUp.menu ?? NSMenu()
@@ -592,6 +600,17 @@ public final class MainOutRowView: NSView {
             busOriginView.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.busColumnWidth),
             busOriginView.heightAnchor.constraint(equalTo: heightAnchor),
         ])
+    }
+
+    /// Tell the row whether a rail exists — pushed by the host every time the
+    /// rail's rows change, resolved from the one rule the wire draws by
+    /// (`BusRailOverlayView.railReaches`): at least one selected, non-failed
+    /// room. It gates the RING, so ring and wire appear and vanish together;
+    /// the ring's TONE stays the row's own (`apply(options:current:master:)`).
+    public func setRailLive(_ live: Bool) {
+        guard live != railIsLive else { return }
+        railIsLive = live
+        haloRingView.apply(lastConnectionState, restingArmed: live)
     }
 
     // MARK: Private Helpers

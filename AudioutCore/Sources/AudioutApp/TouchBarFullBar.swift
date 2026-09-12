@@ -21,12 +21,13 @@ import QuartzCore
 /// keys do, HUD included. Volume alone bypasses that, because an aux key would
 /// target the dead aggregate; it drives Main Out directly.
 ///
-/// WHEN IT SHOWS, and it is three facts, not one: only while Audiout owns the
-/// volume AND audio is actually leaving the Mac AND the user hasn't turned the
-/// feature off in Settings › General. Ownership alone was too broad — it lasts
-/// the entire time our aggregate is the Mac's output, so the user's own Touch
-/// Bar was gone for hours at a stretch over a feature they might use for
-/// seconds. Any of the three going false hands the bar straight back.
+/// WHEN IT SHOWS: while Audiout owns the volume AND the user hasn't turned the
+/// feature off in Settings › General. Ownership lasts the whole time our
+/// aggregate is the Mac's default output, and for that whole time macOS's own
+/// volume controls do nothing — including the "Speakers unreachable. Playing on
+/// your Mac" fallback, where the aggregate stays the default output. So the
+/// user needs ours on screen whenever we hold the volume, streaming or not.
+/// Either fact going false hands the bar straight back.
 ///
 /// PROVENANCE: the private-API sequence was learned by reading Pock and MTMR
 /// (both MIT). No code was copied — this is a clean-room reimplementation, which
@@ -65,7 +66,6 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     private var lastAudibleAt: CFTimeInterval = 0
 
     private var ownsVolume = false
-    private var isStreaming = false
     private var isEnabled = true
 
     // MARK: - Presenting
@@ -76,14 +76,6 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
         reconcilePresentation()
     }
 
-    /// Follow whether audio is actually leaving the Mac. Ownership lasts as
-    /// long as the aggregate is the default output; this is the narrower fact
-    /// that says the bar is worth taking right now.
-    func setStreaming(_ streaming: Bool) {
-        isStreaming = streaming
-        reconcilePresentation()
-    }
-
     /// Follow the user's Settings › General opt-out.
     func setEnabled(_ enabled: Bool) {
         isEnabled = enabled
@@ -91,7 +83,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     }
 
     private func reconcilePresentation() {
-        (ownsVolume && isStreaming && isEnabled) ? present() : dismiss()
+        (ownsVolume && isEnabled) ? present() : dismiss()
     }
 
     private func present() {

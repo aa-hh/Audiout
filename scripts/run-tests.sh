@@ -234,13 +234,14 @@ if [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ] && [ -f "$stamp" ]; then
 fi
 
 # --- prefer-remote ----------------------------------------------------------
-# With `audiout.testPrefer = remote`, go to the other Mac FIRST rather than
-# only on contention — this keeps THIS machine free unconditionally. With
-# `= cpu`, only go first if the other Mac is CURRENTLY less loaded — a straight
-# "remote" preference is wrong the moment the remote is the one that's busy
-# (another agent testing there, or just awake and doing something else). Local
-# slots remain the fallback either way, so an asleep/offline/unmeasurable
-# remote costs one 5s probe and behaves exactly as if none were configured.
+# With `audiout.testPrefer = permits` (the setting since 2026-09-11), go to
+# the other Mac FIRST only when it has at least as many free capacity permits
+# as this one — see remote_permits_win. `= remote` goes there first
+# unconditionally, which keeps THIS machine free but piles every job onto the
+# mule while the local permits idle; `= cpu` compares load average, which
+# misreports this wait-bound suite. Local slots remain the fallback in every
+# mode, so an asleep/offline/unmeasurable remote costs one 5s probe and
+# behaves exactly as if none were configured.
 # `|| true` under `set -e`: "stay local" is a non-zero return from remote_wins,
 # and a bare call would abort the whole script instead of falling through.
 try_remote_first=0

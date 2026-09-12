@@ -824,13 +824,12 @@ func snapshotRailDepth(appearanceName: NSAppearance.Name, label: String, outDir:
     window.contentView = NSView()
 }
 
-/// Render the `resting-ring` scenario (ring-resting-state task): the DEFAULT
-/// {local device} passthrough selection with no toggles applied — audio is
-/// genuinely playing through the Mac, unmuted, but there's no remote AirPlay
-/// handshake for `mainOutConnectionState` to report, so the Main Audio ring
-/// shows its RESTING form (thin, hue-neutral `ringConnected`, never the gold/
-/// ember `connected` override) rather than hiding — the rail's curve into the
-/// ring always has something to land on.
+/// Render the `resting-ring` scenario: the DEFAULT {local device} passthrough
+/// selection with no toggles applied — audio is genuinely playing through the
+/// Mac, unmuted, but there's no remote AirPlay handshake for
+/// `mainOutConnectionState` to report, so the Main Audio ring shows its RESTING
+/// form (the rail's own ink at the thinner shared stroke) rather than hiding —
+/// the rail's curve into the ring always has something to land on.
 @MainActor
 func snapshotRestingRing(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
     let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,

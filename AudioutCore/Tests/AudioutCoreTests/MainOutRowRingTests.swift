@@ -15,6 +15,15 @@ import AppKit
 @MainActor
 @Suite struct MainOutRowRingTests {
 
+    /// Colours resolve through a dynamic provider, so compare components with a
+    /// tolerance rather than by identity.
+    private func sameInk(_ a: NSColor?, _ b: NSColor) -> Bool {
+        guard let a = a?.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return false }
+        return abs(a.redComponent - b.redComponent) <= 0.02
+            && abs(a.greenComponent - b.greenComponent) <= 0.02
+            && abs(a.blueComponent - b.blueComponent) <= 0.02
+    }
+
     private func makeOptions() -> [MainOutRowView.Option] {
         [
             .init(title: "Destination", isHeader: true),
@@ -52,25 +61,43 @@ import AppKit
         #expect(row.test_ringForm == .none)
     }
 
-    // MARK: Resting ring (ring-resting-state task — local-only playback, no
-    // remote AirPlay handshake to track)
+    // MARK: Resting ring — the ring exists exactly while the rail does
 
     @Test func restingRingWhenLocalOnlyArmed() {
         let row = MainOutRowView()
+        row.setRailLive(true)
         row.apply(options: makeOptions(), current: .selectedDevices, master: 50,
-                  connectionState: .off, restingArmed: true)
+                  connectionState: .off, localOnlyArmed: true)
         #expect(row.test_ringForm == .resting,
-                "local-only playback (off + restingArmed) shows the quiet resting ring, not none")
+                "local-only playback (a live rail, nothing connected) shows the quiet resting ring, not none")
+        // The rail curving into this ring is gold here, so the ring is gold too:
+        // a grey `rim` rimmed ring under a gold wire read as two unrelated
+        // things touching.
+        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.spineTone(armed: true)),
+                "the resting ring wears the rail's own ink, never the grey rim")
     }
 
-    @Test func defaultRestingArmedLeavesNoRing() {
-        // Legacy/omitted `restingArmed` (default `false`) must render exactly as
-        // before — an idle target still shows no ring.
+    /// A rail that exists but is not armed (speakers selected, none connected,
+    /// nothing playing locally) rests in the wire's IDLE tone — still never the
+    /// grey rim.
+    @Test func restingRingWearsTheIdleToneWhenTheRailIsNotArmed() {
         let row = MainOutRowView()
+        row.setRailLive(true)
         row.apply(options: makeOptions(), current: .selectedDevices, master: 50,
                   connectionState: .off)
+        #expect(row.test_ringForm == .resting, "a live rail always has a ring to land on")
+        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.spineTone(armed: false)),
+                "an idle rail's ring is the idle spine tone")
+    }
+
+    @Test func noRingWhileThereIsNoRail() {
+        // Nothing selected (or nothing but failed rooms): no wire, so no ring
+        // for it to land on — and no bare ring floating with no wire under it.
+        let row = MainOutRowView()
+        row.apply(options: makeOptions(), current: .selectedDevices, master: 50,
+                  connectionState: .off, localOnlyArmed: true)
         #expect(row.test_ringForm == .none,
-                "omitting restingArmed must not change the .off rendering")
+                "no rail ⇒ no ring, whatever the tone bits say")
     }
 
     // MARK: Readout ink, group chevron and identity glow
@@ -123,13 +150,13 @@ import AppKit
         #expect(style?.lineBreakMode == .byTruncatingTail)
     }
 
-    @Test func connectedRingIsUnaffectedByRestingArmed() {
+    @Test func connectedRingIsUnaffectedByALiveRail() {
         // A genuine remote `.connected` state must render identically whether or
-        // not `restingArmed` happens to be true — `.resting` only ever fires for
-        // `.off`.
+        // not the rail is live — `.resting` only ever fires for `.off`.
         let row = MainOutRowView()
+        row.setRailLive(true)
         row.apply(options: makeOptions(), current: .selectedDevices, master: 50,
-                  connectionState: .connected, restingArmed: true)
+                  connectionState: .connected, localOnlyArmed: true)
         #expect(row.test_ringForm == .connected,
                 "a real connected ring is untouched by restingArmed")
     }

@@ -218,6 +218,9 @@ outputs_device_session_add(uint64_t device_id, void *session)
   if (!d)
     return -1;
   d->session = session;
+  /* A fresh session means the device is (re)starting, so let the idle fill
+   * serve it again after any earlier stop suppressed it. */
+  d->idle_fill_suppressed = 0;
   return 0;
 }
 
@@ -256,6 +259,15 @@ int
 outputs_device_stop(struct output_device *device, int callback_id)
 {
   struct output_definition *backend = backend_for(device);
+
+  /* Teardown starts here (this is the deselect path). Suppress the idle fill for
+   * the whole teardown window right away: the sender frees the session only at
+   * the end (session_cleanup) and reports the stopped state through a deferred
+   * callback, so `device->session` and `device->state` both stay "live" for the
+   * ~1 s the RTSP TEARDOWN takes. The fill must yield when the stop is
+   * requested, not when the teardown finishes. */
+  device->idle_fill_suppressed = 1;
+
   return backend ? backend->device_stop(device, callback_id) : -1;
 }
 
@@ -391,6 +403,39 @@ idle_fill_quality_is_default(const struct media_quality *quality)
          quality->channels == IDLE_FILL_CHANNELS;
 }
 
+/* True when the stream still has at least one device the fill may serve right
+ * now: a live session, a connected/streaming state, the default quality, and no
+ * teardown in progress. Called both to enumerate streams and again immediately
+ * before each write, so a device whose stop began after the enumeration — or in
+ * any future path that yields mid-tick — is never written to. Reads only device
+ * fields (the session pointer is tested, never dereferenced), so it is safe to
+ * call on a session that is being torn down. */
+static bool
+idle_fill_stream_servable(uint32_t stream_id)
+{
+  struct output_device *device;
+  bool servable = false;
+
+  for (device = device_list; device; device = device->next)
+    {
+      if (device->stream_id != stream_id)
+        continue;
+      if (!device->session || device->idle_fill_suppressed)
+        continue;
+      if (device->state != OUTPUT_STATE_CONNECTED && device->state != OUTPUT_STATE_STREAMING)
+        continue;
+
+      /* One device on another format disqualifies the whole stream: every live
+       * device on it is fed from the one default-quality silence buffer. */
+      if (!idle_fill_quality_is_default(&device->quality))
+        return false;
+
+      servable = true;
+    }
+
+  return servable;
+}
+
 static struct idle_fill_entry *
 idle_fill_entry_find(uint32_t stream_id)
 {
@@ -462,11 +507,7 @@ idle_fill_note_host_write(struct output_buffer *buffer)
 static int
 idle_fill_tick(struct timespec now)
 {
-  struct
-  {
-    uint32_t stream_id;
-    bool serve;
-  } live[IDLE_FILL_MAX_STREAMS];
+  uint32_t live[IDLE_FILL_MAX_STREAMS];
   int live_count = 0;
   struct output_device *device;
   int64_t now_ns = idle_fill_ns(now);
@@ -475,32 +516,23 @@ idle_fill_tick(struct timespec now)
   int i;
   int j;
 
-  /* Stream discovery comes from this registry rather than the senders' session
-   * lists, which are file-static inside the vendored code and unreachable here. */
+  /* Enumerate the distinct streams that have a device the fill may serve. Stream
+   * discovery comes from this registry rather than the senders' session lists,
+   * which are file-static inside the vendored code and unreachable here. Whether
+   * a stream is actually served is decided again at write time below. */
   for (device = device_list; device; device = device->next)
     {
-      if (!device->session)
+      if (!device->session || device->idle_fill_suppressed)
         continue;
       if (device->state != OUTPUT_STATE_CONNECTED && device->state != OUTPUT_STATE_STREAMING)
         continue;
 
       for (j = 0; j < live_count; j++)
-        if (live[j].stream_id == device->stream_id)
+        if (live[j] == device->stream_id)
           break;
 
-      if (j == live_count)
-        {
-          if (live_count == IDLE_FILL_MAX_STREAMS)
-            continue;
-          live[live_count].stream_id = device->stream_id;
-          live[live_count].serve = true;
-          live_count++;
-        }
-
-      /* Every live device on the stream is fed from the one buffer below, so one
-       * device on another format disqualifies the whole stream. */
-      if (!idle_fill_quality_is_default(&device->quality))
-        live[j].serve = false;
+      if (j == live_count && live_count < IDLE_FILL_MAX_STREAMS)
+        live[live_count++] = device->stream_id;
     }
 
   /* Release before claiming, so a stream whose devices have gone frees its slot
@@ -512,7 +544,7 @@ idle_fill_tick(struct timespec now)
         continue;
 
       for (j = 0; j < live_count; j++)
-        if (live[j].stream_id == idle_fill_table[i].stream_id)
+        if (live[j] == idle_fill_table[i].stream_id)
           break;
 
       if (j == live_count)
@@ -521,7 +553,7 @@ idle_fill_tick(struct timespec now)
 
   for (j = 0; j < live_count; j++)
     {
-      struct idle_fill_entry *entry = idle_fill_entry_claim(live[j].stream_id);
+      struct idle_fill_entry *entry = idle_fill_entry_claim(live[j]);
       struct output_buffer obuf;
       int64_t end_ns;
       int64_t owed_ns;
@@ -536,7 +568,10 @@ idle_fill_tick(struct timespec now)
       if (entry->end_pts.tv_sec == 0 && entry->end_pts.tv_nsec == 0)
         entry->end_pts = idle_fill_ts(now_ns - one_packet_ns);
 
-      if (!live[j].serve)
+      /* Re-validate against the registry right before writing, never from the
+       * enumeration above: a device whose teardown started in between must not
+       * be fed. This also applies the wrong-format disqualification. */
+      if (!idle_fill_stream_servable(live[j]))
         continue;
       if (now_ns - idle_fill_ns(entry->last_host_write_mono) < IDLE_FILL_QUIET_NS)
         continue;

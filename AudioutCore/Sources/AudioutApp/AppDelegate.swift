@@ -1686,9 +1686,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// exist next time, and the PTP helper's registration is pinned the same
     /// way. The default button copies the running bundle into `/Applications`,
     /// strips quarantine from the copy so it is never translocated again, then
-    /// quits this process and reopens the copy. There is no "don't show again"
-    /// flag, because a translocated launch is transient by nature: moving the
-    /// app to Applications ends it permanently.
+    /// quits this process and reopens the copy. The other button quits, so
+    /// the app never runs from the temporary location at all. There is no
+    /// "don't show again" flag, because a translocated launch is transient by
+    /// nature: moving the app to Applications ends it permanently.
     ///
     /// Runs as the first thing in `applicationDidFinishLaunching`, before the
     /// licence gate and Setup, so a user who takes the move never sees a
@@ -1713,8 +1714,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             will quit and reopen from there.
             """
         alert.addButton(withTitle: "Move to Applications")
-        alert.addButton(withTitle: "Not now")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        alert.addButton(withTitle: "Quit")
+        // Either way this process ends here: the app never runs from the
+        // temporary location (owner's call, 2026-09-12), because a launch
+        // that continued would register the helper and "Launch at login"
+        // against a path that is gone next time. Same hard exit as the move
+        // path, for the same reason: nothing has been built yet.
+        guard alert.runModal() == .alertFirstButtonReturn else { exit(0) }
         moveToApplicationsAndRelaunch()
     }
 
@@ -1744,7 +1750,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard others.isEmpty else {
                 log("Move to Applications: another copy of \(bundleID) is already running; not replacing it")
                 presentMoveFallbackAlert()
-                return
             }
         }
 
@@ -1758,7 +1763,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             log("Move to Applications: copy failed: \(error.localizedDescription)")
             try? FileManager.default.removeItem(at: staging)
             presentMoveFallbackAlert()
-            return
         }
 
         let stripQuarantine = Process()
@@ -1771,13 +1775,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 log("Move to Applications: xattr exited \(stripQuarantine.terminationStatus)")
                 try? FileManager.default.removeItem(at: staging)
                 presentMoveFallbackAlert()
-                return
             }
         } catch {
             log("Move to Applications: xattr failed to launch: \(error.localizedDescription)")
             try? FileManager.default.removeItem(at: staging)
             presentMoveFallbackAlert()
-            return
         }
 
         if FileManager.default.fileExists(atPath: destination.path) {
@@ -1787,7 +1789,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 log("Move to Applications: failed to trash existing \(destination.path): \(error.localizedDescription)")
                 try? FileManager.default.removeItem(at: staging)
                 presentMoveFallbackAlert()
-                return
             }
         }
 
@@ -1800,7 +1801,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 one is left at \(staging.path), so it stays the only usable copy.
                 """)
             presentMoveFallbackAlert()
-            return
         }
 
         let relaunch = Process()
@@ -1815,7 +1815,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             log("Move to Applications: relaunch failed to start: \(error.localizedDescription)")
             presentMoveFallbackAlert()
-            return
         }
 
         log("Moved to Applications; quitting so the copy at \(destination.path) can take over")
@@ -1830,21 +1829,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         exit(0)
     }
 
-    /// The original "move it yourself" wording, shown whenever the automatic
-    /// move can't proceed (another copy running, copy or quarantine-strip
-    /// failure, relaunch failure).
+    /// The "move it yourself" wording, shown whenever the automatic move
+    /// can't proceed (another copy running, copy or quarantine-strip failure,
+    /// relaunch failure). Quits afterwards: the app never runs from the
+    /// temporary location, see `offerMoveToApplicationsIfTranslocated()`.
     @MainActor
-    private func presentMoveFallbackAlert() {
+    private func presentMoveFallbackAlert() -> Never {
         let alert = NSAlert()
         alert.messageText = "Audiout is running from a temporary location"
         alert.informativeText = """
-            macOS is running Audiout from a temporary read-only location. Move \
-            Audiout to your Applications folder and open it from there — \
-            otherwise \u{201C}Launch at login\u{201D} and speaker sync \
-            can\u{2019}t keep working.
+            macOS is running Audiout from a temporary read-only location and \
+            couldn\u{2019}t move itself. Move Audiout to your Applications \
+            folder and open it from there.
             """
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Quit")
         alert.runModal()
+        exit(0)
     }
 
     /// Register the PTP helper daemon once at launch, outside onboarding

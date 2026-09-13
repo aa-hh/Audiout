@@ -188,9 +188,10 @@ extension SerializedSharedState {
                          groundsFor: sameGrounds(textGrounds)),
             ContrastEntry(name: "emberText", token: Tokens.Color.emberText, floor: 4.5,
                          groundsFor: sameGrounds(textGrounds)),
-            // The prominent button's key-window ink, over the only fill it is
-            // ever drawn on. Nothing measures this at runtime any more, so the
-            // floor is held here.
+            // The ink of every gold-filled call to action — the prominent button
+            // and the alignment wizard's primary plates, both of which pin gold
+            // and this ink to their DARK values in both appearances. Nothing
+            // measures this at runtime, so the floor is held here.
             ContrastEntry(name: "inkOnFill", token: Tokens.Color.inkOnFill, floor: 4.5,
                          groundsFor: sameGrounds([("gold", Tokens.Color.gold)])),
             // NON-TEXT, floor 3.0:1

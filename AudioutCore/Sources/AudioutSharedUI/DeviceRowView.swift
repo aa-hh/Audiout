@@ -800,8 +800,26 @@ public final class DeviceRowView: NSView {
     /// row hosts no bus (`busActive` false).
     private func updateBus() {
         guard busActive else { return }
+        let node = Self.busNode(device: device, selected: isSelectedInSet,
+                                energizePending: energizePending, reduceMotion: reduceMotion,
+                                localFallbackOutput: localFallbackOutput)
+        // An unavailable device's hollow node is always dimmed (spec §3.6): the
+        // dim flag reaches a fill only, so it draws like any non-member.
+        var dim = busNodeDimmed || (node == .nonMember && !device.isAvailable)
+        // A FAILED member always renders at full failure emphasis regardless of
+        // dormancy — never dim its node (the red ring carries it, and the node
+        // stays in the spine until an honest toggle-off).
+        if case .failed = device.connectionState { dim = false }
+        busView.apply(node: node, dimmed: dim)
+    }
+
+    /// The rail node a bus row shows for `device`, from the values `apply(...)`
+    /// pushes. The one derivation: the row calls it, and the popover calls it
+    /// for a device whose row is not mounted (hidden inside a collapsed
+    /// subsection) to decide where the rail is cut.
+    public static func busNode(device: Device, selected: Bool, energizePending: Bool,
+                               reduceMotion: Bool, localFallbackOutput: Bool) -> MembershipBusView.Node {
         let node: MembershipBusView.Node
-        var dim = busNodeDimmed
         var isConnectingNow: Bool {
             switch device.connectionState {
             case .connecting, .reconnecting: return true
@@ -824,7 +842,6 @@ public final class DeviceRowView: NSView {
             // fill only, so the hollow node draws like any non-member; the
             // `Unavailable` FEED word + row-level text dim carry the state (R5).
             node = .nonMember
-            dim = true
         } else if energizePending, !reduceMotion, case .off = device.connectionState {
             // Energize "press-play" pending beat (v4.1 item 9): a member of a
             // source switch that hasn't started connecting yet renders the
@@ -836,7 +853,7 @@ public final class DeviceRowView: NSView {
             // Motion drops the beat entirely (the node falls through to its
             // settled member/non-member rendering — "snap to resolved").
             node = .connecting
-        } else if isSelectedInSet {
+        } else if selected {
             // Selected members key their node off the CONNECTION state (v4
             // §Call-1 node vocabulary): connecting/reconnecting → gold dashed;
             // failed → failure-red ring; connected/idle → filled gold.
@@ -855,11 +872,7 @@ public final class DeviceRowView: NSView {
         } else {
             node = .nonMember            // §4.4 hollow node, line detours
         }
-        // A FAILED member always renders at full failure emphasis regardless of
-        // dormancy — never dim its node (the red ring carries it, and the node
-        // stays in the spine until an honest toggle-off).
-        if case .failed = device.connectionState { dim = false }
-        busView.apply(node: node, dimmed: dim)
+        return node
     }
 
     // MARK: Connect-edge brighten (v4.1 item 8)

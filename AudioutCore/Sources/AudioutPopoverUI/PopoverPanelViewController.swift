@@ -427,6 +427,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         railOverlay.deviceRows = deviceRows
         railOverlay.dormant = dormant
         railOverlay.originSection = cardsByHeader[originCardTitle]
+        // The device card is always the LIST clip (the scrolling viewport), even
+        // when the cut below moves to a subsection.
+        railOverlay.deviceListSection = cardsByHeader[deviceCardTitle]
         if let cutSubsectionTitle, let subsection = subsectionBodies[cutSubsectionTitle]?.rail {
             // A collapsed device SUBSECTION whose rows the controller has DROPPED
             // from the model — the hidden device is gone from `deviceRows`, so the

@@ -46,6 +46,14 @@ public extension BTSyncDrawerViewDelegate {
 /// with one caption line under it, carrying where the applied offset came
 /// from or the over-40 ms notice.
 ///
+/// **Why the band starts at the icon column, not the drawer's edge.** The
+/// continuous membership rail is one overlay painted above every row, so the
+/// gutter it runs through is off-limits to controls: anything placed there is
+/// drawn over. Every view that opens under a device row (this drawer,
+/// `BTAlignmentNoteView`, `ConnectionDiagnosisView`) therefore starts its
+/// content at `PopoverColumnGrid.firstElementLeading`, the same edge the row's
+/// own icon uses, and the rail passes down the well fill beside it unbroken.
+///
 /// **Why the two halves sit at opposite ends.** The two alignment doors and
 /// Reset lead the band; the value cluster hugs the trailing edge so it lands
 /// directly beneath the chip that opened the drawer. Reset deletes what is
@@ -376,6 +384,9 @@ public final class BTSyncDrawerView: NSView {
 
     private func installConstraints() {
         let inset = PopoverColumnGrid.syncDrawerHorizontalInset
+        // The band's leading edge is the icon column: the rail gutter to its
+        // left belongs to the spine, which paints over anything put there.
+        let leadingInset = PopoverColumnGrid.syncDrawerLeadingInset
         let controlH = PopoverColumnGrid.syncDrawerControlHeight
         let stepperW = PopoverColumnGrid.syncDrawerStepperButtonWidth
 
@@ -395,7 +406,7 @@ public final class BTSyncDrawerView: NSView {
             captionLabel.topAnchor.constraint(
                 equalTo: band.bottomAnchor,
                 constant: PopoverColumnGrid.syncDrawerCaptionGap),
-            captionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            captionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leadingInset),
             captionLabel.trailingAnchor.constraint(
                 lessThanOrEqualTo: trailingAnchor, constant: -inset),
             captionLabel.heightAnchor.constraint(
@@ -403,7 +414,7 @@ public final class BTSyncDrawerView: NSView {
 
             // LEADING half: the two alignment doors and Reset, together, as
             // far from the steppers as the band allows (see the header comment).
-            alignAgainButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            alignAgainButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leadingInset),
             alignAgainButton.centerYAnchor.constraint(equalTo: band.centerYAnchor),
             alignAgainButton.widthAnchor.constraint(
                 equalToConstant: PopoverColumnGrid.syncDrawerAlignAgainButtonWidth),
@@ -457,7 +468,7 @@ public final class BTSyncDrawerView: NSView {
             equalTo: alignAgainButton.trailingAnchor,
             constant: PopoverColumnGrid.syncDrawerButtonGap)
         alignLeadingToEdge = alignButton.leadingAnchor.constraint(
-            equalTo: leadingAnchor, constant: inset)
+            equalTo: leadingAnchor, constant: leadingInset)
         applyAlignAgainVisibility()
     }
 

@@ -84,6 +84,11 @@ public final class BusRailOverlayView: NSView {
     /// a card collapse from growing a tail past its lowest member into the
     /// non-member rows it is still hiding.
     public var deviceSectionRowsDropped = false
+    /// The section holding the whole device LIST (the "Output Speakers" card),
+    /// whose clip is the scrolling viewport. Only its TOP edge is used, to drop
+    /// rows scrolled off the top; the cut/floor stays `deviceSection`'s. `nil`
+    /// falls back to `deviceSection` (a host with no separate list clip).
+    public weak var deviceListSection: RailSectionProviding?
 
     /// The transient connect pulse currently mid-flight, if any (test-visible
     /// through ``test_isConnectPulsing``; nothing survives the pulse).
@@ -247,7 +252,13 @@ public final class BusRailOverlayView: NSView {
         // drop its stop too, or the detour arc the overlay would draw around it
         // lands on the fixed card header above the list. Nothing is dropped when
         // the list does not scroll: every row sits at or below the clip's top.
-        if let top = deviceBand?.upperBound {
+        //
+        // The ceiling comes from the LIST's clip, never from the cut section: when
+        // the cut is a collapsed SUBSECTION low in the list, every visible row
+        // above it sits above that subsection's clip, and reading the ceiling off
+        // the cut section threw away the whole visible band — the rail then ran
+        // as one bare line past rows it should have fed and detoured around.
+        if let top = clipBand(of: deviceListSection ?? deviceSection)?.upperBound {
             stops.removeAll { $0.y > top }
         }
 

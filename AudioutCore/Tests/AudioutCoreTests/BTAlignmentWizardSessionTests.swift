@@ -522,6 +522,168 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         session.cancel()
     }
 
+    // MARK: Listening
+
+    /// The mic measurement had no screen: the run opened straight on the
+    /// questions while the probe ran underneath it.
+    @Test func startListensWhenTheHostGrantsTheMic() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(recorder.ticks == [true])
+        #expect(recorder.previews == [0], "the probe measures at the stored value")
+
+        session.offerMeasuredProposal(valueMs: 300)
+        #expect(session.screen == .proposal(valueMs: 300), "got \(session.screen)")
+        #expect(session.proposalIsRecalled == false, "measured, not recalled")
+        session.cancel()
+    }
+
+    /// A host that cannot listen still gets the zero-click path — and the
+    /// panel has to be able to tell that proposal apart from a measured one,
+    /// which it could not while the flag outlived the rejection.
+    @Test func aRealignmentWithoutTheMicShowsTheRecalledProposal() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 244,
+                                           candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           openingProposalMs: 244,
+                                           targetIsBluetooth: true)
+        session.requestListening = { $0(false) }
+        session.start()
+        #expect(session.screen == .proposal(valueMs: 244), "got \(session.screen)")
+        #expect(session.proposalIsRecalled, "the stored value, unjudged")
+
+        session.rejectProposal()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        #expect(session.proposalIsRecalled == false)
+        #expect(session.proposalIsMeasured == false)
+        session.cancel()
+    }
+
+    /// The mic tried and could not confirm the stored value, so proposing it
+    /// anyway would lean on the one thing that was just checked and failed.
+    @Test func aFailedListenOnARealignmentGoesToTheQuestions() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 244,
+                                           candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           openingProposalMs: 244,
+                                           targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        #expect(session.screen == .listening(isRealignment: true), "got \(session.screen)")
+
+        session.endListening()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        #expect(recorder.ends.isEmpty, "the run is still live")
+        #expect(recorder.ticks == [true])
+        session.cancel()
+    }
+
+    /// The permission prompt is modal and slow: closing the sheet under it
+    /// once let the grant come back and start the ticks on a dead run.
+    @Test func stopDuringThePermissionPromptNeverStartsTheRun() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        var proceed: ((Bool) -> Void)?
+        session.requestListening = { proceed = $0 }
+        session.start()
+        #expect(session.screen == .intro, "still waiting on the mic")
+
+        session.cancel()
+        proceed?(true)
+        #expect(session.screen == .intro, "got \(session.screen)")
+        #expect(recorder.ticks == [false], "no audio on a closed sheet")
+    }
+
+    /// A rejected measurement listens ONCE more, then falls to the questions —
+    /// it neither dropped straight to the questions nor ran the mic a third
+    /// time. Reddens if `rejectProposal` stops re-listening on a measured
+    /// proposal, or keeps re-listening past `maxMicAttempts`.
+    @Test func aRejectedMeasurementListensAgainThenFallsToTheQuestions() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        var listenCalls = 0
+        session.requestListening = { proceed in
+            listenCalls += 1
+            proceed(true)
+        }
+        session.start()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(session.micAttempts == 1)
+
+        session.offerMeasuredProposal(valueMs: 300)
+        #expect(session.screen == .proposal(valueMs: 300), "got \(session.screen)")
+        #expect(session.proposalIsMeasured)
+        #expect(session.rejectReRunsMic)
+
+        session.rejectProposal()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(listenCalls == 2)
+        #expect(session.micAttempts == 2)
+        #expect(recorder.ticks == [true, false, true], "a fresh injector replays the sweeps")
+        #expect(recorder.previews.last == 0, "the probe re-measures at the stored value")
+        #expect(recorder.ends.isEmpty, "the run is still live")
+
+        session.offerMeasuredProposal(valueMs: 320)
+        #expect(session.screen == .proposal(valueMs: 320), "got \(session.screen)")
+        #expect(session.proposalIsMeasured)
+        #expect(session.rejectReRunsMic == false, "the mic budget is spent")
+
+        session.rejectProposal()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        #expect(listenCalls == 2, "no third listen")
+        #expect(recorder.ticks == [true, false, true])
+        #expect(recorder.ends.isEmpty)
+        session.cancel()
+    }
+
+    /// The measured flag must not outlive its measurement: after a failed
+    /// retry, a proposal the run then EARNS from answers reads "Still off", not
+    /// "Try again". Reddens if `presentEstimatorPhase` leaves
+    /// `proposalCameFromMic` set on an earned proposal.
+    @Test func anEarnedProposalAfterAFailedRetryIsNotMeasured() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        session.offerMeasuredProposal(valueMs: 300)
+        session.rejectProposal()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+
+        session.endListening()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        driveLatencyRun(session, recorder, trueLatencyMs: 200)
+        guard case .proposal = session.screen else {
+            Issue.record("expected a proposal, got \(session.screen)")
+            return
+        }
+        #expect(session.proposalIsMeasured == false)
+        #expect(session.rejectReRunsMic == false)
+
+        session.rejectProposal()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        session.cancel()
+    }
+
     // MARK: Zero-click
 
     /// A speaker measured before opens on the PROPOSAL at its stored value —

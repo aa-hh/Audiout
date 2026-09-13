@@ -720,9 +720,17 @@ public enum PopoverColumnGrid {
     // to sit WITH the row's own controls — two earlier versions were redone for
     // being oversized. Named constants only.
 
-    /// Horizontal inset of the drawer's content from its container edges. No
+    /// TRAILING inset of the drawer's content from its container edge. No
     /// accent edge or border (live feedback — see `BTSyncDrawerView`'s header).
     public static let syncDrawerHorizontalInset: CGFloat = 12
+    /// LEADING inset of the drawer's content: the icon column, not the edge.
+    /// Everything that opens under a device row — this drawer, the alignment
+    /// note, the connection diagnosis — starts its content at
+    /// `firstElementLeading`, so the rail gutter stays the spine's alone. The
+    /// continuous rail overlay draws ON TOP of every row (one unbroken wire);
+    /// a control placed inside the gutter is painted over, which is what
+    /// happened to "Align again…" at the plain 12 pt inset (live, 2026-09-13).
+    public static var syncDrawerLeadingInset: CGFloat { firstElementLeading(indented: false) }
     /// Vertical inset of the drawer's content from its top/bottom edges.
     public static let syncDrawerVerticalInset: CGFloat = 12
     /// The ONE height every element of the band shares — the three leading

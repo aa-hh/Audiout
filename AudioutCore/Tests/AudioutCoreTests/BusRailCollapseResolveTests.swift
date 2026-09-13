@@ -328,4 +328,94 @@ import Testing
         #expect(sameInk(runs[1].color, ember), "the connecting segment is ember")
         #expect(sameInk(runs[2].color, spine), "the member segment is the spine tone")
     }
+
+    // MARK: A collapsed SUBSECTION low in the list must not erase the rows above it
+
+    /// Fixed geometry standing in for a card's or subsection's clip + header.
+    private final class FakeRailSection: NSView, RailSectionProviding {
+        var collapsed = false
+        let clip = NSView()
+        let headerRow = NSView()
+        var railSectionCollapsed: Bool { collapsed }
+        var railSectionHeaderView: NSView? { headerRow }
+        var railSectionHeaderBounds: NSRect { headerRow.bounds }
+        var railSectionClipView: NSView? { clip }
+        var railSectionClipBounds: NSRect { clip.bounds }
+
+        /// The clip and header must live IN the hierarchy: the overlay converts
+        /// their bounds through it.
+        func mount(clip clipFrame: NSRect, header headerFrame: NSRect) {
+            clip.frame = clipFrame
+            headerRow.frame = headerFrame
+            addSubview(clip)
+            addSubview(headerRow)
+        }
+    }
+
+    private final class FakeStopRow: NSView, RailNodeProviding {
+        var node: MembershipBusView.Node = .member
+        var railNode: MembershipBusView.Node? { node }
+        var railDeviceID: String? { nil }
+        var railNodeView: NSView { self }
+        var railNodeBounds: NSRect { bounds }
+    }
+
+    private final class FakeHook: NSView, RailHookProviding {
+        func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
+            let f = view.convert(bounds, from: self)
+            return (f.midY, 20, 8, true)
+        }
+        func receiveRailPulse() {}
+    }
+
+    /// The live regression: with the Bluetooth subsection COLLAPSED at the bottom
+    /// of the list while it hides a selected speaker, the overlay read its stop
+    /// ceiling off that subsection's clip — which sits below every visible row —
+    /// and dropped the whole visible band, so the rail above ran as one bare line
+    /// with no nodes fed and no detours.
+    @Test func collapsedSubsectionBelowTheVisibleRowsKeepsThemAsStops() {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 400))
+
+        let hook = FakeHook(frame: NSRect(x: 0, y: 340, width: 360, height: 28))
+        container.addSubview(hook)
+
+        // The device CARD's clip covers the whole list.
+        let card = FakeRailSection(frame: container.bounds)
+        card.mount(clip: NSRect(x: 0, y: 40, width: 360, height: 280),
+                   header: NSRect(x: 0, y: 320, width: 360, height: 24))
+        container.addSubview(card)
+
+        // Three visible speaker rows inside the card.
+        var rows: [FakeStopRow] = []
+        for (i, y) in [280, 240, 200].enumerated() {
+            let row = FakeStopRow(frame: NSRect(x: 0, y: CGFloat(y), width: 360, height: 28))
+            row.node = i == 1 ? .nonMember : .member
+            container.addSubview(row)
+            rows.append(row)
+        }
+
+        // The collapsed Bluetooth subsection at the bottom: a zero-height clip
+        // under its own header, holding a member the model has dropped.
+        let subsection = FakeRailSection(frame: container.bounds)
+        subsection.collapsed = true
+        subsection.mount(clip: NSRect(x: 0, y: 120, width: 360, height: 0),
+                         header: NSRect(x: 0, y: 120, width: 360, height: 24))
+        container.addSubview(subsection)
+
+        let overlay = BusRailOverlayView()
+        overlay.frame = container.bounds
+        container.addSubview(overlay)
+        overlay.mainOutRow = hook
+        overlay.deviceRows = rows
+        overlay.deviceListSection = card
+        overlay.deviceSection = subsection
+        overlay.deviceSectionRowsDropped = true
+        container.layoutSubtreeIfNeeded()
+
+        let plan = overlay.test_resolvePlan()
+        #expect(plan?.stops.count == 3,
+                "the rows above the collapsed subsection stay on the rail")
+        #expect(plan?.terminusDotY != nil,
+                "the hidden member still cuts the rail at the subsection's fold")
+    }
 }

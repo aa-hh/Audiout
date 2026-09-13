@@ -19,11 +19,12 @@ import MetalKit
 /// ``shaderSource``. Nothing shared is retyped here, so the brand's one
 /// moving image cannot silently fork.
 ///
-/// Exactly one shared value is deviated from, and it is one number:
-/// ``stageScale`` — see its own comment for why. Everything else this file
-/// authors is a PER-SURFACE choice the field explicitly leaves open (the
-/// placements in ``emitters`` and the colour ramp), so it carries no drift
-/// risk.
+/// TWO shared values are deviated from, each one number and each declared:
+/// ``stageScale`` (ring density and speed together) and ``wobble`` (a light
+/// break of perfect concentricity) — see each one's own comment for why.
+/// Everything else this file authors is a PER-SURFACE choice the field
+/// explicitly leaves open (the placements in ``emitters`` and the colour
+/// ramp), so it carries no drift risk.
 ///
 /// The composition is deliberately QUIET. Three sources sit past or on the
 /// window's edges, each with a `reach` cap, so what the window shows is the
@@ -106,14 +107,19 @@ final class EmitterFieldView: NSView {
     ///    canvas floor for about 110 seconds at a time.
     private static let emitters: [Emitter] = [
         // Left edge, slightly high: the anchor, and the widest of the three.
-        Emitter(x: -0.82, y: 0.16, size: 1.00, reach: 0.66),
-        // Past the top-right corner, a touch smaller so the three read at
-        // different distances instead of as one repeated stamp.
-        Emitter(x: 0.80, y: 0.38, size: 0.90, reach: 0.60),
-        // Past the bottom-right corner. It is the one nearest the Quit/Buy
-        // row, which is why the bottom calm zone in the shader ends where it
-        // does — see there.
-        Emitter(x: 0.76, y: -0.54, size: 0.95, reach: 0.62),
+        // Its reach is grown (was 0.66) so its fan carries further in without
+        // ever reaching the middle — see `noSourceReachesTheMiddleOfTheStage`.
+        Emitter(x: -0.82, y: 0.16, size: 1.00, reach: 0.75),
+        // Past the top-right corner, pulled down toward the bottom-right source
+        // (was y 0.38) and its reach grown (was 0.60) so the two right-side
+        // fans genuinely CROSS along the right edge instead of merely both
+        // being lit — the owner's "make them intersect".
+        Emitter(x: 0.80, y: 0.30, size: 0.90, reach: 0.78),
+        // Past the bottom-right corner, pulled up toward the top-right source
+        // (was y -0.54) with its reach grown to meet it. It is still the one
+        // nearest the Quit/Buy row, which is why the bottom calm zone in the
+        // shader ends where it does — see there.
+        Emitter(x: 0.76, y: -0.42, size: 0.95, reach: 0.80),
     ]
 
     /// The bottom calm zone, in the field's uv: the light is nothing at
@@ -126,17 +132,31 @@ final class EmitterFieldView: NSView {
     /// edge so the whole row is ground, not field.
     private static let bottomCalmZone = (dark: -0.50, lit: -0.30)
 
-    /// THE ONE DEVIATION from the shared field. Ring density and ring speed
-    /// are both multiplied by this; nothing else is touched.
+    /// A DECLARED per-surface deviation from the shared field. Ring density and
+    /// ring speed are both multiplied by this; nothing else is touched.
     ///
     /// The shared `densBase` puts 2π/17 uv — about 163 pt — between crests,
     /// which on a 440 pt stage is most of the window, so the hero's rings
-    /// arrive as bare arcs with no concentric structure left to read. At ×5
-    /// the spacing is ~33 pt and a source reads as rings again. Speed is
-    /// scaled by the same number ON PURPOSE: crest velocity is speed/density,
-    /// so scaling both leaves the wavefronts travelling at exactly the site's
-    /// own pace. This is one change of scale, not two tunings.
-    private static let stageScale: Double = 5
+    /// arrive as bare arcs with no concentric structure left to read. At ×3.6
+    /// the spacing is ~45 pt: the rings still read as rings, sit ~39 % bolder
+    /// than they did at the former ×5, and the pulse passes any point ~28 %
+    /// less often — the owner's "bolder and slower" for this window, bought
+    /// with one number. Speed is scaled by the same number ON PURPOSE: crest
+    /// velocity is speed/density, so scaling both leaves the wavefronts
+    /// travelling at exactly the site's own pace. This is one change of scale,
+    /// not two tunings.
+    private static let stageScale: Double = 3.6
+
+    /// THE SECOND declared deviation, and the only other one. A light wobble
+    /// that breaks each source's perfect concentricity, turned on for this
+    /// window alone. The shared `field.json` ships `wobble` at 0 everywhere;
+    /// the mechanism — the two-harmonic radius bend the site's `emitters.js`
+    /// already carries, turned by the shared `wobbleRate` — is reused verbatim,
+    /// so this is one new number, not a new effect. Kept far under the site's
+    /// own stray OG-card 0.045: at 0.02 it reads only as a slight loss of
+    /// perfect roundness, never as a compass-rose bend. `wobbleRate` stays the
+    /// shared value, unretyped.
+    private static let wobble: Double = 0.02
 
     /// Base energy of the field — the shared `gain`, unmodified. The surge
     /// envelope adds on top of it.
@@ -569,6 +589,7 @@ final class EmitterFieldView: NSView {
     /// energy, the one declared deviation, and this window's composition.
     static var test_baseGain: Float { baseGain }
     static var test_stageScale: Double { stageScale }
+    static var test_wobble: Double { wobble }
     static var test_emitters: [Emitter] { emitters }
     static var test_bottomCalmZone: (dark: Double, lit: Double) { bottomCalmZone }
 
@@ -656,7 +677,15 @@ final class EmitterFieldView: NSView {
                                                  cos(t * 0.026 + seed * 1.7));
             // `size` scales the DISTANCE, so a source's rings and its falloff
             // shrink together; the cap's edges are in those same scaled units.
-            float r = length((uv - c) * float2(1.0, \(msl(d.squash)))) / sizes[k];
+            float2 dv = (uv - c) * float2(1.0, \(msl(d.squash)));
+            float r = length(dv) / sizes[k];
+            // WOBBLE (this file's second declared deviation): a light two-lobe
+            // bend of the radius so the rings lose perfect concentricity by a
+            // hair. Applied to `r` before rings, cap and falloff, so the whole
+            // wavefront bends together. `wobbleRate` is the shared number.
+            float th = atan2(dv.y, dv.x);
+            r *= 1.0 + \(msl(wobble)) * (sin(3.0 * th + t * \(msl(d.wobbleRate)) + seed)
+                       + 0.5 * sin(5.0 * th - t * \(msl(d.wobbleRate)) * 0.73 + seed * 1.3)) / 1.5;
             float cap = 1.0 - sstep(0.55 * reaches[k] / sizes[k],
                                     reaches[k] / sizes[k], r);
             // STAGE SCALE (this file's one deviation): density and speed are

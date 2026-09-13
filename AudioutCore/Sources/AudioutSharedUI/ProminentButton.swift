@@ -8,32 +8,53 @@ import AppKit
 /// or not its window is key.
 ///
 /// One rule for the whole app, and not a per-call choice: every call to
-/// action is `Tokens.Color.gold` fill with `Tokens.Color.inkOnFill` ink. The
-/// ink is authored for that one fill, so a settable fill could only ever put
-/// gold's ink on some other colour.
+/// action is the light brand gold with dark ink, in BOTH appearances — the
+/// owner's "one gold everywhere" ruling (2026-08-24, restated 2026-09-13), the
+/// same pin `AlignmentPlateCell.primaryFillColor` uses. ``fill`` and
+/// ``ink`` are `Tokens.Color.gold` and `Tokens.Color.inkOnFill` resolved once
+/// under `.darkAqua`: `#E8B84B` with `#171104`, 10.18:1. Resolving live would
+/// hand light mode `gold`'s paper value `#A67C1E`, which the `.rounded` bezel
+/// shades down to a muddy olive that dark ink cannot read on; a deepened gold
+/// with white ink is the retired "dark mustard" and is NOT an official gold.
+/// Both are still read from Tokens, so the accent dial and Increase Contrast
+/// reach them.
 ///
 /// The bug this exists to fix (ahh, deselecting the setup window): AppKit drops
 /// a `bezelColor` fill to a plain bezel when the window resigns key — correct,
 /// that's how macOS de-emphasises controls in inactive windows — but, UNLIKE a
 /// true default button, it does NOT recolor the title to match. An ink authored
-/// for the fill is not authored for the plain bezel: `inkOnFill` goes
-/// dark-on-dark there in dark mode, and white-on-white in light Increase
-/// Contrast where it flips to white, so the button reads as an empty pill.
+/// for the fill is not authored for the plain bezel: the pinned dark ink goes
+/// dark-on-dark there in dark mode, so the button reads as an empty pill.
 /// Being made the Return-default doesn't fix it either — the sequential flow
 /// DOES make the one live Allow the default while Done is absent
 /// (`SetupRibbonView`), and it still happens the moment the Setup window
 /// resigns key to System Settings, which is exactly when the user is looking
 /// at it.
 ///
-/// Fix: track the window's key state and swap the title colour — `inkOnFill`
-/// over the fill when key, `Tokens.Color.label` (appearance-adaptive, legible
-/// on the plain bezel in both light and dark) when not.
+/// Fix: track the window's key state and swap the title colour — ``ink`` over
+/// the fill when key, `Tokens.Color.label` (appearance-adaptive, legible on the
+/// plain bezel in both light and dark) when not.
 public final class ProminentButton: NSButton {
 
     private let plainTitle: String
-    /// The bezel fill (`bezelColor` carries it). Public so a caller can prove
-    /// the button is the gold one (`OnboardingViewController`'s CTA check).
-    public let fill = Tokens.Color.gold
+    /// The bezel fill (`bezelColor` carries it): `gold`'s dark value, pinned in
+    /// both appearances — see the type doc. Public so a caller can prove the
+    /// button is the gold one (`OnboardingViewController`'s CTA check).
+    /// Resolved on every read, so an accent-dial change reaches a button already
+    /// on screen (re-applied from `accentStyleDidChangeNotification`).
+    public var fill: NSColor { Self.pinnedDark(Tokens.Color.gold) }
+    /// The key-window title ink, pinned with the fill (`inkOnFill` goes white
+    /// under light Increase Contrast, which reads 1.84:1 on `#E8B84B`).
+    private var ink: NSColor { Self.pinnedDark(Tokens.Color.inkOnFill) }
+
+    /// `color` resolved once under `.darkAqua`.
+    private static func pinnedDark(_ color: NSColor) -> NSColor {
+        var resolved = color
+        NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
+            resolved = color.usingColorSpace(.sRGB) ?? color
+        }
+        return resolved
+    }
     /// The title's font. `Tokens.Font.body` for the everyday Allow buttons;
     /// the finale CTA passes the emphasized weight for more presence.
     private let titleFont: NSFont
@@ -49,10 +70,14 @@ public final class ProminentButton: NSButton {
         self.action = action
         bezelStyle = .rounded
         controlSize = .regular
-        bezelColor = fill
         setContentHuggingPriority(.required, for: .horizontal)
-        applyTitleColour()
+        applyColours()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(accentStyleChanged),
+            name: Tokens.accentStyleDidChangeNotification, object: nil)
     }
+
+    @objc private func accentStyleChanged() { applyColours() }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -87,18 +112,26 @@ public final class ProminentButton: NSButton {
 
     public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        applyTitleColour()
+        applyColours()
     }
 
     deinit {
         keyStateObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    /// Fill and title together, so Increase Contrast and the accent dial land
+    /// on both at once.
+    private func applyColours() {
+        bezelColor = fill
+        applyTitleColour()
     }
 
     private func applyTitleColour() {
         let isKey = window?.isKeyWindow ?? false
         attributedTitle = NSAttributedString(
             string: plainTitle,
-            attributes: [.foregroundColor: isKey ? Tokens.Color.inkOnFill : Tokens.Color.label,
+            attributes: [.foregroundColor: isKey ? ink : Tokens.Color.label,
                          .font: titleFont])
     }
 }

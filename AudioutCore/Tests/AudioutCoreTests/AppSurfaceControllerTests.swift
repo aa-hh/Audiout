@@ -1246,4 +1246,22 @@ import AppKit
             #expect(second.test_splash == nil)
         }
     }
+
+    // MARK: The wizard's mic-prompt closures reach the shell
+
+    /// Defect this would catch: the surface stops wiring the popover's
+    /// mic-prompt closures to its shell, so the fix is silently absent in the
+    /// shipping app.
+    @Test func theSurfaceWiresThePopoversMicPromptClosuresToItsShell() throws {
+        let (surface, popover, _, _) = makeSurface()
+
+        popover.onMicPromptInFlightChanged?(true)
+        #expect(surface.shell.test_panel?.hidesOnDeactivate == false)
+
+        popover.onMicPromptInFlightChanged?(false)
+        #expect(surface.shell.test_panel?.hidesOnDeactivate == true)
+
+        popover.onMicPromptAnswered?()
+        #expect(surface.shell.test_returnToFrontCount == 1)
+    }
 }

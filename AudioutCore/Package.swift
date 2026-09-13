@@ -172,8 +172,10 @@ let package = Package(
         // chooses when to follow the shared package, and `Package.resolved`
         // records which tag it is actually on. 0.6.0 is the floor because
         // that is the tag `CompanionMessage.alignmentApplied` landed in, and
-        // the companion server sends it on every applied measurement.
-        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.9.0"),
+        // the companion server sends it on every applied measurement; 0.13.0
+        // added the emitter field's `settled` block, which the alignment
+        // stage draws.
+        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.13.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.
@@ -243,8 +245,11 @@ let package = Package(
         // targets may ever depend back on this one.
         .target(
             name: "AudioutPopoverUI",
+            // AudioutField: the alignment stage's lights draw the emitter
+            // field's SETTLED state, shader generated from the shared numbers.
             dependencies: ["AudioutCore", "AudioutSharedUI",
-                           "AudioutWindowUI", "AudioutSettingsUI"],
+                           "AudioutWindowUI", "AudioutSettingsUI",
+                           .product(name: "AudioutField", package: "audiout-shared")],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit mixer window (SPEC §9 "Full window"): a

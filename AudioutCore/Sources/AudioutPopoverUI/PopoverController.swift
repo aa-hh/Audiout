@@ -474,6 +474,21 @@ public final class PopoverController: NSObject {
     /// means no probe and the run stays purely by-ear.
     public var onStageBTMicProbe: ((_ onStarted: @escaping () -> Void,
                                     _ onFinished: @escaping () -> Void) -> Void)?
+    /// The mic permission answer, asked from the wizard's Start (the system
+    /// prompt when it is still undecided). Overridden in tests so no suite
+    /// ever raises a real prompt.
+    var ensureMicPermission: (@escaping (Bool) -> Void) -> Void = MicCapturePermission.ensure
+    /// Whether Start is about to raise the system mic prompt. Overridden in
+    /// tests so a listening run reads deterministically either way.
+    var micPermissionIsUndecided: () -> Bool = { MicCapturePermission.isUndecided }
+    /// The system mic prompt is about to be raised (`true`) or its answer has
+    /// landed (`false`). The host suspends and restores the shell's tuck-away.
+    var onMicPromptInFlightChanged: ((Bool) -> Void)?
+    /// The mic prompt's answer landed and the run that asked is still live.
+    /// The host brings the app back to front.
+    var onMicPromptAnswered: (() -> Void)?
+    /// The probe itself, so a test can hand the run a silent recorder.
+    var makeMicProbe: () -> MicProbeSession = { MicProbeSession() }
 
     // MARK: Measured latency (roadmap 056 Part A)
 
@@ -5140,18 +5155,39 @@ extension PopoverController: DeviceRowView.Delegate {
             },
             setTick: { [weak self] active in
                 self?.pushBTWizardTick(active, target: isLocalTarget ? nil : deviceID)
-                // The probe rides the tick's lifetime: staged on every `true`
-                // edge (start AND try-again both deserve a fresh measurement),
-                // dropped on every `false` one.
-                if active {
-                    self?.startBTWizardMicProbe(deviceID: deviceID)
-                } else {
+                // The probe is staged only from the session's `requestListening`
+                // callback (Start, and a measured proposal's reject that listens
+                // again), never from here. The tick's `false` edge still drops a
+                // running probe.
+                if !active {
                     self?.btWizardMicProbe?.cancel()
                     self?.btWizardMicProbe = nil
                 }
             },
             setTempo: { [weak self] bpm in self?.onBTWizardTempo?(bpm) })
         btWizardDeviceID = deviceID
+        // Start asks for the mic before the run begins, and the session shows
+        // the listening screen only on a grant. `proceed` switches the tick on
+        // synchronously, so the probe is staged AFTER it — the sweeps need the
+        // wizard feed already running. A real (undecided) ask goes quiet like
+        // Setup's prompt and is brought back on the answer only while this run
+        // is still the live one.
+        if onStageBTMicProbe != nil {
+            session.requestListening = { [weak self, weak session] proceed in
+                guard let self else { return proceed(false) }
+                let prompted = self.micPermissionIsUndecided()
+                if prompted { self.onMicPromptInFlightChanged?(true) }
+                self.ensureMicPermission { [weak self, weak session] granted in
+                    if prompted { self?.onMicPromptInFlightChanged?(false) }
+                    proceed(granted)
+                    guard let self, let session,
+                          self.btWizardSession === session else { return }
+                    if prompted { self.onMicPromptAnswered?() }
+                    guard granted else { return }
+                    self.startBTWizardMicProbe(deviceID: deviceID)
+                }
+            }
+        }
         btWizardSession = session
         Analytics.capture("bt_sync:wizard_started",
                           ["target": isLocalTarget ? "local" : "bluetooth",
@@ -5164,8 +5200,9 @@ extension PopoverController: DeviceRowView.Delegate {
     /// (roadmap 064): the wizard feed plays the dual sweeps in place of the
     /// first ticks, the built-in mic records them, and the resulting Δ —
     /// corrected onto the preview in force when the sweeps started — arrives
-    /// as the run's proposal to confirm by ear. Every failure path is silent:
-    /// the by-ear run is already underway and owes the probe nothing.
+    /// as the run's proposal to confirm by ear. A failure is not silent any
+    /// more: the listening screen is on the user's screen, so every path that
+    /// does not reach a proposal ends the listen and the questions begin.
     ///
     /// The Δ→proposal arithmetic is the same for both run kinds because Δ is
     /// LANE-anchored (Bluetooth-lane arrival minus engine-lane arrival): a
@@ -5180,35 +5217,35 @@ extension PopoverController: DeviceRowView.Delegate {
               // One sweep per fan-out: a pair on the SAME fan-out (BT against
               // BT, or the Mac against AirPlay) would carry both sweeps to
               // both speakers and the arrivals would be unattributable.
-              session.pairSoundsDiffer else { return }
-        MicCapturePermission.ensure { [weak self] granted in
-            guard granted, let self, self.btWizardDeviceID == deviceID,
-                  self.btWizardMicProbe == nil else { return }
-            var generationAtSweep = -1
-            var appliedMsAtSweep = 0.0
-            let probe = MicProbeSession()
-            self.btWizardMicProbe = probe
-            probe.start(stage: { onStarted, onFinished in
-                stageProbe({
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self else { return }
-                        generationAtSweep = self.btWizardPreviewGeneration
-                        appliedMsAtSweep = self.btWizardLastPreviewMs
-                        // Marking the ambient boundary a hop late is safe: air
-                        // always lags the feed, never leads it.
-                        onStarted()
-                    }
-                }, onFinished)
-            }, completion: { [weak self] result in
-                guard let self, self.btWizardDeviceID == deviceID,
-                      self.btWizardMicProbe === probe else { return }
-                self.btWizardMicProbe = nil
-                guard let result, generationAtSweep >= 0,
-                      generationAtSweep == self.btWizardPreviewGeneration else { return }
-                self.btWizardSession?.offerMeasuredProposal(
-                    valueMs: appliedMsAtSweep + result.deltaMs)
-            })
-        }
+              session.pairSoundsDiffer,
+              btWizardDeviceID == deviceID, btWizardMicProbe == nil else { return }
+        var generationAtSweep = -1
+        var appliedMsAtSweep = 0.0
+        let probe = makeMicProbe()
+        btWizardMicProbe = probe
+        probe.start(stage: { onStarted, onFinished in
+            stageProbe({
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    generationAtSweep = self.btWizardPreviewGeneration
+                    appliedMsAtSweep = self.btWizardLastPreviewMs
+                    // Marking the ambient boundary a hop late is safe: air
+                    // always lags the feed, never leads it.
+                    onStarted()
+                }
+            }, onFinished)
+        }, completion: { [weak self] result in
+            guard let self, self.btWizardDeviceID == deviceID,
+                  self.btWizardMicProbe === probe else { return }
+            self.btWizardMicProbe = nil
+            guard let result, generationAtSweep >= 0,
+                  generationAtSweep == self.btWizardPreviewGeneration else {
+                self.btWizardSession?.endListening()
+                return
+            }
+            self.btWizardSession?.offerMeasuredProposal(
+                valueMs: appliedMsAtSweep + result.deltaMs)
+        })
     }
 
     /// Hand the wizard's committed trim to this device's OPEN sync drawer.
@@ -5396,6 +5433,7 @@ extension PopoverController: DeviceRowView.Delegate {
     }
     func test_btWizardView() -> BTAlignmentWizardView? { btWizardView }
     func test_btWizardSheet() -> AlignmentWizardViewController? { btWizardSheet }
+    func test_btWizardSession() -> BTAlignmentWizardSession? { btWizardSession }
     public func test_btWizardIsOpen() -> Bool { btWizardSession != nil }
     public func test_btWizardReferenceID() -> String? { btWizardSession?.reference?.id }
     /// The reference the RUN selected for itself (`nil` when it was already

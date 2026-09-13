@@ -869,6 +869,15 @@ public func makeBackend(
                                 supportsAirPlay2: false, volume: 45,
                                 castVolumeLagSeconds: lag))
         }
+        // A Bluetooth fixture, so the Bluetooth-only UI (SYNC chip, measured
+        // latency, the Bluetooth run of the alignment wizard) is reachable with
+        // no hardware, e.g. in a test VM with no Bluetooth stack. Real Bluetooth
+        // rows only ever come from NativeBackend's HAL/IOBluetooth enumerator.
+        // Opt-in via env; absent = the exact pre-existing demo fleet.
+        if ProcessInfo.processInfo.environment["AUDIOUT_MOCK_BLUETOOTH"] == "1" {
+            fleet.append(Device(id: "bt-headphones", name: "AirPods Pro", kind: .bluetooth,
+                                supportsAirPlay2: false, volume: 50))
+        }
         return MockBackend(fleet: fleet,
                            connectScripts: MockBackend.resolveScenarioScripts(),
                            outputObserver: DefaultOutputObserver())

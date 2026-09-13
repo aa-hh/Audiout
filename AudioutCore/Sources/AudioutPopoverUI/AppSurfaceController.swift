@@ -256,6 +256,11 @@ public final class AppSurfaceController {
         // a drag affordance.
         shell.setUserResizable(false)
 
+        // The wizard's mic ask must not tuck the surface away or steal the
+        // system dialog's focus.
+        popoverController.onMicPromptInFlightChanged = { [weak self] in self?.shell.setPermissionPromptInFlight($0) }
+        popoverController.onMicPromptAnswered = { [weak self] in self?.shell.returnToFront() }
+
         // The one header (D1): a real unified NSToolbar on the shell window,
         // both profiles. Attaching here — before anything shows — means the
         // chrome inset is measurable from the first mount.

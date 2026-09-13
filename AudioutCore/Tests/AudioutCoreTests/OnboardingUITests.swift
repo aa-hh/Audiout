@@ -1505,12 +1505,17 @@ import Testing
         #expect(vc.test_previewFrameLabel == nil,
                 "macOS raises nothing here, so nothing may claim it does")
         #expect(vc.test_demoRemoteInvite?.test_tileSide == RemoteInviteView.setupTileSide)
-        #expect(vc.test_ribbonButtonTitles.contains("Open audiout.app/remote"))
+        #expect(vc.test_ribbonButtonTitles == ["Open audiout.app/remote", "Continue"],
+                "Continue is the skip, so no separate Skip button")
 
-        await vc.test_tapAllow(.audioutRemote)
+        vc.test_ribbonTapQuietLink()
         #expect(opened.map(\.absoluteString) == [RemoteInviteView.pageURLString])
         #expect(vc.test_activeStep == .audioutRemote,
                 "opening the page is not the completion — a phone connecting is")
+
+        await vc.test_ribbonTapPrimary()
+        #expect(opened.count == 1, "Continue must not leave setup")
+        #expect(vc.test_activeStep != .audioutRemote, "Continue moves setup past the card")
     }
 
     /// Defect this names: the seventh row pushing the spine out of the fixed
@@ -2400,6 +2405,7 @@ import Testing
             DemoSettingsMockView(step: .localNetwork, metricScale: 1.35),
             DemoSettingsHandoffMockView(step: .remoteControl),
             DemoSystemAlertMockView(step: .remoteControl),
+            DemoConsentCardMockView(),
         ]
         for mock in mocks {
             mock.layoutSubtreeIfNeeded()

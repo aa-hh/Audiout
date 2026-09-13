@@ -1263,6 +1263,9 @@ import AppKit
     /// through, and a probe over the silent recorder.
     private func armListening(_ popover: PopoverController, granted: Bool) {
         popover.ensureMicPermission = { $0(granted) }
+        // The default closure reads the test process's real mic status — pin
+        // it to "no prompt" so every listening test reads deterministically.
+        popover.micPermissionIsUndecided = { false }
         popover.makeMicProbe = {
             MicProbeSession(recorder: SilentRecorder(), timeout: 1, pipelineTail: 0.05)
         }
@@ -1370,6 +1373,69 @@ import AppKit
         #expect(stageCount == 2, "no third probe")
         #expect(recorder.ends.isEmpty, "the run is still live")
         #expect(popover.test_btWizardIsOpen())
+    }
+
+    // MARK: Listening — the host surface's mic-prompt manners
+
+    /// A bare shell, wired to the popover's mic-prompt closures the way
+    /// `AppSurfaceController` wires the real one. No pinning happens here, so
+    /// the autosave name is never armed.
+    private func makeWiredShell(_ popover: PopoverController) -> ControlPanelWindowController {
+        let shell = ControlPanelWindowController(contentViewController: NSViewController(),
+                                                  frameAutosaveName: "PopoverBTAlignmentUITests")
+        popover.onMicPromptInFlightChanged = { shell.setPermissionPromptInFlight($0) }
+        popover.onMicPromptAnswered = { shell.returnToFront() }
+        return shell
+    }
+
+    /// Defect this would catch: the surface tucks away while the mic dialog
+    /// is up, or the app is not brought back (or is brought back twice)
+    /// after the answer.
+    @Test(arguments: [true, false]) func aRealMicAskSuspendsTheShellThenReturnsOnTheAnswer(granted: Bool) {
+        let (popover, _) = makePopover()
+        armListening(popover, granted: granted)
+        var pending: ((Bool) -> Void)?
+        popover.micPermissionIsUndecided = { true }
+        popover.ensureMicPermission = { pending = $0 }
+        let shell = makeWiredShell(popover)
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        let wizard = popover.test_btWizardView()
+        wizard?.test_clickButton(titled: "Start")
+
+        #expect(shell.test_panel?.hidesOnDeactivate == false)
+        #expect(shell.test_backingWindow?.hidesOnDeactivate == false)
+        #expect(shell.test_returnToFrontCount == 0)
+
+        pending?(granted)
+
+        #expect(shell.test_panel?.hidesOnDeactivate == true)
+        #expect(shell.test_backingWindow?.hidesOnDeactivate == true)
+        #expect(shell.test_returnToFrontCount == 1)
+        if granted {
+            #expect(wizard?.test_screen == .listening(isRealignment: false),
+                    "got \(screenName(wizard))")
+        } else {
+            guard case .question? = wizard?.test_screen else {
+                Issue.record("a denied mic goes to the questions, got \(screenName(wizard))")
+                return
+            }
+        }
+    }
+
+    /// Defect this would catch: a mic that is already decided marks a prompt
+    /// in flight or re-fronts the app, so every Start would steal focus.
+    @Test func aDecidedMicNeverTouchesTheShellsManners() {
+        let (popover, _) = makePopover()
+        armListening(popover, granted: true)
+        let shell = makeWiredShell(popover)
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        let wizard = popover.test_btWizardView()
+        wizard?.test_clickButton(titled: "Start")
+
+        #expect(shell.test_returnToFrontCount == 0)
+        #expect(shell.test_panel?.hidesOnDeactivate == true)
     }
 
     /// The Mac's own row is a SETTING, not a measurement, so it never gets the

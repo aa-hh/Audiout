@@ -30,6 +30,11 @@ public enum MicCapturePermission {
         AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }
 
+    /// True only for the one status `ensure` answers by raising the system prompt.
+    public static var isUndecided: Bool {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
+    }
+
     /// Ask if undecided (the system prompt), report the outcome either way.
     public static func ensure(_ completion: @escaping (Bool) -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {

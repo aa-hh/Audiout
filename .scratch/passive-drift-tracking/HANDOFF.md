@@ -16,13 +16,16 @@ reference (decision 13).
 
 - **Mac repo branch:** `claude/bluetooth-latency-drift-6c2d59`, worktree
   `.claude/worktrees/bluetooth-latency-drift-6c2d59`, pushed to origin.
-  HEAD `4b191c25`. Not merged to main; main was merged INTO it at
-  `2c333536`. Only uncommitted change: `ROADMAP.jsonl` (085's commit list).
+  Not merged to main; main was merged INTO it twice, last at `69bf24f3`
+  (2026-09-13 ~12:55 UTC, full suite 3,872 passed). Nothing uncommitted.
 - **audiout-shared:** everything committed on `main`. Tag `0.12.0`
   (`d4e96b2`) holds the bass filter and `analyzeWithCandidates`. The Mac
-  branch pins `from: "0.12.0"`. That checkout has uncommitted changes that are
-  NOT ours: `docs/analytics-events.md`, untracked `.github/workflows/`,
-  `worktrees/`. Leave them.
+  branch now pins `from: "0.13.0"` (main's emitter-field constants), which
+  is built on 0.12.0 and keeps the fix. That checkout has uncommitted changes
+  that are NOT ours: `docs/analytics-events.md`, untracked
+  `.github/workflows/`, `worktrees/`. Leave them.
+- **Worktree `drift-correction-policy`:** obsolete helper worktree, reset to
+  match origin and flagged `.prunable`; housekeeping removes it.
 - **audiout-remote:** still pinned to shared 0.9.0; bump owed.
 
 ## Ticket state
@@ -38,8 +41,11 @@ reference (decision 13).
 | 07 iPhone re-sync button | not started |
 | 08 roadmap swap | done |
 
-Suites at `4b191c25`: full suite 3,844 tests passed (local run; the second
-Mac's run died partway with no failing test). Build clean.
+Suites at `69bf24f3`: full suite 3,872 tests passed. Build clean.
+
+Main's #193 (merged in) makes the alignment wizard lead with the automatic mic
+measurement; it writes the same stored measured latency that drift
+corrections adjust. Not a conflict, but the live test now runs on that wizard.
 
 ## The live test so far (2026-09-13, 01:12–01:53 UTC)
 
@@ -77,7 +83,7 @@ sync while tracking was already off. That is the real Bluetooth jump this
 feature exists for. The log shows no cause; audio apps were starting and
 stopping between 01:42 and 01:48.
 
-The fixed build (`4b191c25`) was built and launched at 01:53 UTC, but no
+The fixed build (`4b191c25`, before the second main merge) was built and launched at 01:53 UTC, but no
 speakers were selected on it, and no window has run on it. **As of 12:40 UTC
 the app is not running and the live-test slot is free.**
 

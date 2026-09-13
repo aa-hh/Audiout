@@ -233,8 +233,10 @@ tokens: the five accent instruments `gold`, `goldText`, `ember`, `emberText`,
 (via `permissionDynamic`,
 whose own header names `Tokens.accentStyle` as the same switch). Nothing else
 is dial-aware — `failure`/`rim`/`ring`/`muted` and `bluetoothBrand` are fixed
-in every dial position. `glow` alone has no Subtle rendering and resolves fully
-`.clear` at that dial position ("no glow shadow"); the six permission hues
+in every dial position. `glow` resolves a quieter halo of the same hue at
+Subtle: it strokes the rail's connect bead and the ring and header-dot
+blooms, which a `.clear` Subtle column would draw invisibly; the six
+permission hues
 always resolve a real, muted color at Subtle, because an opaque glyph fill
 cannot go invisible the way a halo can. Changing the dial broadcasts
 `Tokens.accentStyleDidChangeNotification`; a `CALayer`-stamped instrument

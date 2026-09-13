@@ -110,15 +110,23 @@ extension SerializedSharedState {
         return result
     }
 
-    @Test func subtleRemapsGoldAndRemovesGlow() {
+    @Test func subtleRemapsGoldAndKeepsAQuieterGlow() {
         let fullGold = resolved(Tokens.Color.gold, appearanceName: .darkAqua)
+        let fullGlow = resolved(Tokens.Color.glow, appearanceName: .darkAqua)
 
         Tokens.accentStyle = .subtle
         let subtleGold = resolved(Tokens.Color.gold, appearanceName: .darkAqua)
         #expect(subtleGold != fullGold, "Subtle must desaturate the gold channel")
-        // Spec §1.3: Subtle has NO glow ("no glow shadow") — the token resolves
-        // fully clear so every halo/bloom call site goes quiet.
-        #expect(resolved(Tokens.Color.glow, appearanceName: .darkAqua).alphaComponent == 0)
+        // Subtle keeps a quieter halo instead of going clear, so the connect
+        // pulse survives the dial.
+        for name in [NSAppearance.Name.darkAqua, .aqua] {
+            let subtleGlow = resolved(Tokens.Color.glow, appearanceName: name)
+            #expect(subtleGlow.alphaComponent == 1, "Subtle glow must still render")
+            #expect(subtleGlow != resolved(Tokens.Color.gold, appearanceName: name),
+                    "the bead must be tellable from the wire it lands on")
+        }
+        #expect(resolved(Tokens.Color.glow, appearanceName: .darkAqua) != fullGlow,
+                "Subtle glow is quieter than Full glow")
     }
 
     @Test func accentDialNeverRemapsFailureRimOrRing() {

@@ -194,8 +194,10 @@ public final class BTAlignmentWizardView: NSView {
         "Open Audiout Remote on \(phoneName.map { "\($0)" } ?? "your iPhone") "
             + "and tap the tuning fork beside \(target)."
     }
-    /// The trailing panel's heading — the Mac's own run, named the one thing
-    /// it is (the glossary in `audiout-shared/CONTEXT.md`).
+    /// The trailing panel's heading when the two speakers make ONE sound and
+    /// there is no automatic mic path — the Mac's own by-ear run, named the one
+    /// thing it is (the glossary in `audiout-shared/CONTEXT.md`). The automatic
+    /// path uses ``autoPanelTitle`` instead.
     static let byEarPanelTitle = "Align by ear"
     /// The sheet's TITLE, on every screen — the plain sentence-form heading a
     /// sheet gets everywhere else in the app (`GroupCreationSheetController`'s
@@ -211,17 +213,39 @@ public final class BTAlignmentWizardView: NSView {
 
     // MARK: Copy awaiting the owner's eye (2026-09-13)
 
-    /// The intro's by-ear panel says the Mac listens before it asks anything,
-    /// so Start's mic prompt is expected rather than a surprise.
-    static let introMicLine = "This Mac listens through its built-in microphone first."
-    static let listeningReadout = "Listening…"
-    /// The listening screen, first alignment and realignment. The realign
-    /// variant says what is being checked, because the run already has a value.
-    static let listeningFirstCopy =
-        "This Mac’s microphone is picking up both speakers. "
-        + "Keep the room quiet for a few seconds."
-    static let listeningRealignCopy =
-        "This Mac’s microphone is checking the last alignment. "
+    /// The intro's right panel when the Mac can measure through its own mic
+    /// (``BTAlignmentWizardSession/listeningIsPossible``) LEADS with the
+    /// automatic measurement — that is the selling point, and the by-ear
+    /// clicks are the fallback. The heading parallels the left panel's
+    /// "Measure with your iPhone": both measure, this one through the Mac's
+    /// own microphone.
+    static let autoPanelTitle = "Measure on this Mac"
+    /// The lead line on the automatic path: what the Mac does the moment Start
+    /// is pressed, which is also why the mic prompt is expected rather than a
+    /// surprise.
+    static let autoLeadCopy =
+        "This Mac measures the offset itself, listening through its built-in microphone."
+    /// The by-ear clicks, reframed as the fallback under the automatic lead.
+    /// The naming half is spliced from ``introCopyNamingSounds`` verbatim so
+    /// the two can never drift — lower-cased at the seam because it now follows
+    /// a dash rather than opening the sentence.
+    static func byEarFallbackCopy(target: String, targetIsBluetooth: Bool,
+                                  reference: String) -> String {
+        let naming = introCopyNamingSounds(target: target,
+                                           targetIsBluetooth: targetIsBluetooth,
+                                           reference: reference)
+        return "No clear read? Match it by ear — "
+            + naming.prefix(1).lowercased() + naming.dropFirst()
+    }
+    /// The listening screen's headline — the focal point of a screen that is
+    /// measuring on its own and asking the user for nothing. First-alignment
+    /// and realignment variants; the realign one says a value already exists.
+    static let listeningHeadlineFirst = "Listening to your speakers"
+    static let listeningHeadlineRealign = "Checking your last alignment"
+    /// The supporting line under the headline, the same for both variants:
+    /// what the Mac is doing, and the one thing the room can do to help.
+    static let listeningBody =
+        "Your Mac is measuring the delay with its built-in microphone. "
         + "Keep the room quiet for a few seconds."
     /// A proposal RECALLED from a previous run, reached only when the mic
     /// never listened — nothing was measured, so the number is a question.
@@ -715,8 +739,7 @@ public final class BTAlignmentWizardView: NSView {
         case .intro:
             readout.stringValue = ""
             stage.lightNames = (session.targetName, session.reference?.name ?? "")
-            let intro = introBody()
-            addIntroPanels(byEarBody: intro)
+            addIntroPanels(byEarBody: introBody())
             // A CHOICE gets its own band; a STATEMENT stays tucked under the
             // sentence it qualifies (see ``addReferenceRow``).
             contentStack.setCustomSpacing(
@@ -738,24 +761,41 @@ public final class BTAlignmentWizardView: NSView {
             // The intro's way OUT. A sheet carries no ✕, so before this row
             // the only exit was Esc — and with no reference to compare
             // against, Start is disabled and the screen had no enabled
-            // control at all. Same corner row, same trailing corner, same
-            // ESC chip the question and proposal screens already use; there
-            // is simply no Undo to put in the other corner yet.
-            addCornerRow(trailing: (Self.stopTitle, #selector(stopClicked(_:)), "ESC"))
-            // The iPhone panel leads, so it is what VoiceOver hears first.
+            // control at all. Same corner row, same trailing corner as the
+            // question and proposal screens; there is simply no Undo to put
+            // in the other corner yet. Esc still stops the run — only the
+            // printed chip is gone (owner ruling 2026-09-13).
+            addCornerRow(trailing: (Self.stopTitle, #selector(stopClicked(_:)), nil))
+            // The iPhone panel leads, so it is what VoiceOver hears first;
+            // the right panel is spoken as it reads — automatic lead plus
+            // fallback when the mic path is available, plain by-ear otherwise.
+            let rightPanelSpoken: String
+            if session.listeningIsPossible, let reference = session.reference {
+                rightPanelSpoken = "\(Self.autoPanelTitle): \(Self.autoLeadCopy) "
+                    + Self.byEarFallbackCopy(target: session.targetName,
+                                             targetIsBluetooth: session.targetIsBluetooth,
+                                             reference: reference.name)
+            } else {
+                rightPanelSpoken = "\(Self.byEarPanelTitle): \(introBody())"
+            }
             setAccessibilityLabel(
                 "Align \(session.targetName). \(Self.remotePanelTitle): \(remoteInviteLine). "
-                + "\(Self.byEarPanelTitle): \(intro)")
+                + rightPanelSpoken)
 
         case .listening(let isRealignment):
             // The mic is doing the work, so the screen asks for nothing: no
-            // plates, no Undo, no click count — one line and the way out.
-            styleReadout(hero: false)
-            readout.stringValue = Self.listeningReadout
-            let copy = isRealignment ? Self.listeningRealignCopy : Self.listeningFirstCopy
-            addBody(copy)
-            addCornerRow(trailing: (Self.stopTitle, #selector(stopClicked(_:)), "ESC"))
-            setAccessibilityLabel(copy)
+            // plates, no Undo, no click count. The HEADLINE carries the state
+            // (the selling point of this guided step is out loud, not buried in
+            // grey), so the readout above the band stays empty and the band
+            // centres cleanly.
+            readout.stringValue = ""
+            let headline = isRealignment
+                ? Self.listeningHeadlineRealign : Self.listeningHeadlineFirst
+            addListeningMic()
+            addHeadline(headline)
+            addBody(Self.listeningBody)
+            addCornerRow(trailing: (Self.stopTitle, #selector(stopClicked(_:)), nil))
+            setAccessibilityLabel(headline + ". " + Self.listeningBody)
 
         case .question(_, let intervalMs, let answersSoFar):
             let referenceName = session.reference?.name ?? ""
@@ -812,7 +852,7 @@ public final class BTAlignmentWizardView: NSView {
             // The manual path sits beside a proposal the listener doesn't
             // like — quiet, never a plate; Stop stays the way out.
             addCornerRow(leading: (Self.setByHandTitle, #selector(setByHandClicked(_:)), nil),
-                         trailing: (Self.stopTitle, #selector(stopClicked(_:)), "ESC"))
+                         trailing: (Self.stopTitle, #selector(stopClicked(_:)), nil))
             pendingBestGuessMs = valueMs
             setAccessibilityLabel(
                 "Aligned at \(wholeMs) milliseconds. Does it sound right?")
@@ -1041,9 +1081,9 @@ public final class BTAlignmentWizardView: NSView {
     /// behind it.
     private func applyReadoutHeight(for screen: BTAlignmentWizardSession.Screen) {
         switch screen {
-        case .listening, .question, .proposal, .kept:
+        case .question, .proposal, .kept:
             readoutHeightConstraint.constant = Self.readoutHeight
-        case .intro, .unsettled, .unreachable, .macIsLate:
+        case .intro, .listening, .unsettled, .unreachable, .macIsLate:
             readoutHeightConstraint.constant = 0
         }
     }
@@ -1080,6 +1120,35 @@ public final class BTAlignmentWizardView: NSView {
         contentStack.addArrangedSubview(label)
     }
 
+    /// The listening screen's focal headline — the `display` voice (20 pt/700)
+    /// on full `label`, centred, at most two lines. macOS has no balanced-wrap
+    /// API, so a short headline sits on one line and the cap is a safety.
+    private func addHeadline(_ text: String) {
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = Tokens.Font.display
+        label.textColor = Tokens.Color.label
+        label.alignment = .center
+        label.maximumNumberOfLines = 2
+        label.preferredMaxLayoutWidth = Self.bodyMeasure
+        contentStack.addArrangedSubview(label)
+    }
+
+    /// The live "listening on the mic" cue — a stock `mic.fill` symbol tinted to
+    /// the label ink, pulsing while the room is measured. STATIC headless and
+    /// under Reduce Motion, so the snapshot stays deterministic.
+    private func addListeningMic() {
+        let mic = NSImageView()
+        mic.translatesAutoresizingMaskIntoConstraints = false
+        mic.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 26, weight: .regular))
+        mic.contentTintColor = Tokens.Color.label
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+           !HeadlessRuntime.isActive {
+            mic.addSymbolEffect(.variableColor.iterative.dimInactiveLayers)
+        }
+        contentStack.addArrangedSubview(mic)
+    }
+
     /// The intro's two panels: measuring from the room on the LEADING side,
     /// the Mac's own paired-click run on the trailing one. Neither is
     /// pressable — Start, below both, stays the page's one primary control
@@ -1104,11 +1173,21 @@ public final class BTAlignmentWizardView: NSView {
         byEar.alignment = .centerX
         byEar.spacing = Self.spacingRow
         byEar.translatesAutoresizingMaskIntoConstraints = false
-        byEar.addArrangedSubview(panelHeading(Self.byEarPanelTitle))
-        byEar.addArrangedSubview(panelLine(byEarBody))
-        // Start raises the system mic prompt when the permission is undecided,
-        // so the panel says the Mac listens before the button is pressed.
-        if session.listeningIsPossible { byEar.addArrangedSubview(panelLine(Self.introMicLine)) }
+        // When the Mac can measure through its own mic, the panel LEADS with
+        // that and the by-ear clicks become the fallback; otherwise the two
+        // speakers make one sound, there is no automatic path, and the panel
+        // stays the plain by-ear instructions.
+        if session.listeningIsPossible, let reference = session.reference {
+            byEar.addArrangedSubview(panelHeading(Self.autoPanelTitle))
+            byEar.addArrangedSubview(panelLine(Self.autoLeadCopy))
+            byEar.addArrangedSubview(panelLine(Self.byEarFallbackCopy(
+                target: session.targetName,
+                targetIsBluetooth: session.targetIsBluetooth,
+                reference: reference.name)))
+        } else {
+            byEar.addArrangedSubview(panelHeading(Self.byEarPanelTitle))
+            byEar.addArrangedSubview(panelLine(byEarBody))
+        }
         byEar.addArrangedSubview(panelLine(Self.introSlotText))
 
         for panel in [remote, byEar] {
@@ -1285,12 +1364,13 @@ public final class BTAlignmentWizardView: NSView {
         contentStack.addArrangedSubview(holder)
     }
 
-    /// `Undo ⌘Z` left, `Stop ESC` right: REAL buttons, each with its key
-    /// printed BESIDE it in the micro-label voice rather than inside the
-    /// title — the title is the word a test clicks and VoiceOver speaks.
+    /// `Undo ⌘Z` left, `Stop` right: REAL buttons. Undo keeps its key printed
+    /// BESIDE it in the micro-label voice; Stop prints none — the ESC chip read
+    /// out of place (owner ruling 2026-09-13), and Esc stops the run regardless.
+    /// The title is the word a test clicks and VoiceOver speaks.
     private func addCornerRow(backEnabled: Bool) {
         addCornerRow(leading: (Self.backTitle, #selector(backClicked(_:)), "⌘Z"),
-                     trailing: (Self.stopTitle, #selector(stopClicked(_:)), "ESC"),
+                     trailing: (Self.stopTitle, #selector(stopClicked(_:)), nil),
                      leadingEnabled: backEnabled)
     }
 
@@ -1467,6 +1547,12 @@ public final class BTAlignmentWizardView: NSView {
 
     var test_screen: BTAlignmentWizardSession.Screen { session.screen }
     var test_stage: AlignmentStageView { stage }
+    /// Every direct text label in the mounted band, in reading order — the
+    /// listening screen splits its message across a display headline and a body
+    /// line, where ``test_bodyText`` reads a single label.
+    var test_bandLabels: [String] {
+        contentStack.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue }
+    }
     /// The screen's body copy. On the INTRO that sentence lives inside the
     /// by-ear panel; everywhere else it is the band's first label.
     var test_bodyText: String? {
@@ -1496,9 +1582,9 @@ public final class BTAlignmentWizardView: NSView {
     public var test_remoteInviteAddress: String? { remoteInviteView?.test_addressText }
     public var test_remoteInviteTileSide: CGFloat? { remoteInviteView?.test_tileSide }
     public var test_byEarPanelHeading: String? { byEarPanelLabels.first?.stringValue }
-    /// Every line of the by-ear panel, in reading order — the mic line sits
-    /// between the instruction and the cost note, where `test_bodyText`
-    /// (which reads the instruction alone) cannot see it.
+    /// Every line of the trailing intro panel, in reading order — heading, the
+    /// lead/instruction lines, and the cost note — where `test_bodyText` (which
+    /// reads the leading panel's instruction alone) cannot see them.
     var test_byEarPanelLines: [String] { byEarPanelLabels.map(\.stringValue) }
 
     /// The labels of the TRAILING intro panel, in reading order.

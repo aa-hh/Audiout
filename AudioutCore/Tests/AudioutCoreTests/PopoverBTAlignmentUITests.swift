@@ -1280,9 +1280,10 @@ import AppKit
         showNote(popover)
         popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
         let wizard = popover.test_btWizardView()
-        // The intro said the Mac would listen, which is what makes the prompt
-        // on Start expected rather than a surprise.
-        #expect(wizard?.test_byEarPanelLines.contains(BTAlignmentWizardView.introMicLine)
+        // The intro's right panel leads with the automatic measurement, which
+        // is what makes the mic prompt on Start expected rather than a surprise
+        // (the denial only happens once Start is pressed).
+        #expect(wizard?.test_byEarPanelLines.contains(BTAlignmentWizardView.autoLeadCopy)
                 == true, "got \(String(describing: wizard?.test_byEarPanelLines))")
         wizard?.test_clickButton(titled: "Start")
         guard case .question? = wizard?.test_screen else {
@@ -1303,7 +1304,11 @@ import AppKit
         wizard?.test_clickButton(titled: "Start")
         #expect(wizard?.test_screen == .listening(isRealignment: false),
                 "got \(screenName(wizard))")
-        #expect(wizard?.test_bodyText == BTAlignmentWizardView.listeningFirstCopy)
+        // The listening state now leads with a display headline over the body
+        // line, so the message reads off the band's two labels, not one.
+        #expect(wizard?.test_bandLabels.contains(BTAlignmentWizardView.listeningHeadlineFirst)
+                == true, "got \(String(describing: wizard?.test_bandLabels))")
+        #expect(wizard?.test_bandLabels.contains(BTAlignmentWizardView.listeningBody) == true)
         // The probe's completion lands on the MAIN QUEUE, which this suite's
         // run-loop pumping never drains — only an `await` lets it through.
         await SuiteWait.until("the failed listen to reach the questions") {

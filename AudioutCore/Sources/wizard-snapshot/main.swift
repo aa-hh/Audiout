@@ -161,9 +161,10 @@ func run() -> Int32 {
     // 1 · intro (armed stage, reference row, Start).
     shoot(main, "1-intro", light: true)
 
-    // 1b–1d · the listening screen and the intro line that announces it.
+    // 1b–1d · the listening screen, and the intro's right panel leading with
+    // the automatic measurement (`listeningIsPossible`), by-ear as the fallback.
     let listeningFirst = Run(referenceOptions: twoOptions, listens: true)
-    shoot(listeningFirst, "1b-intro-mic-line", light: true)
+    shoot(listeningFirst, "1b-intro-auto", light: true)
     listeningFirst.session.start()
     shoot(listeningFirst, "1c-listening-first", light: true)
 

@@ -2110,8 +2110,8 @@ public final class PopoverController: NSObject {
     /// The devices `rebuild()` would mount rows for right now: visible, and
     /// inside an EXPANDED subsection. Compared against `deviceRowsByID` to
     /// decide whether `update(devices:)` needs a structural rebuild. The rail
-    /// deliberately does NOT read this — its band ends at the last device in the
-    /// FULL order (`updateRailRows`).
+    /// deliberately does NOT read this — its cut follows the lowest reached device
+    /// in the FULL order (`updateRailRows`).
     private func renderedDeviceOrder() -> [Device] {
         deviceSections().filter { !isSubsectionCollapsed($0.title) }.flatMap(\.devices)
     }
@@ -3284,23 +3284,26 @@ public final class PopoverController: NSObject {
     /// the LOWEST member. What the host still owns is WHICH rows exist, WHERE the
     /// rail is cut, and whether the whole path is dormant.
     ///
-    /// The cut belongs to the subsection holding the band's LAST device — in the
-    /// FULL order (`deviceSections()`), whether or not a collapsed subsection is
-    /// currently hiding it — so a collapse cuts the rail at that subsection's
-    /// header with a dot, exactly as a collapsed CARD already cuts at its own.
-    /// Indexing the RENDERED order instead silently pulled the far end up to a
-    /// higher visible row with no dot, so the rail read as ending in mid-air. A
-    /// device the BT-LIST filter never listed is a different matter: it is not in
-    /// `deviceSections()` at all, so it can never be the band's end.
+    /// The rail runs to the LOWEST device the rail reaches
+    /// (`BusRailOverlayView.railReaches`) in the FULL order (`deviceSections()`),
+    /// hidden or not. When that device sits inside a collapsed subsection, the
+    /// rail is cut at that subsection's header with a dot, exactly as a collapsed
+    /// CARD cuts at its own. Otherwise there is no cut: the overlay already ends
+    /// the rail at the lowest reached mounted row. A collapsed subsection hiding
+    /// only devices the rail does not reach never cuts. A hidden device has no
+    /// row, so its node comes from `DeviceRowView.busNode`, the same function the
+    /// rows use. A device the BT-LIST filter never listed is not in
+    /// `deviceSections()` at all, so it never decides the cut.
     private func updateRailRows() {
         let sections = deviceSections()
         let fullOrder = sections.flatMap(\.devices)
-        // Only MOUNTED rows carry a node — a collapsed subsection's rows are
-        // already out of the model, which is what leaves them out of the overlay's
-        // stop list while the cut below them still counts.
+        // Only MOUNTED rows go to the overlay — a collapsed subsection's rows are
+        // already out of the model; the cut below speaks for them.
         let railRows = fullOrder.compactMap { deviceRowsByID[$0.id] }
-        let bandEndID = fullOrder.last?.id
-        let cutSubsectionTitle = bandEndID.flatMap { id in
+        let lowestReachedID = fullOrder.last { device in
+            BusRailOverlayView.railReaches(railNode(for: device))
+        }?.id
+        let cutSubsectionTitle = lowestReachedID.flatMap { id in
             sections.first {
                 isSubsectionCollapsed($0.title) && $0.devices.contains { $0.id == id }
             }?.title
@@ -3317,9 +3320,20 @@ public final class PopoverController: NSObject {
         // draws (`RailPlan.isLive`), the Main Audio ring takes it from this
         // push. A room hidden inside a collapsed subsection still counts — the
         // rail cuts to that fold's dot rather than vanishing.
-        mainOutRow.setRailLive(
-            cutSubsectionTitle != nil
-                || railRows.contains { $0.railNode.map(BusRailOverlayView.railReaches) ?? false })
+        mainOutRow.setRailLive(lowestReachedID != nil)
+    }
+
+    /// A device's rail node: the mounted row's own, or — for a device hidden in a
+    /// collapsed subsection — the same derivation from the values
+    /// `applySelectionState` would push to its row.
+    private func railNode(for device: Device) -> MembershipBusView.Node {
+        if let node = deviceRowsByID[device.id]?.railNode { return node }
+        return DeviceRowView.busNode(
+            device: device,
+            selected: groupController?.isSpeakerSelected(device.id) ?? false,
+            energizePending: energizePendingIDs.contains(device.id),
+            reduceMotion: reduceMotionActive,
+            localFallbackOutput: localFallbackActive && device.isLocalDevice)
     }
 
     // MARK: Output Devices "+" menu (BT-UI / BT-LIST)

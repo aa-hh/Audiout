@@ -445,6 +445,49 @@ import AppKit
                 "the rail ends in a dot at the collapsed header, not in mid-air")
     }
 
+    /// The cut follows the lowest device the rail REACHES, not the last device
+    /// in the list. A collapsed AirPlay subsection hiding the only playing
+    /// speaker, with an idle Cast speaker below it, used to leave no cut (the
+    /// Cast device was the list's last) and no reached visible row — so the rail
+    /// and the Main Audio ring's rail vanished while a speaker played.
+    @Test func aCollapsedMidListSubsectionHidingTheLowestMemberCutsTheRail() throws {
+        let fleet = [airplay(), cast("cast-k", name: "Kitchen")]
+        let (popover, controller) = makePopover(fleet: fleet)
+        controller.setDeviceSelected("office", true)
+        popover.update(devices: fleet)
+        popover.test_applyExactFitSize()
+
+        popover.test_fireSubsectionHeaderClick(title: airPlayTitle)
+        popover.test_applyExactFitSize()
+
+        let plan = try #require(popover.test_railPlan())
+        #expect(plan.terminusDotY != nil,
+                "the rail is cut at the collapsed AirPlay header, with a dot")
+        #expect(plan.isLive, "Office is still playing, so the rail stays")
+    }
+
+    /// A collapsed LAST subsection whose hidden speakers are all out of the mix
+    /// hides no signal, so it must not cut: the rail keeps ending on the lowest
+    /// visible member, and with no member anywhere there is no rail at all.
+    @Test func aCollapsedSubsectionHidingOnlyIdleSpeakersDoesNotCut() throws {
+        let fleet = [airplay(), bt("bt-z:output", name: "Zed Box")]
+        let (popover, controller) = makePopover(fleet: fleet)
+        controller.setDeviceSelected("office", true)
+        popover.update(devices: fleet)
+        popover.test_applyExactFitSize()
+
+        popover.test_fireSubsectionHeaderClick(title: bluetoothTitle)
+        popover.test_applyExactFitSize()
+        #expect(try #require(popover.test_railPlan()).terminusDotY == nil,
+                "the rail ends on Office's own node, uncut")
+
+        controller.setDeviceSelected("office", false)
+        popover.update(devices: fleet)
+        popover.test_applyExactFitSize()
+        #expect(!(try #require(popover.test_railPlan()).isLive),
+                "nothing in the mix: no rail, even with Bluetooth collapsed")
+    }
+
     /// The invariant behind both cases above, stated once. With the origin
     /// resolved and devices in the mix, a rail plan may never be BOTH stop-less
     /// and dot-less — that pair IS the dangling hook, a rail that starts at

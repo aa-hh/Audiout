@@ -18,6 +18,7 @@ folder renders; routing arithmetic lives in Core.
 - Two rebuild flavors: `rebuildForOpen()` discards manual toggles, `rebuild()` preserves them.
 - A subsection collapses by animating its own clip height, never rebuilding (2026-08-10).
 - A collapsed subsection cuts the rail exactly as a collapsed card does (2026-08-11).
+- It cuts only when it hides the lowest device the rail reaches, in full order; hidden nodes come from `DeviceRowView.busNode` (2026-09-13).
 - Hidden means idle: ingest skips behind `isEffectivelyShown`, and every open rebuilds.
 - At most one sync drawer is open; `expandedSyncDeviceID` is the single owner.
 - A live scrub applies to audio but must not persist until committed.

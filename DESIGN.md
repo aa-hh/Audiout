@@ -505,7 +505,12 @@ intent even though the number happens to match).
 ### ProminentButton (signature component)
 The one call-to-action button in the app: `Tokens.Color.gold` fill via
 `bezelColor`, `Tokens.Color.inkOnFill` ink, `Tokens.Font.body` (or the
-emphasized weight for a finale CTA). It exists specifically to patch a stock
+emphasized weight for a finale CTA). Fill and ink are pinned to their DARK
+values (`#E8B84B` with `#171104`) in both appearances: one light gold with dark
+text everywhere, the same pin as the alignment wizard's primary plates. Light
+mode's paper gold `#A67C1E` is shaded by the rounded bezel into a muddy olive
+that dark text cannot read on, and a deepened gold with white text is not an
+official gold. It exists specifically to patch a stock
 AppKit defect — a `bezelColor` fill drops to a plain bezel when its window
 resigns key, but AppKit does not recolor the title to match, so `inkOnFill`
 reads dark-on-dark or white-on-white — by tracking key state and swapping to

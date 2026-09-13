@@ -581,10 +581,6 @@ public enum Tokens {
         /// hexes (they already clear the text floor); light deepens, because
         /// `gold`'s light value is a fill on paper and reads at 3.64:1.
         ///
-        /// It is ALSO ``ProminentButton``'s CTA fill: the same deep values read
-        /// as a fill are exactly what a WHITE ink (``goldCTAInk``) needs to
-        /// clear the body floor in light, which `gold` (too bright) could not.
-        ///
         /// CONTRAST RATIONALE (measured; floor 4.5:1). FULL: dark `#E8B84B` =
         /// 8.55:1 vs `raised` (the tightest ground); light `#825E0F` = 5.66:1
         /// vs the flat ground / 4.90:1 vs `well`, light Increase Contrast
@@ -732,31 +728,6 @@ public enum Tokens {
         public static var inkOnFill: NSColor {
             warmDynamic(name: "inkOnFill", dark: 0x171104, darkHighContrast: 0x171104,
                        light: 0x171104, lightHighContrast: 0xFFFFFF)
-        }
-
-        /// The ink ``ProminentButton`` carries over its CTA fill. That fill is
-        /// ``goldText``'s deep values (bright `#E8B84B` in dark, deep `#825E0F`
-        /// in light), read as a fill — deep enough in light for WHITE ink to
-        /// clear the 4.5:1 body floor with real margin, where ``gold`` + dark
-        /// ``inkOnFill`` sat at a nominal 4.94:1 that the `.rounded` bezel's own
-        /// shading gradient pushed under the floor in practice.
-        ///
-        /// The ink FLIPS by appearance because the fill's luminance does: dark
-        /// `goldText` is bright, so the ink is near-black `#171104` (white would
-        /// read at 1.9:1 on it); light `goldText` is deep, so the ink is WHITE
-        /// (dark ink reads at 2.9:1 on it). NOT ``inkOnFill``, which stays dark
-        /// in regular light for the gold-value plates (alignment wizard) that
-        /// must keep dark-on-light-gold — flipping that token would regress them.
-        ///
-        /// CONTRAST RATIONALE (measured, on ``goldText`` as the fill; floor
-        /// 4.5:1). FULL: dark `#E8B84B` + `#171104` = 10.19:1, dark IC `#F2C75E`
-        /// + `#171104` higher; light `#825E0F` + white = 5.90:1, light IC
-        /// `#64480C` + white = 8.49:1. SUBTLE: dark `#B99B53` + `#171104` =
-        /// 6.96:1; light `#79683F` + white = 5.43:1, light IC `#584C2E` + white
-        /// = 8.44:1.
-        public static var goldCTAInk: NSColor {
-            warmDynamic(name: "goldCTAInk", dark: 0x171104, darkHighContrast: 0x171104,
-                       light: 0xFFFFFF, lightHighContrast: 0xFFFFFF)
         }
 
         /// The **dark/empty socket** an unlit instrument rests in. Two

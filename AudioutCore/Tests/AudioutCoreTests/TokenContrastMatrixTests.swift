@@ -188,18 +188,12 @@ extension SerializedSharedState {
                          groundsFor: sameGrounds(textGrounds)),
             ContrastEntry(name: "emberText", token: Tokens.Color.emberText, floor: 4.5,
                          groundsFor: sameGrounds(textGrounds)),
-            // A gold-value fill's dark ink — the alignment wizard's primary
-            // plates (which pin gold's DARK value in both appearances). The
-            // prominent button moved OFF this pairing to `goldCTAInk`/`goldText`
-            // below; nothing measures either at runtime, so the floor is held here.
+            // The ink of every gold-filled call to action — the prominent button
+            // and the alignment wizard's primary plates, both of which pin gold
+            // and this ink to their DARK values in both appearances. Nothing
+            // measures this at runtime, so the floor is held here.
             ContrastEntry(name: "inkOnFill", token: Tokens.Color.inkOnFill, floor: 4.5,
                          groundsFor: sameGrounds([("gold", Tokens.Color.gold)])),
-            // The prominent button's key-window ink, over its CTA fill
-            // (`goldText`'s deep values, read as a fill). This pairing replaced
-            // inkOnFill/gold to clear 4.5:1 with real margin in light (5.90:1)
-            // where the `.rounded` bezel gradient ate the former 4.94:1 nominal.
-            ContrastEntry(name: "goldCTAInk", token: Tokens.Color.goldCTAInk, floor: 4.5,
-                         groundsFor: sameGrounds([("goldText-as-CTA-fill", Tokens.Color.goldText)])),
             // NON-TEXT, floor 3.0:1
             ContrastEntry(name: "failure", token: Tokens.Color.failure, floor: 3.0,
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised)])),

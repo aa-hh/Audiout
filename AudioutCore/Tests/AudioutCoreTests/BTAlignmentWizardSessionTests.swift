@@ -874,5 +874,54 @@ extension SerializedSharedState {
             #expect(lines[0].contains("\"answers\""), "\(lines[0])")
             #expect(lines[1].contains("\"accepted\":\"true\""), "\(lines[1])")
         }
+
+        /// Collects the `Analytics.capture` calls a run makes.
+        private final class AnalyticsCapture: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [(String, [String: String])] = []
+            func append(_ name: String, _ props: [String: String]) {
+                lock.withLock { items.append((name, props)) }
+            }
+            /// Filtered to `bt_sync:` because the sink is process-global and
+            /// other suites capture events of their own.
+            func btSyncEvents() -> [(String, [String: String])] {
+                lock.withLock { items.filter { $0.0.hasPrefix("bt_sync:") } }
+            }
+        }
+
+        /// The three mic-measurement events, in order, with the exact names
+        /// and properties `docs/analytics-events.md` promises. Reddens on any
+        /// event name or property string drifting from that table, or a
+        /// capture moving off its screen edge.
+        @Test func micEventsFireAtTheirScreenEdges() {
+            let captured = AnalyticsCapture()
+            Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             captureError: { _, _ in },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+
+            let recorder = Recorder()
+            let session = recorder.makeSession(targetIsBluetooth: true)
+            session.requestListening = { $0(true) }
+            session.start()
+            session.offerMeasuredProposal(valueMs: 300)
+            session.rejectProposal()
+            session.endListening()
+            session.cancel()
+
+            let events = captured.btSyncEvents()
+            guard events.count == 4 else {
+                Issue.record("expected 4 bt_sync events, got \(events)")
+                return
+            }
+            #expect(events[0].0 == "bt_sync:mic_permission_answered")
+            #expect(events[0].1 == ["granted": "true"])
+            #expect(events[1].0 == "bt_sync:listening_ended")
+            #expect(events[1].1 == ["outcome": "measured", "attempt": "1"])
+            #expect(events[2].0 == "bt_sync:mic_retried")
+            #expect(events[2].1 == [:])
+            #expect(events[3].0 == "bt_sync:listening_ended")
+            #expect(events[3].1 == ["outcome": "failed", "attempt": "2"])
+        }
     }
 }

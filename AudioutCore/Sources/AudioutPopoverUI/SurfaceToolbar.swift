@@ -410,7 +410,13 @@ extension SurfaceToolbarController: NSToolbarDelegate {
                 tabButtons[screen] = button
                 return button
             }
-            item.view = SurfaceToolbarTabCapsule(tabs: buttons)
+            let capsule = SurfaceToolbarTabCapsule(tabs: buttons)
+            item.view = capsule
+            // The capsule tells the item how wide it has become on every tick
+            // of a reveal; without that the container keeps its collapsed
+            // width and the opened tab takes no clicks past that edge.
+            capsule.sizingItem = item
+            capsule.publishWidthToItem()
             // Navigation cannot live behind the overflow chevron.
             item.visibilityPriority = .high
             tabsItem = item

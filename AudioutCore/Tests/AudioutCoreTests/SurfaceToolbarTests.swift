@@ -997,3 +997,58 @@ import AudioutSharedUI
         #expect(controller.test_pinItemLabel == "Pin")
     }
 }
+
+/// A revealed name grows the tab's DRAWN seat, so the whole of it must take
+/// clicks. It did not: the reveal laid out only the capsule's own subtree, so
+/// the toolbar's item container kept its collapsed width and AppKit stopped
+/// hit-testing at that stale edge — the letters were drawn outside it and the
+/// clicks fell through.
+@MainActor
+@Suite struct SurfaceToolbarRevealedTabHitArea {
+
+    @Test func aClickAtTheFarEdgeOfAnOpenTabSelectsIt() {
+        let controller = SurfaceToolbarController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 400),
+                              styleMask: [.titled, .closable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        controller.attach(to: window)
+        window.layoutIfNeeded()
+
+        // Ordered in and given real runloop turns, because a live strip gets
+        // AppKit's own toolbar layout passes after the reveal and the bug is
+        // about what those passes leave behind.
+        window.orderFront(nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        controller.setSelectedScreen(.settings)
+        FoldAnimator.shared.test_settleNow()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+        guard let tab = controller.test_tabButton(.settings),
+              let capsule = controller.test_tabCapsule,
+              let container = capsule.superview,
+              let strip = container.superview else {
+            Issue.record("the strip has no Settings tab in a window")
+            return
+        }
+        // The toolbar's own container for the tabs item — the level whose
+        // stale width used to swallow the clicks. Hit-tested from there, so a
+        // neighbouring item overlapping it cannot decide the result.
+        let farEdge = NSPoint(x: tab.bounds.maxX - 2, y: tab.bounds.midY)
+        // `hitTest` takes a point in the receiver's SUPERVIEW coordinates.
+        let hit = container.hitTest(tab.convert(farEdge, to: strip))
+        #expect(hit === tab,
+                Comment(rawValue: "the last drawn point of the open tab must be the tab itself — got \(String(describing: hit))"))
+        // And the container the toolbar hit-tests through is wide enough for
+        // everything the capsule draws. This is the number that went stale.
+        #expect(container.frame.width >= capsule.fittingSize.width,
+                Comment(rawValue: "the tabs item's container is \(container.frame.width) pt around a \(capsule.fittingSize.width) pt capsule"))
+        // And nothing the capsule holds is drawn outside the pill: a tab
+        // hanging past that edge is drawn where AppKit no longer hit-tests it.
+        for screen in SurfaceScreen.allCases {
+            guard let seat = controller.test_tabButton(screen) else { continue }
+            let inCapsule = seat.convert(seat.bounds, to: capsule)
+            #expect(capsule.bounds.contains(inCapsule),
+                    Comment(rawValue: "\(screen.label) is drawn at \(inCapsule) inside a \(capsule.bounds) capsule"))
+        }
+    }
+}

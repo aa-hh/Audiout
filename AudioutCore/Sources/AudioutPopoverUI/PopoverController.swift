@@ -478,6 +478,15 @@ public final class PopoverController: NSObject {
     /// prompt when it is still undecided). Overridden in tests so no suite
     /// ever raises a real prompt.
     var ensureMicPermission: (@escaping (Bool) -> Void) -> Void = MicCapturePermission.ensure
+    /// Whether Start is about to raise the system mic prompt. Overridden in
+    /// tests so a listening run reads deterministically either way.
+    var micPermissionIsUndecided: () -> Bool = { MicCapturePermission.isUndecided }
+    /// The system mic prompt is about to be raised (`true`) or its answer has
+    /// landed (`false`). The host suspends and restores the shell's tuck-away.
+    var onMicPromptInFlightChanged: ((Bool) -> Void)?
+    /// The mic prompt's answer landed and the run that asked is still live.
+    /// The host brings the app back to front.
+    var onMicPromptAnswered: (() -> Void)?
     /// The probe itself, so a test can hand the run a silent recorder.
     var makeMicProbe: () -> MicProbeSession = { MicProbeSession() }
 
@@ -5160,14 +5169,21 @@ extension PopoverController: DeviceRowView.Delegate {
         // Start asks for the mic before the run begins, and the session shows
         // the listening screen only on a grant. `proceed` switches the tick on
         // synchronously, so the probe is staged AFTER it — the sweeps need the
-        // wizard feed already running.
+        // wizard feed already running. A real (undecided) ask goes quiet like
+        // Setup's prompt and is brought back on the answer only while this run
+        // is still the live one.
         if onStageBTMicProbe != nil {
             session.requestListening = { [weak self, weak session] proceed in
                 guard let self else { return proceed(false) }
+                let prompted = self.micPermissionIsUndecided()
+                if prompted { self.onMicPromptInFlightChanged?(true) }
                 self.ensureMicPermission { [weak self, weak session] granted in
+                    if prompted { self?.onMicPromptInFlightChanged?(false) }
                     proceed(granted)
-                    guard granted, let self, let session,
+                    guard let self, let session,
                           self.btWizardSession === session else { return }
+                    if prompted { self.onMicPromptAnswered?() }
+                    guard granted else { return }
                     self.startBTWizardMicProbe(deviceID: deviceID)
                 }
             }

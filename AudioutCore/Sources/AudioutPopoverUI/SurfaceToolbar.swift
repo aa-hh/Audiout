@@ -192,6 +192,7 @@ final class SurfaceToolbarController: NSObject {
     func setPinned(_ pinned: Bool) {
         isPinned = pinned
         applyPinAppearance()
+        (tabsItem?.view as? SurfaceToolbarTabCapsule)?.alignLeadingEdgeForOlderMacOS()
     }
 
     /// Mark the current screen on the tabs themselves — the seat they draw and

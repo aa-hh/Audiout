@@ -34,6 +34,11 @@ public final class BTAlignmentWizardSession {
 
     public enum Screen: Equatable {
         case intro
+        /// The mic probe is running: the Mac is listening to both speakers
+        /// before it asks the user anything. `isRealignment` is true when the
+        /// run opened with a stored value, which the measurement is about to
+        /// replace.
+        case listening(isRealignment: Bool)
         /// `progress` feeds the narrowing indicator, `credibleIntervalMs` the
         /// confidence line (already in VALUE space — the panel never does the
         /// sign conversion), and `answersSoFar` gates Back. The candidate ms
@@ -107,7 +112,28 @@ public final class BTAlignmentWizardSession {
     /// Repainted on every transition (also fired by ``start()``).
     public var onScreenChange: ((Screen) -> Void)?
 
+    /// Asks the host to get the microphone ready — the system prompt when the
+    /// permission is undecided — and answers whether the run may listen.
+    /// `nil` means this host has no probe to run at all.
+    public var requestListening: ((_ proceed: @escaping (Bool) -> Void) -> Void)?
+
+    /// Whether a listening pass is even on the table: a host that can run the
+    /// probe, and two speakers making DIFFERENT sounds for it to tell apart.
+    public var listeningIsPossible: Bool { requestListening != nil && pairSoundsDiffer }
+
+    /// Whether the proposal on screen is the stored value from a previous run,
+    /// recalled rather than measured or earned — the one case the panel asks
+    /// "still right?" instead of naming a fresh result.
+    public var proposalIsRecalled: Bool {
+        guard case .proposal = screen else { return false }
+        return estimator.openingProposalStands
+    }
+
     public private(set) var screen: Screen = .intro
+
+    /// Set between ``start()`` and the host's permission answer, so a second
+    /// Start does nothing and a ``cancel()`` in between voids the answer.
+    private var startPending = false
 
     /// The wizard's wide tempo and its close-quarters one. A run that is still
     /// hundreds of milliseconds wide walks an unknown 150–700 ms Bluetooth
@@ -178,12 +204,14 @@ public final class BTAlignmentWizardSession {
     ///     every candidate is relative to, and what cancel restores.
     ///   - candidateRangeMs: the values a candidate may actually take.
     ///   - invertsEstimate: see ``invertsEstimate``.
-    ///   - openingProposalMs: a value to open the run's PROPOSAL on instead of
-    ///     the first question — the zero-click path for a device that has been
-    ///     measured before. Deliberately NOT kept: ``tryAgain()`` means "that
-    ///     value was wrong", so re-offering it would be the one useless thing
-    ///     a restart could do. A mic measurement landing before the user has
-    ///     judged it (``offerMeasuredProposal(valueMs:)``) replaces it.
+    ///   - openingProposalMs: the stored value from a previous run. A run
+    ///     that can listen measures over it and never shows it; it is RECALLED
+    ///     as the opening proposal only when listening never starts (no probe,
+    ///     or the mic refused). Deliberately NOT kept across a restart:
+    ///     ``tryAgain()`` means "that value was wrong", so re-offering it would
+    ///     be the one useless thing a restart could do. A mic measurement
+    ///     landing before the user has judged it
+    ///     (``offerMeasuredProposal(valueMs:)``) replaces it.
     ///   - applyPreviewTrim: live, non-persisting trim push (absolute ms),
     ///     carrying the belief's current half-width for the run's telemetry.
     ///   - endPreview: commit (`keepMs`) or restore (`nil`) — see
@@ -278,22 +306,60 @@ public final class BTAlignmentWizardSession {
         case .question:
             estimator = makeEstimator()
             presentEstimatorPhase()
-        case .proposal, .kept, .unsettled, .unreachable, .macIsLate:
+        case .listening, .proposal, .kept, .unsettled, .unreachable, .macIsLate:
             break
         }
     }
 
-    /// Intro's Start: tick on (the wake preamble runs while the first
-    /// question renders), first candidate applied. Refused without a
-    /// reference — there would be nothing to compare the target against.
-    /// A run carrying an opening proposal goes straight to it: the device has
-    /// been measured before, so the honest first question is "still right?".
+    /// Intro's Start: the mic permission is asked for here, because the intro
+    /// is where the panel said the Mac would listen. Granted, the run opens on
+    /// ``Screen/listening(isRealignment:)`` and the probe measures before
+    /// anyone is asked anything; refused (or impossible), it opens the way it
+    /// always did. Refused outright without a reference — there would be
+    /// nothing to compare the target against.
+    ///
+    /// A run carrying an opening proposal that cannot listen goes straight to
+    /// it: the device has been measured before, so the honest first question
+    /// is "still right?".
     public func start() {
-        guard case .intro = screen, !ended, reference != nil else { return }
+        guard case .intro = screen, !ended, !startPending, reference != nil else { return }
+        guard listeningIsPossible, let requestListening else {
+            beginRun(listening: false)
+            return
+        }
+        startPending = true
+        requestListening { [weak self] granted in
+            guard let self, self.startPending, !self.ended else { return }
+            self.startPending = false
+            self.beginRun(listening: granted)
+        }
+    }
+
+    /// The tick gate goes on either way: the backend plays the probe's sweeps
+    /// in place of the first ticks and re-arms the ticks itself afterwards.
+    private func beginRun(listening: Bool) {
         // A fresh injector comes up with a fresh beat clock, so whatever tempo
         // the session pushed before is void.
         lastTempoBPM = nil
         setTick(true)
+        guard listening else {
+            presentEstimatorPhase()
+            return
+        }
+        // The probe measures against whatever the device is playing at, so the
+        // base value is what has to be on the wire while the sweeps run.
+        applyPreviewTrim(baseValueMs, nil)
+        transition(to: .listening(isRealignment: estimator.openingProposalStands))
+    }
+
+    /// The probe is over — it landed (``offerMeasuredProposal(valueMs:)``
+    /// already moved the run on) or it failed. A failed listen on a
+    /// REALIGNMENT drops the stored value rather than proposing it: the mic
+    /// just tried and could not confirm it, so asking "still right?" would be
+    /// leaning on the one thing that was checked and not confirmed.
+    public func endListening() {
+        guard case .listening = screen, !ended else { return }
+        if estimator.openingProposalStands { estimator = makeEstimator() }
         presentEstimatorPhase()
     }
 
@@ -318,7 +384,7 @@ public final class BTAlignmentWizardSession {
     public func offerMeasuredProposal(valueMs: Double) {
         guard !ended else { return }
         switch screen {
-        case .question:
+        case .question, .listening:
             break
         case .proposal:
             guard estimator.openingProposalStands else { return }
@@ -366,7 +432,8 @@ public final class BTAlignmentWizardSession {
     }
 
     /// The proposal's "Still off": the run takes the correction and goes back
-    /// to questions, or bows out if this was the second time.
+    /// to the questions, every time. Only the estimator's own stop rules end a
+    /// run.
     public func rejectProposal() {
         guard case .proposal(let valueMs) = screen, !ended else { return }
         logProposal(valueMs: valueMs, accepted: false)
@@ -381,7 +448,7 @@ public final class BTAlignmentWizardSession {
     public func tryAgain() {
         switch screen {
         case .proposal, .unsettled, .unreachable, .macIsLate: break
-        case .intro, .question, .kept: return
+        case .intro, .listening, .question, .kept: return
         }
         if ended {
             // A bow-out already restored the prior value and silenced the tick;
@@ -502,7 +569,7 @@ public final class BTAlignmentWizardSession {
         // being PRESENTED — never between a level and its answer, or the user
         // would be judging one thing and answering about another.
         switch newScreen {
-        case .question, .proposal:
+        case .question, .proposal, .listening:
             let bpm = estimator.credibleHalfWidthMs > Self.fineTempoHalfWidthMs
                 ? Self.searchTickBPM : Self.blocksTickBPM
             if lastTempoBPM != bpm {

@@ -27,6 +27,10 @@ import QuartzCore
 /// mask at the halo's edge, a ramp built from the light's own token colour —
 /// are the sanctioned ones; no shared knob deviates.
 ///
+/// The field IS the light — no outline ring is drawn above it on any rung —
+/// and two sources that share a `variant` run identical maths, which is how
+/// the target and the reference read as ONE light once they have fused.
+///
 /// `make()` returns `nil` headless or without a GPU, and the stage then keeps
 /// its bitmap halo: a snapshot never depends on a per-frame clock.
 final class SettledLightLayer: CAMetalLayer {
@@ -37,6 +41,9 @@ final class SettledLightLayer: CAMetalLayer {
         /// Half the halo box's width — the field's unit radius.
         var radius: CGFloat
         var opacity: Float
+        /// 0 or 1: the seed/density/breathe-rate family this source belongs
+        /// to; two lights at the same value run identical maths.
+        var variant: Float
         /// The light's colour, linear-ish sRGB components.
         var color: SIMD3<Float>
     }
@@ -47,10 +54,109 @@ final class SettledLightLayer: CAMetalLayer {
     static let timeOrigin: CFTimeInterval = 40
     /// An occlusion or a stalled run loop must not teleport the field.
     private static let maxFrameStep: CFTimeInterval = 0.1
-    /// Where the containment mask fades a source to nothing, in units of the
-    /// light's radius: the halo box's own edge, so the field occupies exactly
-    /// the footprint the bitmap halo did. PER-SURFACE.
-    static let reach: Double = 1.0
+    /// How far the distance is scaled down before it enters the shared ring
+    /// formula — the sanctioned per-surface `size` knob, as a constant here.
+    /// PER-SURFACE.
+    ///
+    /// A light on this stage is 46–106 pt across; at the shared density
+    /// (`densBase` 17 per unit radius) three or four crests fell inside one
+    /// halo and the owner read them as faint ripples instead of one ring.
+    /// Scaling distance puts exactly ONE crest in the mask.
+    ///
+    /// The arithmetic, variant 0 (`seed` = 1.7, `dens` = 17): a crest is
+    /// where `sin(r*dens + seed) = 1`, i.e. `r*17 + 1.7 = π/2 + 2πn`. The
+    /// first crest with a positive radius is n = 1, at scaled r =
+    /// (π/2 + 2π − 1.7)/17 = 0.3620. The owner wanted the ring 10 % smaller,
+    /// so it now lands at 0.558 of the halo radius (0.90 × the former 0.62):
+    /// 0.3620 / 0.558 = 0.6488, the former 0.5839 raised by 1/0.9. The next
+    /// crest (n = 2) sits at scaled 0.7316, which `reach` masks away.
+    static let crestScale: Double = 0.6488
+    /// Where the containment mask fades a source to nothing, in the SCALED
+    /// units above. At the former 0.62 variant 1's next crest (scaled 0.6295)
+    /// poked a faint second ring through the fade tail; 0.58 pulls the edge
+    /// inside it so exactly ONE crest survives per light — variant 0's kept
+    /// crest is at scaled 0.3620, variant 1's at 0.3153, and both next crests
+    /// (0.7316 and 0.6295) are past 0.58. The fade starts at 0.55 * 0.58 =
+    /// 0.319, so the crest peaks pass near full while the outward-rolled lobe
+    /// dims as it reaches the edge. In halo radii the edge is 0.58/0.6488 =
+    /// 0.894. PER-SURFACE.
+    static let reach: Double = 0.58
+    /// How much the light is scaled before the tone curve. The curve was
+    /// tuned for a WASH sitting under a crisp outline ring; with the ring
+    /// gone the field is the whole light, so it has to reach the brightness
+    /// that stroke used to carry. The shared `gain` and `sharp` are untouched;
+    /// brightness is bought here and in the rung's opacity only.
+    ///
+    /// Re-solved 8.19 → 8.2543 when the owner cut `rollDamp` 0.16 → 0.10 from a
+    /// live preview. The roll's inward excursion is what pulls one side of the
+    /// crest to a smaller radius, where the `exp(-r*fade)` falloff is larger and
+    /// the crest flares brightest; a smaller roll amplitude shrinks that
+    /// excursion, so the crest peak sits nearer its nominal radius and the
+    /// pre-tone maximum drops (variant 0: 0.4162 → 0.4104). 8.2543 lifts variant
+    /// 0's post-tone crest peak back to the same pre-calm target 0.9769 it was
+    /// pinned to before; variant 1 lands at ~0.9847, nowhere near full white (no
+    /// pixel clips at any angle or time even with the dither grain added), so no
+    /// wash-out and no mask nudge is needed. `rollRateScale`/`curlSlow` change
+    /// only how fast the lobe and curl move, not the static peak, so they do not
+    /// enter this solve. The shared `gain` and `sharp` are untouched; brightness
+    /// is bought here and in the rung's opacity only. PER-SURFACE.
+    static let exposure: Double = 8.2543
+    /// Narrows the ring band. After the shared `pow(0.5+0.5*sin(…), sharp)`
+    /// crest is formed, it is raised to this power (> 1), which multiplies the
+    /// effective sharpness (`sharp * bandNarrow`) and so shrinks the crest's
+    /// half-width WITHOUT moving its peak or its radius. The shared `sharp`
+    /// is a brand knob and stays 4.0; the owner wanted a thinner stroke, not
+    /// a fat glow. 2.1 takes the crest's full-width-at-half-maximum to
+    /// ~0.70 × its former width in scaled units (~0.62 × on screen once the
+    /// 10 % shrink is folded in). PER-SURFACE.
+    static let bandNarrow: Double = 2.1
+    /// How far the roll lobe's brightness swing is cut on this stage, a
+    /// fraction of the shared `settled.rollAmp`. PER-SURFACE.
+    ///
+    /// The hero's settled state rolls a compression lobe around the ring so it
+    /// reads as alive. On this small stage light, once the centre is pinned to
+    /// the wire, that orbiting lobe read as the light still moving after it had
+    /// landed. Damping both roll cosine amplitudes to 0.10 of the shared value
+    /// drops the on-ring brightness variation to a faint shimmer — small but
+    /// nonzero, so a trace of the settled character stays. The shared
+    /// `settled.rollAmp`/`rollRate` are untouched (brand knobs the hero uses);
+    /// this surface only scales them where they enter the shader. Cut 0.16 →
+    /// 0.10 by the owner from a live preview; `exposure` was re-solved to hold
+    /// the crest peak (see there).
+    static let rollDamp: Double = 0.10
+    /// How much faster the roll lobe orbits than the shared `settled.rollRate`,
+    /// as a multiplier applied where the rate enters BOTH roll cosine terms.
+    /// PER-SURFACE.
+    ///
+    /// The hero's orbit pace read a touch slow on this small pinned light, so
+    /// the owner tuned it up from a live preview. The shared `settled.rollRate`
+    /// is untouched (a brand knob the hero uses); this surface only scales it
+    /// where it enters the shader. Changes the lobe's SPEED, not the static
+    /// crest peak, so it plays no part in the `exposure` solve.
+    static let rollRateScale: Double = 1.35
+    /// How much the curl's roll-over is slowed on this stage, a fraction of the
+    /// shared `settled.curlRate`'s speed. PER-SURFACE.
+    ///
+    /// Same reason as `rollDamp`: the settled crest rolling over itself read as
+    /// motion after the light had settled. Multiplying the curl's TIME rate by
+    /// 0.70 makes the roll-over slow and gentle while keeping it present. The
+    /// crest's wobble amplitude (`settled.curlAmp`, 0.15 rad) is already small,
+    /// so it is left at the shared value — only the speed is cut. Raised 0.40 →
+    /// 0.70 by the owner from a live preview; a speed knob, so it does not
+    /// affect the `exposure` solve.
+    static let curlSlow: Double = 0.70
+    /// The centre-core mask, symmetric to `cap` at the other end: the light
+    /// fades to zero BELOW the crest so no bright blob sits at r = 0. The core
+    /// is the ring function's crest nearest r = 0 — at variant 0
+    /// `sin(seed) = sin(1.7) = 0.99`, so rings is near its max at the centre
+    /// before the first real crest. `sin(r*dens + seed)` reaches its dark gap
+    /// at scaled r = 0.177 (variant 0) and 0.158 (variant 1), so the mask is
+    /// fully 0 up to `innerReach0` = 0.16 (clearing both cores) and fully 1 by
+    /// `innerReach1` = 0.24 — short of both kept crests (0.3153, 0.3620) with
+    /// room for the roll pulling a crest inward. Scaled units, so the 10 %
+    /// shrink leaves the pair untouched. PER-SURFACE.
+    static let innerReach0: Double = 0.16
+    static let innerReach1: Double = 0.24
 
     private let pipeline: MTLRenderPipelineState
     private let commandQueue: MTLCommandQueue
@@ -155,6 +261,7 @@ final class SettledLightLayer: CAMetalLayer {
         var centre1: SIMD2<Float>
         var radius: SIMD2<Float>
         var opacity: SIMD2<Float>
+        var variant: SIMD2<Float>
         var color0: SIMD3<Float>
         var color1: SIMD3<Float>
     }
@@ -164,8 +271,10 @@ final class SettledLightLayer: CAMetalLayer {
         func px(_ p: CGPoint) -> SIMD2<Float> {
             SIMD2(Float(p.x) * scale, Float(p.y) * scale)
         }
-        let a = lights.count > 0 ? lights[0] : Light(centre: .zero, radius: 1, opacity: 0, color: .zero)
-        let b = lights.count > 1 ? lights[1] : Light(centre: .zero, radius: 1, opacity: 0, color: .zero)
+        let a = lights.count > 0 ? lights[0]
+            : Light(centre: .zero, radius: 1, opacity: 0, variant: 0, color: .zero)
+        let b = lights.count > 1 ? lights[1]
+            : Light(centre: .zero, radius: 1, opacity: 0, variant: 0, color: .zero)
         return Uniforms(
             resolution: SIMD2(Float(drawableSize.width), Float(drawableSize.height)),
             // `timeScale` multiplies the clock ONCE, here — never folded into
@@ -175,6 +284,7 @@ final class SettledLightLayer: CAMetalLayer {
             centre0: px(a.centre), centre1: px(b.centre),
             radius: SIMD2(Float(max(a.radius, 1)) * scale, Float(max(b.radius, 1)) * scale),
             opacity: SIMD2(a.opacity, b.opacity),
+            variant: SIMD2(a.variant, b.variant),
             color0: a.color, color1: b.color)
     }
 
@@ -204,6 +314,7 @@ final class SettledLightLayer: CAMetalLayer {
         float2 centre1;
         float2 radius;
         float2 opacity;
+        float2 variant;
         float3 color0;
         float3 color1;
     };
@@ -223,35 +334,61 @@ final class SettledLightLayer: CAMetalLayer {
     }
 
     /// One settled source at `c` with unit radius `radius`, in pixels.
-    static float source(float2 frag, float2 c, float radius, float t, float k) {
-        float seed = k * 6.13 + 1.7;
-        // Step 1 — orbit, at the settled (smaller) radius.
+    static float source(float2 frag, float2 c, float radius, float t, float variant) {
+        float seed = variant * 6.13 + 1.7;
+        // Step 1 — orbit: PER-SURFACE, NOT APPLIED. The hero lets each source
+        // roam on the shared `settled.orbit` so it never sits still, but this
+        // stage pins every light to a wire position it animates ITSELF
+        // (`AlignmentStageView` slides the lights along the interval and lands
+        // them on the detents), so the field adding its own centre drift on top
+        // would read as the light jittering off its mark. The light sits
+        // exactly at `Light.centre` — `dv = uv`, no centre offset. The shared
+        // `settled.orbit` is untouched in the JSON (a brand knob the hero
+        // uses); this surface simply does not consume it.
         float2 uv = (frag - c) / radius;
-        float2 centre = \(msl(s.orbit)) * float2(sin(t * 0.030 + seed), cos(t * 0.026 + seed * 1.7));
-        float2 dv = uv - centre;
+        float2 dv = uv;
         // Step 2 — squash: the wavefronts read as slight ovals.
         float r = length(dv * float2(1.0, \(msl(d.squash))));
+        // PER-SURFACE: one crest per light. Distance is scaled before it
+        // reaches the shared ring maths, so the first crest lands at 0.62 of
+        // the halo radius and the second falls outside `reach`.
+        r *= \(msl(crestScale));
         float th = atan2(dv.y, dv.x);
         // Lobe and curl both fade to zero inside `taper`, so the innermost
         // ring can never fold into itself (load-bearing — see the brief).
         float taperF = smoothstep(0.0, \(msl(s.taper)), r);
         // Steps 3–4, settled: an oval compression lobe orbits the source …
-        float roll = (\(msl(s.rollAmp)) * cos(th - t * \(msl(s.rollRate)) - seed)
-                   + \(msl(s.rollAmp)) * 0.35 * cos(2.0 * th + t * \(msl(s.rollRate)) * 0.61 + seed * 1.3))
+        // PER-SURFACE `rollDamp`: on this stage light the orbiting lobe read
+        // as the light still moving after the centre was pinned, so both roll
+        // cosine amplitudes are damped to a faint shimmer (shared rollAmp/
+        // rollRate untouched, only scaled here). PER-SURFACE `rollRateScale`:
+        // the shared rollRate is sped up by 1.35 in both terms — the hero's
+        // orbit pace read a touch slow on this small pinned light.
+        float roll = \(msl(rollDamp)) * (\(msl(s.rollAmp)) * cos(th - t * \(msl(s.rollRate)) * \(msl(rollRateScale)) - seed)
+                   + \(msl(s.rollAmp)) * 0.35 * cos(2.0 * th + t * \(msl(s.rollRate)) * \(msl(rollRateScale)) * 0.61 + seed * 1.3))
                    * taperF;
-        float dens = \(msl(d.densBase)) + \(msl(d.densStep)) * k;
+        float dens = \(msl(d.densBase)) + \(msl(d.densStep)) * variant;
         float ph = r * dens + seed - roll;      // no -t*speed: nothing travels outward
         // … and each crest rolls over itself in place (never around the rim).
-        float ph2 = ph + \(msl(s.curlAmp)) * sin(ph - t * \(msl(s.curlRate))) * taperF;
+        // PER-SURFACE `curlSlow`: the same settled roll-over read as motion
+        // after the light had landed, so the curl's TIME rate is slowed to a
+        // gentle drift (shared curlAmp/curlRate untouched, only the speed cut).
+        float ph2 = ph + \(msl(s.curlAmp)) * sin(ph - t * \(msl(s.curlRate)) * \(msl(curlSlow))) * taperF;
         float rings = pow(0.5 + 0.5 * sin(ph2), \(msl(d.sharp)));
+        // PER-SURFACE: narrow the crest band. Raising rings to a power > 1
+        // multiplies the effective sharpness, shrinking the band's half-width
+        // without moving its peak or radius — the shared `sharp` stays 4.0.
+        rings = pow(rings, \(msl(bandNarrow)));
         // Step 5 — falloff.
         float fall = exp(-r * \(msl(d.fade)));
         // Step 6 — the settled breath: brightness holds nearly steady.
         float swell = \(msl(s.breatheFloor)) + \(msl(s.breatheDepth))
-                    * (0.5 + 0.5 * sin(t * (\(msl(d.breatheRate)) + \(msl(d.breatheStep)) * k) + seed * 2.3));
-        // PER-SURFACE: contain the source at its halo's edge.
+                    * (0.5 + 0.5 * sin(t * (\(msl(d.breatheRate)) + \(msl(d.breatheStep)) * variant) + seed * 2.3));
+        // PER-SURFACE: contain the source at its halo's edge (one crest), and
+        // clear the centre core below the crest.
         float cap = 1.0 - sstep(0.55 * \(msl(reach)), \(msl(reach)), r);
-        return rings * fall * swell * cap * \(msl(d.gain));
+        float inner = sstep(\(msl(innerReach0)), \(msl(innerReach1)), r);
+        return rings * fall * swell * cap * inner * \(msl(d.gain));
     }
 
     fragment float4 settled_light_fragment(float4 position [[position]],
@@ -263,10 +400,11 @@ final class SettledLightLayer: CAMetalLayer {
         float2 centres[2] = { u.centre0, u.centre1 };
         float3 colors[2] = { u.color0, u.color1 };
         for (int k = 0; k < 2; ++k) {
-            float light = source(frag, centres[k], u.radius[k], u.time, float(k));
+            float light = source(frag, centres[k], u.radius[k], u.time, u.variant[k]);
             // The site's tone curve, then the light's own colour at that
             // intensity — the halo's job, now with structure in it.
-            float l = pow(1.0 - exp(-light * 1.2), 1.35) * u.opacity[k];
+            // PER-SURFACE `exposure`: the field is the whole light here.
+            float l = pow(1.0 - exp(-light * \(msl(exposure)) * 1.2), 1.35) * u.opacity[k];
             col += colors[k] * l;
             alpha += l;
         }

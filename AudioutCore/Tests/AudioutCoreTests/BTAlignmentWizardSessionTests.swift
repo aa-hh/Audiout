@@ -522,6 +522,88 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         session.cancel()
     }
 
+    // MARK: Listening
+
+    /// The mic measurement had no screen: the run opened straight on the
+    /// questions while the probe ran underneath it.
+    @Test func startListensWhenTheHostGrantsTheMic() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(recorder.ticks == [true])
+        #expect(recorder.previews == [0], "the probe measures at the stored value")
+
+        session.offerMeasuredProposal(valueMs: 300)
+        #expect(session.screen == .proposal(valueMs: 300), "got \(session.screen)")
+        #expect(session.proposalIsRecalled == false, "measured, not recalled")
+        session.cancel()
+    }
+
+    /// A host that cannot listen still gets the zero-click path — and the
+    /// panel has to be able to tell that proposal apart from a measured one,
+    /// which it could not while the flag outlived the rejection.
+    @Test func aRealignmentWithoutTheMicShowsTheRecalledProposal() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 244,
+                                           candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           openingProposalMs: 244,
+                                           targetIsBluetooth: true)
+        session.requestListening = { $0(false) }
+        session.start()
+        #expect(session.screen == .proposal(valueMs: 244), "got \(session.screen)")
+        #expect(session.proposalIsRecalled, "the stored value, unjudged")
+
+        session.rejectProposal()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        #expect(session.proposalIsRecalled == false)
+        session.cancel()
+    }
+
+    /// The mic tried and could not confirm the stored value, so proposing it
+    /// anyway would lean on the one thing that was just checked and failed.
+    @Test func aFailedListenOnARealignmentGoesToTheQuestions() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 244,
+                                           candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           openingProposalMs: 244,
+                                           targetIsBluetooth: true)
+        session.requestListening = { $0(true) }
+        session.start()
+        #expect(session.screen == .listening(isRealignment: true), "got \(session.screen)")
+
+        session.endListening()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        #expect(recorder.ends.isEmpty, "the run is still live")
+        #expect(recorder.ticks == [true])
+        session.cancel()
+    }
+
+    /// The permission prompt is modal and slow: closing the sheet under it
+    /// once let the grant come back and start the ticks on a dead run.
+    @Test func stopDuringThePermissionPromptNeverStartsTheRun() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        var proceed: ((Bool) -> Void)?
+        session.requestListening = { proceed = $0 }
+        session.start()
+        #expect(session.screen == .intro, "still waiting on the mic")
+
+        session.cancel()
+        proceed?(true)
+        #expect(session.screen == .intro, "got \(session.screen)")
+        #expect(recorder.ticks == [false], "no audio on a closed sheet")
+    }
+
     // MARK: Zero-click
 
     /// A speaker measured before opens on the PROPOSAL at its stored value —

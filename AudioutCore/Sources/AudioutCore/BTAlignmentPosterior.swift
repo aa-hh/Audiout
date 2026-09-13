@@ -124,8 +124,9 @@ struct BTAlignmentPosterior {
     static let minAnswersForUnreachable = 8
 
     /// ``Phase/unsettled``: the interval has to shrink by this much across
-    /// this many answers, nobody is asked more than ``maxAnswers``, and a
-    /// third rejected proposal ends the run wherever it stands.
+    /// this many answers, and nobody is asked more than ``maxAnswers``.
+    /// Rejecting a proposal never ends a run by itself, however many times it
+    /// happens — see ``rejectProposal()``.
     ///
     /// The shrink check gets two guards, one per false-positive mode it was
     /// measured producing (210 simulated runs, ~10% lapse listener). It never
@@ -135,20 +136,12 @@ struct BTAlignmentPosterior {
     /// interval is inside ``stagnationFloorMs``: near the finish line
     /// relative shrink slows for every listener (the crawl from ~13 ms of
     /// half-width down to the 8 ms stop), which is convergence, not noise.
-    /// ``maxAnswers`` and ``maxRejections`` stay the hard backstops.
+    /// ``maxAnswers`` is the hard backstop.
     static let stagnationWindow = 8
     static let stagnationShrinkFraction: Double = 0.2
     static let stagnationFloorMs: Double = 20
     static let minAnswersForStagnation = 16
     static let maxAnswers = 40
-
-    /// Three rejected proposals, not the two this shipped with. Measured, the
-    /// third one is free — no accuracy cost at all — and it HALVES the share of
-    /// runs that bow out `.unsettled` (5.6% → 2.9%, brief §3.5). That halving
-    /// is what pays for the looser ``proposeHalfWidthMs`` above: a slightly
-    /// looser stop proposes sooner, and the extra rejection is what a run gets
-    /// back if the sooner proposal was wrong. Do NOT put this back to 2.
-    static let maxRejections = 3
 
     /// How far outside the belief grid a presented level may sit, so the
     /// likelihood tables cover every residual that can ever be looked up.
@@ -185,7 +178,6 @@ struct BTAlignmentPosterior {
     /// The 95% half-width at the start and after each answer: the stagnation
     /// rule's ledger.
     private var halfWidths: [Double]
-    private var rejections = 0
     private let openingHalfWidthMs: Double
 
     private let targetLikelihoods: [Double]
@@ -353,19 +345,19 @@ struct BTAlignmentPosterior {
     }
 
     /// "Still off": the opposite evidence, which widens the belief around the
-    /// proposal and sends the run back to questions. ``maxRejections`` is
-    /// enough — one more proposal from the same answers would be the same
-    /// proposal.
+    /// proposal and sends the run back to the questions — however many times
+    /// it happens. A rejection is a correction, not a strike: the only thing
+    /// it can end is a run whose answer budget is already spent, which is
+    /// ``Phase/unsettled``'s own criterion.
     mutating func rejectProposal() {
         guard case .proposing(let valueMs) = phase else { return }
         foldFusedJudgment(atLevel: valueMs, fused: false)
-        rejections += 1
         openingProposalStands = false
         // The rejection is not an ANSWER, so it is not undoable: it becomes the
         // floor the next stretch of answers refolds from.
         baseBelief = belief
         history = []
-        if rejections >= Self.maxRejections {
+        if answerCount >= Self.maxAnswers {
             phase = .unsettled(bestGuessMs: medianMs)
         } else {
             phase = .asking(candidateMs: nextLevelMs())
@@ -564,6 +556,5 @@ struct BTAlignmentPosterior {
 
     var test_belief: [Double] { belief }
     var test_gridLowerMs: Int { gridLowerMs }
-    var test_rejections: Int { rejections }
     var test_openingHalfWidthMs: Double { openingHalfWidthMs }
 }

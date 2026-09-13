@@ -209,6 +209,27 @@ public final class BTAlignmentWizardView: NSView {
     /// sequence settles, over the proposal's own bare number.
     private static func keptReadout(valueMs: Int) -> String { "\(valueMs) ms · kept" }
 
+    // MARK: Copy awaiting the owner's eye (2026-09-13)
+
+    /// The intro's by-ear panel says the Mac listens before it asks anything,
+    /// so Start's mic prompt is expected rather than a surprise.
+    static let introMicLine = "This Mac listens through its built-in microphone first."
+    static let listeningReadout = "Listening…"
+    /// The listening screen, first alignment and realignment. The realign
+    /// variant says what is being checked, because the run already has a value.
+    static let listeningFirstCopy =
+        "This Mac’s microphone is picking up both speakers. "
+        + "Keep the room quiet for a few seconds."
+    static let listeningRealignCopy =
+        "This Mac’s microphone is checking the last alignment. "
+        + "Keep the room quiet for a few seconds."
+    /// A proposal RECALLED from a previous run, reached only when the mic
+    /// never listened — nothing was measured, so the number is a question.
+    static func recalledProposalCopy(valueMs: Int) -> String {
+        "Last time it was \(valueMs) ms. Still right?"
+    }
+    static func recalledReadout(valueMs: Int) -> String { "\(valueMs) ms · last time" }
+
     // MARK: Host seams
 
     /// The wizard finished (Done, Stop, or the window's ✕): the host closes the
@@ -726,6 +747,16 @@ public final class BTAlignmentWizardView: NSView {
                 "Align \(session.targetName). \(Self.remotePanelTitle): \(remoteInviteLine). "
                 + "\(Self.byEarPanelTitle): \(intro)")
 
+        case .listening(let isRealignment):
+            // The mic is doing the work, so the screen asks for nothing: no
+            // plates, no Undo, no click count — one line and the way out.
+            styleReadout(hero: false)
+            readout.stringValue = Self.listeningReadout
+            let copy = isRealignment ? Self.listeningRealignCopy : Self.listeningFirstCopy
+            addBody(copy)
+            addCornerRow(trailing: (Self.stopTitle, #selector(stopClicked(_:)), "ESC"))
+            setAccessibilityLabel(copy)
+
         case .question(_, let intervalMs, let answersSoFar):
             let referenceName = session.reference?.name ?? ""
             // The QUESTION is the headline; the rung is the stage's to decide
@@ -767,8 +798,13 @@ public final class BTAlignmentWizardView: NSView {
             // trim's ±500 ms and would be clamped into a lie.
             let wholeMs = Int(valueMs.rounded())
             styleReadout(hero: true)
-            readout.stringValue = "\(wholeMs) ms"
-            addBody(Self.proposalBody)
+            // A RECALLED value was never measured this run, so it is put as a
+            // question; an earned or measured one states its result.
+            let isRecalled = session.proposalIsRecalled
+            readout.stringValue = isRecalled
+                ? Self.recalledReadout(valueMs: wholeMs)
+                : "\(wholeMs) ms"
+            addBody(isRecalled ? Self.recalledProposalCopy(valueMs: wholeMs) : Self.proposalBody)
             addEdgePlateRow(
                 makePlate(Self.soundsRightTitle, keycap: "⏎", isPrimary: true,
                           action: #selector(acceptClicked(_:)), isDefault: true),
@@ -906,6 +942,7 @@ public final class BTAlignmentWizardView: NSView {
                                    range: ClosedRange<Double>) -> AlignmentStageView.State {
         switch screen {
         case .intro: return .armed(range: range)
+        case .listening: return .measuring(range: range)
         case .question(_, let intervalMs, _):
             return .question(intervalMs: intervalMs, range: range)
         case .proposal(let valueMs): return .listening(valueMs: valueMs, range: range)
@@ -949,7 +986,8 @@ public final class BTAlignmentWizardView: NSView {
         // The intro's title row shares the page with two panel headings, and
         // "About 15 clicks" belongs to one of them — so it rides the by-ear
         // panel and this slot stays empty until the run starts counting.
-        case .intro: clickCountLabel.stringValue = ""
+        // Nothing has been asked yet on either screen.
+        case .intro, .listening: clickCountLabel.stringValue = ""
         case .question(_, _, let answersSoFar):
             clickCountLabel.stringValue = Self.clickCountCopy(answersSoFar + 1)
         case .proposal, .kept, .unsettled, .unreachable, .macIsLate:
@@ -1003,7 +1041,7 @@ public final class BTAlignmentWizardView: NSView {
     /// behind it.
     private func applyReadoutHeight(for screen: BTAlignmentWizardSession.Screen) {
         switch screen {
-        case .question, .proposal, .kept:
+        case .listening, .question, .proposal, .kept:
             readoutHeightConstraint.constant = Self.readoutHeight
         case .intro, .unsettled, .unreachable, .macIsLate:
             readoutHeightConstraint.constant = 0
@@ -1068,6 +1106,9 @@ public final class BTAlignmentWizardView: NSView {
         byEar.translatesAutoresizingMaskIntoConstraints = false
         byEar.addArrangedSubview(panelHeading(Self.byEarPanelTitle))
         byEar.addArrangedSubview(panelLine(byEarBody))
+        // Start raises the system mic prompt when the permission is undecided,
+        // so the panel says the Mac listens before the button is pressed.
+        if session.listeningIsPossible { byEar.addArrangedSubview(panelLine(Self.introMicLine)) }
         byEar.addArrangedSubview(panelLine(Self.introSlotText))
 
         for panel in [remote, byEar] {
@@ -1455,6 +1496,10 @@ public final class BTAlignmentWizardView: NSView {
     public var test_remoteInviteAddress: String? { remoteInviteView?.test_addressText }
     public var test_remoteInviteTileSide: CGFloat? { remoteInviteView?.test_tileSide }
     public var test_byEarPanelHeading: String? { byEarPanelLabels.first?.stringValue }
+    /// Every line of the by-ear panel, in reading order — the mic line sits
+    /// between the instruction and the cost note, where `test_bodyText`
+    /// (which reads the instruction alone) cannot see it.
+    var test_byEarPanelLines: [String] { byEarPanelLabels.map(\.stringValue) }
 
     /// The labels of the TRAILING intro panel, in reading order.
     private var byEarPanelLabels: [NSTextField] {

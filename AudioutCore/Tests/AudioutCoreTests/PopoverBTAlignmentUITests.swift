@@ -1236,12 +1236,81 @@ import AppKit
                 "got \(String(describing: wizard?.test_screen))")
         #expect(recorder.previews.map(\.ms) == [244], "applied so it can be judged")
         #expect(recorder.ticks == [true])
+        // The number was RECALLED, never measured this run, so it is put as a
+        // question rather than announced as a result.
+        #expect(wizard?.test_bodyText
+                == BTAlignmentWizardView.recalledProposalCopy(valueMs: 244))
+        #expect(wizard?.test_readoutText
+                == BTAlignmentWizardView.recalledReadout(valueMs: 244))
 
         wizard?.test_clickButton(titled: BTAlignmentWizardView.stillOffTitle)
         guard case .question? = wizard?.test_screen else {
             Issue.record("Still off falls into the ordinary flow, got \(screenName(wizard))")
             return
         }
+    }
+
+    // MARK: Listening (the mic measurement's own screen)
+
+    /// A microphone that records nothing, so the probe completes with no
+    /// result and no system prompt is ever raised.
+    private final class SilentRecorder: MicProbeRecording {
+        func start() throws -> Double { 48_000 }
+        func stop() -> [Float] { [] }
+    }
+
+    /// Wire a popover for a listening run: a probe stager that fires straight
+    /// through, and a probe over the silent recorder.
+    private func armListening(_ popover: PopoverController, granted: Bool) {
+        popover.ensureMicPermission = { $0(granted) }
+        popover.makeMicProbe = {
+            MicProbeSession(recorder: SilentRecorder(), timeout: 1, pipelineTail: 0.05)
+        }
+        popover.onStageBTMicProbe = { started, finished in
+            started()
+            finished()
+        }
+    }
+
+    /// Defect this would catch: the run entering the listening screen without
+    /// the user's permission answer being a yes.
+    @Test func startWithTheMicDeniedSkipsListening() {
+        let (popover, recorder) = makePopover()
+        armListening(popover, granted: false)
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        let wizard = popover.test_btWizardView()
+        // The intro said the Mac would listen, which is what makes the prompt
+        // on Start expected rather than a surprise.
+        #expect(wizard?.test_byEarPanelLines.contains(BTAlignmentWizardView.introMicLine)
+                == true, "got \(String(describing: wizard?.test_byEarPanelLines))")
+        wizard?.test_clickButton(titled: "Start")
+        guard case .question? = wizard?.test_screen else {
+            Issue.record("a denied mic goes straight to the questions, got \(screenName(wizard))")
+            return
+        }
+        #expect(recorder.ticks == [true])
+    }
+
+    /// Defect this would catch: a probe that finds nothing leaving the user
+    /// stranded on the listening screen.
+    @Test func aFailedListenFallsToTheQuestions() async {
+        let (popover, recorder) = makePopover()
+        armListening(popover, granted: true)
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        let wizard = popover.test_btWizardView()
+        wizard?.test_clickButton(titled: "Start")
+        #expect(wizard?.test_screen == .listening(isRealignment: false),
+                "got \(screenName(wizard))")
+        #expect(wizard?.test_bodyText == BTAlignmentWizardView.listeningFirstCopy)
+        // The probe's completion lands on the MAIN QUEUE, which this suite's
+        // run-loop pumping never drains — only an `await` lets it through.
+        await SuiteWait.until("the failed listen to reach the questions") {
+            if case .question? = wizard?.test_screen { return true }
+            return false
+        }
+        #expect(recorder.ticks == [true])
     }
 
     /// The Mac's own row is a SETTING, not a measurement, so it never gets the

@@ -16,9 +16,10 @@ import Testing
 /// says — including when someone bumps the shared package and the site moves
 /// without this window following.
 ///
-/// Deliberate deviations are allowed but must be DECLARED. Exactly one
-/// exists (`stageScale`, on ring density and speed together) and it is
-/// asserted here by name, so an undeclared second one cannot arrive quietly.
+/// Deliberate deviations are allowed but must be DECLARED. Two exist
+/// (`stageScale`, on ring density and speed together, and `wobble`, a light
+/// per-surface break of concentricity that reuses the shared `wobbleRate`) and
+/// each is asserted here by name, so an undeclared third cannot arrive quietly.
 @Suite struct EmitterFieldTests {
 
     @MainActor private var shader: String { EmitterFieldView.shaderSource }
@@ -54,7 +55,7 @@ import Testing
         #expect(EmitterFieldView.test_baseGain == Float(defaults.gain))
     }
 
-    // MARK: The one declared deviation
+    // MARK: The declared deviations
 
     @MainActor @Test func densityAndSpeedCarryTheSharedBasesAtTheDeclaredScale() {
         let scale = literal(EmitterFieldView.test_stageScale)
@@ -72,6 +73,15 @@ import Testing
         let siteVelocity = defaults.speedBase / defaults.densBase
         let ours = (defaults.speedBase * scale) / (defaults.densBase * scale)
         #expect(abs(ours - siteVelocity) < 1e-12)
+    }
+
+    /// The second declared deviation: a light per-surface wobble whose
+    /// amplitude is authored here but whose RATE stays the shared `wobbleRate`,
+    /// reached unretyped. Asserted by name for the same reason as the stageScale
+    /// pair — an undeclared third deviation cannot slip into the shader quietly.
+    @MainActor @Test func wobbleIsTheSecondDeclaredDeviationReusingTheSharedRate() {
+        #expect(shader.contains("\(literal(EmitterFieldView.test_wobble)) * (sin(3.0 * th"))
+        #expect(shader.contains("t * \(literal(defaults.wobbleRate))"))
     }
 
     // MARK: The per-surface composition

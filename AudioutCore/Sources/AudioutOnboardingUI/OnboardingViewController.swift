@@ -2356,17 +2356,17 @@ public final class OnboardingViewController: NSViewController {
     }
 
     /// Whether the gate button is the gold prominent CTA — a `ProminentButton`
-    /// carrying the gold fill, not a plain bezel. Compared by RESOLVED
-    /// sRGB components: two accesses of a provider-backed token are distinct
-    /// `NSColor` instances, and their `isEqual` is not documented to see
-    /// through the provider.
+    /// carrying the deep-gold CTA fill (`goldText`'s values), not a plain bezel.
+    /// Compared by RESOLVED sRGB components: two accesses of a provider-backed
+    /// token are distinct `NSColor` instances, and their `isEqual` is not
+    /// documented to see through the provider.
     public var test_doneIsGoldProminent: Bool {
         _ = view
         guard ribbon.test_primaryIsCTA,
               let done = ribbon.primaryButton as? ProminentButton else { return false }
         var matches = false
         NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
-            matches = done.fill.usingColorSpace(.sRGB) == Tokens.Color.gold.usingColorSpace(.sRGB)
+            matches = done.fill.usingColorSpace(.sRGB) == Tokens.Color.goldText.usingColorSpace(.sRGB)
         }
         return matches
     }

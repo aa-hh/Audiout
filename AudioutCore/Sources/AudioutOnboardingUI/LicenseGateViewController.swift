@@ -6,7 +6,12 @@ import AudioutSharedUI
 
 /// The first-open licence gate's content: the emitter field (the marketing
 /// site's hero, remapped to gold) filling the window, with the welcome, the
-/// key field and the gold Register floating in its calm centre.
+/// key field and the gold Register on a translucent glass panel floating in
+/// its centre. The panel (``GlassPanelView``) blurs the rings passing behind
+/// the type (`.withinWindow` vibrancy), so the field can run bolder and reach
+/// closer without its crests crossing the letterforms — the field is still
+/// glimpsed through it, softened. The two quiet links and the trial offer sit
+/// below the panel, on the calm-zoned field.
 ///
 /// **One surface, and nothing on it ever moves.** Every state — a clipboard
 /// offer, a verdict, the checkout wait, the lost-key detour — lands as words in
@@ -91,6 +96,14 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// The key column's width — the Settings sheet's 320, the one width a full
     /// key plus slop is known to fit.
     private static let columnWidth: CGFloat = 320
+
+    /// The glass panel's padding around the content it backs — the brand mark
+    /// down through the status gutter. The links and the trial offer sit BELOW
+    /// the panel on the bare field, which is also what guarantees the panel
+    /// clears the Quit/Buy row (there is always link/trial content between the
+    /// gutter and that row — `theGlassPanelClearsTheButtonRowAndTop`).
+    private static let glassHInset: CGFloat = 20
+    private static let glassVInset: CGFloat = 12
 
     /// The gate's trial copy, owner-verbatim from
     /// `dev/notes/trial-spec-2026-09-05.md` § Copy. The expired pair replaces
@@ -256,7 +269,10 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
 
         buyButton.title = "Buy Audiout"
         buyButton.bezelStyle = .rounded
-        buyButton.controlSize = .regular
+        // Tertiary tier of the CTA ladder (16 pt Register → 13 pt trial → this):
+        // `.small` is ~11 pt, so the type size itself ranks the corner utilities
+        // below the trial offer. Buy keeps its 0.75→1.0 quiet-lift besides.
+        buyButton.controlSize = .small
         buyButton.target = self
         buyButton.action = #selector(buyTapped)
         buyButton.isHidden = settings.buyURL == nil
@@ -265,7 +281,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
 
         quitButton.title = "Quit"
         quitButton.bezelStyle = .rounded
-        quitButton.controlSize = .regular
+        // Tertiary, same rung as Buy — `.small` (~11 pt) corner utility.
+        quitButton.controlSize = .small
         quitButton.target = self
         quitButton.action = #selector(quitTapped)
         // No main menu exists yet at the gate, so ⌘Q needs an explicit home.
@@ -284,7 +301,11 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         // without competing with Register for the eye.
         trialButton.title = Self.trialTitle
         trialButton.bezelStyle = .rounded
-        trialButton.controlSize = .large
+        // Secondary tier: dropped from `.large` to `.regular` (~13 pt) so it
+        // stops matching Register's own scale and reads as the alternative path,
+        // not a second primary. Kept at full opacity (it is the no-key user's
+        // main route), unlike the corner utilities' quiet-lift.
+        trialButton.controlSize = .regular
         trialButton.target = self
         trialButton.action = #selector(trialTapped)
         trialButton.isHidden = settings.trialStartedAt != nil
@@ -313,8 +334,14 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         column.setCustomSpacing(14, after: quietLinks)
         column.translatesAutoresizingMaskIntoConstraints = false
 
+        // Between the field and the column, so `.withinWindow` vibrancy blurs
+        // the rings behind it while the column, added after, stays sharp on top.
+        let glass = GlassPanelView()
+        glass.setAccessibilityElement(false)
+
         let root = NSView()
         root.addSubview(field)
+        root.addSubview(glass)
         root.addSubview(column)
         root.addSubview(quitButton)
         root.addSubview(buyButton)
@@ -325,6 +352,13 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
             field.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             field.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             field.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            // The panel backs the brand-mark-through-gutter core; it takes the
+            // column's width plus a side inset, and its height from the mark's
+            // top to the gutter's bottom. Links + trial sit below it.
+            glass.leadingAnchor.constraint(equalTo: column.leadingAnchor, constant: -Self.glassHInset),
+            glass.trailingAnchor.constraint(equalTo: column.trailingAnchor, constant: Self.glassHInset),
+            mark.topAnchor.constraint(equalTo: glass.topAnchor, constant: Self.glassVInset),
+            gutter.bottomAnchor.constraint(equalTo: glass.bottomAnchor, constant: -Self.glassVInset),
             column.centerXAnchor.constraint(equalTo: root.centerXAnchor),
             column.centerYAnchor.constraint(equalTo: root.centerYAnchor),
             quitButton.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
@@ -370,10 +404,14 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// these carry their ink themselves.
     private func setQuietLinkTitle(_ title: String, on button: NSButton,
                                    ink: NSColor = Tokens.Color.label2) {
+        // Underlined so "Paste key" / "I lost my key" read as tappable text —
+        // the one signal that separates them from the plain sentence above. No
+        // colour change: gold stays spent on Register alone.
         button.attributedTitle = NSAttributedString(
             string: title,
             attributes: [.foregroundColor: ink,
-                         .font: Tokens.Font.body])
+                         .font: Tokens.Font.body,
+                         .underlineStyle: NSUnderlineStyle.single.rawValue])
     }
 
     /// The ink IS the disabled look: an attributed title carries its own
@@ -847,4 +885,48 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
 
     /// Whether the gate has fired `onPassed` (or is in the beat before it).
     public var test_didPass: Bool { didPass }
+}
+
+/// The centre backing: a rounded, hairline-bordered vibrancy panel that blurs
+/// the ring field passing behind the type (`.withinWindow`), so the field can
+/// run bolder and reach closer without its crests crossing the letterforms.
+/// Translucent on purpose — the field is still glimpsed through it, softened.
+///
+/// Inserted once at `loadView` and never animated, so the gate's "nothing on
+/// the surface ever moves" contract holds. The opaque Reduce Transparency
+/// stand-in is the shared ``ReduceTransparencyFallbackView``. The corner and
+/// border are re-stamped on every appearance change (the layer-stamp trap —
+/// see SharedUI's AGENTS.md): a stored `cgColor` would freeze at whichever
+/// appearance loaded first.
+private final class GlassPanelView: NSVisualEffectView {
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        material = Tokens.Material.windowBackground
+        // `.withinWindow`, not `.behindWindow`: the thing to blur is the emitter
+        // field sibling in this window, not the desktop behind the window.
+        blendingMode = .withinWindow
+        state = .followsWindowActiveState
+        wantsLayer = true
+        layer?.cornerRadius = 16
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        layer?.borderWidth = 1
+        ReduceTransparencyFallbackView.install(in: self)
+        stampBorder()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        stampBorder()
+    }
+
+    private func stampBorder() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.borderColor = Tokens.Color.separator.cgColor
+        }
+    }
 }

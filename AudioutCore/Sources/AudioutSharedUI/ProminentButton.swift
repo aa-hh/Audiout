@@ -8,32 +8,41 @@ import AppKit
 /// or not its window is key.
 ///
 /// One rule for the whole app, and not a per-call choice: every call to
-/// action is `Tokens.Color.gold` fill with `Tokens.Color.inkOnFill` ink. The
-/// ink is authored for that one fill, so a settable fill could only ever put
-/// gold's ink on some other colour.
+/// action is `Tokens.Color.goldText` fill (the deep-gold CTA fill) with
+/// `Tokens.Color.goldCTAInk` ink. The ink is authored for that one fill, so a
+/// settable fill could only ever put the CTA's ink on some other colour.
+///
+/// The fill deepened from `Tokens.Color.gold` to its `goldText` values so a
+/// WHITE ink clears the 4.5:1 body floor with real margin (5.90:1 light,
+/// 10.19:1 dark). The former `gold` + dark `inkOnFill` pairing was a nominal
+/// 4.94:1 that the `.rounded` bezel's shading gradient pushed under the floor
+/// in practice — a fill that gets DARKER when rendered only helps white ink,
+/// which is why the ink flips to white on the deepened light fill. See
+/// `goldCTAInk`.
 ///
 /// The bug this exists to fix (ahh, deselecting the setup window): AppKit drops
 /// a `bezelColor` fill to a plain bezel when the window resigns key — correct,
 /// that's how macOS de-emphasises controls in inactive windows — but, UNLIKE a
 /// true default button, it does NOT recolor the title to match. An ink authored
-/// for the fill is not authored for the plain bezel: `inkOnFill` goes
-/// dark-on-dark there in dark mode, and white-on-white in light Increase
-/// Contrast where it flips to white, so the button reads as an empty pill.
+/// for the fill is not authored for the plain bezel: `goldCTAInk` goes
+/// dark-on-dark there in dark mode, and white-on-white in light (it is white
+/// over the deep fill), so the button reads as an empty pill.
 /// Being made the Return-default doesn't fix it either — the sequential flow
 /// DOES make the one live Allow the default while Done is absent
 /// (`SetupRibbonView`), and it still happens the moment the Setup window
 /// resigns key to System Settings, which is exactly when the user is looking
 /// at it.
 ///
-/// Fix: track the window's key state and swap the title colour — `inkOnFill`
+/// Fix: track the window's key state and swap the title colour — `goldCTAInk`
 /// over the fill when key, `Tokens.Color.label` (appearance-adaptive, legible
 /// on the plain bezel in both light and dark) when not.
 public final class ProminentButton: NSButton {
 
     private let plainTitle: String
     /// The bezel fill (`bezelColor` carries it). Public so a caller can prove
-    /// the button is the gold one (`OnboardingViewController`'s CTA check).
-    public let fill = Tokens.Color.gold
+    /// the button is the gold one (`OnboardingViewController`'s CTA check). The
+    /// deep-gold CTA fill (`goldText`'s values), not `gold` — see the type doc.
+    public let fill = Tokens.Color.goldText
     /// The title's font. `Tokens.Font.body` for the everyday Allow buttons;
     /// the finale CTA passes the emphasized weight for more presence.
     private let titleFont: NSFont
@@ -98,7 +107,7 @@ public final class ProminentButton: NSButton {
         let isKey = window?.isKeyWindow ?? false
         attributedTitle = NSAttributedString(
             string: plainTitle,
-            attributes: [.foregroundColor: isKey ? Tokens.Color.inkOnFill : Tokens.Color.label,
+            attributes: [.foregroundColor: isKey ? Tokens.Color.goldCTAInk : Tokens.Color.label,
                          .font: titleFont])
     }
 }

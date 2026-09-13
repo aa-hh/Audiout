@@ -650,6 +650,31 @@ import Testing
         #expect(column.frame.maxY < LicenseGateViewController.contentSize.height,
                 "the column overflows the top of a window that cannot grow")
     }
+
+    /// The glass panel backs the brand-mark-through-gutter core. It has to clear
+    /// the Quit/Buy row at the bottom (the links and trial offer that sit below
+    /// it are what leave that room) and not overflow the fixed window at the
+    /// top. The trial axis varies the content it wraps, same as the column test.
+    @MainActor
+    @Test(arguments: [nil, 1.0, 20.0] as [Double?])
+    func theGlassPanelClearsTheButtonRowAndTop(trialStartedDaysAgo: Double?) {
+        let settings = settings(withBuy: true, store: isolation.makeDefaults())
+        if let trialStartedDaysAgo { startTrial(settings, daysAgo: trialStartedDaysAgo) }
+        let gate = makeContent(settings, Transport())
+        gate.view.frame = NSRect(origin: .zero, size: LicenseGateViewController.contentSize)
+        gate.view.layoutSubtreeIfNeeded()
+
+        let glass = gate.view.subviews.compactMap { $0 as? NSVisualEffectView }.first
+        #expect(glass != nil, "expected the glass panel on the root view")
+        let buttons = gate.view.subviews.compactMap { $0 as? NSButton }
+        guard let glass, let rowTop = buttons.map(\.frame.maxY).max() else { return }
+
+        // Unflipped root: y counts up from the bottom edge.
+        #expect(glass.frame.minY > rowTop,
+                "the glass panel reaches down to \(glass.frame.minY), into a button row topping out at \(rowTop)")
+        #expect(glass.frame.maxY < LicenseGateViewController.contentSize.height,
+                "the glass panel overflows the top of a window that cannot grow")
+    }
 }
 
 /// The gate's trial events, asserted on the real `Analytics` calls rather

@@ -651,9 +651,9 @@ import Testing
                 "the column overflows the top of a window that cannot grow")
     }
 
-    /// The glass panel backs the brand-mark-through-gutter core. It has to clear
-    /// the Quit/Buy row at the bottom (the links and trial offer that sit below
-    /// it are what leave that room) and not overflow the fixed window at the
+    /// The glass panel backs the brand mark down through the quiet links. It has
+    /// to clear the Quit/Buy row at the bottom (the trial offer that sits below
+    /// it is what leaves that room) and not overflow the fixed window at the
     /// top. The trial axis varies the content it wraps, same as the column test.
     @MainActor
     @Test(arguments: [nil, 1.0, 20.0] as [Double?])
@@ -664,16 +664,41 @@ import Testing
         gate.view.frame = NSRect(origin: .zero, size: LicenseGateViewController.contentSize)
         gate.view.layoutSubtreeIfNeeded()
 
-        let glass = gate.view.subviews.compactMap { $0 as? NSVisualEffectView }.first
-        #expect(glass != nil, "expected the glass panel on the root view")
+        let glass = gate.test_glassPanel
         let buttons = gate.view.subviews.compactMap { $0 as? NSButton }
-        guard let glass, let rowTop = buttons.map(\.frame.maxY).max() else { return }
+        guard let rowTop = buttons.map(\.frame.maxY).max() else { return }
 
         // Unflipped root: y counts up from the bottom edge.
         #expect(glass.frame.minY > rowTop,
                 "the glass panel reaches down to \(glass.frame.minY), into a button row topping out at \(rowTop)")
         #expect(glass.frame.maxY < LicenseGateViewController.contentSize.height,
                 "the glass panel overflows the top of a window that cannot grow")
+    }
+
+    /// The glass panel's bottom edge keeps a clear gap above the trial button,
+    /// rather than crowding it — the trial button only exists on a fresh
+    /// install (no trial ever started), so this case is not parametrized.
+    @MainActor
+    @Test
+    func theGlassPanelKeepsClearOfTheTrialButton() {
+        let settings = settings(withBuy: true, store: isolation.makeDefaults())
+        let gate = makeContent(settings, Transport())
+        gate.view.frame = NSRect(origin: .zero, size: LicenseGateViewController.contentSize)
+        gate.view.layoutSubtreeIfNeeded()
+
+        let glass = gate.test_glassPanel
+        let column = gate.view.subviews.compactMap { $0 as? NSStackView }.first
+        #expect(column != nil, "expected the content column on the root view")
+        guard let column else { return }
+        let trial = column.arrangedSubviews.compactMap { $0 as? NSButton }.first
+        #expect(trial != nil, "expected the trial button arranged directly in the column")
+        guard let trial else { return }
+
+        let trialInRoot = trial.convert(trial.bounds, to: gate.view)
+
+        // Unflipped root: y counts up from the bottom edge.
+        #expect(glass.frame.minY - trialInRoot.maxY >= 10,
+                "the glass panel's bottom edge crowds the trial button: gap is \(glass.frame.minY - trialInRoot.maxY)")
     }
 }
 

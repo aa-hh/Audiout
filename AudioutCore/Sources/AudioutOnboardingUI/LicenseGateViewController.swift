@@ -7,11 +7,11 @@ import AudioutSharedUI
 /// The first-open licence gate's content: the emitter field (the marketing
 /// site's hero, remapped to gold) filling the window, with the welcome, the
 /// key field and the gold Register on a translucent glass panel floating in
-/// its centre. The panel (``GlassPanelView``) blurs the rings passing behind
-/// the type (`.withinWindow` vibrancy), so the field can run bolder and reach
-/// closer without its crests crossing the letterforms — the field is still
-/// glimpsed through it, softened. The two quiet links and the trial offer sit
-/// below the panel, on the calm-zoned field.
+/// its centre. The panel (``GlassPanelView``) is a translucent veil that dims
+/// the rings behind the type, so the field can run bolder and reach closer
+/// without its crests crossing the letterforms — the field is still glimpsed
+/// through it, softened. The two quiet links sit on the panel's lower band;
+/// the trial offer sits below it, on the calm-zoned field.
 ///
 /// **One surface, and nothing on it ever moves.** Every state — a clipboard
 /// offer, a verdict, the checkout wait, the lost-key detour — lands as words in
@@ -41,6 +41,7 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private let onPassed: () -> Void
 
     private let field = EmitterFieldView()
+    private let glass = GlassPanelView()
     private let headlineLabel = NSTextField(labelWithString: "")
     private let whyLabel = NSTextField(wrappingLabelWithString: "")
     private let keyField = NSTextField()
@@ -97,11 +98,10 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// key plus slop is known to fit.
     private static let columnWidth: CGFloat = 320
 
-    /// The glass panel's padding around the content it backs — the brand mark
-    /// down through the status gutter. The links and the trial offer sit BELOW
-    /// the panel on the bare field, which is also what guarantees the panel
-    /// clears the Quit/Buy row (there is always link/trial content between the
-    /// gutter and that row — `theGlassPanelClearsTheButtonRowAndTop`).
+    /// The glass panel's padding around the content it backs. The glass runs
+    /// from the brand mark down through the quiet links; only the trial offer
+    /// sits BELOW it on the bare field, which is what guarantees the panel
+    /// clears the Quit/Buy row (`theGlassPanelClearsTheButtonRowAndTop`).
     private static let glassHInset: CGFloat = 20
     private static let glassVInset: CGFloat = 12
 
@@ -331,12 +331,11 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         column.setCustomSpacing(12, after: keyField)
         column.setCustomSpacing(14, after: buttonSlot)
         column.setCustomSpacing(6, after: gutter)
-        column.setCustomSpacing(14, after: quietLinks)
+        column.setCustomSpacing(26, after: quietLinks)
         column.translatesAutoresizingMaskIntoConstraints = false
 
-        // Between the field and the column, so `.withinWindow` vibrancy blurs
-        // the rings behind it while the column, added after, stays sharp on top.
-        let glass = GlassPanelView()
+        // Between the field and the column: a translucent veil the column
+        // renders on top of.
         glass.setAccessibilityElement(false)
 
         let root = NSView()
@@ -352,13 +351,13 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
             field.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             field.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             field.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            // The panel backs the brand-mark-through-gutter core; it takes the
-            // column's width plus a side inset, and its height from the mark's
-            // top to the gutter's bottom. Links + trial sit below it.
+            // The panel backs the brand mark down through the quiet links; it
+            // takes the column's width plus a side inset, and its height from
+            // the mark's top to the links' bottom. The trial offer sits below it.
             glass.leadingAnchor.constraint(equalTo: column.leadingAnchor, constant: -Self.glassHInset),
             glass.trailingAnchor.constraint(equalTo: column.trailingAnchor, constant: Self.glassHInset),
             mark.topAnchor.constraint(equalTo: glass.topAnchor, constant: Self.glassVInset),
-            gutter.bottomAnchor.constraint(equalTo: glass.bottomAnchor, constant: -Self.glassVInset),
+            quietLinks.bottomAnchor.constraint(equalTo: glass.bottomAnchor, constant: -Self.glassVInset),
             column.centerXAnchor.constraint(equalTo: root.centerXAnchor),
             column.centerYAnchor.constraint(equalTo: root.centerYAnchor),
             quitButton.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
@@ -885,48 +884,73 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
 
     /// Whether the gate has fired `onPassed` (or is in the beat before it).
     public var test_didPass: Bool { didPass }
+
+    /// The centre veil, for the layout tests that measure its clearances.
+    var test_glassPanel: NSView {
+        _ = view
+        return glass
+    }
 }
 
-/// The centre backing: a rounded, hairline-bordered vibrancy panel that blurs
-/// the ring field passing behind the type (`.withinWindow`), so the field can
-/// run bolder and reach closer without its crests crossing the letterforms.
-/// Translucent on purpose — the field is still glimpsed through it, softened.
+/// The centre backing: a rounded, hairline-bordered TINTED VEIL — not blur —
+/// that dims the ring field passing behind the type, so the field can run
+/// bolder and reach closer without its crests crossing the letterforms. The
+/// field is still glimpsed through it, softened.
+///
+/// TRAP this replaces: `NSVisualEffectView` with `.withinWindow` blending does
+/// NOT sample the sibling `EmitterFieldView`'s `CAMetalLayer` (confirmed live,
+/// Reduce Transparency off) — the backdrop sample comes up empty and the
+/// material renders as its opaque tint, so the panel showed as solid gray with
+/// zero field visible through it. No material choice fixes a failed backdrop
+/// sample, so this draws its own translucency instead of compositing one.
+///
+/// razor: a flat alpha-tinted fill is the ceiling here — real frosting would
+/// live inside `EmitterFieldView`'s shader (soften/dim the field within the
+/// panel's rect), not by compositing a view on top of it.
 ///
 /// Inserted once at `loadView` and never animated, so the gate's "nothing on
-/// the surface ever moves" contract holds. The opaque Reduce Transparency
-/// stand-in is the shared ``ReduceTransparencyFallbackView``. The corner and
-/// border are re-stamped on every appearance change (the layer-stamp trap —
-/// see SharedUI's AGENTS.md): a stored `cgColor` would freeze at whichever
-/// appearance loaded first.
-private final class GlassPanelView: NSVisualEffectView {
+/// the surface ever moves" contract holds. Colors resolve at draw time —
+/// nothing is stamped onto a layer — so there is no layer-stamp trap here.
+private final class GlassPanelView: NSView {
+
+    /// THE transparency knob — owner-tuned live against the real field.
+    static let veilAlpha: CGFloat = 0.6
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         translatesAutoresizingMaskIntoConstraints = false
-        material = Tokens.Material.windowBackground
-        // `.withinWindow`, not `.behindWindow`: the thing to blur is the emitter
-        // field sibling in this window, not the desktop behind the window.
-        blendingMode = .withinWindow
-        state = .followsWindowActiveState
-        wantsLayer = true
-        layer?.cornerRadius = 16
-        layer?.cornerCurve = .continuous
-        layer?.masksToBounds = true
-        layer?.borderWidth = 1
-        ReduceTransparencyFallbackView.install(in: self)
-        stampBorder()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(reduceTransparencyDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        stampBorder()
+    deinit {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
-    private func stampBorder() {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.borderColor = Tokens.Color.separator.cgColor
-        }
+    private var reduceTransparency: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+    }
+
+    @objc private func reduceTransparencyDidChange() {
+        needsDisplay = true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: 16, yRadius: 16)
+        Tokens.Color.canvas.withAlphaComponent(reduceTransparency ? 1.0 : Self.veilAlpha).setFill()
+        path.fill()
+        Tokens.Color.separator.setStroke()
+        path.lineWidth = 1
+        path.stroke()
     }
 }

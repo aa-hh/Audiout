@@ -70,38 +70,38 @@ import AudioutSharedUI
         #expect(stage.test_rung == .locked)
     }
 
-    /// The lock's thesis on screen: neither voice wins — the ring is warm
+    /// The lock's thesis on screen: neither voice wins — the light is warm
     /// white, not the target's green surviving alone.
-    @Test func lockedRingIsFuseWhiteNotTheTargetsGreen() throws {
+    @Test func lockedLightIsFuseWhiteNotTheTargetsGreen() throws {
         let stage = makeStage()
         stage.apply(.question(intervalMs: 30...50, range: range), animated: false)
-        let live = try #require(stage.test_targetRingColor?.usingColorSpace(.sRGB))
+        let live = try #require(stage.test_targetLightColor?.usingColorSpace(.sRGB))
         stage.apply(.locked(valueMs: 40, range: range), animated: false)
-        let locked = try #require(stage.test_targetRingColor?.usingColorSpace(.sRGB))
+        let locked = try #require(stage.test_targetLightColor?.usingColorSpace(.sRGB))
         let fuse = try #require(Tokens.Color.fuseWhite.usingColorSpace(.sRGB))
 
-        #expect(live.greenComponent > 0.9 && live.redComponent < 0.3, "a question ring is Sync Green")
+        #expect(live.greenComponent > 0.9 && live.redComponent < 0.3, "a question light is Sync Green")
         #expect(abs(locked.redComponent - fuse.redComponent) < 0.02
                     && abs(locked.greenComponent - fuse.greenComponent) < 0.02
                     && abs(locked.blueComponent - fuse.blueComponent) < 0.02,
-                "the locked ring is stamped fuseWhite, got \(locked)")
+                "the locked light is stamped fuseWhite, got \(locked)")
     }
 
     /// The stage is a fixed instrument: the reference light is `ring`'s DARK
     /// hex whichever appearance the sheet is in, the way every other stage
     /// token passes one hex for both.
-    @Test func referenceRingIsRingsDarkHexInBothAppearances() throws {
+    @Test func referenceLightIsRingsDarkHexInBothAppearances() throws {
         let pinned = try #require(resolved(Tokens.Color.ring, appearanceName: .darkAqua)
             .usingColorSpace(.sRGB))
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             let stage = makeStage()
             stage.appearance = NSAppearance(named: appearanceName)
             stage.apply(.question(intervalMs: 30...50, range: range), animated: false)
-            let drawn = try #require(stage.test_referenceRingColor?.usingColorSpace(.sRGB))
+            let drawn = try #require(stage.test_referenceLightColor?.usingColorSpace(.sRGB))
             #expect(abs(drawn.redComponent - pinned.redComponent) < 0.02
                         && abs(drawn.greenComponent - pinned.greenComponent) < 0.02
                         && abs(drawn.blueComponent - pinned.blueComponent) < 0.02,
-                    "\(appearanceName.rawValue): the reference ring is the pinned ring, got \(drawn)")
+                    "\(appearanceName.rawValue): the reference light is the pinned ring, got \(drawn)")
         }
     }
 
@@ -178,6 +178,8 @@ import AudioutSharedUI
         let stage = makeStage()
         stage.apply(.armed(range: range), animated: false)
         #expect(stage.test_rung == .armed)
+        stage.apply(.measuring(range: range), animated: false)
+        #expect(stage.test_rung == .measuring)
         stage.apply(.listening(valueMs: 12, range: range), animated: false)
         #expect(stage.test_rung == .fused)
         stage.apply(.locked(valueMs: 12, range: range), animated: false)
@@ -384,31 +386,74 @@ import AudioutSharedUI
         #expect(!stage.test_isBreathing, "breathing never runs headless (no window)")
     }
 
-    /// The living ring's clock rides the same gate as breathing, so headless
-    /// the stage renders at PINNED phase: the ported squash is there (it is a
-    /// settled property), the wobble and the swell are not. This is what keeps
-    /// `cacheDisplay` byte-deterministic for the wizard renders.
-    @Test func headlessDrawsThePinnedRingAtTheRungsOwnOpacity() {
+    /// The light's settled box is the table's diameter, squashed 1.12 in y —
+    /// a settled property of the carrier's bounds, present in every render —
+    /// and its brightness is the table's own column, untouched by any
+    /// transient. This is what keeps `cacheDisplay` deterministic for the
+    /// wizard renders.
+    @Test func headlessDrawsThePinnedHaloAtTheRungsOwnOpacity() {
         let stage = makeStage()
         // Exactly AT the threshold boundary, so `thresholdProgress` is 0 and
-        // the line width is the table's own — this test is about the port, not
-        // about the top rung's inner ramp.
+        // the light is the table's own size, without the top rung's inner
+        // ramp on top of it.
         stage.apply(.question(intervalMs: interval(halfWidth: 12), range: range),
                     animated: false)
 
         let look = AlignmentStageView.look(for: .threshold)
         let light = stage.test_targetLight
-        // The ellipse is the ring box inset by half the stroke, shortened 1.12.
-        let width = look.ringRadius * 2 - look.ringLineWidth
-        #expect(abs(light.ring.width - width) < 0.01,
-                "pinned: no wobble — the path is exactly the settled ellipse")
-        #expect(abs(light.ring.height - width / 1.12) < 0.01,
-                "the emitter's squash IS settled, so it renders at pinned phase too")
+        #expect(abs(light.halo.width - look.haloDiameter) < 0.01,
+                "the light's box is the rung's own diameter")
         #expect(abs(light.halo.height - look.haloDiameter / 1.12) < 0.01,
-                "the halo wears the same squash in its bounds")
-        // `thresholdProgress` brightens the halo inside this rung; the RING's
-        // opacity is the table's, and the swell must not have touched it.
-        #expect(abs(light.ringOpacity - look.ringOpacity) < 0.001,
-                "brightness still encodes certainty — pinned means factor 1")
+                "the emitter's squash IS settled, so it renders here too")
+        #expect(abs(light.opacity - look.haloOpacity) < 0.001,
+                "brightness still encodes certainty — one column, the table's")
+    }
+
+    /// Fused the reference joins the target's ring FAMILY (variant 0) so the
+    /// concentric pair reads as one instrument; locked they have merged, still
+    /// variant 0. Apart and dormant the reference runs its own variant 1.
+    @Test func fusedAndLockedRunTheReferenceOnTheTargetsVariant() {
+        let stage = makeStage()
+        stage.apply(.question(intervalMs: 30...50, range: range), animated: false)
+        #expect(stage.test_referenceVariant == 1, "apart, the two lights differ")
+
+        stage.apply(.listening(valueMs: 40, range: range), animated: false)
+        #expect(stage.test_referenceVariant == 0, "fused, the reference joins the target's family")
+
+        stage.apply(.locked(valueMs: 40, range: range), animated: false)
+        #expect(stage.test_referenceVariant == 0, "locked, still one light")
+
+        stage.apply(.dormant, animated: false)
+        #expect(stage.test_referenceVariant == 1, "dormant is two lights again")
+    }
+
+    /// FUSED (the proposal) is a concentric companion, not a merge: both lights
+    /// lit at one centre, the reference ring drawn LARGER than the target's so
+    /// their two thin bands leave a dark gap. LOCKED they merge to one white
+    /// ring — the reference fades to nothing and only the target survives.
+    @Test func fusedShowsConcentricRingsAndLockedMergesToOne() {
+        let stage = makeStage()
+
+        stage.apply(.question(intervalMs: 30...50, range: range), animated: false)
+        #expect(stage.test_referenceLightOpacity > 0, "apart, the reference light is lit")
+
+        stage.apply(.listening(valueMs: 40, range: range), animated: false)
+        let target = stage.test_targetLight
+        let reference = stage.test_referenceLight
+        #expect(reference.opacity > 0, "fused, the reference light is still lit")
+        #expect(abs(reference.opacity - target.opacity) < 0.001,
+                "fused, both rings sit at the rung's full opacity")
+        #expect(reference.halo.width > target.halo.width + 0.5,
+                "fused, the reference ring is larger than the target, got \(reference.halo.width) vs \(target.halo.width)")
+        let centres = stage.test_lightCentres
+        #expect(abs(centres.target.x - centres.reference.x) < 0.01
+                    && abs(centres.target.y - centres.reference.y) < 0.01,
+                "fused, the two rings are concentric — one centre")
+
+        stage.apply(.locked(valueMs: 40, range: range), animated: false)
+        #expect(stage.test_referenceLightOpacity == 0,
+                "locked, the reference fades out so a single white ring reads")
+        #expect(stage.test_targetLight.opacity > 0,
+                "locked, the lone target ring is the kept white light")
     }
 }

@@ -415,6 +415,30 @@ final class SurfaceToolbarSeatButton: NSButton {
         super.hitTest(point) == nil ? nil : self
     }
 
+    /// The seat tracks its own press. On macOS 27 the stock cell's tracking
+    /// only completes a click on the glyph's own image rect (21 × 10.5 pt of a
+    /// 30 × 28 seat on the live toolbar) and drops a press anywhere else in
+    /// the frame — with `hitTest(for:in:of:)` overridden to claim the whole
+    /// frame it still did, so the decision is not made through that hook.
+    /// Diagnosed 2026-09-13 with an in-app loop that handed synthetic presses
+    /// to this view: glyph fired, 2 pt from the edge never did, on all three
+    /// tabs. This is plain push-button tracking over the frame the cell
+    /// paints: highlight while the pointer is inside, fire on release inside,
+    /// nothing on release outside. Keyboard and VoiceOver go through
+    /// `performClick`, which is untouched.
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled, let window else { return }
+        var inside = true
+        cell?.highlight(true, withFrame: bounds, in: self)
+        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            inside = bounds.contains(convert(next.locationInWindow, from: nil))
+            cell?.highlight(inside, withFrame: bounds, in: self)
+            if next.type == .leftMouseUp { break }
+        }
+        cell?.highlight(false, withFrame: bounds, in: self)
+        if inside, let action { sendAction(action, to: target) }
+    }
+
     /// The `.push` bezel style carries AppKit's own alignment-rect insets,
     /// which Auto Layout would apply OUTSIDE the constrained seat. The cell
     /// paints the whole frame, so the frame IS the alignment rect.
@@ -489,9 +513,21 @@ final class SurfaceToolbarSeatButton: NSButton {
         guard animated else {
             widthConstraint.constant = target
             revealFollower?.foldAnimatorDidTick()
+            settleToolbarLayout()
             return
         }
-        FoldAnimator.shared.animate(widthConstraint, to: target, follower: revealFollower) {}
+        FoldAnimator.shared.animate(widthConstraint, to: target, follower: revealFollower) {
+            [weak self] in self?.settleToolbarLayout()
+        }
+    }
+
+    /// One window-wide layout pass at the END of a reveal, so the toolbar
+    /// settles its item containers around the width the tab arrived at. Per
+    /// TICK this was what made the travel drop frames, so it runs once, after
+    /// it: until the containers are re-sized AppKit hit-tests the tab at its
+    /// old, narrower edge and the revealed part takes no clicks.
+    private func settleToolbarLayout() {
+        window?.layoutIfNeeded()
     }
 
     /// The current screen, or Pin while pinned: the drawn seat, the glyph's
@@ -558,7 +594,8 @@ final class SurfaceToolbarSeatButton: NSButton {
     }
 
     /// The seat's live width, which is what the reveal animates.
-    var test_width: CGFloat { widthConstraint.constant }
+    var seatWidth: CGFloat { widthConstraint.constant }
+    var test_width: CGFloat { seatWidth }
 }
 
 /// The ONE capsule the three screen tabs sit in: a single pill-shaped surface
@@ -642,7 +679,65 @@ final class SurfaceToolbarTabCapsule: NSView, FoldFollowing {
         //
         // What remains is the same shape the app's two other `FoldFollowing`
         // conformers have: one narrow re-layout per tick, nothing else.
+        //
+        // Two things the tick has to do beyond repainting, because AppKit
+        // stops hit-testing at the toolbar container's bounds and the
+        // container used to keep its COLLAPSED width all through a reveal —
+        // the tab drew wide and took clicks narrow:
+        //
+        // - publish the new width as this view's intrinsic size, which is
+        //   what the toolbar sizes the container from;
+        // - write it onto the item itself (`publishWidthToItem`), which is
+        //   what makes the toolbar re-place the container around it.
+        //
+        // The container's own layout is all this view asks for. Laying out
+        // the TOOLBAR VIEW from inside a tick (tried 2026-09-13) crashed the
+        // test process at exit — a segfault in AppKit's toolbar teardown —
+        // and the item-size write already moves the container.
+        invalidateIntrinsicContentSize()
+        publishWidthToItem()
         superview?.layoutSubtreeIfNeeded()
+    }
+
+    /// The toolbar item this capsule is the view of, so a reveal can tell the
+    /// toolbar how wide the item has become.
+    weak var sizingItem: NSToolbarItem?
+
+    /// Write the capsule's live width onto the item itself.
+    ///
+    /// `minSize`/`maxSize` are deprecated, and an item view's constraints are
+    /// the documented replacement — but the toolbar reads those ONCE and keeps
+    /// the container at that width, so a tab that opens afterwards draws past
+    /// the container's edge, and AppKit stops hit-testing there. (The live
+    /// "only the glyph takes a click" report of 2026-09-13 was a DIFFERENT
+    /// defect — the stock cell's press tracking — fixed in the seat's own
+    /// `mouseDown`; this one is the drawn-past-the-container overhang.)
+    ///
+    /// razor: deliberate ceiling — the deprecated pair is the only seam that
+    /// re-sizes a materialized item. Upgrade path: drop this the day a
+    /// constraint change on an item view re-flows the toolbar on its own.
+    func publishWidthToItem() {
+        guard let sizingItem else { return }
+        Self.setItemSize(intrinsicContentSize, on: sizingItem)
+    }
+
+    /// The deprecated pair, called from a context that is itself marked
+    /// deprecated so the build stays quiet about a choice that is written
+    /// down above.
+    @available(macOS, deprecated: 12.0,
+               message: "Deliberate: an item view's constraints do not re-flow a materialized item.")
+    private static func setItemSize(_ size: NSSize, on item: NSToolbarItem) {
+        guard item.maxSize != size else { return }
+        item.minSize = size
+        item.maxSize = size
+    }
+
+    /// The width the three tabs currently need, with whichever one is open
+    /// counted at its revealed width. The toolbar reads this to size the
+    /// item's container, so it must track the reveal tick by tick.
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: tabs.reduce(SurfaceToolbarSeat.capsulePadding * 2) { $0 + $1.seatWidth },
+               height: SurfaceToolbarSeat.capsuleSize.height)
     }
 
     override func draw(_ dirtyRect: NSRect) {

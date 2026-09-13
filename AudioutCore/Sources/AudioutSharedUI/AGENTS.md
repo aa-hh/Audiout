@@ -29,12 +29,14 @@ or `GroupController`.
 - `setContent`'s `defaultSize:` seeds only the first mount of a content controller.
 - `ControlPanelBackingView` is an approved custom-drawn exception; NSPanel has no arrow.
 - `RemoteInviteView`'s tile is FIXED white with black modules in every appearance, dial position and Increase Contrast: a QR code is a print artifact a camera reads, not chrome, so it is the one sanctioned literal colour outside `Tokens`.
-- `Tokens.Color.shadow`'s three real consumers are flat and clipped, never an
+- `Tokens.Color.shadow`'s four real consumers are flat and clipped, never an
   `NSShadow`: `WarmFaderCell` (here), `AlignmentPlateCell` (`AudioutPopoverUI`),
-  and `GroupedSectionView`'s `.well` style (`AudioutWindowUI`, the device
-  detail page's Equalizer recess, 2026-09-04). `WarmFaderCell` and the `.well`
-  style each draw one inset-shade band; `AlignmentPlateCell` draws two lips (a
-  lit one and a shade one) at its own per-state alphas.
+  `GroupedSectionView`'s `.well` style (`AudioutWindowUI`, the device
+  detail page's Equalizer recess, 2026-09-04), and `SetupPreviewFrameView`
+  (`AudioutOnboardingUI`, the demo frame's recess, 2026-09-05).
+  `WarmFaderCell`, the `.well` style and the demo frame each draw one
+  inset-shade band; `AlignmentPlateCell` draws two lips (a lit one and a shade
+  one) at its own per-state alphas.
 - Stability findings carry `STABILITY(id)` markers; sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 - A permission prompt in flight (`setPermissionPromptInFlight`) suspends the UNPINNED tuck-away on panel AND backing bubble and survives a pin flip; the answer restores manners BEFORE `returnToFront()`, and nothing takes the front while the dialog is up — a TCC dialog that loses focus freezes.
 - Long-form traps and changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md); grep before debugging.

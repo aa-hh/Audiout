@@ -125,7 +125,7 @@ The new `bt_clock_jump` line (uid, size) makes this visible next time.
 
 ## Live test 3 (2026-09-13, 21:04–21:16 UTC) — the dumped windows
 
-Three windows dumped (`windows-2026-09-13/` beside this file; harness
+Four windows dumped (`windows-2026-09-13/` beside this file; harness
 `dev/drift-window-analysis.py`, needs numpy+scipy). Findings, offline:
 
 - **Pipeline is sound.** Reference and capture clocks agree (a stretch sweep
@@ -139,10 +139,13 @@ Three windows dumped (`windows-2026-09-13/` beside this file; harness
   whitened correlation resolved 555.1 (local score 4.0); windows 2 and 3 had
   nothing in the treble at all (window 3's music had 5 dB less treble; window
   2 was near-field noise at the Mac, +6.6 dBFS peaks, correlation ~0.1).
-- **No estimator tried offline (plain, whitened 0.5/1.0, 100–1000, 60–4000,
-  sub-band sum and product) gives a repeatable arrival across windows.**
-  Product of four whitened bands: window 1 → 569 ms at 1.9:1, window 3 →
-  595 ms at 1.3:1.
+- **Full whitening (exponent 1.0) is the lever, seen in this room.** Window 4
+  (21:16:33, the quietest music: capture −48 dBFS): plain filter local score
+  1.85, whitened 4.52, 38 % above the next peak, two of four sub-bands on it,
+  at 570.6 ms. Window 1's four-band whitened product → 569.2 (1.9:1); window
+  3's app answer 574.3. An arrival near 570 ms recurs in 3 of 4 windows once
+  whitened; the plain filter the app runs never resolves it. Window 2 was
+  noise. Four windows dumped, all in `windows-2026-09-13/`.
 - **The 2.3 threshold accepted garbage within three windows** (21:13:33,
   `merged` at 574.3 @ 2.40; offline: 4 % above its neighbour, local 1.6) and
   moved the sync point to it. Recommend 3 again before any merge.

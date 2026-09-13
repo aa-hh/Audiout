@@ -2026,6 +2026,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         backendStarted = true
         subscribeToBackendEvents()
         backend.start()
+        applyDevSelectOnLaunchIfSet()
+    }
+
+    /// Dev-only: `defaults write <bundle id> audiout.devSelectOnLaunch -array
+    /// <deviceID> …` selects those devices as soon as they appear after launch,
+    /// the way a click would (``GroupController/setDeviceSelected(_:_:)``), so
+    /// an unattended live test can relaunch the app and reselect its speakers
+    /// with nobody at the screen (drift live test 4, 2026-09-14). Polls for up
+    /// to 90 s; the key is read once per launch and never cleared.
+    /// razor: no UI, no persistence, no Group support — delete the key when done.
+    @MainActor
+    private func applyDevSelectOnLaunchIfSet() {
+        guard let wanted = UserDefaults.standard.stringArray(forKey: "audiout.devSelectOnLaunch"),
+              !wanted.isEmpty else { return }
+        var remaining = Set(wanted)
+        var polls = 0
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                polls += 1
+                for id in remaining
+                where self.backend.devices.contains(where: { $0.id == id && $0.isAvailable }) {
+                    self.groupController.setDeviceSelected(id, true)
+                    remaining.remove(id)
+                }
+                guard remaining.isEmpty || polls >= 45 else { return }
+                Telemetry.log(.localPlayback, "dev_select_on_launch", [
+                    "selected": String(wanted.count - remaining.count),
+                    "missing": String(remaining.count),
+                ])
+                timer.invalidate()
+            }
+        }
     }
 
     /// Build (or reuse) a ``SetupModel`` (production probes) + onboarding window

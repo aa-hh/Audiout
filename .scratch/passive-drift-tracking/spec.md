@@ -51,6 +51,10 @@ low confidence = discard the window, never act on it.
 | 11 | Every sample is logged locally — doubles as the field data that confirms or kills the mid-playback-creep theory and tunes the thresholds. |
 | 12 | Roadmap 062 (reconnect-survival band-split chirps) folds into this: the reconnect trigger in decision 2 covers its goal without audible chirps. |
 | 13 | (2026-09-12, after wave 1) AirPlay and Cast receivers are fixed points: they run scheduled built-in delays against the shared room reference clock and do not drift, so the tracker NEVER adjusts them. Corrections apply to Bluetooth devices only, measured against that same reference clock — the clock is the authority, never a neighboring speaker. A measured AirPlay/Cast arrival is read-only: use it to calibrate the mic's own unknown offset against the reference, exactly as the chirp probe's reference lane does today. |
+| 14 | (2026-09-13, live test 2) One correlation peak that is the only peak inside more than one Bluetooth speaker's search window means those speakers arrived TOGETHER: they are in sync, whatever the model expected. The baselines take that arrival as the sync point and nothing is corrected. Nearest-speaker assignment of a merged peak corrected an in-sync pair out of sync twice live. |
+| 15 | (2026-09-13, live test 2, ruling "for this build") Acceptance threshold 2.3 instead of the correlator's 3, because true arrivals on their baseline scored 2.5–2.9 at normal listening level. Live test 3 showed 2.3 accepting a non-peak within three windows. **Ruling owed:** back to 3 once tickets 09–11 replace the single threshold with gates. |
+| 16 | (2026-09-13, live test 3, evidence not yet a ruling) The plain matched filter cannot resolve music at normal level in a living room: the mic receives bass, which repeats every ~10 ms, and the treble that resolves timing sits at the mic's floor. Whitening the reference's own spectrum resolved a repeatable arrival (window 4: local score 1.85 plain → 4.52 whitened). The estimator in ProbeKit whitens; the window stays 4 s (longer only helps the noise-limited treble). |
+| 17 | (2026-09-13, proposal, ruling owed) No guessed correction is applied before the verify window that decision 7 promises exists. Today `.scheduleVerify` is a no-op in `DriftCorrectionApplier`, so guesses are applied and never checked. |
 
 ## What already exists (verified against code 2026-09-12)
 
@@ -82,3 +86,29 @@ low confidence = discard the window, never act on it.
 | 06 | issues/06-field-logging.md | 03 |
 | 07 | issues/07-ios-resync-button.md | 02 |
 | 08 | issues/08-roadmap-fold-062.md | — |
+
+### Phase 2 (drafted 2026-09-13 after live tests 2–3; tickets 09–16)
+
+Goal: a repeatable arrival at normal listening level, then corrections that
+are checked before they persist. Acceptance numbers live in each ticket and
+come from `dev/notes/drift-ensemble-design-brief.md`.
+
+| Order | Ticket | Where | Blocked by | Runs in parallel with |
+|---|---|---|---|---|
+| 1 | 16 fixtures + harness parity | ProbeKit tests + `dev/drift-window-analysis.py` | — | 13, 14 (parts a–b), 15 (design) |
+| 1 | 13 verify before a guessed correction | Mac | — | 16 |
+| 2 | 09 whitening | ProbeKit (0.14.0) | 16 | 15 |
+| 3 | 10 gates replace the threshold | ProbeKit + Mac constant | 09, 16 | 15 |
+| 4 | 11 sub-band agreement | ProbeKit | 09, 10, 16 | 12 |
+| 4 | 12 multi-window evidence + near-miss retry | ProbeKit accumulator + Mac | 09, 10 | 11 |
+| 5 | 14 clock-step calibration | Mac + a log-fit script | 09, 10 | 15 |
+| any | 15 ambient-noise slice | Mac | 16 | everything |
+
+Rulings owed from Alec before the tickets that carry them: decision 15
+(threshold back to 3, ticket 10), decision 17 (verify-before-apply, ticket
+13), and whether the clock step may correct directly (ticket 14, part d).
+
+Unattended live testing (live test 4): `audiout.devSelectOnLaunch` (defaults
+key, dev-only, `AppDelegate.applyDevSelectOnLaunchIfSet`) reselects the two
+Moves after a relaunch; Spotify is driven by AppleScript; a labelled +40 ms
+jump is made by editing `trims` in the dev store while the app is quit.

@@ -332,6 +332,12 @@ public final class CompanionCommandDispatcher {
         case .playAlignmentDemo(let targetID):
             return alignment(targetID) { actions, id in actions.playDemo(id, clientID) }
 
+        case .activateLicenseKey:
+            // razor: answered the way this Mac answered before the case existed
+            // (it decoded as `.unknown`). The licence-key work adds the real
+            // handling; this line goes when that lands.
+            return .refused("Unknown command: activateLicenseKey.")
+
         case .unknown(let name):
             return .refused("Unknown command: \(name).")
         }

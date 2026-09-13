@@ -100,6 +100,15 @@ public struct PassiveDriftSampler: Sendable {
         reArm()
     }
 
+    /// The correlator's peaks from the most recent usable window, for the
+    /// field log. Empty until one lands.
+    public private(set) var lastPeaks: [DriftPeak] = []
+    /// The strongest peak inside each baseline's search window from the most
+    /// recent window, whatever its confidence — for the field log, so a refused
+    /// window shows whether the arrival scored just under the threshold or was
+    /// outside the search. Empty when the slice was refused before correlating.
+    public private(set) var lastCandidates: [DriftPeak] = []
+
     /// Start listening again after a blind spell — a re-sync or a new
     /// calibration.
     public mutating func reArm() {
@@ -114,15 +123,18 @@ public struct PassiveDriftSampler: Sendable {
                                  capture: [Float], captureRate: Double,
                                  hostNanos: Int64,
                                  ambientNoise: [Float]? = nil) -> Outcome {
+        lastPeaks = []
+        lastCandidates = []
         guard !isBlind else { return .blind }
         guard !baselines.isEmpty else { return .observations([]) }
 
-        let outcome = correlator.analyze(
+        let (outcome, candidates) = correlator.analyzeWithCandidates(
             reference: reference, referenceRate: referenceRate,
             capture: capture, captureRate: captureRate,
             expectedDelaysMs: baselines.map(\.expectedDelayMs),
             searchHalfWidthMs: searchHalfWidthMs,
             ambientNoise: ambientNoise)
+        lastCandidates = candidates
 
         switch outcome {
         case .unusable(let rejection):
@@ -131,6 +143,7 @@ public struct PassiveDriftSampler: Sendable {
             return .unusable(rejection)
         case .usable(let peaks):
             consecutiveUnusableWindows = 0
+            lastPeaks = peaks
             return attribute(peaks: peaks, hostNanos: hostNanos)
         }
     }
@@ -356,19 +369,30 @@ final class PassiveDriftTracker: @unchecked Sendable {
     /// Take a window now, unless one is already running. The reason names the
     /// seam that fired; the window itself is the same either way.
     func trigger(_ reason: Trigger) {
-        queue.async { self.takeWindow() }
+        queue.async { self.takeWindow(reason: reason) }
     }
 
     /// `queue` only.
-    private func takeWindow() {
-        guard !windowInFlight, !sampler.isBlind, !sampler.baselines.isEmpty,
-              permissionIsGranted() else { return }
+    private func takeWindow(reason: Trigger = .periodic) {
+        let skip: String? = windowInFlight ? "window_in_flight"
+            : sampler.isBlind ? "blind"
+            : sampler.baselines.isEmpty ? "no_baselines"
+            : !permissionIsGranted() ? "no_mic_permission" : nil
+        if let skip {
+            Telemetry.log(.localPlayback, "drift_window_skipped",
+                          ["trigger": "\(reason)", "reason": skip])
+            return
+        }
         let recorder = makeRecorder()
         ring.setArmed(true)
         guard let captureRate = try? recorder.start(), captureRate > 0 else {
             ring.setArmed(false)
+            Telemetry.log(.localPlayback, "drift_window_skipped",
+                          ["trigger": "\(reason)", "reason": "mic_start_failed"])
             return
         }
+        Telemetry.log(.localPlayback, "drift_window_started",
+                      ["trigger": "\(reason)", "seconds": String(format: "%.1f", windowSeconds)])
         windowInFlight = true
         queue.asyncAfter(deadline: .now() + windowSeconds) { [self] in
             finishWindow(recorder: recorder, captureRate: captureRate)
@@ -384,7 +408,11 @@ final class PassiveDriftTracker: @unchecked Sendable {
         // measure a delay from, so the window is dropped rather than guessed
         // at — and that is a setup fault, not a deaf mic, so it does not count
         // toward the quiet disable.
-        guard let startNanos = recorder.firstSampleHostNanos, !capture.isEmpty else { return }
+        guard let startNanos = recorder.firstSampleHostNanos, !capture.isEmpty else {
+            Telemetry.log(.localPlayback, "drift_window_dropped",
+                          ["reason": capture.isEmpty ? "empty_capture" : "no_mic_timestamp"])
+            return
+        }
 
         let tailMs = (sampler.baselines.map(\.expectedDelayMs).max() ?? 0)
             + sampler.searchHalfWidthMs + Self.searchMarginMs
@@ -399,12 +427,18 @@ final class PassiveDriftTracker: @unchecked Sendable {
               let slice = ring.slice(fromNanos: startNanos,
                                      toNanos: startNanos + referenceNanos),
               abs(slice.startPtsNanos - startNanos) <= frameNanos
-        else { return }
+        else {
+            Telemetry.log(.localPlayback, "drift_window_dropped",
+                          ["reason": "reference_not_aligned"])
+            return
+        }
 
         let outcome = sampler.analyze(
             reference: Self.mono(slice.pcm),
             referenceRate: Double(PCMFormat.airplay.sampleRate),
             capture: capture, captureRate: captureRate, hostNanos: startNanos)
+        Self.logWindow(outcome, peaks: sampler.lastPeaks, candidates: sampler.lastCandidates,
+                       baselines: sampler.baselines)
         if case .observations(let observations) = outcome, !observations.isEmpty {
             onObservations(observations)
         }
@@ -413,6 +447,38 @@ final class PassiveDriftTracker: @unchecked Sendable {
 
     /// The ring's interleaved S16LE frames as the mono float the correlator
     /// takes.
+    /// One local line per measured window: what the correlator heard, what the
+    /// sampler made of it. Local only — `Telemetry.log` never leaves the Mac,
+    /// so device ids are allowed here.
+    static func logWindow(_ outcome: PassiveDriftSampler.Outcome, peaks: [DriftPeak],
+                          candidates: [DriftPeak],
+                          baselines: [PassiveDriftSampler.Baseline]) {
+        let format = { (p: DriftPeak) in String(format: "%.1fms@%.2f", p.delayMs, p.confidence) }
+        var fields: [String: String] = [
+            "peaks": peaks.map(format).joined(separator: ","),
+            "candidates": candidates.map(format).joined(separator: ","),
+            "baselines": baselines.map {
+                "\($0.deviceUID)\($0.isAnchor ? "(anchor)" : "")=\(String(format: "%.1f", $0.expectedDelayMs))"
+            }.joined(separator: ","),
+        ]
+        switch outcome {
+        case .observations(let observations):
+            fields["result"] = observations.isEmpty ? "aligned" : "observations"
+            fields["errors"] = observations.map {
+                "\($0.deviceUID)=\(String(format: "%+.1f", $0.errorMs))\($0.isBestGuess ? "(guess)" : "")"
+            }.joined(separator: ",")
+        case .rebaselined(let shiftMs):
+            fields["result"] = "rebaselined"
+            fields["shiftMs"] = String(format: "%+.1f", shiftMs)
+        case .unusable(let rejection):
+            fields["result"] = "unusable"
+            fields["rejection"] = rejection.rawValue
+        case .blind:
+            fields["result"] = "blind"
+        }
+        Telemetry.log(.localPlayback, "drift_window_result", fields)
+    }
+
     static func mono(_ pcm: Data, channels: Int = PCMFormat.airplay.channels) -> [Float] {
         pcm.withUnsafeBytes { raw -> [Float] in
             let samples = raw.bindMemory(to: Int16.self)

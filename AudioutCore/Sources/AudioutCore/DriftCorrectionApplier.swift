@@ -129,6 +129,13 @@ final class DriftCorrectionApplier: @unchecked Sendable {
             return
         }
         if correction.notify { surfacedMs[uid] = correction.ms }
+        Telemetry.log(.localPlayback, "drift_correction_started", [
+            "device": uid, "kind": kind,
+            "ms": String(format: "%+.1f", correction.ms),
+            "latencyBeforeMs": String(format: "%.1f", currentLatencyMs(uid)),
+            "placement": correction.placement == .inGap ? "gap" : "slew",
+            "notify": correction.notify ? "true" : "false",
+        ])
         switch correction.placement {
         case .inGap:
             move(uid, byMs: correction.ms, persist: true)
@@ -167,7 +174,11 @@ final class DriftCorrectionApplier: @unchecked Sendable {
         writeLatencyMs(target, uid, persist)
         // Only a persisted move changes what is stored, so only a persisted
         // move can make the stored calibration stale.
-        if persist { markCalibrationStale(uid) }
+        if persist {
+            markCalibrationStale(uid)
+            Telemetry.log(.localPlayback, "drift_correction_landed",
+                          ["device": uid, "latencyAfterMs": String(format: "%.1f", target)])
+        }
     }
 
     // MARK: - Slew

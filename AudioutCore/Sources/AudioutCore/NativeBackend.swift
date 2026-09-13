@@ -11197,8 +11197,18 @@ extension NativeBackend {
             baselines.append(PassiveDriftSampler.Baseline(
                 deviceUID: id, kind: device.kind, expectedDelayMs: room))
         }
-        guard Self.driftTrackingRuns(bluetoothCount: bluetoothCount,
-                                     anchorCount: baselines.count - bluetoothCount) else {
+        let runs = Self.driftTrackingRuns(bluetoothCount: bluetoothCount,
+                                          anchorCount: baselines.count - bluetoothCount)
+        Telemetry.log(.localPlayback, "drift_tracking_state", [
+            "running": runs ? "true" : "false",
+            "selectedBluetooth": String(btSelectedUIDs.count),
+            "measuredBluetooth": String(bluetoothCount),
+            "anchors": String(baselines.count - bluetoothCount),
+            "roomMs": String(format: "%.0f", room),
+            "baselines": baselines.map { "\($0.deviceUID)=\(String(format: "%.1f", $0.expectedDelayMs))" }
+                .joined(separator: ","),
+        ])
+        guard runs else {
             tracker.setBaselines([])
             tracker.stop()
             return

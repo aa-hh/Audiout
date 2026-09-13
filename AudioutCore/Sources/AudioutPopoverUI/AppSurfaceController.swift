@@ -617,7 +617,6 @@ public final class AppSurfaceController {
         // Mixer hides it anyway, and arriving at it below shows it awake.
         surfaceCoveredHidden = false
         selectedScreen = screen
-        syncToolbar()
         if screen == .mixer {
             // The Mixer's open ritual — `show` already ran it while measuring,
             // so returning to the screen re-ingests what arrived meanwhile.
@@ -628,6 +627,17 @@ public final class AppSurfaceController {
             popoverController.surfaceDidShow()
         }
         publishVisibleScreen()
+        // The toolbar is synced HERE, after the mount, not before it: syncing
+        // starts the tab's name reveal on `FoldAnimator`, and that travel lasts
+        // `Tokens.Motion.collapseRevealDuration` of WALL time. Started before
+        // the mount, the swap's synchronous work runs inside the travel and
+        // eats it — the Mixer rebuilds its whole card stack (`rebuildForOpen`)
+        // and Settings mounts its panes, both longer than the reveal, so ⌘1 and
+        // ⌘3 snapped to the finished width while ⌘2 (Groups, prewarmed and
+        // cheap) animated normally (owner, live, 2026-09-13). Both animations a
+        // swap runs now start from the same point: nothing blocking between
+        // this line and the first clock tick.
+        syncToolbar()
         fadeInMountedScreen()
     }
 

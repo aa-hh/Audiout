@@ -211,4 +211,4 @@ Default vocabulary, recorded as a `Status:` line in each ticket file. See `docs/
 
 ### Domain docs
 
-Single-context: `CONTEXT.md` at the root (not yet written) plus `docs/adr/`. See `docs/agents/domain.md`.
+Single-context: `CONTEXT.md` at the root plus `docs/adr/`. See `docs/agents/domain.md`.

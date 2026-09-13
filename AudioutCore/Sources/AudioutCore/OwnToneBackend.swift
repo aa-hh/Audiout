@@ -1008,7 +1008,16 @@ public func makeBackend(
                     // A pacing-clock step is the cheap detector the acoustic
                     // measurement then confirms (spec decision 2): the speaker
                     // that jumped is the one worth listening to now.
-                    if case .jumped = outcome { nativeBackend?.noteDriftTrigger(.clockJump) }
+                    if case .jumped(let magnitudeMs) = outcome {
+                        // Which link stepped and by how much: the only trace a
+                        // speaker that cannot hold its timing leaves in the log
+                        // (live test 2026-09-13: one Move stepped nearly every
+                        // second, audible as a dip that came back re-timed).
+                        Telemetry.log(.localPlayback, "bt_clock_jump", [
+                            "uid": uid, "ms": String(format: "%+.1f", magnitudeMs),
+                        ])
+                        nativeBackend?.noteDriftTrigger(.clockJump)
+                    }
                 }
             } else {
                 clockObserver = nil

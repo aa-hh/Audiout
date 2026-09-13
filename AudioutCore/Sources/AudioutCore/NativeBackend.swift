@@ -12086,6 +12086,11 @@ extension NativeBackend: BTOutputControlling {
             // one hop later, with this measurement already in the table.
             stateQueue.async {
                 self.updateBTReferenceBufferLocked()
+                // A measured speaker is one the drift tracker can now watch,
+                // and the reference it just moved is what the baselines are
+                // built on (live test 2026-09-13: without this, the second
+                // speaker's Keep left tracking off until the next trim nudge).
+                self.refreshDriftTrackingLocked()
                 self.captureControlQueue.async { [weak self] in
                     self?.btSink?.setOffsetMs(Int(value), forDeviceUID: id)
                     self?.btSink?.setTrimMs(0, forDeviceUID: id)

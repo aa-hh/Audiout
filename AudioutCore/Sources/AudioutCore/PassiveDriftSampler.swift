@@ -63,6 +63,11 @@ public struct PassiveDriftSampler: Sendable {
         /// Every peak moved by the same amount with no anchor to check it
         /// against: the baselines absorbed the shift and nothing is corrected.
         case rebaselined(shiftMs: Double)
+        /// One peak inside more than one Bluetooth baseline's window and no
+        /// other peak inside any of theirs: those speakers arrived TOGETHER.
+        /// The baselines took that arrival as the sync point; nothing is
+        /// corrected.
+        case merged(deviceUIDs: [String], delayMs: Double)
         case unusable(DriftRejection)
         /// Sampling is quietly off after ``blindAfterUnusableWindows``.
         case blind
@@ -89,7 +94,17 @@ public struct PassiveDriftSampler: Sendable {
     public var searchHalfWidthMs = PassiveDriftSampler.defaultSearchHalfWidthMs
     public var correlator = PassiveDriftCorrelator()
 
+    /// The correlator ships with 3, the gap its synthetic scenes leave between
+    /// a true arrival (3–6) and none (~0.9). In a living room the built-in
+    /// mic's own noise sits in that background: at normal listening level a
+    /// true arrival on its baseline scored 2.5–2.9 and only 60 dBA reached
+    /// 3.1–3.3, while the best garbage a refused window offered scored 1.9
+    /// (live test 2026-09-13, ruling: 2.3 for this build). The search window
+    /// and the suitability checks still do most of the refusing.
+    static let minPeakToSidelobe = 2.3
+
     public init(baselines: [Baseline] = []) {
+        correlator.minPeakToSidelobe = Self.minPeakToSidelobe
         self.baselines = baselines
     }
 
@@ -156,6 +171,20 @@ public struct PassiveDriftSampler: Sendable {
     }
 
     private mutating func attribute(peaks: [DriftPeak], hostNanos: Int64) -> Outcome {
+        // Two speakers playing the same program IN SYNC merge into one peak,
+        // and that is the state the user wants whatever the model expected: a
+        // by-ear trim compensating a stale stored latency leaves the model
+        // tens of ms off, so assigning the merged peak to the nearer speaker
+        // corrected one of an in-sync pair (live test 2026-09-13, ruling:
+        // treat as in sync). The baselines take the arrival as the sync point
+        // and later windows measure departures from it.
+        if let merged = mergedArrival(peaks: peaks) {
+            for index in merged.baselineIndices {
+                baselines[index].expectedDelayMs = merged.delayMs
+            }
+            return .merged(deviceUIDs: merged.baselineIndices.map { baselines[$0].deviceUID }.sorted(),
+                           delayMs: merged.delayMs)
+        }
         let (matches, contended) = matched(peaks: peaks)
         guard !matches.isEmpty else { return .observations([]) }
 
@@ -241,6 +270,21 @@ public struct PassiveDriftSampler: Sendable {
         return (matches, contended)
     }
 
+    /// The peak that is the ONLY one inside the search window of more than one
+    /// Bluetooth baseline, with the baselines it is that for.
+    private func mergedArrival(peaks: [DriftPeak]) -> (baselineIndices: [Int], delayMs: Double)? {
+        var solePeak: [Int: Int] = [:]   // baseline index → the one peak in its window
+        for (b, baseline) in baselines.enumerated() where !baseline.isAnchor {
+            let inside = peaks.indices.filter {
+                abs(peaks[$0].delayMs - baseline.expectedDelayMs) <= searchHalfWidthMs
+            }
+            if inside.count == 1 { solePeak[b] = inside[0] }
+        }
+        let claimants = Dictionary(grouping: solePeak.keys) { solePeak[$0]! }
+        guard let (peak, indices) = claimants.first(where: { $0.value.count > 1 }) else { return nil }
+        return (indices.sorted(), peaks[peak].delayMs)
+    }
+
     private mutating func shiftBaselines(by ms: Double) {
         for index in baselines.indices { baselines[index].expectedDelayMs += ms }
     }
@@ -279,7 +323,11 @@ final class PassiveDriftTracker: @unchecked Sendable {
     }
 
     /// Long enough for the correlator, short enough to be cheap: the spec's
-    /// "even 10 seconds is more than necessary".
+    /// "even 10 seconds is more than necessary". Longer buys nothing: the
+    /// score is the peak over the whole correlation's background, and for
+    /// music that background is the program's own structure, which grows
+    /// with the window exactly as the peak does (8 s scored 2.49 where 4 s
+    /// scored 2.56, live test 2026-09-13).
     static let windowSeconds = 4.0
     /// razor: one fixed cadence in the spec's 2–5 minute band. The upgrade
     /// path is a cadence that widens while everything stays put.
@@ -433,8 +481,11 @@ final class PassiveDriftTracker: @unchecked Sendable {
             return
         }
 
+        let reference = Self.mono(slice.pcm)
+        Self.dumpWindowIfEnabled(reference: reference, capture: capture,
+                                 captureRate: captureRate, baselines: sampler.baselines)
         let outcome = sampler.analyze(
-            reference: Self.mono(slice.pcm),
+            reference: reference,
             referenceRate: Double(PCMFormat.airplay.sampleRate),
             capture: capture, captureRate: captureRate, hostNanos: startNanos)
         Self.logWindow(outcome, peaks: sampler.lastPeaks, candidates: sampler.lastCandidates,
@@ -443,6 +494,39 @@ final class PassiveDriftTracker: @unchecked Sendable {
             onObservations(observations)
         }
         if sampler.isBlind { timer?.cancel(); timer = nil }
+    }
+
+    /// Diagnostic only: with `defaults write <bundle id> audiout.driftDumpWindows
+    /// -bool YES`, every measured window's reference and capture are written
+    /// as raw little-endian Float32 mono under ~/Library/Logs/Audiout/drift-windows/,
+    /// with a sidecar naming the rates and baselines, so a window can be
+    /// analysed offline against the correlator's verdict (live test
+    /// 2026-09-13: scores stayed marginal at any volume, genre or distance).
+    /// razor: no rotation, no size cap — turn it off when done.
+    private static func dumpWindowIfEnabled(reference: [Float], capture: [Float],
+                                            captureRate: Double,
+                                            baselines: [PassiveDriftSampler.Baseline]) {
+        guard UserDefaults.standard.bool(forKey: "audiout.driftDumpWindows") else { return }
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Audiout/drift-windows", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        func write(_ samples: [Float], _ suffix: String) {
+            samples.withUnsafeBufferPointer { buf in
+                try? Data(buffer: buf).write(to: dir.appendingPathComponent("\(stamp)-\(suffix).f32"))
+            }
+        }
+        write(reference, "ref")
+        write(capture, "cap")
+        let meta: [String: Any] = [
+            "referenceRate": PCMFormat.airplay.sampleRate,
+            "captureRate": captureRate,
+            "baselines": baselines.map { ["uid": $0.deviceUID, "expectedDelayMs": $0.expectedDelayMs,
+                                          "anchor": $0.isAnchor] },
+        ]
+        if let json = try? JSONSerialization.data(withJSONObject: meta) {
+            try? json.write(to: dir.appendingPathComponent("\(stamp)-meta.json"))
+        }
     }
 
     /// The ring's interleaved S16LE frames as the mono float the correlator
@@ -470,6 +554,10 @@ final class PassiveDriftTracker: @unchecked Sendable {
         case .rebaselined(let shiftMs):
             fields["result"] = "rebaselined"
             fields["shiftMs"] = String(format: "%+.1f", shiftMs)
+        case .merged(let deviceUIDs, let delayMs):
+            fields["result"] = "merged"
+            fields["devices"] = deviceUIDs.joined(separator: ",")
+            fields["delayMs"] = String(format: "%.1f", delayMs)
         case .unusable(let rejection):
             fields["result"] = "unusable"
             fields["rejection"] = rejection.rawValue

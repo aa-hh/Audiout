@@ -143,6 +143,27 @@ import Testing
         #expect(abs(shiftMs - 15) < 2)
         #expect(sampler.baselines.allSatisfy { $0.expectedDelayMs > 70 })
     }
+
+    /// THE DEFECT (live, 2026-09-13): two speakers the user had trimmed into
+    /// sync by ear arrive as ONE peak. Nearest-baseline assignment gave it to
+    /// one of them and corrected that speaker 11.5 ms out of the sync the
+    /// user had just set. A merged arrival is the sync point, not drift.
+    @Test func speakersArrivingTogetherAreTakenAsTheSyncPointAndNeverCorrected() {
+        var sampler = Self.sampler([Self.bluetooth("A", 60), Self.bluetooth("B", 80)])
+        let outcome = Self.analyze(&sampler, delaysMs: [55])
+        guard case .merged(let deviceUIDs, let delayMs) = outcome else {
+            Issue.record("expected a merged arrival, got \(outcome)")
+            return
+        }
+        #expect(deviceUIDs == ["A", "B"])
+        #expect(abs(delayMs - 55) < 2)
+        #expect(sampler.baselines.allSatisfy { abs($0.expectedDelayMs - 55) < 2 })
+        // The next window measures against the sync point: the same arrival
+        // is "aligned", and only a speaker that leaves it is an observation.
+        let next = Self.analyze(&sampler, delaysMs: [55])
+        #expect(next == .merged(deviceUIDs: ["A", "B"], delayMs: delayMs)
+                || next == .observations([]))
+    }
 }
 
 /// The tracker end to end: the retained program out of ``ReferenceAudioRing``,

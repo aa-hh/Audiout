@@ -16,8 +16,9 @@ reference (decision 13).
 
 - **Mac repo branch:** `claude/bluetooth-latency-drift-6c2d59`, worktree
   `.claude/worktrees/bluetooth-latency-drift-6c2d59`, pushed to origin.
-  Not merged to main; main was merged INTO it twice, last at `69bf24f3`
-  (2026-09-13 ~12:55 UTC, full suite 3,872 passed). Nothing uncommitted.
+  Not merged to main; main was merged INTO it three times, last at
+  `99813077` (2026-09-13, full suite 3,879 passed), so the branch is level
+  with main as of that merge. Nothing uncommitted.
 - **audiout-shared:** everything committed on `main`. Tag `0.12.0`
   (`d4e96b2`) holds the bass filter and `analyzeWithCandidates`. The Mac
   branch now pins `from: "0.13.0"` (main's emitter-field constants), which
@@ -37,11 +38,16 @@ reference (decision 13).
 | 03 Mac mic sampler | built, reviewed |
 | 04 Bluetooth keep-alive through silence | built, reviewed; **whether it prevents the latency re-roll is unverified on hardware** |
 | 05 corrections | built, reviewed in 3 passes |
-| 06 field logging | partly done ad hoc in `4b191c25` (see Logging); the ticket as written is still open |
+| 06 field logging | partly done ad hoc in `4b191c25` (see Logging); the ticket as written is still open. Read its Comments first: the PostHog correction event already exists, it fires too early for a slew, and a window-count event needs Alec's approval |
 | 07 iPhone re-sync button | not started |
 | 08 roadmap swap | done |
 
-Suites at `69bf24f3`: full suite 3,872 tests passed. Build clean.
+Suites at `99813077`: full suite 3,879 tests passed. Build clean.
+
+The latest merge brought in main's wizard mic-permission focus fix and its
+analytics (#196, #194). They touched `MicProbeSession.swift`, which this branch
+also changed; it auto-merged, and the recorder-restart handling (timestamp
+withheld after a restart) is intact.
 
 Main's #193 (merged in) makes the alignment wizard lead with the automatic mic
 measurement; it writes the same stored measured latency that drift

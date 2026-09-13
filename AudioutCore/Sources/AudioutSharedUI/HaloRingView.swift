@@ -56,6 +56,13 @@ import AudioutCore
 /// the settled ring, never a mid-pulse frame. The connecting ring therefore
 /// renders identically in the deterministic snapshot regardless of when it's
 /// captured.
+///
+/// **Permanent gap (ported from the iOS companion's ring treatment):** every
+/// drawn form is an open arc, not a full circle — a fixed 70°
+/// (`haloRingGapWidth`) dead zone centered on the gold route-armed dot's
+/// corner seat (`haloRingGapCenterAngle`) so the dot sits IN the ring's gap
+/// rather than nearly touching the stroke, separated only by its own
+/// punch-out border. The gap's geometry never varies by state or form.
 public final class HaloRingView: NSView {
 
     /// Which ring form is currently rendered — mirrors the four connection
@@ -289,14 +296,36 @@ public final class HaloRingView: NSView {
                       width: diameter, height: diameter)
     }
 
+    /// The ring's own path: the circle inscribed in `rect`, open across the
+    /// permanent gap centered on `haloRingGapCenterAngle`. Shared by the
+    /// settled ring (`layout()`) and the rail-arrival bloom
+    /// (`receiveRailPulse()`) so the two can never disagree about where the
+    /// gap sits. `HaloRingView` is a plain, non-flipped `NSView`, so this is a
+    /// y-up layer: the arc sweeps with INCREASING angle (mathematically
+    /// counterclockwise), which is what `clockwise: false` draws here — the
+    /// opposite of the visual sense `clockwise` carries in a flipped
+    /// (y-down) view. Proven by `HaloRingGapTests`, which asserts the LONG
+    /// (290°) side is what actually gets stroked.
+    private func ringPath(in rect: NSRect) -> CGPath {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let radius = rect.width / 2
+        let halfGap = PopoverColumnGrid.haloRingGapWidth / 2
+        let startAngle = PopoverColumnGrid.haloRingGapCenterAngle + halfGap
+        let endAngle = startAngle + (2 * .pi - PopoverColumnGrid.haloRingGapWidth)
+        let path = CGMutablePath()
+        path.addArc(center: center, radius: radius,
+                    startAngle: startAngle, endAngle: endAngle, clockwise: false)
+        return path
+    }
+
     public override func layout() {
         super.layout()
         // The visible ring circle sits centered in the view at `haloRingDiameter`
         // (the stroke centerline), regardless of the view's own box size (which
         // matches the 26 pt icon box). The layer fills the view; the path is the
-        // inscribed circle.
+        // inscribed circle, open across the permanent gap.
         ringLayer.frame = bounds
-        ringLayer.path = CGPath(ellipseIn: ringRect, transform: nil)
+        ringLayer.path = ringPath(in: ringRect)
         // Scale animation pulses about the ring's own center.
         ringLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
         ringLayer.frame = bounds
@@ -376,10 +405,11 @@ public final class HaloRingView: NSView {
 
         let bloom = CAShapeLayer()
         bloom.frame = bounds
-        // Same inscribed circle as the settled ring, and the layer's own centre
-        // is the ring's centre — so the scale animation contracts ONTO the
-        // stroke rather than sliding the halo across the view.
-        bloom.path = CGPath(ellipseIn: ringRect, transform: nil)
+        // Same inscribed circle (and same permanent gap) as the settled ring,
+        // and the layer's own centre is the ring's centre — so the scale
+        // animation contracts ONTO the stroke rather than sliding the halo
+        // across the view.
+        bloom.path = ringPath(in: ringRect)
         bloom.anchorPoint = CGPoint(x: 0.5, y: 0.5)
         bloom.fillColor = nil
         bloom.lineWidth = ringLayer.lineWidth * 2
@@ -463,4 +493,8 @@ public final class HaloRingView: NSView {
     /// Whether the ring is currently dashed (the connecting "incomplete" form),
     /// including under Reduce Motion where the dash survives without the pulse.
     public var test_isDashed: Bool { (ringLayer.lineDashPattern?.isEmpty == false) }
+
+    /// The exact path the ring layer strokes (structural hook — the same
+    /// `CGPath` `layout()` stamps, so it can never drift from the drawing).
+    public var test_ringPath: CGPath? { ringLayer.path }
 }

@@ -183,7 +183,11 @@ public struct DriftCorrectionPolicy: Sendable {
         }
 
         guard !guessedThisWindow.isEmpty else { return actions }
-        for uid in guessedThisWindow {
+        // A group of one is the device itself, which it cannot swap with, so
+        // it is stored as no group at all: the verify still runs, and a verify
+        // that disagrees re-corrects as ordinary drift rather than reporting a
+        // swap nobody made.
+        for uid in guessedThisWindow where guessedThisWindow.count > 1 {
             outstanding[uid]?.guessedGroup = guessedThisWindow
         }
         actions.append(.scheduleVerify(deviceUIDs: guessedThisWindow))
@@ -211,12 +215,15 @@ public struct DriftCorrectionPolicy: Sendable {
     /// A device that has just resolved or been corrected on its own can no
     /// longer be moved as part of an older guess, so it leaves every other
     /// device's stored group. A group left with nothing to swap stops being a
-    /// guess and its pending correction is re-tried the ordinary way.
+    /// guess and its pending correction is re-tried the ordinary way — and a
+    /// group holding only its own device is exactly that case, because a
+    /// device cannot be swapped with itself.
     private mutating func dropFromStoredGroups(_ uid: String) {
         for (other, entry) in outstanding where other != uid {
             guard var group = entry.guessedGroup, group.contains(uid) else { continue }
             group.removeAll { $0 == uid }
-            outstanding[other]?.guessedGroup = group.isEmpty ? nil : group
+            let swappable = group.contains { $0 != other }
+            outstanding[other]?.guessedGroup = swappable ? group : nil
         }
     }
 

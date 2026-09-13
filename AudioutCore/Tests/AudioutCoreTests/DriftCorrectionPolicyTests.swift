@@ -124,14 +124,19 @@ import Testing
     @Test func aSwapOnlyRecorrectsTheMembersStillOffByEnough() {
         var policy = DriftCorrectionPolicy()
         _ = policy.decide([observation("a", 25, guess: true),
-                           observation("b", 30, guess: true)], programIsSilent: false)
-        let verify = policy.decide([observation("a", 9, t: 1), observation("b", -30, t: 1)],
-                                   programIsSilent: true)
-        #expect(verify == [.ignore(deviceUID: "a", reason: .corrected),
-                           .swapAndRecorrect([
+                           observation("b", 30, guess: true),
+                           observation("c", 28, guess: true)], programIsSilent: false)
+        // c came back clean, so the swap leaves it alone and it resolves as a
+        // correction that landed; a and b are still off and are re-corrected.
+        let verify = policy.decide([observation("b", -30, t: 1), observation("c", 5, t: 1),
+                                    observation("a", 20, t: 1)], programIsSilent: true)
+        #expect(verify == [.swapAndRecorrect([
                                .init(deviceUID: "b", ms: -30,
-                                     placement: .inGap, notify: false)])])
-        #expect(policy.isAwaitingConfirmation("a") == false)
+                                     placement: .inGap, notify: false),
+                               .init(deviceUID: "a", ms: 20,
+                                     placement: .inGap, notify: false)]),
+                           .ignore(deviceUID: "c", reason: .corrected)])
+        #expect(policy.isAwaitingConfirmation("c") == false)
         #expect(policy.isAwaitingConfirmation("b"))
     }
 
@@ -191,6 +196,32 @@ import Testing
                                                        placement: .inGap, notify: false)])
         #expect(corrections(third, for: "a") == [.init(deviceUID: "a", ms: 15,
                                                        placement: .inGap, notify: false)])
+    }
+
+    // Turns red if a guessed group that has shrunk to its own device still
+    // reports a swap: the move is right either way, but the field log counts
+    // swaps as wrong attributions, and this one is ordinary drift.
+    @Test func aGroupLeftHoldingOnlyItsOwnDeviceRecorrectsAsOrdinaryDrift() {
+        var policy = DriftCorrectionPolicy()
+        _ = policy.decide([observation("a", 25, guess: true),
+                           observation("b", 30, guess: true)], programIsSilent: true)
+        // b's correction landed, so b leaves a's group and a's guess has
+        // nobody left to swap with.
+        _ = policy.decide([observation("b", 2, t: 1)], programIsSilent: true)
+        let third = policy.decide([observation("a", 20, t: 2)], programIsSilent: true)
+        #expect(third == [.correct(.init(deviceUID: "a", ms: 20,
+                                         placement: .inGap, notify: false))])
+    }
+
+    // Turns red if a lone contended device stores itself as its own guessed
+    // group, which is the same mislabel reached from the other direction.
+    @Test func aLoneGuessStoresNoGroupToSwapWith() {
+        var policy = DriftCorrectionPolicy()
+        let first = policy.decide([observation("a", 25, guess: true)], programIsSilent: true)
+        #expect(first.contains(.scheduleVerify(deviceUIDs: ["a"])))
+        let verify = policy.decide([observation("a", 20, t: 1)], programIsSilent: true)
+        #expect(verify == [.correct(.init(deviceUID: "a", ms: 20,
+                                          placement: .inGap, notify: false))])
     }
 
     // Turns red if a device can be corrected twice in one window, before the

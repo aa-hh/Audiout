@@ -1,6 +1,6 @@
 # 05 — Apply corrections: gaps first, slew for residuals, thresholds
 
-Status: claimed (decision core built + reviewed 2026-09-12; wiring + slew + analytics remain)
+Status: resolved (integration built + reviewed in 3 passes 2026-09-13; real-music live test owed)
 Blocked by: 03
 
 Turn attributed observations into delay-line changes without audible artifacts.

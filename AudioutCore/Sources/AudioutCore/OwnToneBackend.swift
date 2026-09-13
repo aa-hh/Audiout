@@ -923,8 +923,14 @@ public func makeBackend(
         // here (rather than relying on the initializer's own real-resolver
         // default) so the production wiring is visible at the call site, same
         // discipline as `resolvePID` above.
-        nativeBackend.captureCoordinator = NativeCaptureCoordinator(
+        let captureCoordinator = NativeCaptureCoordinator(
             engine: engine, processResolver: resolver)
+        nativeBackend.captureCoordinator = captureCoordinator
+        // Passive drift tracking (roadmap 085 ticket 05). Wired here because
+        // the reference it correlates the microphone against is this
+        // coordinator's retained outgoing audio, and this is the only place
+        // that holds both objects.
+        nativeBackend.attachPassiveDriftTracking(ring: captureCoordinator.referenceRing)
         // Bug T2: the local-playback engine renders `.currentDevice`-routed apps on
         // the Mac's built-in speakers as independent, individually-levelable streams.
         nativeBackend.localPlaybackEngine = LocalPlaybackEngine()
@@ -990,6 +996,10 @@ public func makeBackend(
             if BTClockWatcher.isEnabled {
                 clockObserver = { [weak nativeBackend] uid, outcome in
                     nativeBackend?.btSpeakerTiming.noteClockOutcome(uid: uid, outcome: outcome)
+                    // A pacing-clock step is the cheap detector the acoustic
+                    // measurement then confirms (spec decision 2): the speaker
+                    // that jumped is the one worth listening to now.
+                    if case .jumped = outcome { nativeBackend?.noteDriftTrigger(.clockJump) }
                 }
             } else {
                 clockObserver = nil

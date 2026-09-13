@@ -432,6 +432,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// stored offset for anything, which is what a backend mid-init knows.
     public private(set) var btSpeakerTiming = BTSpeakerTiming(storedOffsetMs: { _ in nil })
 
+    // MARK: Passive drift tracking (roadmap 085 ticket 05)
+
+    /// The mic-side tracker and the correction applier, or `nil` wherever
+    /// nothing wired them — every test, and every UI-only build. Assigned once
+    /// by ``attachPassiveDriftTracking(ring:)`` before ``start()``, the same
+    /// discipline `captureCoordinator` and the sink factories keep, because the
+    /// correlation reference is the capture coordinator's own ring and only the
+    /// place that builds the coordinator can hand it over.
+    private var driftTracker: PassiveDriftTracker?
+    /// Readable (not settable) from outside so a test can hand one window's
+    /// observations straight to the applier that is really wired to this
+    /// backend — the only way to reach ``writeBTDriftLatency(_:forDevice:persist:)``.
+    private(set) var driftApplier: DriftCorrectionApplier?
+
     /// The one companion sync-calibration run or fine-tune session in flight,
     /// if any. One at a time by decision — both engage the wizard feed, which
     /// has a single producer, and a second run would replace the first's
@@ -3524,6 +3538,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         enable: armed, uids: armedUIDs, composition: composition,
                         gains: gains, eqs: eqs, referenceBufferMs: referenceMs)
                 }
+                // The selection decides both halves of drift tracking: which
+                // speakers are measured, and whether anything is measured at
+                // all. Recomputed here, where the reference the baselines are
+                // built on has just been decided.
+                self.refreshDriftTrackingLocked()
                 if localReferenceMoved, self.syncedLocalSinkApplied {
                     // Re-anchor the already-running local sink onto the new
                     // reference. Same serial queue as its transitions, so this
@@ -3960,6 +3979,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // re-enters the per-device sink set now, not at the next
                 // selection change.
                 self.reapplyBTSinkLocked()
+                // Each reconnect lands 20–90 ms from last time
+                // (`bt-latency-stability-research-2026-09-05.md`), so this is
+                // one of the moments worth listening at (spec decision 2).
+                self.noteDriftTrigger(.reconnect)
             case .unauthorized:
                 self.setConnectionState(.failed(ConnectionFailure(
                     cause: .unknown, detail: "Bluetooth permission not granted")), for: id)
@@ -10842,6 +10865,225 @@ extension BTOutputControlling {
     }
 }
 
+// MARK: - Passive drift tracking (roadmap 085 ticket 05)
+
+extension NativeBackend {
+
+    /// A playback gap starts once nothing has rendered real program audio for
+    /// this long — see ``DriftCorrectionApplier/gapAfterSilentSeconds``.
+    private static let driftGapNanos =
+        Int64(DriftCorrectionApplier.gapAfterSilentSeconds * 1_000_000_000)
+
+    /// Wire the microphone-side drift tracker onto the retained program audio
+    /// it correlates against. `makeBackend` calls this once, before
+    /// ``start()``: the ring belongs to the capture coordinator, so only the
+    /// place that builds the coordinator can hand it over.
+    ///
+    /// Nothing is sampled until a selection gives it a calibrated Bluetooth
+    /// speaker to measure, and nothing is recorded until a window is actually
+    /// being taken — the ring stays disarmed the rest of the time.
+    func attachPassiveDriftTracking(ring: ReferenceAudioRing) {
+        let applier = DriftCorrectionApplier(
+            isBluetooth: { [weak self] uid in
+                guard let self else { return false }
+                return self.stateQueue.sync { self.known[uid]?.isBluetooth == true }
+            },
+            currentLatencyMs: { [weak self] uid in self?.btMeasuredLatencyMs(forDevice: uid) ?? 0 },
+            writeLatencyMs: { [weak self] ms, uid, persist in
+                self?.writeBTDriftLatency(ms, forDevice: uid, persist: persist)
+            },
+            markCalibrationStale: { [weak self] uid in
+                self?.btSpeakerTiming.noteDriftCorrected(uid: uid)
+            },
+            programIsSilent: { [weak self] in self?.btProgramIsSilent() ?? false })
+        let tracker = PassiveDriftTracker(ring: ring) { [weak applier] observations in
+            applier?.handle(observations)
+        }
+        driftApplier = applier
+        driftTracker = tracker
+        stateQueue.async { self.refreshDriftTrackingLocked() }
+    }
+
+    /// A moment the bench data says Bluetooth alignment jumps (spec decision
+    /// 2). Nothing happens unless a tracker is wired and already sampling.
+    func noteDriftTrigger(_ trigger: PassiveDriftTracker.Trigger) {
+        driftTracker?.trigger(trigger)
+    }
+
+    /// The last drift correction this speaker was big enough to be told about
+    /// (``DriftCorrectionPolicy/surfaceAtOrAboveMs``), in signed milliseconds —
+    /// the state a surface renders; `nil` when there is nothing to say.
+    public func btDriftCorrectionNoticeMs(forDevice id: String) -> Double? {
+        driftApplier?.surfacedCorrectionMs(forDevice: id)
+    }
+
+    /// The user has seen this speaker's drift notice.
+    public func clearBTDriftCorrectionNotice(forDevice id: String) {
+        driftApplier?.clearSurfacedCorrection(forDevice: id)
+    }
+
+    /// The microphone has stopped hearing the speakers — lid shut, wrong room
+    /// (spec decision 9). Tracking is quietly off until a fresh calibration or
+    /// selection re-arms it.
+    public var btDriftTrackingIsBlind: Bool {
+        driftTracker?.isBlind ?? false
+    }
+
+    /// The Bluetooth half of the drift baselines: one per selected speaker that
+    /// has a MEASURED latency on file.
+    ///
+    /// A speaker carrying only a by-ear trim is left out on purpose. The
+    /// baseline `room + trim` presumes a measured latency the sink subtracts;
+    /// on a trim-only speaker the trim is a stand-in for exactly that unmeasured
+    /// latency, so the speaker really arrives a whole true latency away from
+    /// that baseline. Inside the sampler's search width the first window would
+    /// "correct" a speaker nobody ever measured — writing a latency while the
+    /// stand-in trim stays, the double compensation the wizard's Keep zeroes
+    /// the trim to avoid — and outside it, it is a baseline no peak ever
+    /// matches, which nearest-peak attribution can hand another speaker's jump.
+    static func btDriftBaselines(uids: [String], latencies: [String: Double],
+                                 trims: [String: Double],
+                                 roomMs: Double) -> [PassiveDriftSampler.Baseline] {
+        uids.filter { latencies[$0] != nil }.map {
+            PassiveDriftSampler.Baseline(deviceUID: $0, kind: .bluetooth,
+                                         expectedDelayMs: roomMs + (trims[$0] ?? 0))
+        }
+    }
+
+    /// Whether a set of baselines gives passive tracking anything it can act on.
+    ///
+    /// One Bluetooth speaker with no anchor beside it is the case that cannot:
+    /// a window's whole evidence is that one peak moved, which is equally the
+    /// speaker drifting and the microphone moving, and the sampler's
+    /// shared-shift guard (decision 8) needs a second speaker to tell them
+    /// apart. Correcting on that guess is also self-cancelling whenever the
+    /// speaker's own latency sets the BT-only reference floor
+    /// (``btOnlyReferenceMs(latencies:uids:)``): raising the latency raises the
+    /// floor by the same amount, the hold `reference − latency + trim` does not
+    /// move, the error survives, and the next window corrects it again — the
+    /// latency and the buffer marching up together for as long as the music
+    /// plays. So with nothing to align against, tracking stays off.
+    static func driftTrackingRuns(bluetoothCount: Int, anchorCount: Int) -> Bool {
+        bluetoothCount > 1 || (bluetoothCount == 1 && anchorCount > 0)
+    }
+
+    /// On `stateQueue`. Hand the tracker the delays it should hear each
+    /// selected output at, and run it only while there is something to track:
+    /// a Bluetooth speaker whose latency a wizard run has MEASURED, and either
+    /// a second such speaker or an anchor beside it, so a peak off baseline
+    /// means the speaker moved rather than that nobody ever measured it or that
+    /// the microphone did the moving.
+    ///
+    /// The expected delay is the room delay every output schedules against plus
+    /// this device's own trim — the device's measured latency cancels, because
+    /// the sink subtracts exactly what the speaker then adds. How far the sound
+    /// travels to the microphone is the one unknown left, and the sampler is
+    /// what establishes it.
+    ///
+    /// That cancellation is also why this may be rebuilt as often as the
+    /// selection changes without disturbing a correction in flight: a drift
+    /// correction moves the MEASURED LATENCY, which is the half of the delay
+    /// term this expression does not contain, so the number it recomputes is
+    /// the same one before and after. Correcting through the trim instead would
+    /// make every rebuild move the baseline along with the speaker, and the
+    /// next window would read the correction back as fresh error.
+    func refreshDriftTrackingLocked() {   // on stateQueue
+        guard let tracker = driftTracker else { return }
+        let (trims, latencies) = btTrimLock.withLock { (btTrimsByUID, btLatencyMsByUID) }
+        let room = Double(roomDelayLocked())
+        var baselines = Self.btDriftBaselines(uids: btSelectedUIDs, latencies: latencies,
+                                              trims: trims, roomMs: room)
+        let bluetoothCount = baselines.count
+        // Every AirPlay receiver in the selection is an anchor (spec decision
+        // 13): it plays on the room reference clock and does not drift, so an
+        // arrival of one off its baseline measures the MICROPHONE. Cast is
+        // deliberately absent — its receivers carry an unreported output
+        // residue the user's own offset stands in for, which would read as
+        // microphone movement.
+        for id in expectedSelected.sorted() {
+            guard let device = known[id], !device.isBluetooth, !device.isCast,
+                  !device.isLocalDevice else { continue }
+            baselines.append(PassiveDriftSampler.Baseline(
+                deviceUID: id, kind: device.kind, expectedDelayMs: room))
+        }
+        guard Self.driftTrackingRuns(bluetoothCount: bluetoothCount,
+                                     anchorCount: baselines.count - bluetoothCount) else {
+            tracker.setBaselines([])
+            tracker.stop()
+            return
+        }
+        tracker.setBaselines(baselines)
+        tracker.start()
+    }
+
+    /// A drift correction's write: the same stored measured latency the
+    /// wizard's Keep writes, and the same live splice on the sink
+    /// (`setOffsetMs`), so a corrected speaker never goes silent mid-song.
+    ///
+    /// Not the trim, on purpose — see ``DriftCorrectionApplier``. The trim is
+    /// half of what ``refreshDriftTrackingLocked`` builds the baselines from,
+    /// so correcting through it would move each baseline along with the speaker
+    /// and the next window would read the same error all over again.
+    ///
+    /// `persist` false is the in-flight slew step: in memory and on the sink,
+    /// but not on disk, the same scrub-then-commit the drawer's trim makes. The
+    /// in-memory map moves either way, because the applier reads it back to
+    /// compute the next step and the row renders it.
+    private func writeBTDriftLatency(_ ms: Double, forDevice id: String, persist: Bool) {
+        // A latency is a physical delay: whole milliseconds and never negative,
+        // the same shape the wizard's Keep and the loader both store.
+        let value = Swift.max(0, BTSyncTrim.snap(ms))
+        let all: [String: Double] = btTrimLock.withLock {
+            btLatencyMsByUID[id] = value
+            return btLatencyMsByUID
+        }
+        if persist {
+            do { try btTrimStore?.saveLatencies(all) } catch { StoreRecovery.noteWriteFailure(error) }
+        }
+        // The reference floor is a function of the slowest known latency, so a
+        // correction can move it — and it must move FIRST, exactly as at the
+        // wizard's Keep: pushing a latency past the reference drives the delay
+        // onto `SyncTiming.totalDelayNanos`'s ≥ 0 clamp for as long as the two
+        // disagree. Both hops are enqueued from `stateQueue`, so
+        // `captureControlQueue` replays them in that order.
+        //
+        // ONLY on a committed write. A slew's steps arrive twice a second with
+        // `persist` false, and moving the floor on each of them is anything but
+        // inaudible: a floor move rebuilds every Bluetooth sink
+        // (`BTSyncedSink.setBTOnlyBufferMs`) and re-anchors the Mac's own sink,
+        // both of them a full-delay silence, inside a move whose whole purpose
+        // is to be unhearable. The final step of every slew persists, so the
+        // floor still lands on the corrected value — once.
+        // razor: the floor lags the in-flight steps by up to the size of the
+        // correction. The reference's 100 ms headroom (`btReferenceHeadroomMs`)
+        // absorbs corrections under it; the sampler's 120 ms search half-width
+        // means a 100–120 ms correction IS reportable, and on the floor-pinning
+        // speaker its last ~20 ms of steps then ride `totalDelayNanos`'s ≥ 0
+        // clamp and do nothing until the commit moves the floor — a bounded
+        // transient the commit plus the next window's re-baseline recover.
+        // Upgrade path if that transient ever matters: raise the floor to the
+        // slew's TARGET when the slew starts rather than when it lands.
+        stateQueue.async {
+            if persist { self.updateBTReferenceBufferLocked() }
+            self.captureControlQueue.async { [weak self] in
+                self?.btSink?.setOffsetMs(Int(value), forDeviceUID: id)
+            }
+        }
+    }
+
+    /// Whether the program has gone quiet on the Bluetooth fan-out — the gap a
+    /// correction can land in whole. "Can't tell" (no sink, nothing ever
+    /// rendered) reads as music playing, so a correction slews rather than
+    /// snapping on a guess.
+    private func btProgramIsSilent() -> Bool {
+        guard let sink = btSinkRefLock.withLock({ btSink }),
+              let lastAudible = sink.lastAudibleRenderNanos() else { return false }
+        var now = timespec()
+        clock_gettime(CLOCK_MONOTONIC, &now)
+        return SyncTiming.monotonicNanos(now) - lastAudible > Self.driftGapNanos
+    }
+}
+
 extension NativeBackend: BTOutputControlling {
 
     public func setBTSyncTrim(_ ms: Double, forDevice id: String, persist: Bool) {
@@ -10861,6 +11103,11 @@ extension NativeBackend: BTOutputControlling {
             // A persisted nudge is an alignment, wherever it came from: the
             // Mac's ruler, the wizard's trim Keep, or the phone's fine-tune.
             btSpeakerTiming.noteAligned(uid: id)
+            // The user moved this speaker on purpose, so the delay the drift
+            // tracker expects to hear it at moved with it. A drift correction
+            // never comes through here — it moves the MEASURED LATENCY, which
+            // the baselines do not contain, so it leaves them alone.
+            stateQueue.async { self.refreshDriftTrackingLocked() }
         }
         captureControlQueue.async { [weak self] in
             self?.btSink?.setTrimMs(value, forDeviceUID: id)
@@ -11968,11 +12215,17 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// ``BTSyncedSink/setKeepAliveWindow(nanos:)``. Same default-no-op posture
     /// as `setTrimMs`.
     func setKeepAliveWindow(nanos: Int64)
+    /// When the fan-out last rendered real program audio — see
+    /// ``BTSyncedSink/lastAudibleRenderNanos()``. Defaults to `nil` ("can't
+    /// tell"), which the caller reads as "not in a gap", so lifecycle-only
+    /// spies never make a drift correction land as an immediate move.
+    func lastAudibleRenderNanos() -> Int64?
 }
 
 extension BTSyncedSinkControlling {
     func anchoredDeviceUIDs() -> Set<String>? { nil }
     func setKeepAliveWindow(nanos: Int64) {}
+    func lastAudibleRenderNanos() -> Int64? { nil }
     func setTrimMs(_ ms: Double, forDeviceUID uid: String) {}
     func reanchorAll(cause: String) {}
     func setOffsetMs(_ ms: Int, forDeviceUID uid: String) {}

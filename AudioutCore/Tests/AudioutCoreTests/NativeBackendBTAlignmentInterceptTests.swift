@@ -689,6 +689,83 @@ extension SerializedSharedState {
                 "…and only the selected ones count")
     }
 
+    // MARK: - Passive drift tracking (roadmap 085 ticket 05)
+
+    /// DEFECT: the baseline guard asked `btStoredAlignmentOffsetMs`, which
+    /// counts a bare by-ear trim as calibration. A baseline is `room + trim`,
+    /// which presumes a measured latency the sink subtracts; on a trim-only
+    /// speaker the trim IS the stand-in for that unmeasured latency, so the
+    /// speaker really arrives a whole true latency off the baseline. Within the
+    /// sampler's search width the first window "corrected" it — writing a
+    /// measured latency while the stand-in trim stayed, which is the double
+    /// compensation the wizard's Keep zeroes the trim to avoid — and beyond it,
+    /// left a baseline no peak matches for nearest-peak attribution to hand
+    /// another speaker's jump to.
+    @Test func onlyMeasuredSpeakersBecomeDriftBaselines() {
+        let baselines = NativeBackend.btDriftBaselines(
+            uids: ["measured", "trim-only", "untouched"],
+            latencies: ["measured": 300],
+            trims: ["measured": -5, "trim-only": -120],
+            roomMs: 500)
+
+        #expect(baselines.map(\.deviceUID) == ["measured"],
+                "a trim is not a measurement, and an untouched speaker is neither")
+        #expect(baselines.first?.expectedDelayMs == 495,
+                "room + trim — the measured latency cancels against the sink's own subtraction")
+    }
+
+    /// DEFECT: one Bluetooth speaker with no anchor ran anyway. Its whole
+    /// evidence is that one peak moved, which is equally the speaker drifting
+    /// and the microphone moving, and the sampler's shared-shift guard needs a
+    /// second speaker to tell the two apart. Worse, the correction cancelled
+    /// itself whenever that speaker's latency set the reference floor — raising
+    /// the latency raised the floor by the same amount, the hold never moved,
+    /// and every window re-corrected the surviving error, marching the latency
+    /// and the buffer up together.
+    @Test func driftTrackingNeedsSomethingToAlignAgainst() {
+        #expect(NativeBackend.driftTrackingRuns(bluetoothCount: 0, anchorCount: 0) == false)
+        #expect(NativeBackend.driftTrackingRuns(bluetoothCount: 0, anchorCount: 2) == false,
+                "anchors alone measure only the microphone")
+        #expect(NativeBackend.driftTrackingRuns(bluetoothCount: 1, anchorCount: 0) == false,
+                "one speaker, nothing to align it against")
+        #expect(NativeBackend.driftTrackingRuns(bluetoothCount: 1, anchorCount: 1) == true,
+                "an AirPlay receiver is the reference the lone speaker lacked")
+        #expect(NativeBackend.driftTrackingRuns(bluetoothCount: 2, anchorCount: 0) == true,
+                "two speakers: a shift they share is the microphone's, and re-baselines")
+    }
+
+    /// DEFECT: every drift write recomputed the reference floor, slew steps
+    /// included. A slew steps twice a second, and a floor move is not a quiet
+    /// bookkeeping change — it rebuilds every Bluetooth sink and re-anchors the
+    /// Mac's own, a full-delay silence each time, inside a move whose whole
+    /// point is to be inaudible. The floor now moves once, on the committed
+    /// write that ends the slew.
+    @Test func aSlewStepLeavesTheReferenceFloorAlone() throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).saveLatencies([btMove.id: 640, btFlip.id: 640])
+        let (backend, bt, sink, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        backend.start()
+        backend.attachPassiveDriftTracking(ring: ReferenceAudioRing())
+        bt.fire([btMove, btFlip])
+        waitFor { self.device(backend, self.btMove.id) != nil
+            && self.device(backend, self.btFlip.id) != nil }
+        backend.setOutputSet([btMove.id, btFlip.id])
+        waitFor { sink.buffers.last == 740 }
+        let floorMoves = sink.buffers.count
+
+        // Nothing has rendered, so the program reads as playing and the
+        // correction slews. The first step lands at once.
+        let applier = try #require(backend.driftApplier)
+        applier.handle([.init(deviceUID: btMove.id, errorMs: 20,
+                              hostNanos: 0, isBestGuess: false)])
+        waitFor { sink.offsets.contains { $0.uid == self.btMove.id && $0.ms == 641 } }
+
+        #expect(sink.buffers.count == floorMoves,
+                "the step reached the sink, the floor did not move")
+        #expect(sink.buffers.last == 740)
+    }
+
     /// Selecting a device whose measured latency is past the floor moves the
     /// reference for the BT sinks AND for the Mac's own, which rides it.
     @Test func aStoredLatencyRaisesTheReferenceOnSelect() throws {

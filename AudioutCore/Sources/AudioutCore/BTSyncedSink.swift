@@ -575,9 +575,11 @@ final class BTDeviceSink: @unchecked Sendable {
     /// idles the A2DP transport during program silence — a stream restart rolls
     /// a fresh 20–90 ms latency and voids the alignment. `0` window = off.
     private var keepAliveWindowNanos: Int64 = 0   // stateLock
-    /// Monotonic instant of the last cycle that produced real audio. Render
-    /// thread only — written and read nowhere else, so it needs no lock.
-    private var lastAudibleRenderNanos: Int64 = 0
+    /// Monotonic instant of the last cycle that produced real audio. Written
+    /// on the render thread, which must not take a blocking lock, and read
+    /// from a control queue (``lastAudibleRenderNanos()``) — so it lives in one
+    /// aligned word, the same idiom ``ReferenceAudioRing``'s armed flag uses.
+    private let lastAudibleRenderNanosPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
     private var configChangeObserver: NSObjectProtocol?
     private var rateListenerBlock: AudioObjectPropertyListenerBlock?
     private let listenerQueue: DispatchQueue
@@ -645,6 +647,7 @@ final class BTDeviceSink: @unchecked Sendable {
         self.scratchCapacity = self.maxRenderFrames * channels
         self.scratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchCapacity)
         self.scratch.initialize(repeating: 0, count: scratchCapacity)
+        self.lastAudibleRenderNanosPtr.initialize(to: 0)
 
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: renderSampleRate,
@@ -663,6 +666,17 @@ final class BTDeviceSink: @unchecked Sendable {
         // exclusive whichever thread this runs on.
         stopLocked()
         scratch.deallocate()
+        lastAudibleRenderNanosPtr.deallocate()
+    }
+
+    /// The monotonic instant this device last rendered real program audio, or
+    /// `nil` before it ever has. How the drift tracker's correction finds a
+    /// playback gap (roadmap 085 ticket 05): keep-alive frames are zeros, so
+    /// this stops advancing the moment the music does, whether or not the
+    /// transport is being held open.
+    var lastAudibleRenderNanos: Int64? {
+        let nanos = lastAudibleRenderNanosPtr.pointee
+        return nanos > 0 ? nanos : nil
     }
 
     // MARK: Lifecycle
@@ -1192,11 +1206,12 @@ final class BTDeviceSink: @unchecked Sendable {
                 frameCount: produced)
         }
         if produced > 0 {
-            lastAudibleRenderNanos = cycleStartMonotonicNanos
+            lastAudibleRenderNanosPtr.pointee = cycleStartMonotonicNanos
             return true
         }
-        return keepAliveWindow > 0 && lastAudibleRenderNanos > 0
-            && cycleStartMonotonicNanos &- lastAudibleRenderNanos < keepAliveWindow
+        let lastAudible = lastAudibleRenderNanosPtr.pointee
+        return keepAliveWindow > 0 && lastAudible > 0
+            && cycleStartMonotonicNanos &- lastAudible < keepAliveWindow
     }
 
     /// The gate has just opened; make the first frame released the frame that
@@ -1613,6 +1628,16 @@ final class BTSyncedSink: @unchecked Sendable {
     func renderingDeviceUIDs() -> Set<String> {
         let sinks = tableLock.withLock { Array(sinksByUID.values) }
         return Set(sinks.lazy.filter(\.hasStartedRendering).map(\.deviceUID))
+    }
+
+    /// The most recent monotonic instant ANY device sink rendered real program
+    /// audio, or `nil` while none ever has — what the drift corrections read to
+    /// tell music from a playback gap (roadmap 085 ticket 05). The newest of
+    /// the fleet, not each device's own: the program is one program, and a
+    /// speaker that joined late has simply not heard all of it.
+    func lastAudibleRenderNanos() -> Int64? {
+        let sinks = tableLock.withLock { Array(sinksByUID.values) }
+        return sinks.compactMap(\.lastAudibleRenderNanos).max()
     }
 
     /// The UIDs that have been HANDED at least one captured buffer, whether or

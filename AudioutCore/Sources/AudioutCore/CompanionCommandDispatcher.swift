@@ -332,6 +332,13 @@ public final class CompanionCommandDispatcher {
         case .playAlignmentDemo(let targetID):
             return alignment(targetID) { actions, id in actions.playDemo(id, clientID) }
 
+        case .activateLicenseKey:
+            // razor: answered the way this Mac answered before the case existed
+            // (it decoded as `.unknown`). The licence-key work adds the real
+            // handling; this line goes when that lands. Same line as on
+            // `claude/bluetooth-latency-drift-6c2d59`, so the merge is a no-op.
+            return .refused("Unknown command: activateLicenseKey.")
+
         case .unknown(let name):
             return .refused("Unknown command: \(name).")
         }

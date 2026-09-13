@@ -495,6 +495,15 @@ final class AlignmentStageView: NSView {
     private let targetRing = CAShapeLayer()
     private let referenceHalo = CALayer()
     private let referenceRing = CAShapeLayer()
+    /// The two lights as the emitter field's SETTLED state, under the halos
+    /// (`SettledLightLayer`). `nil` headless or without Metal, and the halo
+    /// layers then carry their bitmap instead — the halos stay in the tree
+    /// either way, because their animated position, size and opacity are
+    /// what drive this layer's frames.
+    private let settledLights = SettledLightLayer.make()
+    private var settledLightsLink: CADisplayLink?
+    /// The lights' colours, resolved in `stampColors` for the shader.
+    private var settledTint: (target: SIMD3<Float>, reference: SIMD3<Float>) = (.zero, .zero)
 
     private static let breatheKey = "alignmentStage.breathe"
     /// `CATransition` is filed under this literal reserved key whatever key is
@@ -554,6 +563,9 @@ final class AlignmentStageView: NSView {
                     spanLayer, targetRing, referenceRing] {
             fieldLayer.addSublayer(sub)
         }
+        // Under everything the camera moves: the field is the light itself,
+        // the halo layers above it are transparent carriers of its geometry.
+        if let settledLights { fieldLayer.insertSublayer(settledLights, at: 0) }
         for sub in [plateLayer, wireLeft, wireRight, fieldLayer] {
             layer?.addSublayer(sub)
         }
@@ -819,7 +831,9 @@ final class AlignmentStageView: NSView {
         plateLayer.frame = bounds
         fieldLayer.bounds = CGRect(origin: .zero, size: bounds.size)
         fieldLayer.position = .zero
+        settledLights?.fit(to: bounds.size, scale: window?.backingScaleFactor ?? 2)
         CATransaction.commit()
+        drawSettledStill()
     }
 
     // MARK: - Transition scripts
@@ -1723,8 +1737,12 @@ final class AlignmentStageView: NSView {
             let targetHue = dormant ? rule : (rung == .locked ? fuse : target)
             targetRing.strokeColor = targetHue.cgColor
             referenceRing.strokeColor = (dormant ? rule : reference).cgColor
-            targetHalo.contents = Self.haloImage(color: targetHue)
-            referenceHalo.contents = Self.haloImage(color: dormant ? rule : reference)
+            let referenceHue = dormant ? rule : reference
+            if settledLights == nil {
+                targetHalo.contents = Self.haloImage(color: targetHue)
+                referenceHalo.contents = Self.haloImage(color: referenceHue)
+            }
+            settledTint = (Self.shaderTint(targetHue), Self.shaderTint(referenceHue))
 
             resolvedFuse = fuse.cgColor
             resolvedSpanGlow = fuse.cgColor
@@ -1763,11 +1781,18 @@ final class AlignmentStageView: NSView {
         super.viewDidChangeEffectiveAppearance()
         stampColors()
         needsLayout = true
+        drawSettledStill()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         reconcileBreathing()
+        reconcileSettledLights()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsLayout = true
     }
 
     @objc private func accessibilityDisplayOptionsDidChange() {
@@ -1777,6 +1802,63 @@ final class AlignmentStageView: NSView {
         stampColors()
         applyGeometry(Self.instantScript)
         reconcileBreathing()
+        reconcileSettledLights()
+    }
+
+    // MARK: - The settled field's clock
+
+    /// Loop in a window with motion allowed; otherwise hold one still. The
+    /// gate is the breathing's, minus the rung: a light at rest still rolls
+    /// over itself — that is what the settled state IS — and `dormant` puts
+    /// its opacity to 0 anyway.
+    private func reconcileSettledLights() {
+        guard let settledLights else { return }
+        guard window != nil, !reduceMotion else {
+            settledLightsLink?.invalidate()
+            settledLightsLink = nil
+            drawSettledStill()
+            return
+        }
+        guard settledLightsLink == nil else { return }
+        let link = displayLink(target: self, selector: #selector(settledLightsTick))
+        // 30 fps: the field breathes over seconds (the licence gate's own rate).
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30,
+                                                        preferred: 30)
+        settledLights.resetClock()
+        link.add(to: .main, forMode: .common)
+        settledLightsLink = link
+    }
+
+    @objc private func settledLightsTick(_ link: CADisplayLink) {
+        settledLights?.render(lights: currentLights(), now: link.targetTimestamp)
+    }
+
+    /// A frame at the clock's current value — for Reduce Motion, a resize
+    /// while paused, a colour flip.
+    private func drawSettledStill() {
+        guard let settledLights, settledLightsLink == nil, window != nil else { return }
+        settledLights.render(lights: currentLights(), now: nil)
+    }
+
+    /// The lights as they are ON SCREEN this frame: the halo layers'
+    /// presentation values, so an in-flight transition, the breathe scale and
+    /// the swell all reach the field with no second script.
+    private func currentLights() -> [SettledLightLayer.Light] {
+        func light(_ halo: CALayer, _ tint: SIMD3<Float>) -> SettledLightLayer.Light {
+            let p = halo.presentation() ?? halo
+            let scale = CGFloat(p.transform.m11)
+            return SettledLightLayer.Light(centre: p.position,
+                                           radius: p.bounds.width / 2 * scale,
+                                           opacity: p.opacity,
+                                           color: tint)
+        }
+        return [light(targetHalo, settledTint.target),
+                light(referenceHalo, settledTint.reference)]
+    }
+
+    private static func shaderTint(_ color: NSColor) -> SIMD3<Float> {
+        let c = color.usingColorSpace(.sRGB) ?? color
+        return SIMD3(Float(c.redComponent), Float(c.greenComponent), Float(c.blueComponent))
     }
 
     private var reduceMotion: Bool {

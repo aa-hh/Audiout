@@ -359,6 +359,7 @@ public final class BTAlignmentWizardSession {
         requestListening { [weak self] granted in
             guard let self, self.startPending, !self.ended else { return }
             self.startPending = false
+            Analytics.capture("bt_sync:mic_permission_answered", ["granted": granted ? "true" : "false"])
             self.beginRun(listening: granted)
         }
     }
@@ -394,6 +395,7 @@ public final class BTAlignmentWizardSession {
     /// leaning on the one thing that was checked and not confirmed.
     public func endListening() {
         guard case .listening = screen, !ended else { return }
+        Analytics.capture("bt_sync:listening_ended", ["outcome": "failed", "attempt": String(micAttempts)])
         if estimator.openingProposalStands { estimator = makeEstimator() }
         presentEstimatorPhase()
     }
@@ -418,11 +420,15 @@ public final class BTAlignmentWizardSession {
     /// never the prior.
     public func offerMeasuredProposal(valueMs: Double) {
         guard !ended else { return }
+        let wasListening: Bool
         switch screen {
-        case .question, .listening:
-            break
+        case .question:
+            wasListening = false
+        case .listening:
+            wasListening = true
         case .proposal:
             guard estimator.openingProposalStands else { return }
+            wasListening = false
         default:
             return
         }
@@ -433,6 +439,11 @@ public final class BTAlignmentWizardSession {
             "valueMs": String(Int(valueMs.rounded())),
         ])
         presentEstimatorPhase(measured: true)
+        if wasListening {
+            let outcome: String
+            if case .macIsLate = screen { outcome = "implausible" } else { outcome = "measured" }
+            Analytics.capture("bt_sync:listening_ended", ["outcome": outcome, "attempt": String(micAttempts)])
+        }
     }
 
     /// Undo the last answer and ask that question again. Available only while
@@ -488,6 +499,7 @@ public final class BTAlignmentWizardSession {
         lastTempoBPM = nil
         setTick(true)
         enterListening()
+        Analytics.capture("bt_sync:mic_retried")
         requestListening { [weak self] granted in
             guard let self, !self.ended, granted == false,
                   case .listening = self.screen else { return }

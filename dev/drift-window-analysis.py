@@ -15,6 +15,7 @@ lag inside ±SEARCH ms of the expectation and its score:
   phat1   fully whitened (phase transform)
   local   plain filter scored against a ±300 ms local background
   p2p     peak over the second-best peak inside the search window
+  hi.ph1  1–8 kHz only, fully whitened (the treble carries the timing)
   bands   4 sub-band whitened peaks: spread in ms (agreement)
 plus capture level stats (clipping is the first thing to rule out).
 
@@ -103,7 +104,10 @@ def analyse(stem):
           f"cap peak {20*math.log10(max(np.max(np.abs(cap)),1e-9)):.1f} dBFS  rms {20*math.log10(max(np.sqrt(np.mean(cap**2)),1e-9)):.1f} dBFS  "
           f"clipped {clip*100:.2f}%  ref rms {20*math.log10(max(np.sqrt(np.mean(ref**2)),1e-9)):.1f} dBFS")
     refb, capb = bandlimit(ref, cr, *BAND), bandlimit(cap, cr, *BAND)
-    corrs = {"plain": xcorr_fft(refb, capb), "phat.5": xcorr_fft(refb, capb, 0.5), "phat1": xcorr_fft(refb, capb, 1.0)}
+    corrs = {"plain": xcorr_fft(refb, capb), "phat.5": xcorr_fft(refb, capb, 0.5), "phat1": xcorr_fft(refb, capb, 1.0),
+             # 1–8 kHz whitened: the first live window (2026-09-13 21:07) had its
+             # only clear peak here (local 4.0) while 300 Hz–8 kHz showed none.
+             "hi.ph1": xcorr_fft(bandlimit(ref, cr, 1000.0, BAND[1]), bandlimit(cap, cr, 1000.0, BAND[1]), 1.0)}
     edges = np.geomspace(BAND[0], BAND[1], 5)
     band_corrs = [xcorr_fft(bandlimit(ref, cr, a, b), bandlimit(cap, cr, a, b), 0.5) for a, b in zip(edges[:-1], edges[1:])]
     print(f"{'expected':>9} {'est':>7} {'lag ms':>8} {'err ms':>7} {'score':>6} {'local':>6} {'p2p':>5}")

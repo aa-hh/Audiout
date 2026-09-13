@@ -176,6 +176,14 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// Its only job is picking the row glyph — see ``symbolName``.
     public var bluetoothDeviceClassMinor: UInt32?
 
+    /// Whether this Bluetooth speaker's own volume can be driven over the
+    /// link (BT-HW-VOL). `nil` = not yet known (never connected while this
+    /// process ran, or not a BT device); `false` = checked while connected and
+    /// found unsupported or non-delivering, which is what hides the detail
+    /// pane's "Control speaker volume" toggle — offering it there would
+    /// promise something that cannot happen.
+    public var btHardwareVolumeCapable: Bool?
+
     /// Product phrases that make a Bluetooth device's model unambiguous, and
     /// the SF Symbol each one earns. MOST SPECIFIC FIRST: the first phrase
     /// found anywhere in the name wins, so "AirPods Pro" and "AirPods Max" can
@@ -268,7 +276,8 @@ public struct Device: Identifiable, Equatable, Sendable {
         eq: DeviceEQ = .flat,
         eqBypassReason: EQBypassReason? = nil,
         castVolumeLagSeconds: Int? = nil,
-        bluetoothDeviceClassMinor: UInt32? = nil
+        bluetoothDeviceClassMinor: UInt32? = nil,
+        btHardwareVolumeCapable: Bool? = nil
     ) {
         self.id = id
         self.name = name
@@ -284,6 +293,7 @@ public struct Device: Identifiable, Equatable, Sendable {
         self.eqBypassReason = eqBypassReason
         self.castVolumeLagSeconds = castVolumeLagSeconds
         self.bluetoothDeviceClassMinor = bluetoothDeviceClassMinor
+        self.btHardwareVolumeCapable = btHardwareVolumeCapable
     }
 }
 

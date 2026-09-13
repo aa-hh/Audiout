@@ -19,7 +19,7 @@ the model, never the reverse.
 - `AppRouteDestination` is four cases; `isDeviceRoute` is `.device` only, `isRoutedAway` adds `.group`.
 - A per-app Bluetooth destination is fed by UID and reads the room's timing, never sets it.
 - Every real (re)connect reseeds the engine volume, or the stream is inaudible.
-- Never touch IOBluetooth outside `BTDeviceEnumerator`'s gate; an ungated call kills the process.
+- Never touch IOBluetooth outside the authorization gates in `BTDeviceEnumerator` and `BTAbsoluteVolumeSDP`; an ungated call kills the process.
 - `TCCAccessPreflight` is cached for the process lifetime; read grants through `TCCProbeRunner`.
 - `CompanionSnapshotBuilder` fields never come from `Device` state; use the UI's selection.
 - Use `IsolatedSuite` for shared state; concurrent suites sharing defaults flake.

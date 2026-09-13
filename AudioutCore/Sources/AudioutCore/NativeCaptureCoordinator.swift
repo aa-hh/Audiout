@@ -1419,14 +1419,31 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// into the feed; `onFinished` when the last sweep frame has been rendered
     /// (air arrival lags by the sinks' pipeline delay). Both fire off-queue,
     /// at most once; a run torn down early fires neither — callers recover by
-    /// timeout.
+    /// timeout. A probe that stages after the gate has already opened starts
+    /// immediately instead of being dropped, and the tick grid re-arms after
+    /// the sweeps as usual.
     public func stageWizardMicProbe(onStarted: @escaping () -> Void,
                                     onFinished: @escaping () -> Void) {
         pacerQueue.async { [weak self] in
             guard let self, let injector = self.currentWizardInjector() else { return }
             injector.stageProbe()
-            self.micProbeStarted = onStarted
-            self.micProbeFinished = onFinished
+            if injector.test_isArmed {
+                // The gate already opened and armed the by-ear ticks before this
+                // probe finished staging (cold mic start can take seconds). Undo
+                // that arm and start the sweeps right now instead of dropping
+                // them — the completion handoff below (`emitWizardBlock`) arms
+                // the tick grid again a clean interval after the sweeps, exactly
+                // as the normal stage-before-arm path does.
+                injector.disarmTicks()
+                injector.armProbe()
+                self.micProbeFinished = onFinished
+                let started = onStarted
+                DispatchQueue.global(qos: .userInitiated).async(execute: started)
+                self.queue.async { Telemetry.log(.captureWS, "wizard_probe_late_armed", [:]) }
+            } else {
+                self.micProbeStarted = onStarted
+                self.micProbeFinished = onFinished
+            }
         }
     }
 

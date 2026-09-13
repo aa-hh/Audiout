@@ -1045,4 +1045,79 @@ import AudioToolbox
 
         coordinator.setAlignTickMode(.off)
     }
+
+    /// The first-run race this fix closes: on a cold mic start, the arm gate
+    /// can open — and arm the by-ear tick grid — before the probe finishes
+    /// staging. Before the fix, that left the probe armed nowhere: no sweeps,
+    /// no `onStarted`/`onFinished`, and the mic session recorded room noise.
+    /// Here the gate opens FIRST, ticks render, and only THEN does the probe
+    /// stage — it must still play its sweeps and hand back to a clean tick
+    /// grid afterward, exactly like the normal stage-before-arm path.
+    @Test func aLateStagedMicProbeIsArmedInsteadOfDropped() {
+        let tap = FakeTap()
+        let engineSink = SpyPCMSink()
+        let localSink = SpyFanoutSink()
+        let btSink = SpyFanoutSink()
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { tap },
+            sink: engineSink,
+            makeConverter: { _ in ConstantConverter() },
+            processResolver: AudioProcessResolver(enumerator: EmptyEnumerator()),
+            muteBehavior: .mutedWhenTapped)
+        coordinator.setSyncedLocalSink(localSink, renderProcessPID: 212_121)
+        coordinator.setBTSink(btSink, renderProcessPID: 313_131)
+        coordinator.start()
+        waitFor {
+            if case .capturing = coordinator.state { return true }
+            return false
+        }
+
+        coordinator.test_setWizardModeWithoutPacerTimer()
+
+        // The gate opens with no probe staged yet: the by-ear grid arms.
+        coordinator.armWizardTicks()
+
+        // At least one tick has rendered before the cold mic finishes staging.
+        // First tick lands one search-tempo beat (3 s ≈ 132_300 frames) past
+        // the arm — 33 blocks of 4_096 clears it; pump extra for margin.
+        for _ in 0..<40 { coordinator.test_pumpWizardTick(frames: 4_096) }
+        let tickedBeforeStage = localSink.enqueued.flatMap { $0 }
+        #expect(tickedBeforeStage.contains { abs($0) > 0.2 },
+                "a tick rendered under the gate's arm before the probe ever staged")
+
+        final class Box: @unchecked Sendable {
+            let lock = NSLock()
+            var started = 0
+            var finished = 0
+        }
+        let box = Box()
+        let localBlocksBeforeStage = localSink.enqueued.count
+        let btBlocksBeforeStage = btSink.enqueued.count
+        coordinator.stageWizardMicProbe(
+            onStarted: { box.lock.lock(); box.started += 1; box.lock.unlock() },
+            onFinished: { box.lock.lock(); box.finished += 1; box.lock.unlock() })
+
+        for _ in 0..<20 { coordinator.test_pumpWizardTick(frames: 4_096) }
+        waitFor { box.lock.withLock { box.finished } == 1 }
+        #expect(box.lock.withLock { box.started } == 1,
+                "the late-staged probe still started — this is what the bug dropped")
+
+        let localDuringProbe = localSink.enqueued[localBlocksBeforeStage...].flatMap { $0 }
+        let btDuringProbe = btSink.enqueued[btBlocksBeforeStage...].flatMap { $0 }
+        #expect(localDuringProbe.contains { abs($0) > 0.05 },
+                "the engine/Mac fan-out heard its sweep")
+        #expect(btDuringProbe.contains { abs($0) > 0.1 },
+                "the Bluetooth fan-out heard its sweep")
+
+        // After the handoff the tick grid is armed again: pump past one more
+        // search-tempo beat and confirm ticks are back in the feed.
+        let blocksBefore = localSink.enqueued.count
+        for _ in 0..<40 { coordinator.test_pumpWizardTick(frames: 4_096) }
+        waitFor { localSink.enqueued.count == blocksBefore + 40 }
+        let afterHandover = localSink.enqueued[blocksBefore...].flatMap { $0 }
+        #expect(afterHandover.contains { abs($0) > 0.2 },
+                "the by-ear ticks resume after the late-armed probe finishes")
+
+        coordinator.setAlignTickMode(.off)
+    }
 }

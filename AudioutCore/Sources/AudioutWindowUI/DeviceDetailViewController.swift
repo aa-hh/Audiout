@@ -69,6 +69,12 @@ public final class DeviceDetailViewController: NSViewController {
     /// picking always no-ops without a controller to write through).
     public var deviceIconController: DeviceIconController?
 
+    /// Reads/writes the per-speaker "Control speaker volume" opt-out. Optional
+    /// and nil-tolerant, like ``deviceIconController``: without one there is
+    /// nothing to read the checkbox's state from and nothing to write it to,
+    /// so the whole slot stays hidden rather than showing a dead toggle.
+    public var btHardwareVolumeStore: BTHardwareVolumeStore?
+
     private let iconWell = DeviceIconWellView()
     private let nameLabel = NSTextField(labelWithString: "")
     /// The identity BAND — `.bare`, so it draws nothing at all. Kept as a
@@ -88,7 +94,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// The three slot titles. Each is a plain sibling label sitting on bare
     /// pane above the list or card it names, exactly as the group editor's
     /// "Speakers" label titles its checklist. `eqTitleLabel` hides in lockstep
-    /// with `eqWell` (see `applyEQSectionVisibility()`): This Mac has nothing
+    /// with `eqWell` (see `applyPerDeviceSectionVisibility()`): This Mac has nothing
     /// to tune, so neither the card nor its title has anything to say. The
     /// title line also carries the card's Reset button (`eqResetButton`),
     /// trailing-aligned on the content edge, hidden with the slot.
@@ -96,6 +102,15 @@ public final class DeviceDetailViewController: NSViewController {
     /// The Equalizer card's Reset button — moved off the editor and onto this
     /// title line so the loudness row inside the card is the checkbox alone.
     private let eqResetButton = NSButton()
+    /// The Bluetooth-only "Volume" slot: a `.panel` list holding one checkbox
+    /// and its one-line explanation. `.panel`, not `.card` — `.card`'s
+    /// `raised` fill measures identical to this pane's own ground in light
+    /// (2026-09-04), and this is a fact row, not the page's instrument.
+    private let btVolumeWell = GroupedSectionView()
+    private let btVolumeTitleLabel = NSTextField(labelWithString: "Volume")
+    private let btVolumeCheckbox = NSButton()
+    private let btVolumeHintLabel =
+        NSTextField(labelWithString: "The volume slider moves the speaker's own volume.")
     private let groupsTitleLabel = NSTextField(labelWithString: "Scenes")
     private let aboutTitleLabel = NSTextField(labelWithString: "About")
     private let aboutStack = NSStackView()
@@ -104,13 +119,16 @@ public final class DeviceDetailViewController: NSViewController {
     /// "Scenes" sits one section-gap below whatever precedes it, and WHICH
     /// slot that is depends on the device — the Equalizer card on a speaker,
     /// the identity band on This Mac. So both constraints are built once and
-    /// `applyEQSectionVisibility()` swaps which one is active; rebuilding a
+    /// `applyPerDeviceSectionVisibility()` swaps which one is active; rebuilding a
     /// constraint per refresh instead would leak one every time.
     /// Optional, not implicitly-unwrapped: `show(device:)` is legitimately
     /// called before the view is ever loaded (the pane is built long before
     /// it is mounted), and refreshing then must not trap.
     private var groupsTitleBelowEQCard: NSLayoutConstraint?
     private var groupsTitleBelowHeader: NSLayoutConstraint?
+    /// The third alternative: a Bluetooth speaker carries the "Volume" slot
+    /// between the Equalizer and "Scenes", so "Scenes" hangs off that instead.
+    private var groupsTitleBelowBTVolume: NSLayoutConstraint?
 
     private let statusValueLabel = NSTextField(labelWithString: "")
     private let kindValueLabel = NSTextField(labelWithString: "")
@@ -222,15 +240,29 @@ public final class DeviceDetailViewController: NSViewController {
         groupsStack.alignment = .leading
         groupsStack.spacing = 6
 
-        // The three slot titles are configured identically, because they are
-        // the same thing three times: same font, same colour, same lane.
-        for title in [eqTitleLabel, groupsTitleLabel, aboutTitleLabel] {
+        // The four slot titles are configured identically, because they are
+        // the same thing four times: same font, same colour, same lane.
+        // The Bluetooth-only volume slot. Stock checkbox, no custom drawing;
+        // its state is set by `applyPerDeviceSectionVisibility()`, which may
+        // already have run by the time `loadView` does.
+        btVolumeCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        btVolumeCheckbox.setButtonType(.switch)
+        btVolumeCheckbox.title = "Control speaker volume"
+        btVolumeCheckbox.font = Tokens.Font.body
+        btVolumeCheckbox.target = self
+        btVolumeCheckbox.action = #selector(btVolumeToggled(_:))
+        btVolumeHintLabel.translatesAutoresizingMaskIntoConstraints = false
+        btVolumeHintLabel.font = Tokens.Font.caption
+        btVolumeHintLabel.textColor = Tokens.Color.label2
+        btVolumeHintLabel.lineBreakMode = .byTruncatingTail
+
+        for title in [eqTitleLabel, btVolumeTitleLabel, groupsTitleLabel, aboutTitleLabel] {
             title.translatesAutoresizingMaskIntoConstraints = false
             title.font = Tokens.Font.body
             title.textColor = Tokens.Color.label2
         }
 
-        // Enablement/visibility are set by `refreshUI()`/`applyEQSectionVisibility()`,
+        // Enablement/visibility are set by `refreshUI()`/`applyPerDeviceSectionVisibility()`,
         // which may already have run by the time `loadView` does — not here.
         eqResetButton.translatesAutoresizingMaskIntoConstraints = false
         eqResetButton.bezelStyle = .rounded
@@ -260,6 +292,7 @@ public final class DeviceDetailViewController: NSViewController {
         eqWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
         groupsWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
         aboutWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
+        btVolumeWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
         // The header band is bare — a box around an identity band is not a
         // container anyone asked for. The two fact lists are stroked `panel`
         // rows (the iPhone companion's PanelRow): the pane ground is `panel`
@@ -272,15 +305,17 @@ public final class DeviceDetailViewController: NSViewController {
         headerWell.style = .bare
         groupsWell.style = .panel
         aboutWell.style = .panel
+        btVolumeWell.style = .panel
         eqWell.style = .well
         eqEditor.translatesAutoresizingMaskIntoConstraints = false
         eqEditor.delegate = self
 
-        for well in [headerWell, eqWell, groupsWell, aboutWell] {
+        for well in [headerWell, eqWell, btVolumeWell, groupsWell, aboutWell] {
             well.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(well)
         }
         for v in [iconWell, nameLabel, eqTitleLabel, eqResetButton, eqEditor,
+                  btVolumeTitleLabel, btVolumeCheckbox, btVolumeHintLabel,
                   groupsTitleLabel, groupsStack, aboutTitleLabel, aboutStack] {
             column.addSubview(v)
         }
@@ -319,11 +354,13 @@ public final class DeviceDetailViewController: NSViewController {
 
         // Both of the "Scenes" title's possible top pins, built once (see the
         // properties). Neither goes in the array below — exactly one is
-        // activated by `applyEQSectionVisibility()`.
+        // activated by `applyPerDeviceSectionVisibility()`.
         groupsTitleBelowEQCard = groupsTitleLabel.topAnchor.constraint(
             equalTo: eqWell.bottomAnchor, constant: GroupsPaneLayout.sectionGap)
         groupsTitleBelowHeader = groupsTitleLabel.topAnchor.constraint(
             equalTo: headerWell.bottomAnchor, constant: GroupsPaneLayout.sectionGap)
+        groupsTitleBelowBTVolume = groupsTitleLabel.topAnchor.constraint(
+            equalTo: btVolumeWell.bottomAnchor, constant: GroupsPaneLayout.sectionGap)
 
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: container.topAnchor),
@@ -413,9 +450,42 @@ public final class DeviceDetailViewController: NSViewController {
             eqWell.bottomAnchor.constraint(equalTo: eqEditor.bottomAnchor,
                                            constant: GroupsPaneLayout.cardContentInset),
 
-            // "Scenes". Its TOP is one of the two alternative pins built above
+            // "Volume" — Bluetooth only, one section-gap under the Equalizer
+            // (a Bluetooth speaker always shows that slot), at the same
+            // rail-free lane as every other title here.
+            btVolumeTitleLabel.topAnchor.constraint(equalTo: eqWell.bottomAnchor,
+                                                    constant: GroupsPaneLayout.sectionGap),
+            btVolumeTitleLabel.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
+
+            btVolumeCheckbox.topAnchor.constraint(
+                equalTo: btVolumeTitleLabel.bottomAnchor,
+                constant: GroupsPaneLayout.labelToSectionGap + GroupedSectionView.verticalPadding),
+            btVolumeCheckbox.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
+            btVolumeCheckbox.trailingAnchor.constraint(
+                lessThanOrEqualTo: column.trailingAnchor,
+                constant: -GroupsPaneLayout.contentTrailingInset),
+
+            btVolumeHintLabel.topAnchor.constraint(equalTo: btVolumeCheckbox.bottomAnchor,
+                                                   constant: 2),
+            btVolumeHintLabel.leadingAnchor.constraint(equalTo: btVolumeCheckbox.leadingAnchor),
+            btVolumeHintLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: column.trailingAnchor,
+                constant: -GroupsPaneLayout.contentTrailingInset),
+
+            btVolumeWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            btVolumeWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            btVolumeWell.topAnchor.constraint(equalTo: btVolumeCheckbox.topAnchor,
+                                              constant: -GroupedSectionView.verticalPadding),
+            btVolumeWell.bottomAnchor.constraint(equalTo: btVolumeHintLabel.bottomAnchor,
+                                                 constant: GroupedSectionView.verticalPadding),
+
+            // "Scenes". Its TOP is one of the three alternative pins built above
             // — deliberately NOT in this array, since exactly one of them is
-            // activated by `applyEQSectionVisibility()`.
+            // activated by `applyPerDeviceSectionVisibility()`.
             groupsTitleLabel.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
                 constant: GroupsPaneLayout.railFreeContentLeadingInset),
@@ -474,7 +544,7 @@ public final class DeviceDetailViewController: NSViewController {
         // mounts the pane second), so the `refreshUI()` that ran then found
         // both constraints still nil and left the title — and everything
         // hanging off it — with no top pin at all.
-        applyEQSectionVisibility()
+        applyPerDeviceSectionVisibility()
     }
 
     /// Build one "Caption ······ Value" row: a secondary-colour caption on the
@@ -550,7 +620,7 @@ public final class DeviceDetailViewController: NSViewController {
         rebuildGroupRows()
         refreshIcon()
 
-        applyEQSectionVisibility()
+        applyPerDeviceSectionVisibility()
 
         // A scrub (or a just-committed value still awaiting its echo) wins
         // over the snapshot: the backend fans out `update(devices:)`
@@ -580,15 +650,49 @@ public final class DeviceDetailViewController: NSViewController {
     /// document collapses. With no device yet the speaker branch is the
     /// default — the slot it shows is the one a following `refreshUI()` keeps
     /// for every device but This Mac.
-    private func applyEQSectionVisibility() {
+    private func applyPerDeviceSectionVisibility() {
         let showsEQ = !(shownDevice?.isLocalDevice == true || shownDevice?.kind == .localMac)
         eqWell.isHidden = !showsEQ
         eqEditor.isHidden = !showsEQ
         eqTitleLabel.isHidden = !showsEQ
         eqResetButton.isHidden = !showsEQ
+
+        // The "Volume" slot is Bluetooth-only, and needs a store to read and
+        // write — nothing else can answer the checkbox's question. A speaker
+        // CHECKED and found unable to deliver (`btHardwareVolumeCapable ==
+        // false`) drops the slot: offering the toggle there promises
+        // something that cannot happen. Unknown (`nil` — never connected this
+        // run) keeps it, so the choice can be made ahead of a connect.
+        let store = btHardwareVolumeStore
+        let showsBTVolume = shownDevice?.kind == .bluetooth && store != nil
+            && shownDevice?.btHardwareVolumeCapable != false
+        btVolumeWell.isHidden = !showsBTVolume
+        btVolumeTitleLabel.isHidden = !showsBTVolume
+        btVolumeCheckbox.isHidden = !showsBTVolume
+        btVolumeHintLabel.isHidden = !showsBTVolume
+        if let store, let device = shownDevice {
+            btVolumeCheckbox.state = store.isEnabled(uid: device.id) ? .on : .off
+        }
+
         groupsTitleBelowEQCard?.isActive = false
         groupsTitleBelowHeader?.isActive = false
-        (showsEQ ? groupsTitleBelowEQCard : groupsTitleBelowHeader)?.isActive = true
+        groupsTitleBelowBTVolume?.isActive = false
+        let scenesPin: NSLayoutConstraint?
+        if showsBTVolume {
+            scenesPin = groupsTitleBelowBTVolume
+        } else {
+            scenesPin = showsEQ ? groupsTitleBelowEQCard : groupsTitleBelowHeader
+        }
+        scenesPin?.isActive = true
+    }
+
+    /// The per-speaker opt-out flipped. Persist first, then report — the event
+    /// records what actually landed in the store, never an intent.
+    @objc private func btVolumeToggled(_ sender: NSButton) {
+        guard let store = btHardwareVolumeStore, let device = shownDevice else { return }
+        let enabled = sender.state == .on
+        guard store.setEnabled(enabled, uid: device.id) else { return }
+        Analytics.capture("bt_volume:hardware_toggled", ["enabled": enabled ? "true" : "false"])
     }
 
     /// ONE plain-word line for where this speaker stands, folding the two
@@ -1033,9 +1137,10 @@ public final class DeviceDetailViewController: NSViewController {
     }
 
     /// The VISIBLE slot titles, in page order — the page's shape as words
-    /// ("Equalizer", "Scenes", "About"; This Mac drops the first).
+    /// ("Equalizer", "Volume", "Scenes", "About"; This Mac drops the first
+    /// two, and "Volume" shows only on a Bluetooth speaker with a store).
     public var test_slotTitles: [String] {
-        [eqTitleLabel, groupsTitleLabel, aboutTitleLabel]
+        [eqTitleLabel, btVolumeTitleLabel, groupsTitleLabel, aboutTitleLabel]
             .filter { !$0.isHidden }
             .map(\.stringValue)
     }
@@ -1163,13 +1268,21 @@ public final class DeviceDetailViewController: NSViewController {
         return eqResetButton.convert(eqResetButton.bounds, to: view)
     }
 
-    /// How many of the "Scenes" title's two alternative top pins are active —
-    /// must be exactly 1 from the moment the view loads. Zero leaves the
+    /// How many of the "Scenes" title's three alternative top pins are active
+    /// — must be exactly 1 from the moment the view loads. Zero leaves the
     /// column's height ambiguous and collapses the scroll document; two
     /// conflict.
     public var test_activeGroupsTitlePinCount: Int {
-        [groupsTitleBelowEQCard, groupsTitleBelowHeader].filter { $0?.isActive == true }.count
+        [groupsTitleBelowEQCard, groupsTitleBelowHeader, groupsTitleBelowBTVolume]
+            .filter { $0?.isActive == true }.count
     }
+
+    /// Whether the Bluetooth-only "Control speaker volume" slot is on screen.
+    public var test_speakerVolumeRowShown: Bool { !btVolumeWell.isHidden }
+
+    /// The checkbox's own state, and a headless click on it.
+    public var test_speakerVolumeEnabled: Bool { btVolumeCheckbox.state == .on }
+    public func test_clickSpeakerVolumeCheckbox() { btVolumeCheckbox.performClick(nil) }
 
     /// Drive the hover scrim's visibility headlessly (a real `mouseEntered`/
     /// `mouseExited` can't be synthesized in a headless run) so the snapshot

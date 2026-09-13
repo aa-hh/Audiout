@@ -39,6 +39,13 @@ folder renders; routing arithmetic lives in Core.
   view is nested INSIDE the system's own rounded-square wrapper, which is why a
   hand-drawn Pin could never come out a circle. Pin's pinned state reads off the glyph
   (`pin` / `pin.fill`) for the same reason — the system owns that item's chrome.
+- Below macOS 26, `SurfaceToolbarTabCapsule` moves its own toolbar container so its
+  left edge sits at x=50 (close dot shown) or x=26 (hidden), because macOS 14
+  reserves leading room for all three window buttons and puts the first item at
+  x=91, while 26+ lays out after the visible close button. It re-applies on every
+  container frame change and on pin flip, since AppKit re-places the container on
+  each toolbar layout pass. It is layout, not a cue, so the `#available` ban above
+  does not cover it.
 - The animated tab-name reveal is GONE (2026-09-05), removed with the custom capsule it
   was built on. Tabs now carry a plain `item.label` and AppKit decides what it shows. The
   constraint that produced the reveal still stands if anyone rebuilds it: never let three

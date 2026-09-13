@@ -15,6 +15,7 @@ A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers
 | `docs/SPEC.md` | Product spec — the source of truth for *what* to build |
 | `scripts/make-app.sh` | Wraps the executable into a signed `.app` bundle (required for TCC/process-tap) |
 | `scripts/make-staging.sh` | The staging environment: a standing `com.audiout.Audiout.staging` build pointed at the staging licence server |
+| `scripts/run-on-vm.sh` | macOS 14 checks: builds a self-contained `.app`, starts the `sonoma-14.4` tart VM on the mule if it's off, and launches the app there with dummy devices (incl. a fake Bluetooth speaker). `scripts/guest-setup.sh` is the one-time ssh setup inside a new VM |
 
 ## iOS companion app
 

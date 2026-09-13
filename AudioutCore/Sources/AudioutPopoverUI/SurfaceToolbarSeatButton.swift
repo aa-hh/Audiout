@@ -22,7 +22,7 @@ import AudioutSharedUI
 ///
 /// Every number below is a plain value drawn with `NSBezierPath` on every
 /// macOS the package supports. **Nothing here is behind `#available`**, and
-/// nothing may be: the package deploys to 14.2, and an earlier version put
+/// nothing may be: the package deploys to 14.4, and an earlier version put
 /// its every cue inside `if #available(macOS 26.0, *)`, so macOS 14–25 showed
 /// no current screen at all.
 enum SurfaceToolbarSeat {
@@ -614,8 +614,17 @@ final class SurfaceToolbarSeatButton: NSButton {
 ///
 /// Its HEIGHT is fixed and its width is derived from the three tabs, so it is
 /// exactly as wide as they are and no wider: the highlight moving cannot
-/// resize it, and only a tab opening to show its name can. Nothing here is
-/// behind `#available`: the package deploys to 14.2.
+/// resize it, and only a tab opening to show its name can.
+///
+/// Nothing that DRAWS is behind `#available`: the package deploys to 14.4.
+/// The one exception is the leading-edge correction below
+/// (`alignLeadingEdgeForOlderMacOS`), which is layout, not a cue. It exists
+/// because on macOS 14 (verified on 14.4) a `.unified` toolbar reserves
+/// leading room for all three window buttons even when two are hidden, and
+/// puts the first item at x=91, while macOS 26+ starts after the visible
+/// close button — x=50, or x=26 when it is hidden. It re-applies on every
+/// container frame change because AppKit re-places the container on each
+/// toolbar layout pass.
 final class SurfaceToolbarTabCapsule: NSView, FoldFollowing {
 
     private let tabs: [SurfaceToolbarSeatButton]
@@ -766,5 +775,64 @@ final class SurfaceToolbarTabCapsule: NSView, FoldFollowing {
                                 yRadius: rect.height / 2)
         path.lineWidth = 1
         return path
+    }
+
+    /// The toolbar item's container view, last registered for frame-change
+    /// notifications, so the observation can be torn down when the capsule
+    /// leaves it.
+    private weak var observedContainer: NSView?
+
+    override func viewWillMove(toSuperview newSuperview: NSView?) {
+        super.viewWillMove(toSuperview: newSuperview)
+        if let observedContainer {
+            NotificationCenter.default.removeObserver(
+                self, name: NSView.frameDidChangeNotification, object: observedContainer)
+            self.observedContainer = nil
+        }
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        guard #unavailable(macOS 26) else { return }
+        guard let superview else { return }
+        superview.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(containerFrameDidChange),
+            name: NSView.frameDidChangeNotification, object: superview)
+        observedContainer = superview
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        alignLeadingEdgeForOlderMacOS()
+    }
+
+    @objc private func containerFrameDidChange() {
+        alignLeadingEdgeForOlderMacOS()
+    }
+
+    /// Below macOS 26, `NSToolbar` reserves leading room for all three window
+    /// buttons even with two hidden, and starts the first item at x=91. macOS
+    /// 26+ starts after the visible close button — x=50, or x=26 when it is
+    /// hidden. No public setting closes that gap on 14–25 (`.unifiedCompact`
+    /// shortens the whole strip, `.expanded` wraps to a second row,
+    /// `alignmentRectInsets` moves the drawn position but not hit-testing),
+    /// so this moves the toolbar's own item container to match 26+'s
+    /// position directly. It is layout, not a cue, so the ban on `#available`
+    /// around drawing (above) does not cover it. It re-applies on every
+    /// container frame change because AppKit re-places the container on each
+    /// toolbar layout pass, undoing a one-time move.
+    func alignLeadingEdgeForOlderMacOS() {
+        guard #unavailable(macOS 26) else { return }
+        guard let superview, let window else { return }
+        let closeButtonVisible = window.standardWindowButton(.closeButton)
+            .map { !$0.isHidden } ?? false
+        let target: CGFloat = closeButtonVisible ? 50 : 26
+        let minXInWindow = convert(bounds, to: nil).minX
+        let shift = target - minXInWindow
+        guard abs(shift) >= 0.5 else { return }
+        var frame = superview.frame
+        frame.origin.x += shift
+        superview.setFrameOrigin(frame.origin)
     }
 }

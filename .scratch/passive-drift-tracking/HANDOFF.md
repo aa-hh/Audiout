@@ -123,6 +123,36 @@ The new `bt_clock_jump` line (uid, size) makes this visible next time.
 - Ticket 06 properly, ticket 07, audiout-remote pin bump, merge (owner's
   go-ahead only).
 
+## Live test 3 (2026-09-13, 21:04–21:16 UTC) — the dumped windows
+
+Three windows dumped (`windows-2026-09-13/` beside this file; harness
+`dev/drift-window-analysis.py`, needs numpy+scipy). Findings, offline:
+
+- **Pipeline is sound.** Reference and capture clocks agree (a stretch sweep
+  peaks at 0 ppm); over the full lag range every strong peak sits at
+  548–630 ms where the speakers are; a reversed-reference null scores ~1.
+- **The mic hears the music well — as bass.** Correlation coefficient at the
+  best lag: 0.67 (100–300 Hz) and 0.42 (300–1000 Hz) in window 1, 0.50/0.43 in
+  window 3. In 1–8 kHz the capture is at −50 to −59 dBFS, the mic's floor.
+- **Bass gives a comb, treble picks the tooth — and the treble is not there.**
+  Bass-band peaks repeat every ~10 ms (558/569/579/588). Window 1's 1–8 kHz
+  whitened correlation resolved 555.1 (local score 4.0); windows 2 and 3 had
+  nothing in the treble at all (window 3's music had 5 dB less treble; window
+  2 was near-field noise at the Mac, +6.6 dBFS peaks, correlation ~0.1).
+- **No estimator tried offline (plain, whitened 0.5/1.0, 100–1000, 60–4000,
+  sub-band sum and product) gives a repeatable arrival across windows.**
+  Product of four whitened bands: window 1 → 569 ms at 1.9:1, window 3 →
+  595 ms at 1.3:1.
+- **The 2.3 threshold accepted garbage within three windows** (21:13:33,
+  `merged` at 574.3 @ 2.40; offline: 4 % above its neighbour, local 1.6) and
+  moved the sync point to it. Recommend 3 again before any merge.
+- Treble is noise-limited (not structure-limited), so longer windows DO help
+  in that band specifically; the ensemble brief's plan stands, with these
+  windows as fixtures; acceptance = repeatable arrival at normal level.
+- `dev/notes/drift-ensemble-design-brief.md` (committed): ranked plan —
+  labelled set first, whitening + second-peak gate, sub-band agreement,
+  3-window accumulation, clock-step calibration, verify step.
+
 ## Logging (local only, `~/Library/Logs/Audiout/telemetry.jsonl`)
 
 All `cat: localPlayback`:

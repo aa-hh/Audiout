@@ -156,6 +156,51 @@ Four windows dumped (`windows-2026-09-13/` beside this file; harness
   labelled set first, whitening + second-peak gate, sub-band agreement,
   3-window accumulation, clock-step calibration, verify step.
 
+## Live test 4 runbook (2026-09-14, unattended — Alec is out; agreed 2026-09-13 22:00 UTC)
+
+Agreed with Alec: **2 hours of music maximum**, in 12-minute blocks with
+silence between; his daily playlist `spotify:playlist:37i9dQZF1E35FDDWYtEKBa`;
+first block at tonight's level (Spotify volume 100, Moves' app volumes as
+left), then a few dB quieter for the neighbours (Spotify ~85) and keep it
+there while windows still resolve. Log the level per block. Nothing else in
+the house is touched: not the production app, not system settings, not the
+Mac's position, not the mic input level (83).
+
+Blocks: 5 × known-good at Alec's level → 1 × one Move muted (garbage) →
+2 × forced jump (+40 ms trim on `54-2A…`, before/after) → 2 × validation of
+whitening + gates once built. Every window is dumped
+(`audiout.driftDumpWindows` is set) and copied to `windows-2026-09-14/`.
+
+Commands (dev bundle id `com.audiout.Audiout.dev`; hold the live-test slot
+first: `bash scripts/livetest.sh acquire --label bluetooth-latency-drift-6c2d59`):
+
+```
+# keep the Mac awake for a block (no settings change)
+caffeinate -dims -t 800 &
+# relaunch with both Moves self-selected (key already set; verified 2026-09-13 21:29 UTC)
+defaults write com.audiout.Audiout.dev audiout.devSelectOnLaunch -array "54-2A-1B-79-08-9E:output" "C4-38-75-0E-BF-4A:output"
+open "build/Audiout Dev.app"          # 2 s later: dev_select_on_launch selected=2, tracking running
+# music
+osascript -e 'tell application "Spotify" to set sound volume to 100'
+osascript -e 'tell application "Spotify" to play track "spotify:playlist:37i9dQZF1E35FDDWYtEKBa"'
+osascript -e 'tell application "Spotify" to pause'
+# forced, labelled jump: quit the app, edit trims, relaunch (the hook reselects)
+osascript -e 'tell application "Audiout Dev" to quit'
+python3 - <<'PY'
+import json;p='/Users/alechenderson/Library/Application Support/com.audiout.Audiout.dev/bt-sync-trims.json'
+d=json.load(open(p)); d['trims']['54-2A-1B-79-08-9E:output']+=40; json.dump(d,open(p,'w'),indent=2)
+PY
+# if a Move drops off Bluetooth (Alec was asked to `brew install blueutil`)
+blueutil --connect 54-2A-1B-79-08-9E
+# analyse
+python3 dev/drift-window-analysis.py      # needs a venv with numpy+scipy
+```
+
+Stop rules: pause music on any error line, on a clock-step storm (bad link:
+stop, do not power-cycle anything), or when the 120-minute budget is spent;
+quit the dev app and release the slot at the end. The first window is 3 min
+after the hook selects; do not reselect mid-block (it restarts the timer).
+
 ## Logging (local only, `~/Library/Logs/Audiout/telemetry.jsonl`)
 
 All `cat: localPlayback`:

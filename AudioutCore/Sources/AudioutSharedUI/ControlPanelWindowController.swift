@@ -118,6 +118,10 @@ public final class ControlPanelWindowController: NSWindowController {
     /// state — persisting the user's choice belongs to `AppSettings`, not here.
     public private(set) var isPinned = false
 
+    /// True while a system permission dialog this surface raised is unanswered.
+    /// Suspends the UNPINNED tuck-away — see `setPermissionPromptInFlight(_:)`.
+    private var isPermissionPromptInFlight = false
+
     /// When the panel last closed ITSELF because it resigned key (click-out).
     /// Monotonic (`CACurrentMediaTime`, never wall-clock — an NTP step must not
     /// make a fresh dismissal look stale). Read and cleared exactly once by
@@ -229,6 +233,38 @@ public final class ControlPanelWindowController: NSWindowController {
         }
     }
 
+    /// While a system permission dialog THIS SURFACE raised is unanswered, the
+    /// unpinned shell must not tuck away on the deactivation the dialog causes
+    /// — and the app must not take the front, because a TCC dialog that loses
+    /// input focus freezes (see `OnboardingWindowController.setPromptInFlight`,
+    /// the sibling of this on the Setup window). The caller restores manners
+    /// first and then re-fronts separately via `returnToFront()` once the
+    /// answer lands.
+    public func setPermissionPromptInFlight(_ inFlight: Bool) {
+        isPermissionPromptInFlight = inFlight
+        if !isPinned {
+            applyUnpinnedHidesOnDeactivate()
+        }
+    }
+
+    /// Bring the app and this shell back to front after a permission answer.
+    /// The count is taken BEFORE the headless bail-out, because whether to
+    /// re-front at all is the rule under test.
+    public func returnToFront() {
+        test_returnToFrontCount += 1
+        guard !HeadlessRuntime.isActive else { return }
+        Self.activateForSurface()
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Stamp `hidesOnDeactivate` for the UNPINNED profile onto both the panel
+    /// and its decorative backing window, honouring an in-flight permission
+    /// ask. The single definition of the unpinned profile's tuck-away bit.
+    private func applyUnpinnedHidesOnDeactivate() {
+        window?.hidesOnDeactivate = !isPermissionPromptInFlight
+        backingWindow.hidesOnDeactivate = !isPermissionPromptInFlight
+    }
+
     /// Stamp the current profile's manner bits onto the panel. Idempotent, and
     /// the ONLY place either profile's bits are written — `makePanel` sets none
     /// of them, so there is exactly one definition of each profile.
@@ -303,7 +339,7 @@ public final class ControlPanelWindowController: NSWindowController {
             // written back over the user's remembered pinned position.
             panel.setFrameAutosaveName("")
             panel.isFloatingPanel = true     // also restores `level` to `.floating`
-            panel.hidesOnDeactivate = true   // tuck away on app-switch; restored on return
+            applyUnpinnedHidesOnDeactivate() // tuck away on app-switch; restored on return
             // Not user-draggable: an anchored, transient panel has no business
             // being repositioned by the user, and keeping it fixed guarantees
             // the decorative backing window (which follows this one's frame
@@ -773,6 +809,9 @@ public final class ControlPanelWindowController: NSWindowController {
 
     /// The decorative backing window, for structural assertions (T11).
     public var test_backingWindow: NSWindow? { backingWindow }
+
+    /// Counts every `returnToFront()` call, including under `HeadlessRuntime`.
+    public private(set) var test_returnToFrontCount = 0
 
     /// `nil` = read the real `window.isVisible`. `swift test` never orders a
     /// window on screen, so the on-screen-only paths (close-on-resign, the

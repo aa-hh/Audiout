@@ -23,6 +23,7 @@ folder renders; routing arithmetic lives in Core.
 - At most one sync drawer is open; `expandedSyncDeviceID` is the single owner.
 - A live scrub applies to audio but must not persist until committed.
 - The alignment wizard is a sheet the popover cannot close under; its two lights are the emitter field's settled state (`SettledLightLayer`, audiout-shared `AudioutField.settled`), tinted green and steel blue (`wireCore`/`ring`), never magenta (C1); no outline ring is drawn on any rung. Its mic probe is a screen (`.listening`), entered only after the host's mic-permission answer; the stored value is a recalled proposal only when listening never started; a rejected proposal never ends a run. A measured proposal's reject reads "Try again" once (mic runs again) then "Align by ear" (the questions); an earned or recalled proposal reads "Still off".
+- The wizard's mic ask goes quiet like Setup's: only an undecided mic (`micPermissionIsUndecided`) marks a prompt in flight, the answer ALWAYS restores the shell's manners, and the app returns to front only while the run that asked is still live — an abandoned run must never reopen a closed surface.
 - A selected Bluetooth device that loses availability is deselected here, on the edge.
 - The Mixer carries an equalizer DOOR (the row button beside mute, and the row menu) and one mark (magenta border when the curve is not flat). No editor, no curve, no tone control on the Mixer (2026-08-22, amended 2026-09-03).
 - A never-aligned Bluetooth row's chip IS the wizard's door; a measured one opens the drawer.

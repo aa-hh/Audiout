@@ -421,6 +421,37 @@ struct ControlPanelWindowControllerTests {
                 "the beak/bubble window is re-attached on un-pin")
     }
 
+    /// Defect this catches: the shell tucks away when the mic dialog
+    /// deactivates the app, or a pin flip during the ask re-arms the
+    /// tuck-away, or a pinned shell comes out of the ask with
+    /// `hidesOnDeactivate` true.
+    @Test func aPermissionPromptInFlightKeepsTheUnpinnedShellOnScreenAcrossAPinFlip() throws {
+        let name = uniqueAutosaveName()
+        defer { clearSavedFrame(name) }
+        let controller = makeController(frameAutosaveName: name)
+        let panel = try #require(controller.test_panel)
+        let backing = try #require(controller.test_backingWindow)
+
+        controller.setPermissionPromptInFlight(true)
+        #expect(!panel.hidesOnDeactivate)
+        #expect(!backing.hidesOnDeactivate)
+
+        controller.setPinned(true)
+        #expect(!panel.hidesOnDeactivate)
+        controller.setPinned(false)
+        #expect(!panel.hidesOnDeactivate, "the re-stamp on un-pin must honour the ask")
+        #expect(!backing.hidesOnDeactivate)
+
+        controller.setPermissionPromptInFlight(false)
+        #expect(panel.hidesOnDeactivate)
+        #expect(backing.hidesOnDeactivate)
+
+        controller.setPinned(true)
+        controller.setPermissionPromptInFlight(true)
+        controller.setPermissionPromptInFlight(false)
+        #expect(!panel.hidesOnDeactivate, "a pinned shell never ends the ask tucking away")
+    }
+
     /// R6, the rule the whole flip is built around: the profile changes
     /// APPEARANCE bits only. `.titled`/`.closable` must survive both profiles,
     /// because `performClose(_:)` silently no-ops — no `windowWillClose`, no

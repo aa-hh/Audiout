@@ -845,10 +845,16 @@ public final class BTAlignmentWizardView: NSView {
                 ? Self.recalledReadout(valueMs: wholeMs)
                 : "\(wholeMs) ms"
             addBody(isRecalled ? Self.recalledProposalCopy(valueMs: wholeMs) : Self.proposalBody)
+            // A measured proposal's reject escalates: "Try again" listens once
+            // more, then "Align by ear" hands to the questions. An earned or
+            // recalled proposal reads "Still off".
+            let rejectTitle: String = session.proposalIsMeasured
+                ? (session.rejectReRunsMic ? Self.tryAgainTitle : Self.byEarPanelTitle)
+                : Self.stillOffTitle
             addEdgePlateRow(
                 makePlate(Self.soundsRightTitle, keycap: "⏎", isPrimary: true,
                           action: #selector(acceptClicked(_:)), isDefault: true),
-                makePlate(Self.stillOffTitle, action: #selector(rejectClicked(_:))))
+                makePlate(rejectTitle, action: #selector(rejectClicked(_:))))
             // The manual path sits beside a proposal the listener doesn't
             // like — quiet, never a plate; Stop stays the way out.
             addCornerRow(leading: (Self.setByHandTitle, #selector(setByHandClicked(_:)), nil),

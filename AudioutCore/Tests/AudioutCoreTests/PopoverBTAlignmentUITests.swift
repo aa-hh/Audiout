@@ -1318,6 +1318,60 @@ import AppKit
         #expect(recorder.ticks == [true])
     }
 
+    /// Defect this would catch: "Try again" re-entered listening but the host
+    /// never staged a second probe, so the screen listened to nothing. The
+    /// counter proves the host re-stages, and the escalation ends at the
+    /// by-ear questions rather than the mic a third time.
+    @Test func aMeasuredProposalsRejectReRunsTheProbeThenHandsToTheQuestions() {
+        let (popover, recorder) = makePopover()
+        popover.ensureMicPermission = { $0(true) }
+        popover.makeMicProbe = {
+            MicProbeSession(recorder: SilentRecorder(), timeout: 1, pipelineTail: 0.05)
+        }
+        var stageCount = 0
+        popover.onStageBTMicProbe = { started, finished in
+            stageCount += 1
+            started()
+            finished()
+        }
+        showNote(popover)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)
+        let wizard = popover.test_btWizardView()
+        wizard?.test_clickButton(titled: "Start")
+        #expect(wizard?.test_screen == .listening(isRealignment: false),
+                "got \(screenName(wizard))")
+        #expect(stageCount == 1)
+
+        popover.test_btWizardSession()?.offerMeasuredProposal(valueMs: 300)
+        #expect(wizard?.test_buttonTitles == [BTAlignmentWizardView.soundsRightTitle,
+                                              BTAlignmentWizardView.tryAgainTitle,
+                                              BTAlignmentWizardView.setByHandTitle,
+                                              BTAlignmentWizardView.stopTitle],
+                "the first measured reject reads Try again")
+
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.tryAgainTitle)
+        #expect(wizard?.test_screen == .listening(isRealignment: false),
+                "got \(screenName(wizard))")
+        #expect(stageCount == 2, "the host staged a second probe")
+        #expect(recorder.ticks == [true, false, true], "a fresh injector replays the sweeps")
+
+        popover.test_btWizardSession()?.offerMeasuredProposal(valueMs: 320)
+        #expect(wizard?.test_buttonTitles == [BTAlignmentWizardView.soundsRightTitle,
+                                              BTAlignmentWizardView.byEarPanelTitle,
+                                              BTAlignmentWizardView.setByHandTitle,
+                                              BTAlignmentWizardView.stopTitle],
+                "the second measured reject hands to the questions")
+
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.byEarPanelTitle)
+        guard case .question? = wizard?.test_screen else {
+            Issue.record("expected the questions, got \(screenName(wizard))")
+            return
+        }
+        #expect(stageCount == 2, "no third probe")
+        #expect(recorder.ends.isEmpty, "the run is still live")
+        #expect(popover.test_btWizardIsOpen())
+    }
+
     /// The Mac's own row is a SETTING, not a measurement, so it never gets the
     /// shortcut.
     @Test func theMacsOwnRunNeverOpensOnAProposal() {

@@ -215,6 +215,24 @@ func run() -> Int32 {
         fputs("recalled run never proposed (screen: \(recalled.session.screen))\n", stderr)
     }
 
+    // 5c/5d · a MEASURED proposal's escalating reject: the first reads "Try
+    // again" (listens once more), the second "Align by ear" (the questions).
+    let measured = Run(referenceOptions: twoOptions, listens: true)
+    measured.session.start()
+    measured.session.offerMeasuredProposal(valueMs: 247)
+    if case .proposal = measured.session.screen {
+        shoot(measured, "5c-proposal-measured", light: true)
+        measured.session.rejectProposal()
+        measured.session.offerMeasuredProposal(valueMs: 247)
+        if case .proposal = measured.session.screen {
+            shoot(measured, "5d-proposal-measured-second", light: true)
+        } else {
+            fputs("measured retry never proposed (screen: \(measured.session.screen))\n", stderr)
+        }
+    } else {
+        fputs("measured run never proposed (screen: \(measured.session.screen))\n", stderr)
+    }
+
     // 7 · unsettled (dormant stage) — a fresh run answered until the answer
     // budget runs out; a rejected proposal no longer ends a run, so the loop
     // rejects and keeps answering (72 iterations here, under the guard).

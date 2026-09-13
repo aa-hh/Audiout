@@ -5132,10 +5132,10 @@ extension PopoverController: DeviceRowView.Delegate {
             },
             setTick: { [weak self] active in
                 self?.pushBTWizardTick(active, target: isLocalTarget ? nil : deviceID)
-                // The probe is staged from the Start path once the permission
-                // is granted, never from here — a listening pass the user can
-                // see must not start again behind a Try again or a reference
-                // swap. The tick's `false` edge still drops it.
+                // The probe is staged only from the session's `requestListening`
+                // callback (Start, and a measured proposal's reject that listens
+                // again), never from here. The tick's `false` edge still drops a
+                // running probe.
                 if !active {
                     self?.btWizardMicProbe?.cancel()
                     self?.btWizardMicProbe = nil
@@ -5403,6 +5403,7 @@ extension PopoverController: DeviceRowView.Delegate {
     }
     func test_btWizardView() -> BTAlignmentWizardView? { btWizardView }
     func test_btWizardSheet() -> AlignmentWizardViewController? { btWizardSheet }
+    func test_btWizardSession() -> BTAlignmentWizardSession? { btWizardSession }
     public func test_btWizardIsOpen() -> Bool { btWizardSession != nil }
     public func test_btWizardReferenceID() -> String? { btWizardSession?.reference?.id }
     /// The reference the RUN selected for itself (`nil` when it was already

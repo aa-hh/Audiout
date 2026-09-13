@@ -129,7 +129,35 @@ public final class BTAlignmentWizardSession {
         return estimator.openingProposalStands
     }
 
+    /// Whether the proposal on screen is one the mic MEASURED this run — the
+    /// only proposal whose rejection listens again instead of dropping to the
+    /// by-ear questions. A proposal earned from answers or recalled from the
+    /// store is false.
+    public var proposalIsMeasured: Bool {
+        guard case .proposal = screen else { return false }
+        return proposalCameFromMic
+    }
+
+    /// Whether rejecting the on-screen proposal re-runs the mic rather than
+    /// falling to the questions: a measured proposal, until the mic has spent
+    /// its per-run budget (``maxMicAttempts``). Read by both the view (the
+    /// reject plate's title) and ``rejectProposal()``.
+    public var rejectReRunsMic: Bool { proposalIsMeasured && micAttempts < Self.maxMicAttempts }
+
+    /// How many times one run may listen: the opening pass plus one retry
+    /// earned by rejecting a measured proposal. After that a rejection falls to
+    /// the by-ear questions.
+    public static let maxMicAttempts = 2
+
+    /// How many listening passes this run has started so far.
+    public private(set) var micAttempts = 0
+
     public private(set) var screen: Screen = .intro
+
+    /// Whether the current on-screen proposal came from a mic measurement. Set
+    /// by ``presentEstimatorPhase(measured:)``; read (screen-guarded) through
+    /// ``proposalIsMeasured``.
+    private var proposalCameFromMic = false
 
     /// Set between ``start()`` and the host's permission answer, so a second
     /// Start does nothing and a ``cancel()`` in between voids the answer.
@@ -346,9 +374,16 @@ public final class BTAlignmentWizardSession {
             presentEstimatorPhase()
             return
         }
-        // The probe measures against whatever the device is playing at, so the
-        // base value is what has to be on the wire while the sweeps run.
+        enterListening()
+    }
+
+    /// Show the listening screen and count the pass. Shared by the run's start
+    /// and a measured proposal's first rejection. The probe measures against
+    /// whatever the device is playing at, so the base value is what has to be on
+    /// the wire while the sweeps run.
+    private func enterListening() {
         applyPreviewTrim(baseValueMs, nil)
+        micAttempts += 1
         transition(to: .listening(isRealignment: estimator.openingProposalStands))
     }
 
@@ -397,7 +432,7 @@ public final class BTAlignmentWizardSession {
             "uid": deviceID,
             "valueMs": String(Int(valueMs.rounded())),
         ])
-        presentEstimatorPhase()
+        presentEstimatorPhase(measured: true)
     }
 
     /// Undo the last answer and ask that question again. Available only while
@@ -431,14 +466,33 @@ public final class BTAlignmentWizardSession {
         transition(to: .kept(valueMs: keptMs))
     }
 
-    /// The proposal's "Still off": the run takes the correction and goes back
-    /// to the questions, every time. Only the estimator's own stop rules end a
-    /// run.
+    /// The proposal's reject. A MEASURED proposal escalates: its first
+    /// rejection folds the correction in and LISTENS again; its second (the mic
+    /// budget spent, ``rejectReRunsMic`` false) falls to the by-ear questions. A
+    /// proposal earned from answers or recalled from the store always goes back
+    /// to the questions. Either way the correction is folded into the belief,
+    /// and rejecting never ends a run — only the estimator's own stop rules do.
     public func rejectProposal() {
         guard case .proposal(let valueMs) = screen, !ended else { return }
         logProposal(valueMs: valueMs, accepted: false)
+        let reRunMic = rejectReRunsMic
         estimator.rejectProposal()
-        presentEstimatorPhase()
+        guard reRunMic, let requestListening else {
+            presentEstimatorPhase()
+            return
+        }
+        // A fresh injector (a tick off→on edge) is the only way to replay the
+        // sweeps — the same cost `tryAgain()` pays — and its fresh beat clock
+        // voids the pushed tempo.
+        setTick(false)
+        lastTempoBPM = nil
+        setTick(true)
+        enterListening()
+        requestListening { [weak self] granted in
+            guard let self, !self.ended, granted == false,
+                  case .listening = self.screen else { return }
+            self.endListening()
+        }
     }
 
     /// Try again: a fresh run from a flat prior. Reachable from the proposal
@@ -488,7 +542,10 @@ public final class BTAlignmentWizardSession {
     /// Put whatever the estimator is now on, on screen — the ONE place a
     /// candidate is applied and a screen is chosen, so every intent
     /// (start/answer/back/reject/restart) lands on identical behaviour.
-    private func presentEstimatorPhase() {
+    /// `measured` records whether a proposal reached here from a mic
+    /// measurement, so a later earned or recalled proposal clears the flag.
+    private func presentEstimatorPhase(measured: Bool = false) {
+        proposalCameFromMic = measured
         switch estimator.phase {
         case .asking(let estimateMs):
             applyPreviewTrim(candidate(for: estimateMs), estimator.credibleHalfWidthMs)

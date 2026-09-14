@@ -7605,6 +7605,62 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                              "a redirect-only device must receive a .level from its per-app stream")
     }
 
+    /// A group route names a SET of speakers. The device meter's source
+    /// contribution fans out from the app's PRE-volume level; if that fan-out
+    /// matches `.device` routes only, a group-routed app plays out of every
+    /// member while no member's bar moves. Trap: the app's own `.appLevel` row
+    /// still works, so the fault shows only on the members.
+    /// `redirectOnlyDeviceReceivesLevelFromItsStream` above is the
+    /// single-device control.
+    @Test func groupRouteFeedsTheMeterOfEveryMember() async {
+        let registry = TapRegistry()
+        let perAppCapture = registeringPerAppCapture(
+            muteBehavior: .mutedWhenTapped, bundleIDs: ["com.foo.player"], into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        let mixer = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Mixer")
+        let move = ap2Device(id: "AA:BB:CC:DD:EE:95", name: "Move 2")
+        await startAndDiscoverPair(backend, engine, discovery, mixer, move)
+
+        backend.setMeteringActive(true)
+        let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
+        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+
+        backend.updateAppRoutes(
+            [groupRoute("com.foo.player", name: "Foo", toGroup: "groupy")],
+            groupTargets: ["groupy": GroupRouteTarget(
+                memberVolumes: [mixer.id: 100, move.id: 100])])
+
+        await pollUntil {
+            engine.streamAddCalls.contains { $0.0 == mixer.outputID }
+                && engine.streamAddCalls.contains { $0.0 == move.outputID }
+        }
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.foo.player") { return true }
+            return false
+        }
+        guard let tap = registry.tap(for: "com.foo.player") else {
+            Issue.record("a group route must start the routed app's per-app capture")
+            return
+        }
+
+        tap.push(fingerprintedBuffer(fill: 0xAA, frames: 1000, atSecond: 1))
+
+        // Asserted so a failure separates "no audio flowed" from "the fan-out
+        // missed".
+        await pollUntil { sink.hasAppLevel("com.foo.player") }
+        #expect(sink.hasAppLevel("com.foo.player"),
+                "a group-routed app must still report its own .appLevel")
+
+        await pollUntil {
+            (sink.lastDeviceLevel(mixer.id) ?? 0) > 0 && (sink.lastDeviceLevel(move.id) ?? 0) > 0
+        }
+        #expect((sink.lastDeviceLevel(mixer.id) ?? 0) > 0,
+                "every member of a routed group must receive a .level from the app feeding it")
+        #expect((sink.lastDeviceLevel(move.id) ?? 0) > 0,
+                "the group's SECOND member must be metered too — not just the first")
+    }
+
     /// T3: a device's `.level` is the MAX of its whole-system and app-stream
     /// contributions.
     ///

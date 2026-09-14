@@ -275,11 +275,17 @@ after the hook selects; do not reselect mid-block (it restarts the timer).
   refuses the only true arrival; and the Mac harness's `swift_plain` replica
   predates whitening (one-line fix given in the agent report, not applied).
 
-Owed to merge these: shared `claude/drift-gates` (contains 16 + 09 + 10) → main,
-tag 0.14.0; Mac pin bump + drop the 2.3 override + log margin/local; then
-`claude/drift-verify-step` (13) into this branch; `claude/tap-feed-gap` should
-go to main as its OWN PR first (it fixes production creep, independent of drift).
-Tickets 11, 12, 14, 15 not started. Rulings still owed: decisions 15 and 17.
+**2026-09-14 18:50 UTC: merged.** audiout-shared main @ `6dc9e34`, tag `0.15.0`
+(fixtures + whitening + gates + sub-band); Mac drift branch merged
+`claude/drift-verify-step` and pins `from: "0.15.0"` (`72230998`). PR #200 (tap
+fix) MERGED to main by Alec. Decisions 17 and 18 settled; ticket 17 (event-driven
+cadence) written. Still owed: sub-band 3-of-4 vs 2-of-4 ruling; tickets 12, 14,
+15, 17; the never-done live test of a real reconnect jump being CORRECTED;
+audiout-remote pin bump (shared 0.15.0 changes ProbeKit only, protocol untouched);
+the 63 MB of raw windows + Bluetooth addresses on this branch before any merge
+to main. Flaky test to fix: `aSlewLeavesNoStepBiggerThanTheProgrammesOwn`
+(DriftCorrectionApplierTests, timing-sensitive; failed once and passed on rerun
+twice today).
 
 ### Live test 4 result (blocks 3–8 on the tap-fix build, 08:42–10:10 UTC)
 

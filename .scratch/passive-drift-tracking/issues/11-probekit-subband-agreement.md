@@ -1,6 +1,6 @@
 # 11 — ProbeKit: sub-band agreement as the accept rule
 
-Status: planned
+Status: resolved (audiout-shared claude/drift-subband 3b37ecf, in 0.15.0; 3-of-4 vs 2-of-4 ruling owed)
 Blocked by: 09, 10, 16
 
 Run the whitened correlation in four sub-bands and accept a lag only when enough bands land on it, so the music's own repeats stop being read as arrivals.

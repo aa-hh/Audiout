@@ -1,6 +1,6 @@
 # 16 — Fixtures for ProbeKit, and a Python harness that matches the Swift score
 
-Status: planned
+Status: resolved (audiout-shared 7783226 + Mac harness 7ae7ca01; more fixtures added by ticket 11)
 Blocked by: (none)
 
 Turn dumped mic windows into small test fixtures, prove the Python harness scores them like the Swift correlator, and say how the labelled set gets recorded.

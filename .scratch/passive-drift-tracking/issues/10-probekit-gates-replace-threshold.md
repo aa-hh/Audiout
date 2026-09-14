@@ -1,6 +1,6 @@
 # 10 — Two gates in place of the single acceptance threshold
 
-Status: planned
+Status: resolved (audiout-shared claude/drift-gates 6990309, in 0.15.0; Mac override removed ca746f81)
 Blocked by: 09, 16
 
 One number measured over the whole tape cannot separate a real arrival from the music's next repeat. Measure the two things that can: the competition inside the search window, and the background right around the peak.

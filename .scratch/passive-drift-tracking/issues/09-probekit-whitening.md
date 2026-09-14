@@ -1,6 +1,6 @@
 # 09 — Whiten the cross-spectrum by the reference's own spectrum
 
-Status: planned
+Status: resolved (audiout-shared claude/drift-whitening 4d3fdbe, in 0.15.0)
 Blocked by: 16
 
 Give the drift correlator a configurable whitening exponent so the music's own harmonic

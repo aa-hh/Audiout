@@ -128,4 +128,53 @@ import Testing
         #expect(!detector.isStable)
         #expect(detector.stableForSeconds == 0)
     }
+
+    /// `deviationMs` reports the last step instead of the running total since
+    /// the baseline, or an advance resets it, so the 30 s line reads about 0
+    /// through a slow creep — the blindness the line exists to remove.
+    @Test func deviationMsIsTheRunningTotalSinceTheBaseline() {
+        var detector = BTClockStability()
+        #expect(observe(&detector, t: 0) == .ignored)
+        #expect(detector.deviationMs == 0)
+        #expect(observe(&detector, t: 1, offsetMs: 1.5) == .advanced)
+        #expect(abs(detector.deviationMs - 1.5) < 0.01)
+        #expect(observe(&detector, t: 2, offsetMs: 3.0) == .advanced)
+        #expect(abs(detector.deviationMs - 3.0) < 0.01)
+        let outcome = observe(&detector, t: 3, offsetMs: 8.0)
+        guard case .jumped = outcome else {
+            Issue.record("expected a jump, got \(outcome)")
+            return
+        }
+        #expect(abs(detector.deviationMs - 8.0) < 0.01)
+        // The file's restart idiom: a sampleTime below the baseline's rebaselines.
+        #expect(detector.observe(sampleTime: 0.5 * rate, hostNanos: 4_000_000_000,
+                                 nominalRate: rate) == .rebaselined)
+        #expect(detector.deviationMs == 0)
+    }
+
+    /// A freeze drops the baseline but leaves `deviationMs` at its old total,
+    /// so the next 30 s line reports a creep measured against a baseline that
+    /// no longer exists.
+    @Test func aFreezeZeroesTheRunningDeviation() {
+        var detector = BTClockStability()
+        #expect(observe(&detector, t: 0) == .ignored)
+        #expect(observe(&detector, t: 1, offsetMs: 1.5) == .advanced)
+        #expect(abs(detector.deviationMs - 1.5) < 0.01)
+        // The same sample time a second later: the device stopped running IO.
+        #expect(detector.observe(sampleTime: (101 + 1.5 / 1_000) * rate,
+                                 hostNanos: 2_000_000_000,
+                                 nominalRate: rate) == .frozen)
+        #expect(detector.deviationMs == 0, "the baseline is gone; nothing to measure against")
+    }
+
+    /// A lost baseline leaves `deviationMs` holding the skip itself, so the
+    /// next line reports the whole thousand-millisecond origin move as this
+    /// speaker's creep.
+    @Test func aLostBaselineZeroesTheRunningDeviation() {
+        var detector = BTClockStability()
+        #expect(observe(&detector, t: 0) == .ignored)
+        #expect(observe(&detector, t: 1, offsetMs: 1.5) == .advanced)
+        #expect(observe(&detector, t: 2, offsetMs: 1_025) == .rebaselined)
+        #expect(detector.deviationMs == 0, "a moved origin is not this speaker's creep")
+    }
 }

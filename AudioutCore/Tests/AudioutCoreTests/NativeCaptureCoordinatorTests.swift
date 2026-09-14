@@ -228,6 +228,12 @@ extension SerializedSharedState {
         )
     }
 
+    /// One four-frame block's own duration, rounded the way the coordinator
+    /// rounds it. A run of blocks stepped by this carries as much audio as the
+    /// wall time between their timestamps, which is the only cadence a real tap
+    /// delivers, and the one the dropped-cycle fill leaves alone.
+    private static let blockDurationNanos: UInt64 = 90_703
+
     private func buffer(hostTime: UInt64, frames: Int = 4) -> CapturedBuffer {
         // planar stereo Float32: two channel buffers, `frames` samples each.
         let bytesPerChannel = frames * MemoryLayout<Float32>.size
@@ -1911,7 +1917,7 @@ extension SerializedSharedState {
         coordinatorB.start()
 
         for i in 0..<200 {
-            let hostTime = UInt64(i + 1) * 10_000_000
+            let hostTime = UInt64(i + 1) * Self.blockDurationNanos
             tapA.pushBuffer(buffer(hostTime: hostTime))
             tapB.pushBuffer(buffer(hostTime: hostTime))
         }
@@ -1941,11 +1947,11 @@ extension SerializedSharedState {
         let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
 
         coordinator.start()
-        for i in 0..<3 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * 10_000_000)) }
+        for i in 0..<3 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * Self.blockDurationNanos)) }
         waitFor { sink.forwarded.count == 3 }
 
         coordinator.setCastSink(castSpy, renderProcessPID: getpid())
-        for i in 3..<6 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * 10_000_000)) }
+        for i in 3..<6 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * Self.blockDurationNanos)) }
         waitFor { sink.forwarded.count == 6 }
         waitFor { castSpy.forwarded.count == 3 }
         #expect(sink.forwarded.count == 6)
@@ -1959,7 +1965,7 @@ extension SerializedSharedState {
             "the Cast slot is handed the engine's own live pts, unmodified")
 
         coordinator.setCastSink(nil, renderProcessPID: nil)
-        for i in 6..<8 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * 10_000_000)) }
+        for i in 6..<8 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * Self.blockDurationNanos)) }
         waitFor { sink.forwarded.count == 8 }
         #expect(sink.forwarded.count == 8, "detaching must not disturb the engine's stream")
         #expect(castSpy.forwarded.count == 3, "and nothing more reaches a detached Cast slot")
@@ -1985,7 +1991,7 @@ extension SerializedSharedState {
         coordinatorB.start()
 
         for i in 0..<200 {
-            let hostTime = UInt64(i + 1) * 10_000_000
+            let hostTime = UInt64(i + 1) * Self.blockDurationNanos
             tapA.pushBuffer(buffer(hostTime: hostTime))
             tapB.pushBuffer(buffer(hostTime: hostTime))
         }
@@ -2038,7 +2044,7 @@ extension SerializedSharedState {
         coordinator.setCastSink(castSpy, renderProcessPID: getpid())
         coordinator.setAirPlayPreDelay(ms: 1000)
         coordinator.start()
-        for i in 0..<20 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * 10_000_000)) }
+        for i in 0..<20 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * Self.blockDurationNanos)) }
         waitFor { sink.forwarded.count == 20 }
 
         #expect(sink.forwarded.count == 20, "one block out per block in")

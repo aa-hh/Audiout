@@ -763,7 +763,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
             capture: capture, captureRate: captureRate, hostNanos: startNanos,
             countsTowardBlind: reason != .retry)
         Self.logWindow(outcome, peaks: sampler.lastPeaks, candidates: sampler.lastCandidates,
-                       baselines: sampler.baselines)
+                       baselines: sampler.baselines, hostNanos: startNanos)
         if case .observations(let observations) = outcome, !observations.isEmpty {
             onObservations(observations)
         }
@@ -818,7 +818,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
     /// so device ids are allowed here.
     static func logWindow(_ outcome: PassiveDriftSampler.Outcome, peaks: [DriftPeak],
                           candidates: [DriftPeak],
-                          baselines: [PassiveDriftSampler.Baseline]) {
+                          baselines: [PassiveDriftSampler.Baseline], hostNanos: Int64) {
         // delay@score/local/margin: the whole-tape score, then the two numbers
         // that decide whether the peak is an arrival or the music's own next
         // repeat. Reading a refused window means reading all three, so all
@@ -833,6 +833,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
             "baselines": baselines.map {
                 "\($0.deviceUID)\($0.isAnchor ? "(anchor)" : "")=\(String(format: "%.1f", $0.expectedDelayMs))"
             }.joined(separator: ","),
+            "hostNanos": String(hostNanos),
         ]
         switch outcome {
         case .observations(let observations):

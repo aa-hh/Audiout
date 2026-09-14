@@ -87,6 +87,36 @@ import Testing
         #expect(b?.hostNanos == 42)
     }
 
+    /// THE DEFECT. Two speakers that each moved onto a peak of their own could
+    /// equally have moved onto each other's. The assignment is the likeliest
+    /// of several, and a correction taken on it without a verify moves both
+    /// speakers the wrong way (spec decision 7).
+    @Test func twoSpeakersThatBothMovedAreMatchedByGuess() {
+        var sampler = Self.sampler([Self.bluetooth("A", 60), Self.bluetooth("B", 180)])
+        let outcome = Self.analyze(&sampler, delaysMs: [85, 195])
+        guard case .observations(let observations) = outcome else {
+            Issue.record("expected observations, got \(outcome)")
+            return
+        }
+        #expect(observations.count == 2)
+        #expect(observations.allSatisfy { $0.isBestGuess })
+    }
+
+    /// THE DEFECT. A speaker left with no peak at all, because the one nearest
+    /// it went to another speaker, is the same ambiguity seen from the other
+    /// side: the speaker that DID take that peak may be sitting on the wrong
+    /// one.
+    @Test func aSpeakerLeftWithNoPeakMakesTheOtherMatchAGuess() {
+        var sampler = Self.sampler([Self.bluetooth("A", 60), Self.bluetooth("B", 100)])
+        let outcome = Self.analyze(&sampler, delaysMs: [85, 120])
+        guard case .observations(let observations) = outcome else {
+            Issue.record("expected observations, got \(outcome)")
+            return
+        }
+        #expect(observations.map { $0.deviceUID } == ["B"], "A was left unmatched")
+        #expect(observations.first?.isBestGuess == true)
+    }
+
     /// THE DEFECT. A mic that cannot hear the speakers must go quiet, and it
     /// must never emit a delta on the way there — a correction computed from
     /// an unusable window moves a speaker on noise.

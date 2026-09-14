@@ -11104,7 +11104,10 @@ extension NativeBackend {
             markCalibrationStale: { [weak self] uid in
                 self?.btSpeakerTiming.noteDriftCorrected(uid: uid)
             },
-            programIsSilent: { [weak self] in self?.btProgramIsSilent() ?? false })
+            programIsSilent: { [weak self] in self?.btProgramIsSilent() ?? false },
+            // The tracker is built below, so the backend is what the closure
+            // can hold on to.
+            scheduleVerify: { [weak self] _ in self?.driftTracker?.trigger(.verify) })
         let tracker = PassiveDriftTracker(ring: ring) { [weak applier] observations in
             applier?.handle(observations)
         }

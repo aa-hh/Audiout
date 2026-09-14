@@ -325,6 +325,9 @@ final class PassiveDriftTracker: @unchecked Sendable {
         case reconnect
         case audioModeChange
         case silenceToAudio
+        /// A guessed attribution is waiting to be checked — the window spec
+        /// decision 7 promises, asked for by ``DriftCorrectionApplier``.
+        case verify
     }
 
     /// Long enough for the correlator, short enough to be cheap: the spec's

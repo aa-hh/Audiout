@@ -92,10 +92,12 @@ import Testing
         #expect(actions == [.ignore(deviceUID: "a", reason: .belowThreshold)])
     }
 
+    // MARK: - Apply then verify
+
     // Turns red if a verify window that comes back clean is read as a fresh
     // error and corrected a second time.
     @Test func aVerifyThatComesBackCleanEndsTheGuess() {
-        var policy = DriftCorrectionPolicy()
+        var policy = DriftCorrectionPolicy(verifyMode: .applyThenVerify)
         _ = policy.decide([observation("a", 25, guess: true),
                            observation("b", 30, guess: true)], programIsSilent: false)
         let verify = policy.decide([observation("a", 1, t: 1), observation("b", 2, t: 1)],
@@ -108,7 +110,7 @@ import Testing
     // Turns red if a verify window whose errors persist is treated as ordinary
     // drift instead of a wrong attribution to swap.
     @Test func aVerifyThatStillShowsErrorSwapsAndRecorrects() {
-        var policy = DriftCorrectionPolicy()
+        var policy = DriftCorrectionPolicy(verifyMode: .applyThenVerify)
         _ = policy.decide([observation("a", 25, guess: true),
                            observation("b", 30, guess: true)], programIsSilent: false)
         let verify = policy.decide([observation("a", -30, t: 1), observation("b", -25, t: 1)],
@@ -122,7 +124,7 @@ import Testing
     // which would move a clean speaker by a sub-threshold amount and re-open a
     // device the same window already reported as corrected.
     @Test func aSwapOnlyRecorrectsTheMembersStillOffByEnough() {
-        var policy = DriftCorrectionPolicy()
+        var policy = DriftCorrectionPolicy(verifyMode: .applyThenVerify)
         _ = policy.decide([observation("a", 25, guess: true),
                            observation("b", 30, guess: true),
                            observation("c", 28, guess: true)], programIsSilent: false)
@@ -143,7 +145,7 @@ import Testing
     // Turns red if a swap re-correction is still marked a guess, which would
     // let the pair swap back and forth forever.
     @Test func aSwappedRecorrectionIsNoLongerAGuess() {
-        var policy = DriftCorrectionPolicy()
+        var policy = DriftCorrectionPolicy(verifyMode: .applyThenVerify)
         _ = policy.decide([observation("a", 25, guess: true),
                            observation("b", 30, guess: true)], programIsSilent: false)
         _ = policy.decide([observation("a", -30, t: 1), observation("b", -25, t: 1)],
@@ -168,7 +170,7 @@ import Testing
     // moved a second time in one window by another device's stale guessed
     // group, which doubles its trim against a single measured error.
     @Test func aStaleGroupCannotMoveADeviceThatAlreadyActedThisWindow() {
-        var policy = DriftCorrectionPolicy()
+        var policy = DriftCorrectionPolicy(verifyMode: .applyThenVerify)
         _ = policy.decide([observation("a", 25, guess: true),
                            observation("b", 30, guess: true)], programIsSilent: true)
         // Only b's peak was usable this window, so b re-corrects alone while
@@ -186,7 +188,7 @@ import Testing
     // owner is observed first — the guarantee is one move per device per
     // window whatever the observation order.
     @Test func theOneMovePerWindowRuleHoldsInEitherObservationOrder() {
-        var policy = DriftCorrectionPolicy()
+        var policy = DriftCorrectionPolicy(verifyMode: .applyThenVerify)
         _ = policy.decide([observation("a", 25, guess: true),
                            observation("b", 30, guess: true)], programIsSilent: true)
         _ = policy.decide([observation("b", -30, t: 1)], programIsSilent: true)
@@ -202,7 +204,7 @@ import Testing
     // reports a swap: the move is right either way, but the field log counts
     // swaps as wrong attributions, and this one is ordinary drift.
     @Test func aGroupLeftHoldingOnlyItsOwnDeviceRecorrectsAsOrdinaryDrift() {
-        var policy = DriftCorrectionPolicy()
+        var policy = DriftCorrectionPolicy(verifyMode: .applyThenVerify)
         _ = policy.decide([observation("a", 25, guess: true),
                            observation("b", 30, guess: true)], programIsSilent: true)
         // b's correction landed, so b leaves a's group and a's guess has
@@ -216,12 +218,117 @@ import Testing
     // Turns red if a lone contended device stores itself as its own guessed
     // group, which is the same mislabel reached from the other direction.
     @Test func aLoneGuessStoresNoGroupToSwapWith() {
-        var policy = DriftCorrectionPolicy()
+        var policy = DriftCorrectionPolicy(verifyMode: .applyThenVerify)
         let first = policy.decide([observation("a", 25, guess: true)], programIsSilent: true)
         #expect(first.contains(.scheduleVerify(deviceUIDs: ["a"])))
         let verify = policy.decide([observation("a", 20, t: 1)], programIsSilent: true)
         #expect(verify == [.correct(.init(deviceUID: "a", ms: 20,
                                           placement: .inGap, notify: false))])
+    }
+
+    // Turns red if a re-correction that moves one device alone is reported as
+    // a swap. Nothing was reattributed here — the group's other member gave no
+    // measurement this window — and the field log counts a swap as a wrong
+    // attribution.
+    @Test func aReCorrectionThatMovesOneDeviceAloneIsNotASwap() {
+        var policy = DriftCorrectionPolicy(verifyMode: .applyThenVerify)
+        _ = policy.decide([observation("a", 25, guess: true),
+                           observation("b", 30, guess: true)], programIsSilent: true)
+        let verify = policy.decide([observation("a", 22, t: 1)], programIsSilent: true)
+        #expect(verify == [.correct(.init(deviceUID: "a", ms: 22,
+                                          placement: .inGap, notify: false))])
+    }
+
+    // MARK: - Verify before apply (spec decision 17, the default)
+
+    // Turns red if a guessed match reaches the speaker before a second window
+    // has agreed with it. Live test 2 held -11.5 ms and then -47.6 ms on a
+    // pair that was already in sync, and only the owner caught it.
+    @Test func aGuessedMatchMovesNothingUntilASecondWindowAgrees() {
+        var policy = DriftCorrectionPolicy()
+        let first = policy.decide([observation("a", 25, guess: true),
+                                   observation("b", 30, guess: true)],
+                                  programIsSilent: true)
+        #expect(first == [.scheduleVerify(deviceUIDs: ["a", "b"])])
+        #expect(policy.isAwaitingConfirmation("a") == false)
+    }
+
+    // Turns red if the agreeing verify window stops releasing the held move,
+    // which would leave a real drift uncorrected for good.
+    @Test func aVerifyWindowThatAgreesReleasesTheHeldCorrection() {
+        var policy = DriftCorrectionPolicy()
+        _ = policy.decide([observation("a", 25, guess: true),
+                           observation("b", 30, guess: true)], programIsSilent: true)
+        let verify = policy.decide([observation("a", 26, t: 1), observation("b", 29, t: 1)],
+                                   programIsSilent: true)
+        #expect(verify == [.correct(.init(deviceUID: "a", ms: 26,
+                                          placement: .inGap, notify: false)),
+                           .correct(.init(deviceUID: "b", ms: 29,
+                                          placement: .inGap, notify: false))])
+    }
+
+    // Turns red if the agreement tolerance moves off 1.5 ms, or if the
+    // comparison at the boundary flips from >= to >.
+    @Test func theOneAndAHalfMillisecondLineDecidesWhetherTwoWindowsAgree() {
+        var agreeing = DriftCorrectionPolicy()
+        _ = agreeing.decide([observation("a", 25, guess: true)], programIsSilent: true)
+        #expect(agreeing.decide([observation("a", 26.5, t: 1)], programIsSilent: true)
+                == [.correct(.init(deviceUID: "a", ms: 26.5,
+                                   placement: .inGap, notify: false))])
+
+        var disagreeing = DriftCorrectionPolicy()
+        _ = disagreeing.decide([observation("a", 25, guess: true)], programIsSilent: true)
+        #expect(disagreeing.decide([observation("a", 26.6, t: 1)], programIsSilent: true)
+                == [.scheduleVerify(deviceUIDs: ["a"])])
+    }
+
+    // Turns red if a verify that disagrees applies the fresh reading anyway.
+    // Nothing has moved yet, so that reading is a guess in its turn and is
+    // owed a verify of its own.
+    @Test func aVerifyWindowThatDisagreesMovesNothingAndAsksAgain() {
+        var policy = DriftCorrectionPolicy()
+        _ = policy.decide([observation("a", 25, guess: true),
+                           observation("b", 30, guess: true)], programIsSilent: true)
+        let verify = policy.decide([observation("a", -40, t: 1), observation("b", 12, t: 1)],
+                                   programIsSilent: true)
+        #expect(verify == [.scheduleVerify(deviceUIDs: ["a", "b"])])
+        #expect(policy.isAwaitingConfirmation("a") == false)
+    }
+
+    // Turns red if two windows that hand the pair each other's readings are
+    // read as ordinary drift instead of the wrong attribution they are: both
+    // devices now have two windows agreeing about them, so both move.
+    @Test func aVerifyWindowThatFindsThePeaksSwappedRecorrectsAsASwap() {
+        var policy = DriftCorrectionPolicy()
+        _ = policy.decide([observation("a", 25, guess: true),
+                           observation("b", 30, guess: true)], programIsSilent: true)
+        let verify = policy.decide([observation("a", 30, t: 1), observation("b", 25, t: 1)],
+                                   programIsSilent: true)
+        #expect(verify == [.swapAndRecorrect([
+            .init(deviceUID: "a", ms: 30, placement: .inGap, notify: false),
+            .init(deviceUID: "b", ms: 25, placement: .inGap, notify: false)])])
+    }
+
+    // Turns red if a held guess whose error has gone away is applied anyway.
+    // Nothing was moved, so nothing corrected it and there is nothing left to
+    // correct.
+    @Test func aHeldGuessWhoseErrorWentAwayIsDropped() {
+        var policy = DriftCorrectionPolicy()
+        _ = policy.decide([observation("a", 25, guess: true)], programIsSilent: true)
+        #expect(policy.decide([observation("a", 3, t: 1)], programIsSilent: true)
+                == [.ignore(deviceUID: "a", reason: .belowThreshold)])
+    }
+
+    // Turns red if a correction the verify released is stored as held rather
+    // than outstanding, which would let the window after it release the same
+    // move a second time and double it.
+    @Test func aCorrectionAVerifyReleasedIsConfirmedLikeAnyOther() {
+        var policy = DriftCorrectionPolicy()
+        _ = policy.decide([observation("a", 25, guess: true)], programIsSilent: true)
+        _ = policy.decide([observation("a", 25, t: 1)], programIsSilent: true)
+        #expect(policy.isAwaitingConfirmation("a"))
+        #expect(policy.decide([observation("a", 1, t: 2)], programIsSilent: true)
+                == [.ignore(deviceUID: "a", reason: .corrected)])
     }
 
     // Turns red if a device can be corrected twice in one window, before the

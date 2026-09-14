@@ -49,6 +49,22 @@ final class DriftCorrectionApplier: @unchecked Sendable {
     /// when its own seek has been rendered.
     static let verifySettleSeconds = 5.0
 
+    /// How a slew's steps are scheduled: arm a repeating `tick` on `queue`
+    /// every `intervalSeconds`, and hand back what stops it again.
+    typealias SlewClock = @Sendable (_ intervalSeconds: Double,
+                                     _ queue: DispatchQueue,
+                                     _ tick: @escaping @Sendable () -> Void)
+        -> @Sendable () -> Void
+
+    /// The shipping clock: a repeating timer on the applier's own queue.
+    static let dispatchSlewClock: SlewClock = { intervalSeconds, queue, tick in
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + intervalSeconds, repeating: intervalSeconds)
+        timer.setEventHandler(handler: tick)
+        timer.resume()
+        return { timer.cancel() }
+    }
+
     private let queue = DispatchQueue(label: "com.audiout.drift-correction")
     private let isBluetooth: @Sendable (String) -> Bool
     private let currentLatencyMs: @Sendable (String) -> Double
@@ -65,12 +81,17 @@ final class DriftCorrectionApplier: @unchecked Sendable {
     private let stepSeconds: Double
     /// Only the tests pass anything but ``verifySettleSeconds``.
     private let verifySeconds: Double
+    /// Only the tests pass anything but ``dispatchSlewClock``: a step landing
+    /// while a sink renders costs that cycle its audio, and a test rendering
+    /// far denser than playback does sees that collision where music never
+    /// would. Its clock steps from its own render loop instead.
+    private let slewClock: SlewClock
 
     /// `queue` only.
     private var policy: DriftCorrectionPolicy
     private var slewRemainingMs: [String: Double] = [:]
     private var slewAppliedMs: [String: Double] = [:]
-    private var timer: DispatchSourceTimer?
+    private var cancelSlewClock: (@Sendable () -> Void)?
     private var surfacedMs: [String: Double] = [:]
     /// `queue` only. Verify batches whose own corrections are still moving,
     /// with the devices each is still waiting on.
@@ -87,9 +108,11 @@ final class DriftCorrectionApplier: @unchecked Sendable {
          scheduleVerify: @escaping @Sendable ([String]) -> Void,
          policy: DriftCorrectionPolicy = DriftCorrectionPolicy(),
          stepSeconds: Double = DriftCorrectionApplier.slewStepSeconds,
-         verifySeconds: Double = DriftCorrectionApplier.verifySettleSeconds) {
+         verifySeconds: Double = DriftCorrectionApplier.verifySettleSeconds,
+         slewClock: @escaping SlewClock = DriftCorrectionApplier.dispatchSlewClock) {
         self.stepSeconds = stepSeconds
         self.verifySeconds = verifySeconds
+        self.slewClock = slewClock
         self.isBluetooth = isBluetooth
         self.currentLatencyMs = currentLatencyMs
         self.writeLatencyMs = writeLatencyMs
@@ -99,7 +122,7 @@ final class DriftCorrectionApplier: @unchecked Sendable {
         self.policy = policy
     }
 
-    deinit { timer?.cancel() }
+    deinit { cancelSlewClock?() }
 
     /// One sampling window's usable observations.
     func handle(_ observations: [DriftCorrectionPolicy.Observation]) {
@@ -278,12 +301,8 @@ final class DriftCorrectionApplier: @unchecked Sendable {
 
     /// `queue` only.
     private func startTimerIfNeeded() {
-        guard timer == nil else { return }
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + stepSeconds, repeating: stepSeconds)
-        timer.setEventHandler { [weak self] in self?.stepSlews() }
-        self.timer = timer
-        timer.resume()
+        guard cancelSlewClock == nil else { return }
+        cancelSlewClock = slewClock(stepSeconds, queue) { [weak self] in self?.stepSlews() }
     }
 
     /// `queue` only. One step of every running slew — or, the moment the music
@@ -322,7 +341,7 @@ final class DriftCorrectionApplier: @unchecked Sendable {
 
     /// `queue` only.
     private func stopTimer() {
-        timer?.cancel()
-        timer = nil
+        cancelSlewClock?()
+        cancelSlewClock = nil
     }
 }

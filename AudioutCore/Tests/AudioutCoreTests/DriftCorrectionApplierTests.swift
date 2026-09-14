@@ -375,7 +375,9 @@ import Testing
     /// The applier wired to a real sink: what it writes is the device's stored
     /// measured latency, which the manager splices live (`setOffsetMs`).
     static func applier(on manager: BTSyncedSink, silent: @escaping @Sendable () -> Bool,
-                        stepSeconds: Double) -> DriftCorrectionApplier {
+                        slewClock: @escaping DriftCorrectionApplier.SlewClock
+                            = DriftCorrectionApplier.dispatchSlewClock)
+        -> DriftCorrectionApplier {
         DriftCorrectionApplier(
             isBluetooth: { _ in true },
             currentLatencyMs: { Double(manager.offsetMs(forDeviceUID: $0)) },
@@ -383,7 +385,56 @@ import Testing
             markCalibrationStale: { _ in },
             programIsSilent: silent,
             scheduleVerify: { _ in },
-            stepSeconds: stepSeconds)
+            slewClock: slewClock)
+    }
+
+    /// The applier's slew clock, stepped by the render loop instead of by
+    /// time.
+    ///
+    /// A real timer fires a step on the applier's own queue whenever it comes
+    /// round, including part-way through a `renderInterleaved` call. The seek
+    /// takes the sink's state lock and holds it, and the render path only
+    /// TRIES that lock — a cycle that finds it held returns silence, and a
+    /// silent 512-frame chunk spliced into a sine is a full-amplitude step.
+    /// Music never meets this: playback renders a cycle every 10.7 ms and
+    /// steps twice a second, while these tests render one cycle per step.
+    /// Running each step through `queue.sync` between two renders removes the
+    /// overlap rather than tolerating it.
+    private final class RenderLoopSlewClock: @unchecked Sendable {
+
+        private let lock = NSLock()
+        private var queue: DispatchQueue?
+        private var tick: (@Sendable () -> Void)?
+        private let didArm = DispatchSemaphore(value: 0)
+
+        /// What `DriftCorrectionApplier(slewClock:)` takes.
+        var clock: DriftCorrectionApplier.SlewClock {
+            { [self] _, queue, tick in
+                lock.withLock {
+                    self.queue = queue
+                    self.tick = tick
+                }
+                didArm.signal()
+                return { [self] in lock.withLock { self.tick = nil } }
+            }
+        }
+
+        /// Wait for the applier to arm the clock, and then for the step it
+        /// takes inline while arming it.
+        func waitForFirstStep() {
+            guard didArm.wait(timeout: .now() + 5) == .success else {
+                Issue.record("the applier never armed its slew clock")
+                return
+            }
+            lock.withLock { queue }?.sync {}
+        }
+
+        /// One step, finished before the caller renders again.
+        func step() {
+            let (queue, tick) = lock.withLock { (self.queue, self.tick) }
+            guard let queue, let tick else { return }
+            queue.sync(execute: tick)
+        }
     }
 
     /// One 512-frame render cycle, `cycle` cycles after the anchor.
@@ -417,29 +468,30 @@ import Testing
     // an audible click is the delay line's crossfade. Turns red if a whole
     // correction ever reaches the output as a step bigger than the programme
     // material's own, which is what a raw splice sounds like.
-    @Test func aWholeCorrectionTakenInAGapLeavesNoClickInTheOutput() async throws {
+    @Test func aWholeCorrectionTakenInAGapLeavesNoClickInTheOutput() throws {
         let sine = (0..<400_000).map {
             Float(sin(2 * Double.pi * 1_000 * Double($0) / Self.sampleRate))
         }
         let (manager, sink) = try Self.anchored(on: sine)
         defer { manager.stop() }
-        let applier = Self.applier(on: manager, silent: { true }, stepSeconds: 0.02)
+        let applier = Self.applier(on: manager, silent: { true })
 
         var cycle = try Self.renderUntilAudible(sink)
         for _ in 0..<10 { _ = Self.render(sink, cycle: cycle); cycle += 1 }
+        // The cycle the seek splices into has to be in `out`, or the step
+        // across the splice is the one thing here nothing measures.
+        var out = Self.render(sink, cycle: cycle)
+        cycle += 1
 
         applier.handle([.init(deviceUID: "dev-a", errorMs: 20, hostNanos: 0, isBestGuess: false)])
-        var out: [Float] = []
-        var cyclesSinceMove = 0
-        for _ in 0..<300 {
+        // A gap correction arms no clock, so it is not the seam above that
+        // keeps it clear of a render — this read is. The whole move happens
+        // inside `handle`'s block on the applier's own serial queue, and a
+        // `queue.sync` read of applier state queues behind it.
+        _ = applier.surfacedCorrectionMs(forDevice: "dev-a")
+        for _ in 0..<20 {
             out += Self.render(sink, cycle: cycle)
             cycle += 1
-            if manager.offsetMs(forDeviceUID: "dev-a") == 20 {
-                cyclesSinceMove += 1
-                if cyclesSinceMove > 20 { break }
-            } else {
-                try await Task.sleep(nanoseconds: 1_000_000)
-            }
         }
 
         #expect(manager.offsetMs(forDeviceUID: "dev-a") == 20,
@@ -452,19 +504,14 @@ import Testing
                 "step \(Self.maxStep(out)) vs source \(Self.maxStep(sine))")
     }
 
-    /// Drive a whole slew: twelve one-millisecond seeks arriving mid-playback,
-    /// a few milliseconds apart, while the sink renders. Returns everything
-    /// rendered from the first audible cycle on.
-    static func renderThroughASlew(errorMs: Double, on signal: [Float]) async throws -> [Float] {
+    /// Drive a whole slew: twelve one-millisecond seeks arriving mid-playback
+    /// while the sink renders, one between each pair of render cycles.
+    /// Returns everything rendered from the first audible cycle on.
+    static func renderThroughASlew(errorMs: Double, on signal: [Float]) throws -> [Float] {
         let (manager, sink) = try anchored(on: signal)
         defer { manager.stop() }
-        // A step every 10 ms against a render cycle every millisecond: ten
-        // cycles per step nominally, so the steps stay separate the way they do
-        // in life (one step per half second, one render cycle per ten
-        // milliseconds) even on a machine slow enough to lose most of them. The
-        // 300-iteration bound is a hang-stop, not a deadline — twelve steps
-        // need about 120 ms of it.
-        let applier = applier(on: manager, silent: { false }, stepSeconds: 0.01)
+        let clock = RenderLoopSlewClock()
+        let applier = applier(on: manager, silent: { false }, slewClock: clock.clock)
 
         var cycle = try renderUntilAudible(sink)
         var out = render(sink, cycle: cycle)
@@ -472,34 +519,33 @@ import Testing
 
         applier.handle(
             [.init(deviceUID: "dev-a", errorMs: errorMs, hostNanos: 0, isBestGuess: false)])
+        clock.waitForFirstStep()
+        // A step is written to the sink, not to the ring, so it is the render
+        // ABOVE the next step that consumes it — which is why the loop renders
+        // first and steps second. The 300-iteration bound is a hang-stop, not
+        // a deadline: at one step a pass, twelve of them end it.
         for _ in 0..<300 {
             out += render(sink, cycle: cycle)
             cycle += 1
             if manager.offsetMs(forDeviceUID: "dev-a") == Int(errorMs) { break }
-            try await Task.sleep(nanoseconds: 1_000_000)
+            clock.step()
         }
         #expect(manager.offsetMs(forDeviceUID: "dev-a") == Int(errorMs), "the slew completed")
-        // The last step is written to the sink, not to the ring: it is the next
-        // render that consumes it. Drain a few more cycles so the output holds
-        // the whole correction however late that step landed.
-        for _ in 0..<8 {
-            out += render(sink, cycle: cycle)
-            cycle += 1
-        }
         return out
     }
 
-    // (ii) THE SLEW, HEARD. A dozen seeks land in the middle of the programme a
-    // few milliseconds apart, each with its own crossfade, and some of them
-    // start before the last one's fade has finished. Turns red if any of that
+    // (ii) THE SLEW, HEARD. A dozen seeks land in the middle of the programme,
+    // one between each pair of render cycles, each with its own crossfade —
+    // and each fade is over inside the cycle that starts it, the fade being
+    // 5 ms (240 frames) against a 512-frame cycle. Turns red if any of that
     // reaches the output as a step bigger than the programme material's own —
     // the same ceiling and the same reasoning as the gap move above, applied to
     // the case the slew exists for.
-    @Test func aSlewLeavesNoStepBiggerThanTheProgrammesOwn() async throws {
+    @Test func aSlewLeavesNoStepBiggerThanTheProgrammesOwn() throws {
         let sine = (0..<400_000).map {
             Float(sin(2 * Double.pi * 1_000 * Double($0) / Self.sampleRate))
         }
-        let out = try await Self.renderThroughASlew(errorMs: 12, on: sine)
+        let out = try Self.renderThroughASlew(errorMs: 12, on: sine)
         #expect(Self.maxStep(out) <= Self.maxStep(sine) * 1.5,
                 "step \(Self.maxStep(out)) vs source \(Self.maxStep(sine))")
     }
@@ -516,16 +562,16 @@ import Testing
     // waveform — that bulge dwarfs the 48-frame step and reads as the output
     // going backwards. The test above is where continuity is judged, on
     // material the fade was designed for.
-    @Test func aSlewTakesExactlyTheCorrectionOutOfTheTimeline() async throws {
+    @Test func aSlewTakesExactlyTheCorrectionOutOfTheTimeline() throws {
         let ramp = (0..<400_000).map { Float($0 + 1) }
-        let out = try await Self.renderThroughASlew(errorMs: 12, on: ramp)
+        let out = try Self.renderThroughASlew(errorMs: 12, on: ramp)
         let played = Double(out.count)
         let first = try #require(out.first)
         let last = try #require(out.last)
         let advanced = Double(last - first)
-        // Slack for one render cycle: the last step can be written after the
-        // cycle that would have carried it, leaving it for the cycle after the
-        // loop stopped.
+        // A render cycle of margin rather than an exact match: what this is
+        // here to catch — a step seeking the wrong way, landing twice, or
+        // eaten by a clamp — is off by a whole 48-frame step at the least.
         #expect(abs(advanced - (played - 1) - 576) <= Double(Self.framesPerCycle),
                 "advanced \(advanced) over \(played) samples played")
     }

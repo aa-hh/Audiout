@@ -301,6 +301,27 @@ block 6 (567 → 556 over 9 min) with the tap counter flat; unexplained (real
 speaker drift, or mic). Labels: `windows-2026-09-14/labels.txt`; blocks 1–2 and
 the aborted first block 2 are INVALID (timeline slid before the tap fix).
 
+### Validation attempt (11:16–14:40 UTC) — FAILED, cause open
+
+Gates build `b82d381b` (shared pin 6990309: fixtures + whitening 0.7 + gates;
+2.3 override removed; log now `delay@score/local/margin`). First attempt died
+at once on a script edit of mine (a stray line quit the app at 11:16). Second
+attempt launched 11:38:33 cleanly by the log (tap capturing, both sinks built,
+links settled), but from then on EVERY window was dropped `empty_capture`
+(mic recorder starts, zero samples) and no AirPlay `stream_health` lines
+appear during the block, i.e. the app received no program audio either.
+Nobody home, lid open (`AppleClamshellState = No`), mic device normal
+(48 kHz, 1 ch), app-side mic permission check passed, no TCC line found.
+The Mac then slept (caffeinate expired 11:52; `pmset -g log` shows
+maintenance sleep / dark-wake cycles from 14:14 UTC). Relaunch at 14:37 showed
+the same empty capture. System default output with the app quit = "Sonos Move
+(SONOS 089E)" (a Bluetooth device), not the Mac's speakers — at 07:11 with the
+app running it was "Audiout Dev". **Open question for the next session with
+the owner present:** does the app on this build receive audio and mic at all
+when launched with the system default output on a Bluetooth Move? Reproduce
+by launching from that state and watching `stream_health` + one window.
+Blocks 9–10 unusable; ~13 min of the music budget unused. Slot released.
+
 ## Logging (local only, `~/Library/Logs/Audiout/telemetry.jsonl`)
 
 All `cat: localPlayback`:

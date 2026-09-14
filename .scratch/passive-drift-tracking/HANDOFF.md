@@ -248,9 +248,58 @@ after the hook selects; do not reselect mid-block (it restarts the timer).
   arithmetic on the same baselines agrees with itself). Its commit is
   attributed to Opus 5.
 
-Owed to merge these: shared branches 16 + 09 merged and tagged 0.14.0, Mac pin
-bump, then 13 merged into this branch; all after the music blocks (builds are
-banned during them). Rulings still owed: decisions 15 and 17.
+- **ROOT CAUSE of the early readings (and the creep): the whole-system tap
+  drops an IOProc cycle now and then and NEVER pads it.** Diagnosed read-only
+  08:00 UTC: pts are honest, but every sink is fed by sample count (BT sink
+  anchors on its first buffer only; AirPlay packet time = sample count), so each
+  lost 11.6 ms cycle advances all later audio on every sink. Today one drop per
+  ~40 s (a third Bluetooth link, Alec's AirPods Pro, on the radio), yesterday one
+  per hour. `netDriftTotalSeconds` in `write_cadence_drift` is the tell.
+  **Fixed on `claude/tap-feed-gap` (from main) @ `ace6f8ff`**, merged into this
+  branch at `b8d74312`: `handleBuffer` now pads any unarmed hole between half a
+  block and 50 ms through `fillFeedGap`, logging `tap_feed_gap` with
+  `cause:"dropped_cycle"` and `gapMs`. Verified live 08:39: netDrift −0.002 over
+  3 silent minutes (was +0.05), two fills at launch. This also explains the
+  11 ms inter-speaker desync of 2026-09-13 19:51 (one lost cycle padded by the
+  keep-alive on one BT sink and not the other) and answers spec decision 11's
+  creep question: real, and the sender's fault. Memory:
+  `tap-dropped-cycles-never-padded`. Blocks 3–8 resumed 08:42:42 on this build.
+- audiout-shared `claude/drift-gates` @ `6990309` (stacked on fixtures +
+  whitening): ticket 10. `DriftPeak.margin` (peak over best rival > 3 ms away
+  inside the window) and `DriftPeak.localConfidence` (±300 ms robust
+  background); gates margin ≥ 1.2, local ≥ 2.4, chosen mid-gap on the fixtures
+  (false accept 21-13-33Z: margin 1.017 / local 1.90 → refused; real arrival
+  21-16-33Z: 1.309 / 3.06 → accepted). Parity 0.03 %. Says the Mac should
+  delete `PassiveDriftSampler.minPeakToSidelobe = 2.3` (decision 15) and print
+  margin + local in the `candidates` log field. Caveat: the brief's 1.5 margin
+  refuses the only true arrival; and the Mac harness's `swift_plain` replica
+  predates whitening (one-line fix given in the agent report, not applied).
+
+Owed to merge these: shared `claude/drift-gates` (contains 16 + 09 + 10) → main,
+tag 0.14.0; Mac pin bump + drop the 2.3 override + log margin/local; then
+`claude/drift-verify-step` (13) into this branch; `claude/tap-feed-gap` should
+go to main as its OWN PR first (it fixes production creep, independent of drift).
+Tickets 11, 12, 14, 15 not started. Rulings still owed: decisions 15 and 17.
+
+### Live test 4 result (blocks 3–8 on the tap-fix build, 08:42–10:10 UTC)
+
+Offline, whitened (exponent 0.7, 300 Hz–8 kHz, ±3 ms rival exclusion), top
+two peaks per window resolve BOTH speakers in every non-quiet window:
+
+| block | windows (top two peaks, ms) | separation |
+|---|---|---|
+| 6 good | 567/551, 568/553, 562/546, 556/541 | ~15 ms |
+| 7 +40 ms trim on `54-2A` | 587/531, (garbage), 588/532, 586/533 | ~56 ms |
+| 8 trim restored | 559/531, (garbage), 550/523, 548/523 | ~26 ms |
+
+The +40 ms jump reads as +41 ms of separation. The app's plain filter saw ONE
+lobe per window and called it `merged`, alternating between the two speakers
+(587.4 then 532.4), moving both baselines each time; no correction fired.
+Two windows (09:48:55, 10:04:16) score < 1 everywhere and are garbage the
+ticket-10 gates would refuse. A slow common slide of ~1 ms/min persists in
+block 6 (567 → 556 over 9 min) with the tap counter flat; unexplained (real
+speaker drift, or mic). Labels: `windows-2026-09-14/labels.txt`; blocks 1–2 and
+the aborted first block 2 are INVALID (timeline slid before the tap fix).
 
 ## Logging (local only, `~/Library/Logs/Audiout/telemetry.jsonl`)
 

@@ -58,6 +58,10 @@ public protocol LocalPlaybackControlling: AnyObject, Sendable {
     /// Stop the audio engine and drop every player.
     func stop()
 
+    /// Silence redirected local playback without changing any app's player volume.
+    func setOutputSuppressed(_ suppressed: Bool,
+                             completion: @escaping @Sendable () -> Void)
+
     /// Fired with one app's raw (PRE-volume) captured RMS (0.0…1.0) while
     /// metering is active — the per-app analogue of the whole-system tap's
     /// `onLevel`. ``NativeBackend`` forwards it as ``BackendEvent/appLevel`` for a
@@ -80,6 +84,8 @@ extension LocalPlaybackControlling {
     /// Default no-op (T3) so a conformer that doesn't meter compiles unchanged;
     /// the concrete ``LocalPlaybackEngine`` overrides it with the real gate.
     public func setMeteringActive(_ active: Bool) {}
+    public func setOutputSuppressed(_ suppressed: Bool,
+                                    completion: @escaping @Sendable () -> Void) { completion() }
 }
 
 /// Ways local playback setup can fail.
@@ -205,6 +211,8 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     private let stateLock = NSLock()
     /// Serializes every blocking AVAudioEngine graph mutation off the state lock.
     private let graphQueue = DispatchQueue(label: "com.airplaycontroller.localplayback.graph")
+    /// Confined to graphQueue so a graph restart restores the requested mixer gain.
+    private var outputSuppressed = false
     private var nodes: [String: AppNode] = [:]
     private var engineRunning = false
     /// The device id the engine's output is currently pinned to (or `nil` when no
@@ -358,6 +366,15 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         try graphQueue.sync { try startEngineOnGraphQueue() }
     }
 
+    public func setOutputSuppressed(_ suppressed: Bool,
+                                    completion: @escaping @Sendable () -> Void) {
+        graphQueue.async {
+            self.outputSuppressed = suppressed
+            self.engine.mainMixerNode.outputVolume = suppressed ? 0 : 1
+            completion()
+        }
+    }
+
     /// Start the engine (idempotent). MUST run on `graphQueue`; touches the state
     /// lock only for the brief `engineRunning` reads/writes, never across the
     /// blocking `engine.start()`. `engineRunning` is set from the engine's OWN
@@ -379,6 +396,7 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         // instantiated before start; starting with no player inputs is silent
         // and correct — players attach/connect afterward while it runs.
         _ = engine.mainMixerNode
+        engine.mainMixerNode.outputVolume = outputSuppressed ? 0 : 1
         engine.prepare()
         do {
             if let testOverride = test_startOverride {
@@ -473,6 +491,7 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
             }
         }
         _ = engine.mainMixerNode
+        engine.mainMixerNode.outputVolume = outputSuppressed ? 0 : 1
         engine.prepare()
         do {
             try engine.start()
@@ -510,6 +529,8 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
 
     public func stop() {
         graphQueue.sync {
+            outputSuppressed = false
+            engine.mainMixerNode.outputVolume = 1
             // Snapshot + clear the dict under the state lock, then do the blocking
             // player.stop()/detach outside it.
             let players = stateLock.withLock { () -> [AVAudioPlayerNode] in
@@ -1166,6 +1187,8 @@ struct SystemLocalOutputResolver: LocalOutputResolving {
 // MARK: - Test hooks
 
 extension LocalPlaybackEngine {
+    /// Inspect the local output hold after queued graph work has applied it.
+    var test_mainMixerOutputVolume: Float { graphQueue.sync { engine.mainMixerNode.outputVolume } }
     /// Repoints performed since construction (a repoint runs only when the resolved
     /// target genuinely changed) — asserts the compare-before-rebuild guard.
     var test_repointCount: Int { stateLock.withLock { repointCount } }
@@ -1195,6 +1218,8 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     public func receive(buffer: CapturedBuffer, for bundleID: String) {}
     public func start() throws {}
     public func stop() {}
+    public func setOutputSuppressed(_ suppressed: Bool,
+                                    completion: @escaping @Sendable () -> Void) { completion() }
     public func setMeteringActive(_ active: Bool) {}
 }
 

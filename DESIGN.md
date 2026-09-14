@@ -24,6 +24,7 @@ colors:
   ring: "#7FB4C4"
   failure: "#D9564A"
   muted: "#8E93F0"
+  equalizer: "#41B07A"
   partyRampDeep: "#FF90E9"
   meter: "#464C55"
   socket: "#2A2E33"
@@ -296,6 +297,51 @@ desaturated steel and 29° off `permissionSystemAudio`'s blue, measured ΔE
 any of the four cells. Two candidates were rejected on that measurement: an
 azure at 213° came within ΔE 6.4 of `permissionSystemAudio`, and a violet at
 257° within ΔE 6.5 of `permissionLocalNetwork`.
+
+**The Equalizer-Hue Fence.** One token, `Tokens.Color.equalizer` (`#41B07A`
+dark / `#007835` light), means one thing: this speaker's curve is not flat.
+Its only consumer is the device row's engaged Equalizer door
+(`DeviceRowView.updateEQButton()`), which draws the door's enclosing square in
+this hue with the two band sliders left as holes. It is not a general "on"
+green, not a success tone, and not available to a second control that happens
+to be engaged; `DeviceRowMutedStateTests` fails if a second call site appears
+in `Sources/`. The door wore `goldText` until 2026-09-04, and gold means
+"audio is flowing here" everywhere else — including the live wash the same row
+draws behind the door — so one hue was carrying two ideas. Green was
+unspoken for, and stays 84–86° of hue off `muted`, the control 6 pt to its
+right, and 9° off `permissionUsageStats`, which is fenced to onboarding and
+never shares a screen with a device row.
+
+The two engaged marks are tuned **as a pair**, not to a floor each — but what
+"pair" means depends on the ground, and the first attempt got that wrong. On
+the dark row they pair on OKLCH lightness: 0.680 against `muted`'s 0.698, the
+green a hair under its sibling, which is the intended order (mute is the kill
+switch, the door is not). On the light row lightness is the wrong axis. A dark
+stroke on near-white reads as an outline whatever its luminance; what separates
+`muted`'s periwinkle from a plain dark line is chroma, which it carries at
+0.161. A light green matched on lightness alone (`#1E7E52`, chroma 0.111)
+measured 4.84:1 — far over the floor — and the owner's verdict from the live
+build was still "almost invisible" (2026-09-14). So the light half pairs on
+chroma instead, and takes its hue eight degrees toward the green primary to
+find the room: sRGB tops out at chroma 0.116 near hue 158 at this lightness,
+and at 0.138 near hue 150. Same green family, same 84–87° clear of `muted`;
+only the room sRGB leaves differs between appearances.
+
+Both marks draw at `RowAccessorySymbol.weight`, one shared constant. It went
+from `.thin` to `.light` on 2026-09-14 — a 1.0 pt stroke to a 1.5 pt one on the
+same 17.5 pt square — because a hairline outline stayed hard to see on a light
+row however the hue was tuned. SF Symbols weights are discrete, so that is the
+smallest step available; `.regular` draws the same 1.5 pt stroke but grows the
+square to 18 pt, buying nothing for the size.
+
+Measured against every ground a device row can put behind the door — `canvas`,
+`panel`, `raised`, the gold live wash, the hover wash — dark `#41B07A` runs
+7.27 / 6.60 / 5.79 / 5.23 / 5.23 and light `#007835` runs 5.39 on the flat
+grounds, 4.72 live, 4.45 hovered, against a 3:1 non-text floor. The values they
+replaced (`#227950` / `#1C6543`, 2026-09-05) were measured on `panel` alone:
+the dark half sat at 2.66:1 on the live wash — the ground a shaped speaker
+spends most of its time on — and the light half, at chroma 0.091, read as
+near-black rather than as green.
 
 **The Instrument Ground Rule (Mac-only).** The alignment wizard's stage
 (`stagePlate`, `stageRule`, `stageInk`, `wireCore`, `fuseWhite`) authors the

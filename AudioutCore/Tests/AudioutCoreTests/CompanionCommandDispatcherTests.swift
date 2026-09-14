@@ -14,6 +14,46 @@ import AudioutProtocol
 @MainActor
 @Suite final class CompanionCommandDispatcherTests: IsolatedSuite {
 
+    @Test func interceptedTickUsesTheExistingAlignmentIDLimit() {
+        #expect(CompanionCommandDispatcher.alignmentTargetIDRefusal("") == "Unknown speaker.")
+        #expect(CompanionCommandDispatcher.alignmentTargetIDRefusal(
+            String(repeating: "a", count: 128)) == nil)
+        #expect(CompanionCommandDispatcher.alignmentTargetIDRefusal(
+            String(repeating: "a", count: 129)) == "Unknown speaker.")
+    }
+
+    /// A cancel that does not carry the asking client cannot tell one phone's
+    /// run from another's, so the wiring layer had no way to stop phone B's
+    /// cancel ending phone A's.
+    @Test func cancelProbeReceivesTheAskingClient() async throws {
+        let seen = DispatcherCancelSpy()
+        let actions = CompanionAlignmentActions(
+            startProbe: { _, _ in nil },
+            cancelProbe: { targetID, clientID in
+                seen.calls.append((targetID, clientID))
+                return nil
+            },
+            reportMeasurement: { _, _, _ in nil },
+            setTick: { _, _, _ in nil },
+            nudgeTrim: { _, _ in nil },
+            revertNudge: { _ in nil },
+            clearTuning: { _ in nil },
+            playDemo: { _, _ in nil })
+        let context = try await makeContext(alignmentActions: actions)
+        let phone = UUID()
+        let result = context.dispatcher.execute(
+            .cancelAlignmentProbe(targetID: "speaker-1"), clientID: phone)
+        #expect(result.applied)
+        #expect(seen.calls.count == 1)
+        #expect(seen.calls.first?.0 == "speaker-1")
+        #expect(seen.calls.first?.1 == phone,
+                "the wiring layer needs the caller to refuse another phone's cancel")
+    }
+
+    private final class DispatcherCancelSpy {
+        var calls: [(String, UUID?)] = []
+    }
+
     /// Records everything the two injected closures were called with, so tests
     /// can assert on them without a mock framework.
     private final class Spy {
@@ -35,7 +75,8 @@ import AudioutProtocol
         let spy: Spy
     }
 
-    private func makeContext(fleet: [Device] = .demoFleet) async throws -> Context {
+    private func makeContext(fleet: [Device] = .demoFleet,
+                            alignmentActions: CompanionAlignmentActions? = nil) async throws -> Context {
         let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
         try await waitForFleet(backend, count: fleet.count)
@@ -60,7 +101,8 @@ import AudioutProtocol
                 while spy.holdStartBuffer {
                     try? await Task.sleep(nanoseconds: 5_000_000)
                 }
-            }
+            },
+            alignmentActions: alignmentActions
         )
         return Context(dispatcher: dispatcher, groupController: groupController, appRouting: appRouting,
                        settings: settings, backend: backend, spy: spy)

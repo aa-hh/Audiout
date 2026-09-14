@@ -903,6 +903,68 @@ import Testing
         }
         #expect(windowCount2.value == 0, "a gap short of the edge is not a silence-to-audio event")
     }
+
+    /// THE DEFECT. The room slice is captured while the program is audible, so
+    /// music is weighted as noise, or a captured slice never reaches the
+    /// window's `analyze` call.
+    @Test func aRoomSliceIsTakenOnlyInSilenceAndReachesTheNextWindow() async throws {
+        let rate = Double(PCMFormat.airplay.sampleRate)
+        let startNanos: Int64 = 500 * 1_000_000_000
+        let (ring, program) = Self.silenceProgram(rate: rate)
+        let silence = [Float](repeating: 0, count: Int(rate))
+        let recorders = UncheckedBox<Int>(0)
+        let isSilent = UncheckedBox<Bool>(false)
+        let polls = UncheckedBox<Int>(0)
+        let now = UncheckedBox<Double>(0)
+        let tracker = PassiveDriftTracker(
+            ring: ring,
+            windowSeconds: 0.02,
+            intervalSeconds: 1000,
+            firstWindowSeconds: 1000,
+            // No silence-to-audio window may fire here: the only window in this
+            // test is the .verify one at the end.
+            silenceEdgeSeconds: 1000,
+            pollIntervalSeconds: 0.02,
+            ambientSliceSeconds: 0.05,
+            ambientAfterSilenceSeconds: 1,
+            makeRecorder: {
+                recorders.value += 1
+                return FeedingRecorder(rate: rate, startNanos: startNanos,
+                                scene: { silence },
+                                feed: { ring.append(program, pts: timespec(tv_sec: 500, tv_nsec: 0)) })
+            },
+            permissionIsGranted: { true },
+            programIsSilent: { polls.value += 1; return isSilent.value },
+            now: { now.value },
+            onObservations: { _ in })
+        tracker.setBaselines([PassiveDriftSampler.Baseline(
+            deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
+        tracker.start()
+
+        // Audible program: three polls have been offered the mic and none of
+        // them may take it.
+        try await Self.waitUntil("three polls on the audible program") { polls.value >= 3 }
+        #expect(recorders.value == 0, "the room is never recorded while the program is audible")
+
+        isSilent.value = true
+        let pollsBeforeSilence = polls.value
+        try await Self.waitUntil("a poll to record the silent spell") {
+            polls.value >= pollsBeforeSilence + 1
+        }
+        _ = tracker.isBlind          // the spell is stamped before the clock moves
+        now.value = 5                // past ambientAfterSilenceSeconds
+        try await Self.waitUntil("the room slice to be recorded") { recorders.value == 1 }
+        #expect(tracker.consecutiveUnusableWindows == 0,
+                "a room slice is a capture, not a measured window")
+        try await Self.waitUntil("the room slice to be kept") { tracker.hasAmbientSlice }
+
+        tracker.trigger(.verify)
+        try await Self.waitUntil("the window to finish") {
+            tracker.consecutiveUnusableWindows >= 1
+        }
+        #expect(tracker.lastWindowUsedAmbientNoise,
+                "the kept room slice weights the window's correlation")
+    }
 }
 
 /// A box for a value two queues touch in a test.

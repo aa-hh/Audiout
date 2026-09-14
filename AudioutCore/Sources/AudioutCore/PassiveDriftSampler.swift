@@ -419,6 +419,16 @@ final class PassiveDriftTracker: @unchecked Sendable {
     /// Headroom past the deepest baseline so the reference slice still fits
     /// inside the capture once a speaker's delay has shifted it.
     static let searchMarginMs = 50.0
+    /// About a second of the room — enough spectrum for the correlator to
+    /// weight by, short enough that the mic indicator is a blink.
+    static let ambientSliceSeconds = 1.0
+    /// By this far into a silent spell the room's tail and the sink's buffered
+    /// audio are both gone, so what the mic hears is the room alone.
+    static let ambientAfterSilenceSeconds = 5.0
+    /// A slice older than this is replaced. Same number as the periodic
+    /// interval, declared apart from it because this is what caps the
+    /// microphone to once per 25 minutes.
+    static let ambientMaxAgeSeconds = 1500.0
 
     private let ring: ReferenceAudioRing
     private let makeRecorder: @Sendable () -> MicProbeRecording
@@ -436,6 +446,9 @@ final class PassiveDriftTracker: @unchecked Sendable {
     private let pollIntervalSeconds: Double
     private let clockStepWindowSpacingSeconds: Double
     private let clockStepStormCount: Int
+    private let ambientSliceSeconds: Double
+    private let ambientAfterSilenceSeconds: Double
+    private let ambientMaxAgeSeconds: Double
     private let queue = DispatchQueue(label: "com.audiout.passive-drift")
 
     /// `queue` only.
@@ -471,6 +484,14 @@ final class PassiveDriftTracker: @unchecked Sendable {
     /// silent spell started, `nil` while the program is audible.
     private var silentSince: TimeInterval?
 
+    /// `queue` only. The last slice of the quiet room, for the correlator's
+    /// noise weighting. Memory only: it is never written anywhere.
+    private var ambient: (samples: [Float], rate: Double, takenAt: TimeInterval)?
+    /// `queue` only. A room slice is recording right now.
+    private var ambientInFlight = false
+    /// `queue` only. Whether the last measured window was weighted by a slice.
+    private var lastWindowUsedAmbient = false
+
     init(ring: ReferenceAudioRing,
          windowSeconds: Double = PassiveDriftTracker.windowSeconds,
          intervalSeconds: Double = PassiveDriftTracker.periodicIntervalSeconds,
@@ -481,6 +502,9 @@ final class PassiveDriftTracker: @unchecked Sendable {
          pollIntervalSeconds: Double = PassiveDriftTracker.silencePollIntervalSeconds,
          clockStepWindowSpacingSeconds: Double = PassiveDriftTracker.clockStepWindowSpacingSeconds,
          clockStepStormCount: Int = PassiveDriftTracker.clockStepStormCount,
+         ambientSliceSeconds: Double = PassiveDriftTracker.ambientSliceSeconds,
+         ambientAfterSilenceSeconds: Double = PassiveDriftTracker.ambientAfterSilenceSeconds,
+         ambientMaxAgeSeconds: Double = PassiveDriftTracker.ambientMaxAgeSeconds,
          makeRecorder: @escaping @Sendable () -> MicProbeRecording = { BuiltInMicRecorder() },
          permissionIsGranted: @escaping @Sendable () -> Bool = { MicCapturePermission.isGranted },
          programIsSilent: @escaping @Sendable () -> Bool = { false },
@@ -497,6 +521,9 @@ final class PassiveDriftTracker: @unchecked Sendable {
         self.pollIntervalSeconds = pollIntervalSeconds
         self.clockStepWindowSpacingSeconds = clockStepWindowSpacingSeconds
         self.clockStepStormCount = clockStepStormCount
+        self.ambientSliceSeconds = ambientSliceSeconds
+        self.ambientAfterSilenceSeconds = ambientAfterSilenceSeconds
+        self.ambientMaxAgeSeconds = ambientMaxAgeSeconds
         self.makeRecorder = makeRecorder
         self.permissionIsGranted = permissionIsGranted
         self.programIsSilent = programIsSilent
@@ -532,6 +559,14 @@ final class PassiveDriftTracker: @unchecked Sendable {
 
     var consecutiveUnusableWindows: Int {
         queue.sync { sampler.consecutiveUnusableWindows }
+    }
+
+    var hasAmbientSlice: Bool {
+        queue.sync { ambient != nil }
+    }
+
+    var lastWindowUsedAmbientNoise: Bool {
+        queue.sync { lastWindowUsedAmbient }
     }
 
     func start() {
@@ -582,12 +617,52 @@ final class PassiveDriftTracker: @unchecked Sendable {
     private func pollSilence() {
         if programIsSilent() {
             if silentSince == nil { silentSince = now() }
+            captureAmbientIfDue()
             return
         }
         if let since = silentSince, now() - since >= silenceEdgeSeconds {
             takeWindow(reason: .silenceToAudio)
         }
         silentSince = nil
+    }
+
+    /// `queue` only. A second of the quiet room, which the correlator weights
+    /// its next window by. Taken well into a silent spell so the slice is the
+    /// room and not the program's tail, and kept only while the room stays
+    /// quiet to the end of it. The mic indicator shows for that second, so
+    /// `ambientMaxAgeSeconds` holds it to once per 25 minutes.
+    ///
+    /// The slice lives in memory and nowhere else: never written to disk,
+    /// never in telemetry, never off the Mac.
+    private func captureAmbientIfDue() {
+        guard !windowInFlight, !ambientInFlight,
+              !sampler.baselines.isEmpty,
+              permissionIsGranted(),
+              let since = silentSince, now() - since >= ambientAfterSilenceSeconds,
+              ambient.map({ now() - $0.takenAt >= ambientMaxAgeSeconds }) ?? true
+        else { return }
+        let recorder = makeRecorder()
+        guard let rate = try? recorder.start(), rate > 0 else { return }
+        ambientInFlight = true
+        Telemetry.log(.localPlayback, "drift_ambient_started",
+                      ["seconds": String(format: "%.1f", ambientSliceSeconds)])
+        queue.asyncAfter(deadline: .now() + ambientSliceSeconds) { [self] in
+            let samples = recorder.stop()
+            ambientInFlight = false
+            guard !samples.isEmpty else {
+                Telemetry.log(.localPlayback, "drift_ambient_dropped", ["reason": "empty_capture"])
+                return
+            }
+            // Music that started inside the slice is program, not noise, and
+            // weighting by it would suppress the very signal being matched.
+            guard programIsSilent() else {
+                Telemetry.log(.localPlayback, "drift_ambient_dropped", ["reason": "program_audible"])
+                return
+            }
+            ambient = (samples, rate, now())
+            Telemetry.log(.localPlayback, "drift_ambient_captured",
+                          ["samples": String(samples.count)])
+        }
     }
 
     /// Take a window now, unless one is already running. The reason names the
@@ -696,6 +771,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
     @discardableResult
     private func takeWindow(reason: Trigger = .periodic) -> Bool {
         let skip: String? = windowInFlight ? "window_in_flight"
+            : ambientInFlight ? "ambient_in_flight"
             : sampler.isBlind ? "blind"
             : sampler.baselines.isEmpty ? "no_baselines"
             : !permissionIsGranted() ? "no_mic_permission" : nil
@@ -757,10 +833,18 @@ final class PassiveDriftTracker: @unchecked Sendable {
         let reference = Self.mono(slice.pcm)
         Self.dumpWindowIfEnabled(reference: reference, capture: capture,
                                  captureRate: captureRate, baselines: sampler.baselines)
+        // A slice taken at another mic rate cannot describe this capture's
+        // spectrum, and one older than the cap describes a room that has had
+        // 25 minutes to change.
+        let ambientNoise = ambient.flatMap {
+            $0.rate == captureRate && now() - $0.takenAt <= ambientMaxAgeSeconds ? $0.samples : nil
+        }
+        lastWindowUsedAmbient = ambientNoise != nil
         let outcome = sampler.analyze(
             reference: reference,
             referenceRate: Double(PCMFormat.airplay.sampleRate),
             capture: capture, captureRate: captureRate, hostNanos: startNanos,
+            ambientNoise: ambientNoise,
             countsTowardBlind: reason != .retry)
         Self.logWindow(outcome, peaks: sampler.lastPeaks, candidates: sampler.lastCandidates,
                        baselines: sampler.baselines)

@@ -20,19 +20,14 @@ Alec explicitly declined to run the round-2 fix tracks ("just prepare the
 plan") — do not execute that work order without asking him first, it was
 deliberately parked.
 
-## Current running state (as of this file)
+## Hardware state
 
-- Mac dev build (`Audiout Dev.app`, `com.audiout.Audiout.dev`) is **not
-  currently running** — it was launched and confirmed properly signed
-  earlier today (pid 87522) but is gone now (no crash report in
-  `~/Library/Logs/DiagnosticReports`, so it looks like a normal quit, not a
-  crash — just flagging that nobody has re-verified it since).
-- Live-test slot (`scripts/livetest.sh`) is **HELD** by label
-  `sync-livetest`, worktree `.claude/worktrees/companion-sync`, auto-expires
-  ~16 min from now. Release it (`bash scripts/livetest.sh done`) or let it
-  expire before anyone else's build needs the slot.
-- Phone app is installed on Alec's iPhone 15 Pro from `d12918c` but nothing
-  on the sync feature has been exercised against real hardware yet.
+Nothing on the sync feature has been exercised against real hardware. Round 1
+is compile- and test-suite verified only, on both ends. The phone app was
+installed on Alec's iPhone 15 Pro from `d12918c`.
+
+For what is running right now — the dev build, the live-test slot — ask the
+machine: `pgrep -f AudioutApp` and `bash scripts/livetest.sh status`.
 
 ## Loose end just found and fixed: `make-app.sh` false success
 

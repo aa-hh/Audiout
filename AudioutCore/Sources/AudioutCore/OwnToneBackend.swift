@@ -1013,8 +1013,11 @@ public func makeBackend(
                         // speaker that cannot hold its timing leaves in the log
                         // (live test 2026-09-13: one Move stepped nearly every
                         // second, audible as a dip that came back re-timed).
+                        var now = timespec()
+                        clock_gettime(CLOCK_MONOTONIC, &now)
                         Telemetry.log(.localPlayback, "bt_clock_jump", [
                             "uid": uid, "ms": String(format: "%+.1f", magnitudeMs),
+                            "hostNanos": String(SyncTiming.monotonicNanos(now)),
                         ])
                         nativeBackend?.noteDriftTrigger(.clockJump(uid: uid))
                     }

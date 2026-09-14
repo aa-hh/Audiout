@@ -168,14 +168,19 @@ let package = Package(
         // so the closed-source iPhone companion can link the same code, and a
         // repository of its own because SwiftPM cannot depend on a package
         // that lives inside a subdirectory of another repo — and the phone
-        // now lives in `aa-hh/audiout-remote`. Pinned by range: this app
-        // chooses when to follow the shared package, and `Package.resolved`
-        // records which tag it is actually on. 0.6.0 is the floor because
-        // that is the tag `CompanionMessage.alignmentApplied` landed in, and
-        // the companion server sends it on every applied measurement; 0.13.0
-        // added the emitter field's `settled` block, which the alignment
-        // stage draws; 0.14.0 added the stage look table.
-        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.14.0"),
+        // now lives in `aa-hh/audiout-remote`. Normally pinned by range: this
+        // app chooses when to follow the shared package, and
+        // `Package.resolved` records which tag it is actually on. 0.6.0 is the
+        // floor because that is the tag `CompanionMessage.alignmentApplied`
+        // landed in, and the companion server sends it on every applied
+        // measurement; 0.13.0 added the emitter field's `settled` block, which
+        // the alignment stage draws; 0.14.0 added the stage look table; 0.15.0
+        // whitens the passive-drift correlation, makes a peak clear two more
+        // gates before it counts (its height over the nearest rival lag, and
+        // its score against the lags right around it), votes four sub-bands,
+        // and lets each speaker own its own peak inside a shared search window.
+        .package(url: "https://github.com/aa-hh/audiout-shared.git",
+                 from: "0.15.1"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

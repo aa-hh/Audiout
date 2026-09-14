@@ -506,6 +506,75 @@ import Testing
         return (manager, try #require(manager.sinkForTesting(uid: uid)), ramp)
     }
 
+    /// Render 512-frame cycles from `startNanos` until the first all-zero cycle
+    /// AFTER at least one audible one, and return it with its cycle start.
+    static func drainUntilDry(
+        _ sink: BTDeviceSink, from startNanos: Int64
+    ) -> (cycle: (produced: Bool, samples: [Float]), nanos: Int64)? {
+        var t = startNanos
+        var sawAudio = false
+        for _ in 0..<120 {
+            let cycle = renderCycle(sink, at: t)
+            if cycle.samples.contains(where: { $0 != 0 }) {
+                sawAudio = true
+            } else if sawAudio {
+                return (cycle, t)
+            }
+            t += Int64((512 * nsPerFrame).rounded())
+        }
+        return nil
+    }
+
+    // MARK: - Silence keep-alive (roadmap 085 ticket 04)
+
+    /// THE DEFECT. A2DP transports idle once every render cycle flags
+    /// `isSilence`, and the restart when audio returns rolls a fresh 20–90 ms
+    /// latency that voids the alignment — so if an underrun cycle inside the
+    /// keep-alive window reports silence, or a cycle past the window keeps
+    /// reporting audio, pauses either desync the group or hold a battery
+    /// speaker awake forever.
+    @Test func keepAlive_claimsDryCyclesInsideTheWindowOnly() throws {
+        let (manager, sink, _) = try Self.anchoredSink()
+        defer { manager.stop() }
+        // Set AFTER the sink exists: exercises the live fan-out.
+        let window = Int64(10) * 60 * 1_000_000_000
+        manager.setKeepAliveWindow(nanos: window)
+
+        // Pre-release, nothing has ever played: keep-alive must claim nothing.
+        let early = Self.renderCycle(sink, at: Self.anchorNanos + 50_000_000)
+        #expect(!early.produced, "keep-alive must not flag audio before the gate ever opened")
+
+        let dry = try #require(
+            Self.drainUntilDry(sink, from: Self.anchorNanos + 100_000_000),
+            "the ramp never drained")
+        #expect(dry.cycle.produced,
+                "a dry cycle inside the keep-alive window must still flag audio")
+        #expect(dry.cycle.samples.allSatisfy { $0 == 0 },
+                "…while what it emits stays real silence")
+
+        let late = Self.renderCycle(sink, at: dry.nanos + window + 1_000_000_000)
+        #expect(!late.produced, "past the window the sink goes quiet and lets the transport idle")
+    }
+
+    /// THE DEFECT. `setDevices` builds sinks after the window was configured;
+    /// if it stops applying the stored window to them, keep-alive silently
+    /// works only for devices that existed when Settings was touched.
+    @Test func keepAliveSetBeforeDevices_appliesToSinksCreatedLater() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1, presentationDelayMs: { 100 })
+        manager.setKeepAliveWindow(nanos: Int64(10) * 60 * 1_000_000_000)
+        manager.setComposition(BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        Self.enqueueRamp(into: manager)
+        defer { manager.stop() }
+
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        let dry = try #require(
+            Self.drainUntilDry(sink, from: Self.anchorNanos + 100_000_000),
+            "the ramp never drained")
+        #expect(dry.cycle.produced)
+    }
+
     /// THE DEFECT. The producer anchors on the first captured buffer without
     /// waiting for the engine, so a slow `engine.start()` (well over 500 ms on
     /// A2DP, and every rebuild pays it again) can put the first render cycle
@@ -530,6 +599,10 @@ import Testing
         let (manager, sink, ramp) = try Self.anchoredSink()
         defer { manager.stop() }
 
+        // The enqueue's re-anchor posts lock-holding work to `graphQueue`; render
+        // takes the state lock with `try()` and would produce silence while that
+        // runs, so the on-time cycle below could flake.
+        sink.test_waitForPendingRebuild()
         let early = Self.renderCycle(sink, at: Self.anchorNanos + 50_000_000)
         #expect(!early.produced, "half way to the target is still silence")
         #expect(early.samples.allSatisfy { $0 == 0 })

@@ -113,6 +113,12 @@ public final class AudioSettingsViewController: NSViewController {
     private let wakeRestorePopup = NSPopUpButton()
     private let wakeRestoreHint = SettingsForm.hintLabel()
 
+    // Bluetooth keep-alive state (roadmap 085 ticket 04). Persist-only, the
+    // connect-volume pattern: the backend re-reads `AppSettings` on every
+    // Bluetooth enable, so there is nothing to push to a running session.
+    private let btKeepAlivePopup = NSPopUpButton()
+    private let btKeepAliveHint = SettingsForm.hintLabel()
+
     /// Fired after the denylist changes so the app can enforce precedence (prune
     /// routes) and refresh the popover.
     public var onChange: (() -> Void)?
@@ -207,6 +213,11 @@ public final class AudioSettingsViewController: NSViewController {
                 column.addArrangedSubview(sectionView)
                 sectionView.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
             }
+        }
+
+        for sectionView in makeBTKeepAliveSectionViews() {
+            column.addArrangedSubview(sectionView)
+            sectionView.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         }
 
         if latency != nil {
@@ -331,6 +342,12 @@ public final class AudioSettingsViewController: NSViewController {
         connectVolumeValueLabel.stringValue = Self.percentLabel(percent)
         connectVolumeHint.stringValue = Self.connectVolumeHintLine(percent)
 
+        let keepAliveMinutes = settings.btKeepAliveMinutes
+        if let index = AppSettings.btKeepAliveMinuteOptions.firstIndex(of: keepAliveMinutes) {
+            btKeepAlivePopup.selectItem(at: index)
+        }
+        btKeepAliveHint.stringValue = Self.btKeepAliveHintLine(keepAliveMinutes)
+
         // The buffer popup is disabled outright under an env override, and
         // then its one item is that override — nothing to reconcile.
         guard let latency, latency.envOverrideMs == nil else { return }
@@ -412,6 +429,55 @@ public final class AudioSettingsViewController: NSViewController {
         let minutes = wakeRestore.minuteOptions[index]
         wakeRestoreHint.stringValue = Self.wakeRestoreHintLine(minutes)
         wakeRestore.apply(minutes)
+    }
+
+    // MARK: Bluetooth keep-alive (roadmap 085 ticket 04)
+
+    /// The Bluetooth keep-alive sub-section: hairline + popup row + live hint.
+    /// Persist-only — the value lands on the next Bluetooth enable.
+    private func makeBTKeepAliveSectionViews() -> [NSView] {
+        var views: [NSView] = []
+
+        let hairline = NSBox()
+        hairline.boxType = .separator
+        hairline.translatesAutoresizingMaskIntoConstraints = false
+        views.append(hairline)
+
+        btKeepAlivePopup.translatesAutoresizingMaskIntoConstraints = false
+        for minutes in AppSettings.btKeepAliveMinuteOptions {
+            btKeepAlivePopup.addItem(withTitle: Self.wakeMinutesLabel(minutes))
+        }
+        if let index = AppSettings.btKeepAliveMinuteOptions.firstIndex(of: settings.btKeepAliveMinutes) {
+            btKeepAlivePopup.selectItem(at: index)
+        }
+        btKeepAlivePopup.target = self
+        btKeepAlivePopup.action = #selector(btKeepAliveChanged)
+        btKeepAlivePopup.setAccessibilityLabel("Keep Bluetooth speakers streaming during pauses")
+
+        views.append(SettingsForm.row(
+            title: "Keep Bluetooth speakers streaming during pauses",
+            control: btKeepAlivePopup))
+
+        btKeepAliveHint.stringValue = Self.btKeepAliveHintLine(settings.btKeepAliveMinutes)
+        views.append(btKeepAliveHint)
+        return views
+    }
+
+    private static func btKeepAliveHintLine(_ minutes: Int) -> String {
+        guard minutes != 0 else {
+            return "Never — Bluetooth speakers go idle when audio stops, and can "
+                + "come back slightly out of sync when it resumes."
+        }
+        return "During pauses up to \(wakeMinutesLabel(minutes).lowercased()), Bluetooth "
+            + "speakers keep receiving a silent stream so playback resumes in sync."
+    }
+
+    @objc private func btKeepAliveChanged() {
+        let index = btKeepAlivePopup.indexOfSelectedItem
+        guard AppSettings.btKeepAliveMinuteOptions.indices.contains(index) else { return }
+        let minutes = AppSettings.btKeepAliveMinuteOptions[index]
+        settings.btKeepAliveMinutes = minutes
+        btKeepAliveHint.stringValue = Self.btKeepAliveHintLine(minutes)
     }
 
     // MARK: Advanced › Audio buffer (PLAN-LATENCY-SETTING.md)

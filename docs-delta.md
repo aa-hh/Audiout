@@ -890,7 +890,7 @@ a test.
 Both took TWO values on 2026-09-05. The owner's 2026-09-04 rule — an engaged
 control wears the same fill in both appearances — assumed the hue was a filled
 square, where one value reads on either ground. Since the marks stopped being
-filled, the hue is 0.875 pt of stroke, and a stroke that thin has no area to
+filled, the hue is a 1.5 pt stroke (1.0 pt before 2026-09-14), with no area to
 carry a marginal ratio: one value left light mode "impossible to see". Neither
 carries an Increase Contrast variant; both clear the 3:1 non-text floor at
 their base values on every ground, and a variant that lifts one appearance

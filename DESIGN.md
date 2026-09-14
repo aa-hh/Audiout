@@ -327,6 +327,13 @@ find the room: sRGB tops out at chroma 0.116 near hue 158 at this lightness,
 and at 0.138 near hue 150. Same green family, same 84–87° clear of `muted`;
 only the room sRGB leaves differs between appearances.
 
+Both marks draw at `RowAccessorySymbol.weight`, one shared constant. It went
+from `.thin` to `.light` on 2026-09-14 — a 1.0 pt stroke to a 1.5 pt one on the
+same 17.5 pt square — because a hairline outline stayed hard to see on a light
+row however the hue was tuned. SF Symbols weights are discrete, so that is the
+smallest step available; `.regular` draws the same 1.5 pt stroke but grows the
+square to 18 pt, buying nothing for the size.
+
 Measured against every ground a device row can put behind the door — `canvas`,
 `panel`, `raised`, the gold live wash, the hover wash — dark `#41B07A` runs
 7.27 / 6.60 / 5.79 / 5.23 / 5.23 and light `#007835` runs 5.39 on the flat

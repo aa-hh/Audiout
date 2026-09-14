@@ -419,8 +419,9 @@ public enum Tokens {
         /// token (owner's call, 2026-09-05: light mode was "impossible to
         /// see"). The rule assumed the hue was a FILL, where one value reads on
         /// both grounds. It is a thin outline since the marks stopped being
-        /// filled — 0.875 pt of stroke — and a stroke that thin has no area to
-        /// carry a marginal ratio. Measured on `panel`: `#8E93F0` is 5.18:1 on
+        /// filled — 0.875 pt of stroke at the `.thin` weight of the day, 1.5 pt
+        /// since 2026-09-14 — and a stroke that thin has no area to carry a
+        /// marginal ratio. Measured on `panel`: `#8E93F0` is 5.18:1 on
         /// the dark row and 2.45:1 on the light one, which is what they were
         /// looking at. Deepened for light only, the same move `goldText` makes
         /// for the same reason: `#585EC7` measures 5.24:1 on light and the dark
@@ -444,7 +445,7 @@ public enum Tokens {
         /// unsupported — keeps its at-rest ink.
         ///
         /// TWO VALUES, and they are a PAIR with ``muted`` rather than two
-        /// inks tuned apart. Both marks are 0.875 pt outlines 6 pt from each
+        /// inks tuned apart. Both marks are 1.5 pt outlines 6 pt from each
         /// other, so a difference in presence between them reads as one
         /// control being engaged harder than the other.
         ///

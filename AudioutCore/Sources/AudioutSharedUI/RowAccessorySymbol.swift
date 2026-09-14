@@ -64,20 +64,26 @@ public enum RowAccessorySymbol {
     /// ``PopoverColumnGrid/eqToMuteGap`` between them, and a glyph that
     /// outgrew its column would eat that gap.
     ///
-    /// 20 pt at `.thin` weight (owner, 2026-09-05: too big and too heavy —
-    /// "I don't want these to be the centerpiece"). Measured against the same
-    /// two references the row already draws: the stroke lands at 0.875 pt,
-    /// under the 1 pt `FeedPillView` border, and the drawn square is 17.25 pt
-    /// on a side, smaller than the 22 pt seat these symbols replaced. Both are
-    /// intentional this time — the mark should read as quiet chrome, not a
-    /// focal point.
+    /// 20 pt, from the owner's 2026-09-05 call that the marks were too big
+    /// and too heavy ("I don't want these to be the centerpiece"). The size
+    /// half of that call stands: the drawn square is 17.5 pt on a side,
+    /// smaller than the 22 pt seat these symbols replaced, and it stays
+    /// inside the 24 pt column the row reserves it
+    /// (``PopoverColumnGrid/eqButtonWidth``) with
+    /// ``PopoverColumnGrid/eqToMuteGap`` between the two.
     ///
-    /// `.thin`, not `.regular`: at `.regular` the same square's stroke
-    /// measures 1.75 pt, well past any hairline border in the row, which is
-    /// what read as "heavy" against the row's own type. `RowAccessorySymbol`
-    /// carries no font, so weight is stated directly rather than borrowed —
-    /// `.thin` is the SF Symbols weight nearest `NSFont.systemFont`'s own
-    /// hairline strokes at small sizes.
+    /// The WEIGHT half was walked back on 2026-09-14: `.thin` was too faint
+    /// to see on a light row once the marks stopped being filled, so this is
+    /// `.light`. SF Symbols weights are discrete and there is no step between
+    /// them, so this is the smallest increase available — `.thin` draws a
+    /// 1.0 pt stroke and `.light` a 1.5 pt one, both on a 17.5 pt square.
+    /// `.regular` is still refused: it draws the same 1.5 pt stroke but grows
+    /// the square to 18 pt, so it costs size without buying weight. Figures
+    /// are measured off the DRAWN raster and quantise to its half-point grid;
+    /// the geometric stroke sits a little under each.
+    ///
+    /// `RowAccessorySymbol` carries no font, so weight is stated directly
+    /// rather than borrowed from one.
     ///
     /// `RowAccessorySymbolTests` measures the drawn INK, not `image.size` —
     /// the image box carries empty side bearings wider than the square itself,
@@ -85,7 +91,7 @@ public enum RowAccessorySymbol {
     /// and clip the bearing rather than let `NSButton` scale the box down.
     public static let pointSize: CGFloat = 20
     /// See ``pointSize``.
-    public static let weight: NSFont.Weight = .thin
+    public static let weight: NSFont.Weight = .light
 
     /// The raw symbol image, or `nil` when the catalogue did not make it into
     /// the bundle. Callers use ``image(named:ink:)``; this is separate so

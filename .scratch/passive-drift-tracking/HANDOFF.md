@@ -262,8 +262,11 @@ All `cat: localPlayback`:
   `drift_window_dropped` (reason)
 - `drift_window_result`: `result` (`observations` | `aligned` | `merged` |
   `rebaselined` | `unusable` | `blind`), `rejection`, `peaks`, `candidates`
-  (best per speaker even when refused, `delay@confidence`), `errors`,
-  `baselines`; `merged` adds `devices`, `delayMs`
+  (best per speaker even when refused), `errors`, `baselines`; `merged` adds
+  `devices`, `delayMs`. `peaks` and `candidates` print
+  `delay@score/local/margin`: the whole-tape score, then the two gates a peak
+  has to clear (local 2.4, margin 1.2), so a refused window says which one
+  stopped it
 - `drift_correction_started`, `drift_correction_landed`,
   `drift_correction_refused`
 - `bt_clock_jump`: `uid`, `ms` — every pacing-clock step > 2 ms, one poll

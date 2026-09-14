@@ -695,14 +695,31 @@ public enum Tokens {
         /// (a soft paper halo — acceptable because floor-exempt). House rule 3
         /// still requires IC variants: both reuse the base hexes (a halo needs
         /// no extra IC contrast; the disc's IC variant carries that).
-        /// Accent-dial columns: Subtle = **none** ("no glow shadow" — resolves
-        /// fully `clear`, so every halo/bloom call site goes quiet with zero
-        /// call-site changes).
+        /// Accent-dial columns: Subtle keeps a QUIETER halo of the same hue.
+        /// The rail's connect bead, the ring's arrival bloom and the header-dot
+        /// bloom all stroke this token, so a `clear` Subtle column draws the
+        /// whole connect animation invisibly — a live-reported regression, not
+        /// a theoretical one. The Subtle hexes stand to Subtle ``gold`` the
+        /// way the Full ones stand to Full `gold`: same ~42° hue, lifted
+        /// brightness, cut saturation.
+        /// CONTRAST RATIONALE (measured), SUBTLE column — floor-exempt like
+        /// Full, but the bead must be TELLABLE from the wire it lands on, so
+        /// each value clears 1.5:1 against both Subtle wire tones of its
+        /// appearance. Dark `#EBCE88` = 1.74:1 vs Subtle `gold` `#B99B53` /
+        /// 4.29:1 vs Subtle `ember` `#6D5B34`, and 11.73:1 vs `panel` /
+        /// 10.30:1 vs `raised`; dark Increase Contrast `#FFE39E` = 1.69:1 vs
+        /// Subtle IC `gold` `#CBAF6A` / 3.73:1 vs Subtle IC `ember` `#877146`,
+        /// 14.31:1 vs `panel`. Light `#D1BC8A` = 2.21:1 vs Subtle `gold`
+        /// `#8F7B4A` / 3.24:1 vs Subtle `ember` `#71613B`, and 1.79:1 vs the
+        /// flat ground / 1.55:1 vs `well`; light Increase Contrast `#C2AB74` =
+        /// 2.82:1 vs Subtle IC `gold` `#6F5E33` / 3.54:1 vs Subtle IC `ember`
+        /// `#5C5030`, 2.15:1 vs the flat ground / 1.86:1 vs `well`.
         public static var glow: NSColor {
             accentDynamic(name: "glow",
                           full: WarmVariants(dark: 0xFFD97A, darkHighContrast: 0xFFD97A,
                                              light: 0xE8B84B, lightHighContrast: 0xE8B84B),
-                          subtle: nil)
+                          subtle: WarmVariants(dark: 0xEBCE88, darkHighContrast: 0xFFE39E,
+                                               light: 0xD1BC8A, lightHighContrast: 0xC2AB74))
         }
 
         /// The ink a BRIGHT-gold or bright-instrument fill carries — the
@@ -862,7 +879,8 @@ public enum Tokens {
         // DIAL RESOLUTION (Q5) deliberately does NOT reuse `accentDynamic`
         // (see `permissionDynamic` below for the concrete reason): that
         // resolver's `subtle: nil -> .clear` fallback is a halo-only escape
-        // hatch, and these five are opaque glyph fills that must always render
+        // hatch modelled for halos alone, and these five are opaque glyph
+        // fills that must always render
         // something — `.clear` here would be an invisible icon, not a muted
         // one. `permissionDynamic` resolves `.fullGold` to the authored FULL
         // column and `.subtle` to the authored SUBTLE column (the dial
@@ -1498,8 +1516,11 @@ private struct WarmVariants {
 /// against the CURRENT `Tokens.accentStyle` on its next resolution — the
 /// live-remap seam.
 ///
-/// - `full`/`subtle`: the authored hex columns. `subtle: nil` means the token
-///   has NO Subtle rendering (`glow` — "no glow shadow") and resolves `.clear`.
+/// - `full`/`subtle`: the authored hex columns. `subtle: nil` models a token
+///   with NO Subtle rendering at all, and resolves `.clear`. No token passes
+///   `nil`; the optional stays because "a halo may vanish under the dial" is
+///   the possibility this resolver models and the reason `permissionDynamic`
+///   below is a separate sibling rather than a caller.
 private func accentDynamic(name: String,
                            full: WarmVariants,
                            subtle: WarmVariants?) -> NSColor {
@@ -1521,8 +1542,8 @@ private func accentDynamic(name: String,
 /// `permissionSpeakerSync`/`permissionUsageStats`) — a SIBLING of
 /// `accentDynamic`, not a caller of it, for one concrete reason:
 /// `accentDynamic`'s `subtle: WarmVariants?` models a token that can have NO
-/// Subtle rendering at all (`glow`'s `subtle: nil -> .clear`, because a halo
-/// is allowed to vanish). These five are opaque SF Symbol glyph fills, always
+/// Subtle rendering at all (`subtle: nil -> .clear`, because a halo is allowed
+/// to vanish). These five are opaque SF Symbol glyph fills, always
 /// rendering something — `.clear` here would be an invisible icon, not a muted
 /// one, so `subtle` below is a non-optional `WarmVariants` and the Subtle case
 /// always resolves a real colour.

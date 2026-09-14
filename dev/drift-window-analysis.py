@@ -19,7 +19,25 @@ lag inside ±SEARCH ms of the expectation and its score:
   bands   4 sub-band whitened peaks: spread in ms (agreement)
 plus capture level stats (clipping is the first thing to rule out).
 
+It also reads the fixtures committed in audiout-shared
+(`Tests/ProbeKitTests/Fixtures`: Int16 at one rate, made by that repo's
+`tools/make-drift-fixtures.py`), so both sides consume the identical samples,
+and checks its own plain-filter answer against the Swift correlator's. Run the
+`PassiveDriftFixtureTests` suite in the shared repo with that repo's own test
+command (not this repo's), keep its output, and pass it here:
+
+  python3 dev/drift-window-analysis.py --fixtures <shared>/Tests/ProbeKitTests/Fixtures \
+      --swift /tmp/swift-fixture-run.txt
+
+The `swift` row is a line-by-line replica of PassiveDriftCorrelator's plain
+path: the same causal 300 Hz-8 kHz biquads, the same FFT correlation, the same
+background taken over the search range with a 250 ms reverb shadow, and the
+same parabolic peak. The rows above it are left as they were, zero-phase
+filtering and whole-tape background included, because they answer research
+questions rather than parity ones.
+
 Usage: python3 dev/drift-window-analysis.py [dir] [--search 120] [--band 300 8000]
+       python3 dev/drift-window-analysis.py --fixtures <dir> [--swift <log>]
 Needs numpy + scipy (python3 -m venv v && v/bin/pip install numpy scipy).
 """
 import glob, json, math, os, sys
@@ -57,10 +75,16 @@ def xcorr_fft(ref, cap, beta=0.0, eps=1e-9):
     return np.fft.irfft(cross, nfft)[: len(cap)]
 
 
-def probekit_score(corr, peak_idx, rate):
-    """Peak over the expected largest background lag, ProbeKit style."""
+def probekit_score(corr, peak_idx, rate, shadow_s=SHADOW_S, limit=None):
+    """Peak over the expected largest background lag, ProbeKit style.
+
+    `limit` bounds the background to the lags the correlator itself searches
+    (its `searchCount`); the default whole-tape background is what the research
+    rows above have always used.
+    """
     excl = max(1, int(EXCLUSION_S * rate))
-    shadow = max(excl, int(SHADOW_S * rate))
+    shadow = max(excl, int(shadow_s * rate))
+    corr = corr[:limit] if limit is not None else corr
     idx = np.arange(len(corr))
     bg = np.abs(corr[(idx < peak_idx - excl) | (idx > peak_idx + shadow)])
     if len(bg) < 2:
@@ -94,6 +118,112 @@ def best_in_window(corr, expected_ms, rate):
     return peak, p2p
 
 
+SWIFT_BAND = (300.0, 8000.0)          # PassiveDriftCorrelator.timingBandLow/HighHz
+SWIFT_SHADOW_S = 0.25                 # SyncProbeCorrelator.reverbShadowSeconds
+
+
+def swift_band_limit(x, rate, lo=SWIFT_BAND[0], hi=SWIFT_BAND[1]):
+    """PassiveDriftCorrelator.bandLimited: two causal biquads, Q = 1/sqrt(2).
+
+    Not sosfiltfilt: that runs the filter twice and backwards, which is a
+    different signal. Parity needs the filter the app actually applies.
+    """
+    y = np.asarray(x, dtype=np.float64)
+    for hz, high_pass in ((lo, True), (hi, False)):
+        if not 0 < hz < rate / 2:
+            continue
+        w0 = 2 * math.pi * hz / rate
+        cos_w, alpha = math.cos(w0), math.sin(w0) / math.sqrt(2)
+        a0 = 1 + alpha
+        b = ([(1 + cos_w) / 2, -(1 + cos_w), (1 + cos_w) / 2] if high_pass
+             else [(1 - cos_w) / 2, 1 - cos_w, (1 - cos_w) / 2])
+        y = signal.lfilter(np.array(b) / a0,
+                           [1.0, -2 * cos_w / a0, (1 - alpha) / a0], y)
+    return y
+
+
+def swift_plain(ref, cap, rate, expected_ms, search_ms=None):
+    """PassiveDriftCorrelator's plain path: best lag in the window, and its score."""
+    search_ms = SEARCH_MS if search_ms is None else search_ms
+    probe, rec = swift_band_limit(ref, rate), swift_band_limit(cap, rate)
+    search_count = len(rec) - len(probe) + 1
+    if search_count < 2:
+        return float("nan"), float("nan")
+    n = 1 << (len(rec) + len(probe) - 1).bit_length()
+    corr = np.fft.irfft(np.conj(np.fft.rfft(probe, n)) * np.fft.rfft(rec, n), n)
+
+    half = round(search_ms / 1000 * rate)
+    centre = round(expected_ms / 1000 * rate)
+    lo, hi = max(0, centre - half), min(search_count, centre + half + 1)
+    if lo >= hi:
+        return float("nan"), float("nan")
+    peak = lo + int(np.argmax(corr[lo:hi]))
+    if corr[peak] <= 0:
+        return float("nan"), float("nan")
+
+    offset = float(peak)
+    if 0 < peak < search_count - 1:
+        cm, c0, cp = corr[peak - 1], corr[peak], corr[peak + 1]
+        denom = cm - 2 * c0 + cp
+        if denom < 0:
+            offset += 0.5 * (cm - cp) / denom
+    score = probekit_score(corr, peak, rate, shadow_s=SWIFT_SHADOW_S, limit=search_count)
+    return offset / rate * 1000, score
+
+
+def load_fixtures(directory):
+    """The shared repo's Int16 fixtures, back at the amplitude they were dumped at."""
+    manifest = json.load(open(os.path.join(directory, "manifest.json")))
+    for fixture in manifest["fixtures"]:
+        def samples(kind, scale):
+            raw = np.fromfile(os.path.join(directory, f"{fixture['name']}-{kind}.i16"),
+                              dtype="<i2")
+            return raw.astype(np.float64) / 32767 * scale
+        yield (fixture,
+               samples("ref", fixture["referenceFullScale"]),
+               samples("cap", fixture["captureFullScale"]))
+
+
+def read_swift_output(path):
+    """The CANDIDATE lines PassiveDriftFixtureTests prints, by fixture name."""
+    by_name = {}
+    for line in open(path):
+        parts = line.split()
+        if len(parts) < 3 or parts[0] != "CANDIDATE":
+            continue
+        fields = dict(p.split("=", 1) for p in parts[2:] if "=" in p)
+        by_name.setdefault(parts[1], []).append({k: float(v) for k, v in fields.items()})
+    return by_name
+
+
+def parity(directory, swift_path, tolerance=0.05):
+    """Both sides over the identical samples. False if any score is further apart
+    than `tolerance`."""
+    swift = read_swift_output(swift_path) if swift_path else {}
+    print(f"{'fixture':>34} {'label':>7} {'expected':>9} {'py lag':>7} {'sw lag':>7} "
+          f"{'py score':>9} {'sw score':>9} {'diff':>7}")
+    agreed = True
+    for fixture, ref, cap in load_fixtures(directory):
+        rate = float(fixture["captureRate"])
+        rows = swift.get(fixture["name"], [])
+        for i, baseline in enumerate(fixture["baselines"]):
+            expected = float(baseline["expectedDelayMs"])
+            lag, score = swift_plain(ref, cap, rate, expected)
+            row = rows[i] if i < len(rows) else None
+            if row is None:
+                print(f"{fixture['name']:>34} {fixture['label']:>7} {expected:9.2f} "
+                      f"{lag:7.2f} {'-':>7} {score:9.4f} {'-':>9} {'-':>7}")
+                continue
+            diff = abs(score - row["score"]) / row["score"] if row["score"] else float("inf")
+            agreed &= diff <= tolerance
+            print(f"{fixture['name']:>34} {fixture['label']:>7} {expected:9.2f} "
+                  f"{lag:7.2f} {row['lag']:7.2f} {score:9.4f} {row['score']:9.4f} "
+                  f"{diff*100:6.2f}%{'' if diff <= tolerance else ' OVER'}")
+    if swift:
+        print("scores agree within 5%" if agreed else "SCORES DISAGREE by more than 5%")
+    return agreed
+
+
 def analyse(stem):
     ref, cap, meta = load(stem)
     rr, cr = float(meta["referenceRate"]), float(meta["captureRate"])
@@ -125,6 +255,10 @@ def analyse(stem):
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if "--fixtures" in args:
+        i = args.index("--fixtures")
+        swift_path = args[args.index("--swift") + 1] if "--swift" in args else None
+        sys.exit(0 if parity(args[i + 1], swift_path) else 1)
     d = os.path.expanduser("~/Library/Logs/Audiout/drift-windows")
     if args and not args[0].startswith("--"):
         d = args.pop(0)

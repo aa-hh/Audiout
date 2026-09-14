@@ -42,6 +42,12 @@ final class DriftCorrectionApplier: @unchecked Sendable {
     /// razor: one fixed line. The upgrade path is the keep-alive's own silence
     /// verdict, once ticket 04's live test says what it really sees.
     static let gapAfterSilentSeconds = 1.0
+    /// A verify window is asked for this long after the last correction in its
+    /// batch has landed. A slew moves 2 ms per second of music, so a window
+    /// taken while one is still running would measure a half-applied move.
+    /// razor: one fixed settling time. The upgrade path is the sink saying
+    /// when its own seek has been rendered.
+    static let verifySettleSeconds = 5.0
 
     private let queue = DispatchQueue(label: "com.audiout.drift-correction")
     private let isBluetooth: @Sendable (String) -> Bool
@@ -49,30 +55,48 @@ final class DriftCorrectionApplier: @unchecked Sendable {
     private let writeLatencyMs: @Sendable (_ ms: Double, _ uid: String, _ persist: Bool) -> Void
     private let markCalibrationStale: @Sendable (String) -> Void
     private let programIsSilent: @Sendable () -> Bool
+    /// Ask for another sampling window of these devices. The policy hands back
+    /// `.scheduleVerify` for a guessed attribution, and without this the only
+    /// window that could check one is the next periodic one, three minutes on.
+    private let scheduleVerify: @Sendable ([String]) -> Void
     /// How long one slew step waits. Only the tests pass anything but
     /// ``slewStepSeconds`` — shortening it there keeps a rate-cap assertion
     /// from costing the suite whole seconds.
     private let stepSeconds: Double
+    /// Only the tests pass anything but ``verifySettleSeconds``.
+    private let verifySeconds: Double
 
     /// `queue` only.
-    private var policy = DriftCorrectionPolicy()
+    private var policy: DriftCorrectionPolicy
     private var slewRemainingMs: [String: Double] = [:]
     private var slewAppliedMs: [String: Double] = [:]
     private var timer: DispatchSourceTimer?
     private var surfacedMs: [String: Double] = [:]
+    /// `queue` only. Verify batches whose own corrections are still moving,
+    /// with the devices each is still waiting on.
+    private var verifyWaitingOn: [(deviceUIDs: [String], landing: Set<String>)] = []
+    /// `queue` only. Devices a verify window has been asked for; the next
+    /// batch of observations is what answers it.
+    private var awaitingVerify: Set<String> = []
 
     init(isBluetooth: @escaping @Sendable (String) -> Bool,
          currentLatencyMs: @escaping @Sendable (String) -> Double,
          writeLatencyMs: @escaping @Sendable (Double, String, Bool) -> Void,
          markCalibrationStale: @escaping @Sendable (String) -> Void,
          programIsSilent: @escaping @Sendable () -> Bool,
-         stepSeconds: Double = DriftCorrectionApplier.slewStepSeconds) {
+         scheduleVerify: @escaping @Sendable ([String]) -> Void,
+         policy: DriftCorrectionPolicy = DriftCorrectionPolicy(),
+         stepSeconds: Double = DriftCorrectionApplier.slewStepSeconds,
+         verifySeconds: Double = DriftCorrectionApplier.verifySettleSeconds) {
         self.stepSeconds = stepSeconds
+        self.verifySeconds = verifySeconds
         self.isBluetooth = isBluetooth
         self.currentLatencyMs = currentLatencyMs
         self.writeLatencyMs = writeLatencyMs
         self.markCalibrationStale = markCalibrationStale
         self.programIsSilent = programIsSilent
+        self.scheduleVerify = scheduleVerify
+        self.policy = policy
     }
 
     deinit { timer?.cancel() }
@@ -81,6 +105,7 @@ final class DriftCorrectionApplier: @unchecked Sendable {
     func handle(_ observations: [DriftCorrectionPolicy.Observation]) {
         queue.async { [self] in
             let actions = policy.decide(observations, programIsSilent: programIsSilent())
+            reportVerifyResults(actions, observations: observations)
             for action in actions { apply(action, recordEvent: true) }
         }
     }
@@ -104,8 +129,10 @@ final class DriftCorrectionApplier: @unchecked Sendable {
     /// counting it twice would report drift that never happened.
     private func apply(_ action: DriftCorrectionPolicy.Action, recordEvent: Bool) {
         switch action {
-        case .ignore, .scheduleVerify:
+        case .ignore:
             break   // nothing moves; ticket 06 is what logs these
+        case .scheduleVerify(let deviceUIDs):
+            armVerify(deviceUIDs)
         case .correct(let correction):
             apply(correction, kind: "correct", recordEvent: recordEvent)
         case .swapAndRecorrect(let corrections):
@@ -178,7 +205,73 @@ final class DriftCorrectionApplier: @unchecked Sendable {
             markCalibrationStale(uid)
             Telemetry.log(.localPlayback, "drift_correction_landed",
                           ["device": uid, "latencyAfterMs": String(format: "%.1f", target)])
+            noteLanded(uid)
         }
+    }
+
+    // MARK: - Verify
+
+    /// `queue` only. A verify cannot be taken while this batch's own
+    /// corrections are still moving, so one that is waits for them to land.
+    private func armVerify(_ deviceUIDs: [String]) {
+        let landing = Set(deviceUIDs.filter { slewRemainingMs[$0] != nil })
+        guard landing.isEmpty else {
+            verifyWaitingOn.append((deviceUIDs, landing))
+            return
+        }
+        fireVerify(deviceUIDs)
+    }
+
+    /// `queue` only. Nothing this batch asked for is still moving: take the
+    /// verify window once the speakers have had a moment to settle.
+    private func fireVerify(_ deviceUIDs: [String]) {
+        awaitingVerify.formUnion(deviceUIDs)
+        Telemetry.log(.localPlayback, "drift_verify_scheduled", [
+            "devices": deviceUIDs.sorted().joined(separator: ","),
+            "afterSeconds": String(format: "%.0f", verifySeconds),
+        ])
+        queue.asyncAfter(deadline: .now() + verifySeconds) { [weak self] in
+            self?.scheduleVerify(deviceUIDs)
+        }
+    }
+
+    /// `queue` only. A correction has finished moving, which may be the last
+    /// one a waiting verify batch needed.
+    private func noteLanded(_ uid: String) {
+        guard !verifyWaitingOn.isEmpty else { return }
+        for index in verifyWaitingOn.indices { verifyWaitingOn[index].landing.remove(uid) }
+        let ready = verifyWaitingOn.filter { $0.landing.isEmpty }.map { $0.deviceUIDs }
+        verifyWaitingOn.removeAll { $0.landing.isEmpty }
+        for deviceUIDs in ready { fireVerify(deviceUIDs) }
+    }
+
+    /// `queue` only. The window that answered a verify says whether the
+    /// guessed attribution held: a device this window swapped, or asked
+    /// another verify for, disagreed with the guess.
+    private func reportVerifyResults(_ actions: [DriftCorrectionPolicy.Action],
+                                     observations: [DriftCorrectionPolicy.Observation]) {
+        guard !awaitingVerify.isEmpty else { return }
+        var disagreed: Set<String> = []
+        for action in actions {
+            switch action {
+            case .swapAndRecorrect(let corrections):
+                disagreed.formUnion(corrections.map(\.deviceUID))
+            case .scheduleVerify(let deviceUIDs):
+                disagreed.formUnion(deviceUIDs)
+            case .correct, .ignore:
+                break
+            }
+        }
+        // A device the window had no usable measurement for answered nothing,
+        // so its verify stays open.
+        let answered = awaitingVerify.intersection(observations.map(\.deviceUID))
+        for uid in answered.sorted() {
+            Telemetry.log(.localPlayback, "drift_verify_result", [
+                "device": uid,
+                "result": disagreed.contains(uid) ? "disagree" : "agree",
+            ])
+        }
+        awaitingVerify.subtract(answered)
     }
 
     // MARK: - Slew

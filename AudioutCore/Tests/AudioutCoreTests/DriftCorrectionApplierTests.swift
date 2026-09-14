@@ -107,8 +107,20 @@ import Testing
         }
     }
 
+    /// Which devices the applier asked for another sampling window of, and
+    /// what the speaker's stored latency was at that moment.
+    private final class VerifyLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var asked: [(uids: [String], latencyMs: Double)] = []
+        func record(_ uids: [String], latencyMs: Double = 0) {
+            lock.withLock { asked.append((uids, latencyMs)) }
+        }
+        var all: [(uids: [String], latencyMs: Double)] { lock.withLock { asked } }
+    }
+
     private func applier(_ room: Room, silent: Silence,
-                         bluetooth: @escaping @Sendable (String) -> Bool = { _ in true })
+                         bluetooth: @escaping @Sendable (String) -> Bool = { _ in true },
+                         verify: VerifyLog = VerifyLog())
         -> DriftCorrectionApplier {
         DriftCorrectionApplier(
             isBluetooth: bluetooth,
@@ -116,7 +128,9 @@ import Testing
             writeLatencyMs: { ms, uid, persist in room.write(ms, uid, persist) },
             markCalibrationStale: { room.recordStale($0) },
             programIsSilent: { silent.ask() },
-            stepSeconds: 0.02)
+            scheduleVerify: { verify.record($0) },
+            stepSeconds: 0.02,
+            verifySeconds: 0.02)
     }
 
     /// Silent from the first question — every correction lands as one move.
@@ -253,6 +267,52 @@ import Testing
         #expect(last.persist, "the value that ends the move is the one stored")
     }
 
+    // MARK: - Verify
+
+    // Turns red if a guessed attribution goes unchecked. The applier used to
+    // drop `.scheduleVerify`, which left the next periodic window — three
+    // minutes later — as the only thing that could catch a wrong move.
+    @Test func everyScheduledVerifyAsksTheTrackerForAnotherWindow() async throws {
+        let room = Room([
+            "bt-a": .init(measuredLatencyMs: 150, trueLatencyMs: 175),
+            "bt-b": .init(measuredLatencyMs: 150, trueLatencyMs: 180),
+        ])
+        let verify = VerifyLog()
+        let applier = applier(room, silent: alwaysSilent, verify: verify)
+        applier.handle([
+            .init(deviceUID: "bt-a", errorMs: 25, hostNanos: 0, isBestGuess: true),
+            .init(deviceUID: "bt-b", errorMs: 30, hostNanos: 0, isBestGuess: true),
+        ])
+        try await waitFor { !verify.all.isEmpty }
+        #expect(verify.all.map { $0.uids } == [["bt-a", "bt-b"]])
+        #expect(room.allWrites.isEmpty,
+                "and the guess moved nothing while it waited to be checked")
+    }
+
+    // Turns red if a verify window is asked for while the correction it has to
+    // check is still moving. A slew puts in 2 ms per second of music, so that
+    // window would measure a half-applied move and call a good guess wrong.
+    @Test func aVerifyWaitsForItsCorrectionToLand() async throws {
+        let room = Room(["bt": .init(measuredLatencyMs: 150, trueLatencyMs: 162)])
+        let verify = VerifyLog()
+        let applier = DriftCorrectionApplier(
+            isBluetooth: { _ in true },
+            currentLatencyMs: { room.measuredLatencyMs($0) },
+            writeLatencyMs: { ms, uid, persist in room.write(ms, uid, persist) },
+            markCalibrationStale: { room.recordStale($0) },
+            programIsSilent: { false },
+            scheduleVerify: { verify.record($0, latencyMs: room.measuredLatencyMs("bt")) },
+            policy: DriftCorrectionPolicy(verifyMode: .applyThenVerify),
+            stepSeconds: 0.02,
+            verifySeconds: 0.02)
+
+        applier.handle([.init(deviceUID: "bt", errorMs: 12, hostNanos: 0, isBestGuess: true)])
+        try await waitFor { !verify.all.isEmpty }
+        #expect(verify.all.map { $0.uids } == [["bt"]])
+        #expect(verify.all.first?.latencyMs == 162,
+                "the whole slew had landed before the verify was asked for")
+    }
+
     // Turns red if a correction at or above the surfacing line stops reaching
     // the state a surface reads, or if the state sticks after it is cleared.
     // The ≥ 40 ms half of spec decision 6 — the user is told about a move that
@@ -322,6 +382,7 @@ import Testing
             writeLatencyMs: { ms, uid, _ in manager.setOffsetMs(Int(ms), forDeviceUID: uid) },
             markCalibrationStale: { _ in },
             programIsSilent: silent,
+            scheduleVerify: { _ in },
             stepSeconds: stepSeconds)
     }
 

@@ -1,6 +1,6 @@
 # 13 — Make the verify real, and decide whether it runs before or after the guess
 
-Status: planned
+Status: resolved (built 2026-09-14; decision 17 ruling and a live check owed)
 Blocked by: (none)
 
 Decision 7 promises a guessed correction is re-sampled and swapped if wrong. Nothing schedules that window today, so a guess is applied and never checked.
@@ -44,3 +44,11 @@ every `.scheduleVerify`, and no path applies a guess without a verify.
 ## Comments
 
 - 2026-09-13: drafted from live test 2 (HANDOFF.md), spec decisions 7, 14 and 17 (17 is a proposal awaiting Alec's ruling), ticket 05 comments.
+- 2026-09-14: built. Verify before apply is the default; apply then verify is
+  the other case of `DriftCorrectionPolicy.VerifyMode` and is still tested, so
+  the ruling on decision 17 is a one-line change of the default in
+  `DriftCorrectionPolicy.init`. Two of the three "still a guess" cases got a
+  test; the third — a baseline matched to a peak that was not its nearest —
+  has no scene through `analyze`, because the correlator returns at most one
+  peak per baseline window and that peak is the strongest inside it, so no
+  baseline can lose its nearest peak and still be matched to another.

@@ -22,8 +22,22 @@ import Foundation
 ///   landed; the remainder comes back as an immediate in-gap move.
 /// - `.scheduleVerify` means those devices' attribution was a guess: keep
 ///   sampling them and feed the next window straight back in. This policy
-///   reads that window as the verify.
+///   reads that window as the verify. Under ``VerifyMode/verifyBeforeApply``
+///   no correction for those devices has been returned yet, and the agreeing
+///   window is what releases it.
 public struct DriftCorrectionPolicy: Sendable {
+
+    /// When a guessed attribution reaches the speaker (spec decision 17).
+    public enum VerifyMode: Equatable, Sendable {
+        /// Nothing moves until a second window agrees with the guess to
+        /// within ``verifyAgreesWithinMs``. The wait is one sampling window,
+        /// and a wrong guess never reaches the speaker at all.
+        case verifyBeforeApply
+        /// The likeliest assignment is applied at once and the next window
+        /// checks it. One window quicker to react, at the cost of a wrong
+        /// move being live and stored until that window arrives.
+        case applyThenVerify
+    }
 
     /// One usable measurement of one speaker's delay error.
     public struct Observation: Equatable, Sendable {
@@ -79,7 +93,9 @@ public struct DriftCorrectionPolicy: Sendable {
         /// next window back to `decide`.
         case scheduleVerify(deviceUIDs: [String])
         /// The verify contradicted the guess. Apply these corrections and
-        /// count the earlier attribution as wrong.
+        /// count the earlier attribution as wrong. Never carries fewer than
+        /// two devices: one device moving alone reattributed nothing and
+        /// comes back as `.correct`.
         case swapAndRecorrect([Correction])
     }
 
@@ -90,6 +106,13 @@ public struct DriftCorrectionPolicy: Sendable {
     public static let ignoreBelowMs = 10.0
     /// At or above this the correction is also surfaced to the user.
     public static let surfaceAtOrAboveMs = 40.0
+    /// Two windows agree about a guessed device when their measured errors sit
+    /// this close together. Well past the whole-millisecond quantum a stored
+    /// latency rounds to, well short of the 10 ms line that makes an error
+    /// worth acting on at all.
+    /// razor: one fixed line for every speaker. The upgrade path is a
+    /// tolerance that follows the window's own confidence (ticket 10).
+    public static let verifyAgreesWithinMs = 1.5
 
     private struct Outstanding {
         var correctionMs: Double
@@ -99,9 +122,21 @@ public struct DriftCorrectionPolicy: Sendable {
         var guessedGroup: [String]?
     }
 
-    private var outstanding: [String: Outstanding] = [:]
+    /// A guessed correction nothing has been done about yet. It is applied
+    /// only once a second window agrees with it.
+    private struct Held {
+        var errorMs: Double
+        /// The devices the guess ranged over, this one included.
+        var group: [String]
+    }
 
-    public init() {}
+    private let verifyMode: VerifyMode
+    private var outstanding: [String: Outstanding] = [:]
+    private var held: [String: Held] = [:]
+
+    public init(verifyMode: VerifyMode = .verifyBeforeApply) {
+        self.verifyMode = verifyMode
+    }
 
     /// Whether a correction for this device is still waiting for a later
     /// window to confirm it.
@@ -121,12 +156,60 @@ public struct DriftCorrectionPolicy: Sendable {
         /// Devices a swap action in this window already covers. Their own
         /// observations say nothing new, so they produce no second action.
         var swappedThisWindow: Set<String> = []
+        let reattributed = reattributedDevices(observations)
 
         for observation in observations {
             let uid = observation.deviceUID
             if swappedThisWindow.contains(uid) { continue }
             if actedThisWindow.contains(uid) {
                 actions.append(.ignore(deviceUID: uid, reason: .correctionOutstanding))
+                continue
+            }
+            if let pending = held[uid] {
+                held[uid] = nil
+                guard abs(observation.errorMs) >= Self.ignoreBelowMs else {
+                    // The error went away before anything was moved, so there
+                    // is nothing to apply and nothing to have got wrong.
+                    actions.append(.ignore(deviceUID: uid, reason: .belowThreshold))
+                    continue
+                }
+                if reattributed.contains(uid) {
+                    // This window read the device onto another member's peak,
+                    // so the first attribution was the wrong way round. The
+                    // fresh errors are what to move by, and they are no longer
+                    // guesses: a further miss is ordinary drift.
+                    let corrections = observations
+                        .filter { reattributed.contains($0.deviceUID) }
+                        .filter { !actedThisWindow.contains($0.deviceUID) }
+                        .map { correction(for: $0, programIsSilent: programIsSilent) }
+                    for correction in corrections {
+                        held[correction.deviceUID] = nil
+                        outstanding[correction.deviceUID] = Outstanding(
+                            correctionMs: correction.ms,
+                            placement: correction.placement,
+                            guessedGroup: nil)
+                        swappedThisWindow.insert(correction.deviceUID)
+                        actedThisWindow.insert(correction.deviceUID)
+                    }
+                    actions.append(contentsOf: moveActions(corrections))
+                    continue
+                }
+                if abs(observation.errorMs - pending.errorMs) <= Self.verifyAgreesWithinMs {
+                    // Two windows agree about a device nothing has moved:
+                    // the guess is good and the move is released.
+                    let move = correction(for: observation, programIsSilent: programIsSilent)
+                    outstanding[uid] = Outstanding(correctionMs: move.ms,
+                                                   placement: move.placement,
+                                                   guessedGroup: nil)
+                    actions.append(.correct(move))
+                    actedThisWindow.insert(uid)
+                    continue
+                }
+                // The two windows disagree and neither reading belongs to a
+                // neighbour, so this one is a guess in its turn and waits for
+                // a verify of its own. Still nothing has moved.
+                held[uid] = Held(errorMs: observation.errorMs, group: [uid])
+                guessedThisWindow.append(uid)
                 continue
             }
             if let pending = outstanding[uid] {
@@ -161,7 +244,7 @@ public struct DriftCorrectionPolicy: Sendable {
                         actedThisWindow.insert(correction.deviceUID)
                         dropFromStoredGroups(correction.deviceUID)
                     }
-                    actions.append(.swapAndRecorrect(corrections))
+                    actions.append(contentsOf: moveActions(corrections))
                     continue
                 }
                 // An unambiguous correction that did not take: correct it
@@ -170,6 +253,13 @@ public struct DriftCorrectionPolicy: Sendable {
 
             guard abs(observation.errorMs) >= Self.ignoreBelowMs else {
                 actions.append(.ignore(deviceUID: uid, reason: .belowThreshold))
+                continue
+            }
+            if verifyMode == .verifyBeforeApply, observation.isBestGuess {
+                // Spec decision 17: a guessed match moves nothing until a
+                // second window agrees with it.
+                held[uid] = Held(errorMs: observation.errorMs, group: [uid])
+                guessedThisWindow.append(uid)
                 continue
             }
             let move = correction(for: observation, programIsSilent: programIsSilent)
@@ -189,9 +279,43 @@ public struct DriftCorrectionPolicy: Sendable {
         // swap nobody made.
         for uid in guessedThisWindow where guessedThisWindow.count > 1 {
             outstanding[uid]?.guessedGroup = guessedThisWindow
+            held[uid]?.group = guessedThisWindow
         }
         actions.append(.scheduleVerify(deviceUIDs: guessedThisWindow))
         return actions
+    }
+
+    /// Held devices whose fresh reading matches ANOTHER member of their
+    /// guessed group rather than their own held reading: the peaks were
+    /// attributed the wrong way round, and this window says which way round
+    /// they really go.
+    private func reattributedDevices(_ observations: [Observation]) -> Set<String> {
+        guard !held.isEmpty else { return [] }
+        var swapped: Set<String> = []
+        for observation in observations {
+            guard let own = held[observation.deviceUID],
+                  abs(observation.errorMs - own.errorMs) > Self.verifyAgreesWithinMs
+            else { continue }
+            for member in own.group where member != observation.deviceUID {
+                guard let other = held[member],
+                      abs(observation.errorMs - other.errorMs) <= Self.verifyAgreesWithinMs
+                else { continue }
+                swapped.insert(observation.deviceUID)
+                break
+            }
+        }
+        return swapped
+    }
+
+    /// How a batch of re-corrections is reported. Only a batch that moves more
+    /// than one device reattributed anything; a lone move is ordinary drift,
+    /// and the field log counts a swap as a wrong attribution.
+    private func moveActions(_ corrections: [Correction]) -> [Action] {
+        switch corrections.count {
+        case 0: return []
+        case 1: return [.correct(corrections[0])]
+        default: return [.swapAndRecorrect(corrections)]
+        }
     }
 
     /// The program fell silent while slews were still running.

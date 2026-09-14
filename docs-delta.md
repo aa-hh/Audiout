@@ -881,7 +881,7 @@ the same shape in the engaged state — one rounded square, in two colours. Hue
 alone says which control it is.
 
 `Tokens.Color.muted` — `#8E93F0` dark / `#585EC7` light — means "this output is
-deliberately silent". `Tokens.Color.equalizer` — `#41B07A` dark / `#1E7E52`
+deliberately silent". `Tokens.Color.equalizer` — `#41B07A` dark / `#007835`
 light — means "this speaker's curve is not flat". Both are fenced to their one
 job: `muted` to the two engaged mute buttons (the device row's and Main Out's),
 `equalizer` to the device row's engaged Equalizer door. A second consumer fails

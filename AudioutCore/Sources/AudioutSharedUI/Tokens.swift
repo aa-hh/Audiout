@@ -445,11 +445,29 @@ public enum Tokens {
         ///
         /// TWO VALUES, and they are a PAIR with ``muted`` rather than two
         /// inks tuned apart. Both marks are 0.875 pt outlines 6 pt from each
-        /// other, so a weight difference between them reads as one control
-        /// being engaged harder than the other. Matched in OKLCH lightness:
-        /// dark L 0.680 against `muted`'s 0.698, light L 0.528 against its
-        /// 0.533 — the green sits a hair under its sibling in both, which is
-        /// the intended order (mute is the kill switch, the door is not).
+        /// other, so a difference in presence between them reads as one
+        /// control being engaged harder than the other.
+        ///
+        /// WHAT "PAIR" MEANS DEPENDS ON THE GROUND, and getting that wrong is
+        /// how the first attempt at this failed. On the dark row the two marks
+        /// pair on OKLCH LIGHTNESS — L 0.680 against `muted`'s 0.698, the
+        /// green a hair under its sibling, which is the intended order (mute
+        /// is the kill switch, the door is not). On the light row lightness is
+        /// the wrong axis: a dark stroke on near-white reads as an outline
+        /// whatever its luminance, and what separates `muted`'s periwinkle
+        /// from a plain dark line is CHROMA, which it carries at 0.161. A
+        /// light green matched on lightness alone (`#1E7E52`, chroma 0.111)
+        /// measured 4.84:1 — far over the floor — and still read as
+        /// near-black, which is the owner's verdict from the live build
+        /// ("light mode is still almost invisible", 2026-09-14).
+        ///
+        /// Chroma is also why the light half sits at hue 150 while the dark
+        /// half sits at 158. sRGB has no more chroma to give at 158 near this
+        /// lightness — 0.116 is the gamut wall there — so the light value
+        /// walks the hue eight degrees toward the green primary, where the
+        /// ceiling is 0.138. It is the same green family and the same 84-87
+        /// degrees clear of ``muted``; only the room sRGB leaves differs
+        /// between the two appearances.
         ///
         /// WHY THIS GREEN. The door used to wear ``goldText``, and gold means
         /// "audio is flowing here" everywhere else in the app — one hue
@@ -462,8 +480,10 @@ public enum Tokens {
         /// CONTRAST RATIONALE (floor 3:1, measured on every ground a device
         /// row can put behind the door — `canvas`, `panel`, `raised`, the
         /// gold live wash and the hover wash). Dark `#41B07A`: 7.27 canvas /
-        /// 6.60 panel / 5.79 raised / 5.23 on both washes. Light `#1E7E52`:
-        /// 4.84 on the flat grounds, 4.24 live, 4.00 hovered.
+        /// 6.60 panel / 5.79 raised / 5.23 on both washes. Light `#007835`:
+        /// 5.39 on the flat grounds, 4.72 live, 4.45 hovered — the light
+        /// half gained contrast AND chroma over `#1E7E52`, which is why no
+        /// trade had to be argued for it.
         ///
         /// WHAT THESE REPLACE, and why the old pair could not stay. `#227950`
         /// dark / `#1C6543` light were measured on `panel` alone and the dark
@@ -477,10 +497,11 @@ public enum Tokens {
         /// own ground set. The light half was a second failure of a different
         /// kind: at OKLCH chroma 0.091 it read as near-black rather than as
         /// green, which is the wall the old note recorded as "as far as the
-        /// hue could deepen". Lifting it to L 0.528 / chroma 0.111 buys the
-        /// hue back and still leaves a third more than the floor asks.
+        /// hue could deepen". Chroma is the lever, not lightness: at 0.091 no
+        /// ratio saves it, and 0.111 at the old hue was still not enough to
+        /// read as a colour on paper.
         public static var equalizer: NSColor {
-            warmDynamic(name: "equalizer", dark: 0x41B07A, light: 0x1E7E52)
+            warmDynamic(name: "equalizer", dark: 0x41B07A, light: 0x007835)
         }
 
         /// The COOL body ink — the same second-rung job as ``label2`` on a

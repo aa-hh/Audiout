@@ -289,6 +289,33 @@ import AppKit
                 "several phones, or no name on file: the Mac never guesses which one")
     }
 
+    /// Defect this names: a release built before Audiout Remote is approved
+    /// still offering "Measure with your iPhone" on the wizard's first page —
+    /// a heading, a line and a QR for an app nobody can download. The second
+    /// half pins the panel lookup: with the iPhone panel gone, reading the
+    /// leading panel by POSITION returns the by-ear panel's lines and reports
+    /// them as the iPhone panel's.
+    @Test func aBuildWithoutTheCompanionDropsTheIPhonePanel() {
+        let (popover, _) = makePopover()
+        showNote(popover)
+        popover.test_btAlignmentNoteView("bt-a:output")?.test_clickAlign()
+        let wizard = popover.test_btWizardView()
+        let byEarBody = wizard?.test_bodyText
+
+        wizard?.remoteInvite = .unavailable
+        #expect(wizard?.test_remotePanelHeading == nil)
+        #expect(wizard?.test_remotePanelLine == nil)
+        #expect(wizard?.test_remoteInviteTileSide == nil)
+        #expect(wizard?.test_byEarPanelHeading == "Align by ear",
+                "the Mac's own run is left as the intro's one column")
+        #expect(wizard?.test_bodyText == byEarBody,
+                "carrying the same instructions it did beside the iPhone panel")
+
+        wizard?.remoteInvite = .notConnected
+        #expect(wizard?.test_remotePanelHeading == "Measure with your iPhone",
+                "the panel comes back when the build carries the phone app")
+    }
+
     /// Defect this names: a by-ear sheet left standing over a measurement the
     /// phone has already taken over — the Mac runs one alignment at a time,
     /// so the two would fight over the wizard feed.

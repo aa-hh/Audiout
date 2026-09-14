@@ -287,6 +287,11 @@ public final class BTAlignmentWizardView: NSView {
     /// ``referenceOptions`` is, because only the app layer can see the Allow
     /// switch and the companion server's clients.
     public enum RemoteInviteState: Equatable {
+        /// This build does not carry Audiout Remote at all
+        /// (`AppSettings.remoteAppIsOffered`), so the panel is absent and the
+        /// by-ear one is the intro's only column. Distinct from `allowOff`,
+        /// which tells the reader how to turn a feature they have back on.
+        case unavailable
         /// Allow control from iPhone resolves off (setting or launch option).
         case allowOff
         /// Allow is on and no phone has connected: the code and the address.
@@ -778,9 +783,11 @@ public final class BTAlignmentWizardView: NSView {
             } else {
                 rightPanelSpoken = "\(Self.byEarPanelTitle): \(introBody())"
             }
+            // The iPhone panel is spoken only where it is drawn.
+            let leftPanelSpoken = remoteInviteLine
+                .map { "\(Self.remotePanelTitle): \($0). " } ?? ""
             setAccessibilityLabel(
-                "Align \(session.targetName). \(Self.remotePanelTitle): \(remoteInviteLine). "
-                + rightPanelSpoken)
+                "Align \(session.targetName). " + leftPanelSpoken + rightPanelSpoken)
 
         case .listening(let isRealignment):
             // The mic is doing the work, so the screen asks for nothing: no
@@ -1155,25 +1162,15 @@ public final class BTAlignmentWizardView: NSView {
         contentStack.addArrangedSubview(mic)
     }
 
-    /// The intro's two panels: measuring from the room on the LEADING side,
-    /// the Mac's own paired-click run on the trailing one. Neither is
-    /// pressable — Start, below both, stays the page's one primary control
-    /// and the only gold on the screen (`shape-mac-invites.md` §2.2).
+    /// The intro's panels: measuring from the room on the LEADING side, the
+    /// Mac's own paired-click run on the trailing one. Neither is pressable —
+    /// Start, below both, stays the page's one primary control and the only
+    /// gold on the screen (`shape-mac-invites.md` §2.2).
+    ///
+    /// A build with no companion (`remoteInvite == .unavailable`) drops the
+    /// leading panel entirely and the by-ear panel is the intro's one column,
+    /// centred by `contentStack`'s own `.centerX`.
     private func addIntroPanels(byEarBody: String) {
-        let remote = NSStackView()
-        remote.orientation = .vertical
-        remote.alignment = .centerX
-        remote.spacing = Self.spacingRow
-        remote.translatesAutoresizingMaskIntoConstraints = false
-        remote.addArrangedSubview(panelHeading(Self.remotePanelTitle))
-        remote.addArrangedSubview(panelLine(remoteInviteLine))
-        // No code on a Mac that refuses phones, and none where a phone is
-        // already here: a QR either of those users scans answers nothing.
-        if case .notConnected = remoteInvite {
-            remote.addArrangedSubview(
-                RemoteInviteView(tileSide: RemoteInviteView.wizardTileSide))
-        }
-
         let byEar = NSStackView()
         byEar.orientation = .vertical
         byEar.alignment = .centerX
@@ -1196,10 +1193,11 @@ public final class BTAlignmentWizardView: NSView {
         }
         byEar.addArrangedSubview(panelLine(Self.introSlotText))
 
-        for panel in [remote, byEar] {
+        let panels = [makeRemotePanel(), byEar].compactMap { $0 }
+        for panel in panels {
             panel.widthAnchor.constraint(equalToConstant: Self.introPanelWidth).isActive = true
         }
-        let row = NSStackView(views: [remote, byEar])
+        let row = NSStackView(views: panels)
         row.orientation = .horizontal
         // TOP, not centre: two columns of different lengths have to start on
         // the same line or neither heading reads as a heading.
@@ -1208,9 +1206,39 @@ public final class BTAlignmentWizardView: NSView {
         contentStack.addArrangedSubview(row)
     }
 
-    /// The iPhone panel's one line, per state.
-    private var remoteInviteLine: String {
+    /// The leading "Measure with your iPhone" panel, or `nil` in a build that
+    /// does not carry the companion — there is no app to measure with, so the
+    /// heading and its line would name a thing the reader cannot get.
+    private func makeRemotePanel() -> NSStackView? {
+        guard let line = remoteInviteLine else { return nil }
+        let remote = NSStackView()
+        remote.identifier = Self.remotePanelIdentifier
+        remote.orientation = .vertical
+        remote.alignment = .centerX
+        remote.spacing = Self.spacingRow
+        remote.translatesAutoresizingMaskIntoConstraints = false
+        remote.addArrangedSubview(panelHeading(Self.remotePanelTitle))
+        remote.addArrangedSubview(panelLine(line))
+        // No code on a Mac that refuses phones, and none where a phone is
+        // already here: a QR either of those users scans answers nothing.
+        if case .notConnected = remoteInvite {
+            remote.addArrangedSubview(
+                RemoteInviteView(tileSide: RemoteInviteView.wizardTileSide))
+        }
+        return remote
+    }
+
+    /// Marks the leading panel so the test hooks and the QR lookup find it by
+    /// identity: with the panel gone, position alone would read the by-ear
+    /// panel's labels and report them as the iPhone panel's.
+    private static let remotePanelIdentifier =
+        NSUserInterfaceItemIdentifier("introRemotePanel")
+
+    /// The iPhone panel's one line, per state — `nil` where the panel itself
+    /// does not exist.
+    private var remoteInviteLine: String? {
         switch remoteInvite {
+        case .unavailable: return nil
         case .allowOff: return Self.remoteAllowOffLine
         case .notConnected: return Self.remotePanelLine
         case .connected(let phoneName):
@@ -1582,7 +1610,7 @@ public final class BTAlignmentWizardView: NSView {
     /// Read off the LIVE panel rather than a stored reference, so a state
     /// that removes the code cannot report a stale one.
     private var remoteInviteView: RemoteInviteView? {
-        introPanelStacks.first?.arrangedSubviews.compactMap { $0 as? RemoteInviteView }.first
+        remotePanelStack?.arrangedSubviews.compactMap { $0 as? RemoteInviteView }.first
     }
 
     public var test_remoteInviteAddress: String? { remoteInviteView?.test_addressText }
@@ -1598,9 +1626,17 @@ public final class BTAlignmentWizardView: NSView {
         (introPanelStacks.last?.arrangedSubviews ?? []).compactMap { $0 as? NSTextField }
     }
 
-    /// The labels of the LEADING intro panel, in reading order.
+    /// The labels of the LEADING intro panel, in reading order — empty where
+    /// that panel is not drawn at all.
     private var introPanelLabels: [NSTextField] {
-        (introPanelStacks.first?.arrangedSubviews ?? []).compactMap { $0 as? NSTextField }
+        (remotePanelStack?.arrangedSubviews ?? []).compactMap { $0 as? NSTextField }
+    }
+
+    /// The leading panel, found by its identifier rather than by position:
+    /// when it is absent the by-ear panel is `introPanelStacks.first`, and
+    /// reporting its lines as the iPhone panel's would be a silent lie.
+    private var remotePanelStack: NSStackView? {
+        introPanelStacks.first { $0.identifier == Self.remotePanelIdentifier }
     }
 
     private var introPanelStacks: [NSStackView] {

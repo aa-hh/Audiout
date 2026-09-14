@@ -123,6 +123,10 @@ public final class GeneralSettingsViewController: NSViewController {
     ///   - environment: resolves ``AppSettings/RemoteControlResolution`` alongside
     ///     `settings` (the `AUDIOUT_COMPANION` dev knob); defaults to the real
     ///     process environment, injected as a fixed dictionary in tests.
+    ///   - remoteAppIsOffered: whether this build carries the iPhone companion
+    ///     at all; defaults to ``AppSettings/remoteAppIsOffered``. False drops
+    ///     every companion row from the pane, so a test covering those rows
+    ///     pins it true rather than riding the shipping constant.
     ///   - aboutInfo: the About window's bundle-sourced identity; defaults to
     ///     the live app bundle (`AboutInfo.current()`), injected as a fixed
     ///     value in tests so the rendered version string never depends on how
@@ -138,6 +142,7 @@ public final class GeneralSettingsViewController: NSViewController {
     public init(loginItem: LoginItemManaging,
                 settings: AppSettings = AppSettings(),
                 environment: [String: String] = ProcessInfo.processInfo.environment,
+                remoteAppIsOffered: Bool = AppSettings.remoteAppIsOffered,
                 aboutInfo: AboutInfo = .current(),
                 openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
                 approvals: CompanionApprovalController? = nil,
@@ -146,7 +151,7 @@ public final class GeneralSettingsViewController: NSViewController {
         self.settings = settings
         self.approvals = approvals
         self.remoteControlResolution = AppSettings.resolvedAllowRemoteControlWithSource(
-            environment: environment, settings: settings)
+            environment: environment, offered: remoteAppIsOffered, settings: settings)
         self.openURL = openURL
         self.aboutWindowController = AboutWindowController(info: aboutInfo, openURL: openURL,
                                                            saveDiagnostics: saveDiagnostics)
@@ -346,16 +351,22 @@ public final class GeneralSettingsViewController: NSViewController {
         var rows: [NSView] = [
             launchRow,
             reconnectRow,
-            remoteControlRow,
         ]
-        if remoteControlResolution.isForced {
-            rows.append(remoteControlOverrideNote)
-        }
-        if remoteControlSwitch.state == .on, let remoteInviteRow {
-            rows.append(remoteInviteRow)
-        }
-        if approvals != nil {
-            rows.append(contentsOf: makePhoneListViews())
+        // A build with no companion shows no companion rows at all — not the
+        // switch, not the QR invitation, not the phone list. An off switch
+        // reads as "you could turn this on", and until Audiout Remote is on
+        // the App Store there is nothing to turn on.
+        if !remoteControlResolution.isUnoffered {
+            rows.append(remoteControlRow)
+            if remoteControlResolution.isForced {
+                rows.append(remoteControlOverrideNote)
+            }
+            if remoteControlSwitch.state == .on, let remoteInviteRow {
+                rows.append(remoteInviteRow)
+            }
+            if approvals != nil {
+                rows.append(contentsOf: makePhoneListViews())
+            }
         }
         if TouchBarHardware.isPresent {
             touchBarSwitch.target = self
@@ -951,6 +962,15 @@ public final class GeneralSettingsViewController: NSViewController {
     public var test_allowRemoteControlIsOn: Bool {
         _ = view
         return remoteControlSwitch.state == .on
+    }
+
+    /// Whether the "Allow control from iPhone" row is in the pane at all. A
+    /// build that does not carry the companion mounts none of the companion
+    /// rows — the switch included, since an off switch reads as an invitation
+    /// to turn something on.
+    public var test_allowRemoteControlRowIsMounted: Bool {
+        _ = view
+        return remoteControlRow?.superview != nil
     }
 
     /// Whether the switch is currently clickable — `false` while

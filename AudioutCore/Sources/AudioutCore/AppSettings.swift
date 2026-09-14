@@ -340,8 +340,9 @@ public struct AppSettings {
     /// per-phone approval gate (T24) means an enabled listener still admits
     /// nobody the user hasn't explicitly approved. Unchecking the Settings ›
     /// General checkbox stores `false` and wins. See
-    /// ``resolvedAllowRemoteControl(explicit:environment:)``
-    /// for the env-var override AppDelegate actually reads at launch.
+    /// ``resolvedAllowRemoteControl(explicit:environment:offered:settings:)``
+    /// for the env-var override and the ``remoteAppIsOffered`` build switch
+    /// that sit above it, which is what AppDelegate actually reads at launch.
     public var allowRemoteControl: Bool {
         get {
             guard defaults.object(forKey: Keys.allowRemoteControl) != nil else { return true }
@@ -353,6 +354,22 @@ public struct AppSettings {
     /// The env var that force-overrides ``allowRemoteControl`` for one launch,
     /// mirroring `BackendKind.environmentVariableName`'s dev-convenience idiom.
     public static let allowRemoteControlEnvironmentVariableName = "AUDIOUT_COMPANION"
+
+    /// Whether this build offers the iPhone companion at all — `false` until
+    /// Audiout Remote is approved and on the App Store.
+    ///
+    /// Every surface that mentions the phone app is an invitation to download
+    /// it, and until it exists each one is a dead end: the Setup window's
+    /// iPhone card, the Settings › General switch with its QR row and phone
+    /// list, and the alignment wizard's "Measure with your iPhone" panel all
+    /// read this and stay off the screen. The companion server does not start
+    /// either — there is nothing on any phone to connect with.
+    ///
+    /// Flip this to `true` on the release that follows the phone app's
+    /// approval; nothing else moves. `AUDIOUT_COMPANION=on` still wins over
+    /// it, so a dev build can turn the whole feature back on to test against
+    /// a TestFlight phone.
+    public static let remoteAppIsOffered = false
 
     /// What decided a ``resolvedAllowRemoteControlWithSource(explicit:environment:settings:)``
     /// call — carried alongside the resolved value so a caller that needs to
@@ -370,11 +387,19 @@ public struct AppSettings {
         /// this value for the current process launch. The persisted setting
         /// still exists underneath but cannot change what's running.
         case forced(Bool)
+        /// This build does not carry the companion at all
+        /// (``remoteAppIsOffered`` is `false`). Distinct from `.setting(false)`
+        /// and `.forced(false)` because those two are a feature turned off,
+        /// which a UI shows as a switch the user may turn back on, and this
+        /// one is a feature that is not here: every surface naming the phone
+        /// app is absent rather than off.
+        case unoffered
 
         /// The resolved value, regardless of what decided it.
         public var value: Bool {
             switch self {
             case .setting(let value), .forced(let value): return value
+            case .unoffered: return false
             }
         }
 
@@ -384,29 +409,44 @@ public struct AppSettings {
             if case .forced = self { return true }
             return false
         }
+
+        /// Whether the companion is missing from this build entirely. A caller
+        /// deciding whether to MOUNT a companion surface asks this, not
+        /// ``value``: an off switch is a promise the feature exists.
+        public var isUnoffered: Bool { self == .unoffered }
     }
 
     /// Resolve whether the companion server should run, in priority order: an
     /// explicit argument → the `AUDIOUT_COMPANION` env var (`1`/`0` or
-    /// `on`/`off`, case-insensitive) → the persisted ``allowRemoteControl``
-    /// setting — same priority ``resolvedAllowRemoteControl(explicit:environment:settings:)``
+    /// `on`/`off`, case-insensitive) → ``remoteAppIsOffered`` → the persisted
+    /// ``allowRemoteControl`` setting — same priority
+    /// ``resolvedAllowRemoteControl(explicit:environment:offered:settings:)``
     /// uses, but returned alongside ``RemoteControlResolution`` so a UI can
     /// render the override honestly instead of just reading the raw setting.
+    ///
+    /// The two overrides sit ABOVE `offered` on purpose: a build with no
+    /// companion is the shipping default, and `AUDIOUT_COMPANION=on` is how a
+    /// dev build gets the feature back to test it.
     ///
     /// This is an explicit knob, never a silent fallback (mirrors
     /// `BackendKind.resolved`'s policy, OwnToneBackend.swift): an unrecognized
     /// env value is treated as absent — it falls back to the setting and
     /// prints one warning to stderr rather than silently guessing which way
     /// to go.
+    ///
+    /// - Parameter offered: whether this build carries the companion at all.
+    ///   Injectable so a test pins it instead of inheriting the shipping
+    ///   constant, the way `SetupModel` takes `remoteAppAvailable`.
     public static func resolvedAllowRemoteControlWithSource(
         explicit: Bool? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        offered: Bool = remoteAppIsOffered,
         settings: AppSettings
     ) -> RemoteControlResolution {
         if let explicit { return .forced(explicit) }
 
         guard let raw = environment[allowRemoteControlEnvironmentVariableName] else {
-            return .setting(settings.allowRemoteControl)
+            return offered ? .setting(settings.allowRemoteControl) : .unoffered
         }
         switch raw.lowercased() {
         case "1", "on":  return .forced(true)
@@ -415,19 +455,21 @@ public struct AppSettings {
             FileHandle.standardError.write(
                 Data("warning: unrecognized \(allowRemoteControlEnvironmentVariableName) value \"\(raw)\" — falling back to the setting\n".utf8)
             )
-            return .setting(settings.allowRemoteControl)
+            return offered ? .setting(settings.allowRemoteControl) : .unoffered
         }
     }
 
-    /// Convenience over ``resolvedAllowRemoteControlWithSource(explicit:environment:settings:)``
+    /// Convenience over ``resolvedAllowRemoteControlWithSource(explicit:environment:offered:settings:)``
     /// for callers that only need the resolved value (`AppDelegate`, which
     /// only starts/stops the server and never has to explain the source).
     public static func resolvedAllowRemoteControl(
         explicit: Bool? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        offered: Bool = remoteAppIsOffered,
         settings: AppSettings
     ) -> Bool {
-        resolvedAllowRemoteControlWithSource(explicit: explicit, environment: environment, settings: settings).value
+        resolvedAllowRemoteControlWithSource(explicit: explicit, environment: environment,
+                                             offered: offered, settings: settings).value
     }
 
     /// Whether this Mac's sync trim has an ENTRY at all — the honest answer to

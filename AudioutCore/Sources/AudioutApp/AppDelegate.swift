@@ -3135,7 +3135,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the Mac never guesses which one is in the room.
     @MainActor
     private func remoteInviteState() -> BTAlignmentWizardView.RemoteInviteState {
-        guard AppSettings.resolvedAllowRemoteControl(settings: settings) else { return .allowOff }
+        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(settings: settings)
+        // A build with no phone app drops the panel; a Mac that merely refuses
+        // phones keeps it and says how to allow them.
+        if resolution.isUnoffered { return .unavailable }
+        guard resolution.value else { return .allowOff }
         guard companionClientCount > 0 else { return .notConnected }
         let approved = companionApprovals.approvals.filter { $0.decision == .approved }
         let name = (companionClientCount == 1 && approved.count == 1)

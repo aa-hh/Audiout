@@ -38,7 +38,8 @@ import AppKit
     }
 
     private func makePane(settings: AppSettings, environment: [String: String]) -> GeneralSettingsViewController {
-        GeneralSettingsViewController(loginItem: FakeLoginItem(), settings: settings, environment: environment)
+        GeneralSettingsViewController(loginItem: FakeLoginItem(), settings: settings, environment: environment,
+                                      remoteAppIsOffered: true)
     }
 
     // MARK: No override present — unchanged behavior
@@ -161,7 +162,7 @@ import AppKit
     private func makePane(approvals: CompanionApprovalController?) -> GeneralSettingsViewController {
         GeneralSettingsViewController(loginItem: FakeLoginItem(),
                                       settings: AppSettings(defaults: isolatedDefaults),
-                                      environment: [:],
+                                      environment: [:], remoteAppIsOffered: true,
                                       approvals: approvals)
     }
 
@@ -216,13 +217,34 @@ import AppKit
 
     // MARK: The invitation to Audiout Remote
 
+    /// Defect this names: a release built before Audiout Remote is approved
+    /// still shows the Allow switch, the QR invitation and the phone list —
+    /// three offers to pair with an app nobody can download.
+    @Test func aBuildWithoutTheCompanionMountsNoCompanionRows() throws {
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.allowRemoteControl = true
+        let pane = GeneralSettingsViewController(loginItem: FakeLoginItem(),
+                                                 settings: settings, environment: [:],
+                                                 remoteAppIsOffered: false,
+                                                 approvals: try makeController(records: [
+                                                    record(Self.ownerID, name: "Owner's iPhone",
+                                                           decision: .approved),
+                                                 ]))
+        #expect(!pane.test_allowRemoteControlRowIsMounted)
+        #expect(!pane.test_remoteInviteRowIsMounted)
+        #expect(!pane.test_phoneListIsVisible,
+                "a remembered phone does not bring the list back in a build with no companion")
+        #expect(!pane.test_allowRemoteControlIsOn,
+                "the effective state is off, whatever the persisted setting says")
+    }
+
     /// Defect this names: the invitation stays in the pane after the switch
     /// goes off, so a Mac that refuses phones goes on inviting one.
     @Test func theInvitationIsMountedOnlyWhileTheSwitchIsOn() throws {
         let settings = AppSettings(defaults: isolatedDefaults)
         settings.allowRemoteControl = true
         let pane = GeneralSettingsViewController(loginItem: FakeLoginItem(),
-                                                 settings: settings, environment: [:],
+                                                 settings: settings, environment: [:], remoteAppIsOffered: true,
                                                  approvals: try makeController(records: []))
         #expect(pane.test_remoteInviteRowIsMounted)
 
@@ -241,7 +263,7 @@ import AppKit
         let controller = try makeController(records: [])
         controller.presentPrompt = { _, respond in respond(true) }
         let pane = GeneralSettingsViewController(loginItem: FakeLoginItem(),
-                                                 settings: settings, environment: [:],
+                                                 settings: settings, environment: [:], remoteAppIsOffered: true,
                                                  approvals: controller)
         #expect(pane.test_remoteInviteQRIsVisible)
 
@@ -259,7 +281,7 @@ import AppKit
         let settings = AppSettings(defaults: isolatedDefaults)
         settings.allowRemoteControl = true
         let pane = GeneralSettingsViewController(loginItem: FakeLoginItem(),
-                                                 settings: settings, environment: [:],
+                                                 settings: settings, environment: [:], remoteAppIsOffered: true,
                                                  openURL: { opened.append($0) },
                                                  approvals: try makeController(records: []))
         #expect(pane.test_remoteInviteButtonTitle == "Open audiout.app/remote")

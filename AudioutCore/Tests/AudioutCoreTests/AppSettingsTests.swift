@@ -334,10 +334,10 @@ import Testing
     @Test func resolvedAllowRemoteControlFallsBackToSettingWhenEnvUnset() {
         let settings = AppSettings(defaults: defaults)
         settings.allowRemoteControl = true
-        #expect(AppSettings.resolvedAllowRemoteControl(environment: [:], settings: settings))
+        #expect(AppSettings.resolvedAllowRemoteControl(environment: [:], offered: true, settings: settings))
 
         settings.allowRemoteControl = false
-        #expect(!AppSettings.resolvedAllowRemoteControl(environment: [:], settings: settings))
+        #expect(!AppSettings.resolvedAllowRemoteControl(environment: [:], offered: true, settings: settings))
     }
 
     @Test(arguments: [
@@ -360,10 +360,10 @@ import Testing
         // the setting), never silently guessed — mirrors BackendKind.resolved.
         let settings = AppSettings(defaults: defaults)
         settings.allowRemoteControl = true
-        #expect(AppSettings.resolvedAllowRemoteControl(environment: ["AUDIOUT_COMPANION": "banana"], settings: settings))
+        #expect(AppSettings.resolvedAllowRemoteControl(environment: ["AUDIOUT_COMPANION": "banana"], offered: true, settings: settings))
 
         settings.allowRemoteControl = false
-        #expect(!AppSettings.resolvedAllowRemoteControl(environment: ["AUDIOUT_COMPANION": "banana"], settings: settings))
+        #expect(!AppSettings.resolvedAllowRemoteControl(environment: ["AUDIOUT_COMPANION": "banana"], offered: true, settings: settings))
     }
 
     // MARK: Companion — resolution source (FIX-C)
@@ -377,7 +377,7 @@ import Testing
     @Test func resolutionSourceIsSettingWhenEnvUnset() {
         let settings = AppSettings(defaults: defaults)
         settings.allowRemoteControl = true
-        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(environment: [:], settings: settings)
+        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(environment: [:], offered: true, settings: settings)
         #expect(resolution == .setting(true))
         #expect(resolution.value)
         #expect(!resolution.isForced)
@@ -406,7 +406,7 @@ import Testing
         let settings = AppSettings(defaults: defaults)
         settings.allowRemoteControl = true
         let resolution = AppSettings.resolvedAllowRemoteControlWithSource(
-            environment: ["AUDIOUT_COMPANION": "banana"], settings: settings)
+            environment: ["AUDIOUT_COMPANION": "banana"], offered: true, settings: settings)
         #expect(resolution == .setting(true))
         #expect(!resolution.isForced)
     }
@@ -430,6 +430,47 @@ import Testing
             let withSource = AppSettings.resolvedAllowRemoteControlWithSource(environment: environment, settings: settings)
             #expect(plain == withSource.value)
         }
+    }
+
+    // MARK: Companion - a build that does not carry the phone app
+    //
+    // `remoteAppIsOffered` is false until Audiout Remote is on the App Store.
+    // Every companion surface reads the resolution, so these three pin what
+    // that build resolves to.
+
+    @Test func anUnofferedBuildResolvesOffEvenWhenTheSettingSaysOn() {
+        // The setting defaults to TRUE, so a build that forgot to consult
+        // `offered` would start the companion server and show the Setup
+        // window's iPhone card in a release with no phone app to pair with.
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = true
+        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(
+            environment: [:], offered: false, settings: settings)
+        #expect(resolution == .unoffered)
+        #expect(!resolution.value)
+    }
+
+    @Test func theEnvOverrideStillWinsOverAnUnofferedBuild() {
+        // How a dev build gets the feature back to test against a TestFlight
+        // phone. Ordering `offered` above the env var would take that away.
+        let settings = AppSettings(defaults: defaults)
+        settings.allowRemoteControl = false
+        let resolution = AppSettings.resolvedAllowRemoteControlWithSource(
+            environment: ["AUDIOUT_COMPANION": "on"], offered: false, settings: settings)
+        #expect(resolution == .forced(true))
+        #expect(resolution.value)
+    }
+
+    @Test func unofferedIsNotForced() {
+        // `.forced` mounts Settings' "a launch option is controlling this
+        // setting" note. Reporting an unoffered build as forced would blame a
+        // launch option nobody passed, and the pane drops the whole row here
+        // anyway, so `isUnoffered` is what a caller asks.
+        let resolution = AppSettings.RemoteControlResolution.unoffered
+        #expect(!resolution.isForced)
+        #expect(resolution.isUnoffered)
+        #expect(!AppSettings.RemoteControlResolution.setting(false).isUnoffered)
+        #expect(!AppSettings.RemoteControlResolution.forced(false).isUnoffered)
     }
 
     // MARK: One-surface pin (U3)

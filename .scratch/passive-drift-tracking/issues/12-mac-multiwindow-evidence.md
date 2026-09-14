@@ -1,6 +1,6 @@
 # 12 — Sum the last three windows, and retry a near miss after 30 s
 
-Status: planned
+Status: shelved (Alec, 2026-09-14) — ProbeKit half built and tagged 0.16.0 but NOT adopted; see the 2026-09-14 review comment
 Blocked by: 09, 10
 
 One 4 s window is often too weak to pass on ordinary music: add evidence across windows, and stop waiting 3 minutes after a near miss.
@@ -18,3 +18,46 @@ Done when: the ticket-16 fixtures replayed in sequence put the accumulated answe
 ## Comments
 
 - 2026-09-13: drafted from live tests 2–3 (HANDOFF.md) and dev/notes/drift-ensemble-design-brief.md §2.
+- 2026-09-14: the ProbeKit half is built and tagged `0.16.0` in audiout-shared — `DriftSlice`, a third `slices` element on `analyzeWithCandidates`, and `PassiveDriftAccumulator` (3 windows, 1.5 ms vote tolerance, 2 agreeing windows, and the newest window must be one of them so a verify window cannot confirm the guess it was taken to check). `PassiveDriftFixtureTests` replays the three 2026-09-13 `good` windows through one accumulator, keyed by baseline index, and prints what the summed evidence reaches:
+
+  ```
+  EVIDENCE key=0 none
+  EVIDENCE key=1 none
+  ```
+
+  Summing those three windows reaches no answer either speaker's own windows support.
+
+- 2026-09-14, adversarial review — **SHELVED. Do not pin the Mac to 0.16.0.**
+  The explanation in the comment above is wrong, and the review's numbers say so:
+  windows 21:07 and 21:13 share baselines (537/529), so no correction landed
+  between them, yet their own best lags differ by 7 ms (567.05 vs 574.33; the
+  third reads 570.64). The summed peak is 561.01 ms for BOTH keys — a lag none
+  of the three windows chose, one bass-comb tooth below the ~570 ms arrival that
+  recurs across them. Summing three real windows moved the answer onto a
+  different tooth instead of sharpening the true one, so this ticket's
+  "Done when" is NOT met.
+
+  The blocking defect: `PassiveDriftAccumulator.consensus` has **no confidence
+  gate**. A single window must clear margin ≥ 1.2, local ≥ 2.4 and 2 of 4 bands;
+  the summed answer clears nothing. `Arrival` carries `peakMargin`,
+  `localScore` and `peakToSidelobe` and all three are discarded, so the Mac
+  cannot gate it either. On the fixture the sum's margin is 1.024 and only the
+  vote stopped it. On bass-comb material two windows whose own argmax lands on
+  the same wrong tooth sum to a peak on that tooth, the vote passes, and the app
+  moves a speaker ~10 ms.
+
+  Two more, both needed before any Mac adoption:
+  - The newest-window clause does not close the self-verification hazard on
+    periodic material: a correction shifts the whole comb, so a tooth still sits
+    at the old lag and the newest window can argmax there again.
+  - Every key's slices are cut from the same `full` correlation, so with
+    baselines 8 ms apart the two keys carry near-identical evidence. Two
+    speakers in sync can never reach consensus for the second key — its votes
+    are always for the runner-up.
+  - Mechanical: the Mac's `let (outcome, candidates) = analyzeWithCandidates(`
+    will not compile against the 3-tuple. Adoption means fixing that too.
+
+  To un-shelve: carry the sum's own margin / local score / peak-to-sidelobe out
+  of `consensus` and gate on them, then re-run the fixture replay and require it
+  to land within 2 ms of the labelled sync point. That is a 0.16.1 or 0.17.0
+  release; 0.16.0 is pushed and cannot be amended. The Mac stays on 0.15.1.

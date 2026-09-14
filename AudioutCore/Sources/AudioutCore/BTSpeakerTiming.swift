@@ -349,6 +349,23 @@ public final class BTSpeakerTiming: @unchecked Sendable {
         changed?()
     }
 
+    /// The passive drift tracker has just moved this speaker's measured
+    /// latency (roadmap 085 ticket 05). The number on the sink is the
+    /// microphone's now, not the
+    /// one the user's calibration left there, so the row asks for a re-check
+    /// instead of the rewrite happening silently — the same
+    /// ``staleReasonMoved`` a clock step raises, reached from the microphone
+    /// rather than the clock. A speaker with no stored alignment has nothing
+    /// to call stale.
+    public func noteDriftCorrected(uid: String) {
+        guard storedOffsetMs(uid) != nil else { return }
+        let changed = lock.withLock { () -> (@Sendable () -> Void)? in
+            guard movedUIDs.insert(uid).inserted else { return nil }
+            return _onChange
+        }
+        changed?()
+    }
+
     /// One sample's verdict from this device's ``BTClockStability``, on the
     /// watcher's queue once a second. Fires ``onChange`` ONLY when something
     /// the phone can see flips — the ``ClockState`` this sample left the device
@@ -516,7 +533,7 @@ public final class BTSpeakerTiming: @unchecked Sendable {
     /// vocabulary fixes (`audiout-shared/docs/analytics-events.md`). Bucketed
     /// because a raw millisecond figure is precise enough to tell one room
     /// from another.
-    private static func offsetBucket(_ ms: Double) -> String {
+    static func offsetBucket(_ ms: Double) -> String {
         switch abs(ms) {
         case ..<10: return "0-9"
         case ..<40: return "10-39"

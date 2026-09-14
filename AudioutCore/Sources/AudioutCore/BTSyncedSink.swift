@@ -569,6 +569,17 @@ final class BTDeviceSink: @unchecked Sendable {
     /// The baked processor the render path applies, published under `stateLock`
     /// like `driftPpm`. `nil` = flat, and flat stays untouched audio.
     private var eqProcessor: EQProcessor?   // stateLock
+    /// Keep-alive (roadmap 085, ticket 04): with this on, a released session's
+    /// underrun cycles report their zeroed buffer as AUDIO (`isSilence` false)
+    /// for `keepAliveWindowNanos` after the last audible cycle, so the OS never
+    /// idles the A2DP transport during program silence — a stream restart rolls
+    /// a fresh 20–90 ms latency and voids the alignment. `0` window = off.
+    private var keepAliveWindowNanos: Int64 = 0   // stateLock
+    /// Monotonic instant of the last cycle that produced real audio. Written
+    /// on the render thread, which must not take a blocking lock, and read
+    /// from a control queue (``lastAudibleRenderNanos()``) — so it lives in one
+    /// aligned word, the same idiom ``ReferenceAudioRing``'s armed flag uses.
+    private let lastAudibleRenderNanosPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
     private var configChangeObserver: NSObjectProtocol?
     private var rateListenerBlock: AudioObjectPropertyListenerBlock?
     private let listenerQueue: DispatchQueue
@@ -636,6 +647,7 @@ final class BTDeviceSink: @unchecked Sendable {
         self.scratchCapacity = self.maxRenderFrames * channels
         self.scratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchCapacity)
         self.scratch.initialize(repeating: 0, count: scratchCapacity)
+        self.lastAudibleRenderNanosPtr.initialize(to: 0)
 
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: renderSampleRate,
@@ -654,6 +666,17 @@ final class BTDeviceSink: @unchecked Sendable {
         // exclusive whichever thread this runs on.
         stopLocked()
         scratch.deallocate()
+        lastAudibleRenderNanosPtr.deallocate()
+    }
+
+    /// The monotonic instant this device last rendered real program audio, or
+    /// `nil` before it ever has. How the drift tracker's correction finds a
+    /// playback gap (roadmap 085 ticket 05): keep-alive frames are zeros, so
+    /// this stops advancing the moment the music does, whether or not the
+    /// transport is being held open.
+    var lastAudibleRenderNanos: Int64? {
+        let nanos = lastAudibleRenderNanosPtr.pointee
+        return nanos > 0 ? nanos : nil
     }
 
     // MARK: Lifecycle
@@ -688,6 +711,13 @@ final class BTDeviceSink: @unchecked Sendable {
             self.gain = gain
             self.engine.mainMixerNode.outputVolume = gain
         }
+    }
+
+    /// Silence keep-alive window (see `keepAliveWindowNanos`). `0` disables.
+    func setKeepAliveWindow(nanos: Int64) {
+        stateLock.lock()
+        keepAliveWindowNanos = max(0, nanos)
+        stateLock.unlock()
     }
 
     /// This device's tone. Like the gain above, a live session absorbs it as a
@@ -1113,9 +1143,12 @@ final class BTDeviceSink: @unchecked Sendable {
 
     /// The testable render core (no engine, no clocks): fills `frameCount`
     /// interleaved frames for a cycle starting at `cycleStartMonotonicNanos`
-    /// and reports whether any real audio was emitted. Silent (and
-    /// non-draining) until the gate opens at the anchored target; after that,
-    /// the ring drains through the resampler at unity rate.
+    /// and reports whether the cycle should be flagged as audio (`isSilence`
+    /// false). Silent (and non-draining) until the gate opens at the anchored
+    /// target; after that, the ring drains through the resampler at unity
+    /// rate. An underrun cycle inside the keep-alive window still reports
+    /// audio — its zeroed frames go out for real, keeping the A2DP transport
+    /// from idling (see `keepAliveWindowNanos`).
     @discardableResult
     func renderInterleaved(
         into out: UnsafeMutableBufferPointer<Float>,
@@ -1136,6 +1169,7 @@ final class BTDeviceSink: @unchecked Sendable {
         var processor: EQProcessor?
         guard stateLock.try() else { return false }   // no snapshot → silent cycle
         processor = eqProcessor
+        let keepAliveWindow = keepAliveWindowNanos
         if anchored {
             if released {
                 plan = SyncTiming.RenderPlan(silentFrames: 0, releasesThisCycle: true)
@@ -1171,7 +1205,13 @@ final class BTDeviceSink: @unchecked Sendable {
                 floatInterleaved: base + plan.silentFrames * channelCount,
                 frameCount: produced)
         }
-        return produced > 0
+        if produced > 0 {
+            lastAudibleRenderNanosPtr.pointee = cycleStartMonotonicNanos
+            return true
+        }
+        let lastAudible = lastAudibleRenderNanosPtr.pointee
+        return keepAliveWindow > 0 && lastAudible > 0
+            && cycleStartMonotonicNanos &- lastAudible < keepAliveWindow
     }
 
     /// The gate has just opened; make the first frame released the frame that
@@ -1329,6 +1369,9 @@ final class BTSyncedSink: @unchecked Sendable {
     private var gainByUID: [String: Float] = [:]
     private var eqByUID: [String: DeviceEQ] = [:]
     private var desiredRunning = false
+    /// Group-wide silence keep-alive window, fanned to every sink (`0` = off).
+    /// See `BTDeviceSink.keepAliveWindowNanos`.
+    private var keepAliveWindowNanos: Int64 = 0
 
     init(
         renderSampleRate: Double = 44_100,
@@ -1386,9 +1429,13 @@ final class BTSyncedSink: @unchecked Sendable {
             added.append((sink, gainByUID[uid] ?? 1, eqByUID[uid] ?? .flat))
         }
         shouldStart = desiredRunning
+        let keepAlive = keepAliveWindowNanos
         tableLock.unlock()
 
         for sink in removed { sink.stop() }
+        if keepAlive > 0 {
+            for (sink, _, _) in added { sink.setKeepAliveWindow(nanos: keepAlive) }
+        }
         for (sink, gain, _) in added where gain != 1 {
             // A remembered hold (W3) applies BEFORE the engine starts, so a
             // held device never gets an audible blip ahead of the mute.
@@ -1430,6 +1477,17 @@ final class BTSyncedSink: @unchecked Sendable {
             return composition.usesPresentationReference ? [] : Array(sinksByUID.values)
         }
         for sink in sinks { sink.requestRebuild(cause: "composition_change") }
+    }
+
+    /// Group-wide silence keep-alive window (`0` = off), applied to current
+    /// and future sinks. A live change needs no rebuild: the render path reads
+    /// it per cycle.
+    func setKeepAliveWindow(nanos: Int64) {
+        let sinks = tableLock.withLock { () -> [BTDeviceSink] in
+            keepAliveWindowNanos = max(0, nanos)
+            return Array(sinksByUID.values)
+        }
+        for sink in sinks { sink.setKeepAliveWindow(nanos: max(0, nanos)) }
     }
 
     /// Rebuild every live sink under `cause`, so the next captured buffer
@@ -1570,6 +1628,16 @@ final class BTSyncedSink: @unchecked Sendable {
     func renderingDeviceUIDs() -> Set<String> {
         let sinks = tableLock.withLock { Array(sinksByUID.values) }
         return Set(sinks.lazy.filter(\.hasStartedRendering).map(\.deviceUID))
+    }
+
+    /// The most recent monotonic instant ANY device sink rendered real program
+    /// audio, or `nil` while none ever has — what the drift corrections read to
+    /// tell music from a playback gap (roadmap 085 ticket 05). The newest of
+    /// the fleet, not each device's own: the program is one program, and a
+    /// speaker that joined late has simply not heard all of it.
+    func lastAudibleRenderNanos() -> Int64? {
+        let sinks = tableLock.withLock { Array(sinksByUID.values) }
+        return sinks.compactMap(\.lastAudibleRenderNanos).max()
     }
 
     /// The UIDs that have been HANDED at least one captured buffer, whether or

@@ -391,6 +391,25 @@ import Testing
         #expect(report(timing, uid: "speaker-b", at: 21).status == .tuned, "per device")
     }
 
+    /// Turns red if a drift correction rewrites the trim without the row
+    /// saying so: the number in force is then the tracker's while the row still
+    /// claims the user's calibration, which is the silent rewrite ticket 05
+    /// forbids.
+    @Test func aDriftCorrectionLeavesTheRowAskingForARecheck() {
+        let timing = self.timing()
+        let changes = counting(timing)
+        timing.noteConnected(uid: "speaker-a", at: noon)
+        timing.noteAligned(uid: "speaker-a", at: noon)
+        let before = changes.value
+        timing.noteDriftCorrected(uid: "speaker-a")
+        let corrected = report(timing, at: 1)
+        #expect(corrected.status == .stale)
+        #expect(corrected.staleReason == BTSpeakerTiming.staleReasonMoved)
+        #expect(changes.value == before + 1)
+        timing.noteDriftCorrected(uid: "speaker-a")
+        #expect(changes.value == before + 1, "and not again until something clears it")
+    }
+
     @Test func movedIsPublishedOnceWhenTheJumpsSumToTenMilliseconds() {
         let timing = self.timing()
         let changes = counting(timing)

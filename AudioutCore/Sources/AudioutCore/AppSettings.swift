@@ -90,6 +90,7 @@ public struct AppSettings {
         static let connectVolume = "audio.connectVolume"
         static let mainOutVolume = "audio.mainOutVolume"
         static let syncOffsetMs = "audio.syncOffsetMs"
+        static let btKeepAliveMinutes = "audio.btKeepAliveMinutes"
         static let allowRemoteControl = "companion.allowRemoteControl"
         static let surfacePinned = "surface.pinned"
         static let eqAdvancedExpanded = "eq.advancedExpanded"
@@ -230,6 +231,29 @@ public struct AppSettings {
             return Self.wakeRestoreMinuteOptions.contains(stored) ? stored : Self.defaultWakeRestoreMinutes
         }
         nonmutating set { defaults.set(newValue, forKey: Keys.wakeRestoreMinutes) }
+    }
+
+    /// Bluetooth silence keep-alive window in MINUTES (roadmap 085 decision 4):
+    /// after the program goes quiet, BT sinks keep flagging their zeroed
+    /// cycles as audio for this long so the A2DP transport never restarts —
+    /// a restart rolls a fresh 20–90 ms latency and voids the alignment.
+    /// `0` means "off". Same bare-number option style as
+    /// ``wakeRestoreMinuteOptions``.
+    public static let btKeepAliveMinuteOptions: [Int] = [0, 5, 10, 30]
+
+    /// On by default: 10 minutes covers between-album gaps without keeping a
+    /// battery speaker awake all night.
+    public static let defaultBTKeepAliveMinutes = 10
+
+    public var btKeepAliveMinutes: Int {
+        get {
+            guard defaults.object(forKey: Keys.btKeepAliveMinutes) != nil else {
+                return Self.defaultBTKeepAliveMinutes
+            }
+            let stored = defaults.integer(forKey: Keys.btKeepAliveMinutes)
+            return Self.btKeepAliveMinuteOptions.contains(stored) ? stored : Self.defaultBTKeepAliveMinutes
+        }
+        nonmutating set { defaults.set(newValue, forKey: Keys.btKeepAliveMinutes) }
     }
 
     /// The default starting volume (percent) a speaker gets the moment it joins

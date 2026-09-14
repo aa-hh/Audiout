@@ -419,8 +419,9 @@ public enum Tokens {
         /// token (owner's call, 2026-09-05: light mode was "impossible to
         /// see"). The rule assumed the hue was a FILL, where one value reads on
         /// both grounds. It is a thin outline since the marks stopped being
-        /// filled — 0.875 pt of stroke — and a stroke that thin has no area to
-        /// carry a marginal ratio. Measured on `panel`: `#8E93F0` is 5.18:1 on
+        /// filled — 0.875 pt of stroke at the `.thin` weight of the day, 1.5 pt
+        /// since 2026-09-14 — and a stroke that thin has no area to carry a
+        /// marginal ratio. Measured on `panel`: `#8E93F0` is 5.18:1 on
         /// the dark row and 2.45:1 on the light one, which is what they were
         /// looking at. Deepened for light only, the same move `goldText` makes
         /// for the same reason: `#585EC7` measures 5.24:1 on light and the dark
@@ -443,28 +444,65 @@ public enum Tokens {
         /// engaged. A door that is dark for some other reason — unavailable,
         /// unsupported — keeps its at-rest ink.
         ///
-        /// TWO VALUES, deepened for light, the same reversal ``muted`` took
-        /// on 2026-09-05 and for the same reason: the mark is a 0.875 pt
-        /// outline now, not a filled square, and a stroke that thin does not
-        /// carry a mid-range ratio. Owner's call from the live build ("the
-        /// emerald is invisible as well"), picked from a rendered ladder.
+        /// TWO VALUES, and they are a PAIR with ``muted`` rather than two
+        /// inks tuned apart. Both marks are 1.5 pt outlines 6 pt from each
+        /// other, so a difference in presence between them reads as one
+        /// control being engaged harder than the other.
+        ///
+        /// WHAT "PAIR" MEANS DEPENDS ON THE GROUND, and getting that wrong is
+        /// how the first attempt at this failed. On the dark row the two marks
+        /// pair on OKLCH LIGHTNESS — L 0.680 against `muted`'s 0.698, the
+        /// green a hair under its sibling, which is the intended order (mute
+        /// is the kill switch, the door is not). On the light row lightness is
+        /// the wrong axis: a dark stroke on near-white reads as an outline
+        /// whatever its luminance, and what separates `muted`'s periwinkle
+        /// from a plain dark line is CHROMA, which it carries at 0.161. A
+        /// light green matched on lightness alone (`#1E7E52`, chroma 0.111)
+        /// measured 4.84:1 — far over the floor — and still read as
+        /// near-black, which is the owner's verdict from the live build
+        /// ("light mode is still almost invisible", 2026-09-14).
+        ///
+        /// Chroma is also why the light half sits at hue 150 while the dark
+        /// half sits at 158. sRGB has no more chroma to give at 158 near this
+        /// lightness — 0.116 is the gamut wall there — so the light value
+        /// walks the hue eight degrees toward the green primary, where the
+        /// ceiling is 0.138. It is the same green family and the same 84-87
+        /// degrees clear of ``muted``; only the room sRGB leaves differs
+        /// between the two appearances.
         ///
         /// WHY THIS GREEN. The door used to wear ``goldText``, and gold means
         /// "audio is flowing here" everywhere else in the app — one hue
         /// carrying two ideas on a row that also draws the gold live wash
-        /// behind it. Green is unspoken for. `#227950` was chosen over six
-        /// other candidates on separation: it sits 85° of hue off ``muted``,
-        /// which is the control 6 pt to its right, and 11° off
+        /// behind it. Green is unspoken for. It stays 84-86 degrees of hue
+        /// off ``muted``, the control 6 pt to its right, and 9 degrees off
         /// ``permissionUsageStats``, which is fenced to onboarding and never
         /// shares a screen with a device row.
         ///
-        /// CONTRAST RATIONALE (measured on `panel`, floor 3:1). Dark keeps
-        /// `#227950` at 3.70:1 and does not move. Light goes to `#1C6543`,
-        /// 6.73:1 against the 5.14:1 it replaced — one step down the ladder,
-        /// which was as far as the hue could deepen before it stops reading
-        /// as green at all and starts reading as near-black.
+        /// CONTRAST RATIONALE (floor 3:1, measured on every ground a device
+        /// row can put behind the door — `canvas`, `panel`, `raised`, the
+        /// gold live wash and the hover wash). Dark `#41B07A`: 7.27 canvas /
+        /// 6.60 panel / 5.79 raised / 5.23 on both washes. Light `#007835`:
+        /// 5.39 on the flat grounds, 4.72 live, 4.45 hovered — the light
+        /// half gained contrast AND chroma over `#1E7E52`, which is why no
+        /// trade had to be argued for it.
+        ///
+        /// WHAT THESE REPLACE, and why the old pair could not stay. `#227950`
+        /// dark / `#1C6543` light were measured on `panel` alone and the dark
+        /// half was recorded here at 3.70:1, which it never was — `#227950`
+        /// measures 3.35:1 on `panel`, 2.94:1 on `raised` and 2.66:1 on the
+        /// live wash. A speaker with a shaped curve is usually a speaker
+        /// that is playing, so the door spent most of its engaged life on the
+        /// one ground where it failed the non-text floor hardest. Nothing
+        /// caught it because this token had no entry in
+        /// `TokenContrastMatrixTests` at all; it has one now, on `muted`'s
+        /// own ground set. The light half was a second failure of a different
+        /// kind: at OKLCH chroma 0.091 it read as near-black rather than as
+        /// green, which is the wall the old note recorded as "as far as the
+        /// hue could deepen". Chroma is the lever, not lightness: at 0.091 no
+        /// ratio saves it, and 0.111 at the old hue was still not enough to
+        /// read as a colour on paper.
         public static var equalizer: NSColor {
-            warmDynamic(name: "equalizer", dark: 0x227950, light: 0x1C6543)
+            warmDynamic(name: "equalizer", dark: 0x41B07A, light: 0x007835)
         }
 
         /// The COOL body ink — the same second-rung job as ``label2`` on a

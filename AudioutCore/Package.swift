@@ -180,7 +180,7 @@ let package = Package(
         // its score against the lags right around it), votes four sub-bands,
         // and lets each speaker own its own peak inside a shared search window.
         .package(url: "https://github.com/aa-hh/audiout-shared.git",
-                 from: "0.15.0"),
+                 from: "0.15.1"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

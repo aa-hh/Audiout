@@ -1016,7 +1016,7 @@ public func makeBackend(
                         Telemetry.log(.localPlayback, "bt_clock_jump", [
                             "uid": uid, "ms": String(format: "%+.1f", magnitudeMs),
                         ])
-                        nativeBackend?.noteDriftTrigger(.clockJump)
+                        nativeBackend?.noteDriftTrigger(.clockJump(uid: uid))
                     }
                 }
             } else {

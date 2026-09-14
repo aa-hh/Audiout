@@ -88,7 +88,9 @@ music block plays (load 138 broke the capture in live test 4).
 - The live-test slot may be held by a finished session; `scripts/livetest.sh
   status` names the worktree; `done` from that worktree frees it.
 - Every reselect of a speaker restarts the window timer; the first window is
-  3 min after tracking turns on.
+  3 min after tracking turns on, then a sparse check every 25 min, plus
+  windows on reconnect, silence into audio, rate-limited clock steps, and
+  the existing verify trigger (ticket 17).
 - A wrong correction persists to `~/Library/Application Support/
   com.audiout.Audiout.dev/bt-sync-trims.json` (`latencyMs`); edit it back with
   the app quit. The production app's store is a different file.
@@ -481,11 +483,17 @@ tail -n 0 -F ~/Library/Logs/Audiout/telemetry.jsonl | grep --line-buffered -E '"
 - **Unused listening windows count toward the blind limit.** 5 unusable in a
   row turns tracking off until baselines are reset (reselect speakers or
   relaunch).
-- **The first window runs 3 minutes after tracking turns on**, and EVERY
-  reselect restarts that timer. Tell the owner not to touch the selection
-  while waiting.
-- **A clock-step storm triggers a window every 5 s** (no rate limit on
-  event triggers), so a bad link blinds the tracker in ~25 s.
+- **The first window runs 3 minutes after tracking turns on**, then only a
+  sparse check every 25 minutes (ticket 17) — plus a window on reconnect
+  (15 s after baseband connect), on silence holding 60 s and then giving way
+  to audio, on a rate-limited clock step, or on the existing verify trigger.
+  EVERY reselect restarts the 3-minute first-window timer. Tell the owner not
+  to touch the selection while waiting.
+- **A clock step now takes at most one window per speaker per minute**, and
+  ten steps on one speaker inside a minute marks the link bad and stops
+  triggering until it has been quiet for 60 s (ticket 17). A refused
+  near-miss window gets one retry 30 s later; the retry never itself
+  retries and never counts toward the 5-in-a-row blind limit.
 - **A wrong correction persists to disk** (`~/Library/Application
   Support/com.audiout.Audiout.dev/bt-sync-trims.json`, `latencyMs`). Quit
   the app, edit the number back, relaunch. The production app's store is a

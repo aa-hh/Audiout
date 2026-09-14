@@ -142,7 +142,8 @@ public struct PassiveDriftSampler: Sendable {
     public mutating func analyze(reference: [Float], referenceRate: Double,
                                  capture: [Float], captureRate: Double,
                                  hostNanos: Int64,
-                                 ambientNoise: [Float]? = nil) -> Outcome {
+                                 ambientNoise: [Float]? = nil,
+                                 countsTowardBlind: Bool = true) -> Outcome {
         lastPeaks = []
         lastCandidates = []
         guard !isBlind else { return .blind }
@@ -158,13 +159,32 @@ public struct PassiveDriftSampler: Sendable {
 
         switch outcome {
         case .unusable(let rejection):
-            consecutiveUnusableWindows += 1
-            if consecutiveUnusableWindows >= Self.blindAfterUnusableWindows { isBlind = true }
+            if countsTowardBlind {
+                consecutiveUnusableWindows += 1
+                if consecutiveUnusableWindows >= Self.blindAfterUnusableWindows { isBlind = true }
+            }
             return .unusable(rejection)
         case .usable(let peaks):
             consecutiveUnusableWindows = 0
             lastPeaks = peaks
             return attribute(peaks: peaks, hostNanos: hostNanos)
+        }
+    }
+
+    /// A refused window worth one quick retry (spec decision 18): at least
+    /// two of the three gates the correlator applies beside whole-tape
+    /// confidence — margin, local score, agreeing bands — already cleared.
+    /// Whole-tape `confidence` is excluded on purpose: decision 15 already
+    /// moved the acceptance call onto the other three, so counting it again
+    /// here would retry on the same signal that decision rejected.
+    public static func isNearMiss(candidates: [DriftPeak], correlator: PassiveDriftCorrelator) -> Bool {
+        candidates.contains { peak in
+            let clearedGates = [
+                peak.margin >= correlator.minPeakMargin,
+                peak.localConfidence >= correlator.minLocalScore,
+                peak.agreeingBands >= correlator.minAgreeingBands,
+            ].filter { $0 }.count
+            return clearedGates >= 2
         }
     }
 
@@ -321,13 +341,46 @@ final class PassiveDriftTracker: @unchecked Sendable {
     enum Trigger: Equatable, Sendable {
         case periodic
         /// `BTClockStability.Outcome.jumped` — the pacing clock re-anchored.
-        case clockJump
-        case reconnect
+        /// The uid is what the once-per-minute-per-speaker rate limit and the
+        /// clock-step storm classification key on.
+        case clockJump(uid: String)
+        /// This speaker's baseband link came back up. The uid is what the
+        /// settling suppression keys on: a reconnecting sink's pacing clock
+        /// keeps stepping while it re-buffers, and those steps are not worth
+        /// a window.
+        case reconnect(uid: String)
         case audioModeChange
         case silenceToAudio
         /// A guessed attribution is waiting to be checked — the window spec
         /// decision 7 promises, asked for by ``DriftCorrectionApplier``.
         case verify
+        /// A near-miss window's single follow-up (spec decision 18), taken
+        /// `retryDelaySeconds` after the refusal it answers. Never itself
+        /// retried, and never counted toward the blind budget.
+        case retry
+
+        /// The case name alone, without payload — what the log's `"trigger"`
+        /// field carries.
+        var label: String {
+            switch self {
+            case .periodic: return "periodic"
+            case .clockJump: return "clockJump"
+            case .reconnect: return "reconnect"
+            case .audioModeChange: return "audioModeChange"
+            case .silenceToAudio: return "silenceToAudio"
+            case .verify: return "verify"
+            case .retry: return "retry"
+            }
+        }
+
+        /// The speaker a clock step or a reconnect named; `nil` for every
+        /// other trigger.
+        var uid: String? {
+            switch self {
+            case .clockJump(let uid), .reconnect(let uid): return uid
+            default: return nil
+            }
+        }
     }
 
     /// Long enough for the correlator, short enough to be cheap: the spec's
@@ -337,9 +390,32 @@ final class PassiveDriftTracker: @unchecked Sendable {
     /// with the window exactly as the peak does (8 s scored 2.49 where 4 s
     /// scored 2.56, live test 2026-09-13).
     static let windowSeconds = 4.0
-    /// razor: one fixed cadence in the spec's 2–5 minute band. The upgrade
-    /// path is a cadence that widens while everything stays put.
-    static let periodicIntervalSeconds = 180.0
+    /// 25 minutes (spec decision 18). Live tests 2–4 showed inter-speaker
+    /// drift is event-shaped — reconnect, a bad link, silence into audio —
+    /// not a slow drift the old 3-minute cadence was built to catch, and a
+    /// clock-step storm blinded the tracker in 25 s flat. The event triggers
+    /// below do the real work; this is just the sparse backstop between them.
+    static let periodicIntervalSeconds = 1500.0
+    /// The first window lands here instead of at the full periodic interval:
+    /// a fresh session is worth an early read.
+    static let firstWindowSeconds = 180.0
+    /// One quick follow-up after a near-miss refusal (spec decision 18).
+    static let retryDelaySeconds = 30.0
+    /// `BTClockStability.stableAfterSeconds` (10 s) is how long the pacing
+    /// clock keeps stepping after a reconnect; this waits past that so the
+    /// window lands on a sink that has actually settled, while staying well
+    /// inside the "within 30 s" the acceptance bar wants.
+    static let reconnectDelaySeconds = 15.0
+    /// At most one clock-step window per speaker inside this span.
+    static let clockStepWindowSpacingSeconds = 60.0
+    /// This many steps from one speaker inside the spacing window is a bad
+    /// link, not a run of real jumps.
+    static let clockStepStormCount = 10
+    /// Silence has to hold this long before the edge into audio counts as an
+    /// event — a gap between tracks is not one.
+    static let silenceEdgeSeconds = 60.0
+    /// How often the silence poll checks `programIsSilent`.
+    static let silencePollIntervalSeconds = 1.0
     /// Headroom past the deepest baseline so the reference slice still fits
     /// inside the capture once a speaker's delay has shifted it.
     static let searchMarginMs = 50.0
@@ -347,35 +423,92 @@ final class PassiveDriftTracker: @unchecked Sendable {
     private let ring: ReferenceAudioRing
     private let makeRecorder: @Sendable () -> MicProbeRecording
     private let permissionIsGranted: @Sendable () -> Bool
+    private let programIsSilent: @Sendable () -> Bool
+    private let now: @Sendable () -> TimeInterval
+    private let isNearMiss: @Sendable ([DriftPeak], PassiveDriftCorrelator) -> Bool
     private let onObservations: @Sendable ([DriftCorrectionPolicy.Observation]) -> Void
     private let windowSeconds: Double
     private let intervalSeconds: Double
+    private let firstWindowSeconds: Double
+    private let retryDelaySeconds: Double
+    private let reconnectDelaySeconds: Double
+    private let silenceEdgeSeconds: Double
+    private let pollIntervalSeconds: Double
+    private let clockStepWindowSpacingSeconds: Double
+    private let clockStepStormCount: Int
     private let queue = DispatchQueue(label: "com.audiout.passive-drift")
 
     /// `queue` only.
     private var sampler = PassiveDriftSampler()
     private var timer: DispatchSourceTimer?
+    private var silenceTimer: DispatchSourceTimer?
     private var windowInFlight = false
     /// Whether periodic sampling is meant to be running — true between
     /// ``start()`` and ``stop()``, including a blind spell when the timer
     /// itself is cancelled.
     private var isRunning = false
 
+    /// `queue` only. One clock-step rate-limit/storm state per speaker uid.
+    private struct ClockStepState {
+        /// Step times inside the last `clockStepWindowSpacingSeconds`, for the
+        /// storm count.
+        var stepTimes: [TimeInterval] = []
+        /// When this speaker last took a window — set only when one actually
+        /// started, so a skipped attempt never spends the slot.
+        var lastWindowTime: TimeInterval?
+        /// This speaker's most recent step, suppressed ones included: the
+        /// bad-link clear measures its quiet gap from here.
+        var lastStepTime: TimeInterval?
+        /// Set by a reconnect: until this time, or until that reconnect's own
+        /// window runs, this speaker's clock steps take no window of their
+        /// own. `nil` when the speaker is not settling.
+        var reconnectSettlingUntil: TimeInterval?
+        var badLink = false
+    }
+    private var clockStepState: [String: ClockStepState] = [:]
+
+    /// `queue` only. The silence-edge poll's own state: when the current
+    /// silent spell started, `nil` while the program is audible.
+    private var silentSince: TimeInterval?
+
     init(ring: ReferenceAudioRing,
          windowSeconds: Double = PassiveDriftTracker.windowSeconds,
          intervalSeconds: Double = PassiveDriftTracker.periodicIntervalSeconds,
+         firstWindowSeconds: Double = PassiveDriftTracker.firstWindowSeconds,
+         retryDelaySeconds: Double = PassiveDriftTracker.retryDelaySeconds,
+         reconnectDelaySeconds: Double = PassiveDriftTracker.reconnectDelaySeconds,
+         silenceEdgeSeconds: Double = PassiveDriftTracker.silenceEdgeSeconds,
+         pollIntervalSeconds: Double = PassiveDriftTracker.silencePollIntervalSeconds,
+         clockStepWindowSpacingSeconds: Double = PassiveDriftTracker.clockStepWindowSpacingSeconds,
+         clockStepStormCount: Int = PassiveDriftTracker.clockStepStormCount,
          makeRecorder: @escaping @Sendable () -> MicProbeRecording = { BuiltInMicRecorder() },
          permissionIsGranted: @escaping @Sendable () -> Bool = { MicCapturePermission.isGranted },
+         programIsSilent: @escaping @Sendable () -> Bool = { false },
+         now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         isNearMiss: @escaping @Sendable ([DriftPeak], PassiveDriftCorrelator) -> Bool = PassiveDriftSampler.isNearMiss,
          onObservations: @escaping @Sendable ([DriftCorrectionPolicy.Observation]) -> Void) {
         self.ring = ring
         self.windowSeconds = windowSeconds
         self.intervalSeconds = intervalSeconds
+        self.firstWindowSeconds = firstWindowSeconds
+        self.retryDelaySeconds = retryDelaySeconds
+        self.reconnectDelaySeconds = reconnectDelaySeconds
+        self.silenceEdgeSeconds = silenceEdgeSeconds
+        self.pollIntervalSeconds = pollIntervalSeconds
+        self.clockStepWindowSpacingSeconds = clockStepWindowSpacingSeconds
+        self.clockStepStormCount = clockStepStormCount
         self.makeRecorder = makeRecorder
         self.permissionIsGranted = permissionIsGranted
+        self.programIsSilent = programIsSilent
+        self.now = now
+        self.isNearMiss = isNearMiss
         self.onObservations = onObservations
     }
 
-    deinit { timer?.cancel() }
+    deinit {
+        timer?.cancel()
+        silenceTimer?.cancel()
+    }
 
     /// The calibrated per-speaker delays this tracker measures against, and a
     /// re-arm of a blind mic.
@@ -397,11 +530,15 @@ final class PassiveDriftTracker: @unchecked Sendable {
         queue.sync { sampler.baselines }
     }
 
+    var consecutiveUnusableWindows: Int {
+        queue.sync { sampler.consecutiveUnusableWindows }
+    }
+
     func start() {
         queue.async { [self] in
             isRunning = true
-            guard timer == nil else { return }
-            scheduleTimer()
+            if timer == nil { scheduleTimer() }
+            if silenceTimer == nil { scheduleSilencePoll() }
         }
     }
 
@@ -410,55 +547,183 @@ final class PassiveDriftTracker: @unchecked Sendable {
             self.isRunning = false
             self.timer?.cancel()
             self.timer = nil
+            self.silenceTimer?.cancel()
+            self.silenceTimer = nil
+            // Silence measured before the stop says nothing about the sink the
+            // next start() builds: left set, the first poll after a restart
+            // reads audible against it and takes a silence-to-audio window on a
+            // sink one second old — the unsettled sink the reconnect delay
+            // exists to avoid.
+            self.silentSince = nil
         }
     }
 
     /// `queue` only.
     private func scheduleTimer() {
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + intervalSeconds, repeating: intervalSeconds)
+        timer.schedule(deadline: .now() + firstWindowSeconds, repeating: intervalSeconds)
         timer.setEventHandler { [weak self] in self?.takeWindow() }
         self.timer = timer
         timer.resume()
     }
 
+    /// `queue` only.
+    private func scheduleSilencePoll() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + pollIntervalSeconds, repeating: pollIntervalSeconds)
+        timer.setEventHandler { [weak self] in self?.pollSilence() }
+        self.silenceTimer = timer
+        timer.resume()
+    }
+
+    /// `queue` only. A silent spell that held for `silenceEdgeSeconds` and
+    /// then ended is an event (spec decision 18); a short gap between tracks
+    /// is not.
+    private func pollSilence() {
+        if programIsSilent() {
+            if silentSince == nil { silentSince = now() }
+            return
+        }
+        if let since = silentSince, now() - since >= silenceEdgeSeconds {
+            takeWindow(reason: .silenceToAudio)
+        }
+        silentSince = nil
+    }
+
     /// Take a window now, unless one is already running. The reason names the
     /// seam that fired; the window itself is the same either way.
     func trigger(_ reason: Trigger) {
-        queue.async { self.takeWindow(reason: reason) }
+        queue.async {
+            switch reason {
+            case .clockJump(let uid):
+                self.handleClockStep(uid: uid)
+            case .reconnect(let uid):
+                // Every step of the re-buffering burst below reaches
+                // `handleClockStep`, and the first passes the rate limit
+                // because nothing has used this speaker's allowance in a
+                // minute — a window on a sink that is not rendering yet, spent
+                // out of the five-window blind budget, and on a Move the burst
+                // marks the link bad on top. The settled window scheduled here
+                // is the one worth taking; the timeout is the backstop for a
+                // reconnect whose window never fires.
+                self.clockStepState[uid, default: ClockStepState()].reconnectSettlingUntil =
+                    self.now() + self.clockStepWindowSpacingSeconds
+                // The pacing clock is still settling for up to
+                // `BTClockStability.stableAfterSeconds` after a reconnect.
+                self.queue.asyncAfter(deadline: .now() + self.reconnectDelaySeconds) {
+                    self.clockStepState[uid]?.reconnectSettlingUntil = nil
+                    self.takeWindow(reason: .reconnect(uid: uid))
+                }
+            default:
+                self.takeWindow(reason: reason)
+            }
+        }
+    }
+
+    /// `queue` only. Rate-limits and storm-classifies one speaker's clock
+    /// steps, then takes a window when the step is allowed through.
+    private func handleClockStep(uid: String) {
+        let t = now()
+        var state = clockStepState[uid] ?? ClockStepState()
+
+        if let settlingUntil = state.reconnectSettlingUntil {
+            guard t >= settlingUntil else {
+                // A reconnecting sink's steps say only that it is still
+                // re-buffering. `lastStepTime` moves anyway, exactly as the
+                // bad-link path moves it, so the storm logic keeps measuring
+                // real quiet on the link.
+                state.lastStepTime = t
+                clockStepState[uid] = state
+                return
+            }
+            state.reconnectSettlingUntil = nil
+        }
+
+        if state.badLink {
+            guard let lastStep = state.lastStepTime,
+                  t - lastStep >= clockStepWindowSpacingSeconds
+            else {
+                // The gap is measured from the PREVIOUS step, suppressed ones
+                // included, so only real quiet on the link clears it. Frozen at
+                // the step that declared the storm, a link stepping every few
+                // seconds cleared on schedule, took an unusable window and
+                // re-stormed, over and over, until the mic went blind.
+                state.lastStepTime = t
+                clockStepState[uid] = state
+                return
+            }
+            state.badLink = false
+            state.stepTimes = []
+            Telemetry.log(.localPlayback, "drift_clock_step_storm_cleared", ["uid": uid])
+        }
+
+        state.stepTimes.append(t)
+        state.stepTimes.removeAll { t - $0 > clockStepWindowSpacingSeconds }
+        state.lastStepTime = t
+
+        if state.stepTimes.count >= clockStepStormCount {
+            state.badLink = true
+            clockStepState[uid] = state
+            Telemetry.log(.localPlayback, "drift_clock_step_storm",
+                          ["uid": uid, "steps": String(state.stepTimes.count)])
+            return
+        }
+
+        if let lastWindow = state.lastWindowTime,
+           t - lastWindow < clockStepWindowSpacingSeconds {
+            clockStepState[uid] = state
+            return
+        }
+
+        clockStepState[uid] = state
+        // The limit counts windows that ran, not attempts: a step skipped
+        // because one was already in flight must not silence this speaker's
+        // next step for a minute and leave a real jump unmeasured.
+        if takeWindow(reason: .clockJump(uid: uid)) {
+            clockStepState[uid]?.lastWindowTime = t
+        }
     }
 
     /// `queue` only.
-    private func takeWindow(reason: Trigger = .periodic) {
+    private func logFields(_ reason: Trigger, _ extra: [String: String]) -> [String: String] {
+        var fields = extra
+        fields["trigger"] = reason.label
+        if let uid = reason.uid { fields["uid"] = uid }
+        return fields
+    }
+
+    /// `queue` only. True when a window actually started.
+    @discardableResult
+    private func takeWindow(reason: Trigger = .periodic) -> Bool {
         let skip: String? = windowInFlight ? "window_in_flight"
             : sampler.isBlind ? "blind"
             : sampler.baselines.isEmpty ? "no_baselines"
             : !permissionIsGranted() ? "no_mic_permission" : nil
         if let skip {
-            Telemetry.log(.localPlayback, "drift_window_skipped",
-                          ["trigger": "\(reason)", "reason": skip])
-            return
+            Telemetry.log(.localPlayback, "drift_window_skipped", logFields(reason, ["reason": skip]))
+            return false
         }
         let recorder = makeRecorder()
         ring.setArmed(true)
         guard let captureRate = try? recorder.start(), captureRate > 0 else {
             ring.setArmed(false)
             Telemetry.log(.localPlayback, "drift_window_skipped",
-                          ["trigger": "\(reason)", "reason": "mic_start_failed"])
-            return
+                          logFields(reason, ["reason": "mic_start_failed"]))
+            return false
         }
         Telemetry.log(.localPlayback, "drift_window_started",
-                      ["trigger": "\(reason)", "seconds": String(format: "%.1f", windowSeconds)])
+                      logFields(reason, ["seconds": String(format: "%.1f", windowSeconds)]))
         windowInFlight = true
         queue.asyncAfter(deadline: .now() + windowSeconds) { [self] in
-            finishWindow(recorder: recorder, captureRate: captureRate)
+            finishWindow(recorder: recorder, captureRate: captureRate, reason: reason)
             ring.setArmed(false)
             windowInFlight = false
         }
+        return true
     }
 
     /// `queue` only.
-    private func finishWindow(recorder: MicProbeRecording, captureRate: Double) {
+    private func finishWindow(recorder: MicProbeRecording, captureRate: Double, reason: Trigger) {
         let capture = recorder.stop()
         // Without the instant of `capture[0]` there is no shared zero to
         // measure a delay from, so the window is dropped rather than guessed
@@ -495,11 +760,20 @@ final class PassiveDriftTracker: @unchecked Sendable {
         let outcome = sampler.analyze(
             reference: reference,
             referenceRate: Double(PCMFormat.airplay.sampleRate),
-            capture: capture, captureRate: captureRate, hostNanos: startNanos)
+            capture: capture, captureRate: captureRate, hostNanos: startNanos,
+            countsTowardBlind: reason != .retry)
         Self.logWindow(outcome, peaks: sampler.lastPeaks, candidates: sampler.lastCandidates,
                        baselines: sampler.baselines)
         if case .observations(let observations) = outcome, !observations.isEmpty {
             onObservations(observations)
+        }
+        if reason != .retry, case .unusable(.noConvincingPeak) = outcome,
+           isNearMiss(sampler.lastCandidates, sampler.correlator) {
+            // The retry's own `drift_window_started` line carries
+            // `trigger: retry`, so nothing extra is logged here.
+            queue.asyncAfter(deadline: .now() + retryDelaySeconds) { [weak self] in
+                self?.takeWindow(reason: .retry)
+            }
         }
         if sampler.isBlind { timer?.cancel(); timer = nil }
     }

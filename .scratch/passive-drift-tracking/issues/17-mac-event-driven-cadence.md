@@ -1,6 +1,6 @@
 # 17 — Listen on events, with one sparse periodic check (decision 18)
 
-Status: planned
+Status: built
 Blocked by: (none)
 
 Replace the 3-minute periodic window with event-driven listening plus one
@@ -35,3 +35,17 @@ per speaker. Tests in PassiveDriftTrackerTests with an injected recorder.
 - 2026-09-14: written from Alec's ruling (decision 18) after live tests 2–4.
   Ticket 12's accumulator (part a) is less pressing under this cadence; its
   near-miss retry (part b) folds in here.
+
+- 2026-09-14: built. `periodicIntervalSeconds` is 1500 s (25 min); the first
+  window stays at 180 s (`firstWindowSeconds`). `.reconnect` waits 15 s inside
+  the tracker before its window (`reconnectDelaySeconds`) so the pacing clock
+  has settled. Silence into audio fires after 60 s of continuous silence
+  (`silenceEdgeSeconds`), polled once a second. A clock step takes at most one
+  window per speaker per 60 s; 10 steps on one speaker inside that span marks
+  it a bad link (`drift_clock_step_storm`) until 60 s pass with no further
+  step (`drift_clock_step_storm_cleared`). A near-miss refusal — a candidate
+  clearing at least two of margin, local score, and agreeing bands
+  (`PassiveDriftSampler.isNearMiss`, whole-tape confidence excluded per
+  decision 15) — gets one retry 30 s later that never itself retries and
+  never counts toward the 5-in-a-row blind limit
+  (`analyze(countsTowardBlind:)`).

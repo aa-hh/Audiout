@@ -4167,7 +4167,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // Each reconnect lands 20–90 ms from last time
                 // (`bt-latency-stability-research-2026-09-05.md`), so this is
                 // one of the moments worth listening at (spec decision 2).
-                self.noteDriftTrigger(.reconnect)
+                self.noteDriftTrigger(.reconnect(uid: id))
             case .unauthorized:
                 self.setConnectionState(.failed(ConnectionFailure(
                     cause: .unknown, detail: "Bluetooth permission not granted")), for: id)
@@ -11108,7 +11108,10 @@ extension NativeBackend {
             // The tracker is built below, so the backend is what the closure
             // can hold on to.
             scheduleVerify: { [weak self] _ in self?.driftTracker?.trigger(.verify) })
-        let tracker = PassiveDriftTracker(ring: ring) { [weak applier] observations in
+        let tracker = PassiveDriftTracker(
+            ring: ring,
+            programIsSilent: { [weak self] in self?.btProgramIsSilent() ?? false }
+        ) { [weak applier] observations in
             applier?.handle(observations)
         }
         driftApplier = applier

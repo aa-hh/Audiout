@@ -1,7 +1,114 @@
 # Handoff — passive drift tracking (roadmap 085)
 
-Written 2026-09-13, 12:40 UTC; rewritten 21:00 UTC after live test 2. Read `spec.md` (13 decisions) and the ticket
-files in `issues/` first; this file is only where things stand.
+Rewritten 2026-09-14 19:10 UTC. **Read this section first; everything below it
+is the chronology and only needed when a detail here is not enough.** Then
+`spec.md` (18 decisions) and the ticket files in `issues/`.
+
+## Start here
+
+**Where the code is.** Mac repo branch `claude/bluetooth-latency-drift-6c2d59`,
+worktree `.claude/worktrees/bluetooth-latency-drift-6c2d59`, head `2e7ec3ba`,
+pushed, level with main as of `b8d74312`, NOT merged. It pins audiout-shared
+`from: "0.15.0"` (shared main `6dc9e34`). The tap fix (PR #200) is ON MAIN.
+Rules: never a bare `swift` command in this repo (use `scripts/run-tests.sh
+--filter`, `scripts/build.sh`, `scripts/make-app.sh`); `swift test` is fine
+inside `~/Projects/audiout-shared`; hold `scripts/livetest.sh acquire` before
+building or launching the dev id; never compile on this Mac while a live
+music block plays (load 138 broke the capture in live test 4).
+
+**What is true now (verified live 2026-09-14).**
+- The sender's dropped capture cycles were the main cause of "drift": fixed
+  (PR #200, `NativeCaptureCoordinator.handleBuffer` pads unarmed holes ≤ 50 ms;
+  `tap_feed_gap cause:"dropped_cycle"` in the log; `write_cadence_drift`
+  `netDriftTotalSeconds` must stay near 0 — if it climbs, stop and look there).
+- With that fixed, two Sonos Moves held their separation within ~1 ms over 90
+  min of music; the tracker had nothing to correct. Remaining jumps are
+  event-shaped: a relaunch/reconnect re-rolled one link by ~10 ms; a bad link
+  shows as `bt_clock_jump` storms (one Move, every second) and a speaker
+  power-cycle clears it.
+- The measurement (shared 0.15.0: whitening 0.7, gates margin ≥ 1.2 / local
+  ≥ 2.4, four sub-bands 3-of-4, per-speaker second-peak search) accepted three
+  live windows within 1 ms at normal level and read a labelled +40 ms trim jump
+  as 39–41 ms offline. The old plain filter never resolved a peak.
+- Corrections have NEVER been exercised correctly live. The only live
+  corrections ever fired were wrong ones (the merged-peak bug, now fixed:
+  decision 14). Verify-before-apply is the default (decision 17).
+- Decision 18 (Alec, 2026-09-14): the mic listens on events + one sparse
+  periodic check per 20–30 min, not every 3 min. Not built yet (ticket 17).
+
+**Owed, in order, with what each needs.**
+
+1. **Ticket 17 — event-driven cadence** (`issues/17-mac-event-driven-cadence.md`).
+   Code: `PassiveDriftTracker` in `AudioutCore/Sources/AudioutCore/PassiveDriftSampler.swift`
+   (`periodicIntervalSeconds`, `trigger(_:)`, `takeWindow`, the blind counter);
+   triggers arrive via `NativeBackend.noteDriftTrigger` from
+   `OwnToneBackend.swift` (clock steps, ~line 1010) and wherever reconnect /
+   silence→audio edges live (`btProgramIsSilent`, sink rebuild causes). Rate-limit
+   clock-step triggers (one per speaker per 60 s; a storm = bad link, log it,
+   do not window). Tests: `PassiveDriftTrackerTests` with the injected recorder.
+2. **The live test that proves the loop** — never done. With Alec home: dev
+   build, both Moves selected (the hook `audiout.devSelectOnLaunch` is set on
+   this Mac and reselects them after any relaunch), music at his normal level
+   (Spotify volume 85, playlist `spotify:playlist:37i9dQZF1E35FDDWYtEKBa`),
+   then turn ONE Move off and on. Expect: `bt_sink_rebuild` / reconnect trigger
+   → a window → two peaks (one moved) → `drift_correction_started` for that
+   speaker only after a second agreeing window → `drift_correction_landed` →
+   Alec hears it land. Watch with:
+   `tail -n 0 -F ~/Library/Logs/Audiout/telemetry.jsonl | grep --line-buffered -E '"evt":"(drift_window_result|drift_correction|drift_verify|bt_clock_jump|tap_feed_gap)' | awk '{print substr($0,1,600); fflush()}'`
+   (`cut` buffers; end pipelines in awk with fflush). Window log format:
+   `candidates`/`peaks` = `delay@score/local/margin`; `result` ∈ observations |
+   aligned | merged | rebaselined | unusable | blind.
+3. **Ruling owed (Alec): sub-band agreement 3-of-4 vs 2-of-4.** At 3-of-4 the
+   quietest real window (2026-09-13 21:16:33, capture −48 dBFS) is refused
+   although both gates pass; at 2-of-4 it is accepted and no garbage window
+   passes. Constant lives in audiout-shared `PassiveDriftCorrelator.swift`
+   (the ticket-11 commit `3b37ecf` names it); the fixture test pins the
+   numbers. Changing it = a shared 0.15.x tag + Mac pin bump.
+4. **Tickets 12, 14, 15** (`issues/`). 12's accumulator is less pressing under
+   decision 18 (its near-miss retry folded into 17); 14 (clock-step
+   calibration + rate limit) overlaps 17 — build 17 first, then 14's fit
+   script over `bt_clock_jump` + `drift_window_result` (needs `hostNanos` on the
+   result line to join them); 15 (ambient-noise slice) is cheap and last.
+5. **audiout-remote pin bump** to shared 0.15.0 (ProbeKit only; the protocol
+   is unchanged, so no `CompanionProto.version` bump). Repo `aa-hh/audiout-remote`.
+6. **Before this branch merges to main:** `windows-2026-09-13/` and
+   `windows-2026-09-14/` hold 63 MB of raw Float32 windows whose `-meta.json`
+   carry the Moves' Bluetooth addresses, in a PUBLIC GPL repo. Options: drop
+   them from history before merge (the compact fixtures in audiout-shared keep
+   only expected delays), or move them to a private location. Alec decides.
+7. **Flaky test:** `aSlewLeavesNoStepBiggerThanTheProgrammesOwn`
+   (`DriftCorrectionApplierTests.swift` ~503, timing-sensitive, 1.5× tolerance)
+   failed once and passed on rerun twice on 2026-09-14. Guard 4 may refuse a
+   commit on it; `AUDIOUT_FULL_SUITE=1 bash scripts/run-tests.sh` warms the pass
+   cache. Fix or de-flake before merge.
+8. Ticket 06 (field logging: the PostHog events need Alec's approval; local
+   lines are all in place) and ticket 07 (iPhone re-sync button) untouched.
+
+**Traps a fresh agent will hit.**
+- The live-test slot may be held by a finished session; `scripts/livetest.sh
+  status` names the worktree; `done` from that worktree frees it.
+- Every reselect of a speaker restarts the window timer; the first window is
+  3 min after tracking turns on.
+- A wrong correction persists to `~/Library/Application Support/
+  com.audiout.Audiout.dev/bt-sync-trims.json` (`latencyMs`); edit it back with
+  the app quit. The production app's store is a different file.
+- Windows are dumped to `~/Library/Logs/Audiout/drift-windows/` while the
+  defaults key `audiout.driftDumpWindows` is set (it is, on this Mac); the
+  harness is `dev/drift-window-analysis.py` (needs a venv with numpy+scipy;
+  `--fixtures` reads the shared repo's compact fixtures).
+- With the app quit, macOS's default output is a Bluetooth Move; the app makes
+  its own "Audiout Dev" device the default when it runs. If `stream_health`
+  lines are absent while music plays, the app is not receiving audio at all.
+- A Mac left alone sleeps once `caffeinate` expires; empty mic windows
+  (`drift_window_dropped empty_capture`) for hours meant the Mac was asleep,
+  not a bug.
+- Claude's shell cannot use Bluetooth (no usage entry in the helper app), not
+  even through Terminal; `blueutil` only works from Alec's own terminal.
+- Third Bluetooth devices (AirPods) on the radio raised the dropped-cycle rate
+  from one per hour to one per 40 s before the fix; keep them off during
+  timing tests anyway.
+
+---
 
 ## What this is
 

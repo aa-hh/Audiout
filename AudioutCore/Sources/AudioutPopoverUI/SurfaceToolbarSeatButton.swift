@@ -27,15 +27,23 @@ import AudioutSharedUI
 /// no current screen at all.
 enum SurfaceToolbarSeat {
 
+    /// The strip's ONE height: the capsule's, and the slot Pin is centred in.
+    /// `size` and `capsuleSize` are both derived from it, so nothing in the
+    /// strip can drift out of step with the pill.
+    static let stripHeight: CGFloat = 34
+
     /// Pin's seat: a true CIRCLE, so equal on both sides (owner's call,
-    /// 2026-09-05 — "make the pin button a circle instead of an oval"). This
-    /// number is also the strip's ONE height: `size` and `capsuleSize` are both
-    /// derived from it, so the pill and Pin cannot stand at different heights.
+    /// 2026-09-05 — "make the pin button a circle instead of an oval"), as wide
+    /// as a TAB is tall (owner, 2026-09-14: "the exact same size as the radius
+    /// of the highlighted button in the rail, rather than filling the size of
+    /// the rail itself"). It was `stripHeight` until then, which made Pin a
+    /// circle the size of the capsule's outer shell rather than of the buttons
+    /// inside it.
     ///
     /// Pin being round while the tabs are stadiums reverses the one-shape rule
     /// the strip was built under; `SurfaceToolbarController`'s header carries
     /// what changed and what did not.
-    static let pinDiameter: CGFloat = 34
+    static var pinDiameter: CGFloat { size.height }
 
     /// Pin's seat, square so `seatCornerRadius` rounds it to a circle.
     static var pinSize: NSSize { NSSize(width: pinDiameter, height: pinDiameter) }
@@ -47,7 +55,7 @@ enum SurfaceToolbarSeat {
     /// The HEIGHT is derived, never typed: a tab is the capsule minus the
     /// padding above and below it, so the concentric arithmetic in
     /// `seatCornerRadius` cannot drift out of step with the pill.
-    static var size: NSSize { NSSize(width: 30, height: pinDiameter - capsulePadding * 2) }
+    static var size: NSSize { NSSize(width: 30, height: stripHeight - capsulePadding * 2) }
 
     /// The corner every HIGHLIGHT is cut at, in every state — the current
     /// tab's, a hovered tab's, a pressed tab's, and Pin's while pinned: HALF
@@ -112,10 +120,9 @@ enum SurfaceToolbarSeat {
     /// The capsule holding all three tabs with every one of them COLLAPSED —
     /// the floor its width can never go below, and its height in every state.
     ///
-    /// That height is `pinDiameter`, because `size.height` is derived from it:
-    /// the capsule and Pin are the SAME height, which is what the owner asked
-    /// for on 2026-09-05 ("make the component slightly bigger to meet the same
-    /// height as the pin button"). It was 32 pt against a 26 pt Pin before.
+    /// That height is `stripHeight`, because `size.height` is derived from it.
+    /// Pin no longer stands the full height of it (owner, 2026-09-14): the
+    /// circle is a tab's height, centred in the same strip.
     static var capsuleSize: NSSize {
         NSSize(width: size.width * 3 + capsulePadding * 2,
                height: size.height + capsulePadding * 2)
@@ -164,12 +171,14 @@ enum SurfaceToolbarSeat {
     /// The glyph size inside a tab.
     static let glyphPointSize: CGFloat = 15
 
-    /// Pin's glyph only. Two points under the tabs' 15: the pushpin glyph is
-    /// markedly taller than it is wide, so at 15 it left less air above and
-    /// below than beside it and the circle read as an oval (owner,
-    /// 2026-09-05: "make the glyph slightly smaller"). 13 restores an even
-    /// ring of padding.
-    static let pinGlyphPointSize: CGFloat = 13
+    /// Pin's glyph only, and well under the tabs' 15: the pushpin is markedly
+    /// taller than it is wide, so the same point size DRAWS bigger. Measured
+    /// off a real render at @2x, a 15 pt tab glyph stands 30-31 px tall while
+    /// the pushpin at 13 stood 38 — visibly the largest thing in the strip.
+    /// 10.5 puts it at the tabs' own drawn height (owner, 2026-09-14: shrink
+    /// it to the size of the glyphs in the rail), which also leaves the even
+    /// ring of padding the circle was given on 2026-09-05.
+    static let pinGlyphPointSize: CGFloat = 10.5
 
     /// How much stronger every seat draws while Increase Contrast is on. One
     /// factor over the whole ladder, so the three strengths keep their
@@ -336,9 +345,9 @@ final class SurfaceToolbarSeatButton: NSButton {
     /// `SurfaceToolbarSeat.tabWidth` can be written into it.
     private var widthConstraint: NSLayoutConstraint!
 
-    /// The seat's height. Held because Pin is taller than a tab: it is a
-    /// circle the full height of the capsule, while a tab is the capsule minus
-    /// its padding.
+    /// The seat's height. Held because Pin sets both its sides at once: it is
+    /// a circle as tall as a tab and exactly as wide, where a tab keeps the
+    /// collapsed tab width and grows it for a name.
     private var heightConstraint: NSLayoutConstraint!
 
     /// The name's own width, pinned to the clamped measurement so the letters

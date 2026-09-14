@@ -51,7 +51,8 @@ Interface, four functions:
 - `resolve(env, key) → LicenseRow | TrialRow | null`. Looks in `licenses`, then
   `trials`. Every existing route that does a `licenses` lookup calls this instead.
 - `verdict(row: TrialRow, now) → ValidateBody`. Active: `{status:"active", key,
-  max_major, kind:"trial", expires_at}`. Converted: the *paid* row's validate body
+  max_major, kind:"trial", expires_at, companion_token}` (the token so a
+  trialist can pair the iPhone remote like a buyer; added 2026-09-06). Converted: the *paid* row's validate body
   (`key` = paid key). Expired: `{status:"revoked", key, reason:"trial_expired",
   expires_at}`.
 - `markConverted(env, trialKey, paidKey, now)`. Called by `fulfil` when

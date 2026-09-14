@@ -320,7 +320,17 @@ app running it was "Audiout Dev". **Open question for the next session with
 the owner present:** does the app on this build receive audio and mic at all
 when launched with the system default output on a Bluetooth Move? Reproduce
 by launching from that state and watching `stream_health` + one window.
-Blocks 9–10 unusable; ~13 min of the music budget unused. Slot released.
+Blocks 9–10 unusable that afternoon. **Retried 15:53–16:05 UTC with the owner
+home (Mac awake): audio and mic both fine — the afternoon failure was the
+Mac's sleep state, not the build.** Gates build, 4 windows: merged 530.2
+(score 8.9 / local 5.8 / margin 1.2), refused too-periodic, merged 529.3
+(3.0 / 2.5 / 1.3), merged 529.3 (6.6 / 4.5 / 1.5). Three accepted windows
+within 1 ms of each other and one honest refusal; still one lobe per window
+because the per-speaker second-peak search is on `claude/drift-subband`, not
+in this build. Music budget fully used. Slot released, app quit.
+
+PR for the tap fix: https://github.com/aa-hh/Audiout/pull/200 (open, mergeable,
+no CI checks in this repo; owner merges).
 
 ## Logging (local only, `~/Library/Logs/Audiout/telemetry.jsonl`)
 

@@ -171,12 +171,14 @@ enum SurfaceToolbarSeat {
     /// The glyph size inside a tab.
     static let glyphPointSize: CGFloat = 15
 
-    /// Pin's glyph only. Two points under the tabs' 15: the pushpin glyph is
-    /// markedly taller than it is wide, so at 15 it left less air above and
-    /// below than beside it and the circle read as an oval (owner,
-    /// 2026-09-05: "make the glyph slightly smaller"). 13 restores an even
-    /// ring of padding.
-    static let pinGlyphPointSize: CGFloat = 13
+    /// Pin's glyph only, and well under the tabs' 15: the pushpin is markedly
+    /// taller than it is wide, so the same point size DRAWS bigger. Measured
+    /// off a real render at @2x, a 15 pt tab glyph stands 30-31 px tall while
+    /// the pushpin at 13 stood 38 — visibly the largest thing in the strip.
+    /// 10.5 puts it at the tabs' own drawn height (owner, 2026-09-14: shrink
+    /// it to the size of the glyphs in the rail), which also leaves the even
+    /// ring of padding the circle was given on 2026-09-05.
+    static let pinGlyphPointSize: CGFloat = 10.5
 
     /// How much stronger every seat draws while Increase Contrast is on. One
     /// factor over the whole ladder, so the three strengths keep their

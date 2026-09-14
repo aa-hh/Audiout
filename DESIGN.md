@@ -24,6 +24,7 @@ colors:
   ring: "#7FB4C4"
   failure: "#D9564A"
   muted: "#8E93F0"
+  equalizer: "#41B07A"
   partyRampDeep: "#FF90E9"
   meter: "#464C55"
   socket: "#2A2E33"
@@ -296,6 +297,33 @@ desaturated steel and 29° off `permissionSystemAudio`'s blue, measured ΔE
 any of the four cells. Two candidates were rejected on that measurement: an
 azure at 213° came within ΔE 6.4 of `permissionSystemAudio`, and a violet at
 257° within ΔE 6.5 of `permissionLocalNetwork`.
+
+**The Equalizer-Hue Fence.** One token, `Tokens.Color.equalizer` (`#41B07A`
+dark / `#1E7E52` light), means one thing: this speaker's curve is not flat.
+Its only consumer is the device row's engaged Equalizer door
+(`DeviceRowView.updateEQButton()`), which draws the door's enclosing square in
+this hue with the two band sliders left as holes. It is not a general "on"
+green, not a success tone, and not available to a second control that happens
+to be engaged; `DeviceRowMutedStateTests` fails if a second call site appears
+in `Sources/`. The door wore `goldText` until 2026-09-04, and gold means
+"audio is flowing here" everywhere else — including the live wash the same row
+draws behind the door — so one hue was carrying two ideas. Green was
+unspoken for, and stays 84–86° of hue off `muted`, the control 6 pt to its
+right, and 9° off `permissionUsageStats`, which is fenced to onboarding and
+never shares a screen with a device row.
+
+The two engaged marks are tuned **as a pair**, not to a floor each. They are
+0.875 pt outlines 6 pt apart, so a weight difference between them reads as one
+control being engaged harder than the other: OKLCH lightness 0.680 against
+`muted`'s 0.698 in dark, 0.528 against its 0.533 in light, the green a hair
+under its sibling in both. Measured against every ground a device row can put
+behind the door — `canvas`, `panel`, `raised`, the gold live wash, the hover
+wash — dark runs 7.27 / 6.60 / 5.79 / 5.23 / 5.23 and light runs 4.84 on the
+flat grounds, 4.24 live, 4.00 hovered, against a 3:1 non-text floor. The
+values it replaced (`#227950` / `#1C6543`, 2026-09-05) were measured on `panel`
+alone: the dark half sat at 2.66:1 on the live wash — the ground a shaped
+speaker spends most of its time on — and the light half, at chroma 0.091, read
+as near-black rather than as green.
 
 **The Instrument Ground Rule (Mac-only).** The alignment wizard's stage
 (`stagePlate`, `stageRule`, `stageInk`, `wireCore`, `fuseWhite`) authors the

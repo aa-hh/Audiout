@@ -214,6 +214,16 @@ extension SerializedSharedState {
                              [("canvas", canvas), ("panel", panel), ("raised", raised)]
                                  + rowWashGrounds(appearanceName)
                          }),
+            // The Equalizer door is the mute mark's sibling, 6 pt from it and
+            // drawn the same way, so it is measured on the same grounds. It
+            // had NO entry here until 2026-09-14, which is why `#227950` could
+            // ship at 2.66:1 on the live wash — the same omission this file
+            // already records against `gold`, repeated one token later.
+            ContrastEntry(name: "equalizer", token: Tokens.Color.equalizer, floor: 3.0,
+                         groundsFor: { appearanceName in
+                             [("canvas", canvas), ("panel", panel), ("raised", raised)]
+                                 + rowWashGrounds(appearanceName)
+                         }),
             // `panel` is a BACKDROP everywhere else; on the mute pill it is the
             // ink the slashed glyph is knocked out in, so it carries a glyph
             // floor there and nowhere else.

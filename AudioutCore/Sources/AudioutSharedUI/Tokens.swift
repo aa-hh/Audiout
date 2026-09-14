@@ -443,28 +443,44 @@ public enum Tokens {
         /// engaged. A door that is dark for some other reason — unavailable,
         /// unsupported — keeps its at-rest ink.
         ///
-        /// TWO VALUES, deepened for light, the same reversal ``muted`` took
-        /// on 2026-09-05 and for the same reason: the mark is a 0.875 pt
-        /// outline now, not a filled square, and a stroke that thin does not
-        /// carry a mid-range ratio. Owner's call from the live build ("the
-        /// emerald is invisible as well"), picked from a rendered ladder.
+        /// TWO VALUES, and they are a PAIR with ``muted`` rather than two
+        /// inks tuned apart. Both marks are 0.875 pt outlines 6 pt from each
+        /// other, so a weight difference between them reads as one control
+        /// being engaged harder than the other. Matched in OKLCH lightness:
+        /// dark L 0.680 against `muted`'s 0.698, light L 0.528 against its
+        /// 0.533 — the green sits a hair under its sibling in both, which is
+        /// the intended order (mute is the kill switch, the door is not).
         ///
         /// WHY THIS GREEN. The door used to wear ``goldText``, and gold means
         /// "audio is flowing here" everywhere else in the app — one hue
         /// carrying two ideas on a row that also draws the gold live wash
-        /// behind it. Green is unspoken for. `#227950` was chosen over six
-        /// other candidates on separation: it sits 85° of hue off ``muted``,
-        /// which is the control 6 pt to its right, and 11° off
+        /// behind it. Green is unspoken for. It stays 84-86 degrees of hue
+        /// off ``muted``, the control 6 pt to its right, and 9 degrees off
         /// ``permissionUsageStats``, which is fenced to onboarding and never
         /// shares a screen with a device row.
         ///
-        /// CONTRAST RATIONALE (measured on `panel`, floor 3:1). Dark keeps
-        /// `#227950` at 3.70:1 and does not move. Light goes to `#1C6543`,
-        /// 6.73:1 against the 5.14:1 it replaced — one step down the ladder,
-        /// which was as far as the hue could deepen before it stops reading
-        /// as green at all and starts reading as near-black.
+        /// CONTRAST RATIONALE (floor 3:1, measured on every ground a device
+        /// row can put behind the door — `canvas`, `panel`, `raised`, the
+        /// gold live wash and the hover wash). Dark `#41B07A`: 7.27 canvas /
+        /// 6.60 panel / 5.79 raised / 5.23 on both washes. Light `#1E7E52`:
+        /// 4.84 on the flat grounds, 4.24 live, 4.00 hovered.
+        ///
+        /// WHAT THESE REPLACE, and why the old pair could not stay. `#227950`
+        /// dark / `#1C6543` light were measured on `panel` alone and the dark
+        /// half was recorded here at 3.70:1, which it never was — `#227950`
+        /// measures 3.35:1 on `panel`, 2.94:1 on `raised` and 2.66:1 on the
+        /// live wash. A speaker with a shaped curve is usually a speaker
+        /// that is playing, so the door spent most of its engaged life on the
+        /// one ground where it failed the non-text floor hardest. Nothing
+        /// caught it because this token had no entry in
+        /// `TokenContrastMatrixTests` at all; it has one now, on `muted`'s
+        /// own ground set. The light half was a second failure of a different
+        /// kind: at OKLCH chroma 0.091 it read as near-black rather than as
+        /// green, which is the wall the old note recorded as "as far as the
+        /// hue could deepen". Lifting it to L 0.528 / chroma 0.111 buys the
+        /// hue back and still leaves a third more than the floor asks.
         public static var equalizer: NSColor {
-            warmDynamic(name: "equalizer", dark: 0x227950, light: 0x1C6543)
+            warmDynamic(name: "equalizer", dark: 0x41B07A, light: 0x1E7E52)
         }
 
         /// The COOL body ink — the same second-rung job as ``label2`` on a

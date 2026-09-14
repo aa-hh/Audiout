@@ -72,6 +72,13 @@ import AudioutSharedUI
 /// The same review made the capsule as tall as Pin and made the tab highlight
 /// concentric with the pill; both fall out of that one rule.
 ///
+/// **AMENDED 2026-09-14: Pin's circle is a TAB's size, not the strip's.** Pin
+/// stood the full 34 pt height of the capsule, so its circle matched the pill's
+/// outer shell rather than the three buttons inside it. `pinDiameter` is now
+/// `size.height` — a tab's own 28 — and the circle sits centred in the same
+/// strip. Only the seat shrank; the strip, the capsule and the tabs are
+/// untouched.
+///
 /// The `NSToolbar` itself stays: it is the window's one unified title-bar
 /// strip, and it supplies the system material and the Reduce Transparency
 /// handling that the retired custom header had to hand-build.
@@ -501,7 +508,9 @@ final class SurfaceBrandView: NSView {
             wordmark.leadingAnchor.constraint(equalTo: leadingAnchor),
             wordmark.trailingAnchor.constraint(equalTo: trailingAnchor),
             wordmark.centerYAnchor.constraint(equalTo: centerYAnchor),
-            heightAnchor.constraint(equalToConstant: SurfaceToolbarSeat.pinDiameter),
+            // The strip's height, not Pin's: Pin is a circle the size of a tab
+            // button, centred in a taller strip (owner, 2026-09-14).
+            heightAnchor.constraint(equalToConstant: SurfaceToolbarSeat.stripHeight),
         ])
     }
 

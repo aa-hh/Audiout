@@ -62,3 +62,9 @@ ClashDisplay-*
 # Impeccable ships a platform-specific engine binary; the launcher fetches
 # and checksum-verifies the right one per platform.
 .claude/skills/impeccable/scripts/bin/
+
+# Other agent harnesses' local config, generated per machine and never shared.
+# They sit at the repo root, so an uncommitted copy makes the tree dirty and
+# scripts/release.sh refuses to cut a release.
+.agents/
+.codex/

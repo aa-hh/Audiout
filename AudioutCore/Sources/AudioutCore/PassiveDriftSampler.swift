@@ -92,19 +92,23 @@ public struct PassiveDriftSampler: Sendable {
     public private(set) var isBlind = false
 
     public var searchHalfWidthMs = PassiveDriftSampler.defaultSearchHalfWidthMs
+    /// Every threshold as the correlator ships it, `minPeakToSidelobe`
+    /// included.
+    ///
+    /// NEVER lower `minPeakToSidelobe` here to let a quiet arrival through.
+    /// A true arrival in a living room scores 2.5 to 2.9 against the whole
+    /// tape, so 2.3 looks like the fix and is the trap: at 2.3 the app
+    /// accepted a peak that was no arrival within three windows and moved a
+    /// speaker that had not moved (live test 2026-09-13, spec decision 15).
+    /// The whole-tape background is mostly lags nowhere near the peak, so it
+    /// cannot see the music's own next repeat, which is exactly what that
+    /// false arrival was. The two gates the correlator applies beside it
+    /// measure where the competition actually sits: the peak's height over
+    /// the nearest rival lag, and its score against the 300 ms either side of
+    /// it. Those are what a marginal window has to clear.
     public var correlator = PassiveDriftCorrelator()
 
-    /// The correlator ships with 3, the gap its synthetic scenes leave between
-    /// a true arrival (3–6) and none (~0.9). In a living room the built-in
-    /// mic's own noise sits in that background: at normal listening level a
-    /// true arrival on its baseline scored 2.5–2.9 and only 60 dBA reached
-    /// 3.1–3.3, while the best garbage a refused window offered scored 1.9
-    /// (live test 2026-09-13, ruling: 2.3 for this build). The search window
-    /// and the suitability checks still do most of the refusing.
-    static let minPeakToSidelobe = 2.3
-
     public init(baselines: [Baseline] = []) {
-        correlator.minPeakToSidelobe = Self.minPeakToSidelobe
         self.baselines = baselines
     }
 
@@ -119,9 +123,10 @@ public struct PassiveDriftSampler: Sendable {
     /// field log. Empty until one lands.
     public private(set) var lastPeaks: [DriftPeak] = []
     /// The strongest peak inside each baseline's search window from the most
-    /// recent window, whatever its confidence — for the field log, so a refused
-    /// window shows whether the arrival scored just under the threshold or was
-    /// outside the search. Empty when the slice was refused before correlating.
+    /// recent window, clearing none of the correlator's gates. For the field
+    /// log, so a refused window shows which gate stopped it, or that the
+    /// arrival was outside the search at all. Empty when the slice was refused
+    /// before correlating.
     public private(set) var lastCandidates: [DriftPeak] = []
 
     /// Start listening again after a blind spell — a re-sync or a new
@@ -537,7 +542,14 @@ final class PassiveDriftTracker: @unchecked Sendable {
     static func logWindow(_ outcome: PassiveDriftSampler.Outcome, peaks: [DriftPeak],
                           candidates: [DriftPeak],
                           baselines: [PassiveDriftSampler.Baseline]) {
-        let format = { (p: DriftPeak) in String(format: "%.1fms@%.2f", p.delayMs, p.confidence) }
+        // delay@score/local/margin: the whole-tape score, then the two numbers
+        // that decide whether the peak is an arrival or the music's own next
+        // repeat. Reading a refused window means reading all three, so all
+        // three go in the line.
+        let format = { (p: DriftPeak) in
+            String(format: "%.1fms@%.1f/%.1f/%.1f",
+                   p.delayMs, p.confidence, p.localConfidence, p.margin)
+        }
         var fields: [String: String] = [
             "peaks": peaks.map(format).joined(separator: ","),
             "candidates": candidates.map(format).joined(separator: ","),

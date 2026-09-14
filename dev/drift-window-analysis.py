@@ -22,19 +22,22 @@ plus capture level stats (clipping is the first thing to rule out).
 It also reads the fixtures committed in audiout-shared
 (`Tests/ProbeKitTests/Fixtures`: Int16 at one rate, made by that repo's
 `tools/make-drift-fixtures.py`), so both sides consume the identical samples,
-and checks its own plain-filter answer against the Swift correlator's. Run the
+and checks its own replica of the correlator against the Swift one. Run the
 `PassiveDriftFixtureTests` suite in the shared repo with that repo's own test
 command (not this repo's), keep its output, and pass it here:
 
   python3 dev/drift-window-analysis.py --fixtures <shared>/Tests/ProbeKitTests/Fixtures \
       --swift /tmp/swift-fixture-run.txt
 
-The `swift` row is a line-by-line replica of PassiveDriftCorrelator's plain
-path: the same causal 300 Hz-8 kHz biquads, the same FFT correlation, the same
-background taken over the search range with a 250 ms reverb shadow, and the
-same parabolic peak. The rows above it are left as they were, zero-phase
-filtering and whole-tape background included, because they answer research
-questions rather than parity ones.
+The `sw` columns are a line-by-line replica of what PassiveDriftCorrelator
+reports for one window: the same causal 300 Hz-8 kHz biquads, the same FFT
+correlation whitened by the reference's own magnitude spectrum at exponent
+0.7, the same background taken over the search range with a 250 ms reverb
+shadow, the same parabolic peak, and the same two extra numbers the correlator
+gates on: its local score, and its margin over the nearest rival lag, which
+this file has always called p2p. The research rows in the per-window report
+are left as they were, zero-phase filtering and whole-tape background
+included, because they answer research questions rather than parity ones.
 
 Usage: python3 dev/drift-window-analysis.py [dir] [--search 120] [--band 300 8000]
        python3 dev/drift-window-analysis.py --fixtures <dir> [--swift <log>]
@@ -94,7 +97,11 @@ def probekit_score(corr, peak_idx, rate, shadow_s=SHADOW_S, limit=None):
     return corr[peak_idx] / sidelobe if sidelobe > 0 else float("inf")
 
 
-def local_score(corr, peak_idx, rate, half_s=0.3):
+def local_score(corr, peak_idx, rate, half_s=0.3, limit=None):
+    """Peak over the background within ±`half_s` of it. `limit` bounds that
+    neighbourhood to the lags the correlator itself searches, as the Swift side
+    does; the research rows pass nothing and keep the whole tape."""
+    corr = corr[:limit] if limit is not None else corr
     lo, hi = max(0, peak_idx - int(half_s * rate)), min(len(corr), peak_idx + int(half_s * rate))
     excl = max(1, int(EXCLUSION_S * rate))
     idx = np.arange(lo, hi)
@@ -120,6 +127,8 @@ def best_in_window(corr, expected_ms, rate):
 
 SWIFT_BAND = (300.0, 8000.0)          # PassiveDriftCorrelator.timingBandLow/HighHz
 SWIFT_SHADOW_S = 0.25                 # SyncProbeCorrelator.reverbShadowSeconds
+SWIFT_WHITENING = 0.7                 # PassiveDriftCorrelator.whiteningExponent
+RIVAL_SEPARATION_S = 0.003            # SyncProbeCorrelator.peakMarginSeparationSeconds
 
 
 def swift_band_limit(x, rate, lo=SWIFT_BAND[0], hi=SWIFT_BAND[1]):
@@ -142,24 +151,34 @@ def swift_band_limit(x, rate, lo=SWIFT_BAND[0], hi=SWIFT_BAND[1]):
     return y
 
 
-def swift_plain(ref, cap, rate, expected_ms, search_ms=None):
-    """PassiveDriftCorrelator's plain path: best lag in the window, and its score."""
+def swift_candidate(ref, cap, rate, expected_ms, search_ms=None):
+    """One window as PassiveDriftCorrelator reports it: best lag, whole-tape
+    score, local score, and margin over the nearest rival lag."""
+    nan4 = (float("nan"),) * 4
     search_ms = SEARCH_MS if search_ms is None else search_ms
     probe, rec = swift_band_limit(ref, rate), swift_band_limit(cap, rate)
     search_count = len(rec) - len(probe) + 1
     if search_count < 2:
-        return float("nan"), float("nan")
+        return nan4
     n = 1 << (len(rec) + len(probe) - 1).bit_length()
-    corr = np.fft.irfft(np.conj(np.fft.rfft(probe, n)) * np.fft.rfft(rec, n), n)
+    # SyncProbeCorrelator.whiteningWeights: each bin divided by the reference's
+    # own magnitude raised to the exponent, with a floor at 5% of the
+    # reference's mean power so a near-empty bin divides by the floor rather
+    # than by nothing. `power` holds half the spectrum, so the mean over the
+    # whole one counts every bin but DC and Nyquist twice.
+    R, C = np.fft.rfft(probe, n), np.fft.rfft(rec, n)
+    power = np.abs(R) ** 2
+    eps = (power[0] + power[-1] + 2 * power[1:-1].sum()) / n * 0.05
+    corr = np.fft.irfft(np.conj(R) * C / (power + eps) ** (SWIFT_WHITENING / 2), n)
 
     half = round(search_ms / 1000 * rate)
     centre = round(expected_ms / 1000 * rate)
     lo, hi = max(0, centre - half), min(search_count, centre + half + 1)
     if lo >= hi:
-        return float("nan"), float("nan")
+        return nan4
     peak = lo + int(np.argmax(corr[lo:hi]))
     if corr[peak] <= 0:
-        return float("nan"), float("nan")
+        return nan4
 
     offset = float(peak)
     if 0 < peak < search_count - 1:
@@ -168,7 +187,12 @@ def swift_plain(ref, cap, rate, expected_ms, search_ms=None):
         if denom < 0:
             offset += 0.5 * (cm - cp) / denom
     score = probekit_score(corr, peak, rate, shadow_s=SWIFT_SHADOW_S, limit=search_count)
-    return offset / rate * 1000, score
+    local = local_score(corr, peak, rate, limit=search_count)
+    # The best lag in the same window that is not this arrival.
+    rivals = corr[lo:hi][np.abs(np.arange(lo, hi) - peak) > max(1, int(RIVAL_SEPARATION_S * rate))]
+    best_rival = np.max(rivals) if rivals.size else 0.0
+    margin = corr[peak] / best_rival if best_rival > 0 else float("inf")
+    return offset / rate * 1000, score, local, margin
 
 
 def load_fixtures(directory):
@@ -200,25 +224,29 @@ def parity(directory, swift_path, tolerance=0.05):
     """Both sides over the identical samples. False if any score is further apart
     than `tolerance`."""
     swift = read_swift_output(swift_path) if swift_path else {}
-    print(f"{'fixture':>34} {'label':>7} {'expected':>9} {'py lag':>7} {'sw lag':>7} "
-          f"{'py score':>9} {'sw score':>9} {'diff':>7}")
+    print(f"{'fixture':>26} {'label':>6} {'exp':>7} {'py lag':>7} {'sw lag':>7} "
+          f"{'py score':>8} {'sw score':>8} {'diff':>7} "
+          f"{'py local':>8} {'sw local':>8} {'py p2p':>7} {'sw marg':>7}")
     agreed = True
     for fixture, ref, cap in load_fixtures(directory):
         rate = float(fixture["captureRate"])
         rows = swift.get(fixture["name"], [])
         for i, baseline in enumerate(fixture["baselines"]):
             expected = float(baseline["expectedDelayMs"])
-            lag, score = swift_plain(ref, cap, rate, expected)
+            lag, score, local, p2p = swift_candidate(ref, cap, rate, expected)
             row = rows[i] if i < len(rows) else None
+            head = (f"{fixture['name']:>26} {fixture['label']:>6} {expected:7.1f} "
+                    f"{lag:7.2f}")
             if row is None:
-                print(f"{fixture['name']:>34} {fixture['label']:>7} {expected:9.2f} "
-                      f"{lag:7.2f} {'-':>7} {score:9.4f} {'-':>9} {'-':>7}")
+                print(f"{head} {'-':>7} {score:8.4f} {'-':>8} {'-':>7} "
+                      f"{local:8.2f} {'-':>8} {p2p:7.2f} {'-':>7}")
                 continue
             diff = abs(score - row["score"]) / row["score"] if row["score"] else float("inf")
             agreed &= diff <= tolerance
-            print(f"{fixture['name']:>34} {fixture['label']:>7} {expected:9.2f} "
-                  f"{lag:7.2f} {row['lag']:7.2f} {score:9.4f} {row['score']:9.4f} "
-                  f"{diff*100:6.2f}%{'' if diff <= tolerance else ' OVER'}")
+            print(f"{head} {row['lag']:7.2f} {score:8.4f} {row['score']:8.4f} "
+                  f"{diff*100:6.2f}% {local:8.2f} {row['local']:8.2f} "
+                  f"{p2p:7.2f} {row['margin']:7.2f}"
+                  f"{'' if diff <= tolerance else '  OVER'}")
     if swift:
         print("scores agree within 5%" if agreed else "SCORES DISAGREE by more than 5%")
     return agreed

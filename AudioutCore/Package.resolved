@@ -1,13 +1,12 @@
 {
-  "originHash" : "dd0d75df9d92a25e36d9b8b462926a42c1643f4f7eb950589a093efb02f450dd",
+  "originHash" : "9813b8718dce91763c93955689055ddce22d9005a1208e707249436119c3de4c",
   "pins" : [
     {
       "identity" : "audiout-shared",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/aa-hh/audiout-shared.git",
       "state" : {
-        "revision" : "9730aaf9f6d7515f6f71881187fcf3c45f6e0a9d",
-        "version" : "0.14.0"
+        "revision" : "69903095e7ad434f5d4f362eb95f8b9c84f9579e"
       }
     },
     {

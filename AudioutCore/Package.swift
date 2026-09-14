@@ -168,14 +168,23 @@ let package = Package(
         // so the closed-source iPhone companion can link the same code, and a
         // repository of its own because SwiftPM cannot depend on a package
         // that lives inside a subdirectory of another repo — and the phone
-        // now lives in `aa-hh/audiout-remote`. Pinned by range: this app
-        // chooses when to follow the shared package, and `Package.resolved`
-        // records which tag it is actually on. 0.6.0 is the floor because
-        // that is the tag `CompanionMessage.alignmentApplied` landed in, and
-        // the companion server sends it on every applied measurement; 0.13.0
-        // added the emitter field's `settled` block, which the alignment
-        // stage draws; 0.14.0 added the stage look table.
-        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.14.0"),
+        // now lives in `aa-hh/audiout-remote`. Normally pinned by range: this
+        // app chooses when to follow the shared package, and
+        // `Package.resolved` records which tag it is actually on. 0.6.0 is the
+        // floor because that is the tag `CompanionMessage.alignmentApplied`
+        // landed in, and the companion server sends it on every applied
+        // measurement; 0.13.0 added the emitter field's `settled` block, which
+        // the alignment stage draws; 0.14.0 added the stage look table.
+        //
+        // Right now it is a commit pin instead, so a build can go in front of
+        // real speakers before the shared work is tagged: the tip of the shared
+        // repo's `claude/drift-gates` branch, which whitens the passive-drift
+        // correlation and makes a peak clear two more gates before it counts:
+        // its height over the nearest rival lag, and its score against the
+        // lags right around it. Put `from: "0.15.0"` back once that branch is
+        // merged and tagged.
+        .package(url: "https://github.com/aa-hh/audiout-shared.git",
+                 revision: "69903095e7ad434f5d4f362eb95f8b9c84f9579e"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

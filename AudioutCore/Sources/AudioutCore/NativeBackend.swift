@@ -475,6 +475,57 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// has a single producer, and a second run would replace the first's
     /// staging under it. `btTrimLock`.
     private var companionAlignmentRun: CompanionAlignmentRun?
+    /// Nil outside an audition; otherwise only these two outputs keep their gain.
+    /// All reads and writes are on stateQueue.
+    private var companionTickParticipants: Set<String>?
+    /// Audio callbacks take only btTrimLock for this snapshot, never stateQueue.
+    private var companionProgramSuppressed = false
+    private enum CompanionAuditionPhase { case preparing, active, cleaning }
+    /// What the engine actually CONFIRMED for one restoration output, and
+    /// whether that write succeeded. A push answered `false` because a newer
+    /// write superseded it never lands here: it is not this value completing.
+    private struct CompanionRestoreCompletion { let value: Double; let ok: Bool }
+    private struct CompanionAuditionLifecycle {
+        let id: UUID
+        let targetID: String
+        let referenceID: String
+        let preparationDeadline: Date
+        let leaseDeadline: Date
+        var phase: CompanionAuditionPhase = .preparing
+        var startCompletions: [@Sendable (String?) -> Void]
+        var stopCompletions: [@Sendable (String?) -> Void] = []
+        /// Every hold this preparation issued and is still waiting on: engine
+        /// outputs, the local setter, and each Bluetooth and Cast sink write.
+        /// A key is removed ONCE, so a repeat acknowledgement can never stand
+        /// in for a hold that has not answered.
+        var preparationPending: Set<String> = []
+        /// The first output whose hold failed, recorded in the same lock turn
+        /// that moves the phase to `.cleaning` — so a success landing after it
+        /// cannot start clicks.
+        var preparationFailure: String?
+        /// `beginCompanionAuditionCleanup` runs exactly once. Separate from
+        /// `phase` because a failed preparation marks `.cleaning` under the
+        /// lock before the cleanup itself can be scheduled.
+        var cleanupStarted = false
+        /// The audition's ONE persistence of the by-ear nudge. The ordinary
+        /// drain and backend `stop()` race to claim it; only the winner writes,
+        /// and a phone Clear claims it to stop either of them writing at all.
+        var trimPersistenceClaimed = false
+        var cleanupPrepared = false
+        var localRestored = false
+        var restoreOutputs: [OutputID: String] = [:]
+        var restoreCompleted: [OutputID: CompanionRestoreCompletion] = [:]
+        /// Fired ONCE per start request, on main, after the reservation is
+        /// actually gone. Independent of the one-shot start/stop replies: a
+        /// stop that refuses on its four-second timeout does not consume it.
+        var releaseCallbacks: [@Sendable () -> Void] = []
+        var cleanupDeadline: Date?
+    }
+    /// The .tick run remains reserved during preparation and restoration.
+    private var companionAudition: CompanionAuditionLifecycle?
+    var test_companionAuditionPreparationSeconds: TimeInterval = 4
+    var test_companionAuditionLeaseSeconds: TimeInterval = 600
+    var test_companionAuditionStopSeconds: TimeInterval = 4
 
     /// The device an A/B receipt is playing for, if one is. Its own field
     /// rather than another ``CompanionAlignmentRun/Phase``: a receipt takes no
@@ -1779,15 +1830,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // is audibly playing == the documented silent-buffer condition.
                 AudioDiag.tick("perAppBuffer:\(bundleID)", detail: "peak=\(Self.diagFloatPeak(buffer))")
             }
-            self?.routeMixer.handleBuffer(bundleID: bundleID, buffer: buffer)
-            self?.leveledInjector.handleBuffer(bundleID: bundleID, buffer: buffer)
-            self?.localPlaybackEngine?.receive(buffer: buffer, for: bundleID)
+            guard let self else { return }
+            let suppressed = self.btTrimLock.withLock { self.companionProgramSuppressed }
+            let delivered = suppressed
+                ? CapturedBuffer(channelData: buffer.channelData.map { Data(count: $0.count) },
+                                 frameCount: buffer.frameCount, pts: buffer.pts)
+                : buffer
+            self.routeMixer.handleBuffer(bundleID: bundleID, buffer: delivered)
+            self.leveledInjector.handleBuffer(bundleID: bundleID, buffer: delivered)
+            self.localPlaybackEngine?.receive(buffer: delivered, for: bundleID)
         }
         routeMixer.onDestinationSetsChanged = { [weak self] sets in
             self?.handleDestinationSetsChanged(sets)
         }
         routeMixer.onMixedBuffer = { [weak self] mixed in
             guard let self else { return }
+            let pcm = self.btTrimLock.withLock { self.companionProgramSuppressed }
+                ? Data(count: mixed.pcm.count) : mixed.pcm
             // `engine.write` is nonisolated + fire-and-forget — safe from the
             // mixer's queue with no hop. streamID is ≥ 1 (0 is the legacy path).
             if AudioDiag.isEnabled {
@@ -1805,11 +1864,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             let feed = self.btPerAppFeedsLock.withLock { self.btPerAppFeeds[mixed.streamID] }
             if feed?.feedsEngine ?? true {
                 self.engine.write(
-                    pcm: mixed.pcm, streamId: UInt32(mixed.streamID), pts: mixed.pts)
+                    pcm: pcm, streamId: UInt32(mixed.streamID), pts: mixed.pts)
             }
             if let feed {
                 NativeCaptureCoordinator.fanOutToSyncedLocal(
-                    mixed.pcm, pts: mixed.pts, into: feed, resampler: feed.resampler)
+                    pcm, pts: mixed.pts, into: feed, resampler: feed.resampler)
             }
             // BACKPRESSURE VISIBILITY (diagnostic): the engine's write guard can
             // silently DROP audio once a stream's un-drained backlog hits its cap
@@ -2367,6 +2426,35 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     public func stop() {
+        let shuttingAudition = btTrimLock.withLock { () -> (UUID, [@Sendable (String?) -> Void],
+                                                            (targetID: String, ms: Double)?)? in
+            guard var audition = companionAudition else { return nil }
+            audition.phase = .cleaning
+            audition.cleanupPrepared = false
+            let callbacks = audition.startCompletions + audition.stopCompletions
+            audition.startCompletions = []
+            audition.stopCompletions = []
+            companionAudition = audition
+            companionProgramSuppressed = false
+            // Shutdown is an ordinary exit: quitting mid-audition must not be
+            // the one way to lose what the user nudged by ear. Claimed here,
+            // written below with the lock released.
+            let persist = claimCompanionAuditionTrimLocked(id: audition.id)
+            return (audition.id, callbacks, persist)
+        }
+        // Before the engine teardown Task below: a value written after the
+        // sessions are gone would still be correct, but the store write is what
+        // the next launch reads, so it happens while the backend is still whole.
+        if let persist = shuttingAudition?.2 {
+            setBTSyncTrim(persist.ms, forDevice: persist.targetID, persist: true)
+        }
+        if shuttingAudition != nil {
+            setBTWizardTickActive(false, btTargetDeviceID: nil, btReferenceDeviceID: nil)
+            endBTWizardRun()
+            DispatchQueue.main.async {
+                shuttingAudition?.1.forEach { $0("Audiout is shutting down.") }
+            }
+        }
         // Stop delivering levels; the whole-system capture tap itself is torn down by
         // the ORDERED `captureControlQueue` stop below — NOT eagerly here (C1). An
         // eager caller-thread `captureCoordinator?.stop()` did a `queue.sync` + HAL
@@ -2431,7 +2519,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // `stopAndWait(timeout:)` on the terminate path — otherwise process exit
         // outruns the RTSP/RTP teardown and the AirPlay sessions are cut un-gracefully.
         let engine = self.engine
-        let engineStop = Task { await engine.stop() }
+        let engineStop = Task {
+            await engine.stop()
+            if let id = shuttingAudition?.0 {
+                // Teardown is the other way the reservation can honestly end:
+                // the engine sessions are gone, so no late write can reach a new
+                // one. Only now may the lifetime callbacks fire.
+                let released = self.btTrimLock.withLock { () -> [@Sendable () -> Void] in
+                    guard let current = self.companionAudition, current.id == id else { return [] }
+                    self.companionAudition = nil
+                    if self.companionAlignmentRun?.id == id { self.companionAlignmentRun = nil }
+                    return current.releaseCallbacks
+                }
+                if !released.isEmpty {
+                    DispatchQueue.main.async { released.forEach { $0() } }
+                }
+            }
+        }
 
         stateQueue.async {
             self.engineStopTask = engineStop
@@ -2507,6 +2611,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.btConnectingDeadlines.removeAll()
             // W3: drop the wizard's hold too — the sinks are going away.
             self.btWizardHeldUIDs.removeAll()
+            self.companionTickParticipants = nil
             self.suspended = false
             // Seamless handoff T3.8-3: reset the release flag and stop/nil the
             // watcher so no orphan `log` child survives quit (AppDelegate's quit
@@ -2549,6 +2654,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.added.removeAll()
             self.volumeInFlight.removeAll()
             self.volumePending.removeAll()
+            self.lastVolumeOutcome.removeAll()
+            // Invalidate the write pipeline itself, not just its bookkeeping: a
+            // completion still in flight against the torn-down engine would
+            // otherwise land on a restarted backend and clear a NEW push's
+            // in-flight marker.
+            self.volumeGeneration &+= 1
             self.expectedSelected.removeAll()
             self.desiredOn.removeAll()
             self.converging.removeAll()
@@ -2946,6 +3057,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Main down would quieten the AirPlay speakers while the Mac's own output
     /// stayed at full — the master control visibly failing on the commonest setup.
     private var syncedLocalGain: Float {   // on stateQueue
+        if let companionTickParticipants,
+           !companionTickParticipants.contains(Self.localDeviceID) { return 0 }
         let level = known[Self.localDeviceID]?.volume ?? 100
         let main = weOwnSystemVolume ? Double(mainOutGain) / 100.0 : 1.0
         return Float(main * Double(groupGain) / 100.0 * Double(level.clampedToVolume) / 100.0)
@@ -2962,6 +3075,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// its own device, which the Mac's system volume never touches. On
     /// `stateQueue`.
     private func btSinkGain(forUID uid: String) -> Float {   // on stateQueue
+        if let companionTickParticipants, !companionTickParticipants.contains(uid) { return 0 }
         if btWizardHeldUIDs.contains(uid) || muted.contains(uid) { return 0 }
         // A hardware-controlled uid's device term is on the speaker itself
         // (BT-HW-VOL), so the software product carries Main alone.
@@ -2973,10 +3087,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Push one uid's composed gain to the live sink (a no-op before the sink
     /// exists — `applyBTSinkTransition` seeds the same product on arm). Reads on
     /// `stateQueue`, then hops to `captureControlQueue`, which owns `btSink`.
-    private func pushBTSinkGainLocked(_ uid: String) {   // on stateQueue
+    ///
+    /// `completion` fires on `captureControlQueue` once the write has actually
+    /// reached the sink. The audition's preparation is the only caller that
+    /// passes one: without it the hold was fire-and-forget, and clicks could
+    /// start before another speaker's gain had landed — so music burst out of a
+    /// speaker that was supposed to be silent for the audition.
+    private func pushBTSinkGainLocked(_ uid: String,
+                                      completion: (@Sendable () -> Void)? = nil) {   // on stateQueue
         let gain = btSinkGain(forUID: uid)
         captureControlQueue.async { [weak self] in
             self?.btSink?.setGain(gain, forDeviceUID: uid)
+            completion?()
         }
     }
 
@@ -3108,6 +3230,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// protocol's `SET_VOLUME muted` flag, so nothing else can fight over the
     /// knob and no receiver-side mute can outlive the session. On `stateQueue`.
     private func castLevel(forID id: String) -> Double {   // on stateQueue
+        if let companionTickParticipants, !companionTickParticipants.contains(id) { return 0 }
         if muted.contains(id) { return 0 }
         return masterGainFraction * Double((known[id]?.volume ?? 100).clampedToVolume) / 100.0
     }
@@ -3116,10 +3239,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the channel is live — the manager stores it and sends it on connect).
     /// Reads on `stateQueue`, then hops to `captureControlQueue`, which owns the
     /// manager's transitions. On `stateQueue`.
-    private func pushCastLevelLocked(_ id: String) {   // on stateQueue
+    /// `completion` fires on `captureControlQueue` once the level has reached
+    /// the manager — see ``pushBTSinkGainLocked(_:completion:)`` for why the
+    /// audition's preparation waits for it.
+    private func pushCastLevelLocked(_ id: String,
+                                     completion: (@Sendable () -> Void)? = nil) {   // on stateQueue
         let level = castLevel(forID: id)
         captureControlQueue.async { [weak self] in
             self?.castOutputManager?.setLevel(level, forDevice: id)
+            completion?()
         }
     }
 
@@ -9551,6 +9679,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///   an already-compressed dB value, and the same Main setting would mean two
     ///   different things on the two protocols.
     private func engineVolume(forID id: String, uiVolume: Int) -> Double {
+        if let companionTickParticipants, !companionTickParticipants.contains(id) {
+            return known[id]?.supportsAirPlay2 == false ? -1.0 : 0.0
+        }
         let fraction = Double(uiVolume.clampedToVolume) / 100.0 * masterGainFraction
         let isAirPlay2 = known[id]?.supportsAirPlay2 ?? true
         // ZERO MEANS SILENT, from whichever stage produced it — Main, the group, or
@@ -9604,7 +9735,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// for one id (e.g. a fast slider drag) collapses to at most one extra call
     /// once the in-flight one completes, instead of replaying every
     /// intermediate value.
-    private var volumePending: [OutputID: (engineValue: Double, id: String, uiLevel: Int?)] = [:]
+    private var volumePending: [OutputID: (engineValue: Double, id: String, uiLevel: Int?,
+                                          completion: (@Sendable (Bool) -> Void)?)] = [:]
+    private var lastVolumeOutcome: [OutputID: Bool] = [:]
+    /// Bumped by ``stop()``. A volume completion carrying an older generation
+    /// belongs to a torn-down engine session: its output ids and the in-flight
+    /// bookkeeping now belong to a new one, so it must touch nothing.
+    private var volumeGeneration = 0
 
     /// The last UI-domain level per device id the ENGINE actually acknowledged —
     /// the only level we know a receiver really has. A refused push falls back to
@@ -9620,13 +9757,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// (a mute's silence push, a master-gain re-push, a seed while muted) — a
     /// throw then re-emits the last confirmed level so the fader never lies about
     /// where a speaker is. On `stateQueue`.
-    private func pushVolume(_ outputID: OutputID, id: String, engineValue: Double, uiLevel: Int?) {
+    private func pushVolume(_ outputID: OutputID, id: String, engineValue: Double, uiLevel: Int?,
+                            completion: (@Sendable (Bool) -> Void)? = nil) {
         guard !volumeInFlight.contains(outputID) else {
-            volumePending[outputID] = (engineValue, id, uiLevel)
+            let previous = volumePending.updateValue(
+                (engineValue, id, uiLevel, completion), forKey: outputID)
+            previous?.completion?(false)
             return
         }
         volumeInFlight.insert(outputID)
-        issueVolumePush(outputID, id: id, engineValue: engineValue, uiLevel: uiLevel)
+        issueVolumePush(outputID, id: id, engineValue: engineValue, uiLevel: uiLevel,
+                        completion: completion)
     }
 
     /// Issue one `setVolume` call and, on completion, either chase the latest
@@ -9639,8 +9780,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// write (there is no poll loop by design — the engine's completions ARE
     /// ground truth), so it doubles as the fader's bound: success records
     /// ``confirmedVolume``, a throw snaps the model back to it.
-    private func issueVolumePush(_ outputID: OutputID, id: String, engineValue: Double, uiLevel: Int?) {
+    private func issueVolumePush(_ outputID: OutputID, id: String, engineValue: Double, uiLevel: Int?,
+                                 completion: (@Sendable (Bool) -> Void)?) {
         let engine = self.engine
+        let generation = volumeGeneration
         Task { [weak self] in
             var failed = false
             do {
@@ -9650,6 +9793,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             guard let self else { return }
             self.stateQueue.async {
+                guard generation == self.volumeGeneration else { return }
                 if let uiLevel {
                     if failed {
                         // Revert only when this push's optimistic echo is still
@@ -9670,10 +9814,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     }
                 }
                 if let next = self.volumePending.removeValue(forKey: outputID) {
-                    self.issueVolumePush(outputID, id: next.id, engineValue: next.engineValue, uiLevel: next.uiLevel)
+                    self.issueVolumePush(outputID, id: next.id, engineValue: next.engineValue,
+                                         uiLevel: next.uiLevel, completion: next.completion)
                 } else {
                     self.volumeInFlight.remove(outputID)
                 }
+                self.lastVolumeOutcome[outputID] = !failed
+                completion?(!failed)
+                self.checkCompanionAuditionDrainLocked()
             }
         }
     }
@@ -10984,6 +11132,23 @@ public protocol BTOutputControlling: AnyObject {
     /// the nudges reached.
     func setCompanionAlignmentTick(targetID: String, active: Bool) -> String?
 
+    /// Start the speaker clicks for `targetID` against `referenceID`.
+    ///
+    /// Two callbacks, deliberately separate. `completion` is this REQUEST's
+    /// one-shot reply — nil for a start that took, a sentence for one that did
+    /// not. `onReleased` is the lifetime signal: it fires once, on main, after
+    /// this Mac's reservation is actually gone, whether that came from a real
+    /// drain, from backend teardown, or from a start that was refused before it
+    /// claimed anything. A stop that refuses on its four-second timeout does
+    /// NOT consume it, because the reservation is still held at that point.
+    func startCompanionAlignmentAudition(
+        targetID: String, referenceID: String,
+        onReleased: @escaping @Sendable () -> Void,
+        completion: @escaping @Sendable (String?) -> Void)
+    func endCompanionAlignmentAudition(
+        targetID: String,
+        completion: @escaping @Sendable (String?) -> Void)
+
     /// Move `targetID`'s trim by `deltaMs`, live and immediately — never
     /// coalesced, because a dropped detent is a nudge the user made and did
     /// not get.
@@ -11034,6 +11199,27 @@ extension BTOutputControlling {
     public func setCompanionAlignmentTick(targetID: String, active: Bool) -> String? {
         "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
     }
+    /// For callers with no interest in the lifetime signal.
+    public func startCompanionAlignmentAudition(
+        targetID: String, referenceID: String,
+        completion: @escaping @Sendable (String?) -> Void
+    ) {
+        startCompanionAlignmentAudition(targetID: targetID, referenceID: referenceID,
+                                        onReleased: {}, completion: completion)
+    }
+    public func startCompanionAlignmentAudition(
+        targetID: String, referenceID: String,
+        onReleased: @escaping @Sendable () -> Void,
+        completion: @escaping @Sendable (String?) -> Void
+    ) {
+        DispatchQueue.main.async {
+            completion("This Mac can't play speaker clicks right now. Reconnect the speaker and try again.")
+            onReleased()
+        }
+    }
+    public func endCompanionAlignmentAudition(
+        targetID: String, completion: @escaping @Sendable (String?) -> Void
+    ) { DispatchQueue.main.async { completion(nil) } }
     public func nudgeCompanionAlignmentTrim(targetID: String, deltaMs: Double) -> String? {
         "This Mac can't measure speaker timing right now. Reconnect the speaker and try again."
     }
@@ -11371,6 +11557,11 @@ extension NativeBackend: BTOutputControlling {
     }
 
     public func cancelCompanionAlignmentProbe(targetID: String) {
+        if let audition = btTrimLock.withLock({ companionAudition }),
+           audition.targetID == targetID {
+            endCompanionAlignmentAudition(targetID: targetID, completion: { _ in })
+            return
+        }
         if let run = takeCompanionProbeRun({ $0.targetUID == targetID }) {
             abandonCompanionProbe(run)
         }
@@ -11508,7 +11699,490 @@ extension NativeBackend: BTOutputControlling {
                         correctedMs: Swift.max(0, keptMs) - applied)
     }
 
+    public func startCompanionAlignmentAudition(
+        targetID: String, referenceID: String,
+        onReleased: @escaping @Sendable () -> Void,
+        completion: @escaping @Sendable (String?) -> Void
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                completion("This Mac can't play speaker clicks right now.")
+                onReleased()
+                return
+            }
+            let now = Date()
+            let claimed = self.btTrimLock.withLock { () -> (UUID?, String?) in
+                if var current = self.companionAudition {
+                    guard current.targetID == targetID, current.referenceID == referenceID else {
+                        return (nil, "This Mac is already measuring a speaker. Finish that first.")
+                    }
+                    switch current.phase {
+                    case .preparing:
+                        current.startCompletions.append(completion)
+                        // A joined start is answered by the audition it joined,
+                        // and retired with it.
+                        current.releaseCallbacks.append(onReleased)
+                        self.companionAudition = current
+                        return (nil, nil)
+                    case .active:
+                        current.releaseCallbacks.append(onReleased)
+                        self.companionAudition = current
+                        return (nil, "")
+                    case .cleaning:
+                        return (nil, "This Mac is restoring the speaker levels. Try again shortly.")
+                    }
+                }
+                guard self.companionAlignmentRun == nil, self.companionDemoTargetUID == nil,
+                      !self.btWizardTickActive else {
+                    return (nil, "This Mac is already measuring a speaker. Finish that first.")
+                }
+                let trim = self.btTrimsByUID[targetID] ?? 0
+                let run = CompanionAlignmentRun(targetUID: targetID, phase: .tick,
+                                                staggerMs: 0, trimAtSessionStartMs: trim,
+                                                liveTrimMs: trim)
+                self.companionAlignmentRun = run
+                self.companionProgramSuppressed = true
+                var lifecycle = CompanionAuditionLifecycle(
+                    id: run.id, targetID: targetID, referenceID: referenceID,
+                    preparationDeadline: now.addingTimeInterval(self.test_companionAuditionPreparationSeconds),
+                    leaseDeadline: now.addingTimeInterval(self.test_companionAuditionLeaseSeconds),
+                    startCompletions: [completion])
+                lifecycle.releaseCallbacks = [onReleased]
+                self.companionAudition = lifecycle
+                return (run.id, nil)
+            }
+            guard let id = claimed.0 else {
+                if let reason = claimed.1 {
+                    let refused = !reason.isEmpty
+                    completion(refused ? reason : nil)
+                    // Refused before any reservation was claimed, so there is
+                    // nothing to wait for: retire this request right behind its
+                    // own reply. A start that JOINED an existing audition took
+                    // the other branch and is retired with that audition.
+                    if refused { onReleased() }
+                }
+                return
+            }
+            let preparationSeconds = self.test_companionAuditionPreparationSeconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + preparationSeconds) { [weak self] in
+                self?.failCompanionAuditionPreparation(id: id,
+                    reason: "Starting the speaker clicks took too long. Try again.")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + self.test_companionAuditionLeaseSeconds) {
+                [weak self] in self?.beginCompanionAuditionCleanup(id: id,
+                    reason: "The speaker click session ended.")
+            }
+            self.stateQueue.async {
+                self.companionTickParticipants = [targetID, referenceID]
+                let btUIDs = Array(self.btSelectedUIDs)
+                let castIDs = Array(self.castSelectedIDs)
+                let holds = self.outputIDs.filter {
+                    self.added.contains($0.key) && $0.key != targetID && $0.key != referenceID
+                }
+                // Name every hold BEFORE any of them can answer. The Bluetooth
+                // and Cast writes belong here as much as the engine ones do:
+                // they reach their sinks on `captureControlQueue`, so clicks
+                // starting on an engine-only count began while another speaker
+                // was still at its old gain.
+                var required = Set(holds.keys)
+                required.insert(Self.localDeviceID)
+                required.formUnion(btUIDs)
+                required.formUnion(castIDs)
+                let preparing = self.btTrimLock.withLock { () -> Bool in
+                    guard var audition = self.companionAudition, audition.id == id,
+                          audition.phase == .preparing else { return false }
+                    audition.preparationPending = required
+                    self.companionAudition = audition
+                    return true
+                }
+                guard preparing else { return }
+                for uid in btUIDs {
+                    self.pushBTSinkGainLocked(uid) { [weak self] in
+                        self?.noteCompanionAuditionPreparation(id: id, success: true, output: uid)
+                    }
+                }
+                for castID in castIDs {
+                    self.pushCastLevelLocked(castID) { [weak self] in
+                        self?.noteCompanionAuditionPreparation(id: id, success: true, output: castID)
+                    }
+                }
+                self.pushSyncedLocalGain()
+                for (outputID, engineID) in holds.map({ ($0.value, $0.key) }) {
+                    self.pushVolume(outputID, id: engineID,
+                                    engineValue: self.engineVolume(forID: engineID,
+                                        uiVolume: self.known[engineID]?.volume ?? 0),
+                                    uiLevel: nil) { [weak self] success in
+                        self?.noteCompanionAuditionPreparation(id: id, success: success,
+                                                                 output: engineID)
+                    }
+                }
+                if let local = self.localPlaybackEngine {
+                    local.setOutputSuppressed(true) { [weak self] in
+                        self?.noteCompanionAuditionPreparation(id: id, success: true,
+                                                                 output: Self.localDeviceID)
+                    }
+                } else {
+                    self.noteCompanionAuditionPreparation(id: id, success: true,
+                                                           output: Self.localDeviceID)
+                }
+            }
+        }
+    }
+
+    /// One hold has answered.
+    ///
+    /// Idempotent per output — the key comes out of ``CompanionAuditionLifecycle
+    /// /preparationPending`` exactly once, so a repeat acknowledgement stands in
+    /// for nothing. A failure is recorded AND the audition revoked to
+    /// `.cleaning` in the same lock turn, which is what makes a failure that
+    /// lands before activation win: every later success finds a phase that is
+    /// no longer `.preparing`. The cleanup itself is scheduled once, outside
+    /// the lock.
+    /// The engine value `id` is owed RIGHT NOW. On `stateQueue`, and only
+    /// meaningful once ``companionTickParticipants`` has been cleared.
+    ///
+    /// A muted speaker is owed silence, not the level in ``stashedVolume`` —
+    /// the stash is what an UNMUTE would restore, so pushing it at cleanup
+    /// turned a muted speaker back on. Reads state, writes none: the mute and
+    /// the stored fader both stay exactly as the user left them.
+    private func currentCompanionRestoreValue(forID id: String) -> Double {   // on stateQueue
+        if muted.contains(id) {
+            return known[id]?.supportsAirPlay2 == false ? -1.0 : Self.engineVolume(fraction: 0)
+        }
+        return engineVolume(forID: id, uiVolume: stashedVolume[id] ?? known[id]?.volume ?? 0)
+    }
+
+    /// Claim the audition's single trim persistence and hand back what to
+    /// write, or `nil` when it is already claimed or the nudges never moved.
+    ///
+    /// MUST be called with `btTrimLock` held, and the caller MUST write outside
+    /// it — ``setBTSyncTrim(_:forDevice:persist:)`` takes the same lock.
+    private func claimCompanionAuditionTrimLocked(
+        id: UUID
+    ) -> (targetID: String, ms: Double)? {   // btTrimLock held
+        guard var audition = companionAudition, audition.id == id,
+              !audition.trimPersistenceClaimed else { return nil }
+        audition.trimPersistenceClaimed = true
+        companionAudition = audition
+        guard let run = companionAlignmentRun, run.id == id, run.phase == .tick,
+              run.liveTrimMs != run.trimAtSessionStartMs else { return nil }
+        return (run.targetUID, run.liveTrimMs)
+    }
+
+    private func noteCompanionAuditionPreparation(id: UUID, success: Bool, output: String) {
+        enum Next { case ignore, refuse, activate }
+        let next = btTrimLock.withLock { () -> Next in
+            guard var audition = companionAudition, audition.id == id,
+                  audition.phase == .preparing,
+                  audition.preparationPending.remove(output) != nil else { return .ignore }
+            if !success {
+                audition.preparationFailure = output
+                audition.phase = .cleaning
+                companionAudition = audition
+                return .refuse
+            }
+            companionAudition = audition
+            return audition.preparationPending.isEmpty ? .activate : .ignore
+        }
+        switch next {
+        case .ignore:
+            break
+        case .refuse:
+            DispatchQueue.main.async { [weak self] in
+                self?.beginCompanionAuditionCleanup(id: id, reason: nil)
+            }
+        case .activate:
+            DispatchQueue.main.async { [weak self] in self?.activateCompanionAudition(id: id) }
+        }
+    }
+
+    private func failCompanionAuditionPreparation(id: UUID, reason: String) {
+        let preparing = btTrimLock.withLock {
+            companionAudition?.id == id && companionAudition?.phase == .preparing
+        }
+        if preparing { beginCompanionAuditionCleanup(id: id, reason: reason) }
+    }
+
+    private func companionAuditionPairIsLive(targetID: String, referenceID: String) -> Bool {
+        stateQueue.sync {
+            func live(_ id: String) -> Bool {
+                guard let device = known[id], device.isAvailable else { return false }
+                if id == Self.localDeviceID { return selectedDevicesQuery?(id) ?? false }
+                if device.isBluetooth { return btSelectedUIDs.contains(id) }
+                if device.isCast { return castSelectedIDs.contains(id) }
+                return expectedSelected.contains(id) && added.contains(id)
+            }
+            return targetID != referenceID && live(targetID) && live(referenceID)
+        }
+    }
+
+    private func activateCompanionAudition(id: UUID) {
+        guard let current = btTrimLock.withLock({ companionAudition }),
+              current.id == id, current.phase == .preparing else { return }
+        // The live-pair read waits on `stateQueue`; no lock is held across it.
+        guard Date() < current.preparationDeadline,
+              companionAuditionPairIsLive(targetID: current.targetID,
+                                          referenceID: current.referenceID) else {
+            failCompanionAuditionPreparation(id: id,
+                reason: "The speaker pair changed before clicks could start.")
+            return
+        }
+        // Claim `.active` BEFORE the synchronous pacer start, re-reading the
+        // same state and the ORIGINAL deadline. A hold failure that landed
+        // while the pair read was waiting has already moved this audition to
+        // `.cleaning`, and it must win: otherwise clicks start over a speaker
+        // that was never quieted, and the refusal arrives too late to stop it.
+        enum Claim { case claimed([@Sendable (String?) -> Void]), expired, gone }
+        let claim = btTrimLock.withLock { () -> Claim in
+            guard var audition = companionAudition, audition.id == id,
+                  audition.phase == .preparing, audition.preparationFailure == nil,
+                  audition.preparationPending.isEmpty else { return .gone }
+            guard Date() < audition.preparationDeadline else { return .expired }
+            audition.phase = .active
+            let callbacks = audition.startCompletions
+            audition.startCompletions = []
+            companionAudition = audition
+            return .claimed(callbacks)
+        }
+        switch claim {
+        case .gone:
+            return
+        case .expired:
+            failCompanionAuditionPreparation(id: id,
+                reason: "Starting the speaker clicks took too long. Try again.")
+        case .claimed(let callbacks):
+            setBTWizardTickActive(true, btTargetDeviceID: nil, btReferenceDeviceID: nil)
+            callbacks.forEach { $0(nil) }
+            monitorCompanionAuditionPair(id: id)
+        }
+    }
+
+    private func monitorCompanionAuditionPair(id: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self, let audition = self.btTrimLock.withLock({ self.companionAudition }),
+                  audition.id == id, audition.phase == .active else { return }
+            if !self.companionAuditionPairIsLive(targetID: audition.targetID,
+                                                 referenceID: audition.referenceID) {
+                self.beginCompanionAuditionCleanup(id: id,
+                    reason: "The speaker pair changed during the clicks.")
+            } else {
+                self.monitorCompanionAuditionPair(id: id)
+            }
+        }
+    }
+
+    public func endCompanionAlignmentAudition(
+        targetID: String, completion: @escaping @Sendable (String?) -> Void
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { completion(nil); return }
+            let outcome = self.btTrimLock.withLock { () -> (UUID?, String?) in
+                guard var audition = self.companionAudition else { return (nil, nil) }
+                guard audition.targetID == targetID else {
+                    return (nil, "A different speaker click session is running.")
+                }
+                if let deadline = audition.cleanupDeadline, Date() >= deadline {
+                    return (nil, "Restoring the speaker levels took too long. Try again shortly.")
+                }
+                audition.stopCompletions.append(completion)
+                self.companionAudition = audition
+                return (audition.id, nil)
+            }
+            if let id = outcome.0 { self.beginCompanionAuditionCleanup(id: id, reason: nil) }
+            else { completion(outcome.1) }
+        }
+    }
+
+    /// Put the room back and retire the audition. Runs exactly ONCE per
+    /// audition, gated on ``CompanionAuditionLifecycle/cleanupStarted`` rather
+    /// than on the phase: a failed preparation has already marked `.cleaning`
+    /// under the lock, and its cleanup still has to run.
+    private func beginCompanionAuditionCleanup(id: UUID, reason: String?) {
+        let started = btTrimLock.withLock { () -> ([@Sendable (String?) -> Void], String?)? in
+            guard var audition = companionAudition, audition.id == id,
+                  !audition.cleanupStarted else { return nil }
+            audition.cleanupStarted = true
+            audition.phase = .cleaning
+            audition.cleanupDeadline = Date().addingTimeInterval(test_companionAuditionStopSeconds)
+            let callbacks = audition.startCompletions
+            audition.startCompletions = []
+            companionAudition = audition
+            // A recorded hold failure names the refusal, whichever caller got
+            // here first — a stop arriving in the same turn must not relabel it.
+            let refusal = audition.preparationFailure
+                .map { "Couldn't quiet \($0) for the speaker clicks." } ?? reason
+            return (callbacks, refusal)
+        }
+        guard let startCallbacks = started?.0 else { return }
+        let refusal = started?.1
+        startCallbacks.forEach { $0(refusal ?? "The speaker clicks were stopped.") }
+        setBTWizardTickActive(false, btTargetDeviceID: nil, btReferenceDeviceID: nil)
+        endBTWizardRun()
+        btTrimLock.withLock { companionProgramSuppressed = false }
+        DispatchQueue.main.asyncAfter(deadline: .now() + test_companionAuditionStopSeconds) { [weak self] in
+            self?.timeoutCompanionAuditionStop(id: id)
+        }
+        stateQueue.async {
+            self.companionTickParticipants = nil
+            for uid in self.btSelectedUIDs { self.pushBTSinkGainLocked(uid) }
+            for castID in self.castSelectedIDs { self.pushCastLevelLocked(castID) }
+            self.pushSyncedLocalGain()
+            let outputs = self.outputIDs.filter { self.added.contains($0.key) }
+            self.btTrimLock.withLock {
+                guard self.companionAudition?.id == id else { return }
+                self.companionAudition?.restoreOutputs = Dictionary(
+                    uniqueKeysWithValues: outputs.map { ($0.value, $0.key) })
+            }
+            for (engineID, outputID) in outputs {
+                self.pushCompanionAuditionRestore(id: id, outputID: outputID, engineID: engineID)
+            }
+            self.btTrimLock.withLock {
+                guard self.companionAudition?.id == id else { return }
+                self.companionAudition?.cleanupPrepared = true
+            }
+            self.checkCompanionAuditionDrainLocked()
+        }
+        if let local = localPlaybackEngine {
+            local.setOutputSuppressed(false) { [weak self] in
+                self?.stateQueue.async {
+                    self?.btTrimLock.withLock {
+                        guard self?.companionAudition?.id == id else { return }
+                        self?.companionAudition?.localRestored = true
+                    }
+                    self?.checkCompanionAuditionDrainLocked()
+                }
+            }
+        } else {
+            stateQueue.async {
+                self.btTrimLock.withLock {
+                    guard self.companionAudition?.id == id else { return }
+                    self.companionAudition?.localRestored = true
+                }
+                self.checkCompanionAuditionDrainLocked()
+            }
+        }
+    }
+
+    /// Issue one restoration write and record what it actually completes at.
+    /// On `stateQueue`.
+    private func pushCompanionAuditionRestore(id: UUID, outputID: OutputID,
+                                              engineID: String) {   // on stateQueue
+        let value = currentCompanionRestoreValue(forID: engineID)
+        pushVolume(outputID, id: engineID, engineValue: value, uiLevel: nil) { [weak self] ok in
+            self?.noteCompanionAuditionRestoreCompleted(id: id, outputID: outputID,
+                                                        value: value, ok: ok)
+        }
+    }
+
+    /// Record a restoration write's real outcome. Both call sites are on
+    /// `stateQueue`: `pushVolume`'s supersede branch and `issueVolumePush`'s
+    /// completion.
+    ///
+    /// A superseded push is answered `false` while the newer write is already
+    /// sitting in ``volumePending``, which is how the two are told apart — and
+    /// why a superseded answer records nothing and the drain keeps waiting,
+    /// instead of reading it as this value having reached the speaker.
+    private func noteCompanionAuditionRestoreCompleted(id: UUID, outputID: OutputID,
+                                                       value: Double, ok: Bool) { // stateQueue
+        guard volumePending[outputID] == nil else { return }
+        btTrimLock.withLock {
+            guard var audition = companionAudition, audition.id == id else { return }
+            audition.restoreCompleted[outputID] = CompanionRestoreCompletion(value: value, ok: ok)
+            companionAudition = audition
+        }
+    }
+
+    /// The audition is retired here and nowhere else: every restoration write
+    /// has completed, so no late write can reach a new engine session.
+    ///
+    /// The whole sequence stays on `stateQueue` — check the writes, claim and
+    /// persist the trim, then remove the run and reservation. No queue wait and
+    /// no main hop happens inside it, so a user volume edit already queued on
+    /// this queue runs BEFORE the check and an edit made after it is an
+    /// ordinary new write against a released backend. `setBTSyncTrim` is called
+    /// with the lock RELEASED, because it takes the same lock.
+    private func checkCompanionAuditionDrainLocked() { // stateQueue
+        guard let audition = btTrimLock.withLock({ companionAudition }),
+              audition.phase == .cleaning, audition.cleanupPrepared, audition.localRestored,
+              audition.restoreOutputs.keys.allSatisfy({ !volumeInFlight.contains($0) &&
+                                                        volumePending[$0] == nil }) else { return }
+        // Nothing is in flight, so what each speaker is owed can be compared
+        // against what it actually got. A user edit made during cleanup, a
+        // mute, or a superseded restore all show up as a mismatch here — and
+        // `lastVolumeOutcome` is deliberately not consulted: it carries the
+        // outcome of whatever wrote last, including the user's own edit, which
+        // is not evidence about the restoration at all.
+        var reissued = false
+        for (outputID, engineID) in audition.restoreOutputs {
+            let want = currentCompanionRestoreValue(forID: engineID)
+            guard audition.restoreCompleted[outputID]?.value != want else { continue }
+            pushCompanionAuditionRestore(id: audition.id, outputID: outputID, engineID: engineID)
+            reissued = true
+        }
+        // A value that completed and still differs cannot happen (it is a pure
+        // function of state), so this terminates; a value that FAILED at the
+        // level it is owed is reported below rather than retried forever.
+        guard !reissued else { return }
+        let failure = audition.restoreOutputs.first {
+            audition.restoreCompleted[$0.key]?.ok == false
+        }?.value
+        if let persist = btTrimLock.withLock({ claimCompanionAuditionTrimLocked(id: audition.id) }) {
+            setBTSyncTrim(persist.ms, forDevice: persist.targetID, persist: true)
+        }
+        let retired = btTrimLock.withLock { () -> ([@Sendable (String?) -> Void],
+                                                   [@Sendable () -> Void])? in
+            guard let current = companionAudition, current.id == audition.id,
+                  current.phase == .cleaning else { return nil }
+            companionAudition = nil
+            if companionAlignmentRun?.id == audition.id { companionAlignmentRun = nil }
+            return (current.stopCompletions, current.releaseCallbacks)
+        }
+        guard let retired else { return }
+        if let failure {
+            Telemetry.log(.localPlayback, "companion_audition_restore_failed", ["output": failure])
+        }
+        DispatchQueue.main.async {
+            retired.0.forEach { $0(failure.map { "Couldn't restore \($0)'s level." }) }
+            // After the reservation is gone, never before — this is the signal
+            // the executable retires its owner on.
+            retired.1.forEach { $0() }
+        }
+    }
+
+    private func timeoutCompanionAuditionStop(id: UUID) {
+        let timedOut = btTrimLock.withLock { () -> ([@Sendable (String?) -> Void],
+                                              [OutputID: String], Bool) in
+            guard var audition = companionAudition, audition.id == id,
+                  audition.phase == .cleaning else { return ([], [:], true) }
+            let callbacks = audition.stopCompletions
+            audition.stopCompletions = []
+            companionAudition = audition
+            return (callbacks, audition.restoreOutputs, audition.localRestored)
+        }
+        guard !timedOut.0.isEmpty else { return }
+        stateQueue.async {
+            let affected: String
+            if !timedOut.2 {
+                affected = self.known[Self.localDeviceID]?.name ?? "This Mac"
+            } else {
+                affected = timedOut.1.first {
+                    self.volumeInFlight.contains($0.key) || self.volumePending[$0.key] != nil
+                }?.value ?? timedOut.1.first {
+                    self.lastVolumeOutcome[$0.key] == false
+                }?.value ?? "a speaker"
+            }
+            DispatchQueue.main.async {
+                timedOut.0.forEach {
+                    $0("Restoring \(affected)'s level took too long. Try again shortly.")
+                }
+            }
+        }
+    }
+
     public func setCompanionAlignmentTick(targetID: String, active: Bool) -> String? {
+        if btTrimLock.withLock({ companionAudition != nil }) {
+            return "This Mac is already playing or restoring speaker clicks. Finish that first."
+        }
         if active {
             // A user who walked out of the A/B demo straight into fine-tune
             // ends it here rather than being refused for it. The demo's two
@@ -11556,6 +12230,7 @@ extension NativeBackend: BTOutputControlling {
     /// device that had none.
     private func endCompanionTickSession(targetID: String, persist: Bool) {
         let ended = btTrimLock.withLock { () -> CompanionAlignmentRun? in
+            guard companionAudition == nil else { return nil }
             guard let run = companionAlignmentRun,
                   run.targetUID == targetID, run.phase == .tick else { return nil }
             companionAlignmentRun = nil
@@ -11572,6 +12247,8 @@ extension NativeBackend: BTOutputControlling {
 
     public func nudgeCompanionAlignmentTrim(targetID: String, deltaMs: Double) -> String? {
         let next = btTrimLock.withLock { () -> Double? in
+            if let audition = companionAudition,
+               (audition.targetID != targetID || audition.phase != .active) { return nil }
             guard var run = companionAlignmentRun,
                   run.targetUID == targetID, run.phase == .tick else { return nil }
             run.liveTrimMs = BTSyncTrim.clamp(run.liveTrimMs + deltaMs)
@@ -11587,6 +12264,8 @@ extension NativeBackend: BTOutputControlling {
 
     public func revertCompanionAlignmentNudge(targetID: String) -> String? {
         let restored = btTrimLock.withLock { () -> Double? in
+            if let audition = companionAudition,
+               (audition.targetID != targetID || audition.phase != .active) { return nil }
             guard var run = companionAlignmentRun,
                   run.targetUID == targetID, run.phase == .tick else { return nil }
             run.liveTrimMs = run.trimAtSessionStartMs
@@ -11601,6 +12280,19 @@ extension NativeBackend: BTOutputControlling {
     }
 
     public func clearCompanionAlignmentTuning(targetID: String) {
+        let owned = btTrimLock.withLock { () -> Bool in
+            guard var audition = companionAudition, audition.targetID == targetID else { return false }
+            // Clear WINS over the audition's own persistence as well as over a
+            // fine-tune session: taking the one claim here is what stops the
+            // drain writing the nudge back and recreating the entry this call
+            // is about to delete.
+            audition.trimPersistenceClaimed = true
+            companionAudition = audition
+            return true
+        }
+        if owned {
+            endCompanionAlignmentAudition(targetID: targetID, completion: { _ in })
+        }
         // Clear WINS over a fine-tune that is still up. Ending the session
         // FIRST, and without persisting, is what makes that true: a session
         // left standing would write its live value back the moment the phone

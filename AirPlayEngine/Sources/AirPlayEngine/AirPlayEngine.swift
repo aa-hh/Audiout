@@ -1026,13 +1026,20 @@ public actor AirPlayEngine {
         return issued.value
     }
 
-    /// Set the volume (0.0...1.0) on `id`. Maps onto AirPlay's volume model and
-    /// calls `output_airplay.device_volume_set`. Awaits the completion.
+    /// Set the volume on `id`. Maps onto AirPlay's volume model and calls
+    /// `output_airplay.device_volume_set`. Awaits the completion.
+    ///
+    /// `volume` is 0.0...1.0, plus one sentinel: **exactly `-1.0`** means true
+    /// mute and is passed through to `applyVolumeOnDevice` unchanged, so the C
+    /// layer sees `device->volume = -1`. `raop_volume_from_pct` reads that as
+    /// out of range and sends -144 dB — real silence on an AirPlay 1 receiver,
+    /// where 0 would be -30 dB and still audible. Any other negative value
+    /// clamps to 0, as does anything above 1.
     public func setVolume(_ id: OutputID, _ volume: Double) async throws {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
 
-        let clamped = max(0.0, min(1.0, volume))
+        let clamped = volume == -1.0 ? -1.0 : max(0.0, min(1.0, volume))
         // Set device->volume (a 0...100 PERCENT) BEFORE the op, on the engine
         // thread. The vendored airplay_set_volume_one reads it to build
         // SET_PARAMETER, and airplay_volume_from_pct() maps 0..100 -> -30..0 dB.

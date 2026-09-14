@@ -432,11 +432,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Main-thread only, touched inside the command/disconnect main hops.
     private var companionRateLimiter = CompanionCommandRateLimiter()
 
-    /// Which phone staged the sync-calibration run for each device, so the
-    /// two probe messages go back to it alone and a client that vanishes
-    /// mid-run takes its run down with it. Main-thread only, touched inside
-    /// the command/disconnect main hops like the rate limiter above.
-    private var companionAlignmentClientByDeviceID: [String: UUID] = [:]
+    /// Which phone owns each speaker's calibration, what KIND of work it is,
+    /// and which request made it. One map for the probe, the by-ear metronome,
+    /// the A/B receipt and the audition — but every rule keyed on all three,
+    /// so a refused legacy request cannot orphan a live audition and a reply
+    /// from a replaced request cannot stop its successor. The rules live in
+    /// `CompanionAlignmentOwnership` (Core), because this target is invisible
+    /// to the test suite. Main-thread only, like the rate limiter above.
+    private let alignmentOwners = CompanionAlignmentOwnership()
 
     /// Cached `.regular` running-app list backing `addableApps`/`isRunning`
     /// in the snapshot (FIX-B2 finding 2b). `NSWorkspace.runningApplications`
@@ -2658,6 +2661,175 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// launch path already owns, so the companion tail rides inside them at
     /// their original sites rather than being reassigned here.
     @MainActor
+    private func handleCompanionAlignmentTick(
+        targetID: String, active: Bool, clientID: UUID,
+        reply: @escaping @Sendable (CompanionServer.CommandResult) -> Void
+    ) {
+        if let reason = CompanionCommandDispatcher.alignmentTargetIDRefusal(targetID) {
+            reply(.init(applied: false, refusalReason: reason))
+            return
+        }
+        guard let bt = backend as? BTOutputControlling else {
+            reply(.init(applied: false, refusalReason: "This Mac can't measure speaker timing right now."))
+            return
+        }
+        guard active else {
+            if let entry = alignmentOwners.current(targetID: targetID),
+               entry.clientID != clientID {
+                reply(.init(applied: false,
+                            refusalReason: "A different speaker click session is running."))
+                return
+            }
+            // A stop ALWAYS reaches the backend, repeat or not — and with
+            // nothing running it is the no-op it has always been. Each command
+            // gets its own one-shot reply from the cleanup it joins, and
+            // ownership stays until the backend says its reservation is gone.
+            _ = alignmentOwners.markExplicitAuditionStop(targetID: targetID, clientID: clientID)
+            bt.endCompanionAlignmentAudition(targetID: targetID) { [weak self] reason in
+                DispatchQueue.main.async {
+                    reply(.init(applied: reason == nil, refusalReason: reason))
+                    self?.scheduleCompanionBroadcast()
+                }
+            }
+            return
+        }
+        let referenceID: String
+        switch CompanionAlignmentPreconditions.evaluate(
+            targetID: targetID, among: companionAlignmentDevices,
+            isAudible: groupController.isMainOutMember
+        ) {
+        case .refused(let reason):
+            reply(.init(applied: false, refusalReason: reason))
+            return
+        case .ready(let id): referenceID = id
+        }
+        let entry: CompanionAlignmentOwnership.Entry
+        let isFreshClaim: Bool
+        switch alignmentOwners.claim(targetID: targetID, clientID: clientID, kind: .audition,
+                                     referenceID: referenceID,
+                                     leaseDeadline: Date().addingTimeInterval(600)) {
+        case .refused(let reason):
+            reply(.init(applied: false, refusalReason: reason))
+            return
+        case .fresh(let fresh):
+            entry = fresh
+            isFreshClaim = true
+            // Armed once, off the ORIGINAL lease. Repeated starts join the
+            // same entry and arm nothing, so the budget cannot be renewed.
+            monitorCompanionAuditionLease(targetID: targetID, requestID: fresh.requestID,
+                                          deadline: fresh.leaseDeadline ?? Date())
+        case .existing(let existing):
+            entry = existing
+            isFreshClaim = false
+        }
+        let requestID = entry.requestID
+        // The one ordinary retirement signal. Nothing here polls or guesses
+        // when the cleanup ended: the backend fires this after its reservation
+        // is actually gone, and a refused start fires it behind its refusal.
+        let onReleased: @Sendable () -> Void = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.alignmentOwners.release(targetID: targetID, kind: .audition,
+                                                requestID: requestID) {
+                    self.scheduleCompanionBroadcast()
+                }
+            }
+        }
+        bt.startCompanionAlignmentAudition(
+            targetID: targetID, referenceID: referenceID, onReleased: onReleased
+        ) { [weak self] reason in
+            DispatchQueue.main.async {
+                guard let self else {
+                    reply(.init(applied: false, refusalReason: "Audiout is shutting down."))
+                    return
+                }
+                if let reason {
+                    reply(.init(applied: false, refusalReason: reason))
+                    self.scheduleCompanionBroadcast()
+                    return
+                }
+                let samePair: Bool
+                switch CompanionAlignmentPreconditions.evaluate(
+                    targetID: targetID, among: self.companionAlignmentDevices,
+                    isAudible: self.groupController.isMainOutMember
+                ) {
+                case .ready(let currentReference): samePair = currentReference == referenceID
+                case .refused: samePair = false
+                }
+                guard samePair, !self.isTerminating else {
+                    // Token-checked like every other cleanup trigger, so this
+                    // completion cannot stand down a request that replaced it.
+                    self.alignmentOwners.requestAuditionCleanup(
+                        targetID: targetID, requestID: requestID,
+                        stop: { [weak self] id in self?.stopCompanionAudition(targetID: id) })
+                    reply(.init(applied: false,
+                        refusalReason: "The speaker pair changed before clicks could start."))
+                    self.scheduleCompanionBroadcast()
+                    return
+                }
+                reply(.init(applied: true))
+                self.scheduleCompanionBroadcast()
+                // One monitor per audition, not per start: it rearms itself
+                // every 0.25 s for the audition's life, so arming it again on
+                // each reopen would leave a stack of them running.
+                if isFreshClaim {
+                    self.monitorCompanionAuditionOwner(targetID: targetID,
+                                                        referenceID: referenceID, requestID: requestID)
+                }
+            }
+        }
+    }
+
+    /// The one backend call every autonomous cleanup trigger makes. Its own
+    /// completion is ignored on purpose: this is not a phone's command, so
+    /// there is nobody to answer — the lifetime signal retires the owner.
+    @MainActor
+    private func stopCompanionAudition(targetID: String) {
+        (backend as? BTOutputControlling)?.endCompanionAlignmentAudition(
+            targetID: targetID, completion: { _ in })
+    }
+
+    @MainActor
+    private func monitorCompanionAuditionLease(targetID: String, requestID: UUID,
+                                               deadline: Date) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, deadline.timeIntervalSinceNow)) {
+            [weak self] in
+            guard let self else { return }
+            self.alignmentOwners.expireAudition(
+                targetID: targetID, requestID: requestID,
+                stopAudition: { [weak self] id in self?.stopCompanionAudition(targetID: id) })
+        }
+    }
+
+    @MainActor
+    private func monitorCompanionAuditionOwner(targetID: String, referenceID: String,
+                                               requestID: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self, !self.isTerminating,
+                  let entry = self.alignmentOwners.current(targetID: targetID),
+                  entry.kind == .audition, entry.requestID == requestID,
+                  !entry.cleanupRequested else { return }
+            let samePair: Bool
+            switch CompanionAlignmentPreconditions.evaluate(
+                targetID: targetID, among: self.companionAlignmentDevices,
+                isAudible: self.groupController.isMainOutMember
+            ) {
+            case .ready(let currentReference): samePair = currentReference == referenceID
+            case .refused: samePair = false
+            }
+            if samePair {
+                self.monitorCompanionAuditionOwner(targetID: targetID,
+                                                    referenceID: referenceID, requestID: requestID)
+            } else {
+                self.alignmentOwners.requestAuditionCleanup(
+                    targetID: targetID, requestID: requestID,
+                    stop: { [weak self] id in self?.stopCompanionAudition(targetID: id) })
+                self.scheduleCompanionBroadcast()
+            }
+        }
+    }
+
+    @MainActor
     private func wireCompanionServer() {
         companionDispatcher = CompanionCommandDispatcher(
             groupController: groupController,
@@ -2775,6 +2947,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.serveAppIconPages(requested, to: clientID)
                     return  // no snapshot broadcast — icons are not snapshot state
                 }
+                if case .setAlignmentTick(let targetID, let active) = command {
+                    self.handleCompanionAlignmentTick(targetID: targetID, active: active,
+                                                      clientID: clientID, reply: reply)
+                    return
+                }
                 let result = self.companionDispatcher.execute(command, clientID: clientID)
                 reply(CompanionServer.CommandResult(
                     applied: result.applied,
@@ -2845,13 +3022,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // receipt is put back, and a fine-tune session ENDS — writing
                 // down what the user had already nudged, rather
                 // than throwing it away.
-                let orphaned = self.companionAlignmentClientByDeviceID
-                    .filter { $0.value == clientID }.map(\.key)
-                for deviceID in orphaned {
-                    self.companionAlignmentClientByDeviceID.removeValue(forKey: deviceID)
-                    (self.backend as? BTOutputControlling)?
-                        .cancelCompanionAlignmentProbe(targetID: deviceID)
-                }
+                // An audition is stood down at once but stays OWNED while its
+                // cleanup drains, so nothing else starts over a room still
+                // being put back; its lifetime signal retires it.
+                self.alignmentOwners.disconnect(
+                    clientID: clientID,
+                    stopAudition: { [weak self] id in self?.stopCompanionAudition(targetID: id) },
+                    cancelLegacy: { [weak self] id in
+                        (self?.backend as? BTOutputControlling)?
+                            .cancelCompanionAlignmentProbe(targetID: id)
+                    })
             }
         }
 
@@ -3052,6 +3232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, let bt = self.backend as? BTOutputControlling else {
                     return "This Mac can't measure speaker timing."
                 }
+                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
                 let referenceID: String
                 switch CompanionAlignmentPreconditions.evaluate(
                     targetID: targetID,
@@ -3059,10 +3240,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     isAudible: self.groupController.isMainOutMember
                 ) {
                 case .refused(let reason):
-                    self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
                     return reason
                 case .ready(let id):
                     referenceID = id
+                }
+                // Claimed BEFORE the backend call, so a second phone is refused
+                // rather than racing it, and given back if the run never staged
+                // — but ONLY if this call is what created it. A repeat request
+                // joins the run already going, and giving THAT back would erase
+                // the owner the first run's events are addressed to.
+                var claim: CompanionAlignmentOwnership.Claim?
+                if let clientID {
+                    let attempt = self.alignmentOwners.claim(
+                        targetID: targetID, clientID: clientID, kind: .probe,
+                        referenceID: referenceID, leaseDeadline: nil)
+                    if case .refused(let reason) = attempt { return reason }
+                    claim = attempt
                 }
                 let refusal = bt.startCompanionAlignmentProbe(
                     targetID: targetID, referenceID: referenceID,
@@ -3072,21 +3265,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     onFinished: { [weak self] in
                         self?.sendCompanionProbeEvent(targetID: targetID, started: false)
                     })
-                // Recorded only on a run that actually staged, and before any
-                // callback can be serviced: both fire through a main-queue hop
-                // that cannot run until this synchronous closure returns. A
-                // refusal drops any older entry rather than leaving one behind
-                // for a run that never started.
-                if refusal == nil, let clientID {
-                    self.companionAlignmentClientByDeviceID[targetID] = clientID
-                } else if refusal != nil {
-                    self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                if refusal != nil, let claim {
+                    self.alignmentOwners.releaseFresh(claim, targetID: targetID)
                 }
                 return refusal
             },
-            cancelProbe: { [weak self] targetID in
+            cancelProbe: { [weak self] targetID, clientID in
                 guard let self else { return nil }
-                self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                // Cancel is the legacy family's exit, never the audition's:
+                // that one is stopped by its own tick command.
+                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
+                // And it is the OWNER's exit. Another phone's cancel neither
+                // erases this owner nor reaches the backend to stop its run —
+                // erasing it would also disarm the disconnect that is supposed
+                // to put the room back, leaving a metronome nobody can stop.
+                if self.alignmentOwners.current(targetID: targetID) != nil {
+                    guard let clientID,
+                          self.alignmentOwners.releaseOwned(targetID: targetID,
+                                                            clientID: clientID) != nil else {
+                        return "Another phone is using these speaker clicks."
+                    }
+                }
                 (self.backend as? BTOutputControlling)?
                     .cancelCompanionAlignmentProbe(targetID: targetID)
                 return nil
@@ -3100,7 +3299,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, let bt = self.backend as? BTOutputControlling else {
                     return "This Mac can't measure speaker timing."
                 }
-                let clientID = self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
+                let clientID = self.alignmentOwners.takeProbeForReport(targetID: targetID)
                 switch bt.applyCompanionAlignmentMeasurement(
                     targetID: targetID, offsetMs: offsetMs, confidence: confidence) {
                 case .refused(let reason):
@@ -3137,17 +3337,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, let bt = self.backend as? BTOutputControlling else {
                     return "This Mac can't measure speaker timing."
                 }
-                let refusal = bt.setCompanionAlignmentTick(targetID: targetID, active: active)
+                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
                 // A fine-tune session is per-client state exactly as a run is,
                 // and it is the half that leaves a metronome in the room and
-                // the user's nudges unwritten if the phone vanishes. Registered
-                // on the same map, so the disconnect hop ends it.
-                if active, refusal == nil, let clientID {
-                    self.companionAlignmentClientByDeviceID[targetID] = clientID
-                } else if !active || refusal != nil {
-                    self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                // the user's nudges unwritten if the phone vanishes.
+                if active {
+                    var claim: CompanionAlignmentOwnership.Claim?
+                    if let clientID {
+                        let attempt = self.alignmentOwners.claim(
+                            targetID: targetID, clientID: clientID, kind: .legacyTick,
+                            referenceID: nil, leaseDeadline: nil)
+                        if case .refused(let reason) = attempt { return reason }
+                        claim = attempt
+                    }
+                    let refusal = bt.setCompanionAlignmentTick(targetID: targetID, active: true)
+                    // Only a claim this call created; a repeat joins the session
+                    // already running and has nothing of its own to give back.
+                    if refusal != nil, let claim {
+                        self.alignmentOwners.releaseFresh(claim, targetID: targetID)
+                    }
+                    return refusal
                 }
-                return refusal
+                // Switching the metronome off is the owner's exit, like Cancel:
+                // checked BEFORE the backend, so another phone neither ends this
+                // session nor stops the ticks it is still listening to.
+                if self.alignmentOwners.current(targetID: targetID)?.kind == .legacyTick {
+                    guard let clientID,
+                          self.alignmentOwners.releaseOwned(targetID: targetID,
+                                                            clientID: clientID) != nil else {
+                        return "Another phone is using these speaker clicks."
+                    }
+                }
+                return bt.setCompanionAlignmentTick(targetID: targetID, active: false)
             },
             nudgeTrim: { [weak self] targetID, deltaMs in
                 guard let bt = self?.backend as? BTOutputControlling else {
@@ -3162,9 +3383,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return bt.revertCompanionAlignmentNudge(targetID: targetID)
             },
             clearTuning: { [weak self] targetID in
-                guard let bt = self?.backend as? BTOutputControlling else {
+                guard let self, let bt = self.backend as? BTOutputControlling else {
                     return "This Mac can't measure speaker timing."
                 }
+                // The phone's own Clear is ordered AFTER its stop is
+                // acknowledged; one arriving while the clicks still own the
+                // speaker is the legacy path, and it waits.
+                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
                 bt.clearCompanionAlignmentTuning(targetID: targetID)
                 return nil
             },
@@ -3172,26 +3397,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, let bt = self.backend as? BTOutputControlling else {
                     return "This Mac can't measure speaker timing."
                 }
+                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
+                var claim: CompanionAlignmentOwnership.Claim?
+                if let clientID {
+                    let attempt = self.alignmentOwners.claim(
+                        targetID: targetID, clientID: clientID, kind: .demo,
+                        referenceID: nil, leaseDeadline: nil)
+                    if case .refused(let reason) = attempt { return reason }
+                    claim = attempt
+                }
                 let refusal = bt.playCompanionAlignmentDemo(
                     targetID: targetID,
                     referenceID: self.companionAlignmentReferenceID(forTarget: targetID))
+                guard let claim else { return refusal }
+                if refusal != nil {
+                    self.alignmentOwners.releaseFresh(claim, targetID: targetID)
+                    return refusal
+                }
+                let entry: CompanionAlignmentOwnership.Entry
+                switch claim {
+                case .fresh(let created): entry = created
+                case .existing(let joined): entry = joined
+                case .refused: return refusal
+                }
                 // Four seconds of held-silent speakers is short, but a phone
-                // that drops inside it must still put the room back.
-                if refusal == nil, let clientID {
-                    self.companionAlignmentClientByDeviceID[targetID] = clientID
-                } else if refusal != nil {
-                    self.companionAlignmentClientByDeviceID.removeValue(forKey: targetID)
+                // that drops inside it must still put the room back — and the
+                // backend ends a receipt on its own clock and reports nothing,
+                // so the owner retires on the same clock. A SECOND receipt
+                // started inside that window is a new run with its own four
+                // seconds, so the release quotes the run it belongs to and the
+                // earlier one's timer finds a newer run and does nothing.
+                let requestID = entry.requestID
+                let run = self.alignmentOwners.noteDemoStarted(targetID: targetID)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4.1) { [weak self] in
+                    self?.alignmentOwners.releaseDemoRun(targetID: targetID,
+                                                         requestID: requestID, run: run)
                 }
                 return refusal
             })
+    }
+
+    /// The sentence every legacy alignment action is refused with while the
+    /// speaker clicks own the speaker, and `nil` when they do not. None of
+    /// those paths may reach a backend method that would stand an audition
+    /// down: the phone's own stop command is the only thing that ends it.
+    @MainActor
+    private func legacyAlignmentRefusal(targetID: String) -> String? {
+        guard alignmentOwners.current(targetID: targetID)?.kind == .audition else { return nil }
+        return "This Mac is already playing or restoring speaker clicks. Finish that first."
     }
 
     /// Address one of the run's two moments back to the phone that staged it,
     /// and to nobody else. Fired from the pacer's own thread, so it hops.
     private func sendCompanionProbeEvent(targetID: String, started: Bool) {
         DispatchQueue.main.async { [weak self] in
+            // A probe event goes only to a CURRENT probe owner: an audition or
+            // a later job on the same speaker is not this run's audience.
             guard let self, !self.isTerminating,
-                  let clientID = self.companionAlignmentClientByDeviceID[targetID] else { return }
+                  let entry = self.alignmentOwners.current(targetID: targetID),
+                  entry.kind == .probe else { return }
+            let clientID = entry.clientID
             if started {
                 // The Mac runs one alignment at a time, so a by-ear sheet
                 // open on this same speaker has been superseded.

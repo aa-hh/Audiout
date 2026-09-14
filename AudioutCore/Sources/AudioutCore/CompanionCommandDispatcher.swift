@@ -31,7 +31,10 @@ import AudioutProtocol
 @MainActor
 public struct CompanionAlignmentActions {
     public var startProbe: (_ targetID: String, _ clientID: UUID?) -> String?
-    public var cancelProbe: (_ targetID: String) -> String?
+    /// Carries the asking client, like `startProbe` does: cancel is the
+    /// owner's own exit, and without the id one phone's cancel can end
+    /// another phone's run.
+    public var cancelProbe: (_ targetID: String, _ clientID: UUID?) -> String?
     public var reportMeasurement: (_ targetID: String, _ offsetMs: Double, _ confidence: Double) -> String?
     public var setTick: (_ targetID: String, _ active: Bool, _ clientID: UUID?) -> String?
     public var nudgeTrim: (_ targetID: String, _ deltaMs: Double) -> String?
@@ -41,7 +44,7 @@ public struct CompanionAlignmentActions {
 
     public init(
         startProbe: @escaping (String, UUID?) -> String?,
-        cancelProbe: @escaping (String) -> String?,
+        cancelProbe: @escaping (String, UUID?) -> String?,
         reportMeasurement: @escaping (String, Double, Double) -> String?,
         setTick: @escaping (String, Bool, UUID?) -> String?,
         nudgeTrim: @escaping (String, Double) -> String?,
@@ -288,7 +291,7 @@ public final class CompanionCommandDispatcher {
             return alignment(targetID) { actions, id in actions.startProbe(id, clientID) }
 
         case .cancelAlignmentProbe(let targetID):
-            return alignment(targetID) { actions, id in actions.cancelProbe(id) }
+            return alignment(targetID) { actions, id in actions.cancelProbe(id, clientID) }
 
         case .reportAlignmentMeasurement(let targetID, let offsetMs, let confidence):
             // A measurement turns straight into a persisted latency, so the
@@ -353,14 +356,16 @@ public final class CompanionCommandDispatcher {
         _ targetID: String,
         _ action: (CompanionAlignmentActions, String) -> String?
     ) -> Result {
-        guard !targetID.isEmpty, targetID.count <= Limits.maxMemberIDChars else {
-            return .refused("Unknown speaker.")
-        }
+        if let reason = Self.alignmentTargetIDRefusal(targetID) { return .refused(reason) }
         guard let alignmentActions else {
             return .refused("This Mac can't measure speaker timing right now. Reconnect the speaker and try again.")
         }
         if let reason = action(alignmentActions, targetID) { return .refused(reason) }
         return .ok
+    }
+
+    public static func alignmentTargetIDRefusal(_ targetID: String) -> String? {
+        targetID.isEmpty || targetID.count > Limits.maxMemberIDChars ? "Unknown speaker." : nil
     }
 
     // MARK: - Group CRUD (validated + all-or-nothing)

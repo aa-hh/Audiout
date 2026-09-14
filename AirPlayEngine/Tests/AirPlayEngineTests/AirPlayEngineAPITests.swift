@@ -226,6 +226,45 @@ extension SerializedEngineState {
             }
         }
 
+        // MARK: - setVolume: the AirPlay 1 true-mute sentinel survives normalization.
+        //
+        // DEFECT THIS NAMES: `setVolume` clamped its input with
+        // `max(0.0, min(1.0, volume))`, so the -1.0 the host sends for an AirPlay 1
+        // nonparticipant arrived at `applyVolumeOnDevice` as 0.0 and wrote
+        // `device->volume = 0`. On a RAOP receiver that is
+        // raop_volume_from_pct(0) = -30 dB — quiet, not silent — so a speaker the
+        // wizard holds out of an audition still plays. Only EXACTLY -1.0 passes
+        // through; any other negative still clamps to 0.
+        //
+        // LIMIT: this reaches the C `device->volume` field through the real
+        // `setVolume` path. What the receiver does with the resulting
+        // SET_PARAMETER is a live-speaker check, not a headless one.
+        @Test func setVolumeSentinelReachesTheRaopDeviceOnlyForExactlyMinusOne() async throws {
+            let cases: [(Double, Int32)] = [(-1.0, -1), (-0.5, 0), (-2.0, 0), (0.0, 0), (0.75, 75)]
+            for (input, expected) in cases {
+                outputs_dispatcher_reset(); drainRegistry()
+                let id = OutputID(rawValue: 0xB7)
+                makeRegistryDevice(id: id.rawValue)
+                // An AirPlay 1 output, as discovery would register it: the -144 dB
+                // out-of-range mapping is raop.c's, not airplay.c's.
+                outputs_device_get(id.rawValue)!.pointee.type = OUTPUT_TYPE_RAOP
+
+                let engine = AirPlayEngine()
+                await engine.enterHeadlessTestMode(issue: { device, _ in
+                    #expect(device.pointee.volume == expected,
+                            "normalized \(input) must reach device->volume \(expected)")
+                    return 1
+                })
+                await engine.registerKnownOutputForTest(id)
+
+                async let op: Void = engine.setVolume(id, input)
+                try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
+                try await op
+
+                #expect(outputs_device_get(id.rawValue)?.pointee.volume == expected)
+            }
+        }
+
         // MARK: - removeOutput: awaits stop completion.
 
         @Test func removeOutputCompletes() async throws {

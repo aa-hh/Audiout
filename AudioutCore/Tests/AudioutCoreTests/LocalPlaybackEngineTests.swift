@@ -34,6 +34,25 @@ private let tapFormat = TapFormat(
 
 @Suite struct LocalPlaybackEngineTests {
 
+    @Test func localOutputHoldSurvivesOfflineGraphReconstruction() throws {
+        let engine = LocalPlaybackEngine(offlineRenderingForTests: true)
+        defer { engine.stop() }
+        try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 0.6)
+        engine.setOutputSuppressed(true, completion: {})
+        engine.test_flushGraphQueue()
+        #expect(engine.test_mainMixerOutputVolume == 0)
+        engine.test_simulateConfigurationChange()
+        #expect(engine.test_mainMixerOutputVolume == 0)
+        engine.setOutputSuppressed(false, completion: {})
+        engine.test_flushGraphQueue()
+        #expect(engine.test_mainMixerOutputVolume == 1)
+        engine.setOutputSuppressed(true, completion: {})
+        engine.test_flushGraphQueue()
+        engine.stop()
+        #expect(engine.test_mainMixerOutputVolume == 1,
+                "backend shutdown cannot leave a later local graph suppressed")
+    }
+
     // MARK: - Follow-real-output-with-guard (R13)
     //
     // These drive the decision through an injected fake ``LocalOutputResolving``

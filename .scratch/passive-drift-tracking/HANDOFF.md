@@ -201,6 +201,57 @@ stop, do not power-cycle anything), or when the 120-minute budget is spent;
 quit the dev app and release the slot at the end. The first window is 3 min
 after the hook selects; do not reselect mid-block (it restarts the timer).
 
+## Live test 4 progress (2026-09-14, unattended)
+
+- **Block 1 (07:11–07:23 UTC, volume 100) is INVALID after its first window.** I ran
+  three build agents on this Mac in parallel; load average hit 138 and the
+  whole-system capture writer fell behind (`write_cadence_drift`
+  `netDriftTotalSeconds` climbed 0 → 0.15 s at ~13 ms/min, still climbing during
+  silence). The reference timeline slid: windows at 07:19 and 07:22 read the
+  arrival 40 and 58 ms EARLY, the merged rule re-baselined both speakers to that
+  garbage, and the mic recorder restarted at the start of both windows. Window
+  07:13:29 (before the load) is good: merged at 537.7, whitened local score 10.5.
+  Labels in `windows-2026-09-14/labels.txt` mark the two as INVALID.
+  **Rule: no compiles or test runs on this Mac while a block plays.** The
+  cadence drift never resets on its own; a relaunch resets it (done 07:41:41).
+  Yesterday's netDriftTotal stayed at 0.011 s all evening.
+- Also seen at 07:08: the owner heard the MacBook's own speakers for a moment
+  after the hook selected the Moves; the default output flapped between five
+  devices in 6 s (built-in → two Bluetooth → built-in) while the sinks came up.
+  Not reproduced on the 07:10 and 07:41 relaunches.
+- Blocks 2–8 resumed 07:41:52 via `lt4-resume.sh` (same as the runbook minus
+  block 1): five good blocks at Spotify 85, then +40 ms trim jump, then −40.
+
+**Phase 2 code landed on branches this morning (none merged, none live-tested):**
+
+- audiout-shared `claude/drift-fixtures` @ `7783226`: ticket 16. Fixtures
+  (200 Hz–8 kHz, 24 kHz Int16, 1.32 MB for four windows), loader test,
+  `Package.swift` resources entry. Harness parity 0.02 % via the Mac harness's
+  new `--fixtures` / `--swift` modes (Mac commit `7ae7ca01` on this branch).
+  Caveat: the raw `.f32` dumps committed in this PUBLIC repo carry the speakers'
+  Bluetooth addresses in their sidecars — owner to decide whether they stay.
+- audiout-shared `claude/drift-whitening` @ `4d3fdbe`: ticket 09. Whitening
+  exponent on `SyncProbeCorrelator.correlate` (default 0, chirp path proven
+  bit-identical), `PassiveDriftCorrelator.whiteningExponent = 0.7` (sweep:
+  window 4 score 2.52 → 5.12; 1.0 accepted a 10 %-margin lobe in window 1),
+  `peakSeparationSeconds` 5 → 1 ms. Caveats: windows 1/3/4 still do not cluster
+  within 2 ms (spread 8.6 ms) — tickets 10–12 must carry that; with ±120 ms
+  search windows both baselines pick the same global maximum so the separation
+  constant barely bites until per-speaker windows narrow.
+- Mac `claude/drift-verify-step` @ `8a4a1dca` (forked from this branch): ticket
+  13. `DriftCorrectionPolicy.VerifyMode` (`verifyBeforeApply` default,
+  `applyThenVerify` one-line switch in the init default), `scheduleVerify`
+  now arms a tracker `Trigger.verify` after the slew lands + 5 s, new local
+  lines `drift_verify_scheduled` / `drift_verify_result`, swap label by batch
+  size. 419 tests green in the covering suites. Caveat: verify-before-apply
+  catches a spurious peak, not a systematically wrong attribution (same
+  arithmetic on the same baselines agrees with itself). Its commit is
+  attributed to Opus 5.
+
+Owed to merge these: shared branches 16 + 09 merged and tagged 0.14.0, Mac pin
+bump, then 13 merged into this branch; all after the music blocks (builds are
+banned during them). Rulings still owed: decisions 15 and 17.
+
 ## Logging (local only, `~/Library/Logs/Audiout/telemetry.jsonl`)
 
 All `cat: localPlayback`:

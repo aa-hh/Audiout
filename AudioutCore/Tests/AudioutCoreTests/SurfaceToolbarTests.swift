@@ -609,8 +609,8 @@ import AudioutSharedUI
     /// (owner, 2026-09-05: style Pin like the tabs, keep it on the right).
     ///
     /// Asserted on real pixels, and the OUTER ring is what carries it: at 45°
-    /// a 34 pt square reaches 24 pt from its centre, so a rounded-square seat
-    /// still paints at radius 19 on the diagonal where a circle of radius 17
+    /// a 28 pt square reaches 19.8 pt from its centre, so a rounded-square seat
+    /// still paints at radius 16 on the diagonal where a circle of radius 14
     /// does not.
     @Test func pinDrawsACircleAndNotARoundedSquare() {
         #expect(SurfaceToolbarSeat.pinSize.width == SurfaceToolbarSeat.pinSize.height,
@@ -793,17 +793,21 @@ import AudioutSharedUI
         }
     }
 
-    /// The strip is ONE height: the capsule is exactly as tall as Pin (owner's
-    /// call, 2026-09-05, "make the component slightly bigger to meet the same
-    /// height as the pin button"). It was 32 pt against a 26 pt Pin before.
+    /// The strip is ONE height, and Pin's circle is a TAB's, not the strip's
+    /// (owner, 2026-09-14: "the exact same size as the radius of the
+    /// highlighted button in the rail, rather than filling the size of the rail
+    /// itself"). Pin filled the capsule's own 34 pt until then, which made it
+    /// a circle the size of the shell around the tabs.
     ///
-    /// A tab's height is DERIVED from that, and the arithmetic below is the
+    /// A tab's height is DERIVED from the strip, and the arithmetic below is the
     /// whole reason the highlight can be concentric: a seat cut at half its own
     /// height lands on `capsuleCornerRadius - capsulePadding` only while the
     /// tab is the capsule minus its padding.
     @Test func theCapsuleAndPinAreTheSameHeightAndTheTabRadiusFollowsFromIt() {
-        #expect(SurfaceToolbarSeat.capsuleSize.height == SurfaceToolbarSeat.pinSize.height,
-                "the pill and Pin stand the same height — \(SurfaceToolbarSeat.capsuleSize.height) against \(SurfaceToolbarSeat.pinSize.height)")
+        #expect(SurfaceToolbarSeat.capsuleSize.height == SurfaceToolbarSeat.stripHeight,
+                "the pill fills the strip — \(SurfaceToolbarSeat.capsuleSize.height) against \(SurfaceToolbarSeat.stripHeight)")
+        #expect(SurfaceToolbarSeat.pinSize.height == SurfaceToolbarSeat.size.height,
+                "and Pin's circle is one tab button wide, not one strip — \(SurfaceToolbarSeat.pinSize.height) against \(SurfaceToolbarSeat.size.height)")
         #expect(SurfaceToolbarSeat.size.height
                     == SurfaceToolbarSeat.capsuleSize.height - SurfaceToolbarSeat.capsulePadding * 2,
                 "a tab is the capsule minus the padding above and below it")

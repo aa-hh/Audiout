@@ -10263,17 +10263,35 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // must not animate the offline device's meter.
             for route in self.lastRoutes
             where route.bundleID == bundleID && self.routedBundleIDs.contains(bundleID) {
-                if case .device(let deviceID) = route.destination {
+                // A GROUP route feeds every resolved member, so every member's
+                // bar must re-emit. Keying on `.device` alone leaves a
+                // group-routed app's speakers with a dead meter while audio
+                // plays out of them.
+                for deviceID in self.meterTargetsLocked(of: route.destination) {
                     self.emitCombinedLevel(forDevice: deviceID)
                 }
             }
         }
     }
 
+    /// The speakers a destination's audio actually reaches: the one named by a
+    /// `.device` route, or every resolved member of a `.group` route. Local /
+    /// no-redirect destinations reach none. THE one place the two meter sites
+    /// answer that question, so they cannot drift apart. On `stateQueue`.
+    private func meterTargetsLocked(of destination: AppRouteDestination) -> [String] {
+        switch destination {
+        case .device(let deviceID):        return [deviceID]
+        case .group(let groupID):          return Array(
+                                              lastGroupTargets[groupID]?.memberVolumes.keys ?? [:].keys)
+        case .noRedirect, .currentDevice:  return []
+        }
+    }
+
     /// Emit `.level` for `id` as the MAX of its whole-system contribution
     /// (`latestSystemRMS`, only while ``isMeterable`` + unmuted) and its SOURCE
-    /// contribution — the loudest PRE-volume level among the apps `.device`-routed
-    /// to it (`latestAppLevel`). A device fed by both shows the larger. Every input
+    /// contribution — the loudest PRE-volume level among the apps whose route
+    /// reaches it, by `.device` or as a member of a routed `.group`
+    /// (`latestAppLevel`). A device fed by both shows the larger. Every input
     /// is a source/program level, so no routing/output volume ever attenuates the
     /// bar. Emitted through the D3 coalescer (`scheduleLevelEmit`, ~25 Hz). On
     /// `stateQueue`.
@@ -10286,7 +10304,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // device, so it must not keep this device's bar alive while it is offline.
         for route in lastRoutes
         where routedBundleIDs.contains(route.bundleID) && !deadBundleIDs.contains(route.bundleID) {
-            if case .device(let deviceID) = route.destination, deviceID == id,
+            if meterTargetsLocked(of: route.destination).contains(id),
                let level = latestAppLevel[route.bundleID] {
                 sourceContribution = max(sourceContribution, level)
             }

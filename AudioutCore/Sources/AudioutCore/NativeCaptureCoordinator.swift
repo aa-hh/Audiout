@@ -1733,6 +1733,42 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             if gapNanos > 0, gapNanos <= Self.maxFeedGapFillNanos {
                 fillFeedGap(nanos: gapNanos, from: gap.lastEndPtsNanos, snapshot: snapshot)
             }
+        } else {
+            // No rebuild, and still a hole: the IOProc itself loses a cycle now
+            // and then (live diagnosis 2026-09-14: about one per 40 s with a
+            // third Bluetooth link on the radio, one per hour the day before).
+            // Nothing downstream notices on its own, because every sink is fed
+            // by sample count. `BTSyncedSink` reads a pts only for its first
+            // buffer, and the sender anchors packet time to samples too, so one
+            // lost cycle plays all later audio 11.6 ms early on every speaker at
+            // once: `write_cadence_drift`'s `netDriftTotalSeconds` climbs by that
+            // much with no overrun to explain it, and five of them put the
+            // arrival 55-66 ms early. Measuring every buffer against the last one
+            // delivered, not just the first after a rebuild, keeps the sample
+            // count honest against wall time.
+            let lastEnd = feedGap.lastDeliveredEndPtsNanos
+            let gapNanos = SyncTiming.monotonicNanos(buffer.pts) &- lastEnd
+            // A lost cycle costs a whole block. Anything smaller is the
+            // converter's own per-block rounding and clock jitter, which averages
+            // out to nothing; filling only the positive half of it would itself
+            // add silence that was never missing. Anything bigger than the cap is
+            // a pause or an idle tap (both taps sleep until an app plays), where
+            // the audio really did stop and padding would push the next real
+            // block late.
+            let blockFrames = pcm.count / (PCMFormat.airplay.channels * MemoryLayout<Int16>.size)
+            let blockNanos = Int64(Double(blockFrames) * 1_000_000_000 / Double(PCMFormat.airplay.sampleRate))
+            if lastEnd != 0, gapNanos >= blockNanos / 2, gapNanos <= Self.maxDroppedCycleFillNanos {
+                // Logged only when it fills, unlike the rebuild arm above: an
+                // unfilled hole here is the tap waking from idle, which happens
+                // every time the music stops and says nothing worth a line.
+                queue.async {
+                    Telemetry.log(.captureWS, "tap_feed_gap", [
+                        "cause": "dropped_cycle",
+                        "gapMs": String(format: "%.1f", Double(gapNanos) / 1_000_000),
+                    ])
+                }
+                fillFeedGap(nanos: gapNanos, from: lastEnd, snapshot: snapshot)
+            }
         }
 
         // Tell the fallback clock the tap is alive. While this keeps updating,
@@ -2094,6 +2130,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             lastEndPtsPtr.pointee = endPtsNanos
         }
 
+        /// Delivery thread only: where the last block handed downstream ends, or
+        /// 0 when nothing has been delivered since the last ``reset()``. Read
+        /// without clearing the arm, so every buffer can be measured against it
+        /// and not only the first one after a rebuild.
+        var lastDeliveredEndPtsNanos: Int64 { lastEndPtsPtr.pointee }
+
         /// Control side only: the first buffer carrying `fromEpoch` or later is
         /// the first one after this rebuild, so it should measure and fill.
         /// Anything still in flight from before the claim carries an earlier epoch
@@ -2155,6 +2197,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private static let maxFeedGapFillNanos: Int64 = 2_000_000_000
     /// One fill block, capped at the same ~93 ms the wizard pacer uses per fire.
     private static let feedGapFillChunkFrames = 4_096
+    /// Beyond this a hole with no rebuild behind it is not a lost IOProc cycle:
+    /// it is a pause, a tap waking from idle, or a buffer in flight across a
+    /// rebuild, and the audio genuinely stopped. Four lost cycles in a row
+    /// (11.6 ms each at 512 frames / 44.1 kHz) still fit under it. The cap is
+    /// also the worst a wrong fill can cost, since it delays everything after it
+    /// by the length it patched.
+    /// razor: one flat cap rather than a multiple of the cycle length measured
+    /// per device. Upgrade path if a device ever runs cycles long enough for
+    /// 50 ms to be one of them: derive it from the incoming block's duration.
+    private static let maxDroppedCycleFillNanos: Int64 = 50_000_000
 
     /// Tear the current tap down and recreate it — against the (possibly
     /// new) default output device, and always with the LIVE exclusion process-

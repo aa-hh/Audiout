@@ -174,8 +174,8 @@ let package = Package(
         // that is the tag `CompanionMessage.alignmentApplied` landed in, and
         // the companion server sends it on every applied measurement; 0.13.0
         // added the emitter field's `settled` block, which the alignment
-        // stage draws.
-        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.13.0"),
+        // stage draws; 0.14.0 added the stage look table.
+        .package(url: "https://github.com/aa-hh/audiout-shared.git", from: "0.14.0"),
         // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.

@@ -846,5 +846,76 @@ extension SerializedSharedState {
                     containing: ["\"cause\":\"exclusionChange\"", "\"gapMs\":\"499.9\""]),
                 "no tap_feed_gap line for the rebuild's hole")
         }
+
+        /// Defect (live diagnosis 2026-09-14): the IOProc loses a cycle now and
+        /// then, nothing padded the hole, and every sink is fed by sample count,
+        /// so all later audio played 11.6 ms early once per lost cycle. Turns red
+        /// if `handleBuffer` goes back to measuring the feed hole only when a
+        /// rebuild armed it.
+        @Test func aDroppedIOProcCycleIsPaddedWithSilence() async throws {
+            let capture = LineCapture()
+            Telemetry._installTestSink { capture.append($0) }
+            defer { Telemetry._installTestSink(nil) }
+
+            let tap = SyncedLocalFanoutTests.FeedbackFakeTap()
+            let engineSink = SyncedLocalFanoutTests.SpyPCMSink()
+            let coordinator = makeCoordinator(tap: tap, sink: engineSink)
+            defer { coordinator.stop() }
+
+            coordinator.start()
+            await waitForCapturing(coordinator)
+
+            // Block 1 ends 4 frames after its own pts (the fixed converter's
+            // payload); block 2 arrives one whole 512-frame IOProc cycle later
+            // than that, which is the hole a lost cycle leaves.
+            tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0))
+            let firstEndNsec = 90_703
+            let cycleNanos = 11_609_977
+            tap.deliverMix(frames: 4, phaseStart: 4,
+                           pts: timespec(tv_sec: 1, tv_nsec: firstEndNsec + cycleNanos))
+
+            let bytesPerFrame = PCMFormat.airplay.channels * MemoryLayout<Int16>.size
+            let framesDelivered = engineSink.forwarded.reduce(0) { $0 + $1.pcm.count / bytesPerFrame }
+            #expect(framesDelivered == 4 + 512 + 4,
+                    "the lost cycle's 512 frames must reach the sinks as silence")
+
+            _ = try #require(
+                await capture.pollForLine(
+                    evt: "tap_feed_gap",
+                    containing: ["\"cause\":\"dropped_cycle\"", "\"gapMs\":\"11.6\""]),
+                "no tap_feed_gap line for the lost cycle")
+        }
+
+        /// The other half of the same defect: a hole far longer than a lost cycle
+        /// is a pause or a tap waking from idle, where the audio really stopped.
+        /// Turns red if the cap on the unarmed fill is removed or raised past
+        /// 200 ms, which would push the next real block late by that much.
+        @Test func aHoleLongerThanTheCapIsNotPadded() async throws {
+            let tap = SyncedLocalFanoutTests.FeedbackFakeTap()
+            let engineSink = SyncedLocalFanoutTests.SpyPCMSink()
+            let coordinator = makeCoordinator(tap: tap, sink: engineSink)
+            defer { coordinator.stop() }
+
+            coordinator.start()
+            await waitForCapturing(coordinator)
+
+            tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0))
+            tap.deliverMix(frames: 4, phaseStart: 4, pts: timespec(tv_sec: 1, tv_nsec: 200_000_000))
+
+            let bytesPerFrame = PCMFormat.airplay.channels * MemoryLayout<Int16>.size
+            let framesDelivered = engineSink.forwarded.reduce(0) { $0 + $1.pcm.count / bytesPerFrame }
+            #expect(framesDelivered == 8, "a 200 ms hole must reach the sinks unpadded")
+        }
+
+        private func makeCoordinator(tap: SyncedLocalFanoutTests.FeedbackFakeTap,
+                                     sink: SyncedLocalFanoutTests.SpyPCMSink) -> NativeCaptureCoordinator {
+            NativeCaptureCoordinator(
+                makeTap: { tap },
+                sink: sink,
+                makeConverter: { _ in SyncedLocalFanoutTests.FixedConverter() },
+                processResolver: AudioProcessResolver(
+                    enumerator: SyncedLocalFanoutTests.ScriptedEnumerator(pids: [self.sinkRenderPID])),
+                muteBehavior: .mutedWhenTapped)
+        }
     }
 }

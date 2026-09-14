@@ -84,11 +84,16 @@ Rulings from the iteration, so they don't get relitigated:
 
 ## Where the exploration lives
 
-Throwaway lab pages (session scratchpad, not committed — regenerate from this
-brief if needed): `settled-emitter-lab.html` (first four candidates),
-`c-iterations.html` (lobe cleanup + curl/flow), `roll-iterations.html`
-(final round, Tweakpane knobs, settings-in-URL). Served via a python
-http.server on 8471; Tweakpane comes from jsdelivr (cdnjs has no package).
+`settled-emitter-lab/roll-iterations.html`, beside this note, is the final
+round's lab page. The constants above are values FOR its Tweakpane knobs, at
+its 2.5x clock — which is what `timeScale` records, so read the two together.
+Serve it over a local http.server (it was 8471); Tweakpane loads from jsdelivr,
+as cdnjs has no package. "Copy settings" puts the current values on the
+clipboard and in the URL.
+
+The two earlier rounds are not kept: `settled-emitter-lab.html` (the first four
+candidates) and `c-iterations.html` (lobe cleanup, curl/flow). What they
+settled is in the rulings above.
 
 ## When this ships
 

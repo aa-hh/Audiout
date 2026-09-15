@@ -1554,14 +1554,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     /// Test-only (`@testable`): run one scheduling-snapshot poll NOW, instead of
     /// waiting out the live ~5 s cadence, so a test can read the `stream_health`
-    /// line it writes. Cancels the pending work item first, so this leaves
-    /// exactly one poll armed, as the live path does.
+    /// line it writes. Goes through the real arming path, so it leaves exactly
+    /// one poll armed, exactly as a capture start does.
     func test_pollSchedulingSnapshotNow() {
-        stateQueue.sync {
-            self.schedulingSnapshotPollWork?.cancel()
-            self.schedulingSnapshotPollWork = nil
-            self.pollSchedulingSnapshot()
-        }
+        stateQueue.sync { self.startSchedulingSnapshotPolling() }
     }
 
     /// Test-only (`@testable`): the whole-system-tap retry attempt counter
@@ -2727,6 +2723,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.wholeSystemStreamByDevice.removeAll()
             self.eqSlotByStream.removeAll()
             self.mainOutEQSlot = nil
+            // The plan published here bypasses `pushEQPlanLocked`, so its log
+            // cache has to be cleared by hand or the next plan that happens to
+            // match the pre-stop one is swallowed. Same for a gesture whose
+            // commit never arrived: a stale entry would suppress the first
+            // frame of the next drag on that device.
+            self.lastEQPlanLogSummary = nil
+            self.eqEditGesturesLogged.removeAll()
             if let coordinator = self.captureCoordinator {
                 self.captureControlQueue.async { coordinator.setEQPlan(.passthrough) }
             }
@@ -3302,19 +3305,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     public func setEQ(_ eq: DeviceEQ, for id: String, commit: Bool) {
         guard id != Self.localDeviceID else { return }
         stateQueue.async {
-            guard self.known[id] != nil else { return }
-            self.eqByDeviceID[id] = eq
-            self.applyLocal(id) { $0.eq = eq }
-            if commit { self.saveEQLocked() }
             // The one line that says a curve left the editor, next to
             // everything that decides whether it can reach the audio (ticket
             // 04: no log could answer "did this speaker's curve reach the
-            // sound?"). A drag calls this per frame, so only the FIRST frame of
-            // a gesture and the commit that ends it are logged — the gesture
-            // and its final value, without a line per mouse-move. Local only:
-            // `Telemetry.log` never leaves the Mac, so a device id is allowed.
+            // sound?"). ABOVE the `known` guard on purpose: an edit for an id
+            // the backend does not know is exactly the id-mismatch case this
+            // instrumentation exists to catch, and the guard used to drop it
+            // without a word. A drag calls this per frame, so only the FIRST
+            // frame of a gesture and the commit that ends it are logged — the
+            // gesture and its final value, without a line per mouse-move. Local
+            // only: `Telemetry.log` never leaves the Mac, so a device id is
+            // allowed.
             let firstOfGesture = commit ? false : self.eqEditGesturesLogged.insert(id).inserted
             if commit { self.eqEditGesturesLogged.remove(id) }
+            let isKnown = self.known[id] != nil
             if commit || firstOfGesture {
                 Telemetry.log(.airplay, "eq_edit", [
                     "device": id,
@@ -3328,8 +3332,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     "home": self.wholeSystemStreamByDevice[id].map { "\($0)" } ?? "none",
                     "added": self.added.contains(id) ? "true" : "false",
                     "perapp": self.streamBindings[id] != nil ? "true" : "false",
+                    "known": isKnown ? "true" : "false",
                 ])
             }
+            guard isKnown else { return }
+            self.eqByDeviceID[id] = eq
+            self.applyLocal(id) { $0.eq = eq }
+            if commit { self.saveEQLocked() }
             if self.known[id]?.isBluetooth == true {
                 self.pushBTSinkEQLocked(id)
                 return
@@ -3521,6 +3530,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // flat (ticket 04). Logged only when that summary CHANGES — a scrub
         // republishes the plan per frame and an unchanged line per mouse-move
         // is noise. Local only (device ids).
+        guard let coordinator = captureCoordinator else { return }
         let planStreams = plan.telemetryStreamSummary
         let planDevices = added.compactMap { id in
             wholeSystemStreamByDevice[id].map { "\(id)=\($0)" }
@@ -3534,7 +3544,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 "devices": planDevices,
             ])
         }
-        guard let coordinator = captureCoordinator else { return }
         captureControlQueue.async { coordinator.setEQPlan(plan) }
     }
 
@@ -7888,6 +7897,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // re-publishes matches engine truth with no rebind.
         self.eqSlotByStream.removeAll()
         self.mainOutEQSlot = nil
+        // Published without `pushEQPlanLocked`, so its log cache is cleared by
+        // hand: the wake rebuilds the very same plan, and a stale cache would
+        // swallow the first `eq_plan` after the wake — the line a reader wants.
+        self.lastEQPlanLogSummary = nil
         if let coordinator = self.captureCoordinator {
             self.captureControlQueue.async { coordinator.setEQPlan(.passthrough) }
         }
@@ -8683,7 +8696,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // every whole-system line named nobody and the log could not say
             // which speaker a stream belonged to.
             var deviceSet = Set(self.streamBindings.filter { $0.value == level.streamId }.keys)
-            deviceSet.formUnion(self.wholeSystemStreamByDevice.filter { $0.value == level.streamId }.keys)
+            deviceSet.formUnion(self.wholeSystemStreamByDevice
+                .filter { $0.value == level.streamId && self.added.contains($0.key) }.keys)
             let devices = deviceSet.sorted()
             Telemetry.log(.airplay, "stream_health", [
                 "stream": "\(level.streamId)",

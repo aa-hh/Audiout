@@ -14,8 +14,6 @@ everything up to the `OutputBackend` seam and never imports AppKit.
 - Every AirPlay speaker binds to its own whole-system stream at connect (`connectTargetStreamLocked`); an EQ edit retargets that stream's processor and never moves a session, because a rebind costs the receiver's ~2 s lead.
 - Over budget, a speaker shares stream 0 and streams flat, and says so through `eqBypassReason`.
 - A shaped curve is trimmed by its peak response, and a retarget ramps the channel gains across one chunk, because a bare gain step is a click; a fresh whole-system processor ramps in from unity for the same reason.
-- An EQ rebind goes through `bindOutput` and claims the device's converging slot, never a naked rebind.
-- `reconcileEQPlan` owns both added edges; an edited stage is retargeted in place, because a fresh processor crackles.
 - A device the per-app domain claims leaves the EQ domain, and says so through `eqBypassReason`.
 - A Bluetooth trim is a ring seek and must never clear session state: the anchor and ring survive.
 - A Bluetooth EQ change bakes a new processor on `graphQueue`, never re-parameterizing a live one.

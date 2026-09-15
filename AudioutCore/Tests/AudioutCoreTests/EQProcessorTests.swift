@@ -199,6 +199,30 @@ import Testing
         #expect(abs(ratio - 1) < 0.01, "three octaves above the cut must be untouched; measured \(ratio)")
     }
 
+    /// Drop the ramp-in seed from `init` and a device crossing flat to shaped
+    /// steps the whole makeup trim on its very first frame — 6 dB the instant
+    /// loudness goes on. Measured against a processor built WITHOUT the flag,
+    /// whose biquads are identical and start from the same zero delay memory,
+    /// so the two differ by the channel gain alone.
+    @Test func aFreshWholeSystemProcessorRampsInFromUnity() {
+        let eq = DeviceEQ(loudness: true)
+        let trimDB = -EQProcessor.headroomDB(for: eq, sampleRate: sampleRate)
+        #expect(abs(trimDB + 6) < 0.5, "loudness should be trimmed by about 6 dB; measured \(trimDB) dB")
+
+        let input = sine(hz: 1_000, amplitude: 0.4)
+        var rampedIn = input, stepped = input
+        EQProcessor(eq: eq, sampleRate: sampleRate, rampInFromUnity: true).process(&rampedIn)
+        EQProcessor(eq: eq, sampleRate: sampleRate).process(&stepped)
+
+        let trim = pow(10, trimDB / 20)
+        let opening = headRMS(rampedIn, frames: 64) / headRMS(stepped, frames: 64)
+        #expect(abs(opening - 1 / trim) < 0.02 / trim,
+                "the first frames must arrive at unity, not at the trim; measured \(opening)x vs \(1 / trim)x")
+
+        // The ramp is a transient: one chunk later both sit at the trimmed level.
+        #expect(abs(rms(rampedIn, channel: 0) / rms(stepped, channel: 0) - 1) < 0.01)
+    }
+
     // MARK: Entry-point parity
 
     @Test func floatEntryPointMatchesTheSixteenBitOneWithinQuantization() {
@@ -336,6 +360,13 @@ import Testing
             samples[frame * 2 + 1] = quantized
         }
         return samples.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
+    /// RMS of the left channel over the FIRST `count` frames — where a ramp-in
+    /// lives, which ``rms(_:channel:)``'s second-half window deliberately skips.
+    private func headRMS(_ pcm: Data, frames count: Int) -> Double {
+        let samples = leftChannelS16(pcm).prefix(count).map { Double($0) / 32_767 }
+        return (samples.reduce(0) { $0 + $1 * $1 } / Double(count)).squareRoot()
     }
 
     private func leftChannelS16(_ pcm: Data) -> [Int16] {

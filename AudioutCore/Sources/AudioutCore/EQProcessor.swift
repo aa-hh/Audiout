@@ -29,9 +29,10 @@ import Foundation
 /// is not bit-exact, so a flat device has to bypass the processor entirely to
 /// stay byte-identical passthrough.
 ///
-/// **A shaped curve is trimmed by its peak response**, so a boost never nets
-/// above 0 dB at any frequency and near-full-scale program cannot be pushed into
-/// the clip; the curve the Equalizer page draws is the UNTRIMMED shape.
+/// **A shaped curve is trimmed by its peak response**, so a boost nets at most
+/// about 0.2 dB above 0 dB on a mixed curve — which the clip stage absorbs —
+/// instead of driving near-full-scale program deep into it. The curve the
+/// Equalizer page draws is the UNTRIMMED shape.
 ///
 /// Scratch buffers are allocated once at ``EQProcessor/maxChunkFrames`` and work
 /// is chunked to that size, so no allocation ever depends on the incoming buffer
@@ -44,6 +45,14 @@ public final class EQProcessor: @unchecked Sendable {
     /// Interleaved stereo everywhere: the AirPlay wire format and both sink
     /// render formats are 2-channel.
     private static let channels = 2
+
+    /// Where the fixed sections sit. ``sections(for:sampleRate:)`` builds at
+    /// these and ``headroomDB(for:sampleRate:)`` probes at them, so a move here
+    /// moves both.
+    private static let bassHz = 120.0
+    private static let trebleHz = 8_000.0
+    private static let loudnessLowHz = 100.0
+    private static let loudnessHighHz = 10_000.0
 
     /// A section whose corner sits at or above this fraction of the sample rate
     /// is skipped — at Bluetooth HFP's 24 kHz the top bands would otherwise
@@ -140,11 +149,22 @@ public final class EQProcessor: @unchecked Sendable {
 
     /// - Parameter sampleRate: the rate of the audio this instance will be fed.
     ///   Coefficients are baked for it, so a rate change means a new processor.
-    public init(eq: DeviceEQ, sampleRate: Double) {
+    /// - Parameter rampInFromUnity: slide the first chunk from unity into this
+    ///   curve's own gains. A path that had NO processor a moment ago was
+    ///   running at unity, so without this, crossing flat to shaped steps the
+    ///   whole makeup trim on the first frame — 6 dB the instant loudness goes
+    ///   on. A path that rebuilds a processor per edit wants the default: a
+    ///   ramp-in on every drag frame would pump.
+    public init(eq: DeviceEQ, sampleRate: Double, rampInFromUnity: Bool = false) {
         self.sampleRate = sampleRate
         let engine = Engine(eq: eq, sampleRate: sampleRate)
         self.engine = engine
         liveKeys = engine.keys
+        if rampInFromUnity {
+            rampFromLeft = 1
+            rampFromRight = 1
+            rampPending = true
+        }
 
         chanLeft = .allocate(capacity: Self.maxChunkFrames)
         chanRight = .allocate(capacity: Self.maxChunkFrames)
@@ -164,10 +184,12 @@ public final class EQProcessor: @unchecked Sendable {
     /// Filter interleaved S16LE stereo in place — the whole-system path, run on
     /// the buffer `AVFormatConverter` just produced.
     public func process(_ pcm: inout Data) {
-        adoptPendingEngine()
         let bytesPerFrame = Self.channels * MemoryLayout<Int16>.size
         let totalFrames = pcm.count / bytesPerFrame
         guard totalFrames > 0 else { return }
+        // Below the guard: an empty buffer would otherwise consume a swap with
+        // no chunk to ramp it across, and the gain would step on the next one.
+        adoptPendingEngine()
 
         pcm.withUnsafeMutableBytes { raw in
             guard let base = raw.bindMemory(to: Int16.self).baseAddress else { return }
@@ -186,8 +208,8 @@ public final class EQProcessor: @unchecked Sendable {
     /// Filter interleaved float stereo in place, clamped to ±1 — the Bluetooth
     /// render path, which never touches S16.
     public func process(floatInterleaved: UnsafeMutablePointer<Float>, frameCount: Int) {
-        adoptPendingEngine()
         guard frameCount > 0 else { return }
+        adoptPendingEngine()
         var frame = 0
         while frame < frameCount {
             let count = Swift.min(Self.maxChunkFrames, frameCount - frame)
@@ -410,12 +432,12 @@ public final class EQProcessor: @unchecked Sendable {
             keys.append(.band(index))
         }
 
-        if eq.bassDB != 0, 120 < ceiling {
-            coefficients += lowShelf(frequency: 120, q: 0.707, gainDB: eq.bassDB, sampleRate: sampleRate)
+        if eq.bassDB != 0, bassHz < ceiling {
+            coefficients += lowShelf(frequency: bassHz, q: 0.707, gainDB: eq.bassDB, sampleRate: sampleRate)
             keys.append(.bass)
         }
-        if eq.trebleDB != 0, 8_000 < ceiling {
-            coefficients += highShelf(frequency: 8_000, q: 0.707, gainDB: eq.trebleDB, sampleRate: sampleRate)
+        if eq.trebleDB != 0, trebleHz < ceiling {
+            coefficients += highShelf(frequency: trebleHz, q: 0.707, gainDB: eq.trebleDB, sampleRate: sampleRate)
             keys.append(.treble)
         }
         if eq.loudness {
@@ -423,12 +445,12 @@ public final class EQProcessor: @unchecked Sendable {
             // loudness compensation needs a calibrated reference level the app
             // has no way to know yet; upgrade path is to scale these two gains
             // by the composed output level once one exists.
-            if 100 < ceiling {
-                coefficients += lowShelf(frequency: 100, q: 0.707, gainDB: 6, sampleRate: sampleRate)
+            if loudnessLowHz < ceiling {
+                coefficients += lowShelf(frequency: loudnessLowHz, q: 0.707, gainDB: 6, sampleRate: sampleRate)
                 keys.append(.loudnessLow)
             }
-            if 10_000 < ceiling {
-                coefficients += highShelf(frequency: 10_000, q: 0.707, gainDB: 3, sampleRate: sampleRate)
+            if loudnessHighHz < ceiling {
+                coefficients += highShelf(frequency: loudnessHighHz, q: 0.707, gainDB: 3, sampleRate: sampleRate)
                 keys.append(.loudnessHigh)
             }
         }
@@ -497,32 +519,29 @@ public final class EQProcessor: @unchecked Sendable {
         let floorHz = 20.0, points = 64
         let ceiling = nyquistFraction * sampleRate
         guard ceiling > floorHz else { return 0 }
-        let sections = responseSections(for: eq, sampleRate: sampleRate)
-        guard !sections.isEmpty else { return 0 }
+        let built = sections(for: eq, sampleRate: sampleRate)
+        guard !built.keys.isEmpty else { return 0 }
 
         let step = log(ceiling / floorHz) / Double(points - 1)
         var probes = (0..<points).map { floorHz * exp(step * Double($0)) }
-        probes += centreFrequencies(of: eq).filter { $0 < ceiling }
+        probes += built.keys.map(centreFrequency(of:))
 
         var peak = 0.0
         for hz in probes {
-            peak = max(peak, responseDB(sections: sections, atHz: hz, sampleRate: sampleRate))
+            peak = max(peak, responseDB(sections: built.coefficients, atHz: hz, sampleRate: sampleRate))
         }
         return peak
     }
 
-    /// The centre frequency of every section ``sections(for:sampleRate:)``
-    /// would build for `eq`.
-    private static func centreFrequencies(of eq: DeviceEQ) -> [Double] {
-        var hz: [Double] = []
-        for (index, gainDB) in eq.bandGainsDB.enumerated()
-        where gainDB != 0 && index < DeviceEQ.bandCentresHz.count {
-            hz.append(DeviceEQ.bandCentresHz[index])
+    /// The frequency a section is centred on — where its own response peaks.
+    private static func centreFrequency(of key: SectionKey) -> Double {
+        switch key {
+        case .band(let index): return DeviceEQ.bandCentresHz[index]
+        case .bass: return bassHz
+        case .treble: return trebleHz
+        case .loudnessLow: return loudnessLowHz
+        case .loudnessHigh: return loudnessHighHz
         }
-        if eq.bassDB != 0 { hz.append(120) }
-        if eq.trebleDB != 0 { hz.append(8_000) }
-        if eq.loudness { hz += [100, 10_000] }
-        return hz
     }
 
     private static func peaking(frequency: Double, q: Double, gainDB: Double, sampleRate: Double) -> [Double] {

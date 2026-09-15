@@ -3497,7 +3497,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             return existing.processor
         }
-        let processor = EQProcessor(eq: eq, sampleRate: eqSampleRate)
+        let processor = EQProcessor(eq: eq, sampleRate: eqSampleRate, rampInFromUnity: true)
         slot = EQProcessorSlot(eq: eq, processor: processor)
         return processor
     }

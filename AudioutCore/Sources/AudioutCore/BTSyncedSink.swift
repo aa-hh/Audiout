@@ -741,6 +741,9 @@ final class BTDeviceSink: @unchecked Sendable {
     private func rebuildEQProcessorLocked() {   // on graphQueue
         let processor: EQProcessor? = (eq.isFlat || channelCount != 2)
             ? nil
+            // No `rampInFromUnity:` on purpose — this path bakes a FRESH
+            // processor per change, so a ramp-in on every drag frame would pump.
+            // Roadmap 057 switches it to `retarget(to:)`; pass true then.
             : EQProcessor(eq: eq, sampleRate: renderSampleRate)
         stateLock.withLock { eqProcessor = processor }
     }

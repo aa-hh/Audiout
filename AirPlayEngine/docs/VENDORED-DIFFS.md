@@ -158,7 +158,7 @@ it's empty, there's nothing to ledger yet.
      any shipping path.
 - **Sibling shim edits (NOT vendored, listed for context)**: `shims/outputs.h`
   gained `uint32_t stream_id` on `struct output_device` and `struct
-  output_data`; `shims/engine_bridge.h` declares the five test-seam
+  output_data`; `shims/engine_bridge.h` declares the six test-seam
   prototypes. These files are engine-owned `shims/` code, outside the
   byte-identical set.
 - **Verification**: `swift build` clean; `swift test` 101/101 pass (was 98,

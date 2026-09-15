@@ -34,10 +34,10 @@ public struct RunningAppInfo: Equatable {
 /// `PopoverController` stays the only thing that talks to the controllers.
 ///
 /// Two users, ONE construction so the popover has a single "add a thing to
-/// this list" affordance: Applications takes both segments ("+" opens the
-/// running-app picker, "−" removes the selected row); Output Devices takes
-/// `showsRemove: false` — its "+" fronts the add MENU and there is no
-/// remove (a device leaves the list by going away, never by a button).
+/// this list" affordance: Applications ("+" opens the running-app picker, "−"
+/// removes the selected row) and Output Devices ("+" fronts the add MENU, "−"
+/// fronts the hide menu — 2026-09-15, replacing the add-only strip: a device
+/// still leaves the LIST by going away; "−" only hides it from display).
 /// Segment metrics are identical either way, so the two "+" glyphs sit on the
 /// same left edge at the same size.
 private final class CardFooterView: NSView {
@@ -48,10 +48,10 @@ private final class CardFooterView: NSView {
     var onRemove: (() -> Void)?
 
     private let segmented = NSSegmentedControl()
-    private let showsRemove: Bool
+    private let label: String
 
-    init(showsRemove: Bool = true) {
-        self.showsRemove = showsRemove
+    init(label: String) {
+        self.label = label
         super.init(frame: NSRect(x: 0, y: 0, width: 320,
                                  height: PopoverColumnGrid.applicationsFooterRowHeight))
         autoresizingMask = [.width]
@@ -66,24 +66,21 @@ private final class CardFooterView: NSView {
         segmented.translatesAutoresizingMaskIntoConstraints = false
         segmented.segmentStyle = .texturedRounded
         segmented.trackingMode = .momentaryAccelerator
-        segmented.segmentCount = showsRemove ? 2 : 1
+        segmented.segmentCount = 2
         let addSymbol = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add")
         segmented.setImage(addSymbol, forSegment: Segment.add.rawValue)
         segmented.setWidth(segmentWidth, forSegment: Segment.add.rawValue)
-        if showsRemove {
-            let removeSymbol = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove")
-            segmented.setImage(removeSymbol, forSegment: Segment.remove.rawValue)
-            segmented.setWidth(segmentWidth, forSegment: Segment.remove.rawValue)
-        }
+        let removeSymbol = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove")
+        segmented.setImage(removeSymbol, forSegment: Segment.remove.rawValue)
+        segmented.setWidth(segmentWidth, forSegment: Segment.remove.rawValue)
         segmented.target = self
         segmented.action = #selector(segmentTapped(_:))
-        // The devices "+" (showsRemove: false) fronts a MENU — save the
+        // The caller names the pair: the devices "+" fronts a MENU (save the
         // selected devices as a group, pair a Bluetooth speaker, connect a
-        // known one — so its spoken name and tooltip must cover saving too,
-        // not just "add a device".
-        let label = showsRemove ? "Add or remove application" : "Add or save speakers"
+        // known one) and its "−" fronts the hide menu, so the spoken name and
+        // tooltip must cover more than "add/remove a device".
         segmented.setAccessibilityLabel(label)
-        if !showsRemove { segmented.toolTip = label }
+        segmented.toolTip = label
 
         addSubview(segmented)
 
@@ -92,8 +89,7 @@ private final class CardFooterView: NSView {
             segmented.leadingAnchor.constraint(equalTo: leadingAnchor,
                                                constant: PopoverColumnGrid.leadingInset),
             segmented.centerYAnchor.constraint(equalTo: centerYAnchor),
-            segmented.widthAnchor.constraint(
-                equalToConstant: showsRemove ? segmentWidth * 2 : segmentWidth),
+            segmented.widthAnchor.constraint(equalToConstant: segmentWidth * 2),
             segmented.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.applicationsFooterControlHeight),
         ])
     }
@@ -191,6 +187,12 @@ public final class PopoverController: NSObject {
     /// how a Dock-visible app would be discovered; tests inject a fixed list so
     /// they don't depend on whatever's actually running.
     private let runningAppsProvider: () -> [RunningAppInfo]
+
+    /// The user's hidden-speakers list (display-only: never selection, groups
+    /// or routing). `deviceSections()` drops a hidden UNSELECTED device; a
+    /// hidden device that is selected — a saved scene can select one — still
+    /// renders, so nothing ever plays from an invisible row.
+    private let hiddenSpeakers: HiddenSpeakersController
 
     /// Collapse-default policy (PLAN §B, T-5): defaults are recomputed on EVERY
     /// popover OPEN and manual toggles during that open are transient — they are
@@ -707,14 +709,15 @@ public final class PopoverController: NSObject {
 
     /// The Applications card's ± footer row (T3, LOCKED DECISION — replaces
     /// the retired "+ Add application…" row as the card's add affordance).
-    private let applicationsFooter = CardFooterView()
+    private let applicationsFooter = CardFooterView(label: "Add or remove application")
 
     /// The Output Devices card's footer row: the "+" that fronts
-    /// `makeOutputDevicesPlusMenu()`. Lives at the BOTTOM of the card, below
-    /// every subsection (the owner's call, 2026-08-08 — a list-management control
-    /// belongs under the list, not in the column-title header row). Add-only:
-    /// nothing removes a device from the list.
-    private let devicesFooter = CardFooterView(showsRemove: false)
+    /// `makeOutputDevicesPlusMenu()` and the "−" that fronts
+    /// `makeOutputDevicesMinusMenu()` (2026-09-15 — hide a shown speaker).
+    /// Lives at the BOTTOM of the card, below every subsection (the owner's
+    /// call, 2026-08-08 — a list-management control belongs under the list,
+    /// not in the column-title header row).
+    private let devicesFooter = CardFooterView(label: "Add, save or hide speakers")
 
     /// Whether the LAST `rebuild()` mounted the Applications card's "No apps
     /// routed…" empty-state placeholder (V11).
@@ -814,10 +817,17 @@ public final class PopoverController: NSObject {
     ///     candidate list (T-7). Defaults to `NSWorkspace.shared
     ///     .runningApplications` filtered to `.regular`-activation-policy apps
     ///     with a non-nil bundle id; tests inject a fixed list.
+    ///   - hiddenSpeakers: backs the devices footer's "−" (hide a shown
+    ///     speaker) and the "+" menu's "Hidden speakers" section. The default
+    ///     deliberately does NOT load persistence — the many bare
+    ///     `PopoverController()` call sites (tests, harnesses) must never read
+    ///     the machine's real hidden list; the app injects a persisted one.
     public init(appRouting: AppRoutingController = AppRoutingController(),
-                runningAppsProvider: @escaping () -> [RunningAppInfo] = PopoverController.defaultRunningAppsProvider) {
+                runningAppsProvider: @escaping () -> [RunningAppInfo] = PopoverController.defaultRunningAppsProvider,
+                hiddenSpeakers: HiddenSpeakersController = HiddenSpeakersController(loadPersisted: false)) {
         self.appRouting = appRouting
         self.runningAppsProvider = runningAppsProvider
+        self.hiddenSpeakers = hiddenSpeakers
         super.init()
         panel.controller = self
         mainOutRow.delegate = self
@@ -827,6 +837,7 @@ public final class PopoverController: NSObject {
         }
         applicationsFooter.onRemove = { [weak self] in self?.removeSelectedApp() }
         devicesFooter.onAdd = { [weak self] in self?.presentOutputDevicesPlusMenu() }
+        devicesFooter.onRemove = { [weak self] in self?.presentOutputDevicesMinusMenu() }
         rebuild()
     }
 
@@ -1809,6 +1820,12 @@ public final class PopoverController: NSObject {
         // opens via `insertRow` directly under ITS device row, so it can never
         // land below this strip.
         panel.endSubsection()
+        // The "−" pops a menu of the shown speakers; with none to offer (only
+        // the Mac's row, or nothing) the segment disables like the
+        // Applications "−" does with no selection.
+        devicesFooter.isRemoveEnabled = sections.contains {
+            $0.title != Self.thisMacSubsectionTitle && !$0.devices.isEmpty
+        }
         panel.addRow(devicesFooter)
         // Set each row's rail extent + feed the continuous rail overlay: the
         // spine runs Main Audio → the LOWEST SELECTED node; rows below it render
@@ -2108,8 +2125,21 @@ public final class PopoverController: NSObject {
     /// BT-LIST connected-only filter are expressed, so the rail's render order
     /// can never drift from the rows' (the terminus would land on the wrong
     /// row).
+    /// Whether `device` is dropped from the list by the user's hidden set.
+    /// The Mac's own row is never hideable, and a SELECTED device always
+    /// renders regardless (a saved scene can select a hidden speaker — the
+    /// row must be visible while it plays; the footer "−" menu disables
+    /// selected speakers so the direct path can't get here).
+    private func isHiddenFromList(_ device: Device) -> Bool {
+        !device.isLocalDevice
+            && hiddenSpeakers.isHidden(device.id)
+            && !(groupController?.isSpeakerSelected(device.id) ?? false)
+    }
+
     private func deviceSections() -> [DeviceSection] {
-        let visible = orderedDevices().filter { !$0.isBluetooth || isBluetoothRowListed($0) }
+        let visible = orderedDevices().filter {
+            (!$0.isBluetooth || isBluetoothRowListed($0)) && !isHiddenFromList($0)
+        }
         return [
             DeviceSection(title: Self.thisMacSubsectionTitle,
                           devices: visible.filter(\.isLocalDevice)),
@@ -3379,7 +3409,7 @@ public final class PopoverController: NSObject {
         // surfaces as a live `.connecting` row and resolves to connected or failed.
         let lastUsed = btLastUsedProvider?() ?? [:]
         let unlisted = devicesByID.values
-            .filter { $0.isBluetooth && !isBluetoothRowListed($0) }
+            .filter { $0.isBluetooth && !isBluetoothRowListed($0) && !hiddenSpeakers.isHidden($0.id) }
             .sorted { byBTRecency($0, $1, lastUsed: lastUsed) }
         if !unlisted.isEmpty {
             menu.addItem(.separator())
@@ -3394,7 +3424,73 @@ public final class PopoverController: NSObject {
                 menu.addItem(item)
             }
         }
+        // The way back for the footer "−": every hidden speaker still in the
+        // discovery snapshot, one "Show" item each. A hidden speaker not
+        // currently discovered has no row to restore, so it isn't offered —
+        // its id stays in the store and it reappears here when it's back on
+        // the network. A hidden BT pairing lands here (as "Show"), never in
+        // the "Bluetooth pairings" connect list above, so one device never
+        // gets two items.
+        let hidden = devicesByID.values
+            .filter { !$0.isLocalDevice && hiddenSpeakers.isHidden($0.id) }
+            .sorted { ($0.name, $0.id) < ($1.name, $1.id) }
+        if !hidden.isEmpty {
+            menu.addItem(.separator())
+            let header = NSMenuItem(title: "Hidden speakers", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for device in hidden {
+                let item = NSMenuItem(title: "Show '\(device.name)'",
+                                      action: #selector(menuShowSpeaker(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = device.id
+                menu.addItem(item)
+            }
+        }
         return menu
+    }
+
+    /// Build the "−" affordance's menu FRESH per presentation: one "Hide"
+    /// item per shown non-Mac speaker, in the list's own rendered order. A
+    /// speaker that is currently SELECTED (playing in the broadcast) is
+    /// disabled — deselect first, then hide (owner's call, 2026-09-15) — so
+    /// hiding can never take a playing speaker off screen.
+    func makeOutputDevicesMinusMenu() -> NSMenu {
+        let menu = NSMenu(title: "Hide")
+        menu.autoenablesItems = false
+        let shown = deviceSections()
+            .filter { $0.title != Self.thisMacSubsectionTitle }
+            .flatMap(\.devices)
+        for device in shown {
+            let selected = groupController?.isSpeakerSelected(device.id) ?? false
+            let item = NSMenuItem(title: "Hide '\(device.name)'",
+                                  action: #selector(menuHideSpeaker(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = device.id
+            item.isEnabled = !selected
+            if selected { item.toolTip = "Playing now — turn it off first to hide it." }
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    @objc private func menuHideSpeaker(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let device = devicesByID[id], !device.isLocalDevice,
+              !(groupController?.isSpeakerSelected(id) ?? false) else { return }
+        hiddenSpeakers.hide(deviceID: id)
+        Analytics.capture("mixer:speaker_hidden", ["kind": device.kind.rawValue])
+        rebuild()
+        panel.panelContentDidChangeHeight(animated: true)
+    }
+
+    @objc private func menuShowSpeaker(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              hiddenSpeakers.isHidden(id) else { return }
+        hiddenSpeakers.show(deviceID: id)
+        Analytics.capture("mixer:speaker_shown", ["kind": devicesByID[id]?.kind.rawValue ?? "unknown"])
+        rebuild()
+        panel.panelContentDidChangeHeight(animated: true)
     }
 
     @objc private func plusMenuSaveGroup(_ sender: Any?) { saveCurrentSetup() }
@@ -3416,6 +3512,14 @@ public final class PopoverController: NSObject {
     private func presentOutputDevicesPlusMenu() {
         guard !HeadlessRuntime.isActive else { return }
         makeOutputDevicesPlusMenu().popUp(
+            positioning: nil, at: NSPoint(x: 0, y: devicesFooter.bounds.height), in: devicesFooter)
+    }
+
+    /// The footer "−"'s click: same pop as the "+", headless-gated the same
+    /// way; headless callers assert via `test_outputDevicesMinusMenu()`.
+    private func presentOutputDevicesMinusMenu() {
+        guard !HeadlessRuntime.isActive else { return }
+        makeOutputDevicesMinusMenu().popUp(
             positioning: nil, at: NSPoint(x: 0, y: devicesFooter.bounds.height), in: devicesFooter)
     }
 
@@ -4621,6 +4725,11 @@ public final class PopoverController: NSObject {
     /// Tests dispatch its items via `NSMenu.performActionForItem(at:)` — real
     /// AppKit menu dispatch, per the row-selection lesson (never a bypass seam).
     public func test_outputDevicesPlusMenu() -> NSMenu { makeOutputDevicesPlusMenu() }
+    /// The footer "−" menu a real click would pop (headless twin of
+    /// `presentOutputDevicesMinusMenu`).
+    public func test_outputDevicesMinusMenu() -> NSMenu { makeOutputDevicesMinusMenu() }
+    /// Whether the devices footer's "−" segment is enabled.
+    public var test_devicesFooterRemoveEnabled: Bool { devicesFooter.isRemoveEnabled }
 
     /// The device id whose align-by-ear tick is currently running, if any
     /// (BT-OFFSET-UI) — asserts one-at-a-time + the close/auto-stop paths.

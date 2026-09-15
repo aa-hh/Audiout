@@ -563,6 +563,135 @@ import AppKit
         let after = try #require(popover.test_railPlan())
         #expect(after == before, "same origin, same stops, same terminus")
     }
+
+    // MARK: Feature — footer "−" hides a speaker, "+" shows it back
+
+    @Test func minusMenuHidesAnUnselectedSpeakerAndPlusMenuShowsItBack() {
+        let fleet = [local(), airplay()]
+        let (popover, _) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        #expect(popover.test_deviceRow(for: "office") != nil, "precondition: the row is mounted")
+
+        let minus = popover.test_outputDevicesMinusMenu()
+        let hideIndex = minus.items.firstIndex { $0.title == "Hide 'Office'" }
+        #expect(hideIndex != nil)
+        minus.performActionForItem(at: hideIndex!)
+        #expect(popover.test_deviceRow(for: "office") == nil, "hidden speakers mount no row")
+
+        let plus = popover.test_outputDevicesPlusMenu()
+        #expect(plus.item(withTitle: "Hidden speakers")?.isEnabled == false,
+                "the section header is a disabled label, not an action")
+        let showIndex = plus.items.firstIndex { $0.title == "Show 'Office'" }
+        #expect(showIndex != nil)
+        plus.performActionForItem(at: showIndex!)
+        #expect(popover.test_deviceRow(for: "office") != nil, "shown again = mounted again")
+        #expect(popover.test_outputDevicesPlusMenu().item(withTitle: "Hidden speakers") == nil,
+                "an empty hidden list adds no section")
+    }
+
+    @Test func minusMenuDisablesAPlayingSpeakerAndItsActionIsANoOp() {
+        let fleet = [local(), airplay()]
+        let (popover, controller) = makePopover(fleet: fleet)
+        controller.setDeviceSelected("office", true)
+        popover.update(devices: fleet)
+
+        let minus = popover.test_outputDevicesMinusMenu()
+        let item = minus.item(withTitle: "Hide 'Office'")
+        #expect(item?.isEnabled == false, "a speaker in the broadcast can't be hidden")
+        // Fire it anyway (an accessibility client can): the guard must hold.
+        if let index = minus.items.firstIndex(where: { $0.title == "Hide 'Office'" }) {
+            minus.performActionForItem(at: index)
+        }
+        #expect(popover.test_deviceRow(for: "office") != nil, "still listed")
+        #expect(controller.selectedDeviceIDs.contains("office"), "still selected")
+    }
+
+    @Test func aHiddenSpeakerSelectedByASceneStillRenders() {
+        // A saved scene can select a speaker the user hid earlier; the row
+        // must render while it plays — nothing plays invisibly.
+        let fleet = [local(), airplay()]
+        let hidden = HiddenSpeakersController(store: HiddenSpeakersStore(directory: tempDirectory()),
+                                              loadPersisted: false)
+        hidden.hide(deviceID: "office")
+        let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        let controller = GroupController(backend: backend,
+                                         store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        let popover = PopoverController(hiddenSpeakers: hidden)
+        popover.configure(groupController: controller)
+        popover.test_isShownOverride = true
+        backend.start()
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline && backend.devices.count < fleet.count {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        }
+        popover.update(devices: fleet)
+        #expect(popover.test_deviceRow(for: "office") == nil, "precondition: hidden while unselected")
+
+        controller.setDeviceSelected("office", true)
+        popover.update(devices: fleet)
+        #expect(popover.test_deviceRow(for: "office") != nil, "selected wins over hidden")
+
+        controller.setDeviceSelected("office", false)
+        popover.update(devices: fleet)
+        #expect(popover.test_deviceRow(for: "office") == nil, "deselected = hidden again")
+    }
+
+    @Test func hiddenSpeakersPersistAcrossControllers() {
+        // The list must survive relaunch: a hide that never reaches disk means
+        // the speaker the user removed is back at the next launch.
+        let directory = tempDirectory()
+        let first = HiddenSpeakersController(store: HiddenSpeakersStore(directory: directory))
+        first.hide(deviceID: "office")
+        let second = HiddenSpeakersController(store: HiddenSpeakersStore(directory: directory))
+        #expect(second.isHidden("office"))
+        second.show(deviceID: "office")
+        let third = HiddenSpeakersController(store: HiddenSpeakersStore(directory: directory))
+        #expect(!third.isHidden("office"))
+    }
+
+    @Test func minusSegmentDisablesWhenOnlyTheMacRemains() {
+        let (macOnly, _) = makePopover(fleet: [local()])
+        macOnly.update(devices: [local()])
+        #expect(!macOnly.test_devicesFooterRemoveEnabled, "nothing hideable → disabled, like the Applications '−' with no selection")
+
+        let (withSpeaker, _) = makePopover(fleet: [local(), airplay()])
+        withSpeaker.update(devices: [local(), airplay()])
+        #expect(withSpeaker.test_devicesFooterRemoveEnabled)
+    }
+
+    @Test func aHiddenBluetoothPairingGetsAShowItemNeverAConnectItem() {
+        // One device must never carry two "+"-menu items: hidden wins, and the
+        // way back is "Show", not "Connect".
+        let fleet = [local(), bt("bt-z:output", name: "Zed Box", available: false)]
+        let hidden = HiddenSpeakersController(store: HiddenSpeakersStore(directory: tempDirectory()),
+                                              loadPersisted: false)
+        let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        let controller = GroupController(backend: backend,
+                                         store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        let popover = PopoverController(hiddenSpeakers: hidden)
+        popover.configure(groupController: controller)
+        popover.test_isShownOverride = true
+        backend.start()
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline && backend.devices.count < fleet.count {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        }
+        popover.update(devices: fleet)
+        #expect(popover.test_outputDevicesPlusMenu().item(withTitle: "Connect 'Zed Box'") != nil,
+                "precondition: the unlisted pairing is offered")
+
+        hidden.hide(deviceID: "bt-z:output")
+
+        let plus = popover.test_outputDevicesPlusMenu()
+        #expect(plus.item(withTitle: "Connect 'Zed Box'") == nil)
+        #expect(plus.item(withTitle: "Show 'Zed Box'") != nil)
+    }
 }
 
 /// Wraps a real ``MockBackend`` and records every id `retryOutput` was called

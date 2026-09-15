@@ -1,6 +1,6 @@
 # 03 — One permanent whole-system stream per AirPlay speaker (Track C), or Track A
 
-Status: Track C built 950cd490 + c5e7e193 + cf0a52f4 + review fixes 7dc88620 (250 NativeBackend tests); live check owed
+Status: Track C built + reviewed APPROVE at 33edbfc4 (251 NativeBackend tests); PR open; live check owed
 Blocked by: 02
 Worktree: this one (`claude/equalizer-latency-optimization-d714da`)
 
@@ -154,3 +154,12 @@ Keep the topology machinery and remove the two commonest gaps only:
   plan's stream 0 entry has a processor); keep `EQStreamTopologyTests` and add the
   lone-device rule to it.
 - Same AGENTS.md update, worded for what was built.
+
+## Comments
+
+- 2026-09-15 review (Fable, adversarial, three passes): APPROVE at 33edbfc4. Known, accepted: a
+  converge that exits through the `failedGate` guard while a deselect lands between its last
+  snapshot and its `defer` releases no home; one budget slot is over-counted for that speaker
+  until it is reselected (then reused). Closure if ever needed: release in
+  `releaseConvergingAndRequeueIfNeeded`'s no-requeue branch when `desiredOn[id] != true &&
+  !added.contains(id)`.

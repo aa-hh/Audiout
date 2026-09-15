@@ -1,6 +1,6 @@
 # 02 — Raise the engine stream cap 6 → 16 and measure 16 parallel ALAC encodes
 
-Status: ready-for-agent
+Status: built ffd89914; gate result rtf=0.038 on the mule (16 streams × 5 s in 0.19 s) → Track C
 Worktree: this one (`claude/equalizer-latency-optimization-d714da`)
 
 Why: one permanent stream per AirPlay speaker (ticket 03) needs more than 5 streams

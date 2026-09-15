@@ -20,6 +20,7 @@ folder renders; routing arithmetic lives in Core.
 - A collapsed subsection cuts the rail exactly as a collapsed card does (2026-08-11).
 - It cuts only when it hides the lowest device the rail reaches, in full order; hidden nodes come from `DeviceRowView.busNode` (2026-09-13).
 - Hidden means idle: ingest skips behind `isEffectivelyShown`, and every open rebuilds.
+- The footer "−" hides a speaker from the LIST only (`HiddenSpeakersController`, display-only, persisted); a SELECTED speaker always renders and its "Hide" item disables — nothing may play from an invisible row (2026-09-15). The way back is the "+" menu's "Hidden speakers" section, discovered devices only.
 - At most one sync drawer is open; `expandedSyncDeviceID` is the single owner.
 - A live scrub applies to audio but must not persist until committed.
 - The alignment wizard is a sheet the popover cannot close under; its two lights are the emitter field's settled state (`SettledLightLayer`, audiout-shared `AudioutField.settled`), tinted green and steel blue (`wireCore`/`ring`), never magenta (C1); no outline ring is drawn on any rung. Its mic probe is a screen (`.listening`), entered only after the host's mic-permission answer; the stored value is a recalled proposal only when listening never started; a rejected proposal never ends a run. A measured proposal's reject reads "Try again" once (mic runs again) then "Align by ear" (the questions); an earned or recalled proposal reads "Still off".

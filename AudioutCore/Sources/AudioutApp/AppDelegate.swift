@@ -360,6 +360,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `pruneRoutesForExcludedApps()`, inside `applicationDidFinishLaunching`.
     private lazy var excludedApps = ExcludedAppsController(store: ExcludedAppsStore())
 
+    /// The user's hidden-speakers list (popover footer "−" / "+" menu), lazy
+    /// for the same Application Support-read reason as `excludedApps` above.
+    private lazy var hiddenSpeakers = HiddenSpeakersController(store: HiddenSpeakersStore())
+
     /// The app's device model, kept as a pure function of backend events. Keyed
     /// by `Device.id`. T-U2 reads this to build rows; for now it just backs the
     /// placeholder master-volume value the status symbol tracks.
@@ -1029,7 +1033,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // menu" report). No-ops while the surface is closed.
             self.popoverController.groupsDidChange()
         }
-        popoverController = PopoverController(appRouting: appRouting)
+        popoverController = PopoverController(appRouting: appRouting, hiddenSpeakers: hiddenSpeakers)
         popoverController.deviceIconController = deviceIconController
         popoverController.configure(groupController: groupController)
         // T6 (takeover status strip, state 1's "Open Login Items…" button): the

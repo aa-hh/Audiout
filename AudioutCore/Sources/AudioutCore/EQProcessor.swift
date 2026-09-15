@@ -29,6 +29,10 @@ import Foundation
 /// is not bit-exact, so a flat device has to bypass the processor entirely to
 /// stay byte-identical passthrough.
 ///
+/// **A shaped curve is trimmed by its peak response**, so a boost never nets
+/// above 0 dB at any frequency and near-full-scale program cannot be pushed into
+/// the clip; the curve the Equalizer page draws is the UNTRIMMED shape.
+///
 /// Scratch buffers are allocated once at ``EQProcessor/maxChunkFrames`` and work
 /// is chunked to that size, so no allocation ever depends on the incoming buffer
 /// length.
@@ -78,9 +82,15 @@ public final class EQProcessor: @unchecked Sendable {
                 : vDSP_biquad_CreateSetup(built.coefficients, vDSP_Length(built.keys.count))
             delaysLeft = [Float](repeating: 0, count: 2 * built.keys.count + 2)
             delaysRight = [Float](repeating: 0, count: 2 * built.keys.count + 2)
+            // `filterBalanceAndClip` applies these AFTER the biquads and BEFORE
+            // the clip, in float, so the cascade may run past +/-1 internally and
+            // the trim still brings it back under in time. Post-filter also
+            // leaves the biquad delay memory in pre-gain units, so the carry
+            // ``retarget(to:)`` performs stays valid.
             let gains = EQProcessor.channelGains(balance: eq.balance)
-            leftGain = gains.left
-            rightGain = gains.right
+            let trim = Float(pow(10, -EQProcessor.headroomDB(for: eq, sampleRate: sampleRate) / 20))
+            leftGain = gains.left * trim
+            rightGain = gains.right * trim
         }
 
         deinit { if let setup { vDSP_biquad_DestroySetup(setup) } }
@@ -115,6 +125,13 @@ public final class EQProcessor: @unchecked Sendable {
     /// build a carry map without reading the live instance. Written by the
     /// processing thread at swap time, under the lock it is already holding.
     private var liveKeys: [SectionKey]   // mailbox
+
+    /// The gains the engine displaced by the last swap ran at, and whether the
+    /// next chunk still owes a ramp from them. PROCESSING thread only, like
+    /// ``engine`` itself.
+    private var rampFromLeft: Float = 0
+    private var rampFromRight: Float = 0
+    private var rampPending = false
 
     private let chanLeft: UnsafeMutablePointer<Float>
     private let chanRight: UnsafeMutablePointer<Float>
@@ -232,18 +249,36 @@ public final class EQProcessor: @unchecked Sendable {
             chanRight.update(from: filteredRight, count: frameCount)
         }
 
-        if engine.leftGain != 1 {
-            var gain = engine.leftGain
-            vDSP_vsmul(chanLeft, 1, &gain, chanLeft, 1, count)
-        }
-        if engine.rightGain != 1 {
-            var gain = engine.rightGain
-            vDSP_vsmul(chanRight, 1, &gain, chanRight, 1, count)
+        // razor: ONE chunk is the whole ramp, so its length is whatever the
+        // caller handed over — at most `maxChunkFrames`, 93 ms at 44.1 kHz.
+        // Upgrade path if a drag on a long buffer ever zippers: carry the
+        // remaining distance across buffers and ramp for a fixed TIME instead.
+        if rampPending {
+            ramp(chanLeft, from: rampFromLeft, to: engine.leftGain, count: count)
+            ramp(chanRight, from: rampFromRight, to: engine.rightGain, count: count)
+            rampPending = false
+        } else {
+            if engine.leftGain != 1 {
+                var gain = engine.leftGain
+                vDSP_vsmul(chanLeft, 1, &gain, chanLeft, 1, count)
+            }
+            if engine.rightGain != 1 {
+                var gain = engine.rightGain
+                vDSP_vsmul(chanRight, 1, &gain, chanRight, 1, count)
+            }
         }
 
         var low = Float(-1), high = Float(1)
         vDSP_vclip(chanLeft, 1, &low, &high, chanLeft, 1, count)
         vDSP_vclip(chanRight, 1, &low, &high, chanRight, 1, count)
+    }
+
+    /// Multiply in place by a gain sliding linearly from `from` to `to` across
+    /// the chunk. Allocation-free, and the balance trim rides it for free.
+    private func ramp(_ samples: UnsafeMutablePointer<Float>, from: Float, to: Float, count: vDSP_Length) {
+        var value = from
+        var step = (to - from) / Float(count)
+        vDSP_vrampmul(samples, 1, &value, &step, samples, 1, count)
     }
 
     // MARK: Retargeting
@@ -282,6 +317,13 @@ public final class EQProcessor: @unchecked Sendable {
             // so parking the old engine and emptying the mailbox both release
             // references that something else still holds. Nothing is freed.
             retired = Retired(engine: engine, spent: next)
+            // The new engine's makeup trim is almost never the old one's, so a
+            // flat multiply here would step the level mid-note — the very click
+            // the delay carry above exists to avoid. `filterBalanceAndClip`
+            // slides between them over the next chunk instead.
+            rampFromLeft = engine.leftGain
+            rampFromRight = engine.rightGain
+            rampPending = true
             engine = next.engine
             pending = nil
             liveKeys = engine.keys
@@ -437,6 +479,50 @@ public final class EQProcessor: @unchecked Sendable {
     /// once and ``responseDB(sections:atHz:sampleRate:)`` per point instead.
     public static func responseDB(for eq: DeviceEQ, atHz hz: Double, sampleRate: Double) -> Double {
         responseDB(sections: responseSections(for: eq, sampleRate: sampleRate), atHz: hz, sampleRate: sampleRate)
+    }
+
+    /// How far `eq` boosts above 0 dB anywhere in the audible band, in dB — the
+    /// makeup trim ``Engine`` turns the output down by, so a shaped stream that
+    /// arrives near full scale does not saturate at the clip. A curve that only
+    /// cuts reads 0, and so does a flat one. Balance is excluded because it is
+    /// attenuate-only and can add no pressure of its own.
+    ///
+    /// The peak is sampled rather than solved for: a log grid, plus every
+    /// section's own centre, which is exactly where a single RBJ section's
+    /// maximum sits and which the grid would otherwise straddle. Two overlapping
+    /// bands can still peak BETWEEN their centres — at most 0.08 dB over, across
+    /// every pair of band centres at full boost — and the clip stage absorbs that
+    /// rather than the trim carrying a safety margin.
+    public static func headroomDB(for eq: DeviceEQ, sampleRate: Double) -> Double {
+        let floorHz = 20.0, points = 64
+        let ceiling = nyquistFraction * sampleRate
+        guard ceiling > floorHz else { return 0 }
+        let sections = responseSections(for: eq, sampleRate: sampleRate)
+        guard !sections.isEmpty else { return 0 }
+
+        let step = log(ceiling / floorHz) / Double(points - 1)
+        var probes = (0..<points).map { floorHz * exp(step * Double($0)) }
+        probes += centreFrequencies(of: eq).filter { $0 < ceiling }
+
+        var peak = 0.0
+        for hz in probes {
+            peak = max(peak, responseDB(sections: sections, atHz: hz, sampleRate: sampleRate))
+        }
+        return peak
+    }
+
+    /// The centre frequency of every section ``sections(for:sampleRate:)``
+    /// would build for `eq`.
+    private static func centreFrequencies(of eq: DeviceEQ) -> [Double] {
+        var hz: [Double] = []
+        for (index, gainDB) in eq.bandGainsDB.enumerated()
+        where gainDB != 0 && index < DeviceEQ.bandCentresHz.count {
+            hz.append(DeviceEQ.bandCentresHz[index])
+        }
+        if eq.bassDB != 0 { hz.append(120) }
+        if eq.trebleDB != 0 { hz.append(8_000) }
+        if eq.loudness { hz += [100, 10_000] }
+        return hz
     }
 
     private static func peaking(frequency: Double, q: Double, gainDB: Double, sampleRate: Double) -> [Double] {

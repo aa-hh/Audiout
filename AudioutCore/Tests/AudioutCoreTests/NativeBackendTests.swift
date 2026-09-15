@@ -9595,6 +9595,56 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }
         #expect(capture.eqPlans.last?.streams.contains { $0.streamID == departingStream } == false,
                 "a departed device's stream must not stay in the plan")
+
+        // And the deselect really RELEASED the stream: ids are never reused, so
+        // re-selecting the same speaker has to home it somewhere new.
+        backend.setOutputSet([departing.id, staying.id])
+        await pollUntil {
+            (engine.liveStream(of: departing.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase
+        }
+        #expect(engine.liveStream(of: departing.outputID) != departingStream,
+                "a deselect frees the home, so the reselect allocates a fresh stream")
+    }
+
+    /// A session that dies under a speaker the user still wants keeps its home
+    /// stream. The engine can re-establish that session itself, out of band and
+    /// on the stream id it still holds, so dropping the home on `.failed` leaves
+    /// the plan carrying no entry for the stream the speaker is actually on —
+    /// audibly, a speaker that comes back silent and stays that way.
+    @Test func aFailureUnderADesiredSpeakerKeepsItsStream() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:71", name: "Dropped Tone")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        defer { backend.stop() }
+
+        backend.setEQ(DeviceEQ(bassDB: 4), for: device.id, commit: true)
+        let home = try #require(engine.liveStream(of: device.outputID))
+        try #require(home >= SpyEngine.wholeSystemStreamIDBase,
+                     "precondition: the speaker owns a stream of its own")
+        await pollUntil {
+            capture.eqPlans.last?.streams.contains { $0.streamID == home } == true
+        }
+        let rebindsBeforeFailure = engine.rebindCalls.count
+
+        // The session dies out of band — the user never deselected, so the
+        // speaker is still desired.
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+
+        // The engine recovers it itself: this never passes through
+        // `convergeDevice`, so nothing re-reads or re-binds the stream.
+        engine.pushState(device.outputID, .connected)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == true }
+
+        await pollUntil {
+            capture.eqPlans.last?.streams.contains { $0.streamID == home } == true
+        }
+        #expect(capture.eqPlans.last?.streams
+            .contains { $0.streamID == home && $0.processor != nil } == true,
+            "the recovered speaker must be back in the plan on the SAME stream, still shaped")
+        #expect(engine.rebindCalls.count == rebindsBeforeFailure,
+                "an out-of-band recovery must cost no engine op of ours")
     }
 
     /// A slider drag on ONE device must be inaudible on every other stream. Each

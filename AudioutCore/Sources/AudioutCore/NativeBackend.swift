@@ -566,12 +566,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private var eqByDeviceID: [String: DeviceEQ] = [:]   // on stateQueue
     /// The whole mix's own tone stage, applied before every fan-out. On `stateQueue`.
     private var storedMainOutEQ: DeviceEQ = .flat   // on stateQueue
-    /// The whole-system stream each AirPlay device's session is bound to, for
-    /// the LIFE of that session — deviceID → stream id. `0` means the device
-    /// shares the flat stream 0 because the engine had no stream left when it
-    /// connected. Written only by ``connectTargetStreamLocked(_:)``, which every
-    /// whole-system session-establishing op reads immediately before its engine
-    /// call. On `stateQueue`.
+    /// The whole-system stream each AirPlay device is homed on — deviceID →
+    /// stream id. `0` means the device shares the flat stream 0 because the
+    /// engine had no stream left when it connected. It OUTLIVES a session that
+    /// dies under a still-desired device, so an engine-driven reconnect lands
+    /// back on the stream the plan already carries; only a deselect
+    /// (``removeFromAddedLocked(_:)``) and `stop()` release it. Written only by
+    /// ``connectTargetStreamLocked(_:)``, which every whole-system
+    /// session-establishing op reads immediately before its engine call.
+    /// On `stateQueue`.
     private var wholeSystemStreamByDevice: [String: UInt32] = [:]   // on stateQueue
     /// The next whole-system stream id to hand out. Monotonic: a released id is
     /// retired for the session and never reused (decision 8). On `stateQueue`.
@@ -3380,19 +3383,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     @discardableResult
     private func removeFromAddedLocked(_ id: String) -> Bool {   // on stateQueue
         let wasStreaming = added.remove(id) != nil
-        // The session that held this stream is gone — and UNCONDITIONALLY, not
-        // only on a real streaming edge: every caller is a teardown or a failed
-        // connect, and a connect that threw after taking its stream would
-        // otherwise hold that slot against the budget for the rest of the
-        // session. A reconnect re-homes from scratch.
-        wholeSystemStreamByDevice.removeValue(forKey: id)
+        // Release the home stream only when the user no longer wants this
+        // speaker. A session that died while the device is still DESIRED is
+        // coming back — possibly through the engine's own out-of-band reconnect,
+        // which re-establishes it on the stream id the engine still holds — so
+        // the assignment has to outlive the failure or the plan stops carrying
+        // that stream and the speaker comes back silent. Checked here rather
+        // than at the `desiredOn` write because this is the single site every
+        // per-device departure passes through.
+        if desiredOn[id] != true { wholeSystemStreamByDevice.removeValue(forKey: id) }
         guard wasStreaming else { return false }
         reconcileEQPlan()
         return true
     }
 
     /// The whole-system stream `id`'s session belongs on — allocated on first
-    /// use and kept for the life of that session.
+    /// use and kept until the user deselects the speaker.
     ///
     /// Every whole-system session-establishing op reads this under `stateQueue`
     /// immediately before its engine call, so a speaker is on its own stream
@@ -3408,6 +3414,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// ``Device/eqBypassReason`` — and it KEEPS `0` until it disconnects: being
     /// re-homed when a neighbour leaves would cost exactly the gap this design
     /// exists to avoid. On `stateQueue`.
+    ///
+    /// razor: the budget is read once, at connect. A per-app bind that takes a
+    /// stream AFTER ~15 speakers are already homed can push the total past the
+    /// engine's capacity, and the speaker that loses gets an engine refusal
+    /// rather than a bypass sentence. Upgrade path: re-home the over-budget
+    /// speakers when a per-app destination set changes — which costs each of
+    /// them the rebind gap, so it is worth doing only if a real mix ever gets
+    /// near the cap.
     private func connectTargetStreamLocked(_ id: String) -> UInt32 {   // on stateQueue
         if let home = wholeSystemStreamByDevice[id] { return home }
         let perAppStreams = Set(streamBindings.values.filter {
@@ -9256,10 +9270,6 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 device.isAvailable = false
                 device.isSelected = false
                 let wasStreaming = self.added.remove(id) != nil
-                // The same release `removeFromAddedLocked` does, which this arm
-                // can't call (see `eqNeedsReconcile`): the session is dead, so a
-                // reconnect re-homes fresh and the slot goes back in the budget.
-                if wasStreaming { self.wholeSystemStreamByDevice.removeValue(forKey: id) }
                 eqNeedsReconcile = wasStreaming
                 if self.desiredOn[id] == true {
                     self.failedGate.insert(id)

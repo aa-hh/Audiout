@@ -3370,24 +3370,25 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// a REAL true→false edge — the departure mirror of the `added` false→true
     /// edge, and the only site that owns it.
     ///
-    /// A departure changes two things nothing else notices: it releases the
-    /// device's own stream, so a device the budget had refused gets one on its
-    /// next connect; and it takes that stream out of the plan, which otherwise
-    /// keeps costing a per-buffer filter pass for audio no output is bound to.
-    /// `setOutputSet`'s reconcile can't do either — it runs while the teardown is
-    /// still in flight, with the device still in `added`.
+    /// A departure takes the device's stream out of the plan, which otherwise
+    /// keeps costing a per-buffer filter pass for audio no output is bound to —
+    /// and, for a device the user has already deselected, releases that stream
+    /// back to the budget. `setOutputSet`'s own reconcile can do neither: it runs
+    /// while the teardown is still in flight, with the device still in `added`.
     ///
     /// Issues no engine op of its own, so it is safe to call from inside a
     /// converge loop. On `stateQueue`.
     /// - Returns: whether `id` was actually in the streaming set.
     @discardableResult
     private func removeFromAddedLocked(_ id: String) -> Bool {   // on stateQueue
-        // The home stream is NOT released here: a session that died under a
-        // still-desired speaker is coming back — possibly through the engine's
-        // own out-of-band reconnect, which re-establishes it on the stream id the
-        // engine still holds — so the assignment has to outlive the failure or
-        // the plan stops carrying that stream and the speaker comes back silent.
-        // `setOutputSet` releases it at the desire edge instead.
+        // Released only for a device the user no longer wants. A session that
+        // died under a still-DESIRED speaker is coming back — possibly through
+        // the engine's own out-of-band reconnect, which re-establishes it on the
+        // stream id the engine still holds — so the assignment has to outlive the
+        // failure or the plan stops carrying that stream and the speaker comes
+        // back silent. The mirror case, a deselect with no session to tear down,
+        // releases at `setOutputSet`'s desire edge instead.
+        if desiredOn[id] != true { wholeSystemStreamByDevice.removeValue(forKey: id) }
         guard added.remove(id) != nil else { return false }
         reconcileEQPlan()
         return true
@@ -3612,17 +3613,27 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // its own entry point, `retryOutput(_:)`.
                 if previous != wantOn { self.failedGate.remove(id) }
 
-                // The user no longer wants this speaker, so its whole-system
-                // stream goes back to the budget HERE, at the desire edge — not
-                // in the teardown. A device with no live session (a connect the
-                // receiver refused, a receiver that vanished, a session that died
-                // out of band) reaches no teardown at all, and a converge that
-                // finds `want == isOn` issues nothing and is not even requeued
-                // (`releaseConvergingAndRequeueIfNeeded`), so a release owned by
-                // either of those would simply never run: the stream would keep
-                // counting against the budget and a stale `0` would pin the
-                // speaker to the flat stream on every later reselect.
-                if previous != wantOn, !wantOn {
+                // A speaker the user no longer wants, with NO session and NO
+                // engine op in flight, gives its whole-system stream back here.
+                // It reaches no teardown — a connect the receiver refused, a
+                // receiver that vanished, a session that died out of band all
+                // leave `added` false — and a converge that finds `want == isOn`
+                // issues nothing and is not even requeued
+                // (`releaseConvergingAndRequeueIfNeeded`), so nothing else would
+                // ever release it: the stream would keep counting against the
+                // budget and a stale `0` would pin the speaker to the flat stream
+                // on every later reselect.
+                //
+                // BOTH guards are load-bearing. A converge that has already read
+                // the home is inside a ~2 s negotiation: taking the stream now
+                // and re-selecting before the add lands would leave the post-add
+                // `added` insert with no home at all, so the plan would carry no
+                // stream for a row that says connected — a speaker fed nothing
+                // but idle fill, with the loop already settled at `want == isOn`.
+                // A speaker with a live session releases at its teardown instead
+                // (`removeFromAddedLocked`).
+                if previous != wantOn, !wantOn,
+                   !self.added.contains(id), !self.converging.contains(id) {
                     self.wholeSystemStreamByDevice.removeValue(forKey: id)
                 }
 
@@ -3863,11 +3874,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
 
             // The selection just moved, so the set of devices the plan carries
-            // moved with it. This pass sees INTENT only:
-            // devices connecting as a result of this call reconcile again on
-            // their own `added` edge, and a DESELECTED device is still in
-            // `added` here (its teardown is only being scheduled) — the
-            // departure edge is `removeFromAddedLocked`'s to report, not this
+            // moved with it — and, for a deselected speaker with no session and
+            // no op in flight, its stream was just released above. This pass sees
+            // INTENT only: devices connecting as a result of this call reconcile
+            // again on their own `added` edge, and a DESELECTED device that IS
+            // streaming is still in `added` here (its teardown is only being
+            // scheduled) — that departure is `removeFromAddedLocked`'s to report,
+            // not this
             // one's.
             self.reconcileEQPlan()
 

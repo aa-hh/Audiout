@@ -343,9 +343,17 @@ public final class EQProcessor: @unchecked Sendable {
             // flat multiply here would step the level mid-note — the very click
             // the delay carry above exists to avoid. `filterBalanceAndClip`
             // slides between them over the next chunk instead.
-            rampFromLeft = engine.leftGain
-            rampFromRight = engine.rightGain
-            rampPending = true
+            //
+            // A ramp already pending keeps ITS start: that is the last gain the
+            // speaker actually heard. The engine being displaced here was never
+            // played if a retarget beat the first buffer to it — a drag off flat
+            // builds the processor and the next drag frame retargets it — and
+            // adopting its gain would put the whole step back on frame 0.
+            if !rampPending {
+                rampFromLeft = engine.leftGain
+                rampFromRight = engine.rightGain
+                rampPending = true
+            }
             engine = next.engine
             pending = nil
             liveKeys = engine.keys

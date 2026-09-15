@@ -221,6 +221,19 @@ import Testing
 
         // The ramp is a transient: one chunk later both sit at the trimmed level.
         #expect(abs(rms(rampedIn, channel: 0) / rms(stepped, channel: 0) - 1) < 0.01)
+
+        // A drag off flat builds the processor and the NEXT drag frame retargets
+        // it, both before any capture buffer arrives. Overwrite the seed with
+        // that first engine's never-heard trim and the whole step lands on
+        // frame 0 anyway. Retargeting to the SAME curve holds the biquads still,
+        // so the opening level measures the ramp's starting gain and nothing else.
+        var retargetedFirst = input
+        let processor = EQProcessor(eq: eq, sampleRate: sampleRate, rampInFromUnity: true)
+        processor.retarget(to: eq)
+        processor.process(&retargetedFirst)
+        let reopening = headRMS(retargetedFirst, frames: 64) / headRMS(stepped, frames: 64)
+        #expect(abs(reopening - 1 / trim) < 0.02 / trim,
+                "a retarget before the first buffer must not eat the ramp-in; measured \(reopening)x")
     }
 
     // MARK: Entry-point parity

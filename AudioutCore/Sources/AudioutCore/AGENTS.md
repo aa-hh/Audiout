@@ -11,8 +11,8 @@ everything up to the `OutputBackend` seam and never imports AppKit.
 - `SyncCore.swift` is LICENSE-CLEAN: never add a GPL header, never move GPL-derived code in.
 - A trim or measured latency change moves the sink's read position; a rebuild silences a live scrub.
 - A flat EQ must stay byte-identical passthrough: never route a flat buffer through `EQProcessor`.
-- An EQ rebind goes through `bindOutput` and claims the device's converging slot, never a naked rebind.
-- `reconcileEQPlan` owns both added edges; an edited stage is retargeted in place, because a fresh processor crackles.
+- Every AirPlay speaker binds to its own whole-system stream at connect (`connectTargetStreamLocked`); an EQ edit retargets that stream's processor and never moves a session, because a rebind costs the receiver's ~2 s lead.
+- Over budget, a speaker shares stream 0 and streams flat, and says so through `eqBypassReason`.
 - A device the per-app domain claims leaves the EQ domain, and says so through `eqBypassReason`.
 - A Bluetooth trim is a ring seek and must never clear session state: the anchor and ring survive.
 - A Bluetooth EQ change bakes a new processor on `graphQueue`, never re-parameterizing a live one.

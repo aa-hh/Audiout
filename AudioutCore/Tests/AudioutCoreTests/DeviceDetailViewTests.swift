@@ -701,7 +701,7 @@ import AppKit
         device.eqBypassReason = .streamBudget
         let detail = makeLoadedPane(device: device)
         #expect(detail.test_eqEditor.test_bypassNoteText
-                == "Not applied. Reset another speaker's EQ to bring this one back.")
+                == "Not applied. Too many speakers are streaming at once for this one to get its own EQ.")
 
         device.eqBypassReason = .perAppRouting
         detail.refresh(device: device)

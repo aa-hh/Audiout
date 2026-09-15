@@ -1366,13 +1366,13 @@ public actor AirPlayEngine {
 
     /// Max simultaneous `output_data` entries one `write(streams:pts:)` call
     /// can carry. Derived from the shim's fixed `output_buffer.data` array
-    /// (`OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS` (5) `+ 2` in `shims/outputs.h`: one
+    /// (`OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS` (15) `+ 2` in `shims/outputs.h`: one
     /// slot for the original untranscoded blob the array was originally sized
     /// for, one always-zero terminator) minus 1 further reserved slot so a
     /// zero terminator (`buffer == NULL`) always remains immediately after the
     /// last real entry — `airplay_write` loops `for (i; obuf->data[i].buffer;
     /// i++)` and never sees a `bufsize`/count, only the NULL sentinel.
-    static let maxSimultaneousStreams = 6
+    static let maxSimultaneousStreams = 16
 
     /// The write-path backpressure cap (memory-leak audit 2026-07-23): the most
     /// *un-drained* audio, per stream, that may sit queued on the engine thread

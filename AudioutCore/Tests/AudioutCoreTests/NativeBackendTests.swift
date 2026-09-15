@@ -21,6 +21,27 @@ import AudioToolbox
 
 /// Records every engine op and lets a test drive the device-state stream.
 private final class SpyEngine: EngineControlling, @unchecked Sendable {
+
+    /// Where `NativeBackend` allocates each speaker's own whole-system stream
+    /// from — the top half of the id space, disjoint from `AppRouteMixer`'s
+    /// per-app ids (1 upward). Mirrored here because the backend's own constant
+    /// is private.
+    static let wholeSystemStreamIDBase: UInt32 = 0x8000_0000
+    /// Whether `streamId` is a speaker's own whole-system home stream. Stream 0
+    /// is NOT one: a speaker lands there only when the engine had no stream left,
+    /// so an assertion that accepts it cannot tell "whole-system won the device"
+    /// from "the move never happened".
+    static func isWholeSystem(_ streamId: UInt32) -> Bool {
+        streamId >= wholeSystemStreamIDBase
+    }
+    /// Which bucket an add is RECORDED in. Stream 0 belongs with the home
+    /// streams here and only here — it carries the whole-system mix, so every
+    /// assertion about "this speaker's session was established" reads one list
+    /// whichever entry point the backend used.
+    static func logsAsWholeSystemAdd(_ streamId: UInt32) -> Bool {
+        streamId == 0 || streamId >= wholeSystemStreamIDBase
+    }
+
     let lock = NSLock()
     private(set) var started = false
     private(set) var stopped = false
@@ -75,8 +96,8 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// variants, after the op is recorded and any `onAddOutputBody` ran but
     /// BEFORE the spy's `liveStreams` write — so while a test holds an add
     /// open here, a concurrent `boundStreamId` read still sees the pre-add
-    /// world. The stream argument is 0 for the whole-system add, ≥ 1 for the
-    /// per-app add, so one hook can hold the two apart.
+    /// world. The stream argument is the id the add is for, so one hook can hold
+    /// the whole-system and per-app adds apart with `isWholeSystem(_:)`.
     var onAddOutputHold: (@Sendable (OutputID, UInt32) async -> Void)?
 
     /// Async hold-open hook awaited inside `removeOutput`, after the remove is
@@ -133,13 +154,27 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     private var liveStreams: [UInt64: UInt32] = [:]
     /// The stream `id`'s live session is on, or `nil` if it has none.
     func liveStream(of id: OutputID) -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
+    /// One level row per LIVE stream, which is what the `stream_health` poll
+    /// reads. The real engine reports a row per stream it has written to; the
+    /// spy reports a row per live session, so a test can assert what that row
+    /// says about the speakers on it. Levels themselves are fixtures.
+    nonisolated func streamLevelSnapshot() -> [StreamLevelSnapshot] {
+        let ids = Set(lock.withLock { Array(liveStreams.values) })
+        return ids.sorted().map {
+            StreamLevelSnapshot(streamId: $0, peakDBFS: -6, silentSeconds: 0, writes: 1)
+        }
+    }
     /// Every `rebindOutput` the backend issued, in order (T7).
     private(set) var rebinds: [(OutputID, UInt32)] = []
     var rebindCalls: [(OutputID, UInt32)] { lock.withLock { rebinds } }
 
     func addOutput(_ id: OutputID) async throws {
         try await runOp(id) {
-            self.lock.withLock { self.added.append(id); self.opLog.append("add:\(id.rawValue)") }
+            self.lock.withLock {
+                self.added.append(id)
+                self.wholeSystemAdds.append((id, 0))
+                self.opLog.append("add:\(id.rawValue)")
+            }
             let hook = self.lock.withLock { self.onAddOutputBody }
             hook?(id)
             let hold = self.lock.withLock { self.onAddOutputHold }
@@ -196,7 +231,7 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
             if let hold { await hold(id, streamId) }
             if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
             self.lock.withLock {
-                if streamId == 0 {
+                if Self.logsAsWholeSystemAdd(streamId) {
                     self.added.append(id)
                     self.opLog.append("add:\(id.rawValue)")
                 } else {
@@ -208,14 +243,26 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
         }
     }
 
+    /// Every whole-system add the backend asked for, with the stream it asked
+    /// for — recorded even when the add then throws, which is the only way a test
+    /// can see the stream a REFUSED connect took.
+    private(set) var wholeSystemAdds: [(OutputID, UInt32)] = []
+    var wholeSystemAddCalls: [(OutputID, UInt32)] { lock.withLock { wholeSystemAdds } }
+
     /// Per-app stream bind (T6). Recorded SEPARATELY from the legacy `added`
     /// (stream_id 0) so per-app assertions never perturb the whole-system tests.
     private var streamAdds: [(OutputID, UInt32)] = []
     func addOutput(_ id: OutputID, streamId: UInt32) async throws {
         try await runOp(id) {
             self.lock.withLock {
-                self.streamAdds.append((id, streamId))
-                self.opLog.append("streamAdd:\(id.rawValue):\(streamId)")
+                if Self.logsAsWholeSystemAdd(streamId) {
+                    self.added.append(id)
+                    self.wholeSystemAdds.append((id, streamId))
+                    self.opLog.append("add:\(id.rawValue)")
+                } else {
+                    self.streamAdds.append((id, streamId))
+                    self.opLog.append("streamAdd:\(id.rawValue):\(streamId)")
+                }
             }
             // T6 (008): the per-app add runs the same mid-op hooks as the
             // whole-system add, so per-app-side interleavings are forceable.
@@ -1059,7 +1106,7 @@ private final class FakeCapture: CaptureControlling, @unchecked Sendable {
 }
 
 /// Bring a selected AP2 device to actually-streaming (`added`) so a whole-system
-/// session reset has a live stream-0 session to rebind.
+/// session reset has a live whole-system session to rebind.
 private func startSelectAndStream(
     _ backend: NativeBackend, _ engine: SpyEngine, _ discovery: FakeDiscovery,
     _ capture: FakeCapture, _ device: DiscoveredDevice
@@ -1402,6 +1449,21 @@ private func makeSyncedLocalBackend(
         id == NativeBackend.localDeviceID ? macSelected.get() : false
     }
     return (backend, engine, discovery, capture, sink, macSelected)
+}
+
+/// Whether the engine's live session for `outputID` is on the speaker's own
+/// whole-system home stream. Stream 0 does not count: a scope test that accepted
+/// it would pass on a device the whole-system domain never actually moved.
+private func onAWholeSystemStream(_ engine: SpyEngine, _ outputID: OutputID) -> Bool {
+    guard let live = engine.liveStream(of: outputID) else { return false }
+    return SpyEngine.isWholeSystem(live)
+}
+
+/// Whether the engine's live session for `outputID` is a PER-APP one —
+/// `AppRouteMixer` allocates those upward from 1, below the whole-system homes.
+private func onAPerAppStream(_ engine: SpyEngine, _ outputID: OutputID) -> Bool {
+    guard let live = engine.liveStream(of: outputID) else { return false }
+    return live >= 1 && live < SpyEngine.wholeSystemStreamIDBase
 }
 
 private func pollUntil(timeout: TimeInterval? = nil,
@@ -4936,7 +4998,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
     /// A device/nominal-rate rebuild (`onDeviceRateRebuild`, fired by the
     /// coordinator's `recreateTap(cause: .deviceOrRateChange)`) resets every
-    /// streaming Selected Device's whole-system (stream-0) session — and, as of
+    /// streaming Selected Device's whole-system session — and, as of
     /// F-REANCHOR going live-verified/default, does so via a FLUSH re-anchor, NOT
     /// a removeOutput→addOutput teardown: the flush keeps the session alive
     /// (no fresh RTSP/RTP session, no audible drop), so a device with a healthy
@@ -5432,7 +5494,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     // MARK: T7 — scope transitions across the converging/bindTail seam
     //
     // The two tests below are the whole point of T7 (architecture review defect
-    // B). `converging` serializes the whole-system path (stream 0) and `bindTail`
+    // B). `converging` serializes the whole-system path and `bindTail`
     // serializes the per-app path (stream >= 1); neither knows the other exists,
     // and the engine answers a mismatched-stream `addOutput` on an already-live
     // session with a SILENT no-op. So a device changing SCOPE used to keep
@@ -5460,10 +5522,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let device = ap2Device()
         await startAndDiscover(backend, engine, discovery, device)
 
-        // Whole-system first: the device is streaming the system mix on stream 0.
+        // Whole-system first: the device is streaming the system mix on its own stream.
         backend.setOutputSet([device.id])
-        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
-        #expect(engine.liveStream(of: device.outputID) == 0,
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
+        #expect(onAWholeSystemStream(engine, device.outputID),
                 "precondition: the device must be live on the whole-system stream")
 
         // Deselect (whole-system releases the device), then redirect an app to it.
@@ -5472,18 +5534,18 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
 
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { onAPerAppStream(engine, device.outputID) }
         let live = engine.liveStream(of: device.outputID)
-        #expect(live != nil && live! >= 1,
+        #expect(onAPerAppStream(engine, device.outputID),
                 """
                 after whole-system releases the device, the per-app domain must \
                 genuinely own the engine session — it ended on \(live.map(String.init) ?? "nil")
                 """)
     }
 
-    /// PER-APP -> WHOLE-SYSTEM, same device: a redirect target (live on stream N)
-    /// that is then selected for the whole system must end up with its ENGINE
-    /// session on stream 0, which is where the whole-system mix is written.
+    /// PER-APP -> WHOLE-SYSTEM, same device: a redirect target (live on a per-app
+    /// stream) that is then selected for the whole system must end up with its
+    /// ENGINE session on a whole-system stream, which is where the mix is written.
     @Test func deviceMovingFromPerAppToWholeSystemRebindsTheLiveSession() async {
         let (backend, engine, discovery) = makeBackend(
             injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
@@ -5493,22 +5555,22 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // Per-app first: the device carries one app's redirect on a stream >= 1.
         backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
-        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
+        await pollUntil { onAPerAppStream(engine, device.outputID) }
+        #expect(onAPerAppStream(engine, device.outputID),
                 "precondition: the device must be live on a per-app stream")
 
         // Now select the SAME device for the whole system.
         backend.setOutputSet([device.id])
 
-        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
-        #expect(engine.liveStream(of: device.outputID) == 0,
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
+        #expect(onAWholeSystemStream(engine, device.outputID),
                 """
-                the engine session must actually MOVE to stream 0 — a silent \
-                addOutput no-op leaves the device on its per-app stream while the \
-                whole-system mix goes to stream 0 and is never heard
+                the engine session must actually MOVE onto the whole-system domain \
+                — a silent addOutput no-op leaves the device on its per-app stream \
+                while the whole-system mix goes elsewhere and is never heard
                 """)
-        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
-                "the move must go through the engine's serialized rebindOutput")
+        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && SpyEngine.isWholeSystem($0.1) },
+                "the move must go through the engine's serialized rebindOutput, onto a home stream")
     }
 
     // MARK: Roadmap 008 — scope arbiter (whole-system priority) race tests
@@ -5516,7 +5578,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     // Every test below names the interleaving it forces and forces it
     // deterministically via a SpyEngine hold hook, an armable PTP gate, or a
     // telemetry-observed classification — never a sleep-as-synchronization.
-    // The policy under test: whole-system routing (stream 0) always wins a
+    // The policy under test: whole-system routing always wins a
     // contested device; the per-app domain yields LOUDLY (telemetry + queryable
     // conflict + `.routedApps` clear + audible fallback into the system mix)
     // and re-engages automatically on deselect.
@@ -5550,7 +5612,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             let raw = device.outputID.rawValue
 
             backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-            await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+            await pollUntil { onAPerAppStream(engine, device.outputID) }
             let stream = engine.liveStream(of: device.outputID) ?? 0
             backend.updateAppRoutes([])
             await pollUntil { engine.ops.contains("remove:\(raw)") }
@@ -9360,8 +9422,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let (reloaded, engine, discovery) = makeBackend(eqStore: DeviceEQStore(directory: directory))
         await startSelectAndStream(reloaded, engine, discovery, FakeCapture(), device)
         defer { reloaded.stop() }
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase }
-        #expect((engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase,
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase,
                 "a backend that loaded a stored EQ must put the device on its own stream at connect")
     }
 
@@ -9391,28 +9453,60 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(backend.devices.first { $0.id == device.id }?.eq == eq)
     }
 
-    /// Committing a non-flat EQ moves the device's live session onto an EQ stream
-    /// (top-half id, disjoint from the per-app namespace); going flat again moves
-    /// it back to stream 0, where it is byte-identical passthrough.
-    @Test func nonFlatCommitRebindsOntoAnEQStreamAndFlatReturnsToZero() async {
+    /// A connect binds the speaker straight to its OWN stream — before any EQ is
+    /// set — and no edit ever moves it again. Moving a live session is a fresh
+    /// AirPlay negotiation that throws away the receiver's ~2 s lead, which the
+    /// owner hears as a gap on every crossing between flat and shaped.
+    @Test func aConnectBindsStraightToTheDevicesOwnStreamAndAnEditNeverRebinds() async throws {
         let (backend, engine, discovery) = makeBackend()
         let device = ap2Device()
         await startSelectAndStream(backend, engine, discovery, FakeCapture(), device)
         defer { backend.stop() }
-        #expect(engine.liveStream(of: device.outputID) == 0, "a fresh connect starts on stream 0")
+
+        let home = try #require(engine.liveStream(of: device.outputID))
+        #expect(home >= SpyEngine.wholeSystemStreamIDBase,
+                "a fresh connect owns its own stream with no EQ set at all")
 
         backend.setEQ(DeviceEQ(trebleDB: 3), for: device.id, commit: true)
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase }
-        let eqStream = engine.liveStream(of: device.outputID) ?? 0
-        #expect(eqStream >= EQStreamAllocator.idBase,
-                "a non-flat commit binds the device to an EQ stream, not a mixer one")
-        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == eqStream },
-                "the move goes through the engine's rebind, never a bare re-add")
-
+        await pollUntil { backend.devices.first { $0.id == device.id }?.eq.trebleDB == 3 }
         backend.setEQ(.flat, for: device.id, commit: true)
-        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
-        #expect(engine.liveStream(of: device.outputID) == 0,
-                "flat means stream 0 again — EQ off has to be the untouched path")
+        await pollUntil { backend.devices.first { $0.id == device.id }?.eq == .flat }
+
+        #expect(engine.liveStream(of: device.outputID) == home,
+                "a shaped value and a flat one live on the SAME stream — only the coefficients change")
+        #expect(engine.rebindCalls.isEmpty,
+                "no EQ value may move a live session: that is the gap this design exists to remove")
+    }
+
+    /// A speaker with a SAVED curve costs exactly one AirPlay session on connect.
+    /// Binding it to stream 0 and moving it onto a shaped stream afterwards is
+    /// two negotiations for one connect, and the second one is the silence the
+    /// owner hears.
+    @Test func aStoredCurveCostsOneSessionOnConnect() async throws {
+        let directory = isolation.scratchDir
+        let device = ap2Device()
+        try DeviceEQStore(directory: directory).save(
+            mainOut: nil, devices: [device.id: DeviceEQ(bassDB: 4)])
+
+        let (backend, engine, discovery) = makeBackend(eqStore: DeviceEQStore(directory: directory))
+        let capture = FakeCapture()
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        defer { backend.stop() }
+
+        let home = try #require(engine.liveStream(of: device.outputID))
+        #expect(home >= SpyEngine.wholeSystemStreamIDBase,
+                "the stored curve's speaker binds straight to its own stream")
+        #expect(engine.ops.filter { $0 == "add:\(device.outputID.rawValue)" }.count == 1,
+                "one connect, one session — a second add is the double negotiation the user hears")
+        #expect(engine.rebindCalls.isEmpty, "nothing may move the session the connect just established")
+
+        await pollUntil {
+            capture.eqPlans.last?.streams
+                .contains { $0.streamID == home && $0.processor != nil } == true
+        }
+        #expect(capture.eqPlans.last?.streams
+            .contains { $0.streamID == home && $0.processor != nil } == true,
+            "the plan must shape the very stream the session is bound to")
     }
 
     /// The whole-mix tone is readable back off the backend, so the Main Audio
@@ -9430,11 +9524,11 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         #expect(backend.mainOutEQ == DeviceEQ(trebleDB: 3))
     }
 
-    /// More distinct settings than the engine has streams for: the admission
-    /// order is deterministic (equal-sized groups break the tie on the smallest
-    /// member id), the loser streams flat and SAYS so via `eqBypassReason`, and no
-    /// engine op is ever issued on its behalf. Its stored values are untouched.
-    @Test func budgetExhaustionBypassesTheDeterministicLoserWithoutBinding() async {
+    /// One more whole-system speaker than the engine has streams for: stream 0
+    /// carries the flat program, so the LAST speaker to connect shares it, keeps
+    /// its stored values, and says out loud why they are not reaching the audio.
+    /// No engine op is ever issued on its behalf — there is nowhere to move it.
+    @Test func theSpeakerThatConnectsWithNoStreamLeftSharesStreamZeroAndSaysSo() async {
         let (backend, engine, discovery) = makeBackend()
         let capture = FakeCapture()
         backend.captureCoordinator = capture
@@ -9442,9 +9536,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         defer { backend.stop() }
         await waitUntilStarted(engine)
 
-        // Six devices, six distinct settings: one more group than the budget
-        // (engine capacity 6, less stream 0, less zero per-app streams = 5).
-        let devices = (1...6).map { index in
+        // One speaker per stream the engine has, which is one more than the
+        // capacity less stream 0. Driven off the constant so a capacity change
+        // keeps the shape.
+        let devices = (1...NativeBackend.engineStreamCapacity).map { index in
             ap2Device(id: String(format: "AA:BB:CC:DD:EE:%02d", index), name: "Speaker \(index)")
         }
         for device in devices {
@@ -9454,40 +9549,50 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 }
             } after: { discovery.fire(.appeared(device)) }
         }
-        backend.setOutputSet(Set(devices.map(\.id)))
-        await pollUntil {
-            devices.allSatisfy { engine.liveStream(of: $0.outputID) != nil }
+        // Selected ONE AT A TIME: the speaker left out is decided by connect
+        // order, so a single `setOutputSet` would leave which one loses up to
+        // converge scheduling.
+        var selected: Set<String> = []
+        for device in devices {
+            selected.insert(device.id)
+            backend.setOutputSet(selected)
+            await pollUntil { engine.liveStream(of: device.outputID) != nil }
         }
 
-        for (index, device) in devices.enumerated() {
-            backend.setEQ(DeviceEQ(bassDB: Double(index + 1)), for: device.id, commit: true)
-        }
-        // The loser is the largest id: every group has one member, so admission
-        // runs in ascending member order and the sixth is left out.
-        let loser = devices.max { $0.id < $1.id }!
+        // One shared curve is enough: every speaker owns a stream whatever its
+        // values are, so nothing here depends on the settings being distinct.
+        let eq = DeviceEQ(bassDB: 3)
+        for device in devices { backend.setEQ(eq, for: device.id, commit: true) }
+
+        let loser = devices.last!
         await pollUntil {
             backend.devices.filter { $0.eqBypassReason != nil }.count == 1
         }
-
         let bypassed = backend.devices.filter { $0.eqBypassReason != nil }.map(\.id)
-        #expect(bypassed == [loser.id], "exactly the deterministic loser is bypassed")
+        #expect(bypassed == [loser.id], "exactly the speaker that found no stream left is bypassed")
         #expect(backend.devices.first { $0.id == loser.id }?.eqBypassReason == .streamBudget,
                 "the budget is the reason, and the drawer's sentence depends on knowing that")
         #expect(engine.liveStream(of: loser.outputID) == 0,
-                "an unadmitted device stays on stream 0 — it streams flat, it does not get an EQ stream")
+                "an unadmitted speaker shares stream 0 — it streams flat, it does not get a stream")
         #expect(!engine.rebindCalls.contains { $0.0 == loser.outputID },
-                "no engine op may be issued for a device that could not be admitted")
-        #expect(backend.devices.first { $0.id == loser.id }?.eq == DeviceEQ(bassDB: 6),
+                "no engine op may be issued for a speaker that could not be admitted")
+        #expect(backend.devices.first { $0.id == loser.id }?.eq == eq,
                 "the stored values survive the bypass — only the streaming is flat")
+
+        // Deselecting it releases the shared stream 0 with everything else, so
+        // the sentence has to go with it: a speaker nobody selected is not
+        // being denied anything.
+        backend.setOutputSet(selected.subtracting([loser.id]))
+        await pollUntil { backend.devices.first { $0.id == loser.id }?.eqBypassReason == nil }
+        #expect(backend.devices.first { $0.id == loser.id }?.eqBypassReason == nil,
+                "a deselected speaker must not keep saying its tone is being refused")
     }
 
-    /// A DEPARTURE is an EQ edge too. Deselecting a device frees the stream its
-    /// group held, which is exactly what the budget's loser was waiting for — and
-    /// the departed device's own stream has to leave the plan, or the delivery
-    /// thread keeps copying and filtering a buffer no output is bound to.
-    /// `setOutputSet`'s reconcile cannot see either: it runs while the teardown is
-    /// still in flight, with the device still in the streaming set.
-    @Test func aDepartureUnbypassesTheBudgetLoserAndTakesItsOwnStreamOutOfThePlan() async throws {
+    /// A departed speaker's stream has to leave the plan, or the delivery thread
+    /// keeps copying and filtering a buffer no output is bound to.
+    /// `setOutputSet`'s own reconcile cannot see it: that runs while the teardown
+    /// is still in flight, with the device still in the streaming set.
+    @Test func aDepartureTakesTheDevicesStreamOutOfThePlan() async throws {
         let (backend, engine, discovery) = makeBackend()
         let capture = FakeCapture()
         backend.captureCoordinator = capture
@@ -9495,51 +9600,168 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         defer { backend.stop() }
         await waitUntilStarted(engine)
 
-        // Same shape as the budget test above: six distinct settings, budget five.
-        let devices = (1...6).map { index in
-            ap2Device(id: String(format: "AA:BB:CC:DD:EE:%02d", index), name: "Speaker \(index)")
-        }
-        for device in devices {
+        let departing = ap2Device(id: "AA:BB:CC:DD:EE:01", name: "Leaving")
+        let staying = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Staying")
+        for device in [departing, staying] {
             _ = await collect(from: backend) { events in
                 events.contains {
                     if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
                 }
             } after: { discovery.fire(.appeared(device)) }
         }
-        backend.setOutputSet(Set(devices.map(\.id)))
+        backend.setOutputSet([departing.id, staying.id])
         await pollUntil {
-            devices.allSatisfy { engine.liveStream(of: $0.outputID) != nil }
+            [departing, staying].allSatisfy {
+                (engine.liveStream(of: $0.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase
+            }
         }
-        for (index, device) in devices.enumerated() {
-            backend.setEQ(DeviceEQ(bassDB: Double(index + 1)), for: device.id, commit: true)
-        }
-
-        let loser = devices.max { $0.id < $1.id }!
-        let departing = devices.first!
-        await pollUntil {
-            backend.devices.contains { $0.id == loser.id && $0.eqBypassReason == .streamBudget }
-        }
-        try #require(backend.devices.first { $0.id == loser.id }?.eqBypassReason == .streamBudget)
-        await pollUntil {
-            (engine.liveStream(of: departing.outputID) ?? 0) >= EQStreamAllocator.idBase
-        }
+        backend.setEQ(DeviceEQ(bassDB: 3), for: departing.id, commit: true)
         let departingStream = try #require(engine.liveStream(of: departing.outputID))
-
-        // Deselect the first speaker. Ids are never reused, so its stream can
-        // only leave the plan — the loser's admission gets a fresh one.
-        backend.setOutputSet(Set(devices.dropFirst().map(\.id)))
-
         await pollUntil {
-            backend.devices.first { $0.id == loser.id }?.eqBypassReason == nil
+            capture.eqPlans.last?.streams.contains { $0.streamID == departingStream } == true
         }
-        #expect(backend.devices.first { $0.id == loser.id }?.eqBypassReason == nil,
-                "the freed stream must un-bypass the device the budget had refused")
+
+        backend.setOutputSet([staying.id])
 
         await pollUntil {
             capture.eqPlans.last?.streams.contains { $0.streamID == departingStream } == false
         }
         #expect(capture.eqPlans.last?.streams.contains { $0.streamID == departingStream } == false,
                 "a departed device's stream must not stay in the plan")
+
+        // And the deselect really RELEASED the stream: ids are never reused, so
+        // re-selecting the same speaker has to home it somewhere new.
+        backend.setOutputSet([departing.id, staying.id])
+        await pollUntil {
+            (engine.liveStream(of: departing.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase
+        }
+        #expect(engine.liveStream(of: departing.outputID) != departingStream,
+                "a deselect frees the home, so the reselect allocates a fresh stream")
+    }
+
+    /// A deselect landing INSIDE a connect's negotiation must NOT take the
+    /// stream that connect already read. The add lands afterwards and inserts
+    /// the device into the streaming set; with its home gone the plan carries no
+    /// stream for it at all, and the converge — settled at `want == isOn` — never
+    /// runs again to notice. The row says connected and the speaker is fed
+    /// nothing but idle fill.
+    @Test func aDeselectDuringAnInFlightConnectKeepsTheStream() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:73", name: "Slow Negotiator")
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+            }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // Hold the add open where a real receiver spends its ~2 s negotiating.
+        let addHold = HoldPoint()
+        engine.onAddOutputHold = { id, _ in
+            if id == device.outputID { await addHold.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { addHold.entered }
+        let home = try #require(
+            engine.wholeSystemAddCalls.first { $0.0 == device.outputID }?.1)
+
+        // The user toggles the speaker off and straight back on while the
+        // receiver is still negotiating.
+        backend.setOutputSet([])
+        backend.setOutputSet([device.id])
+        addHold.open()
+
+        await pollUntil { engine.liveStream(of: device.outputID) == home }
+        #expect(engine.liveStream(of: device.outputID) == home,
+                "the engine bound the stream the converge read — nothing may move it")
+        await pollUntil {
+            capture.eqPlans.last?.streams.contains { $0.streamID == home } == true
+        }
+        #expect(capture.eqPlans.last?.streams.contains { $0.streamID == home } == true,
+                "a connected row whose stream the plan does not carry is a speaker fed nothing")
+    }
+
+    /// A speaker deselected while it has NO live session must still give its
+    /// stream back. A connect the receiver refused reaches no teardown, so
+    /// without a release on the deselect edge the home stays allocated: it keeps
+    /// counting against the budget, and the reselect lands straight back on the
+    /// same stream — the shape that would pin an over-budget speaker to the flat
+    /// stream 0 for the rest of the session.
+    @Test func aDeselectWithNoLiveSessionStillReleasesTheStream() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        backend.captureCoordinator = FakeCapture()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:72", name: "Refusing Speaker")
+        engine.addFailures = [device.outputID.rawValue]
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+            }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // The connect takes a home stream and THEN the receiver refuses it.
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.wholeSystemAddCalls.contains { $0.0 == device.outputID } }
+        let refused = try #require(
+            engine.wholeSystemAddCalls.first { $0.0 == device.outputID }?.1)
+        #expect(refused >= SpyEngine.wholeSystemStreamIDBase,
+                "precondition: the refused connect had already taken a stream of its own")
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+
+        backend.setOutputSet([])
+        engine.addFailures = []
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            (engine.liveStream(of: device.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase
+        }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) > refused,
+                "ids are monotonic, so anything but a HIGHER stream means the deselect never released it")
+    }
+
+    /// A session that dies under a speaker the user still wants keeps its home
+    /// stream. The engine can re-establish that session itself, out of band and
+    /// on the stream id it still holds, so dropping the home on `.failed` leaves
+    /// the plan carrying no entry for the stream the speaker is actually on —
+    /// audibly, a speaker that comes back silent and stays that way.
+    @Test func aFailureUnderADesiredSpeakerKeepsItsStream() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:71", name: "Dropped Tone")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        defer { backend.stop() }
+
+        backend.setEQ(DeviceEQ(bassDB: 4), for: device.id, commit: true)
+        let home = try #require(engine.liveStream(of: device.outputID))
+        try #require(home >= SpyEngine.wholeSystemStreamIDBase,
+                     "precondition: the speaker owns a stream of its own")
+        await pollUntil {
+            capture.eqPlans.last?.streams.contains { $0.streamID == home } == true
+        }
+        let rebindsBeforeFailure = engine.rebindCalls.count
+
+        // The session dies out of band — the user never deselected, so the
+        // speaker is still desired.
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+
+        // The engine recovers it itself: this never passes through
+        // `convergeDevice`, so nothing re-reads or re-binds the stream.
+        engine.pushState(device.outputID, .connected)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == true }
+
+        await pollUntil {
+            capture.eqPlans.last?.streams.contains { $0.streamID == home } == true
+        }
+        #expect(capture.eqPlans.last?.streams
+            .contains { $0.streamID == home && $0.processor != nil } == true,
+            "the recovered speaker must be back in the plan on the SAME stream, still shaped")
+        #expect(engine.rebindCalls.count == rebindsBeforeFailure,
+                "an out-of-band recovery must cost no engine op of ours")
     }
 
     /// A slider drag on ONE device must be inaudible on every other stream. Each
@@ -9568,13 +9790,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             [scrubbed, untouched].allSatisfy { engine.liveStream(of: $0.outputID) != nil }
         }
 
-        // Two distinct settings, so each owns its own stream — the scrub is then
-        // expressible in place and never recomputes topology.
+        // Each speaker already owns a stream; these give the two of them
+        // different coefficients so a leak between stages would be visible.
         backend.setEQ(DeviceEQ(bassDB: 3), for: scrubbed.id, commit: true)
         backend.setEQ(DeviceEQ(trebleDB: -3), for: untouched.id, commit: true)
         await pollUntil {
             [scrubbed, untouched].allSatisfy {
-                (engine.liveStream(of: $0.outputID) ?? 0) >= EQStreamAllocator.idBase
+                (engine.liveStream(of: $0.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase
             }
         }
         let otherStream = try #require(engine.liveStream(of: untouched.outputID))
@@ -9622,13 +9844,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             [scrubbed, untouched].allSatisfy { engine.liveStream(of: $0.outputID) != nil }
         }
 
-        // Two distinct settings, so the scrubbed device owns a stream of its own
-        // and the drag is expressible in place.
+        // Each speaker already owns a stream; these give the two of them
+        // different coefficients so a leak between stages would be visible.
         backend.setEQ(DeviceEQ(bassDB: 3), for: scrubbed.id, commit: true)
         backend.setEQ(DeviceEQ(trebleDB: -3), for: untouched.id, commit: true)
         await pollUntil {
             [scrubbed, untouched].allSatisfy {
-                (engine.liveStream(of: $0.outputID) ?? 0) >= EQStreamAllocator.idBase
+                (engine.liveStream(of: $0.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase
             }
         }
         let ownStream = try #require(engine.liveStream(of: scrubbed.outputID))
@@ -9710,15 +9932,12 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "the stored values survive the whole round trip")
     }
 
-    /// Close the lid, open it again: the speaker must come back SHAPED. Sleep
-    /// tears every engine session down while keeping the selection intent, so
-    /// the EQ topology it leaves behind describes sessions that no longer
-    /// exist. If that stale map survived, the wake re-add would land on stream 0
-    /// while the map still claimed the device was on its EQ stream — the
-    /// reconcile would see no difference, issue no rebind, and the speaker would
-    /// play flat forever with its chip still lit and no bypass sentence to
-    /// explain it.
-    @Test func aSleepWakeCycleRebindsTheEQdSpeakerBackOntoItsStream() async throws {
+    /// Close the lid, open it again: the speaker must come back SHAPED, on the
+    /// very stream it slept on. Sleep tears every engine session down while
+    /// keeping the selection intent, so the wake re-add is a fresh session — and
+    /// it has to land on the same stream the plan is still shaped for, with no
+    /// second engine op to move it there.
+    @Test func aSleepWakeCycleReAddsTheSpeakerOntoItsOwnStreamWithoutARebind() async throws {
         let (backend, engine, discovery) = makeBackend()
         let capture = FakeCapture()
         let device = ap2Device(id: "AA:BB:CC:DD:EE:70", name: "Sleepy Tone")
@@ -9726,11 +9945,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         defer { backend.stop() }
 
         backend.setEQ(DeviceEQ(bassDB: 4), for: device.id, commit: true)
-        await pollUntil {
-            (engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase
-        }
-        try #require((engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase,
-                     "precondition: the committed tone put the device on an EQ stream")
+        let beforeSleep = try #require(engine.liveStream(of: device.outputID))
+        try #require(beforeSleep >= SpyEngine.wholeSystemStreamIDBase,
+                     "precondition: the speaker owns a stream of its own")
         let rebindsBeforeSleep = engine.rebindCalls.count
 
         backend.handleSystemWillSleep()
@@ -9739,21 +9956,18 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                      "precondition: sleep really tore the session down")
 
         backend.handleSystemDidWake()
-        await pollUntil {
-            (engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase
-        }
-        let woken = engine.liveStream(of: device.outputID) ?? 0
-        #expect(woken >= EQStreamAllocator.idBase,
-                "a woken speaker with a stored tone must end up back on an EQ stream, not flat")
-        #expect(engine.rebindCalls.count > rebindsBeforeSleep,
-                "the wake re-add lands on stream 0, so the move must be a FRESH engine rebind")
+        await pollUntil { engine.liveStream(of: device.outputID) != nil }
+        #expect(engine.liveStream(of: device.outputID) == beforeSleep,
+                "the wake re-add must land on the stream the speaker slept on, shaped from the first buffer")
+        #expect(engine.rebindCalls.count == rebindsBeforeSleep,
+                "no second engine op: a rebind after the re-add is the gap this design removed")
 
         await pollUntil {
-            capture.eqPlans.last?.streams.contains { $0.streamID == woken } == true
+            capture.eqPlans.last?.streams.contains { $0.streamID == beforeSleep } == true
         }
         #expect(capture.eqPlans.last?.streams
-            .contains { $0.streamID == woken && $0.processor != nil } == true,
-            "the plan the coordinator is running must carry the stream the output is now bound to")
+            .contains { $0.streamID == beforeSleep && $0.processor != nil } == true,
+            "the plan the coordinator is running must carry the stream the output is bound to")
     }
 
 }
@@ -9822,6 +10036,42 @@ extension SerializedSharedState {
         func sendSchedLines() -> [String] { box.snapshot().filter { $0.contains("\"evt\":\"send_sched\"") } }
         await pollUntil { !sendSchedLines().isEmpty }
         #expect(!sendSchedLines().isEmpty, "arming the poll must immediately log send_sched at least once — this event had never fired in production")
+    }
+
+    /// A `stream_health` row must name the speakers the stream actually serves.
+    /// Under one-stream-per-speaker a whole-system speaker has no entry in
+    /// `streamBindings` (the per-app map), so the row for its own home stream
+    /// used to name nobody, and the live log could not say which speaker a
+    /// stream belonged to — an hour of the 2026-09-15 EQ investigation went on
+    /// inferring it from peak levels. Reverting `devices` to `streamBindings`
+    /// alone turns this red.
+    @Test func streamHealthNamesTheSpeakerOnItsOwnWholeSystemStream() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A7", name: "Health Named Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        defer { backend.stop() }
+
+        backend.setEQ(DeviceEQ(bassDB: 6), for: device.id, commit: true)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.eq.bassDB == 6 }
+        let home = try #require(engine.liveStream(of: device.outputID))
+        try #require(home >= SpyEngine.wholeSystemStreamIDBase,
+                     "precondition: the speaker owns a whole-system stream of its own")
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        backend.test_pollSchedulingSnapshotNow()
+
+        func homeRows() -> [String] {
+            box.snapshot().filter {
+                $0.contains("\"evt\":\"stream_health\"") && $0.contains("\"stream\":\"\(home)\"")
+            }
+        }
+        await pollUntil { !homeRows().isEmpty }
+        let row = try #require(homeRows().last)
+        #expect(row.contains("\"devices\":\"\(device.id)\""),
+                "the row for a speaker's own whole-system stream must name that speaker")
     }
 
     /// Selecting a SECOND device while already capturing (captureRunning
@@ -9930,7 +10180,7 @@ extension SerializedSharedState {
                       "the per-app call site must tag its own path — EngineSink's mirror in NativeCaptureCoordinator.swift tags \"wholeSystem\", and the two must stay distinguishable")
     }
 
-    /// The whole-system (stream 0) mirror of the test above, at the ACTUAL
+    /// The whole-system mirror of the test above, at the ACTUAL
     /// production `EngineSink` (not `SpyEngine` — `EngineSink.init(engine:)`
     /// takes the concrete `AirPlayEngine`, not the `EngineControlling` seam,
     /// so this is the one place a real engine instance is the only way to
@@ -10054,10 +10304,10 @@ extension SerializedSharedState {
     /// Test 1 (sanctioned direction, steady state): selecting a device that
     /// currently carries a per-app redirect demotes the route, clears its
     /// `.routedApps` claim, records a queryable conflict, and leaves the engine
-    /// session on stream 0 with the whole-system domain the sole owner — the
+    /// session on a whole-system stream with that domain the sole owner — the
     /// deferred/downgraded unbind settles with a NO-OP verify, never a
     /// session-killing removeOutput.
-    @Test func selectingARedirectTargetDemotesTheRouteAndWinsStream0() async {
+    @Test func selectingARedirectTargetDemotesTheRouteAndWinsTheSession() async {
         let (backend, engine, discovery) = makeBackend(
             injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
         defer { backend.stop() }
@@ -10071,14 +10321,14 @@ extension SerializedSharedState {
         defer { sub.cancel() }
 
         backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { onAPerAppStream(engine, device.outputID) }
         await pollUntil { routedApps.last == ["Foo"] }
 
         backend.setOutputSet([device.id])
 
-        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
-        #expect(engine.liveStream(of: device.outputID) == 0,
-                "whole-system must win the contested device onto stream 0")
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
+        #expect(onAWholeSystemStream(engine, device.outputID),
+                "whole-system must win the contested device onto its own stream")
         await pollUntil { routedApps.last?.isEmpty == true }
         #expect(routedApps.last?.isEmpty == true,
                 ".routedApps must be cleared for the demoted device — the teal dot never lies")
@@ -10101,7 +10351,7 @@ extension SerializedSharedState {
                     .contains { $0["settled"] as? String == "noop" })
         #expect(engine.ops.filter { $0 == "remove:\(device.outputID.rawValue)" }.count == 1,
                 "exactly ONE remove — the scope rebind's own stop half; the unbind must never have issued the I4 session-killer")
-        #expect(engine.liveStream(of: device.outputID) == 0)
+        #expect(onAWholeSystemStream(engine, device.outputID))
     }
 
     /// Test 2 (demote-at-decision): a route pushed at an ALREADY-selected device
@@ -10115,7 +10365,7 @@ extension SerializedSharedState {
         await startAndDiscover(backend, engine, discovery, device)
 
         backend.setOutputSet([device.id])
-        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
 
         let box = TelemetryLineBox()
         Telemetry._installTestSink { box.append($0) }
@@ -10141,16 +10391,17 @@ extension SerializedSharedState {
         }
         #expect(telemetryLines(box, evt: "scope_conflict", device: device.id)
                     .contains { $0["stage"] as? String == "routeDemoted" })
-        #expect(engine.liveStream(of: device.outputID) == 0,
+        #expect(onAWholeSystemStream(engine, device.outputID),
                 "the whole-system session is untouched")
     }
 
     /// Test 3 (forces I4 — the kill-the-fresh-session bug): the demotion's
-    /// `.unbind` fires while converge's 1→0 rebind is HELD OPEN mid-op
-    /// (`onRebindBody` between the stop and add halves), so its classification
-    /// deterministically sees the whole-system op in flight → case 3, deferred —
-    /// and the release-side settle then verifies engine truth (already 0) with
-    /// zero extra ops. The stream-0 session the user just asked for survives.
+    /// `.unbind` fires while converge's per-app → whole-system rebind is HELD
+    /// OPEN mid-op (`onRebindBody` between the stop and add halves), so its
+    /// classification deterministically sees the whole-system op in flight →
+    /// case 3, deferred — and the release-side settle then verifies engine truth
+    /// (already home) with zero extra ops. The whole-system session the user just
+    /// asked for survives.
     @Test func unbindFiringDuringConvergesRebindIsDeferredThenSettles() async {
         let (backend, engine, discovery) = makeBackend(
             injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
@@ -10163,12 +10414,13 @@ extension SerializedSharedState {
         defer { Telemetry._installTestSink(nil) }
 
         backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { onAPerAppStream(engine, device.outputID) }
 
-        // Hold converge's 1→0 rebind open between its stop and add halves.
+        // Hold converge's per-app → whole-system rebind open between its stop
+        // and add halves.
         let rebindHold = HoldPoint()
         engine.onRebindBody = { id, streamId in
-            if id == device.outputID, streamId == 0 { await rebindHold.hold() }
+            if id == device.outputID, SpyEngine.isWholeSystem(streamId) { await rebindHold.hold() }
         }
 
         backend.setOutputSet([device.id])
@@ -10191,8 +10443,8 @@ extension SerializedSharedState {
         }
         #expect(telemetryLines(box, evt: "unbind_downgraded", device: device.id)
                     .contains { $0["settled"] as? String == "noop" })
-        #expect(engine.liveStream(of: device.outputID) == 0,
-                "the fresh stream-0 session must survive the deferred unbind")
+        #expect(onAWholeSystemStream(engine, device.outputID),
+                "the fresh whole-system session must survive the deferred unbind")
         #expect(engine.ops.filter { $0 == "remove:\(device.outputID.rawValue)" }.count == 1,
                 "exactly one remove — the held rebind's own stop half; the deferred unbind issued none")
         #expect(backend.devices.first { $0.id == device.id }?.isSelected == true,
@@ -10214,7 +10466,7 @@ extension SerializedSharedState {
         await startAndDiscover(backend, engine, discovery, device)
 
         backend.setOutputSet([device.id])
-        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
 
         let box = TelemetryLineBox()
         Telemetry._installTestSink { box.append($0) }
@@ -10237,9 +10489,9 @@ extension SerializedSharedState {
 
         backend.setOutputSet([])   // converge teardown: the removeOutput runs the hook
 
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { onAPerAppStream(engine, device.outputID) }
         let live = engine.liveStream(of: device.outputID)
-        #expect(live != nil && live! >= 1,
+        #expect(onAPerAppStream(engine, device.outputID),
                 "the re-driven bind must land after the whole-system release")
         #expect(telemetryLines(box, evt: "bind_superseded", device: device.id)
                     .contains { $0["reason"] as? String == "ws_in_flight" },
@@ -10303,8 +10555,8 @@ extension SerializedSharedState {
         // chain reaches a terminal exit, the release re-drives the route.
         backend.setOutputSet([])
         engine.addFailures = []
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
-        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
+        await pollUntil { onAPerAppStream(engine, device.outputID) }
+        #expect(onAPerAppStream(engine, device.outputID),
                 "after the deselect the demoted route must re-engage by itself")
         let bindOps = engine.ops.filter {
             $0.hasPrefix("add:\(device.outputID.rawValue)")
@@ -10352,10 +10604,10 @@ extension SerializedSharedState {
         await pollUntil { activator.holding }
         activator.release()
 
-        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
-        #expect(engine.liveStream(of: device.outputID) == 0,
-                "converge must arbitrate on engine truth and move the session to 0")
-        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
+        #expect(onAWholeSystemStream(engine, device.outputID),
+                "converge must arbitrate on engine truth and move the session out of the per-app domain")
+        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && SpyEngine.isWholeSystem($0.1) },
                 "the move must go through the serialized rebindOutput")
         #expect(engine.maxConcurrent == 1,
                 "the per-app add and converge's rebind must never overlap for the device")
@@ -10368,7 +10620,7 @@ extension SerializedSharedState {
             telemetryLines(box, evt: "unbind_downgraded", device: device.id)
                 .contains { $0["settled"] as? String == "noop" }
         }
-        #expect(engine.liveStream(of: device.outputID) == 0)
+        #expect(onAWholeSystemStream(engine, device.outputID))
     }
 
     /// Test 7 (end-to-end backend-only exclusivity, no GroupController): a
@@ -10388,12 +10640,12 @@ extension SerializedSharedState {
         defer { sub.cancel() }
 
         backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { onAPerAppStream(engine, device.outputID) }
         await pollUntil { routedApps.last == ["Foo"] }
 
         // Select: demoted, whole-system wins.
         backend.setOutputSet([device.id])
-        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
         await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
         await pollUntil { routedApps.last?.isEmpty == true }
 
@@ -10401,8 +10653,8 @@ extension SerializedSharedState {
         // assign a FRESH stream id on re-engage — any per-app stream (>= 1) is
         // the ownership fact under test.)
         backend.setOutputSet([])
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
-        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
+        await pollUntil { onAPerAppStream(engine, device.outputID) }
+        #expect(onAPerAppStream(engine, device.outputID),
                 "the demoted route must re-engage the moment the device is deselected")
         await pollUntil { routedApps.last == ["Foo"] }
         #expect(routedApps.last == ["Foo"], ".routedApps must repopulate on restore")
@@ -10426,11 +10678,11 @@ extension SerializedSharedState {
     /// Test 9 (forces the I1 interleaving the original design believed
     /// impossible): converge reads `boundStreamId` = nil BEFORE the in-flight
     /// per-app add lands (its `liveStreams` write is held open), then converge's
-    /// own stream-0 `addOutput` is the engine's silent `.alreadyBound` no-op —
+    /// own whole-system `addOutput` is the engine's silent `.alreadyBound` no-op —
     /// `added` records a session the engine never moved, the engine is stuck on
     /// stream 1. The guaranteed trailing `.unbind` (FIFO-ordered after the
     /// astray bind) is the deterministic last word: its case-4 verify reads
-    /// engine truth AFTER the astray op completed and rebinds 1 → 0.
+    /// engine truth AFTER the astray op completed and rebinds it home.
     @Test func staleConvergeReadIsHealedByTheSettlingUnbind() async {
         let (backend, engine, discovery) = makeBackend(
             injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
@@ -10446,7 +10698,11 @@ extension SerializedSharedState {
         let wsHold = HoldPoint()
         engine.onAddOutputHold = { id, stream in
             guard id == device.outputID else { return }
-            if stream >= 1 { await perAppHold.hold() } else { await wsHold.hold() }
+            if SpyEngine.isWholeSystem(stream) {
+                await wsHold.hold()
+            } else {
+                await perAppHold.hold()
+            }
         }
 
         backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
@@ -10454,18 +10710,18 @@ extension SerializedSharedState {
 
         backend.setOutputSet([device.id])
         // Converge's boundStreamId read is FORCED to see nil (the per-app write
-        // is still held), so it falls to the plain stream-0 add — held in turn.
+        // is still held), so it falls to the plain whole-system add — held in turn.
         await pollUntil { wsHold.entered }
 
         perAppHold.open()                        // per-app session lands: live → 1
         await pollUntil { engine.liveStream(of: device.outputID) == 1 }
         wsHold.open()                            // converge's add: silent .alreadyBound no-op
 
-        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
-        #expect(engine.liveStream(of: device.outputID) == 0,
-                "the settling unbind must heal the silent-no-op corruption back to stream 0")
-        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
-                "the heal must be the verify-first settle's rebindOutput(_, 0)")
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
+        #expect(onAWholeSystemStream(engine, device.outputID),
+                "the settling unbind must heal the silent-no-op corruption back to the whole-system stream")
+        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && SpyEngine.isWholeSystem($0.1) },
+                "the heal must be the verify-first settle's rebind onto the whole-system stream")
         await pollUntil {
             telemetryLines(box, evt: "unbind_downgraded", device: device.id)
                 .contains { $0["settled"] as? String == "rebound" }
@@ -10504,14 +10760,14 @@ extension SerializedSharedState {
         defer { Telemetry._installTestSink(nil) }
 
         backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { onAPerAppStream(engine, device.outputID) }
 
-        // Hold converge's 1→0 rebind open so the demotion's unbind
-        // deterministically defers (case 3) and the deselect below lands while
-        // the converge is provably still in flight.
+        // Hold converge's per-app → whole-system rebind open so the demotion's
+        // unbind deterministically defers (case 3) and the deselect below lands
+        // while the converge is provably still in flight.
         let rebindHold = HoldPoint()
         engine.onRebindBody = { id, streamId in
-            if id == device.outputID, streamId == 0 { await rebindHold.hold() }
+            if id == device.outputID, SpyEngine.isWholeSystem(streamId) { await rebindHold.hold() }
         }
 
         backend.setOutputSet([device.id])
@@ -10543,8 +10799,8 @@ extension SerializedSharedState {
                 "the release must drop (loudly) a settle whose device the route table re-claimed")
 
         activator.release()
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
-        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
+        await pollUntil { onAPerAppStream(engine, device.outputID) }
+        #expect(onAPerAppStream(engine, device.outputID),
                 "the re-engaged per-app session must survive — a stale unbind here is silent stranding")
         let ops = engine.ops
         let lastBind = ops.lastIndex { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") }

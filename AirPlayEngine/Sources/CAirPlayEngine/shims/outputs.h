@@ -60,7 +60,7 @@
 extern "C" {
 #endif
 
-#define OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS 5
+#define OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS 15
 
 /* Forward declarations (as in OwnTone outputs.h). */
 struct output_device;

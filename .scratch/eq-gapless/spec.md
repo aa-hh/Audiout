@@ -23,7 +23,7 @@ Order (serial in this worktree, except 01 which is its own worktree from main):
 
 | # | Ticket | Gate |
 |---|---|---|
-| 01 | `issues/01-eq-headroom.md` — 087, `EQProcessor` makeup headroom | none; worktree `.claude/worktrees/eq-headroom-087` |
+| 01 | `issues/01-eq-headroom.md` — 087, makeup headroom | REJECTED at the live test: an auto-trim makes a boost quieter, never louder |
 | 02 | `issues/02-stream-cap-and-encode-gate.md` — caps 6→16 + `MultiStreamEncodeLoadTests` | reports RTF |
 | 03 | `issues/03-one-stream-per-device.md` — Track C, or Track A fallback | C if RTF ≤ 0.25, else A |
 

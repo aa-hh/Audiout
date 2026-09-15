@@ -1,6 +1,6 @@
 # 01 — EQ makeup headroom: a boost must not clip at full scale (roadmap 087)
 
-Status: built + reviewed twice (PR #203, 3 commits, 22 tests); merge + live check owed
+Status: REJECTED — built, reviewed, failed the live test, reverted (see Outcome below); PR #203 closed
 Worktree: `.claude/worktrees/eq-headroom-087` (branch `claude/eq-headroom-087`, from main)
 
 Evidence: owner session 2026-09-14 23:55Z, `stream_health` on the shaped stream read
@@ -54,3 +54,17 @@ refuse paths outside the session's own worktree.
 
 Commit on `claude/eq-headroom-087`, push to origin, open a PR to main titled
 "EQ: trim a shaped curve by its peak response so a boost never clips". Do not merge.
+
+## Outcome — REJECTED 2026-09-15
+
+Built, reviewed twice, then failed the owner's live test and reverted. The trim is folded into the
+channel gains, so a +6 dB bass boost attenuates the whole stream 6 dB: the bass lands back at its
+original level and every other frequency drops. Owner: "I put up the bass, the volume goes down and
+the bass stays where it was."
+
+A boost must raise the band it names and leave the rest alone. Clipping on a boosted stream is
+ordinary EQ behaviour, and `filterBalanceAndClip`'s float→S16 clamp already prevents wrap-into-noise.
+`stream_health peak_dbfs=-0.0` on a shaped stream is that clamp working, not a defect. If boosts ever
+crunch audibly, the fix is a user-controlled preamp, not an automatic trim.
+
+PR #203 closed, roadmap 087 rejected. The branch `claude/eq-headroom-087` is kept for reference.

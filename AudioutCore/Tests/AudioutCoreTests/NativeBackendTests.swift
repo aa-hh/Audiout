@@ -9442,9 +9442,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         defer { backend.stop() }
         await waitUntilStarted(engine)
 
-        // Six devices, six distinct settings: one more group than the budget
-        // (engine capacity 6, less stream 0, less zero per-app streams = 5).
-        let devices = (1...6).map { index in
+        // One device (and one distinct setting) more than the budget, which is
+        // the engine's capacity less stream 0 less the zero per-app streams
+        // here. Driven off the constant so a capacity change keeps the shape.
+        let devices = (1...NativeBackend.engineStreamCapacity).map { index in
             ap2Device(id: String(format: "AA:BB:CC:DD:EE:%02d", index), name: "Speaker \(index)")
         }
         for device in devices {
@@ -9460,10 +9461,13 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }
 
         for (index, device) in devices.enumerated() {
-            backend.setEQ(DeviceEQ(bassDB: Double(index + 1)), for: device.id, commit: true)
+            // Half-steps, not whole dB: `DeviceEQ` clamps every gain to +/-12,
+            // so whole steps would collapse devices 13 and up onto one curve —
+            // one group, nothing bypassed, and the budget never exercised.
+            backend.setEQ(DeviceEQ(bassDB: Double(index + 1) / 2), for: device.id, commit: true)
         }
         // The loser is the largest id: every group has one member, so admission
-        // runs in ascending member order and the sixth is left out.
+        // runs in ascending member order and the last one is left out.
         let loser = devices.max { $0.id < $1.id }!
         await pollUntil {
             backend.devices.filter { $0.eqBypassReason != nil }.count == 1
@@ -9477,7 +9481,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "an unadmitted device stays on stream 0 — it streams flat, it does not get an EQ stream")
         #expect(!engine.rebindCalls.contains { $0.0 == loser.outputID },
                 "no engine op may be issued for a device that could not be admitted")
-        #expect(backend.devices.first { $0.id == loser.id }?.eq == DeviceEQ(bassDB: 6),
+        #expect(backend.devices.first { $0.id == loser.id }?.eq
+                    == DeviceEQ(bassDB: Double(NativeBackend.engineStreamCapacity) / 2),
                 "the stored values survive the bypass — only the streaming is flat")
     }
 
@@ -9495,8 +9500,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         defer { backend.stop() }
         await waitUntilStarted(engine)
 
-        // Same shape as the budget test above: six distinct settings, budget five.
-        let devices = (1...6).map { index in
+        // Same shape as the budget test above: one more distinct setting than
+        // the budget.
+        let devices = (1...NativeBackend.engineStreamCapacity).map { index in
             ap2Device(id: String(format: "AA:BB:CC:DD:EE:%02d", index), name: "Speaker \(index)")
         }
         for device in devices {
@@ -9511,7 +9517,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             devices.allSatisfy { engine.liveStream(of: $0.outputID) != nil }
         }
         for (index, device) in devices.enumerated() {
-            backend.setEQ(DeviceEQ(bassDB: Double(index + 1)), for: device.id, commit: true)
+            // Half-steps, not whole dB: `DeviceEQ` clamps every gain to +/-12,
+            // so whole steps would collapse devices 13 and up onto one curve —
+            // one group, nothing bypassed, and the budget never exercised.
+            backend.setEQ(DeviceEQ(bassDB: Double(index + 1) / 2), for: device.id, commit: true)
         }
 
         let loser = devices.max { $0.id < $1.id }!

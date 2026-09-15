@@ -144,6 +144,18 @@ it's empty, there's nothing to ledger yet.
      `write(streams:pts:)` API, so a headless test can prove NO CROSS-TALK end
      to end (Swift API -> C fan-out -> per-stream master session), not just at
      the C `master_session_make` level the original four accessors cover.
+  8. Test/diagnostic seam, 2026-09-15 (`[AirPlayEngine vendored change
+     2026-09-15] TEST SEAM`): a sixth accessor,
+     `airplay_test_master_session_rtp_pos`, returning
+     `ams->rtp_session->pos`. `packets_send` advances that position by
+     `samples_per_packet` via `rtp_packet_commit`, and only after
+     `alac_encode` returned a length, so its DELTA across a headless run
+     counts the packets the ALAC encoder actually produced. The 16-stream
+     encode benchmark (`MultiStreamEncodeLoadTests`, added with the engine
+     stream cap raise 6 -> 16) needs exactly that to prove its timing measured
+     real encoding. The position is seeded by `gcry_randomize` in
+     `rtp_session_new`, so only the delta is meaningful. Not reachable from
+     any shipping path.
 - **Sibling shim edits (NOT vendored, listed for context)**: `shims/outputs.h`
   gained `uint32_t stream_id` on `struct output_device` and `struct
   output_data`; `shims/engine_bridge.h` declares the five test-seam

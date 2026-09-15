@@ -604,9 +604,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private static let eqSampleRate: Double = 44_100
 
     /// How many streams the engine can carry at once. Mirrors
-    /// `AirPlayEngine.maxSimultaneousStreams`, which is internal to that package
-    /// (a licensing boundary this file may not widen).
-    private static let engineStreamCapacity = 6
+    /// `AirPlayEngine.maxSimultaneousStreams`, kept in step by hand because that
+    /// constant is internal to the engine package. The shim both derive from
+    /// (`OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS` in `shims/outputs.h`) is
+    /// engine-owned, not vendored.
+    static let engineStreamCapacity = 16
 
     /// Test seam: a BT `Device.id` (its Core Audio UID) → the live
     /// `AudioObjectID` a per-device sink pins its engine to. `nil` (production)

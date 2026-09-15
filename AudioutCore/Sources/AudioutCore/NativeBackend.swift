@@ -571,7 +571,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// engine had no stream left when it connected. It OUTLIVES a session that
     /// dies under a still-desired device, so an engine-driven reconnect lands
     /// back on the stream the plan already carries; only a deselect
-    /// (``removeFromAddedLocked(_:)``) and `stop()` release it. Written only by
+    /// (``setOutputSet(_:)``'s desire edge) and `stop()` release it. Written only by
     /// ``connectTargetStreamLocked(_:)``, which every whole-system
     /// session-establishing op reads immediately before its engine call.
     /// On `stateQueue`.
@@ -3382,17 +3382,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// - Returns: whether `id` was actually in the streaming set.
     @discardableResult
     private func removeFromAddedLocked(_ id: String) -> Bool {   // on stateQueue
-        let wasStreaming = added.remove(id) != nil
-        // Release the home stream only when the user no longer wants this
-        // speaker. A session that died while the device is still DESIRED is
-        // coming back — possibly through the engine's own out-of-band reconnect,
-        // which re-establishes it on the stream id the engine still holds — so
-        // the assignment has to outlive the failure or the plan stops carrying
-        // that stream and the speaker comes back silent. Checked here rather
-        // than at the `desiredOn` write because this is the single site every
-        // per-device departure passes through.
-        if desiredOn[id] != true { wholeSystemStreamByDevice.removeValue(forKey: id) }
-        guard wasStreaming else { return false }
+        // The home stream is NOT released here: a session that died under a
+        // still-desired speaker is coming back — possibly through the engine's
+        // own out-of-band reconnect, which re-establishes it on the stream id the
+        // engine still holds — so the assignment has to outlive the failure or
+        // the plan stops carrying that stream and the speaker comes back silent.
+        // `setOutputSet` releases it at the desire edge instead.
+        guard added.remove(id) != nil else { return false }
         reconcileEQPlan()
         return true
     }
@@ -3615,6 +3611,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // deliberate same-membership retry ("Try again") now travels
                 // its own entry point, `retryOutput(_:)`.
                 if previous != wantOn { self.failedGate.remove(id) }
+
+                // The user no longer wants this speaker, so its whole-system
+                // stream goes back to the budget HERE, at the desire edge — not
+                // in the teardown. A device with no live session (a connect the
+                // receiver refused, a receiver that vanished, a session that died
+                // out of band) reaches no teardown at all, and a converge that
+                // finds `want == isOn` issues nothing and is not even requeued
+                // (`releaseConvergingAndRequeueIfNeeded`), so a release owned by
+                // either of those would simply never run: the stream would keep
+                // counting against the budget and a stale `0` would pin the
+                // speaker to the flat stream on every later reselect.
+                if previous != wantOn, !wantOn {
+                    self.wholeSystemStreamByDevice.removeValue(forKey: id)
+                }
 
                 // Connection-status brief §1/§3 semantics (mirrors OwnToneBackend's
                 // `setOutputSet`): a device newly desired ON goes `.connecting`

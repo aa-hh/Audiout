@@ -27,12 +27,18 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// per-app ids (1 upward). Mirrored here because the backend's own constant
     /// is private.
     static let wholeSystemStreamIDBase: UInt32 = 0x8000_0000
-    /// Whether `streamId` carries the whole-system mix: stream 0 (the flat
-    /// stream) or a speaker's own home stream. Which entry point establishes it
-    /// is an implementation detail — a whole-system add is recorded in
-    /// `added`/`add:` either way, so every assertion about "this speaker's
-    /// session was established" reads one list.
+    /// Whether `streamId` is a speaker's own whole-system home stream. Stream 0
+    /// is NOT one: a speaker lands there only when the engine had no stream left,
+    /// so an assertion that accepts it cannot tell "whole-system won the device"
+    /// from "the move never happened".
     static func isWholeSystem(_ streamId: UInt32) -> Bool {
+        streamId >= wholeSystemStreamIDBase
+    }
+    /// Which bucket an add is RECORDED in. Stream 0 belongs with the home
+    /// streams here and only here — it carries the whole-system mix, so every
+    /// assertion about "this speaker's session was established" reads one list
+    /// whichever entry point the backend used.
+    static func logsAsWholeSystemAdd(_ streamId: UInt32) -> Bool {
         streamId == 0 || streamId >= wholeSystemStreamIDBase
     }
 
@@ -154,7 +160,11 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
 
     func addOutput(_ id: OutputID) async throws {
         try await runOp(id) {
-            self.lock.withLock { self.added.append(id); self.opLog.append("add:\(id.rawValue)") }
+            self.lock.withLock {
+                self.added.append(id)
+                self.wholeSystemAdds.append((id, 0))
+                self.opLog.append("add:\(id.rawValue)")
+            }
             let hook = self.lock.withLock { self.onAddOutputBody }
             hook?(id)
             let hold = self.lock.withLock { self.onAddOutputHold }
@@ -211,7 +221,7 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
             if let hold { await hold(id, streamId) }
             if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
             self.lock.withLock {
-                if Self.isWholeSystem(streamId) {
+                if Self.logsAsWholeSystemAdd(streamId) {
                     self.added.append(id)
                     self.opLog.append("add:\(id.rawValue)")
                 } else {
@@ -223,14 +233,21 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
         }
     }
 
+    /// Every whole-system add the backend asked for, with the stream it asked
+    /// for — recorded even when the add then throws, which is the only way a test
+    /// can see the stream a REFUSED connect took.
+    private(set) var wholeSystemAdds: [(OutputID, UInt32)] = []
+    var wholeSystemAddCalls: [(OutputID, UInt32)] { lock.withLock { wholeSystemAdds } }
+
     /// Per-app stream bind (T6). Recorded SEPARATELY from the legacy `added`
     /// (stream_id 0) so per-app assertions never perturb the whole-system tests.
     private var streamAdds: [(OutputID, UInt32)] = []
     func addOutput(_ id: OutputID, streamId: UInt32) async throws {
         try await runOp(id) {
             self.lock.withLock {
-                if Self.isWholeSystem(streamId) {
+                if Self.logsAsWholeSystemAdd(streamId) {
                     self.added.append(id)
+                    self.wholeSystemAdds.append((id, streamId))
                     self.opLog.append("add:\(id.rawValue)")
                 } else {
                     self.streamAdds.append((id, streamId))
@@ -1424,11 +1441,9 @@ private func makeSyncedLocalBackend(
     return (backend, engine, discovery, capture, sink, macSelected)
 }
 
-/// Whether the engine's live session for `outputID` is a WHOLE-SYSTEM one: the
-/// speaker's own home stream, or stream 0 — which a speaker lands on only when
-/// the engine had no stream left for it. Which of the two it is, is the stream
-/// budget's business; every scope test cares only that the whole-system domain
-/// owns the session.
+/// Whether the engine's live session for `outputID` is on the speaker's own
+/// whole-system home stream. Stream 0 does not count: a scope test that accepted
+/// it would pass on a device the whole-system domain never actually moved.
 private func onAWholeSystemStream(_ engine: SpyEngine, _ outputID: OutputID) -> Bool {
     guard let live = engine.liveStream(of: outputID) else { return false }
     return SpyEngine.isWholeSystem(live)
@@ -5544,8 +5559,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 — a silent addOutput no-op leaves the device on its per-app stream \
                 while the whole-system mix goes elsewhere and is never heard
                 """)
-        #expect(engine.rebindCalls.contains { $0.0 == device.outputID },
-                "the move must go through the engine's serialized rebindOutput")
+        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && SpyEngine.isWholeSystem($0.1) },
+                "the move must go through the engine's serialized rebindOutput, onto a home stream")
     }
 
     // MARK: Roadmap 008 — scope arbiter (whole-system priority) race tests
@@ -9553,6 +9568,14 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "no engine op may be issued for a speaker that could not be admitted")
         #expect(backend.devices.first { $0.id == loser.id }?.eq == eq,
                 "the stored values survive the bypass — only the streaming is flat")
+
+        // Deselecting it releases the shared stream 0 with everything else, so
+        // the sentence has to go with it: a speaker nobody selected is not
+        // being denied anything.
+        backend.setOutputSet(selected.subtracting([loser.id]))
+        await pollUntil { backend.devices.first { $0.id == loser.id }?.eqBypassReason == nil }
+        #expect(backend.devices.first { $0.id == loser.id }?.eqBypassReason == nil,
+                "a deselected speaker must not keep saying its tone is being refused")
     }
 
     /// A departed speaker's stream has to leave the plan, or the delivery thread
@@ -9604,6 +9627,44 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         }
         #expect(engine.liveStream(of: departing.outputID) != departingStream,
                 "a deselect frees the home, so the reselect allocates a fresh stream")
+    }
+
+    /// A speaker deselected while it has NO live session must still give its
+    /// stream back. A connect the receiver refused reaches no teardown, so
+    /// without a release on the deselect edge the home stays allocated: it keeps
+    /// counting against the budget, and the reselect lands straight back on the
+    /// same stream — the shape that would pin an over-budget speaker to the flat
+    /// stream 0 for the rest of the session.
+    @Test func aDeselectWithNoLiveSessionStillReleasesTheStream() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        backend.captureCoordinator = FakeCapture()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:72", name: "Refusing Speaker")
+        engine.addFailures = [device.outputID.rawValue]
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+            }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // The connect takes a home stream and THEN the receiver refuses it.
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.wholeSystemAddCalls.contains { $0.0 == device.outputID } }
+        let refused = try #require(
+            engine.wholeSystemAddCalls.first { $0.0 == device.outputID }?.1)
+        #expect(refused >= SpyEngine.wholeSystemStreamIDBase,
+                "precondition: the refused connect had already taken a stream of its own")
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+
+        backend.setOutputSet([])
+        engine.addFailures = []
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            (engine.liveStream(of: device.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase
+        }
+        #expect(engine.liveStream(of: device.outputID) != refused,
+                "ids are monotonic, so landing back on the refused stream means the deselect never released it")
     }
 
     /// A session that dies under a speaker the user still wants keeps its home

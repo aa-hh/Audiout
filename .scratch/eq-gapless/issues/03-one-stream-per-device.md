@@ -1,6 +1,6 @@
 # 03 — One permanent whole-system stream per AirPlay speaker (Track C), or Track A
 
-Status: needs-triage (blocked on ticket 02's RTF; becomes ready-for-agent once known)
+Status: Track C built 950cd490 + c5e7e193 + cf0a52f4 + review fixes 7dc88620 (250 NativeBackend tests); live check owed
 Blocked by: 02
 Worktree: this one (`claude/equalizer-latency-optimization-d714da`)
 

@@ -1,6 +1,6 @@
 # 01 — EQ makeup headroom: a boost must not clip at full scale (roadmap 087)
 
-Status: ready-for-agent
+Status: built + reviewed twice (PR #203, 3 commits, 22 tests); merge + live check owed
 Worktree: `.claude/worktrees/eq-headroom-087` (branch `claude/eq-headroom-087`, from main)
 
 Evidence: owner session 2026-09-14 23:55Z, `stream_health` on the shaped stream read

@@ -2106,7 +2106,9 @@ extension SerializedSharedState {
         let sink = SpySink()
         let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
 
-        let eqStreamID = EQStreamAllocator.idBase
+        // A whole-system stream id: `NativeBackend` gives every speaker its own,
+        // allocated from the top half of the id space.
+        let eqStreamID: UInt32 = 0x8000_0000
         coordinator.setEQPlan(WholeSystemEQPlan(
             main: nil,
             streams: [

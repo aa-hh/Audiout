@@ -442,7 +442,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
 
     /// The tone stages this coordinator applies to each delivered buffer: the
     /// Main Out stage (before every fan-out, so the local Mac and Bluetooth
-    /// inherit it) plus one AirPlay write per EQ stream. Queue-confined here
+    /// inherit it) plus one AirPlay write per stream in the plan. Queue-confined here
     /// (set via ``setEQPlan(_:)``), consumed only through the published
     /// ``BufferSnapshot``. ``WholeSystemEQPlan/passthrough`` — the default — is
     /// the ONLY shape that stays byte-identical, and it is exactly the legacy
@@ -2837,7 +2837,7 @@ public protocol PCMSink: Sendable {
     func write(pcm: Data, pts: timespec)
 
     /// Forward several per-stream buffers sharing one `pts` — what a non-flat
-    /// ``WholeSystemEQPlan`` produces, one entry per EQ stream. Batching matters:
+    /// ``WholeSystemEQPlan`` produces, one entry per stream. Batching matters:
     /// the engine processes one shared `pts` per call, so N separate writes would
     /// let simultaneous streams drift apart.
     ///

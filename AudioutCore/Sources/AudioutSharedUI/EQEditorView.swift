@@ -68,7 +68,7 @@ public final class EQEditorView: NSView {
     /// and nothing else on the row tells the user which one they are in.
     public static func bypassNoteText(_ reason: Device.EQBypassReason) -> String {
         switch reason {
-        case .streamBudget: return "Not applied. Reset another speaker's EQ to bring this one back."
+        case .streamBudget: return "Not applied. Too many speakers are streaming at once for this one to get its own EQ."
         case .perAppRouting: return "Not applied. An app playing straight to this speaker skips EQ; switch it to \u{201C}Follows main output\u{201D} to use it."
         }
     }

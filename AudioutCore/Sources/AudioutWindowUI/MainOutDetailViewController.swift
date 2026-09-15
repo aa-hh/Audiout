@@ -257,8 +257,9 @@ public final class MainOutDetailViewController: NSViewController {
     // MARK: Model
 
     /// Render the whole mix's current tone. Never bypassed: the two
-    /// `Device.EQBypassReason`s are both per-device conditions (a stream-budget
-    /// eviction, a per-app route), and the main-out stage sits before either.
+    /// `Device.EQBypassReason`s are both per-device conditions (a speaker that
+    /// found no stream free, a per-app route), and the main-out stage sits
+    /// before either.
     public func show(eq: DeviceEQ) {
         // A scrub (or a just-committed value still awaiting its echo) wins
         // over the snapshot — see ``pendingEdit``. Released here, the instant

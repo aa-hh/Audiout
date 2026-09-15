@@ -9629,6 +9629,52 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "a deselect frees the home, so the reselect allocates a fresh stream")
     }
 
+    /// A deselect landing INSIDE a connect's negotiation must NOT take the
+    /// stream that connect already read. The add lands afterwards and inserts
+    /// the device into the streaming set; with its home gone the plan carries no
+    /// stream for it at all, and the converge — settled at `want == isOn` — never
+    /// runs again to notice. The row says connected and the speaker is fed
+    /// nothing but idle fill.
+    @Test func aDeselectDuringAnInFlightConnectKeepsTheStream() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:73", name: "Slow Negotiator")
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+            }
+        } after: { discovery.fire(.appeared(device)) }
+
+        // Hold the add open where a real receiver spends its ~2 s negotiating.
+        let addHold = HoldPoint()
+        engine.onAddOutputHold = { id, _ in
+            if id == device.outputID { await addHold.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { addHold.entered }
+        let home = try #require(
+            engine.wholeSystemAddCalls.first { $0.0 == device.outputID }?.1)
+
+        // The user toggles the speaker off and straight back on while the
+        // receiver is still negotiating.
+        backend.setOutputSet([])
+        backend.setOutputSet([device.id])
+        addHold.open()
+
+        await pollUntil { engine.liveStream(of: device.outputID) == home }
+        #expect(engine.liveStream(of: device.outputID) == home,
+                "the engine bound the stream the converge read — nothing may move it")
+        await pollUntil {
+            capture.eqPlans.last?.streams.contains { $0.streamID == home } == true
+        }
+        #expect(capture.eqPlans.last?.streams.contains { $0.streamID == home } == true,
+                "a connected row whose stream the plan does not carry is a speaker fed nothing")
+    }
+
     /// A speaker deselected while it has NO live session must still give its
     /// stream back. A connect the receiver refused reaches no teardown, so
     /// without a release on the deselect edge the home stays allocated: it keeps
@@ -9663,8 +9709,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil {
             (engine.liveStream(of: device.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase
         }
-        #expect(engine.liveStream(of: device.outputID) != refused,
-                "ids are monotonic, so landing back on the refused stream means the deselect never released it")
+        #expect((engine.liveStream(of: device.outputID) ?? 0) > refused,
+                "ids are monotonic, so anything but a HIGHER stream means the deselect never released it")
     }
 
     /// A session that dies under a speaker the user still wants keeps its home

@@ -26,6 +26,19 @@ import Testing
         return samples.withUnsafeBufferPointer { Data(buffer: $0) }
     }
 
+    /// Interleaved stereo S16LE holding a full-scale square wave in both
+    /// channels. Its fundamental sits at 4/pi of full scale, so it still
+    /// overdrives a boost the makeup trim has brought back to unity.
+    private func square(hz: Double) -> Data {
+        var samples = [Int16](repeating: 0, count: frames * 2)
+        for frame in 0..<frames {
+            let value: Int16 = sin(2 * Double.pi * hz * Double(frame) / sampleRate) >= 0 ? 32_767 : -32_767
+            samples[frame * 2] = value
+            samples[frame * 2 + 1] = value
+        }
+        return samples.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
     /// RMS of one channel over the SECOND half only, so the filters' start-up
     /// transient never lands in the measurement.
     private func rms(_ pcm: Data, channel: Int) -> Double {
@@ -43,7 +56,10 @@ import Testing
         let input = sine(hz: hz, amplitude: amplitude)
         var output = input
         EQProcessor(eq: eq, sampleRate: sampleRate).process(&output)
-        return rms(output, channel: 0) / rms(input, channel: 0)
+        // Divide the makeup trim back out: these tests assert the SHAPE of the
+        // curve, which is what the Equalizer page draws, not the level it ships at.
+        let trim = pow(10, -EQProcessor.headroomDB(for: eq, sampleRate: sampleRate) / 20)
+        return rms(output, channel: 0) / rms(input, channel: 0) / trim
     }
 
     private func bands(_ pairs: [Int: Double]) -> [Double] {
@@ -130,21 +146,94 @@ import Testing
         let oneKIndex = DeviceEQ.bandCentresHz.firstIndex(of: 1_000)!
         let eq = DeviceEQ(bandGainsDB: bands([oneKIndex: 12]))
 
-        var pcm = sine(hz: 1_000, amplitude: 1.0)
+        // A square wave: the makeup trim keeps a full-scale SINE under the
+        // ceiling, but a square's 4/pi fundamental still overruns it.
+        var pcm = square(hz: 1_000)
         EQProcessor(eq: eq, sampleRate: sampleRate).process(&pcm)
         let s16 = pcm.withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
 
-        #expect(s16.max() == 32_767, "a +12 dB boost on a full-scale sine must reach the ceiling")
+        #expect(s16.max() == 32_767, "a +12 dB boost on a full-scale square must reach the ceiling")
         #expect(s16.min() == -32_767, "and the floor")
         #expect(!s16.contains(Int16.min), "-32768 would be the wrap artifact this clamp exists to prevent")
 
         // A wrap flips a sample's sign. Compare against the float path, which
         // clamps in floating point and cannot wrap by construction.
-        var floats = floatMirror(of: sine(hz: 1_000, amplitude: 1.0))
+        var floats = floatMirror(of: square(hz: 1_000))
         EQProcessor(eq: eq, sampleRate: sampleRate).process(floatInterleaved: &floats, frameCount: frames)
         for (index, sample) in s16.enumerated() where sample != 0 {
             #expect(sample.signum() == Int16(floats[index] < 0 ? -1 : 1), "sign flip at \(index)")
         }
+    }
+
+    /// Drop the makeup trim from `Engine.init` and this is what comes back: a
+    /// +12 dB band on program that was already at full scale runs straight into
+    /// the clamp, flat-topping the peaks and lifting the level with it.
+    @Test func aBoostedFullScaleSineNeverClips() {
+        let oneKIndex = DeviceEQ.bandCentresHz.firstIndex(of: 1_000)!
+        let eq = DeviceEQ(bandGainsDB: bands([oneKIndex: 12]))
+
+        let input = sine(hz: 1_000, amplitude: 1.0)
+        var output = input
+        EQProcessor(eq: eq, sampleRate: sampleRate).process(&output)
+
+        var run = 0, longest = 0
+        for sample in leftChannelS16(output) {
+            run = abs(Int(sample)) == 32_767 ? run + 1 : 0
+            longest = max(longest, run)
+        }
+        #expect(longest < 3, "a flat top \(longest) samples long means the boost clipped")
+
+        let db = 20 * log10(rms(output, channel: 0) / rms(input, channel: 0))
+        #expect(abs(db) < 0.5, "the trim must hand back the level it was given; measured \(db) dB")
+    }
+
+    /// Clamping the peak the wrong way round turns a cut into a boost: a curve
+    /// whose peak response is -6 dB would be handed a 10^(6/20) makeup gain and
+    /// shove the whole stream 6 dB up.
+    @Test func aCutOnlyCurveGetsNoTrim() {
+        let index = DeviceEQ.bandCentresHz.firstIndex(of: 1_000)!
+        let eq = DeviceEQ(bandGainsDB: bands([index: -6]))
+
+        #expect(EQProcessor.headroomDB(for: eq, sampleRate: sampleRate) == 0)
+        let ratio = gain(eq, atHz: 8_000)
+        #expect(abs(ratio - 1) < 0.01, "three octaves above the cut must be untouched; measured \(ratio)")
+    }
+
+    /// Drop the ramp-in seed from `init` and a device crossing flat to shaped
+    /// steps the whole makeup trim on its very first frame — 6 dB the instant
+    /// loudness goes on. Measured against a processor built WITHOUT the flag,
+    /// whose biquads are identical and start from the same zero delay memory,
+    /// so the two differ by the channel gain alone.
+    @Test func aFreshWholeSystemProcessorRampsInFromUnity() {
+        let eq = DeviceEQ(loudness: true)
+        let trimDB = -EQProcessor.headroomDB(for: eq, sampleRate: sampleRate)
+        #expect(abs(trimDB + 6) < 0.5, "loudness should be trimmed by about 6 dB; measured \(trimDB) dB")
+
+        let input = sine(hz: 1_000, amplitude: 0.4)
+        var rampedIn = input, stepped = input
+        EQProcessor(eq: eq, sampleRate: sampleRate, rampInFromUnity: true).process(&rampedIn)
+        EQProcessor(eq: eq, sampleRate: sampleRate).process(&stepped)
+
+        let trim = pow(10, trimDB / 20)
+        let opening = headRMS(rampedIn, frames: 64) / headRMS(stepped, frames: 64)
+        #expect(abs(opening - 1 / trim) < 0.02 / trim,
+                "the first frames must arrive at unity, not at the trim; measured \(opening)x vs \(1 / trim)x")
+
+        // The ramp is a transient: one chunk later both sit at the trimmed level.
+        #expect(abs(rms(rampedIn, channel: 0) / rms(stepped, channel: 0) - 1) < 0.01)
+
+        // A drag off flat builds the processor and the NEXT drag frame retargets
+        // it, both before any capture buffer arrives. Overwrite the seed with
+        // that first engine's never-heard trim and the whole step lands on
+        // frame 0 anyway. Retargeting to the SAME curve holds the biquads still,
+        // so the opening level measures the ramp's starting gain and nothing else.
+        var retargetedFirst = input
+        let processor = EQProcessor(eq: eq, sampleRate: sampleRate, rampInFromUnity: true)
+        processor.retarget(to: eq)
+        processor.process(&retargetedFirst)
+        let reopening = headRMS(retargetedFirst, frames: 64) / headRMS(stepped, frames: 64)
+        #expect(abs(reopening - 1 / trim) < 0.02 / trim,
+                "a retarget before the first buffer must not eat the ramp-in; measured \(reopening)x")
     }
 
     // MARK: Entry-point parity
@@ -268,7 +357,8 @@ import Testing
         var output = input
         processor.process(&output)
 
-        let db = 20 * log10(rms(output, channel: 0) / rms(input, channel: 0))
+        let trim = pow(10, -EQProcessor.headroomDB(for: DeviceEQ(bassDB: 6), sampleRate: sampleRate) / 20)
+        let db = 20 * log10(rms(output, channel: 0) / rms(input, channel: 0) / trim)
         #expect(abs(db - 6) < 0.5, "expected the new 6 dB shelf, measured \(db) dB")
     }
 
@@ -283,6 +373,20 @@ import Testing
             samples[frame * 2 + 1] = quantized
         }
         return samples.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
+    /// RMS of the left channel over the FIRST `count` frames — where a ramp-in
+    /// lives, which ``rms(_:channel:)``'s second-half window deliberately skips.
+    private func headRMS(_ pcm: Data, frames count: Int) -> Double {
+        let samples = leftChannelS16(pcm).prefix(count).map { Double($0) / 32_767 }
+        return (samples.reduce(0) { $0 + $1 * $1 } / Double(count)).squareRoot()
+    }
+
+    private func leftChannelS16(_ pcm: Data) -> [Int16] {
+        pcm.withUnsafeBytes { raw in
+            let all = raw.bindMemory(to: Int16.self)
+            return stride(from: 0, to: all.count, by: 2).map { all[$0] }
+        }
     }
 
     private func leftChannel(_ pcm: Data) -> [Double] {

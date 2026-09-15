@@ -154,6 +154,16 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     private var liveStreams: [UInt64: UInt32] = [:]
     /// The stream `id`'s live session is on, or `nil` if it has none.
     func liveStream(of id: OutputID) -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
+    /// One level row per LIVE stream, which is what the `stream_health` poll
+    /// reads. The real engine reports a row per stream it has written to; the
+    /// spy reports a row per live session, so a test can assert what that row
+    /// says about the speakers on it. Levels themselves are fixtures.
+    nonisolated func streamLevelSnapshot() -> [StreamLevelSnapshot] {
+        let ids = Set(lock.withLock { Array(liveStreams.values) })
+        return ids.sorted().map {
+            StreamLevelSnapshot(streamId: $0, peakDBFS: -6, silentSeconds: 0, writes: 1)
+        }
+    }
     /// Every `rebindOutput` the backend issued, in order (T7).
     private(set) var rebinds: [(OutputID, UInt32)] = []
     var rebindCalls: [(OutputID, UInt32)] { lock.withLock { rebinds } }
@@ -10026,6 +10036,42 @@ extension SerializedSharedState {
         func sendSchedLines() -> [String] { box.snapshot().filter { $0.contains("\"evt\":\"send_sched\"") } }
         await pollUntil { !sendSchedLines().isEmpty }
         #expect(!sendSchedLines().isEmpty, "arming the poll must immediately log send_sched at least once — this event had never fired in production")
+    }
+
+    /// A `stream_health` row must name the speakers the stream actually serves.
+    /// Under one-stream-per-speaker a whole-system speaker has no entry in
+    /// `streamBindings` (the per-app map), so the row for its own home stream
+    /// used to name nobody, and the live log could not say which speaker a
+    /// stream belonged to — an hour of the 2026-09-15 EQ investigation went on
+    /// inferring it from peak levels. Reverting `devices` to `streamBindings`
+    /// alone turns this red.
+    @Test func streamHealthNamesTheSpeakerOnItsOwnWholeSystemStream() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A7", name: "Health Named Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        defer { backend.stop() }
+
+        backend.setEQ(DeviceEQ(bassDB: 6), for: device.id, commit: true)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.eq.bassDB == 6 }
+        let home = try #require(engine.liveStream(of: device.outputID))
+        try #require(home >= SpyEngine.wholeSystemStreamIDBase,
+                     "precondition: the speaker owns a whole-system stream of its own")
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        backend.test_pollSchedulingSnapshotNow()
+
+        func homeRows() -> [String] {
+            box.snapshot().filter {
+                $0.contains("\"evt\":\"stream_health\"") && $0.contains("\"stream\":\"\(home)\"")
+            }
+        }
+        await pollUntil { !homeRows().isEmpty }
+        let row = try #require(homeRows().last)
+        #expect(row.contains("\"devices\":\"\(device.id)\""),
+                "the row for a speaker's own whole-system stream must name that speaker")
     }
 
     /// Selecting a SECOND device while already capturing (captureRunning

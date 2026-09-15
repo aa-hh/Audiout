@@ -576,6 +576,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// session-establishing op reads immediately before its engine call.
     /// On `stateQueue`.
     private var wholeSystemStreamByDevice: [String: UInt32] = [:]   // on stateQueue
+    /// Devices whose `eq_edit` gesture has already been logged, so a drag
+    /// writes one line at its first frame and one at its commit rather than one
+    /// per mouse-move. On `stateQueue`.
+    private var eqEditGesturesLogged: Set<String> = []
+    /// The last `eq_plan` summary written, so a scrub that republishes the same
+    /// plan shape every frame logs once. On `stateQueue`.
+    private var lastEQPlanLogSummary: String?
     /// The next whole-system stream id to hand out. Monotonic: a released id is
     /// retired for the session and never reused (decision 8). On `stateQueue`.
     private var nextWholeSystemStreamID: UInt32 = NativeBackend.wholeSystemStreamIDBase
@@ -1543,6 +1550,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// process-global and unattributable — see ``schedulingSnapshotLogCount``.
     func test_schedulingPollLogCount() -> Int {
         stateQueue.sync { schedulingSnapshotLogCount }
+    }
+
+    /// Test-only (`@testable`): run one scheduling-snapshot poll NOW, instead of
+    /// waiting out the live ~5 s cadence, so a test can read the `stream_health`
+    /// line it writes. Cancels the pending work item first, so this leaves
+    /// exactly one poll armed, as the live path does.
+    func test_pollSchedulingSnapshotNow() {
+        stateQueue.sync {
+            self.schedulingSnapshotPollWork?.cancel()
+            self.schedulingSnapshotPollWork = nil
+            self.pollSchedulingSnapshot()
+        }
     }
 
     /// Test-only (`@testable`): the whole-system-tap retry attempt counter
@@ -3287,6 +3306,30 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.eqByDeviceID[id] = eq
             self.applyLocal(id) { $0.eq = eq }
             if commit { self.saveEQLocked() }
+            // The one line that says a curve left the editor, next to
+            // everything that decides whether it can reach the audio (ticket
+            // 04: no log could answer "did this speaker's curve reach the
+            // sound?"). A drag calls this per frame, so only the FIRST frame of
+            // a gesture and the commit that ends it are logged — the gesture
+            // and its final value, without a line per mouse-move. Local only:
+            // `Telemetry.log` never leaves the Mac, so a device id is allowed.
+            let firstOfGesture = commit ? false : self.eqEditGesturesLogged.insert(id).inserted
+            if commit { self.eqEditGesturesLogged.remove(id) }
+            if commit || firstOfGesture {
+                Telemetry.log(.airplay, "eq_edit", [
+                    "device": id,
+                    "commit": commit ? "true" : "false",
+                    "shaped": eq.isFlat ? "false" : "true",
+                    "bass": String(format: "%.1f", eq.bassDB),
+                    "treble": String(format: "%.1f", eq.trebleDB),
+                    "balance": String(format: "%.2f", eq.balance),
+                    "loudness": eq.loudness ? "true" : "false",
+                    "bands": "\(eq.bandGainsDB.filter { $0 != 0 }.count)",
+                    "home": self.wholeSystemStreamByDevice[id].map { "\($0)" } ?? "none",
+                    "added": self.added.contains(id) ? "true" : "false",
+                    "perapp": self.streamBindings[id] != nil ? "true" : "false",
+                ])
+            }
             if self.known[id]?.isBluetooth == true {
                 self.pushBTSinkEQLocked(id)
                 return
@@ -3472,6 +3515,25 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let plan = WholeSystemEQPlan(
             main: Self.processor(reusing: &mainOutEQSlot, for: storedMainOutEQ),
             streams: streams)
+        // What was actually published: which streams carry a processor, and
+        // which speaker each home stream belongs to. A stored curve that never
+        // reaches the audio reads here as its stream missing, or present and
+        // flat (ticket 04). Logged only when that summary CHANGES — a scrub
+        // republishes the plan per frame and an unchanged line per mouse-move
+        // is noise. Local only (device ids).
+        let planStreams = plan.telemetryStreamSummary
+        let planDevices = added.compactMap { id in
+            wholeSystemStreamByDevice[id].map { "\(id)=\($0)" }
+        }.sorted().joined(separator: ",")
+        let planSummary = "\(plan.main == nil) \(planStreams) \(planDevices)"
+        if lastEQPlanLogSummary != planSummary {
+            lastEQPlanLogSummary = planSummary
+            Telemetry.log(.airplay, "eq_plan", [
+                "main": plan.main == nil ? "off" : "on",
+                "streams": planStreams,
+                "devices": planDevices,
+            ])
+        }
         guard let coordinator = captureCoordinator else { return }
         captureControlQueue.async { coordinator.setEQPlan(plan) }
     }
@@ -8615,7 +8677,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // `silent_s` is the field to read first. Device ids stay local.
         let dropped = self.engine.writeBacklogSnapshot().droppedWrites
         for level in self.engine.streamLevelSnapshot() {
-            let devices = self.streamBindings.filter { $0.value == level.streamId }.keys.sorted()
+            // Which speakers this stream actually serves: the per-app ids bound
+            // to it PLUS the ids whose whole-system home it is. Before ticket 04
+            // this read `streamBindings` alone, so under one-stream-per-speaker
+            // every whole-system line named nobody and the log could not say
+            // which speaker a stream belonged to.
+            var deviceSet = Set(self.streamBindings.filter { $0.value == level.streamId }.keys)
+            deviceSet.formUnion(self.wholeSystemStreamByDevice.filter { $0.value == level.streamId }.keys)
+            let devices = deviceSet.sorted()
             Telemetry.log(.airplay, "stream_health", [
                 "stream": "\(level.streamId)",
                 "devices": devices.joined(separator: ","),

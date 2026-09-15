@@ -448,6 +448,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// the ONLY shape that stays byte-identical, and it is exactly the legacy
     /// single stream-0 write.
     private var eqPlan: WholeSystemEQPlan = .passthrough
+    /// The last `eq_plan_applied` summary written, so a scrub that hands the
+    /// same plan shape over every frame logs once. Queue-confined.
+    private var lastEQPlanLogSummary: String?
 
     /// W1-T7 (Gap 1 + Fix 1): the excluded process-OBJECT set the CURRENT live tap
     /// was last built/recreated against — the compare-before-rebuild key for the
@@ -1627,9 +1630,25 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// alone, so a value change reaches a live one only through its own mailbox,
     /// which the delivery thread itself picks up.
     public func setEQPlan(_ plan: WholeSystemEQPlan) {
-        queue.sync {
+        let summary = "\(plan.isPassthrough) \(plan.main == nil) \(plan.telemetryStreamSummary)"
+        let changed: Bool = queue.sync {
             self.eqPlan = plan
             self.publishBufferSnapshot()
+            defer { self.lastEQPlanLogSummary = summary }
+            return self.lastEQPlanLogSummary != summary
+        }
+        // What the delivery path will actually use, in the same shape as the
+        // backend's `eq_plan` line: a plan that is shaped where it is built and
+        // flat (or passthrough) here separates a backend fault from a delivery
+        // one on two adjacent lines (ticket 04). Logged on CHANGE only — a
+        // scrub republishes the plan per frame — and off the delivery thread,
+        // which must never call `Telemetry.log` at all.
+        if changed {
+            Telemetry.log(.captureWS, "eq_plan_applied", [
+                "passthrough": plan.isPassthrough ? "true" : "false",
+                "main": plan.main == nil ? "off" : "on",
+                "streams": plan.telemetryStreamSummary,
+            ])
         }
     }
 

@@ -78,6 +78,12 @@ so the Bluetooth sink can run the same processor — never add one or move
 GPL-derived code in; and `DeviceEQStore` drops flat entries on save, so a
 round-trip legitimately returns fewer keys than it was handed.
 
+**SUPERSEDED 2026-09-15 (roadmap 056): there is no EQ rebind any more.** Every
+speaker owns a whole-system stream from connect to disconnect
+(`connectTargetStreamLocked`) and an edit only retargets that stream's
+processor; `EQStreamTopology`, `EQStreamAllocator` and `enqueueEQRebindLocked`
+are deleted. What follows is why the old shape existed.
+
 **An EQ rebind is a whole-system engine op: it rides the per-device `converging`
 slot, and its stream ids live in their own namespace.** Moving a device onto its
 EQ group's stream is a real `removeOutput`→`addOutput` with the accepted ~1 s
@@ -92,7 +98,9 @@ allocates from 1, so the two id spaces can never collide and the EQ budget can
 count per-app streams by range test alone.
 
 **`reconcileEQPlan` owns BOTH `added` edges, and `pushEQPlanLocked` NEVER
-rebuilds a live stage.** The departure edge is `removeFromAddedLocked` — the
+rebuilds a live stage.** (The stream-move half is superseded — see above; the
+processor-reuse half below is still the rule.) The departure edge is
+`removeFromAddedLocked` — the
 single site every per-device `added.remove` goes through — because a departure
 frees a stream for whoever the budget refused AND takes the departed device's
 stream out of the plan; `setOutputSet`'s reconcile cannot cover it (it runs while
@@ -276,7 +284,7 @@ Redirecting one app to a specific device:
 | Routing brain | `GroupController`, `AppRoutingController`, `PhaseController` |
 | Repaint gating | `StructuralStateGate` — has selection/scenes moved since the surfaces were last painted? `onStateDidChange` fires for EVERY model change (a volume-key hold included) while the repaints it can trigger are full sweeps, so the coordinator gates them on this. |
 | Persistence | `AppRouteStore`, `RoutingStore`, `GroupStore`, `AppSettings`, `ExcludedAppsStore`, `ExcludedAppsController`, `DeviceIconStore`, `DeviceEQStore` |
-| Tone shaping | `DeviceEQ`, `EQStreamTopology`, `EQProcessor` |
+| Tone shaping | `DeviceEQ`, `EQProcessor` |
 | Mic-probe calibration (064) | `MicProbeSession`, `BuiltInMicRecorder`, `MicCapturePermission` (license-clean; hardware-free). The DSP itself — `SyncProbe`, `SyncProbeCorrelator` — moved out to the `ProbeKit` package in [audiout-shared](https://github.com/aa-hh/audiout-shared), which the iPhone companion also links |
 | Local playback | `LocalPlaybackEngine`, `SyncedLocalSink`, `LocalOutputLatency`, `DefaultOutputObserver`, `SystemOutputVolume` |
 | Public aggregate device (Wave 3) | `AggregateOutputDevice` — PUBLIC aggregate "Audiout" (UID `com.audiout.Audiout.aggregate`); wired by `NativeBackend` (adopt/sweep/restore on start/quit). Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` (in `OutputBackend.swift`) drives popover warning via `PopoverController.setRoutingBlockedNeedsDefault(_:)` and user-reselect via `PopoverController.onReselectAudiout`. Shared `EffectiveCaptureDevice.resolve(_:)` (in `NativeCaptureCoordinator.swift`) prevents the private tap-aggregate nesting on the public aggregate (A1). **Interim ceiling:** system volume slider + hardware volume keys dead (A2); fix is `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md`. **Seamless handoff (Wave 3 T9+):** `AirPlayHandoffWatcher` (best-effort unified-log watcher for blocked macOS AirPlay attempts; spawns `/usr/bin/log stream`; degrades silently), `BlockedAirPlayAttempt` (pure matcher), `PTPHelperReleasing` (fast ~1s port release), `releaseForHandoff`/`resumeFromHandoffLocked` (NativeBackend seam; release preserves selection intent, resume restores whole-system + per-app). |

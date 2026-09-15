@@ -1,6 +1,6 @@
 # 04 — "Bass up = quieter, no more bass" on the Move 2: find out why, then fix
 
-Status: scoped, not started — Track 0 is a GATE the owner has to run before any code
+Status: Track 0 done (the stale process was quit and the trim-free build relaunched 05:37 local, pid 57238 — owner's ears OWED); Track 1 observability built f4bcd0a2, review in flight
 Blocked by: 03 (Track C is the code under suspicion)
 Worktree: `.claude/worktrees/equalizer-latency-optimization-d714da` (branch
 `claude/equalizer-latency-optimization-d714da`, HEAD d7828aa2). The live-test slot is

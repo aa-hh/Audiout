@@ -574,20 +574,16 @@ public enum Tokens {
         // 11.21 / 9.84 / 12.71). `ember` is dimmer by design — it is the
         // connecting line, not the node — at 3.94 / 3.58 / 3.14 / 4.06.
         //
-        // BOTH LIGHT INSTRUMENTS ARE MEASURED AGAINST `well`, NOT ONLY THE FLAT
-        // GROUND: the Groups editor's sections are filled with `well`, so the
-        // rail and its nodes run over the darker of the two surfaces. Light
-        // `gold` `#A67C1E` measures 3.64:1 on the flat ground / 3.16:1 on
-        // `well` (Increase Contrast `#8A6614` 5.04 / 4.37); Subtle light
-        // `#8F7B4A` 3.95 / 3.42 (IC `#6F5E33` 6.06 / 5.25). Subtle dark `gold`
-        // clears `raised` at 5.91:1 (IC 7.42:1).
-        //
-        // NOTE the consequence, deliberately accepted: in LIGHT mode the two
-        // inks sit close in luminance, so ember's "dimmer" reads as LESS
-        // CHROMATIC rather than lighter — saturation 0.656 against gold's
-        // 0.819 at the same ~41° hue, a muted brown beside a saturated gold.
-        // Dark keeps the luminance hierarchy unchanged. `MembershipWellContrastTests`
-        // pins the pair's separation: a 1.595:1 gap, inside its 1.40–1.60 band.
+        // LIGHT `ember` IS MEASURED AGAINST `well`, NOT ONLY THE FLAT GROUND:
+        // the Groups editor's sections are filled with `well`, so the rail
+        // runs over the darker of the two surfaces. Light Full `gold` is the
+        // light `#E8B84B` since 2026-09-17 and holds no floor on paper (see
+        // its own doc); its Increase Contrast `#8A6614` still measures 5.04 /
+        // 4.37 on `well`. Subtle light `#8F7B4A` 3.95 / 3.42 (IC `#6F5E33`
+        // 6.06 / 5.25). Subtle dark `gold` clears `raised` at 5.91:1 (IC
+        // 7.42:1). In light mode gold now sits well above ember in luminance,
+        // as in dark; `MembershipWellContrastTests` pins the pair at least
+        // 1.40:1 apart.
         //
         // Neither `gold` nor `ember` may set TEXT — a fill held to 3:1 is not
         // an ink. `goldText`/`emberText` are the 4.5:1 companions for that.
@@ -595,21 +591,28 @@ public enum Tokens {
         /// THE gold accent — the bus-node fill (spec §4.2), route-armed dot, and
         /// meter hot end (spec §1). Remapped ONLY by the accent dial
         /// (``Tokens/accentStyle``, spec §1.3 — W1); never by anything else.
-        /// CONTRAST RATIONALE (measured; ≥3:1 non-text floor). FULL column:
-        /// dark `#E8B84B` = 10.73:1 vs `canvas` / 9.74:1 vs `panel` / 8.55:1
-        /// vs `raised` / 11.04:1 vs `well`, dark Increase Contrast `#F2C75E` =
-        /// 12.35 / 11.21 / 9.84 / 12.71; light `#A67C1E` = 3.64:1 vs the flat
-        /// ground / 3.16:1 vs `well`, light Increase Contrast `#8A6614` =
-        /// 5.04:1 / 4.37:1. SUBTLE column: dark `#B99B53` = 5.91:1 vs `raised`
-        /// (IC `#CBAF6A` 7.42:1); light `#8F7B4A` = 3.95:1 vs the flat ground
-        /// / 3.42:1 vs `well` (IC `#6F5E33` 6.06:1 / 5.25:1).
+        /// CONTRAST RATIONALE (measured). FULL column: dark `#E8B84B` =
+        /// 10.73:1 vs `canvas` / 9.74:1 vs `panel` / 8.55:1 vs `raised` /
+        /// 11.04:1 vs `well`, dark Increase Contrast `#F2C75E` = 12.35 /
+        /// 11.21 / 9.84 / 12.71. Full LIGHT takes the same `#E8B84B` (owner's
+        /// call, 2026-09-17: the darkened `#A67C1E` read muddy, and the phone
+        /// made the same move the same day). That is 1.5–1.8:1 on the light
+        /// grounds, under the 3:1 non-text floor every other graphic here
+        /// holds — accepted as the price of the warmth, and the one exception
+        /// the contrast tests carry. Light Increase Contrast keeps the deep
+        /// `#8A6614` (5.04:1 / 4.37:1 vs `well`), so asking the OS for more
+        /// contrast still gets a gold that clears. SUBTLE column: dark
+        /// `#B99B53` = 5.91:1 vs `raised` (IC `#CBAF6A` 7.42:1); light
+        /// `#8F7B4A` = 3.95:1 vs the flat ground / 3.42:1 vs `well` (IC
+        /// `#6F5E33` 6.06:1 / 5.25:1).
         ///
         /// This is a FILL and a graphical mark, not an ink: text set in the
-        /// gold family uses ``goldText``, which carries the 4.5:1 floor.
+        /// gold family uses ``goldText``, which still deepens for light paper
+        /// and carries the 4.5:1 floor.
         public static var gold: NSColor {
             accentDynamic(name: "gold",
                           full: WarmVariants(dark: 0xE8B84B, darkHighContrast: 0xF2C75E,
-                                             light: 0xA67C1E, lightHighContrast: 0x8A6614),
+                                             light: 0xE8B84B, lightHighContrast: 0x8A6614),
                           subtle: WarmVariants(dark: 0xB99B53, darkHighContrast: 0xCBAF6A,
                                                light: 0x8F7B4A, lightHighContrast: 0x6F5E33))
         }
@@ -670,13 +673,12 @@ public enum Tokens {
                           // bought with value, never with chroma — dropping
                           // saturation on the way down is what makes a brown.
                           //
-                          // Full light `#7A5E2A`: a 1.595:1 luminance gap from
-                          // light gold `#A67C1E`, hue 39.0° against gold's
-                          // 41.5° (same family), saturation 0.656 against
-                          // gold's 0.819 — a 0.164 gap, so ember stays the
-                          // duller ink by chroma AND the darker one by
-                          // luminance, which is exactly the relationship dark
-                          // has. Subtle light `#71613B` separates by luminance
+                          // Full light `#7A5E2A`: hue 39.0° against gold's
+                          // 41.5° (same family), and since light gold went to
+                          // `#E8B84B` (2026-09-17) about 3:1 darker than it,
+                          // which is exactly the relationship dark has. The
+                          // depth predates that move (it was tuned to clear
+                          // 3:1 on `well`) and still does that job. Subtle light `#71613B` separates by luminance
                           // rather than chroma (1.468:1 from Subtle gold): the
                           // muted column is meant to be muted, and value is the
                           // only axis that does not re-saturate it. IC variants

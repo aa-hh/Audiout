@@ -216,28 +216,10 @@ import AppKit
                 "light ember vs panel: \(onPanel):1 below the \(floor):1 non-text floor")
     }
 
-    /// `gold` carries the same ≥3:1 non-text floor on the same two surfaces —
-    /// the node discs sit on the card's `raised` fill, where the pre-retune
-    /// `#A97F1E` measured only 2.92:1 (2026-08-12). Same base-value-only
-    /// caveat as ember's: Increase Contrast can't be forced from a test, and
-    /// the IC variant is authored strictly darker still.
-    @Test func lightGoldClearsTheNonTextFloorOnBothSurfaces() {
-        let floor: CGFloat = 3.0
-        let gold = resolved(Tokens.Color.gold, appearanceName: .aqua)
-
-        let onRaised = contrastRatio(gold, resolved(Tokens.Color.raised, appearanceName: .aqua))
-        #expect(onRaised >= floor,
-                Comment(rawValue: "light gold vs raised: \(onRaised):1 below the \(floor):1 non-text floor — " +
-                "the editor's nodes sit on the card fill, not the pane"))
-
-        let onPanel = contrastRatio(gold, resolved(Tokens.Color.panel, appearanceName: .aqua))
-        #expect(onPanel >= floor,
-                "light gold vs panel: \(onPanel):1 below the \(floor):1 non-text floor")
-    }
-
-    /// …and darkening GOLD must not let ember catch up: gold stays the louder
-    /// instrument on both axes it can still spend in light mode — chroma, and
-    /// (narrowly, since both inks are pinned just over 3:1 on the same ground)
+    /// Light `gold` carries no ground floor since 2026-09-17: it is the light
+    /// `#E8B84B` on paper too (owner's call), and `TokenContrastMatrixTests`
+    /// lists that as its one exception. Gold stays the louder instrument
+    /// beside ember on both axes — chroma and, now by a wide margin,
     /// luminance.
     @Test func lightGoldStaysTheLouderInkBesideEmber() {
         let gold = resolved(Tokens.Color.gold, appearanceName: .aqua)
@@ -251,34 +233,30 @@ import AppKit
     }
 
     /// …and darkening it must not walk it into `gold`. The two are the rail's
-    /// idle/armed pair, so they have to stay visibly different inks. In LIGHT
-    /// mode that separation is CHROMA, not luminance: nothing clearing 3:1 on
-    /// `well` can also be lighter than light gold (see `Tokens`' rationale).
+    /// idle/armed pair, so they have to stay visibly different inks. Since
+    /// light gold went to `#E8B84B` (2026-09-17) that separation is
+    /// luminance, as in dark, so the old chroma-gap floor is gone; the hue
+    /// family still holds.
     @Test func lightEmberStaysTheDullerInkBesideGold() {
         let ember = resolved(Tokens.Color.ember, appearanceName: .aqua)
         let gold = resolved(Tokens.Color.gold, appearanceName: .aqua)
 
-        #expect(gold.saturationComponent - ember.saturationComponent >= 0.15,
-                Comment(rawValue: "ember \(ember.saturationComponent) vs gold \(gold.saturationComponent) — " +
-                "ember is gold's DIM companion; converged chroma makes the idle rail " +
-                "read as the live one"))
         #expect(abs(gold.hueComponent - ember.hueComponent) <= 0.03,
                 "…while staying in the same warm family, not becoming a second hue")
     }
 
-    /// The light idle/armed gap has a floor AND a ceiling. `spineTone(armed:)`
-    /// resolves to `gold` or `ember`; under ~1.40:1 the two are one visible
-    /// colour on a 2 pt line and the rail cannot report armed vs idle — the
-    /// only reason ember has a light depth of its own. Past 1.60:1 ember has
-    /// dropped far enough to read as a brown that muddies the whole rail, so
-    /// a future "make it clearer" cannot buy the gap with depth alone.
+    /// The light idle/armed gap has a floor. `spineTone(armed:)` resolves to
+    /// `gold` or `ember`; under ~1.40:1 the two are one visible colour on a
+    /// 2 pt line and the rail cannot report armed vs idle. The 1.60:1 ceiling
+    /// that guarded ember from sinking into brown went with the light gold
+    /// move of 2026-09-17: the gap is now bought by gold lifting, ember's
+    /// depth unchanged.
     @Test func lightEmberStaysTellableFromGold() {
         let gold = resolved(Tokens.Color.gold, appearanceName: .aqua)
         let ember = resolved(Tokens.Color.ember, appearanceName: .aqua)
         let gap = contrastRatio(gold, ember)
 
         #expect(gap >= 1.40, Comment(rawValue: "gold vs ember \(gap):1 — the idle rail merges into the armed one"))
-        #expect(gap <= 1.60, Comment(rawValue: "gold vs ember \(gap):1 — ember has sunk into a muddy brown"))
     }
 
     // MARK: Structural — the editor's checklist actually wears the new surface

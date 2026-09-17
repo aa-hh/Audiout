@@ -243,8 +243,8 @@ public final class AlignmentPlateCell: NSButtonCell {
     ///   deepened CTA gold — a dark mustard, which is what the live build
     ///   read as.
     /// - Not the dynamic value. Resolving live would hand the LIGHT appearance
-    ///   `gold`'s own light hex (`#9E761D`, deepened for paper), i.e. two
-    ///   different CTAs; the ruling is one gold everywhere, so it is resolved
+    ///   `gold`'s Increase Contrast hex (`#8A6614`, deepened for paper), i.e.
+    ///   two different CTAs; the ruling is one gold everywhere, so it is resolved
     ///   once under `.darkAqua` — the same force-resolve idiom
     ///   `AlignmentTokenContrastTests` uses to measure a token under a fixed
     ///   appearance. `gold` is still read from Tokens rather than copied, so

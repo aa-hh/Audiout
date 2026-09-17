@@ -188,12 +188,15 @@ extension SerializedSharedState {
     /// `raised` well (a deliberate non-permission hue — the first note of the
     /// finale's colour story). Same ≥3:1 glyph floor the five permission
     /// tokens are held to, measured in both authored dial columns and both
-    /// appearances (light 3.64:1, Subtle light 3.95:1).
+    /// appearances (Subtle light 3.95:1) — except Full light, the light gold
+    /// on paper since 2026-09-17, which `TokenContrastMatrixTests` lists as
+    /// the one accepted exception.
     @Test func goldOnRaisedClearsTheGlyphFloorInBothDialColumnsAndAppearances() {
         let floor: CGFloat = 3.0
         for style: AccentStyle in [.fullGold, .subtle] {
             Tokens.accentStyle = style
             for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+                if style == .fullGold && appearance == .aqua { continue }
                 let gold = resolved(Tokens.Color.gold, appearanceName: appearance)
                 let raised = resolved(Tokens.Color.raised, appearanceName: appearance)
                 let ratio = contrastRatio(gold, raised)
@@ -206,10 +209,12 @@ extension SerializedSharedState {
     // MARK: The gold CTA fill — its double floor (ink AND canvas)
 
     /// A `gold`-filled call to action is contrast-governed on BOTH sides:
-    /// `inkOnFill` must clear the 4.5:1 body floor on it (dark 10.18:1, light
-    /// 4.94:1), and the fill itself must clear 3:1 against `canvas`, the Setup
-    /// window's true background (10.73:1 / 3.64:1). Re-measured here rather
-    /// than trusted from the tokens' written rationales.
+    /// `inkOnFill` must clear the 4.5:1 body floor on it (10.18:1 in both,
+    /// since light `gold` took the dark hex on 2026-09-17), and the fill
+    /// itself must clear 3:1 against `canvas`, the Setup window's true
+    /// background, in dark (10.73:1); light is the accepted exception
+    /// `TokenContrastMatrixTests` lists. Re-measured here rather than
+    /// trusted from the tokens' written rationales.
     @Test func goldFillTakesInkOnFillAndClearsTheCanvasFloorInBothAppearances() {
         Tokens.accentStyle = .fullGold
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
@@ -220,8 +225,10 @@ extension SerializedSharedState {
             let canvasRatio = contrastRatio(fill, canvas)
             #expect(inkRatio >= 4.5,
                     "gold/\(appearance.rawValue): inkOnFill \(inkRatio):1 under the 4.5:1 body floor")
-            #expect(canvasRatio >= 3.0,
-                    "gold/\(appearance.rawValue): fill vs canvas \(canvasRatio):1 under the 3:1 floor")
+            if appearance == .darkAqua {
+                #expect(canvasRatio >= 3.0,
+                        "gold/\(appearance.rawValue): fill vs canvas \(canvasRatio):1 under the 3:1 floor")
+            }
         }
     }
 

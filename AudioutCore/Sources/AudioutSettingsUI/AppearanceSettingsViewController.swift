@@ -332,16 +332,17 @@ final class ThemeTileButton: NSButton {
             gold: NSColor(srgbRed: 0xE8 / 255, green: 0xB8 / 255, blue: 0x4B / 255, alpha: 1),
             ember: NSColor(srgbRed: 0x8A / 255, green: 0x6A / 255, blue: 0x2F / 255, alpha: 1))
 
-        /// Light: one flat near-white ground with a recessed `well`, and the
-        /// two gold instruments deepened until each clears 3:1 on the `well`
-        /// they are drawn over. Pinned the same way as `dark` above.
+        /// Light: one flat near-white ground with a recessed `well`. `gold`
+        /// is the same light hex as dark's (owner's call, 2026-09-17); only
+        /// `ember` is deepened to clear 3:1 on the `well`. Pinned the same
+        /// way as `dark` above.
         static let light = WarmPreviewPalette(
             chrome: Mock.lightChrome, stroke: Mock.lightStroke,
             canvas: NSColor(srgbRed: 0xFA / 255, green: 0xFA / 255, blue: 0xFB / 255, alpha: 1),
             well: NSColor(srgbRed: 0xE9 / 255, green: 0xEA / 255, blue: 0xEC / 255, alpha: 1),
             name: NSColor(srgbRed: 0x2B / 255, green: 0x25 / 255, blue: 0x19 / 255, alpha: 1),
             nameDim: NSColor(srgbRed: 0x9A / 255, green: 0x8F / 255, blue: 0x7D / 255, alpha: 1),
-            gold: NSColor(srgbRed: 0xA6 / 255, green: 0x7C / 255, blue: 0x1E / 255, alpha: 1),
+            gold: NSColor(srgbRed: 0xE8 / 255, green: 0xB8 / 255, blue: 0x4B / 255, alpha: 1),
             ember: NSColor(srgbRed: 0x7A / 255, green: 0x5E / 255, blue: 0x2A / 255, alpha: 1))
     }
 

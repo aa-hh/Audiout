@@ -12,10 +12,11 @@ import AppKit
 /// owner's "one gold everywhere" ruling (2026-08-24, restated 2026-09-13), the
 /// same pin `AlignmentPlateCell.primaryFillColor` uses. ``fill`` and
 /// ``ink`` are `Tokens.Color.gold` and `Tokens.Color.inkOnFill` resolved once
-/// under `.darkAqua`: `#E8B84B` with `#171104`, 10.18:1. Resolving live would
-/// hand light mode `gold`'s paper value `#A67C1E`, which the `.rounded` bezel
-/// shades down to a muddy olive that dark ink cannot read on; a deepened gold
-/// with white ink is the retired "dark mustard" and is NOT an official gold.
+/// under `.darkAqua`: `#E8B84B` with `#171104`, 10.18:1. Light `gold` has been
+/// the same hex since 2026-09-17, but its Increase Contrast value is still the
+/// deep `#8A6614`, which the `.rounded` bezel shades down to a muddy olive that
+/// dark ink cannot read on; a deepened gold with white ink is the retired
+/// "dark mustard" and is NOT an official gold.
 /// Both are still read from Tokens, so the accent dial and Increase Contrast
 /// reach them.
 ///

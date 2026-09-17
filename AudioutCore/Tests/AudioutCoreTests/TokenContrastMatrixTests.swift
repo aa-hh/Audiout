@@ -140,11 +140,13 @@ extension SerializedSharedState {
         let icOn: Bool
     }
 
-    /// None today: every entry below clears its own floor in all four
-    /// appearance x Increase-Contrast cells. The mechanism stays because a
-    /// future authored under-floor case needs it, and Test A's self-cleaning
-    /// assertion keeps a listed pair from going stale.
-    private let exceptions: [Exception] = []
+    /// Light `gold` without Increase Contrast, on every ground: the owner's
+    /// call of 2026-09-17 put the light gold `#E8B84B` on light paper too
+    /// (1.5–1.8:1), matching the phone. Increase Contrast keeps the deep
+    /// hex and still clears, so only the `icOn: false` cells are listed.
+    private let exceptions: [Exception] = ["canvas", "panel", "raised", "well"].map {
+        Exception(token: "gold", ground: $0, appearance: .aqua, icOn: false)
+    }
 
     @Test func everyInstrumentClearsItsFloorAcrossAppearanceAndIncreaseContrast() {
         Tokens.accentStyle = .fullGold

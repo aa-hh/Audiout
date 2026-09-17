@@ -384,7 +384,7 @@ remote_run() {
                          echo \"  remote: reclaimed mule permit \$_n held by pid \$_p (its ssh session is gone; killed its process group)\" >&2; \
                      else \
                          case \"\$_c\" in \
-                             *run-tests.sh*|*build.sh*|*make-app.sh*|*ios.sh*|*run-app.sh*|*pre-commit*|*swift*|*xcodebuild*|*xctest*) \
+                             *run-tests.sh*|*mule-test.sh*|*build.sh*|*make-app.sh*|*ios.sh*|*run-app.sh*|*pre-commit*|*swift*|*xcodebuild*|*xctest*) \
                                  if [ \$_a -gt 2700 ]; then rm -f \"\$_f\"; \
                                      echo \"  remote: reclaimed mule permit \$_n held by pid \$_p (held \${_a}s > ceiling)\" >&2; fi;; \
                              *) rm -f \"\$_f\"; \
@@ -585,7 +585,7 @@ capacity_sweep() {
                 _cs_cmd=$(ps -o command= -p "$_cs_pid" 2>/dev/null)
                 _cs_age=$((_cs_now - $(stat -f %m "$_cs_f" 2>/dev/null || echo "$_cs_now")))
                 case "$_cs_cmd" in
-                    *run-tests.sh*|*build.sh*|*make-app.sh*|*ios.sh*|*run-app.sh*|*pre-commit*|*swift*|*xcodebuild*|*xctest*)
+                    *run-tests.sh*|*mule-test.sh*|*build.sh*|*make-app.sh*|*ios.sh*|*run-app.sh*|*pre-commit*|*swift*|*xcodebuild*|*xctest*)
                         if [ "$_cs_age" -gt "$_cs_max" ]; then
                             rm -f "$_cs_f"
                             echo "  capacity: reclaimed local permit $_cs_n held by pid $_cs_pid (held ${_cs_age}s > ceiling)" >&2

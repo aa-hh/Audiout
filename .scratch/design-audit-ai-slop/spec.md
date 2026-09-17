@@ -1,6 +1,6 @@
 # Design audit, first pass: AI slop across every screen
 
-Status: needs-triage
+Status: ruled — tickets cut under `issues/`
 Date: 2026-09-15
 Branch: claude/design-audit-ai-slop-f1de78
 
@@ -58,8 +58,9 @@ the cheapest fix and it removes the most tells.
 
 ## Findings index
 
-"Decide" marks a finding that overturns a recorded owner's call or a documented
-design choice; those need a ruling, not a fix. Full text: `reports/<letter>-*.md`.
+"Decide" marked a finding that overturns a recorded owner's call or a documented
+design choice. All ten were ruled on 2026-09-17 ("ruled" in the last column); the
+rulings are under "Owner's rulings" below and in the tickets that carry them. Full text: `reports/<letter>-*.md`.
 
 | ID | Sev | Screen | Finding | Anchor | Decide |
 |---|---|---|---|---|---|
@@ -71,8 +72,8 @@ design choice; those need a ruling, not a fix. Full text: `reports/<letter>-*.md
 | D1 | P1 | Wizard intro stage | A steel-blue reference light is drawn with no reference speaker chosen, in light mode only | AlignmentStageView.swift:770, 1080-1087 | |
 | B1 | P1 | Settings › Audio | Connect-volume hint judges the number ("a moderate, comfortable start") and joins with an em dash | AudioSettingsViewController.swift:308-318 | |
 | B2 | P1 | Icon picker | Search field sits under the grid it filters; a hidden typed-SF-Symbol-name path with an Apply button | IconPickerViewController.swift:150, 192, 370-382 | |
-| A2 | P1 | First open | Up to 0.6 s of nothing, then a logo held 0.7 to 2.7 s over the mixer | SurfaceSplashView.swift:37, 43; AppSurfaceController.swift:238 | yes |
-| A3 | P2 | Header strip | Wordmark in ClashDisplay centred where a Mac window puts its title | SurfaceToolbar.swift:181 | yes |
+| A2 | P1 | First open | Up to 0.6 s of nothing, then a logo held 0.7 to 2.7 s over the mixer | SurfaceSplashView.swift:37, 43; AppSurfaceController.swift:238 | ruled |
+| A3 | P2 | Header strip | Wordmark in ClashDisplay centred where a Mac window puts its title | SurfaceToolbar.swift:181 | ruled |
 | A4 | P2 | Output Speakers | "Connect a speaker" and "Pair a Bluetooth speaker…" fire the same action | PopoverController.swift:3372, 3476 | |
 | A5 | P2 | Device row | `flashRow()` gold pulse has no caller outside its own test | DeviceRowView.swift:3290-3339 | |
 | A6 | P2 | Device row mute / EQ | Filled engaged symbols are declared, catalogued and never drawn; comments and DESIGN.md describe the filled version | DeviceRowView.swift:974, 1005; MainOutRowView.swift:630 | |
@@ -93,25 +94,25 @@ design choice; those need a ruling, not a fix. Full text: `reports/<letter>-*.md
 | D3 | P2 | First-join note | A gold inline phrase reads as a link; the whole sentence is the button | BTAlignmentNoteView.swift:42-47, 189-193 | |
 | D4 | P2 | Wizard "Mac is late" | Copy ends "Try again." above a Try again button; the comment says the words were removed | BTAlignmentWizardView.swift:114-119 | |
 | A7 | P3 | Device row | A dashed stroke means "connecting" on the ring and "not set" on the Offset chip | DeviceRowView.swift:3543; HaloRingView.swift:252 | |
-| A8 | P3 | Source column | Bordered pills look pressable; none are | FeedPillView.swift:33-51, 105 | yes |
+| A8 | P3 | Source column | Bordered pills look pressable; none are | FeedPillView.swift:33-51, 105 | ruled |
 | A9 | P3 | Failure diagnosis | "Power-cycle it" beside "restart the speaker" | ConnectionState.swift:115, 119 | |
 | A10 | P3 | Output Speakers menu | "Bluetooth pairings" is a disabled plain item, against DESIGN.md's section-header rule | PopoverController.swift:3386-3387 | |
 | B9 | P3 | Settings, Groups editor | Straight and typographic apostrophes mixed in the same files | GeneralSettingsViewController.swift:512; AudioSettingsViewController.swift:317; GroupEditorViewController.swift:215 | |
-| B10 | P3 | Scene cards | Magenta identity glow ships at an alpha nobody can see (2 to 7 RGB levels) | GroupIdentityGlowView.swift:28-29 | yes |
+| B10 | P3 | Scene cards | Magenta identity glow ships at an alpha nobody can see (2 to 7 RGB levels) | GroupIdentityGlowView.swift:28-29 | ruled |
 | B11 | P3 | Zero-scenes canvas | Headline 15 pt grey and subtitle 12 pt, off the scale | GroupsOverviewViewController.swift:71-73; Tokens.swift:1276-1283 | |
-| B12 | P3 | Groups editor | "‹ Scenes" and "Done" are two doors to one place | GroupEditorViewController.swift:118, 217-223 | yes |
+| B12 | P3 | Groups editor | "‹ Scenes" and "Done" are two doors to one place | GroupEditorViewController.swift:118, 217-223 | ruled |
 | B13 | P3 | Settings › About | "Third-Party Notices" in Title Case; "Questions or problems? Email…" | AboutView.swift:131, 223, 226 | |
-| C12 | P3 | Setup finale | A resting glow disc at 0.40 dark / 0.70 light behind the mark; the glow token's doc says transient only | DemoPaneView.swift:2195 | yes |
-| C13 | P3 | Setup usage-stats step | The stage rehearses the app's own consent dialog directly above the real buttons | DemoPaneView.swift:1820-1838 | yes |
+| C12 | P3 | Setup finale | A resting glow disc at 0.40 dark / 0.70 light behind the mark; the glow token's doc says transient only | DemoPaneView.swift:2195 | ruled |
+| C13 | P3 | Setup usage-stats step | The stage rehearses the app's own consent dialog directly above the real buttons | DemoPaneView.swift:1820-1838 | ruled |
 | C14 | P3 | Setup denied recovery | The drawn pane says "System Audio Recording Only", the sentence says "Screen & System Audio Recording"; "▸" is not Apple's separator | DemoPaneView.swift:1675; OnboardingViewController.swift:1580 | |
 | C15 | P3 | Licence gate | Underlined grey links; the centred key field parks the caret mid-placeholder | LicenseGateViewController.swift:222, 406-411 | |
 | D5 | P3 | Wizard keycaps | One 10 pt radius makes a circle on the 22 pt chip and a capsule on the 44×20 one | AlignmentPlateCell.swift:490-499 | |
 | D6 | P3 | Wizard proposal | "Listen: the clicks should land as one." above two answer buttons | BTAlignmentWizardView.swift:157 | |
 | D7 | P3 | Sync drawer | Negative offsets print with an ASCII hyphen; every other readout uses a real minus | BTSyncDrawerView.swift:713-715 | |
 | D8 | P3 | EQ scope | A 6 pt corner and nine bare constants with no reason recorded | EQResponseCurveView.swift:84-93 | |
-| D9 | P3 | EQ scope | Band grid drawn in gold at rest, so gold is everything except the signal | EQResponseCurveView.swift:372-386 | yes |
-| D10 | P3 | Wizard chassis | Canvas grain and the two room-spill washes exist on screen and nowhere in DESIGN.md | WarmCanvasView.swift:19-28; AlignmentWizardViewController.swift:155-274 | record |
-| D11 | P3 | Wizard bow-outs | The dormant stage is an empty black panel holding the top third of the sheet | BTAlignmentWizardView.swift:8-11 | yes |
+| D9 | P3 | EQ scope | Band grid drawn in gold at rest, so gold is everything except the signal | EQResponseCurveView.swift:372-386 | ruled |
+| D10 | P3 | Wizard chassis | Canvas grain and the two room-spill washes exist on screen and nowhere in DESIGN.md | WarmCanvasView.swift:19-28; AlignmentWizardViewController.swift:155-274 | ruled |
+| D11 | P3 | Wizard bow-outs | The dormant stage is an empty black panel holding the top third of the sheet | BTAlignmentWizardView.swift:8-11 | ruled |
 
 ## Patterns across slices
 
@@ -175,8 +176,38 @@ source only. Anything visual in them is unverified.
 - Sync drawer in any state; EQ editor with a shaped or bypassed curve.
 - Hover, pressed, focus and disabled states everywhere; Increase Contrast; the Subtle accent dial; Reduce Motion variants.
 
-## Next step
+## Owner's rulings, 2026-09-17
 
-Owner's pass over the "Decide" rows, then tickets under `issues/` grouped by fix
-(one copy pass, the device-row control, the Setup finish layer, the four UI lies,
-the record catch-up), each with the finding IDs it closes.
+| ID | Ruling | Ticket |
+|---|---|---|
+| A2 | The splash was meant to cover loading, not to be an entrance. Measure what the 0.6 s deferral actually hides, then cut the hold to that; if nothing needs covering, delete it. | 04 |
+| A3 | Replace the centred wordmark with the current screen's name, keeping ClashDisplay-Semibold 17 pt in the same place. No wordmark on the surface. | 04 |
+| A8 | Neither keeping it nor plain text. Design pass with the `impeccable` skill; values stay non-interactive, and hovering "+N" reveals the hidden items. | 09 |
+| B10 | Delete the glow view, its layer, its two observers and its re-stamp path. | 06 |
+| B12 | No preference stated; taking the audit's fix. "‹ Scenes" is the way out, and the right-hand button shows only while it reads "Save". | 06 |
+| C12 | Drop the resting aura. The glow passes with the one-shot and leaves. | 05 |
+| C13 | Delete the caption "You'll see this from Audiout". The rehearsal and its greeked body stay. | 05 |
+| D9 | Grid in `scopeFlatLine`; gold arrives only with a shaped trace. DESIGN.md's Scope Instrument Rule changes with it. | 07 |
+| D10 | Record the grain and both room-spill washes in DESIGN.md with their alphas, dark-only scope and accessibility switches. | 08 |
+| D11 | Let the dormant stage collapse its height on the four bow-out screens. | 07 |
+
+## Tickets
+
+Nine tickets under `issues/`, grouped by the fix rather than by screen. Every one of
+the 49 findings is carried by exactly one of them.
+
+| # | Ticket | Closes | Status |
+|---|---|---|---|
+| 01 | One copy pass over every user-visible string | A4, A9, B1, B7, B8, B9, B13, C2, C3, C5, C6, C14, D4, D6, D7 | ready-for-agent |
+| 02 | The four places the UI states something untrue | C1, C4, C9, D1 | ready-for-agent |
+| 03 | Mixer device row: make selection visible, then delete its stand-ins | A1, A5, A6, A7, A10 | ready-for-agent |
+| 04 | Surface shell: first-open wait, screen name in the title position | A2, A3 | ready-for-agent |
+| 05 | Setup window: the finish layer | C7, C8, C10, C11, C12, C13, C15 | ready-for-agent |
+| 06 | Groups window and Settings: template scaffolds and one broken picker | B2, B3, B4, B5, B6, B10, B11, B12 | ready-for-agent |
+| 07 | Wizard and EQ scope: the instrument surfaces | D2, D3, D5, D9, D11 | ready-for-agent |
+| 08 | The record catches up with the pixels | D8, D10 | ready-for-agent |
+| 09 | Source column: shape it, don't just strip it | A8 | ready-for-human |
+
+Suggested order: 02 (the untrue screens) and 01 (the copy pass) first — the first is
+trust, the second is what a stranger clocks. 04 and 03 change what the app feels like
+on the first click. 09 needs a design pass before it can be built.

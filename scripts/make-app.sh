@@ -1037,7 +1037,8 @@ fi
 #
 # PostHog must be present in a bundled release because double-clicked apps do not
 # inherit the build shell's environment. CI supplies these values directly; local
-# release builds may use the wizard-managed root .env.
+# release builds may use the wizard-managed root .env; anything else gets the
+# production defaults below.
 #
 # .env is gitignored, so a fresh `git worktree` never has one — only the
 # primary checkout does. Every worktree shares that one repository, so the
@@ -1060,8 +1061,15 @@ if [ -f "$ENV_FILE" ]; then
   . "$ENV_FILE"
   set +a
 fi
-[ -n "${POSTHOG_PROJECT_TOKEN:-}" ] || { echo "ERROR: POSTHOG_PROJECT_TOKEN is required for a release bundle" >&2; exit 1; }
-[ -n "${POSTHOG_HOST:-}" ] || { echo "ERROR: POSTHOG_HOST is required for a release bundle" >&2; exit 1; }
+# No .env and nothing exported (a plain checkout of the public repository):
+# fall back to the production project. A PostHog project token is a write-only
+# public key, the same thing every website ships in its page source, so it can
+# live here — and it means a copy built straight from GitHub reports usage like
+# a shipped one. The app stamps such copies `distribution: source` (it keys off
+# the code signature, not this value). Delete the two lines to build a copy that
+# never reports; the in-app Settings switch turns it off at runtime.
+: "${POSTHOG_PROJECT_TOKEN:=phc_pC3ZshhGY9nzyvaUgUsxpvNYSYgfrQa8iwV2npeydU7P}"
+: "${POSTHOG_HOST:=https://eu.i.posthog.com}"
 #
 #   AIRPLAY_BACKEND=native — a double-clicked release MUST drive real speakers.
 #     BackendKind.resolved() already defaults to `.native` in code (mock is

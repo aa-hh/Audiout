@@ -132,6 +132,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let internalMarker, FileManager.default.fileExists(atPath: internalMarker.path) {
             PostHogSDK.shared.register(["internal": true])
         }
+        // `distribution` separates the copies we ship from copies built out of
+        // the public repository. The project token is committed (it is a
+        // write-only public key, as on any website), so a plain checkout
+        // reports too; only a binary signed by our Developer ID team can be
+        // an official release, so the team id is the tell. Source builds
+        // never get a licence server, so they never appear in a purchase
+        // funnel: filter every insight by this property or the two
+        // populations blend.
+        let distribution = CodeSignature.teamIdentifier() == Self.officialTeamIdentifier ? "official" : "source"
+        PostHogSDK.shared.register(["distribution": distribution])
         Analytics.install(Analytics.Sink(
             capture: { PostHogSDK.shared.capture($0, properties: $1) },
             captureError: { name, properties in
@@ -162,6 +172,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// PostHog's per-event escape hatch from server-side GeoIP enrichment.
     private static let geoipDisableKey = "$geoip_disable"
+    /// The Apple Developer team every official Audiout release is signed with.
+    private static let officialTeamIdentifier = "TGT8D69RZ4"
 
     /// The one event per launch that carries coarse location. It overrides the
     /// registered opt-out for itself only; every other event stays clean.

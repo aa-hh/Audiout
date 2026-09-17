@@ -86,8 +86,8 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// Why a stored EQ is not reaching the audio right now. Both cases keep the
     /// user's values intact; they differ only in what the UI must say.
     public enum EQBypassReason: Equatable, Sendable {
-        /// More distinct EQ settings are in play than the engine has streams
-        /// for, so this device streams flat (`EQStreamTopology`'s loser).
+        /// More whole-system speakers are streaming than the engine has
+        /// streams for, so this one shares the flat stream.
         case streamBudget
         /// Apps are routed straight to this speaker, so its audio comes from the
         /// per-app mixer and never passes the whole-system EQ stage at all.

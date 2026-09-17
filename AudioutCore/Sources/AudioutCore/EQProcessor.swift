@@ -522,6 +522,16 @@ public struct WholeSystemEQPlan: Sendable {
         main: nil,
         streams: [Stream(streamID: 0, processor: nil)])
 
+    /// `streamID:shaped|flat` for every published stream, in order. The one
+    /// string both `eq_plan` (where the plan is built) and `eq_plan_applied`
+    /// (where the delivery path receives it) print, so the two log lines
+    /// compare directly and a plan that is shaped when published and flat when
+    /// applied is one glance rather than an hour of inference (ticket 04).
+    public var telemetryStreamSummary: String {
+        streams.map { "\($0.streamID):\($0.processor == nil ? "flat" : "shaped")" }
+            .joined(separator: ",")
+    }
+
     /// True when the plan can be served by the existing single stream-0 write.
     public var isPassthrough: Bool {
         main == nil && streams.count == 1 && streams[0].streamID == 0 && streams[0].processor == nil

@@ -52,7 +52,7 @@ print_local_permit() {
     _stale=""
     if [ "$_alive" = "alive" ]; then
         case "$_cmd" in
-            *run-tests.sh*|*build.sh*|*make-app.sh*|*ios.sh*|*run-app.sh*|*pre-commit*|*swift*|*xcodebuild*|*xctest*)
+            *run-tests.sh*|*mule-test.sh*|*build.sh*|*make-app.sh*|*ios.sh*|*run-app.sh*|*pre-commit*|*swift*|*xcodebuild*|*xctest*)
                 [ "$_age" -gt "$max_age" ] && _stale=" STALE (age > ${max_age}s)" ;;
             *) _stale=" STALE (unrecognised command)" ;;
         esac
@@ -114,7 +114,7 @@ printf '%s\n' "$_mule_out" | while IFS="$(printf '\t')" read -r _n _pid _alive _
         _stale=" STALE (ssh session gone; the next remote run reclaims it)"
     elif [ "$_alive" = "alive" ]; then
         case "$_cmd" in
-            *run-tests.sh*|*build.sh*|*make-app.sh*|*ios.sh*|*run-app.sh*|*pre-commit*|*swift*|*xcodebuild*|*xctest*)
+            *run-tests.sh*|*mule-test.sh*|*build.sh*|*make-app.sh*|*ios.sh*|*run-app.sh*|*pre-commit*|*swift*|*xcodebuild*|*xctest*)
                 [ "$_age" -gt "$max_age" ] && _stale=" STALE (age > ${max_age}s)" ;;
             *) _stale=" STALE (unrecognised command)" ;;
         esac

@@ -1,0 +1,48 @@
+name: Tests
+
+# The full suite, off the owner's Macs. Every branch push runs everything
+# here, so the local pre-commit guards can stay scoped to the files being
+# changed, and the merge onto main can accept this run's verdict instead of
+# repeating it — see Guard 4 in .githooks/pre-commit. Public repo: macOS
+# runners are free, up to five at once.
+on:
+  push:
+    paths:
+      - 'AudioutCore/**'
+      - 'AirPlayEngine/**'
+      - 'scripts/run-tests.sh'
+      - 'scripts/lib/**'
+      - '.github/workflows/tests.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audioutcore:
+    runs-on: macos-26
+    env:
+      # No second Mac to route to, no machine-wide permit pool to share, and no
+      # earlier pass to reuse: this runner exists to produce a fresh verdict.
+      AUDIOUT_BUILD_LOCAL: "1"
+      AUDIOUT_TEST_NO_LOCK: "1"
+      AUDIOUT_TEST_NO_CACHE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: brew install libevent libsodium libgcrypt libgpg-error libplist ffmpeg
+      - name: AudioutCore suite
+        run: bash scripts/run-tests.sh
+  airplayengine:
+    runs-on: macos-26
+    env:
+      AUDIOUT_BUILD_LOCAL: "1"
+      AUDIOUT_TEST_NO_LOCK: "1"
+      AUDIOUT_TEST_NO_CACHE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: brew install libevent libsodium libgcrypt libgpg-error libplist ffmpeg
+      - name: AirPlayEngine suite
+        run: AUDIOUT_TEST_PACKAGE=AirPlayEngine bash scripts/run-tests.sh

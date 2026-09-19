@@ -179,13 +179,42 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     fi
     # A merge onto main is the last gate before main, so it never runs filtered
     # and never accepts the runner's "these sources already passed" cache.
+    # Unless GitHub Actions already ran that full, uncached suite on exactly
+    # these sources (.github/workflows/tests.yml runs it on every branch push).
+    # Two conditions, both checked, neither assumed:
+    #   - the Swift being committed is byte-identical to the branch head's, so
+    #     the run tested THIS code (main having moved underneath means it did
+    #     not, and the local run happens as before)
+    #   - `gh` reports every job of that workflow green for that commit
+    # Anything missing (no gh, offline, run still going, red) => local run, the
+    # old behaviour. A skipped local run is only ever a trade for a proven one.
     merge_env=""
+    ci_green=0
     if [ "$branch" = "main" ] && [ -f "$git_dir/MERGE_HEAD" ]; then
         scope=FULL
         merge_env="AUDIOUT_TEST_NO_CACHE=1"
+        merge_head=$(cat "$git_dir/MERGE_HEAD")
+        if command -v gh >/dev/null 2>&1 \
+           && git diff --quiet "$merge_head" -- \
+                'AudioutCore/' 'AirPlayEngine/' 'scripts/run-tests.sh' 'scripts/lib/' 2>/dev/null; then
+            ci_runs=$(gh run list --workflow tests.yml --commit "$merge_head" \
+                        --json status,conclusion \
+                        --jq 'map(select(.status=="completed")) | length as $n
+                              | if $n > 0 and all(.conclusion=="success") then "green" else "no" end' \
+                        2>/dev/null || echo no)
+            if [ "$ci_runs" = "green" ]; then
+                echo "" >&2
+                echo "  Guard 4: GitHub Actions ran the full suite on $(git rev-parse --short "$merge_head") (tests.yml, green)" >&2
+                echo "  and the Swift here matches that commit — skipping the local run." >&2
+                echo "  (AUDIOUT_FULL_SUITE=1 to run it anyway.)" >&2
+                [ "${AUDIOUT_FULL_SUITE:-0}" = "1" ] || ci_green=1
+            fi
+        fi
     fi
     echo "" >&2
-    if [ "$scope" = "FULL" ]; then
+    if [ "$ci_green" = "1" ]; then
+        :
+    elif [ "$scope" = "FULL" ]; then
         echo "  Guard 4: AudioutCore Swift changed — running full suite" >&2
         echo "  (scripts/run-tests.sh) before commit. ~70s warm; --no-verify to skip." >&2
     else
@@ -250,14 +279,18 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
             $nogit $merge_env "$run_suite" --filter "$scope"
         fi
     }
-    if ! run_guard4; then
+    if [ "$ci_green" = "1" ]; then
+        echo "  Guard 4: full suite passed (on GitHub Actions)." >&2
+    elif ! run_guard4; then
         echo "" >&2
         echo "  REFUSED: the tests Guard 4 ran failed. Fix the failures" >&2
         echo "  (or 'git commit --no-verify' for a real emergency)." >&2
         echo "" >&2
         exit 1
     fi
-    if [ "$scope" = "FULL" ]; then
+    if [ "$ci_green" = "1" ]; then
+        :
+    elif [ "$scope" = "FULL" ]; then
         echo "  Guard 4: full suite passed." >&2
     else
         echo "  Guard 4: the suites covering this change passed." >&2

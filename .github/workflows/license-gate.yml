@@ -1,7 +1,11 @@
 name: License gate
 
+# Runs only when a merge lands on main, or by hand. Branch pushes and PRs
+# stay off Actions: the repo is public, so every PR run would be visible, and
+# the pre-commit guards already run the suites locally while code is written.
 on:
-  pull_request:
+  push:
+    branches: [main]
     paths:
       - 'scripts/**'
       - 'AudioutCore/**'
@@ -39,9 +43,10 @@ jobs:
     # ON DEMAND ONLY while the repo was private (macOS billed at 10x). It is
     # the home of the licence build invariants now: make-release.sh asserts
     # only the cheap artifact-plist check, and the unlicensed probe build
-    # happens here, on every PR that touches the build. The clean runner also
+    # happens here, on every merge to main that touches the build. The clean runner also
     # installs the brew dependencies from scratch, so it catches a build that
-    # has come to depend on something missing from the list below.
+    # has come to depend on something missing from the list below. It runs
+    # on merges to main, not on PRs (see the trigger comment above).
     # macos-26 (Xcode 26.x): matches the Swift toolchains on both of the
     # owner's Macs; macos-15's Xcode 16.4 is older than anything this repo is
     # built with locally.

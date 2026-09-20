@@ -2990,6 +2990,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         refusalReason: "Too many commands. Slow down and try again."))
                     return
                 }
+                // A phone-bought licence key is answered HERE, not in the
+                // dispatcher: it needs `LicenseValidator`, the gate window and
+                // `applyLicenseState`, none of which that AppKit-free,
+                // client-agnostic type owns (CompanionCommandDispatcher.swift).
+                if case .activateLicenseKey(let key) = command {
+                    if let gate = self.licenseGateWindowController {
+                        // The gate is still up: its own field already runs the
+                        // validate/store/pass sequence, so hand the key to it
+                        // rather than racing it with a second validator.
+                        gate.submit(key: key)
+                        reply(CompanionServer.CommandResult(applied: true))
+                    } else {
+                        CompanionLicenseActivation(settings: self.settings).activate(key: key) { [weak self] result in
+                            reply(result)
+                            // `applyLicenseState` is what pushes the companion
+                            // token that unlocks the phone.
+                            guard result.applied, let self, !self.isTerminating else { return }
+                            self.applyLicenseState()
+                            LicenseCheckIn(settings: self.settings).checkInIfNeeded()
+                        }
+                    }
+                    return  // no snapshot broadcast — licence state is not snapshot state
+                }
                 // Icon requests are answered HERE, not in the dispatcher:
                 // addressing the icon frames needs the client identity and
                 // reading an icon needs AppKit, neither of which that

@@ -18,6 +18,17 @@ import AudioutCore
 @MainActor
 @Suite struct RouteArmedSignalTests {
 
+    /// `swift test` builds no `.app`, so the shipping symbol lookup has
+    /// nothing to find and the mute-mark assertions below would measure a nil
+    /// image. Installing here rather than relying on another suite having done
+    /// it first: `test_catalogueBundle` is process-wide, so without this the
+    /// mute tests pass or fail on suite ordering.
+    init() {
+        if CompiledSymbolFixture.install() == nil {
+            Issue.record("the symbol fixture failed to compile — actool or the source catalogue is broken")
+        }
+    }
+
     private func makeDevice(connectionState: ConnectionState = .connected,
                             isMuted: Bool = false,
                             isAvailable: Bool = true) -> Device {

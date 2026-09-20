@@ -6,6 +6,32 @@ import AppKit
 import AudioutSharedUI
 @testable import AudioutPopoverUI
 
+/// A titled window cannot be parked off screen by its `contentRect` alone.
+/// AppKit constrains a titled frame onto a real screen twice — once inside
+/// `init(contentRect:…)` and again when the window is ordered in — so
+/// `NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, …))` lands at the
+/// top-left of the developer's display, and ordering it in draws it there.
+/// Overriding the constraint and moving the window AFTER init is what actually
+/// keeps it off every screen; that is the only reason this subclass exists.
+private final class UnconstrainedWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+}
+
+/// A titled window carrying a real `NSToolbar`, parked off every screen. The
+/// toolbar still gets AppKit's own layout passes out there, so a test can order
+/// this in without anything reaching the screen.
+@MainActor
+private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
+    let window = UnconstrainedWindow(
+        contentRect: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: height),
+        styleMask: [.titled, .closable, .fullSizeContentView],
+        backing: .buffered, defer: false)
+    window.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+    return window
+}
+
 /// Coverage for `SurfaceToolbarController` — the one-surface header as a real
 /// window-attached `NSToolbar` (live-review D1, which retired the custom
 /// `PopoverHeaderView` strip and its three-tier material machinery; the
@@ -26,12 +52,7 @@ import AudioutSharedUI
     /// orders in.
     private func makeAttached() -> (SurfaceToolbarController, NSWindow) {
         let controller = SurfaceToolbarController()
-        // Parked far outside every screen: a test must never put anything on
-        // the developer's actual screen.
-        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000,
-                                                  width: SurfaceLayout.width, height: 400),
-                              styleMask: [.titled, .closable, .fullSizeContentView],
-                              backing: .buffered, defer: false)
+        let window = makeParkedWindow()
         controller.attach(to: window)
         return (controller, window)
     }
@@ -1015,13 +1036,10 @@ import AudioutSharedUI
 
     @Test func aClickAtTheFarEdgeOfAnOpenTabSelectsIt() {
         let controller = SurfaceToolbarController()
-        // Parked far outside every screen: the reveal below needs a real
-        // ordered-in window, and a test must never put anything on the
-        // developer's actual screen.
-        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000,
-                                                  width: SurfaceLayout.width, height: 400),
-                              styleMask: [.titled, .closable, .fullSizeContentView],
-                              backing: .buffered, defer: false)
+        // The reveal below needs a real ordered-in window, and a test must
+        // never put anything on the developer's actual screen — see
+        // `makeParkedWindow` for why a plain `NSWindow` cannot do both.
+        let window = makeParkedWindow()
         controller.attach(to: window)
         defer { window.orderOut(nil) }
         window.layoutIfNeeded()
@@ -1029,7 +1047,13 @@ import AudioutSharedUI
         // Ordered in and given real runloop turns, because a live strip gets
         // AppKit's own toolbar layout passes after the reveal and the bug is
         // about what those passes leave behind.
-        window.orderFrontRegardless()
+        window.orderFrontRegardless()  // screen-ok: off every screen, asserted next
+        // Goes red if this window ever becomes a plain `NSWindow` again: AppKit
+        // would constrain it onto a display and the run would flash a real
+        // window in the developer's face.
+        let onARealScreen = NSScreen.screens.contains { $0.frame.intersects(window.frame) }
+        #expect(!onARealScreen,
+                Comment(rawValue: "ordered in at \(window.frame), which a screen covers"))
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         controller.setSelectedScreen(.settings)
         FoldAnimator.shared.test_settleNow()

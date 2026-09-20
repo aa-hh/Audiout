@@ -20,9 +20,7 @@
 // from OwnTone src/mdns.h (note MDNS_CONNECTION_TEST = (1 << 1), which the
 // T-PKG-1 scaffold had as (1 << 0)).
 //
-// STUB STATUS (T-BUILD-1): mdns.c provides mdns_browse as a no-op returning 0.
-// TODO(T-API-1): the Swift addOutput/removeOutput path calls airplay_device_cb
-// directly; the C-side mdns_browse stub stays a no-op forever.
+// mdns.c: mdns_browse is a permanent no-op; discovery is fed in from Swift through engine_bridge.
 
 #ifndef CAIRPLAYENGINE_SHIM_MDNS_H
 #define CAIRPLAYENGINE_SHIM_MDNS_H

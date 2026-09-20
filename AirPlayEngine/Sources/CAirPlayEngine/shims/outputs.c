@@ -1,28 +1,23 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// outputs.c — the registry/runner shim (T-BUILD-1 MINIMAL scaffolding).
+// outputs.c — the registry/runner shim (real implementation).
 //
-// This is the load-bearing shim (seam-map §2, risk R-A). For T-BUILD-1
-// (compile+link only) it provides:
-//   - A trivial singly-linked device registry (add/remove/get/list/free) — a
-//     REAL minimal registry so airplay.c's outputs_list()/outputs_device_get()
-//     resolve to actual lookups. Not thread-safe, not the final shape.
-//   - outputs_device_session_add/remove: attach/detach the opaque session
-//     pointer on the matching device (minimal but real).
-//   - outputs_cb + the callback-id registry: **REAL** as of T-SHIM-1 — the R-A
-//     async-callback dispatcher. It reproduces OwnTone outputs.c's callback
-//     machinery (OUTPUTS_MAX_CALLBACKS slots, replace-on-add-per-device,
-//     deferred delivery on evbase_player, device re-resolved by device_id) and
-//     adds the engine completion hook that unblocks T-API-1's async waiter.
-//     Implemented against docs/outputs-dispatcher-contract.md (N ∈ {0,1},
-//     exactly once, keyed by callback_id). See that doc + §4 of build-notes.md.
+// This is the load-bearing shim (seam-map §2, risk R-A). It provides:
+//   - the device registry (add/remove/get/list/free), a singly-linked list
+//     backing airplay.c's outputs_list() / outputs_device_get();
+//   - session attach/detach (outputs_device_session_add/remove);
+//   - outputs_cb plus the callback-id register and the deferred completion
+//     dispatcher: OwnTone's callback machinery (OUTPUTS_MAX_CALLBACKS slots,
+//     replace-on-add-per-device, deferred delivery on evbase_player, device
+//     re-resolved by device_id) plus the engine completion hook that unblocks
+//     the Swift async waiter. Contract: docs/outputs-dispatcher-contract.md
+//     (N ∈ {0,1}, exactly once, keyed by callback_id);
+//   - the idle silence fill;
 //   - outputs_name / quality_subscribe/unsubscribe / buffer_duration_ms_get /
-//     exclusive_mode_get: trivial correct values (name string, 0, default
-//     2250 ms, false).
+//     exclusive_mode_get.
 //
-// TODO(T-SHIM-1): the REAL registry ownership/merge semantics + string-freeing
-// outputs_device_free remain (see build-notes §4); those are independent of the
-// R-A dispatcher, which is now complete.
+// Open item: registry ownership/merge semantics and a string-freeing
+// outputs_device_free (build-notes §4); independent of the dispatcher.
 
 #include "outputs.h"
 #include "engine_bridge.h" /* prototypes for the idle-fill test seam defined here */
@@ -38,9 +33,8 @@
  * event_base *evbase_player;` (airplay.c:459) and uses it to own the timing/
  * control UDP services, every RTSP connection, and its timers (seam-map §8).
  * The engine owns one event_base on one dedicated thread and sets this at
- * airplay_init. For T-BUILD-1 (compile+link only, nothing runs) it is NULL.
- * TODO(T-API-1): set this to the engine thread's event_base before
- * airplay_init runs, per seam-map §8's threading model. */
+ * airplay_init. The engine sets this from EngineThread.base before
+ * airplay_init on every start (AirPlayEngine.start). */
 struct event_base *evbase_player = NULL;
 
 /* Minimal global device registry (single linked list). Not thread-safe by
@@ -1055,7 +1049,8 @@ int
 outputs_quality_subscribe(struct media_quality *quality)
 {
   (void)quality;
-  // TODO(T-SHIM-1): track the single 44100/16/2 quality. Stub: success.
+  // Open item: quality subscriptions are not tracked; every subscribe succeeds.
+  // Only 44100/16/2 is ever requested today.
   return 0;
 }
 

@@ -21,17 +21,7 @@
 //   cfg_gettsec(cfg,"airplay",name) + per-device cfg_getbool/getstr/getint
 //   cfg_getopt(devcfg,"reconnect") + cfg_opt_getnbool(opt,0) :4102-4104
 //
-// STUB STATUS (T-BUILD-1): conffile.c bodies are MINIMAL — cfg_getsec/getstr/
-// getint/getbool return safe defaults (the conffile.c defaults from seam-map
-// §3.1), cfg_gettsec returns NULL (so all `if (devcfg && ...)` per-device
-// override branches in airplay.c short-circuit), cfg_getopt returns NULL,
-// cfg_opt_getnbool returns false. This is enough to LINK and run with pure
-// defaults. T-SHIM-1 wires these to the real config struct populated from the
-// Swift API.
-//
-// TODO(T-SHIM-1): back cfg_* with the static config struct, populated from
-// the Swift AirPlayEngine session config (user_agent, client name, ports,
-// bind address, per-device nickname/password/max_volume/ptp_disable).
+// conffile.c is the real implementation: a static config populated from the Swift EngineConfig at start.
 
 #ifndef CAIRPLAYENGINE_SHIM_CONFFILE_H
 #define CAIRPLAYENGINE_SHIM_CONFFILE_H

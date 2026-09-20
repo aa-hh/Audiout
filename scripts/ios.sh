@@ -228,7 +228,11 @@ newest_iphone='xcrun simctl list devices available 2>/dev/null | awk "
 # `NAME-<look>.png`. `-store-shots` opens straight into the demo fleet with the
 # Demo strip hidden and the Mac named like a real one, which is the App Store
 # screenshot state; `-uitest-isolated` alongside it skips Bonjour browsing so a
-# real Mac on the LAN can't pull the app away mid-capture.
+# real Mac on the LAN can't pull the app away mid-capture. Release, not
+# Debug: Settings carries a debug-only "Replay intro" row that must not ship
+# in a screenshot. The status bar is pinned to Apple's own screenshot
+# convention (9:41, full battery, full signal) so six captures taken minutes
+# apart do not show six different clocks.
 #
 # $1 = output directory, as the machine that runs this will see it.
 shot_cmd_for() {
@@ -241,13 +245,14 @@ shot_cmd_for() {
     dd=\"\${TMPDIR:-/tmp/}audiout-ios-shot/$(basename "$root")\"; \
     xcodebuild -project $project -scheme AudioutRemote \
         -destination \"platform=iOS Simulator,id=\$udid\" \
-        -derivedDataPath \"\$dd\" -quiet build || exit 65; \
+        -derivedDataPath \"\$dd\" -configuration Release -quiet build || exit 65; \
     app=\$(find \"\$dd/Build/Products\" -maxdepth 2 -type d -name 'AudioutRemote.app' | head -1); \
     [ -n \"\$app\" ] || { echo 'ios.sh: no AudioutRemote.app was built' >&2; exit 70; }; \
     bundle=\$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \"\$app/Info.plist\"); \
     xcrun simctl bootstatus \"\$udid\" -b >/dev/null; \
     xcrun simctl install \"\$udid\" \"\$app\"; \
     xcrun simctl terminate \"\$udid\" \"\$bundle\" >/dev/null 2>&1 || true; \
+    xcrun simctl status_bar \"\$udid\" override --time 9:41 --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 --operatorName \"\" >/dev/null 2>&1 || true; \
     xcrun simctl launch \"\$udid\" \"\$bundle\" -uitest-isolated -store-shots -store-shots-screen $shot_screen >/dev/null; \
     sleep 3; \
     mkdir -p \"$1\"; \

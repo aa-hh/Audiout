@@ -90,6 +90,20 @@ public final class DACPServer: @unchecked Sendable {
     /// itself is (the `.cancelled`/`.failed` state handler and `stop()`).
     private var idleTimeouts: [ObjectIdentifier: DispatchWorkItem] = [:]
 
+    /// How many DACP connections may be accepted at once. The listener is
+    /// unauthenticated and open to the LAN, so a misbehaving or flooding
+    /// peer could otherwise grow `connections` without limit and exhaust
+    /// this process's file descriptors — which AirPlay RTP, PTP and Bonjour
+    /// draw on too. The idle deadline above bounds how LONG each socket
+    /// lives; this bounds how MANY exist. Same value and same reasoning as
+    /// ``CompanionServer``'s `pendingCap`.
+    private static let connectionCap = 32
+    /// Test-only: overrides ``connectionCap`` so the flood test doesn't need
+    /// 33 real sockets. Nil (default) uses the real value.
+    public var test_connectionCapOverride: Int?
+    /// Test-only: how many connections are currently held.
+    var test_connectionCount: Int { connections.count }
+
     public init() {}
 
     // MARK: - Lifecycle
@@ -194,6 +208,12 @@ public final class DACPServer: @unchecked Sendable {
     /// unchanged: always invoked on ``queue`` in production, via
     /// `listener.newConnectionHandler`.
     func accept(_ connection: NWConnection) {
+        guard connections.count < (test_connectionCapOverride ?? Self.connectionCap) else {
+            // Flood: drop on arrival, no courtesy goodbye — see connectionCap.
+            log.notice("DACP connection dropped: connection pool full")
+            connection.cancel()
+            return
+        }
         let key = ObjectIdentifier(connection)
         connections[key] = connection
         connection.stateUpdateHandler = { [weak self] state in
@@ -343,8 +363,12 @@ public final class DACPServer: @unchecked Sendable {
 
     /// Map an AirPlay volume in dB to a 0…1 level, mirroring the outbound map for
     /// the default `max_volume` (`airplay_volume_from_pct`): −30…0 dB ↔ 0…1, and
-    /// ≤ −30 dB (including the −144 mute sentinel) clamps to 0.
+    /// ≤ −30 dB (including the −144 mute sentinel) clamps to 0. The dB value
+    /// arrives from an unauthenticated LAN request via ``DACPRequest/deviceVolumeDb``
+    /// and `Double("nan")` parses, so a non-finite input maps to 0 here rather
+    /// than reaching the backend's volume write.
     public static func level(fromDb db: Double) -> Double {
+        guard db.isFinite else { return 0 }
         if db <= -30 { return 0 }
         if db >= 0 { return 1 }
         return (db + 30) / 30

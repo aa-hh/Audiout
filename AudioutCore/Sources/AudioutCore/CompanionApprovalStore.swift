@@ -64,11 +64,21 @@ public struct CompanionApprovalStore: Sendable {
     /// rather than crashing an older build (refuse-forward). Note the failure
     /// direction for a TRUST store: an unreadable file means unknown phones,
     /// which re-prompt — never silent approval.
+    /// The file is moved aside first (`StoreRecovery.quarantine`) so the next save cannot overwrite a file this build cannot read.
     public func load() throws -> [CompanionApproval]? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
         let data = try Data(contentsOf: fileURL)
-        let envelope = try decoder.decode(Envelope.self, from: data)
-        guard envelope.schemaVersion <= Self.currentSchemaVersion else { return nil }
+        let envelope: Envelope
+        do {
+            envelope = try decoder.decode(Envelope.self, from: data)
+        } catch {
+            StoreRecovery.quarantine(fileURL)
+            throw error
+        }
+        guard envelope.schemaVersion <= Self.currentSchemaVersion else {
+            StoreRecovery.quarantine(fileURL)
+            return nil
+        }
         return envelope.approvals
     }
 
@@ -214,8 +224,7 @@ public final class CompanionApprovalController {
         do {
             try store.save(approvals)
         } catch {
-            FileHandle.standardError.write(
-                Data("[Audiout] companion approvals failed to save: \(error)\n".utf8))
+            StoreRecovery.noteWriteFailure(error)
         }
         onChange?()
     }

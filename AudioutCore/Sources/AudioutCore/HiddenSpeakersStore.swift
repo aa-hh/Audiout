@@ -38,6 +38,7 @@ public struct HiddenSpeakersStore: Sendable {
     /// Load the saved hidden device ids. Missing file → `nil` (first run — no
     /// hidden speakers). A file from a newer schema is treated as missing
     /// rather than crashing an older build.
+    /// The file is moved aside first (`StoreRecovery.quarantine`) so the next save cannot overwrite a file this build cannot read.
     public func load() throws -> [String]? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
         let data = try Data(contentsOf: fileURL)
@@ -48,7 +49,10 @@ public struct HiddenSpeakersStore: Sendable {
             StoreRecovery.quarantine(fileURL)
             throw error
         }
-        guard envelope.schemaVersion <= Self.currentSchemaVersion else { return nil }
+        guard envelope.schemaVersion <= Self.currentSchemaVersion else {
+            StoreRecovery.quarantine(fileURL)
+            return nil
+        }
         return envelope.deviceIDs
     }
 

@@ -76,6 +76,7 @@ public struct RoutingStore: Sendable {
     /// Load the saved routing state. Missing file → `nil` (first run — the caller
     /// applies its own defaults). A file from a newer schema is treated as
     /// missing rather than crashing an older build.
+    /// The file is moved aside first (`StoreRecovery.quarantine`) so the next save cannot overwrite a file this build cannot read.
     public func load() throws -> State? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
         let data = try Data(contentsOf: fileURL)
@@ -86,7 +87,10 @@ public struct RoutingStore: Sendable {
             StoreRecovery.quarantine(fileURL)
             throw error
         }
-        guard envelope.schemaVersion <= Self.currentSchemaVersion else { return nil }
+        guard envelope.schemaVersion <= Self.currentSchemaVersion else {
+            StoreRecovery.quarantine(fileURL)
+            return nil
+        }
         return envelope.state
     }
 

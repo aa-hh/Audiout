@@ -26,7 +26,7 @@ cannot see it.
 
 ## Map
 
-- `AppDelegate` → lifecycle owner: backend, `GroupController`, surface, setup gate.
+- `AppDelegate` → lifecycle owner: backend, `GroupController`, surface, setup gate; companion wiring is `CompanionCoordinator` in the library.
 - `StatusItemController` → the `NSStatusItem`: volume symbol, forwards clicks.
 - `main.swift` → bootstrap: builds and retains `AppDelegate`.
 - `scripts/make-app.sh` → wraps the binary into a signed `.app` with Info.plist keys.

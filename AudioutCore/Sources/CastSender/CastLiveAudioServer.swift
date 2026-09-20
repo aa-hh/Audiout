@@ -82,11 +82,13 @@ public final class CastLiveAudioServer: @unchecked Sendable {
     private let primeMilliseconds: Int
     /// Every request head the receiver sends, for the spike log.
     public var onRequest: ((String) -> Void)?
-    /// Every connection ``accept(_:)`` turned away: why (`wrong_peer` or
-    /// `max_connections`) and the peer it arrived from. Both refusals used to
-    /// cancel the socket in silence, which made a wrongly refused GET from the
-    /// receiver's own address look exactly like a receiver that never fetched
-    /// (live failure, 2026-09-20).
+    /// Every connection ``accept(_:)`` turned away: why (`wrong_peer`,
+    /// `max_connections` or `idle_timeout`) and the peer it arrived from. All
+    /// three used to cancel the socket in silence, which made a wrongly
+    /// refused GET from the receiver's own address look exactly like a
+    /// receiver that never fetched (live failure, 2026-09-20), and still makes
+    /// a receiver that connects and then asks for nothing look like one that
+    /// never connected.
     public var onRefused: ((String, String) -> Void)?
     private let queue = DispatchQueue(label: "CastLiveAudioServer")
 
@@ -248,8 +250,14 @@ public final class CastLiveAudioServer: @unchecked Sendable {
         connection.start(queue: queue)
         readRequest(connection, buffer: Data())
 
+        // Only a connection still held here was dropped for idleness:
+        // ``respond(to:on:)`` cancels this deadline the moment a complete
+        // request head arrives, and ``drop(_:)`` cancels it when the socket
+        // goes away, so a served GET must never be reported as a refusal.
         let idleWork = DispatchWorkItem { [weak self] in
-            self?.connections[key]?.cancel()
+            guard let self, let idle = self.connections[key] else { return }
+            self.onRefused?("idle_timeout", "\(idle.endpoint)")
+            idle.cancel()
         }
         idleTimeouts[key] = idleWork
         queue.asyncAfter(deadline: .now() + idleDeadline, execute: idleWork)

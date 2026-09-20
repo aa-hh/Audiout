@@ -1657,7 +1657,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Runs on the tap's delivery thread (the IOProc, in production). Allocation
     /// beyond the converter's own scratch is avoided on this path where practical.
     private func handleBuffer(_ buffer: CapturedBuffer) {
-        // T8 (plan finding F12): REAL-TIME THREAD — never take `queue` here.
+        // T8 (plan finding F12): this is the tap's delivery thread — never take
+        // `queue` here. See the policy at `startIOProc`'s IOProc block.
         //
         // This used to be `queue.sync { (converter, meteringActive, sink,
         // resampler) }`, i.e. the audio thread blocking on the same unqualified,
@@ -1693,6 +1694,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         guard !snapshot.wizardActive else { return }
         guard let converter = snapshot.converter else { return }
 
+        // The converter's own lock is the bounded, single-caller kind point 3
+        // of the policy allows to be taken with `lock()`.
         let converted = converter.convertToAirPlayPCM(buffer)
         // Sampled AFTER the convert attempt and BEFORE the failure early-out,
         // so a converter dropping every buffer still surfaces its counters
@@ -3763,7 +3766,29 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         let err = AudioDeviceCreateIOProcIDWithBlock(
             &newProcID, aggregateID, queue
         ) { [weak self] _, inInputData, inInputTime, _, _ in
-            // ---- REALTIME THREAD ----
+            // ---- THE REAL-TIME POLICY FOR TAP DELIVERY (the one place it
+            // is written down; every other site points here) ----
+            //
+            // 1. This block runs on the `.userInitiated` serial queue it was
+            //    registered on just above, NOT on the HAL's own real-time
+            //    thread. But `AudioHardware.h` says of that queue: "All
+            //    IOBlocks are dispatched synchronously", i.e. the HAL waits
+            //    for this block, so its wall time still counts against the
+            //    device's IO cycle. Everything downstream of here — the
+            //    per-app `onBuffer` closure, `handleBuffer`, `AppRouteMixer`
+            //    and `LeveledAppInjector` — is on that same critical path.
+            // 2. Nothing on this path waits on a serial queue, or on any lock
+            //    whose holder may do unbounded work (build a converter,
+            //    recompute routes, fire callbacks, log). Queue-confined state
+            //    is read as one immutable snapshot through
+            //    `snapshotLock.try()`, and a miss drops the buffer — at most
+            //    one edit stale, so a drop costs nothing.
+            // 3. A lock whose EVERY holder does only bounded in-memory work
+            //    may be taken with `lock()`: the converter's own lock (single
+            //    caller in production), and the mixers' timeline and ring
+            //    locks.
+            // 4. Allocation and the `AVAudioConverter` run are accepted costs
+            //    here. There is no no-allocation contract to honour.
             guard let self else { return }
             let mutablePtr = UnsafeMutablePointer(mutating: inInputData)
             let listPtr = UnsafeMutableAudioBufferListPointer(mutablePtr)
@@ -4315,6 +4340,9 @@ final class AVFormatConverter: PCMConverting, @unchecked Sendable {
     private let inputAVFormat: AVAudioFormat?
     private let outputAVFormat: AVAudioFormat?
     private let converter: AVAudioConverter?
+    /// Taken by ``convertToAirPlayPCM(_:)`` on the delivery thread and by the
+    /// `conversionFailureCount` test seam only — no two production threads ever
+    /// contend it.
     private let lock = NSLock()
 
     // Conversion-failure counters, one slot per ``ConversionFailureReason``

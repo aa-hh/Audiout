@@ -434,6 +434,18 @@ import Foundation
         #expect(out.allSatisfy { $0 == 0 })
     }
 
+    /// A stopped sink must be freed. The render block used to capture `self`
+    /// strongly, so the sink kept itself alive and `deinit` never ran.
+    @Test func sinkDeinitsAfterStop() {
+        weak var weakSink: SyncedLocalSink?
+        do {
+            let sink = Self.rampSink()
+            weakSink = sink
+            sink.stop()
+        }
+        #expect(weakSink == nil, "the render block captures the sink strongly, so it can never be freed")
+    }
+
     // MARK: T-LIFECYCLE — device-change + sleep/wake rebuild
 
     /// Drives the trigger methods directly — no real device change, no real
@@ -1033,16 +1045,26 @@ extension SerializedSharedState {
 
             var ramp = [Float](repeating: 0, count: 20_000)
             for i in 0..<ramp.count { ramp[i] = Float(i + 1) }
+            // A pts no other test uses. `SerializedSharedState` orders this suite
+            // against the other suites that install the process-global sink, but
+            // NOT against `SyncedLocalSinkTests`, which runs in parallel and
+            // anchors ten sessions of its own at `rampAnchorPtsSec` (1_000) — the
+            // value this test used to enqueue and assert. Those lines landed in
+            // this capture, and the count below failed on whichever interleaving
+            // lost the race.
+            let anchorPtsSec = 4_242
             ramp.withUnsafeBufferPointer {
                 sink.enqueue(interleavedFrames: $0.baseAddress!, frameCount: ramp.count,
-                             pts: timespec(tv_sec: 1_000, tv_nsec: 0))
+                             pts: timespec(tv_sec: anchorPtsSec, tv_nsec: 0))
             }
 
             Telemetry._installTestSink(nil)   // flush barrier
-            let anchored = captured.snapshot.filter { $0.contains("\"evt\":\"sync_session_anchored\"") }
+            let anchorPtsNanos = Int64(anchorPtsSec) * 1_000_000_000
+            let anchored = captured.snapshot.filter {
+                $0.contains("\"evt\":\"sync_session_anchored\"")
+                    && $0.contains("\"anchorPtsNanos\":\"\(anchorPtsNanos)\"")
+            }
             #expect(anchored.count == 1, "got: \(captured.snapshot)")
-            #expect(anchored.first?.contains("\"anchorPtsNanos\":\"1000000000000\"") == true,
-                    "got: \(anchored)")
         }
     }
 }

@@ -78,7 +78,10 @@ public final class SyncedLocalSink: @unchecked Sendable {
     private let userOffsetMs: @Sendable () -> Int
 
     private let engine = AVAudioEngine()
-    private let sourceNode: AVAudioSourceNode
+    /// Assigned once in `init`. Implicitly unwrapped, not `let`, because the render
+    /// block captures `self` weakly and Swift forbids that until every non-optional
+    /// stored property is initialized.
+    private var sourceNode: AVAudioSourceNode!
     /// Deinterleaved standard Float32 — an `AVAudioSourceNode`→mixer connection
     /// rejects an interleaved format with an uncatchable Core Audio exception
     /// (-10868), the same lesson `LocalPlaybackEngine` encodes. The ring stores
@@ -186,18 +189,22 @@ public final class SyncedLocalSink: @unchecked Sendable {
         }
         self.connectionFormat = format
 
-        // Render block built with an unowned box so `self` can wire it in the same
-        // init; it is only ever invoked between `start()` and `stop()`.
-        var boxed: SyncedLocalSink?
-        self.sourceNode = AVAudioSourceNode(format: format) { isSilence, timestamp, frameCount, audioBufferList in
-            boxed?.render(isSilence: isSilence, timestamp: timestamp, frameCount: frameCount, audioBufferList: audioBufferList) ?? noErr
+        // The block captures `self` weakly so the sink can deinit once it is released.
+        self.sourceNode = AVAudioSourceNode(format: format) { [weak self] isSilence, timestamp, frameCount, audioBufferList in
+            guard let self else {
+                isSilence.pointee = true
+                return noErr
+            }
+            return self.render(isSilence: isSilence, timestamp: timestamp, frameCount: frameCount, audioBufferList: audioBufferList)
         }
-        boxed = self
         self.lifecycleHooks = makeLiveLifecycleHooks()
     }
 
     deinit {
-        stopObservingLifecycleEvents()
+        // deinit can run on `lifecycleQueue` — the listener block's temporary strong
+        // reference can be the last one — so it must not `sync` onto that queue.
+        // Nothing else can reach the sink during deinit, so no queue hop is needed.
+        removeDeviceChangeListener()
         deinterleaveScratch.deallocate()
     }
 
@@ -369,7 +376,15 @@ public final class SyncedLocalSink: @unchecked Sendable {
             stopEngine: { [weak self] in self?.teardownEngine() },
             remeasureLatency: { [weak self] in self?.measureTotalDelayNanos() ?? 0 },
             resetSessionState: { [weak self] _ in self?.clearSessionState() },
-            restartEngine: { [weak self] in try? self?.start() })
+            restartEngine: { [weak self] in
+                guard let self else { return }
+                do {
+                    try self.start()
+                } catch {
+                    Telemetry.fail(
+                        .localPlayback, "sync:restart_failed", local: ["error": String(describing: error)])
+                }
+            })
     }
 
     /// Runs the four hooks in order: stop → re-measure → reset → restart. Never
@@ -549,18 +564,21 @@ public final class SyncedLocalSink: @unchecked Sendable {
     }
 
     /// Remove the listener installed by ``startObservingLifecycleEvents()``.
-    /// Idempotent; also called from `deinit`.
+    /// Idempotent.
     public func stopObservingLifecycleEvents() {
-        lifecycleQueue.sync {
-            guard let block = deviceChangeListenerBlock else { return }
-            AudioObjectRemovePropertyListenerBlock(
-                AudioObjectID(kAudioObjectSystemObject), &defaultOutputDeviceAddress, lifecycleQueue, block)
-            deviceChangeListenerBlock = nil
-        }
+        lifecycleQueue.sync { removeDeviceChangeListener() }
+    }
+
+    private func removeDeviceChangeListener() {
+        guard let block = deviceChangeListenerBlock else { return }
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &defaultOutputDeviceAddress, lifecycleQueue, block)
+        deviceChangeListenerBlock = nil
     }
     #else
     public func startObservingLifecycleEvents() {}
     public func stopObservingLifecycleEvents() {}
+    private func removeDeviceChangeListener() {}
     #endif
 
     // MARK: Producer (capture → ring)
@@ -640,9 +658,8 @@ public final class SyncedLocalSink: @unchecked Sendable {
         }
 
         // mach hostTime → CLOCK_MONOTONIC ns via the shared, sleep-aware rebase.
-        // Called only while still gated: once `released`, `renderInterleaved`
-        // short-circuits before this timeline read, so the two `clock_gettime`
-        // calls the helper resamples are paid during pre-roll only, not steady state.
+        // Rebased every render cycle, before `renderInterleaved` runs, because the
+        // T-CORRECTION loop inside it needs `cycleStartMonotonicNanos` each cycle.
         // The rebase lives on `CoreAudioSystemTap` (macOS 14.2+); below that the
         // process-tap capture path that feeds this sink doesn't exist, so nothing
         // is ever enqueued — emit silence.

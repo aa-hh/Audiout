@@ -165,6 +165,14 @@ run_remote() {
 
     rrc=0
     remote_run "$repo_root" "cd $pkg && swift test $rargs$qargs" || rrc=$?
+    if [ "$rrc" -eq 2 ] && [ "${AUDIOUT_TRUST_REMOTE_FAILURE:-0}" = "1" ]; then
+        # Opt-out for an EXPLORATORY run: the caller is gating nothing, so the
+        # false-refusal risk the re-run protects against does not apply, and
+        # confirming locally would just build the same tree a second time.
+        # Never set this in a hook, or in anything a commit blocks on.
+        echo "  suite: remote reported FAILURES — trusting it (AUDIOUT_TRUST_REMOTE_FAILURE=1)." >&2
+        return 1
+    fi
     if [ "$rrc" -eq 2 ]; then
         # "Ran, but failed" — re-run locally rather than trusting the verdict.
         # The remote compiles against a different SDK (macOS 26 there, 27 here),

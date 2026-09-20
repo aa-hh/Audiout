@@ -203,3 +203,105 @@ and was set back to 2, the documented value. The second Mac was unreachable for 
 effort, so its 3 permits were unavailable and every pipeline queued behind the local pool. That
 is why the wave took hours of wall-clock for a few hours of work. `bash scripts/capacity.sh
 status` shows the current picture. If the mule is up, the same wave runs far faster.
+
+---
+
+# Wave 2 — built, verified, uncommitted (2026-09-20)
+
+All six wave-2 tickets ran through `scope-and-run2`, one orchestrator per ticket, each in its
+own worktree at base `a14ff11f`. All six are built, reviewed and APPROVED. **Nothing is
+committed.** Every worktree still has `HEAD` at `a14ff11f` with the work in the tree.
+
+| Ticket | Diff | Review | Verification re-run independently |
+|---|---|---|---|
+| 08 app row drag flag | 6 files, +52 −8 | Opus, approved | `Test run with 73 tests in 2 suites passed` |
+| 09 level meter display link | 2 files, +53 −1 | Opus, approved | `Test run with 7 tests in 1 suite passed` |
+| 10 default output monitor leak | 2 files, +35 −3 | Opus, approved | `Test run with 18 tests in 1 suite passed` |
+| 11 synced local sink lifetime | 2 files, +48 −19 | Fable, approved | `Test run with 44 tests in 6 suites passed` |
+| 12 render callback clock rebase | 6 files, +168 −25 | Fable, approved | `Test run with 84 tests in 9 suites passed` |
+| 13 real-time contract mixers | 6 files, +394 −85 | Fable, approved twice | `Test run with 125 tests in 4 suites passed` |
+
+Those verification lines are from a separate run done after every pipeline finished, with
+`AUDIOUT_TEST_NO_CACHE=1`, one worktree at a time on an otherwise idle machine. They are not
+the pipelines' own reports.
+
+Tickets 11 and 12 both edit `SyncedLocalSink.swift` and were fenced against each other. Ticket
+12 checked the merge: its hunks land at old lines 134, 254, 351–357, 624–629 and 651, and
+ticket 11's at 190–194, 367–372 and 642–650. No overlap.
+
+## Decisions taken inside wave 2
+
+- **Ticket 13's real-time policy.** The capture delivery thread is the `.userInitiated` serial
+  dispatch queue the IOProc is registered on, not the HAL's real-time thread — but the HAL
+  dispatches the block synchronously and waits, so its wall time still counts against the
+  device's IO cycle. Rule now written once at the IOProc registration site: never wait on a
+  serial queue, or on a lock whose holder does unbounded work; a lock whose every holder does
+  bounded in-memory work may be taken outright; allocation and the converter run are accepted
+  costs. The three `// ---- REALTIME THREAD ----` labels were reworded to point at it, since
+  they named a thread the code does not run on.
+- **Ticket 11's `sourceNode`.** Became `AVAudioSourceNode!` rather than `let`, because Swift
+  forbids capturing `self` weakly in `init` before every stored property has a value. Matches
+  `lifecycleHooks!` two lines below.
+- **Ticket 11's deinit deadlock** was fixed, not argued away. `deinit` can run on
+  `lifecycleQueue`, so listener removal moved into its own method that `deinit` calls directly;
+  `stopObservingLifecycleEvents()` keeps the queue hop.
+
+## Owed after a merge
+
+- **Ticket 11 adds a PostHog exception type**, `sync:restart_failed` under `.localPlayback`.
+  Event names are an external contract, so `docs/analytics-events.md` in `audiout-shared` needs
+  its row. That joins ticket 03's `local_playback:start_failed`, already open as
+  [audiout-shared PR #19](https://github.com/aa-hh/audiout-shared/pull/19).
+- All six ticket files still read `Status: ready-for-agent`.
+
+## Wave 1's commit run failed again, for a reason that is nobody's ticket
+
+The commit loop was restarted and refused at ticket 01. Guard 4 ran the **full** suite (a
+branch commit falls back to the full suite when the diff touches AudioutCore Swift) and
+reported:
+
+```
+Test run with 3950 tests in 229 suites failed after 1046.198 seconds with 16 issues.
+```
+
+That run happened while six wave-2 pipelines and their executors were competing for two build
+permits. The popover controller suite alone took 954 seconds against 321 seconds for the whole
+suite in the previous session. The loop was stopped so it would stop starving wave 2. **No
+wave-1 work was lost**; all seven worktrees still hold their changes.
+
+## `main` is red, and this is the thing to deal with first
+
+Eleven tests fail on the clean base commit, which is `main` plus review documents only:
+
+```bash
+cd .claude/worktrees/unslop-code-ca8d54
+AUDIOUT_TEST_NO_CACHE=1 bash scripts/run-tests.sh --filter 'RouteArmedSignalTests|DeviceRowConnectionStateTests'
+# Test run with 103 tests in 2 suites failed after 1.606 seconds with 11 issues.
+```
+
+All eleven are mute-pill assertions: `test_isMutePillEngaged`, `test_mutePillIsMutedHue` and
+`test_muteDrawsRestSymbol`, at RouteArmedSignalTests.swift:184, :190, :194, :203, :397, :434 and
+DeviceRowConnectionStateTests.swift:511, :520, :527, :533, :536.
+
+A lead, not a diagnosis. In `DeviceRowView.swift:2773`, `test_mutePillIsMutedHue` documents
+itself as checking "the filled square" but builds its reference from
+`RowAccessorySymbol.muteRest` (`custom.speaker.slash.square`), while `muteEngaged`
+(`custom.speaker.slash.square.fill`) exists. That does not explain every failure —
+`muteDrawsTheOutlineSquareWhenUnmutedViaApply` exercises the rest path, which looks correct —
+so confirm the cause before changing anything. These are raster comparisons over TIFF bytes, so
+a rendering-environment difference has to be ruled out too.
+
+**This blocks every commit in both waves**, because Guard 4 runs the full suite for any diff
+touching AudioutCore Swift and the full suite cannot pass while `main` is red. Fix this first,
+then re-run the wave-1 commit loop on an idle machine, then wave 2.
+
+Two other tests were already known to fail on `main` and are separate:
+`cardTitlesTintGoldWhileTheirRowsSound` and
+`enabledRetouchesMoreThanOnceAcrossAWaitThatNeverBecomesReady`.
+
+## One process lesson, worth putting in every orchestrator prompt
+
+Five of the six orchestrators stalled the same way: each launched a child agent in the
+background, went idle waiting for a report, and stopped. With no live child, nothing was ever
+coming back. Each needed a nudge to check the tree itself and to relaunch children with
+`run_in_background: false`. **Tell an orchestrator to launch every child synchronously.**

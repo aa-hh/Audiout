@@ -1047,7 +1047,7 @@ private func makeParkedWindow(height: CGFloat = 400) -> NSWindow {
         // Ordered in and given real runloop turns, because a live strip gets
         // AppKit's own toolbar layout passes after the reveal and the bug is
         // about what those passes leave behind.
-        window.orderFrontRegardless()
+        window.orderFrontRegardless()  // screen-ok: off every screen, asserted next
         // Goes red if this window ever becomes a plain `NSWindow` again: AppKit
         // would constrain it onto a display and the run would flash a real
         // window in the developer's face.

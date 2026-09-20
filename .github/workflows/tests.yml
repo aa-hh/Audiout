@@ -30,6 +30,17 @@ jobs:
       AUDIOUT_TEST_NO_CACHE: "1"
     steps:
       - uses: actions/checkout@v4
+      # Compiled dependencies and the app's own modules from the last run.
+      # Keyed on the lockfile so a dependency bump starts clean; restore-keys
+      # takes the newest cache otherwise, and SwiftPM rebuilds only what
+      # changed. Without this every run is a cold compile of everything.
+      - uses: actions/cache@v4
+        with:
+          path: AudioutCore/.build
+          key: audioutcore-build-${{ runner.os }}-${{ hashFiles('AudioutCore/Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            audioutcore-build-${{ runner.os }}-${{ hashFiles('AudioutCore/Package.resolved') }}-
+            audioutcore-build-${{ runner.os }}-
       - name: Install build dependencies
         run: brew install libevent libsodium libgcrypt libgpg-error libplist ffmpeg
       - name: AudioutCore suite
@@ -42,6 +53,11 @@ jobs:
       AUDIOUT_TEST_NO_CACHE: "1"
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: AirPlayEngine/.build
+          key: airplayengine-build-${{ runner.os }}-${{ github.sha }}
+          restore-keys: airplayengine-build-${{ runner.os }}-
       - name: Install build dependencies
         run: brew install libevent libsodium libgcrypt libgpg-error libplist ffmpeg
       - name: AirPlayEngine suite

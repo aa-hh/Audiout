@@ -28,7 +28,7 @@ set -eu
 # A compiler orphaned by a killed wrapper holds the .build lock and makes
 # this script hang with no output at all. Clear it first -- see
 # scripts/reap-orphaned-swift.sh.
-bash "$(dirname "${BASH_SOURCE[0]}")/reap-orphaned-swift.sh" || true
+bash "$(dirname "$0")/reap-orphaned-swift.sh" || true
 
 repo_root=$(git rev-parse --show-toplevel)
 package=${AUDIOUT_BUILD_PACKAGE:-AudioutCore}
@@ -50,7 +50,7 @@ package=${AUDIOUT_BUILD_PACKAGE:-AudioutCore}
 if [ "${AUDIOUT_BUILD_LOCAL:-0}" != "1" ] && remote_wins; then
     echo "  build: sending to remote $remote_host ..." >&2
     rrc=0
-    remote_run "$repo_root" "cd \"$package\" && swift build $*" || rrc=$?
+    remote_run "$repo_root" "cd \"$package\" && swift build$(remote_quote_args "$@")" || rrc=$?
     if [ "$rrc" -eq 0 ]; then
         echo "  build: compiled clean on remote $remote_host." >&2
         exit 0

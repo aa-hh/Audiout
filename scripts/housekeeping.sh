@@ -165,7 +165,7 @@ done
 # is squatting on the ports. Threshold is >1 because one loaded helper is legit
 # (the current dev build). When exceeded, nag with the fix. Best-effort: any
 # error is silent, never blocks the build.
-stale_helpers_output=$(bash scripts/purge-stale-ptp-helpers.sh 2>/dev/null || true)
+stale_helpers_output=$(bash "$(cd "$(dirname "$0")" && pwd)/purge-stale-ptp-helpers.sh" 2>/dev/null || true)
 stale_helpers_total=$(printf '%s\n' "$stale_helpers_output" | grep -oE 'Found [0-9]+' | grep -oE '[0-9]+')
 [ -z "$stale_helpers_total" ] && stale_helpers_total=0
 stale_helpers_ghosts=$(printf '%s\n' "$stale_helpers_output" | grep -c "unknown (override-only entry, no loaded job)")

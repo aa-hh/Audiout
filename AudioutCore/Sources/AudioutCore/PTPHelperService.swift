@@ -273,6 +273,12 @@ public struct PTPHelperActivator: PTPHelperActivating {
     /// sleep; a test injects an instant, deterministic advance so the whole
     /// loop runs at CPU speed with a fake clock instead of racing a real one.
     private let sleep: @Sendable (TimeInterval) async -> Void
+    /// Reads the helper's clock record. Defaults to the real `/airptp_shm`
+    /// probe; injected by a test that needs the wait to run its full course,
+    /// because the real probe reports READY whenever any helper is live on the
+    /// machine — including the one the developer's own running copy of the app
+    /// demand-started, which is not a fact about the loop under test.
+    private let isReady: @Sendable () -> Bool
 
     public init(
         ptpHelper: PTPHelperManaging = SMAppServicePTPHelper(),
@@ -283,7 +289,8 @@ public struct PTPHelperActivator: PTPHelperActivating {
         now: @escaping @Sendable () -> Date = Date.init,
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
-        }
+        },
+        isReady: @escaping @Sendable () -> Bool = { PTPClockProbe.isReady() }
     ) {
         self.ptpHelper = ptpHelper
         self.machServiceName = machServiceName
@@ -292,6 +299,7 @@ public struct PTPHelperActivator: PTPHelperActivating {
         self.onTouch = onTouch
         self.now = now
         self.sleep = sleep
+        self.isReady = isReady
     }
 
     public var willWaitForClock: Bool { ptpHelper.status == .enabled }
@@ -320,7 +328,7 @@ public struct PTPHelperActivator: PTPHelperActivating {
 
         let deadline = now().addingTimeInterval(max(0, timeout))
         while now() < deadline {
-            if PTPClockProbe.isReady() { break }
+            if isReady() { break }
             // razor: fixed 2.0 s re-touch ceiling, not adaptive backoff — well
             // under the helper's own ~15 s idle-exit window, so a flat
             // interval keeps it re-armed with room to spare. Upgrade path:
@@ -333,7 +341,7 @@ public struct PTPHelperActivator: PTPHelperActivating {
             }
             await sleep(pollInterval)
         }
-        let ready = PTPClockProbe.isReady()
+        let ready = isReady()
         withExtendedLifetime(touches) {}
         return ready ? .ready : .timingPortsUnavailable
     }

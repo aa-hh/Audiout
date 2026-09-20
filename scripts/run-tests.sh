@@ -130,8 +130,12 @@ slots=${AUDIOUT_TEST_SLOTS:-$(git config --get audiout.localSlots 2>/dev/null ||
 . "$(cd "$(dirname "$0")" && pwd)/lib/remote.sh"
 remote_tried=0
 
-# Thin test-specific wrapper over remote_run. Return codes are remote_run's:
-#   0 = passed remotely   1 = could not use the remote   2 = ran and FAILED
+# Thin test-specific wrapper over remote_run. Its own return codes, which are
+# remote_run's 0/1/2 plus a third for "the remote's verdict is final":
+#   0 = passed remotely
+#   1 = could not use the remote at all - run here, no verdict claimed
+#   2 = ran and FAILED, but that failure is not a verdict - re-run here
+#   3 = ran and FAILED with named failing tests - end the run on that result
 run_remote() {
     if [ "$remote_pref" = "remote" ]; then
         echo "  suite: sending to remote $remote_host (preferred) ..." >&2
@@ -171,19 +175,27 @@ run_remote() {
         # confirming locally would just build the same tree a second time.
         # Never set this in a hook, or in anything a commit blocks on.
         echo "  suite: remote reported FAILURES — trusting it (AUDIOUT_TRUST_REMOTE_FAILURE=1)." >&2
-        return 1
+        return 3
     fi
     if [ "$rrc" -eq 2 ]; then
-        # "Ran, but failed" — re-run locally rather than trusting the verdict.
-        # The remote compiles against a different SDK (macOS 26 there, 27 here),
-        # and that shared machine has been out of disk and starved
-        # before, so it must never be what REFUSES a commit:
-        # Guard 4 blocks on this result, and a toolchain difference presenting
-        # as "your code is broken" would send an agent hunting a bug that does
-        # not exist. A remote PASS is still accepted — the asymmetry is
-        # deliberate, since the expensive error is a false refusal.
-        echo "  suite: remote reported FAILURES — re-running locally to confirm." >&2
-        return 2
+        # Which of the three failures it was decides whether it is a verdict.
+        # Named failing tests are: the toolchains match (re-checked 2026-09-20),
+        # so the same sources fail the same way here and there is nothing to
+        # confirm. The other two say more about the machine than about the code
+        # — the mule has been out of disk and starved before, and a test process
+        # that died mid-run produced no verdict at all — so they still get
+        # re-run here rather than being allowed to refuse a commit through
+        # Guard 4. Empty means the classifier never ran: treat it as untrusted.
+        case "${remote_failure_kind:-}" in
+            tests)
+                echo "  suite: remote reported named test FAILURES — trusting that verdict, not re-running here." >&2
+                return 3
+                ;;
+            *)
+                echo "  suite: remote failed without a verdict (${remote_failure_kind:-unknown}) — re-running locally to confirm." >&2
+                return 2
+                ;;
+        esac
     fi
     [ "$rrc" -ne 0 ] && return 1
     echo "  suite: passed on remote $remote_host." >&2
@@ -263,6 +275,11 @@ if [ "$try_remote_first" -eq 1 ] && [ "$remote_tried" -eq 0 ]; then
             : > "$stamp"
         fi
         exit 0
+    elif [ "$rrc" -eq 3 ]; then
+        # The remote's verdict is final. No pass stamp, no local re-run, and
+        # nothing local has been acquired yet, so there is no permit to unwind.
+        echo "  suite: FAILED on remote $remote_host — not re-run here." >&2
+        exit "${remote_status:-1}"
     elif [ "$rrc" -eq 1 ]; then
         # 1 = could not use the remote at all. 2 = it ran and failed, and has
         # already said it is re-running locally, so do not print a second reason.
@@ -308,6 +325,13 @@ if [ "${AUDIOUT_TEST_NO_LOCK:-0}" != "1" ] && [ "$remote_tried" -eq 0 ]; then
             fi
             # Nothing local was started, so there is no permit to unwind.
             exit 0
+        fi
+        if [ "$rrc" -eq 3 ]; then
+            # Same final verdict as the prefer-remote path above. This site is
+            # reached whenever the local slots were busy, and missing it would
+            # leave every overflowed run still building the tree twice.
+            echo "  suite: FAILED on remote $remote_host — not re-run here." >&2
+            exit "${remote_status:-1}"
         fi
         echo "  suite: all $slots test slots busy — waiting for one to free." >&2
     fi

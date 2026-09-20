@@ -55,12 +55,13 @@ if [ "${AUDIOUT_BUILD_LOCAL:-0}" != "1" ] && remote_wins; then
         echo "  build: compiled clean on remote $remote_host." >&2
         exit 0
     elif [ "$rrc" -eq 2 ]; then
-        # Ran and failed. Do NOT report it as the caller's error: both Macs run
-        # Swift 6.4 but against different SDKs (macOS 27 here, macOS 26 there),
-        # and the remote has been out of disk and starved before, so
-        # a remote-only failure is as likely to be skew as a real break. Same
-        # asymmetry run-tests.sh uses — a remote PASS is accepted, a remote
-        # FAILURE is re-confirmed here before anyone acts on it.
+        # Ran and failed. Do NOT report it as the caller's error. Not because
+        # the toolchains differ — they match, re-checked 2026-09-20 — but
+        # because of the machine's condition: the mule has been out of disk and
+        # starved before, and a compile that dies for either reason looks
+        # exactly like broken code from here. A compile failure always
+        # classifies as `nobuild`, one of the two kinds the test wrapper also
+        # declines to trust, so this path re-confirms locally as it always has.
         echo "  build: remote reported ERRORS — rebuilding locally to confirm." >&2
     else
         echo "  build: falling back to this machine." >&2

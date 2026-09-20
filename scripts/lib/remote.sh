@@ -298,7 +298,12 @@ remote_quote_args() {
 
 # Run a command in the synced tree on the remote.
 #   remote_run <repo_root> <shell command string>
-# Sets $remote_status to the command's own exit code when it ACTUALLY RAN.
+# Sets $remote_status to the command's own exit code when it ACTUALLY RAN, and
+# $remote_failure_kind to WHICH of the three failures it was: `tests` (named
+# failing tests), `nobuild` (the build never finished), `noverdict` (tests
+# passed, then the process died without a summary). Empty means unknown -- the
+# classifier only runs for the swift toolchain -- and every reader must treat
+# empty as "do not trust".
 #
 # Return codes, and why the distinction is the whole point of this function:
 #   0  ran remotely and succeeded
@@ -307,12 +312,17 @@ remote_quote_args() {
 #   2  ran remotely and FAILED
 #
 # A remote that cannot be reached, synced or set up must NEVER surface as "your
-# code is broken". Both Macs run Swift 6.4 but against different SDKs (macOS 27
-# here, macOS 26 there), and the remote has been out of disk and starved
-# before, so callers accept a remote PASS but re-confirm a
-# remote FAILURE locally before letting it block anything. The asymmetry is
-# deliberate: the expensive error is a false refusal, not a false pass.
+# code is broken". The toolchains match (re-checked 2026-09-20), so named test
+# failures from there are a real verdict; what callers still re-confirm locally
+# is a `nobuild` or a `noverdict`, because those say more about the machine's
+# condition -- out of disk, starved, a crashed test process -- than about the
+# caller's code. The asymmetry is deliberate: the expensive error is a false
+# refusal, not a false pass.
 remote_run() {
+    # Cleared here, not only on the failure path: it is a global, and a stale
+    # value from an earlier call in the same script would be read as this
+    # call's answer.
+    remote_failure_kind=''
     _root=$1
     shift
     _rdir=$(remote_dir_for "$_root")
@@ -421,7 +431,9 @@ remote_run() {
            done ) & \
          _w=\$!; \
          trap 'rm -f \"\$_s\"; kill \$_w 2>/dev/null' EXIT HUP INT TERM; \
-         $* ; echo \"REMOTE_EXIT:\$?\"" >"$_rr_out" 2>&1 </dev/null &
+         $* ; _jrc=\$?; \
+         echo \"REMOTE_LOAD:\$(sysctl -n hw.ncpu 2>/dev/null) \$(sysctl -n vm.loadavg 2>/dev/null)\"; \
+         echo \"REMOTE_EXIT:\$_jrc\"" >"$_rr_out" 2>&1 </dev/null &
     _rr_ssh=$!
     # macOS has no parent-death signal, so poll for one. A trap cannot cover
     # this: the runner is often SIGKILLed (a torn-down agent session), and traps
@@ -446,8 +458,27 @@ remote_run() {
     # run with `set -e` (make-app.sh adds `pipefail`), so a remote command whose
     # only output was the marker line would kill the CALLER outright instead of
     # falling back. Neither grep's exit status is information we use.
-    printf '%s\n' "$_out" | grep -v '^REMOTE_EXIT:' >&2 || true
+    printf '%s\n' "$_out" | grep -v -e '^REMOTE_EXIT:' -e '^REMOTE_LOAD:' >&2 || true
     _marker=$(printf '%s\n' "$_out" | grep '^REMOTE_EXIT:' | tail -1 | cut -d: -f2 || true)
+    # "REMOTE_LOAD:8 { 1.23 4.56 7.89 }" -> " (mule load 1.23, 8 cores)", appended
+    # to the failure messages. A starved mule fails wait-bound tests by name, which
+    # now reads as a real verdict, so the number makes that diagnosable.
+    # razor: reported, never gated on. A threshold here would silently change when
+    # a commit gets refused, and the mule's job cap already attacks starvation at
+    # its source. Upgrade path if starvation outlives the cap: decide in the
+    # CALLER, where refusing a commit is already a decision.
+    _load=$(printf '%s\n' "$_out" | grep '^REMOTE_LOAD:' | tail -1 || true)
+    _loadnote=''
+    if [ -n "$_load" ]; then
+        _cores=$(printf '%s' "$_load" | sed -e 's/^REMOTE_LOAD://' -e 's/ .*//')
+        _load1=$(printf '%s' "$_load" | sed -e 's/.*{ *//' -e 's/ .*//')
+        # `if`, not `[ ... ] && ...`: callers run with `set -e`, and a trailing
+        # AND-list whose test fails would abort the whole run when the mule's
+        # sysctl came back empty.
+        if [ -n "$_load1" ]; then
+            _loadnote=" (mule load $_load1, ${_cores:-?} cores)"
+        fi
+    fi
 
     if [ "$_rc" -eq 97 ]; then
         echo "  remote: environment not usable (missing dir, no toolchain, or Command Line Tools selected instead of Xcode) — staying local." >&2
@@ -484,7 +515,8 @@ remote_run() {
         _nfailed=$(printf '%s' "$_failed" | grep -c . || true)
         if [ "$_nfailed" -gt 0 ]; then
             _names=$(printf '%s' "$_failed" | tr '\n' ' ' | sed 's/ *$//')
-            echo "  remote: ran and FAILED there — $_nfailed test(s) failed: $_names" >&2
+            remote_failure_kind=tests
+            echo "  remote: ran and FAILED there — $_nfailed test(s) failed: $_names$_loadnote" >&2
         else
             # Pattern match, not `grep -q`: under pipefail grep -q exits at the first
             # match, printf takes SIGPIPE, and `!` inverts the resulting 141 — which
@@ -494,10 +526,12 @@ remote_run() {
                 *"Build complete!"*)
                     _npassed=$(printf '%s\n' "$_out" | grep -v ' Test run with ' \
                         | grep -c ' Test .* passed after ' || true)
-                    echo "  remote: ran and FAILED there — exit $remote_status, no test verdict in the output ($_npassed tests passed, no failure lines, no summary line)" >&2
+                    remote_failure_kind=noverdict
+                    echo "  remote: ran and FAILED there — exit $remote_status, no test verdict in the output ($_npassed tests passed, no failure lines, no summary line)$_loadnote" >&2
                     ;;
                 *)
-                    echo "  remote: ran and FAILED there — the build did not finish (no \"Build complete!\" line); the compiler errors are in the output above" >&2
+                    remote_failure_kind=nobuild
+                    echo "  remote: ran and FAILED there — the build did not finish (no \"Build complete!\" line); the compiler errors are in the output above$_loadnote" >&2
                     ;;
             esac
         fi

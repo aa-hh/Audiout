@@ -86,6 +86,10 @@ public final class CompanionCommandDispatcher {
         /// any real room plus the staging's own separation, and a measurement
         /// becomes a persisted latency, so an absurd one stops here.
         static let maxOffsetMs: Double = 10_000
+        /// A key is `AUDT-XXXXX-XXXXX-XXXXX-XXXXX` (29 characters). The cap is
+        /// the same generous multiple the id caps above use — the server, not
+        /// this line, decides whether a key is real.
+        static let maxLicenseKeyChars = 128
     }
 
     /// Mirrors the wire `commandResult` message 1:1
@@ -135,6 +139,10 @@ public final class CompanionCommandDispatcher {
     /// The alignment family's actuators — see ``CompanionAlignmentActions``.
     /// `nil` on a backend with no Bluetooth sink of its own.
     private let alignmentActions: CompanionAlignmentActions?
+    /// The licence server round trip ``activateLicenseKey(_:completion:)``
+    /// makes, injected for the reason every other network seam here is: tests
+    /// answer it without a network.
+    private let licenseTransport: LicenseValidator.Transport
 
     /// True while a `setStartBufferMs` apply Task is running. The apply tears
     /// every AirPlay stream down and back (~3-5s); overlapping runs would keep
@@ -157,7 +165,8 @@ public final class CompanionCommandDispatcher {
         isExcluded: @escaping (String) -> Bool,
         setLocalPlaybackVolume: @escaping (Int, String) -> Void,
         applyStartBuffer: @escaping (Int) async -> Void,
-        alignmentActions: CompanionAlignmentActions? = nil
+        alignmentActions: CompanionAlignmentActions? = nil,
+        licenseTransport: @escaping LicenseValidator.Transport = LicenseValidator.defaultTransport
     ) {
         self.groupController = groupController
         self.appRouting = appRouting
@@ -166,6 +175,7 @@ public final class CompanionCommandDispatcher {
         self.setLocalPlaybackVolume = setLocalPlaybackVolume
         self.applyStartBuffer = applyStartBuffer
         self.alignmentActions = alignmentActions
+        self.licenseTransport = licenseTransport
     }
 
     /// Execute one command, mapping it to the exact controller method the
@@ -343,15 +353,144 @@ public final class CompanionCommandDispatcher {
             return alignment(targetID) { actions, id in actions.playDemo(id, clientID) }
 
         case .activateLicenseKey:
-            // razor: answered the way this Mac answered before the case existed
-            // (it decoded as `.unknown`). The licence-key work adds the real
-            // handling; this line goes when that lands. Same line as on
-            // `claude/bluetooth-latency-drift-6c2d59`, so the merge is a no-op.
-            return .refused("Unknown command: activateLicenseKey.")
+            // Answered by the wiring layer through `activateLicenseKey(_:completion:)`
+            // before it reaches here: the verdict belongs to the licence server, so
+            // the reply waits for a round trip this synchronous switch cannot make.
+            // Reaching this arm means the wiring didn't intercept and nothing was
+            // activated — say so, rather than report a success the purchase never got.
+            return .refused("This Mac can't activate a license key right now.")
 
         case .unknown(let name):
             return .refused("Unknown command: \(name).")
         }
+    }
+
+    // MARK: - The licence key a phone bought
+
+    /// Takes the licence key a paired phone bought in the App Store through the
+    /// same three steps a key typed into Settings takes: store it, ask the
+    /// licence server, keep the server's verdict.
+    ///
+    /// The one command whose answer is not local, so it is the one command that
+    /// replies when the round trip ends instead of immediately — the wiring
+    /// layer calls this INSTEAD of ``execute(_:clientID:)`` for
+    /// `.activateLicenseKey`, and re-reads the app's licence state in the
+    /// completion, which is what pushes the unlock token to the phone.
+    ///
+    /// Refusals are real refusals: a purchase that did not reach the Mac must
+    /// never come back as an applied command.
+    public func activateLicenseKey(_ key: String, completion: @escaping (Result) -> Void) {
+        // The same event the Settings sheet and the first-run gate fire for a
+        // key submission, with the `source` the shared event table already
+        // reserves for this path. Never the key itself: it identifies a
+        // purchase (PRODUCT.md "Data Collection").
+        func report(_ outcome: String) {
+            Analytics.capture("license:key_submitted", ["outcome": outcome, "source": "phone"])
+        }
+        func refuse(_ outcome: String, _ reason: String) {
+            report(outcome)
+            completion(.refused(reason))
+        }
+
+        // Trust boundary, same as every other LAN-supplied string here.
+        let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, key.count <= Limits.maxLicenseKeyChars else {
+            return refuse(LicenseStatus.invalid.rawValue,
+                          "That doesn’t look like an Audiout key (\(LicenseCopy.keyFormatHint)).")
+        }
+        // A build from source has no server to ask and no lock to open.
+        guard settings.licenseServerURL != nil else {
+            return refuse("no_server", "This copy of Audiout doesn’t use license keys.")
+        }
+        // The phone re-sends its key on every connection by design, so the Mac
+        // that already holds THAT key active answers without a round trip — and
+        // without an event, which would otherwise count one submission per
+        // reconnection.
+        if settings.licenseKey == key, settings.licenseStatus == .active {
+            return completion(.ok)
+        }
+        // A different key while this Mac holds a paid one of its own: keep the
+        // one that works. A running trial is not that — a trial IS a licence
+        // key, and replacing it with the bought one is the whole point.
+        if settings.licenseStatus == .active, !trialIsRunning {
+            return refuse("already_licensed", "This Mac already has its own license key.")
+        }
+
+        // Stored before the question is asked, exactly as the Settings sheet
+        // does it: the validator reads the stored key, and a key saved through
+        // an unreachable server is what the next launch's check picks up.
+        //
+        // What the sheet has and this path doesn't is a user standing at the
+        // Mac to undo a key the server rejects — so a rejected key is rolled
+        // back here. Without it, one bad key from a paired phone replaces a
+        // running trial's key with a `.unknown` verdict, and the next launch
+        // meets the licence gate with days still left on the trial.
+        let previous = LicenseState(settings)
+        if key != settings.licenseKey { settings.licenseStatus = nil }
+        settings.licenseKey = key
+        LicenseValidator(settings: settings, transport: licenseTransport).validate { [settings] result in
+            switch result {
+            case .verified(.active):
+                report("active")
+                completion(.ok)
+            case .verified(let status):
+                previous.restore(into: settings)
+                refuse(status.rawValue, LicenseCopy.statusLine(for: status))
+            case .unreachable:
+                refuse("unreachable",
+                       "Audiout couldn’t reach the license server. Try again when your Mac is back online.")
+            case .noServer, .noKey:
+                // Both are guarded above; answering honestly beats reporting a
+                // success nothing produced if that ever stops being true.
+                refuse(result == .noServer ? "no_server" : "no_key",
+                       "This Mac couldn’t check the key. Try again.")
+            }
+        }
+    }
+
+    /// Everything ``AppSettings/licenseKey``'s setter reaches, captured so a
+    /// key the licence server rejects leaves this Mac as it found it. The trial
+    /// fields are in here because a `nil` key clears them — a trial IS a
+    /// licence key.
+    private struct LicenseState {
+        let key: String?
+        let status: LicenseStatus?
+        let reason: String?
+        let maxMajor: Int?
+        let token: String?
+        let trialStartedAt: Date?
+        let trialExpiresAt: Date?
+        let trialRegistered: Bool
+
+        init(_ settings: AppSettings) {
+            key = settings.licenseKey
+            status = settings.licenseStatus
+            reason = settings.licenseReason
+            maxMajor = settings.licenseMaxMajor
+            token = settings.companionToken
+            trialStartedAt = settings.trialStartedAt
+            trialExpiresAt = settings.trialExpiresAt
+            trialRegistered = settings.trialRegistered
+        }
+
+        /// The key goes back FIRST: writing a `nil` key clears every other
+        /// field here, so restoring it last would undo the restore.
+        func restore(into settings: AppSettings) {
+            settings.licenseKey = key
+            settings.licenseStatus = status
+            settings.licenseReason = reason
+            settings.licenseMaxMajor = maxMajor
+            settings.companionToken = token
+            settings.trialStartedAt = trialStartedAt
+            settings.trialExpiresAt = trialExpiresAt
+            settings.trialRegistered = trialRegistered
+        }
+    }
+
+    /// A trial running on this Mac right now.
+    private var trialIsRunning: Bool {
+        if case .active = TrialClock.state(settings: settings) { return true }
+        return false
     }
 
     // MARK: - Sync calibration (the alignment family)

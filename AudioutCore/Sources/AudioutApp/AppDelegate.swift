@@ -3006,6 +3006,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                       clientID: clientID, reply: reply)
                     return
                 }
+                // Also answered outside the dispatcher's synchronous switch: the
+                // verdict on a licence key is the licence server's, so the reply
+                // waits for the round trip. `applyLicenseState()` is the same
+                // re-read a typed key gets (`useNewTrialKey`), and it is what
+                // pushes the unlock token to the phone that sent the key.
+                if case .activateLicenseKey(let key) = command {
+                    self.companionDispatcher.activateLicenseKey(key) { [weak self] result in
+                        self?.applyLicenseState()
+                        reply(CompanionServer.CommandResult(applied: result.applied,
+                                                            refusalReason: result.refusalReason))
+                    }
+                    return  // nothing in the snapshot changes with a licence
+                }
                 let result = self.companionDispatcher.execute(command, clientID: clientID)
                 reply(CompanionServer.CommandResult(
                     applied: result.applied,

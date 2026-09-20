@@ -76,7 +76,9 @@ import AudioutProtocol
     }
 
     private func makeContext(fleet: [Device] = .demoFleet,
-                            alignmentActions: CompanionAlignmentActions? = nil) async throws -> Context {
+                            alignmentActions: CompanionAlignmentActions? = nil,
+                            licenseServerURL: URL? = nil,
+                            licenseTransport: LicenseTransportStub? = nil) async throws -> Context {
         let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
         try await waitForFleet(backend, count: fleet.count)
@@ -85,7 +87,7 @@ import AudioutProtocol
                                               routingStore: RoutingStore(directory: scratchDir),
                                               loadPersisted: false)
         let appRouting = AppRoutingController(store: AppRouteStore(directory: scratchDir), loadPersisted: false)
-        let settings = AppSettings(defaults: isolatedDefaults)
+        let settings = AppSettings(defaults: isolatedDefaults, licenseServerURL: licenseServerURL)
         let spy = Spy()
 
         let dispatcher = CompanionCommandDispatcher(
@@ -102,7 +104,8 @@ import AudioutProtocol
                     try? await Task.sleep(nanoseconds: 5_000_000)
                 }
             },
-            alignmentActions: alignmentActions
+            alignmentActions: alignmentActions,
+            licenseTransport: licenseTransport?.closure ?? LicenseValidator.defaultTransport
         )
         return Context(dispatcher: dispatcher, groupController: groupController, appRouting: appRouting,
                        settings: settings, backend: backend, spy: spy)
@@ -834,6 +837,161 @@ import AudioutProtocol
         #expect(ctx.groupController.groups.count == groupsBefore)
         #expect(ctx.appRouting.appRoutes.count == appRoutesBefore)
         #expect(ctx.groupController.selectedDeviceIDs == selectedBefore)
+    }
+
+    // MARK: - The licence key a phone bought
+
+    private static let phoneKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+    private static let licenseServer = URL(string: "https://license.example.com")!
+
+    private func activate(_ ctx: Context, _ key: String) async -> CompanionCommandDispatcher.Result {
+        await withCheckedContinuation { continuation in
+            ctx.dispatcher.activateLicenseKey(key) { continuation.resume(returning: $0) }
+        }
+    }
+
+    /// The defect: a reply saying applied while nothing was stored — the phone
+    /// tells the buyer the purchase landed and the Mac stays locked.
+    @Test func aKeyTheServerAcceptsIsStoredAndUnlocksTheMac() async throws {
+        let transport = LicenseTransportStub()
+        transport.stub(status: 200,
+                       json: #"{"status":"active","key":"\#(Self.phoneKey)","companion_token":"tok-1"}"#)
+        let ctx = try await makeContext(licenseServerURL: Self.licenseServer, licenseTransport: transport)
+
+        let result = await activate(ctx, Self.phoneKey.lowercased())
+
+        #expect(result.applied)
+        #expect(result.refusalReason == nil)
+        #expect(ctx.settings.licenseKey == Self.phoneKey, "the server's spelling of the key is what gets stored")
+        #expect(ctx.settings.licenseStatus == .active)
+        #expect(ctx.settings.companionToken == "tok-1", "the token is what unlocks the phone")
+    }
+
+    /// The defect: a key the licence server does not recognize answered as
+    /// applied, leaving the buyer with no sentence to act on.
+    @Test func aKeyTheServerDoesNotKnowIsRefusedWithAReason() async throws {
+        let transport = LicenseTransportStub()
+        transport.stub(status: 200, json: #"{"status":"unknown"}"#)
+        let ctx = try await makeContext(licenseServerURL: Self.licenseServer, licenseTransport: transport)
+
+        let result = await activate(ctx, Self.phoneKey)
+
+        #expect(!result.applied)
+        #expect(result.refusalReason == LicenseCopy.statusLine(for: .unknown))
+    }
+
+    /// The defect: a server that never answered reported as a finished
+    /// activation.
+    @Test func anUnreachableServerRefusesRatherThanPretending() async throws {
+        let transport = LicenseTransportStub()
+        transport.answer = (nil, nil, URLError(.notConnectedToInternet))
+        let ctx = try await makeContext(licenseServerURL: Self.licenseServer, licenseTransport: transport)
+
+        let result = await activate(ctx, Self.phoneKey)
+
+        #expect(!result.applied)
+        #expect(result.refusalReason?.isEmpty == false)
+        #expect(ctx.settings.licenseKey == Self.phoneKey, "the key stays saved for the next launch's check")
+        #expect(ctx.settings.licenseStatus == nil)
+    }
+
+    /// The phone re-sends its key on every connection by design. The defect: a
+    /// licence-server round trip, and a toast, per reconnection.
+    @Test func aRepeatOfTheActiveKeyIsAppliedWithoutAskingTheServer() async throws {
+        let transport = LicenseTransportStub()
+        let ctx = try await makeContext(licenseServerURL: Self.licenseServer, licenseTransport: transport)
+        ctx.settings.licenseKey = Self.phoneKey
+        ctx.settings.licenseStatus = .active
+
+        let result = await activate(ctx, Self.phoneKey)
+
+        #expect(result.applied)
+        #expect(transport.requests.isEmpty)
+    }
+
+    /// The defect: a phone's key overwriting the paid licence this Mac already
+    /// holds.
+    @Test func aDifferentKeyIsRefusedWhileThisMacHoldsItsOwnLicense() async throws {
+        let transport = LicenseTransportStub()
+        let ctx = try await makeContext(licenseServerURL: Self.licenseServer, licenseTransport: transport)
+        ctx.settings.licenseKey = "AUDT-MMMMM-NNNNN-OOOOO-PPPPP"
+        ctx.settings.licenseStatus = .active
+
+        let result = await activate(ctx, Self.phoneKey)
+
+        #expect(!result.applied)
+        #expect(ctx.settings.licenseKey == "AUDT-MMMMM-NNNNN-OOOOO-PPPPP")
+        #expect(transport.requests.isEmpty)
+    }
+
+    /// A trial IS a licence key, so the refusal above must not catch the one
+    /// case this path exists for: a trial converting to the phone's purchase.
+    @Test func aBoughtKeyReplacesARunningTrialKey() async throws {
+        let transport = LicenseTransportStub()
+        transport.stub(status: 200, json: #"{"status":"active","key":"\#(Self.phoneKey)"}"#)
+        let ctx = try await makeContext(licenseServerURL: Self.licenseServer, licenseTransport: transport)
+        ctx.settings.licenseKey = "AUDT-TRIAL-TRIAL-TRIAL-TRIAL"
+        ctx.settings.licenseStatus = .active
+        TrialClock.start(settings: ctx.settings)
+
+        let result = await activate(ctx, Self.phoneKey)
+
+        #expect(result.applied)
+        #expect(ctx.settings.licenseKey == Self.phoneKey)
+    }
+
+    /// The defect: one key the server rejects replacing a running trial's key,
+    /// so the next launch meets the licence gate with days still left.
+    @Test func aRejectedKeyLeavesARunningTrialExactlyAsItWas() async throws {
+        let transport = LicenseTransportStub()
+        transport.stub(status: 200, json: #"{"status":"unknown"}"#)
+        let ctx = try await makeContext(licenseServerURL: Self.licenseServer, licenseTransport: transport)
+        ctx.settings.licenseKey = "AUDT-TRIAL-TRIAL-TRIAL-TRIAL"
+        ctx.settings.licenseStatus = .active
+        ctx.settings.companionToken = "trial-token"
+        TrialClock.start(settings: ctx.settings)
+
+        let result = await activate(ctx, Self.phoneKey)
+
+        #expect(!result.applied)
+        #expect(ctx.settings.licenseKey == "AUDT-TRIAL-TRIAL-TRIAL-TRIAL")
+        #expect(ctx.settings.licenseStatus == .active)
+        #expect(ctx.settings.companionToken == "trial-token")
+        if case .active = TrialClock.state(settings: ctx.settings) {} else {
+            Issue.record("the trial is gone: \(TrialClock.state(settings: ctx.settings))")
+        }
+    }
+
+    /// The defect: the synchronous arm reporting a success the licence server
+    /// never gave, on a build whose wiring layer failed to intercept.
+    @Test func theSynchronousArmNeverReportsAnActivation() async throws {
+        let ctx = try await makeContext()
+
+        let result = ctx.dispatcher.execute(.activateLicenseKey(key: Self.phoneKey))
+
+        #expect(!result.applied)
+        #expect(result.refusalReason?.isEmpty == false)
+    }
+}
+
+/// Answers the licence-server round trip from a canned reply, so these tests
+/// never reach the network. Same shape as `LicenseValidatorTests.Transport`.
+private final class LicenseTransportStub: @unchecked Sendable {
+    private(set) var requests: [URLRequest] = []
+    var answer: (Data?, URLResponse?, Error?) = (nil, nil, nil)
+
+    func stub(status: Int, json: String) {
+        answer = (Data(json.utf8),
+                  HTTPURLResponse(url: URL(string: "https://license.example.com")!,
+                                  statusCode: status, httpVersion: nil, headerFields: nil),
+                  nil)
+    }
+
+    var closure: LicenseValidator.Transport {
+        { [self] request, completion in
+            requests.append(request)
+            completion(answer.0, answer.1, answer.2)
+        }
     }
 }
 

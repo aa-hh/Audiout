@@ -117,7 +117,7 @@ Then on the mule: boot a simulator, install, `simctl spawn <udid> defaults write
 
 This opens a path nobody has taken: capture every screen against a live Mac serving the curated fleet, instead of against demo mode. It needs a tap on Connect, which `simctl` cannot do, so it would go through the existing XCUITest harness, plus the Allow click on the Mac.
 
-## 7. Uncommitted work in the phone worktree
+## 7. The approval capture (committed)
 
 It was reviewed and committed as `f253271`. The approval capture parks the connection in the awaiting-approval state through `ConnectionController(initialConnectionState:)` and names "MacBook Pro".
 

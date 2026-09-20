@@ -98,6 +98,19 @@ struct CastFeedStats: Sendable, Equatable {
     /// How many receiver GETs have dropped the backlog. More than one means a
     /// mid-session re-GET shortened the achieved delay.
     let feedResets: Int
+    /// The loudest sample in the last block the server actually served, as
+    /// dBFS, floored at −120 for all zeros. The AirPlay leg's `peak_dbfs`
+    /// (`StreamLevelSnapshot`), on this path. Taken AFTER the feed gain, so a
+    /// leg muted by ``CastFeedRing/setTargetGain(_:)`` reads silent — which is
+    /// the point, because ``underrunFrames`` stays at 0 both for a zeroed gain
+    /// and for a ring full of digital zeros. It covers one ~20 ms block, so a
+    /// single quiet sample is a pause; silence is every line reading the floor.
+    let peakDBFS: Double
+    /// Producer blocks the ring accepted: the success counterpart to
+    /// ``droppedBlocks``, and the AirPlay leg's `writes`. Frozen means the
+    /// capture tap handed nothing over; climbing while ``peakDBFS`` sits at the
+    /// floor means it is handing over silence.
+    let writes: Int
 }
 
 /// One Cast receiver's feed: the 2-second hand-off between the capture IOProc
@@ -159,6 +172,13 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
     private let droppedLockBusyWord: UnsafeMutablePointer<Int>
     private var underrunFrames = 0                          // lock-guarded (consumer)
     private var feedResets = 0                              // lock-guarded
+    /// Magnitude of the loudest sample in the last rendered block, and the
+    /// count of blocks the producer got in. Both lock-guarded; the peak is the
+    /// consumer's, the count the producer's.
+    private var lastRenderPeak: Int32 = 0
+    private var writes = 0
+    /// What an all-zero block reports, matching the AirPlay leg's floor.
+    private static let floorDBFS: Double = -120
 
     init() {
         storage = UnsafeMutablePointer<Int16>.allocate(capacity: Self.capacityFrames * 2)
@@ -218,6 +238,7 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
             }
         }
         availableFrames += frames
+        writes &+= 1
     }
 
     private func countDroppedBlock() {
@@ -267,7 +288,11 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
             droppedBlocks: dropped,
             droppedLockBusy: lockBusy,
             underrunFrames: underrunFrames,
-            feedResets: feedResets)
+            feedResets: feedResets,
+            peakDBFS: lastRenderPeak > 0
+                ? 20 * log10(Double(lastRenderPeak) / 32768)
+                : Self.floorDBFS,
+            writes: writes)
     }
 
     /// How much audio is queued right now. The server's pacing clock waits on
@@ -297,8 +322,23 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         // Unity on both ends is the whole attenuation-receiver path: the
         // memcpy above is all it costs.
         if currentGain != 1 || targetGain != 1 { applyGainLocked(&out, frames: frames) }
+        // After the gain, over the bytes the server is about to serve: a leg
+        // held at gain 0 is silence the underrun count cannot see.
+        lastRenderPeak = Self.peakMagnitude(out)
         lock.unlock()
         return out
+    }
+
+    /// Loudest sample magnitude in a block of interleaved S16LE.
+    private static func peakMagnitude(_ pcm: Data) -> Int32 {
+        pcm.withUnsafeBytes { raw in
+            var peak: Int32 = 0
+            for sample in raw.bindMemory(to: Int16.self) {
+                let magnitude = Int32(sample.magnitude)
+                if magnitude > peak { peak = magnitude }
+            }
+            return peak
+        }
     }
 
     /// The receiver's volume for a `fixed` receiver, in [0, 1]. Lock-guarded
@@ -893,6 +933,8 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
             "dropped_blocks": String(feed.droppedBlocks),
             "dropped_lock_busy": String(feed.droppedLockBusy),
             "underrun_frames": String(feed.underrunFrames),
+            "peak_dbfs": String(format: "%.1f", feed.peakDBFS),
+            "writes": String(feed.writes),
             "achieved_delay_ms": String(feed.achievedDelayMs),
         ])
         guard kept else { return }

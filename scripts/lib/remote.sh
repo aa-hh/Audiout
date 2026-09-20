@@ -287,6 +287,15 @@ remote_prune_stale() {
         2>/dev/null || true
 }
 
+# The remote command is a STRING the far shell re-parses, so a caller argument
+# must be quoted INTO that string, not just quoted in this shell. Prints each
+# argument single-quoted and preceded by one space; nothing if there are none.
+remote_quote_args() {
+    for _a in "$@"; do
+        printf " '%s'" "$(printf '%s' "$_a" | sed "s/'/'\\\\''/g")"
+    done
+}
+
 # Run a command in the synced tree on the remote.
 #   remote_run <repo_root> <shell command string>
 # Sets $remote_status to the command's own exit code when it ACTUALLY RAN.

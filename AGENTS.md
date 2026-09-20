@@ -77,6 +77,9 @@ because SwiftPM cannot depend on a package inside a subdirectory of another
 repo. `AudioutCore` pins it by version.
 - [dev/](dev/AGENTS.md) — offline dev tooling, plus `dev/notes/`, the home for
   research briefs and phase write-ups.
+- [marketing/video/](marketing/video/AGENTS.md) — Remotion demo videos, the only
+  JavaScript here. It rebuilds the app's Mixer panel rather than recording it,
+  so the likeness goes stale silently; nothing in the app may import from it.
 - [scripts/make-app.sh](scripts/make-app.sh) — wraps the executable into a real
   `.app` with a stable bundle id, signed with a Developer ID identity when one
   is present in the keychain (auto-detected, override with `CODESIGN_IDENTITY`),

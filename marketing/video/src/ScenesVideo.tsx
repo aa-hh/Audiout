@@ -11,48 +11,37 @@ import {
   AbsoluteFill,
   Easing,
   interpolate,
+  Sequence,
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
 import { color, font, PANEL_WIDTH } from "./tokens";
 import { DeviceModel, layout, Mixer, MixerModel } from "./mixer";
-import { Caption, ClickRing, Cursor, Menu } from "./chrome";
+import { CaptionCard, ClickRing, Cursor, Menu } from "./chrome";
 
 /** Every moment in the video, in frames at 30 fps. */
 const BEAT = {
-  hookIn: 12,
-  hookOut: 100,
 
   armHomePod: 122,
   armOffice: 168,
   armSonos: 212,
-  clickCapIn: 108,
-  clickCapOut: 252,
 
   dragStart: 276,
   dragEnd: 330,
-  levelCapIn: 262,
-  levelCapOut: 348,
 
   plusClick: 382,
   plusMenuIn: 384,
   plusMenuPick: 424,
   plusMenuOut: 434,
-  saveCapIn: 362,
-  saveCapOut: 500,
 
   cutOut: 510,
   cutIn: 538,
-  laterCapIn: 512,
-  laterCapOut: 552,
 
   destClick: 580,
   destMenuIn: 582,
   destMenuPick: 630,
   destMenuOut: 640,
   recall: 642,
-  recallCapIn: 562,
-  recallCapOut: 790,
 
   outroIn: 800,
   end: 900,
@@ -254,38 +243,32 @@ export const ScenesVideo: React.FC = () => {
         }}
       />
 
-      <Caption
-        text="Play on every speaker at once."
-        opacity={pulse(frame, BEAT.hookIn, BEAT.hookOut) * (1 - outro)}
-        lift={interpolate(pulse(frame, BEAT.hookIn, BEAT.hookOut), [0, 1], [18, 0])}
-      />
-      <Caption
-        text="Click a name. It plays there."
-        opacity={pulse(frame, BEAT.clickCapIn, BEAT.clickCapOut)}
-        lift={0}
-      />
-      <Caption
-        text="Every speaker keeps its own level."
-        opacity={pulse(frame, BEAT.levelCapIn, BEAT.levelCapOut)}
-        lift={0}
-      />
-      <Caption
-        text="Save the set as a scene."
-        accent="Name it in the Scenes window."
-        opacity={pulse(frame, BEAT.saveCapIn, BEAT.saveCapOut)}
-        lift={0}
-      />
-      <Caption
-        text="Tomorrow morning."
-        opacity={pulse(frame, BEAT.laterCapIn, BEAT.laterCapOut, 8)}
-        lift={0}
-      />
-      <Caption
-        text="One click. Everything’s back."
-        accent="At the levels you left it."
-        opacity={pulse(frame, BEAT.recallCapIn, BEAT.recallCapOut)}
-        lift={0}
-      />
+      {/* Captions. Each one's timing IS its sequence: drag either edge on the
+          Studio timeline and the numbers below move with it. */}
+      <Sequence name="Hook" from={12} durationInFrames={100} premountFor={30}>
+        <CaptionCard text="Play on every speaker at once." />
+      </Sequence>
+      <Sequence name="Click a name" from={108} durationInFrames={156} premountFor={30}>
+        <CaptionCard text="Click a name. It plays there." />
+      </Sequence>
+      <Sequence name="Own level" from={262} durationInFrames={98} premountFor={30}>
+        <CaptionCard text="Every speaker keeps its own level." />
+      </Sequence>
+      <Sequence name="Save it" from={362} durationInFrames={150} premountFor={30}>
+        <CaptionCard
+          text="Save the set as a scene."
+          note="Name it in the Scenes window."
+        />
+      </Sequence>
+      <Sequence name="Later" from={512} durationInFrames={48} premountFor={30}>
+        <CaptionCard text="Tomorrow morning." />
+      </Sequence>
+      <Sequence name="Recall" from={562} durationInFrames={240} premountFor={30}>
+        <CaptionCard
+          text="One click. Everything’s back."
+          note="At the levels you left it."
+        />
+      </Sequence>
 
       {/* The stage: the panel and everything drawn in its coordinate space. */}
       <div

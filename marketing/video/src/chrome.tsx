@@ -1,6 +1,13 @@
 /** Pointer, menus and captions laid over the rebuilt Mixer panel. */
 
 import React from "react";
+import {
+  Easing,
+  Interactive,
+  interpolate,
+  useCurrentFrame,
+  useVideoConfig,
+} from "remotion";
 import { color, font } from "./tokens";
 
 /** The macOS arrow, drawn in panel points so it scales with the camera. */
@@ -127,48 +134,76 @@ export const Menu: React.FC<{
   </div>
 );
 
-/** The one line of copy carrying each beat, above the panel. */
-export const Caption: React.FC<{
-  text: string;
-  accent?: string;
-  opacity: number;
-  lift: number;
-}> = ({ text, accent, opacity, lift }) => (
-  <div
-    style={{
-      position: "absolute",
-      left: 90,
-      right: 90,
-      top: 300,
-      textAlign: "center",
-      fontFamily: font.ui,
-      opacity,
-      translate: `0px ${lift}px`,
-    }}
-  >
-    <div
+/**
+ * The line of copy carrying one beat.
+ *
+ * Wrap it in a `<Sequence>` — it fades itself in and out against that
+ * sequence's own length, so its timing is the sequence's `from` and
+ * `durationInFrames` and nothing else. Both are draggable on the Studio
+ * timeline, and the styles below are literals on purpose: Studio can only
+ * keyframe and write back values it can see inline, so these do not go
+ * through `tokens.ts` the way the rebuilt panel does.
+ */
+export const CaptionCard: React.FC<{
+  readonly text: string;
+  readonly note?: string;
+}> = ({ text, note }) => {
+  const frame = useCurrentFrame();
+  const { durationInFrames } = useVideoConfig();
+
+  return (
+    <Interactive.Div
+      name="Caption"
       style={{
-        fontSize: 72,
-        lineHeight: "84px",
-        fontWeight: 600,
-        letterSpacing: "-0.02em",
-        color: "#F7F6F4",
+        position: "absolute",
+        left: 90,
+        right: 90,
+        top: 300,
+        textAlign: "center",
+        fontFamily: '-apple-system, "SF Pro Text", sans-serif',
+        opacity: interpolate(
+          frame,
+          [0, 12, durationInFrames - 12, durationInFrames],
+          [0, 1, 1, 0],
+          {
+            extrapolateLeft: "clamp",
+            extrapolateRight: "clamp",
+            easing: Easing.bezier(0.16, 1, 0.3, 1),
+          },
+        ),
+        translate: interpolate(frame, [0, 12], ["0px 18px", "0px 0px"], {
+          extrapolateLeft: "clamp",
+          extrapolateRight: "clamp",
+          easing: Easing.bezier(0.16, 1, 0.3, 1),
+        }),
       }}
     >
-      {text}
-    </div>
-    {accent ? (
-      <div
+      <Interactive.Div
+        name="Caption headline"
         style={{
-          marginTop: 22,
-          fontSize: 40,
-          lineHeight: "50px",
-          fontWeight: 400,
-          color: color.label2,
+          fontSize: 72,
+          lineHeight: "84px",
+          fontWeight: 600,
+          letterSpacing: "-0.02em",
+          color: "#F7F6F4",
         }}
       >
-        {accent}
-      </div>
-    ) : null}
-  </div>
-);
+        {text}
+      </Interactive.Div>
+      {note ? (
+        <Interactive.Div
+          name="Caption note"
+          style={{
+            marginTop: 22,
+            fontSize: 40,
+            lineHeight: "50px",
+            fontWeight: 400,
+            color: "#B7AC95",
+          }}
+        >
+          {note}
+        </Interactive.Div>
+      ) : null}
+    </Interactive.Div>
+  );
+};

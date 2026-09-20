@@ -7,9 +7,9 @@ touching anything.
 ## Where you are
 
 - Worktree: `.claude/worktrees/trusting-liskov-371f2b`, branch
-  `claude/remotion-demo-videos-726553`, HEAD **`0f3800e4`**, pushed, open as
+  `claude/remotion-demo-videos-726553`, HEAD **`c30732c6`**, pushed, open as
   [PR #216](https://github.com/aa-hh/Audiout/pull/216).
-- Three commits are **landed and green in CI**. On top of them sits
+- Four commits are landed; the first three are **green in CI**. On top of them sits
   **uncommitted working-tree state** — one finished track of a four-track work
   order. **The tree is the truth. Do not restore from HEAD.**
 - Nobody has committed the uncommitted part on purpose: the work order says the
@@ -75,8 +75,7 @@ independent of everything. Then: one combined verification, then a review.
  marketing/video/src/tokens.ts | 131 +++++--
 ```
 
-plus two untracked paths: `marketing/video/reference/` (four PNGs, see §5) and
-`dev/notes/work-order-2026-09-20-mixer-fidelity.md`.
+plus one untracked path: `marketing/video/reference/` (four PNGs, see §5).
 
 ## 4. Why the panel is rebuilt rather than captured
 

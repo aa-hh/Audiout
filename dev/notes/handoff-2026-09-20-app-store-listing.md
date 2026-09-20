@@ -164,3 +164,39 @@ Measured, on slide 3: the dark phone body is 1.08:1 against the slide ground and
 3. ~~Re-render the set with the corrected captions from `app-store-listing-copy.md`.~~ Done.
 4. Settle §9.4.
 5. The purchase chain in §5 is separate work and mostly Alec's; do not let it block the listing.
+
+## 12. Later the same night
+
+The phone branch `claude/store-shots` is at `43d53c8`. It now carries a merge of
+`claude/wizard-design-audit-9cab03` — the redesigned Align sheet, which follows
+the system appearance; that branch is pushed but not merged to main — plus the
+parked sync captures re-wired to the new sheet's `Verdict` and `State` shapes,
+and 408 unit tests green on the mule.
+
+The slides: the fields are gold, green, magenta, gold, green, magenta; every
+emitter alpha is 0.9; the gold ramp is `#8A6A2F` / `#E8B84B` / `#FFF3D1`; the
+phases on slides 1 and 6 sit at the swell peak; slide 1 reach is 1350. The
+connect captures come from the demo path and say "MacBook Pro". The settings
+captures show "Mac licence / Bought".
+
+§9 status: 9.2 is answered, light is the pick. 9.6 is answered by the wizard
+branch — the sheet no longer forces dark, so slide 4 light is usable. 9.1 (04a
+vs 04b), 9.4 (the Dynamic Island pill) and 9.5 (05a vs 05b) are still open. The
+crests touch the headline's edge on slides 3 and 6; it reads fine, but the owner
+has not ruled on it.
+
+The mule demo build: host `alechamilton@SUMUP-M9Y197RFVG.local`, simulator
+`5B35AE36-A2AC-45EA-B371-6D31BEB6AE0B`. Relaunch it only with
+`xcrun simctl launch <udid> com.audiout.remote -uitest-isolated -store-shots` —
+a tap on the home screen drops those flags and the app then finds the real Mac.
+On the Xcode 27 beta the simulator window belongs to DeviceHub, not Simulator.
+
+Trap: `ios.sh shot --appearance both` set the appearance AFTER the app launched,
+until this commit. A frozen screen repaints its content on the flip but keeps
+the toolbar it was built with at launch, so the light capture came back with a
+white title on a white header. Fixed in this commit.
+
+Trap: a remembered Mac (`knownMacs`, `lastUsedMacID` in the simulator's copy of
+the app defaults) leaks the owner's own Mac name into the connect capture. Clear
+it with
+`simctl spawn <udid> defaults delete <container>/Library/Preferences/com.audiout.remote knownMacs`.

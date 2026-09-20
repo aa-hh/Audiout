@@ -379,21 +379,14 @@ public struct AppSettings {
     /// mirroring `BackendKind.environmentVariableName`'s dev-convenience idiom.
     public static let allowRemoteControlEnvironmentVariableName = "AUDIOUT_COMPANION"
 
-    /// Whether this build offers the iPhone companion at all — `false` until
-    /// Audiout Remote is approved and on the App Store.
-    ///
-    /// Every surface that mentions the phone app is an invitation to download
-    /// it, and until it exists each one is a dead end: the Setup window's
-    /// iPhone card, the Settings › General switch with its QR row and phone
-    /// list, and the alignment wizard's "Measure with your iPhone" panel all
-    /// read this and stay off the screen. The companion server does not start
-    /// either — there is nothing on any phone to connect with.
-    ///
-    /// Flip this to `true` on the release that follows the phone app's
-    /// approval; nothing else moves. `AUDIOUT_COMPANION=on` still wins over
-    /// it, so a dev build can turn the whole feature back on to test against
-    /// a TestFlight phone.
-    public static let remoteAppIsOffered = false
+    /// Whether this build offers the iPhone companion at all. Every surface
+    /// that mentions the phone app reads the resolution this feeds — the Setup
+    /// window's iPhone card, the Settings › General switch with its QR row and
+    /// phone list, the alignment wizard's "Measure with your iPhone" panel —
+    /// and the companion server does not start while it is `false`, so one
+    /// flip takes the whole feature off the screen. `AUDIOUT_COMPANION` still
+    /// wins over it for one launch, either way.
+    public static let remoteAppIsOffered = true
 
     /// What decided a ``resolvedAllowRemoteControlWithSource(explicit:environment:settings:)``
     /// call — carried alongside the resolved value so a caller that needs to

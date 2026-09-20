@@ -2,6 +2,8 @@
 
 2026-09-20, evening. Everything below is pushed unless it says otherwise. **Nothing is merged.**
 
+Updated later the same evening: the phone branch is now at `baf8bfa`, everything in §7 is committed, and the slides are re-rendered with the corrected captions.
+
 The job Alec asked for: finish the App Store listing for the iPhone companion app, screenshots included, and run a design discovery first into how the listing conveys visually that the phone is a remote for the Mac app rather than a standalone product.
 
 Read these two first, they are the substance:
@@ -22,9 +24,11 @@ Read these two first, they are the substance:
 | `1530db3b` | the Mac activates a licence key the phone bought (see §5) |
 | `74304f2f` | corrects the false claim in `ios.sh` that the Simulator cannot find a Mac |
 
-**Phone repo** (`/Users/alechenderson/Projects/audiout-remote`), `claude/store-shots`, head `a50b6af`. `origin/main` is merged in, so it carries the in-app purchase. It has **uncommitted work**, see §7.
+**Phone repo** (`/Users/alechenderson/Projects/audiout-remote`), `claude/store-shots`, head `baf8bfa`. `origin/main` is merged in, so it carries the in-app purchase. It has no uncommitted work. The phone's unit tests ran on the second Mac after these changes: "Test run with 394 tests in 24 suites passed".
 
 Earlier commits on it add `-store-shots` (opens the demo shell directly, Mac named "MacBook Pro", three speakers playing, and `showsDemoAffordances = false` hiding the Demo strip, the Speakers coach mark and Settings' "Leave demo" row), `-store-shots-screen NAME`, the demo additions (Bedroom HomePod, Apple Music routed to it, Spotify routed to the Living Room scene, a second saved scene "Kitchen"), and `scripts/store-shots/`, the slide renderer.
+
+Three more commits finish it: `f253271` adds the `approval` capture screen and a stand-in licence key store under `-store-shots` so Settings reads "Mac licence / Bought"; `ec72a93` brings the captions over from the listing copy, adds `build-all.sh dark|light`, renders both sync and both connect states, and gitignores `out-light/`; `baf8bfa` keeps slides 4 and 6 to two headline lines by moving the second sentence of each caption to the sub-line.
 
 ## 2. How a screenshot gets made
 
@@ -39,12 +43,13 @@ bash scripts/ios.sh shot \
   --appearance both --screen speakers
 ```
 
-Screens: `speakers apps scenes sync sync-listening sync-settled connect settings`, plus `approval` once §7 is committed. Output is `<screen>-<dark|light>.png` at 1320×2868. The script builds Release (Debug leaks a "Replay intro" row into Settings), pins the status bar to 09:41 twice, and copies `scripts/store-shots/app-icons/*.png` into the simulator's icon cache so Apple Music and Spotify show real artwork.
+Screens: `speakers apps scenes sync sync-listening sync-settled connect settings approval`. Output is `<screen>-<dark|light>.png` at 1320×2868. The script builds Release (Debug leaks a "Replay intro" row into Settings), pins the status bar to 09:41 twice, and copies `scripts/store-shots/app-icons/*.png` into the simulator's icon cache so Apple Music and Spotify show real artwork.
 
 ```bash
 # render — from the phone repo
 cd /Users/alechenderson/Projects/audiout-remote/.claude/worktrees/store-shots/scripts/store-shots
-./build-all.sh                       # all six into out/
+./build-all.sh                       # dark, into out/ — 8 files: 01 02 03 04a 04b 05a 05b 06
+./build-all.sh light                 # the same 8 into out-light/
 ./build.sh out/03-scenes.png PAGE=slide3.html PHONE=captures/scenes-light.png
 ```
 
@@ -114,27 +119,22 @@ This opens a path nobody has taken: capture every screen against a live Mac serv
 
 ## 7. Uncommitted work in the phone worktree
 
-`/Users/alechenderson/Projects/audiout-remote/.claude/worktrees/store-shots`:
-- `AudioutRemote/RootView.swift` and `AudioutRemote/Networking/ConnectionController.swift` add `-store-shots-screen approval`, which parks the gate at `ConnectGateView.Junction.awaitingApproval` with the connection really in that state rather than the view forced. It seeds `lastUsedMacID` so the instruction names a Mac.
-- `captures/approval-dark.png` and `approval-light.png` exist already.
-- `scripts/store-shots/sheet.py` is modified and `scripts/store-shots/out-light/` is untracked.
-
-An agent was told to finish and commit this and Alec cancelled it mid-task, so **it is unreviewed and untested**. Read it before trusting it. `out-light/` is not gitignored although `out/` is, so it would otherwise land as about 20 MB of PNGs.
+It was reviewed and committed as `f253271`. The approval capture parks the connection in the awaiting-approval state through `ConnectionController(initialConnectionState:)` and names "MacBook Pro".
 
 ## 8. What the slides look like now
 
 `scripts/store-shots/out/` (dark phones) and `out-light/` (light phones on the same dark ground), plus `contact-sheet.png` in each and `compare-01.png` / `compare-03.png`.
 
-| # | screen | caption as rendered |
-|---|---|---|
-| 1 | Speakers + Mac popover | Your Mac's speakers. In your hand. |
-| 2 | Apps | Send one app to the kitchen. |
-| 3 | Scenes | One tap plays the whole house. |
-| 4 | Sync, two versions `04a` listening and `04b` settled | Your phone is the ear. |
-| 5 | Connect | Finds your Mac. Allow once. |
-| 6 | Settings | Included with Audiout for Mac. |
+| # | screen | caption as rendered | sub-line |
+|---|---|---|---|
+| 1 | Speakers + Mac popover | Your Mac's speakers. In your hand. | |
+| 2 | Apps | Send one app to the kitchen. | |
+| 3 | Scenes | Saved scenes. One tap to play. | |
+| 4 | Sync, two versions `04a` listening and `04b` settled | Your iPhone is the ear. | It aligns a Bluetooth speaker. Stand where you listen. |
+| 5 | Connect, two versions `05a` found and `05b` approval | Finds your Mac on the same Wi-Fi. Allow once. | Tap your Mac's name. It asks once, then remembers. |
+| 6 | Settings | Talks to your Mac directly. | No account, no sign-in. |
 
-Captions 3 to 6 are **superseded** by `dev/notes/app-store-listing-copy.md`, which changed them for real reasons: caption 6 is both untrue now and a commercial term, which guideline 2.3.7 bars inside a screenshot. The slides still carry the old text. Re-render after reading that note.
+Slides 4 and 6 could not hold the copy note's full caption on two headline lines at 107px, so each second sentence became the sub-line.
 
 Measured, on slide 3: the dark phone body is 1.08:1 against the slide ground and reads as a floating list; the light phone is 17.45:1 and reads as a phone.
 
@@ -142,9 +142,9 @@ Measured, on slide 3: the dark phone body is 1.08:1 against the slide ground and
 
 1. **Slide 4**, listening or settled. Both are rendered as `04a` and `04b` and were sent to him; no answer yet.
 2. **Appearance.** He said he will shoot Speakers, Apps and Scenes himself because he wants to control exactly how they look, and to keep light for the others. **His iPhone 15 Pro captures at 1179×2556, the 6.1 inch class.** Apple needs a 6.9 inch set (1320×2868) or a 6.5 inch one; 6.1 alone is not accepted. His three would have to be scaled up 1.12×, or he directs the state and someone shoots it natively on the 6.9 inch simulator. He has been told and has not answered.
-3. **The Settings slide shows a disabled grey "Buy Mac licence" row**, because no StoreKit product loads in an isolated launch. It reads as broken, and its footer mentions a free trial under a headline that is changing anyway.
+3. **Settled.** The capture now shows "Mac licence / Bought" via the stand-in key store, which the copy note's Guideline 2.3.7 constraint required anyway.
 4. **The light connect capture has a black Dynamic Island pill** against a near-white status bar, measured at island `(0,0,0)` versus background `(249,249,250)`. It appears because that junction draws its field edge to edge under the status bar. The dark capture is clean. Whether it is wrong at all is a judgement call; it is not in other apps' listings.
-5. **Slide 5**, the plain found-Mac screen or the approval screen. Alec described the approval screen from memory and liked it; it names the Mac and shows the one-time Allow, which is what the caption claims. §7 has the capture.
+5. **Slide 5**, the plain found-Mac screen or the approval screen. Both are rendered, as `05a` and `05b`. Alec described the approval screen from memory and liked it; it names the Mac and shows the one-time Allow, which is what the caption claims. §7 has the capture.
 6. **The wizard's appearance.** Alec believes "the new design for the wizard is a light mode". The code and the design record disagree: `SyncSheet.swift:72` forces dark, landed in `55f39a9`, and `DESIGN.md` records `stagePlate` as "the alignment run page's dark ground, fixed in both light and dark appearance", with stageInk, stageRule, stageReference and fuseWhite all fixed the same way. The Mac's own stage says the same. No unmerged branch changes it. So either he is thinking of a proposal that never landed, or he wants a real design change. **Unresolved, and it blocks slide 4's appearance**: the light sync capture is a grey band above a black screen and is unusable as it stands.
 
 ## 10. Traps worth carrying forward
@@ -160,7 +160,7 @@ Measured, on slide 3: the dark phone body is 1.08:1 against the slide ground and
 ## 11. Suggested order for whoever picks this up
 
 1. Get answers to §9.1, §9.2 and §9.6 before rendering anything again; 9.6 decides whether slide 4 can be light.
-2. Review and commit or discard §7.
-3. Re-render the set with the corrected captions from `app-store-listing-copy.md`.
-4. Settle §9.3 and §9.4.
+2. ~~Review and commit or discard §7.~~ Done.
+3. ~~Re-render the set with the corrected captions from `app-store-listing-copy.md`.~~ Done.
+4. Settle §9.4.
 5. The purchase chain in §5 is separate work and mostly Alec's; do not let it block the listing.

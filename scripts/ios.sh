@@ -4,7 +4,7 @@
 #   scripts/ios.sh build  [--root DIR] [extra xcodebuild args]
 #   scripts/ios.sh device [--root DIR] [--name LABEL] [extra xcodebuild args]
 #   scripts/ios.sh test   [--root DIR] [extra xcodebuild args]
-#   scripts/ios.sh shot   [--root DIR] [--out DIR] [--appearance dark|light|both]
+#   scripts/ios.sh shot   [--root DIR] [--out DIR] [--appearance dark|light|both] [--screen NAME]
 #
 # `device` is the one that puts the app on the owner's actual iPhone, which is
 # the only way the companion app is ever verified (audiout-remote's AGENTS.md).
@@ -60,6 +60,7 @@ fi
 
 out_dir=$(pwd)
 appearances="dark light"
+shot_screen=speakers
 device_label=
 if [ "$mode" = device ]; then
     while [ $# -gt 0 ]; do
@@ -82,6 +83,8 @@ if [ "$mode" = shot ]; then
                        *) echo "ios.sh: --appearance needs dark|light|both" >&2; exit 64 ;;
                    esac
                    shift 2 ;;
+            --screen) [ -n "${2:-}" ] || { echo "ios.sh: --screen needs a name" >&2; exit 64; }
+                   shot_screen=$2; shift 2 ;;
             *) echo "ios.sh: unknown shot option '$1'" >&2; exit 64 ;;
         esac
     done
@@ -220,11 +223,12 @@ newest_iphone='xcrun simctl list devices available 2>/dev/null | awk "
 # a remote run writes into the synced tree (relative, fetchable), a local run
 # writes straight where the caller asked.
 #
-# WHICH TAB YOU GET: Speakers, via `-store-shots` (RootView.swift): the app
-# opens straight into the demo fleet with the Demo strip hidden and the Mac
-# named like a real one, which is the App Store screenshot state. `-uitest-
-# isolated` alongside it skips Bonjour browsing so a real Mac on the LAN can't
-# pull the app away mid-capture.
+# WHICH SCREEN YOU GET: `--screen NAME` (default speakers) becomes the app's
+# `-store-shots-screen NAME` launch argument (RootView.swift), and the file is
+# `NAME-<look>.png`. `-store-shots` opens straight into the demo fleet with the
+# Demo strip hidden and the Mac named like a real one, which is the App Store
+# screenshot state; `-uitest-isolated` alongside it skips Bonjour browsing so a
+# real Mac on the LAN can't pull the app away mid-capture.
 #
 # $1 = output directory, as the machine that runs this will see it.
 shot_cmd_for() {
@@ -244,13 +248,13 @@ shot_cmd_for() {
     xcrun simctl bootstatus \"\$udid\" -b >/dev/null; \
     xcrun simctl install \"\$udid\" \"\$app\"; \
     xcrun simctl terminate \"\$udid\" \"\$bundle\" >/dev/null 2>&1 || true; \
-    xcrun simctl launch \"\$udid\" \"\$bundle\" -uitest-isolated -store-shots >/dev/null; \
-    sleep 2; \
+    xcrun simctl launch \"\$udid\" \"\$bundle\" -uitest-isolated -store-shots -store-shots-screen $shot_screen >/dev/null; \
+    sleep 3; \
     mkdir -p \"$1\"; \
     for look in $appearances; do \
         xcrun simctl ui \"\$udid\" appearance \"\$look\"; \
         sleep 1; \
-        xcrun simctl io \"\$udid\" screenshot \"$1/speakers-\$look.png\" >/dev/null || exit 70; \
+        xcrun simctl io \"\$udid\" screenshot \"$1/$shot_screen-\$look.png\" >/dev/null || exit 70; \
     done; \
     xcrun simctl ui \"\$udid\" appearance dark"
 }
@@ -304,11 +308,11 @@ refuse_local() {
 fetch_shots() {
     mkdir -p "$out_dir"
     for look in $appearances; do
-        if remote_fetch "$root" "$shot_remote_out/speakers-$look.png" \
-                        "$out_dir/speakers-$look.png"; then
-            echo "  wrote $out_dir/speakers-$look.png" >&2
+        if remote_fetch "$root" "$shot_remote_out/$shot_screen-$look.png" \
+                        "$out_dir/$shot_screen-$look.png"; then
+            echo "  wrote $out_dir/$shot_screen-$look.png" >&2
         else
-            echo "ios.sh: ran on $remote_host but could not fetch speakers-$look.png" >&2
+            echo "ios.sh: ran on $remote_host but could not fetch $shot_screen-$look.png" >&2
             exit 70
         fi
     done

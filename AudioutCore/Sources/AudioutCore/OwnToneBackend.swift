@@ -863,7 +863,13 @@ public func makeBackend(
         // fixture in the offline fleet, so the fixed-volume pending fader can
         // be reproduced with zero hardware. Opt-in via env; absent = the
         // exact pre-existing demo fleet.
-        var fleet: [Device] = .demoFleet
+        // The App Store screenshot composite puts the Mac popover beside the
+        // iPhone app's screen, so both halves must name the same speakers —
+        // `storeShotsFleet` copies the phone's demo fleet. Opt-in via env;
+        // absent = the exact pre-existing demo fleet.
+        var fleet: [Device] = ProcessInfo.processInfo.environment["AUDIOUT_MOCK_FLEET"] == "store-shots"
+            ? .storeShotsFleet
+            : .demoFleet
         if let lag = ProcessInfo.processInfo.environment["AUDIOUT_MOCK_CAST_LAG"].flatMap(Int.init) {
             fleet.append(Device(id: "cast-tv", name: "Google TV", kind: .cast,
                                 supportsAirPlay2: false, volume: 45,

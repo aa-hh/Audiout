@@ -657,6 +657,28 @@ public extension Array where Element == Device {
         ]
     }
 
+    /// The fleet the App Store screenshots show. The composite puts this
+    /// popover next to the iPhone app's screen, so both halves have to name
+    /// the same speakers; the iPhone app's demo fleet is the reference and
+    /// these names/kinds copy it exactly. Selected here = "Playing" there.
+    /// Reached with `AUDIOUT_MOCK_FLEET=store-shots` (see `makeBackend`).
+    static var storeShotsFleet: [Device] {
+        [
+            Device(id: "local-mac", name: "MacBook Pro Speakers", kind: .localMac,
+                   supportsAirPlay2: false, volume: 65, isLocalDevice: true),
+            Device(id: "homepod-kitchen", name: "Kitchen HomePod", kind: .homePod,
+                   volume: 55, isSelected: true),
+            Device(id: "sonos-one-left", name: "Sonos One (Left)", kind: .sonos,
+                   volume: 45, isSelected: true),
+            Device(id: "sonos-one-right", name: "Sonos One (Right)", kind: .sonos,
+                   volume: 45, isSelected: true),
+            Device(id: "bt-kitchen-jbl", name: "Kitchen JBL", kind: .bluetooth,
+                   supportsAirPlay2: false, volume: 40),
+            Device(id: "office-speaker", name: "Office Speaker", kind: .generic,
+                   isAvailable: false, supportsAirPlay2: false, volume: 30),
+        ]
+    }
+
     /// `demoFleet` PLUS one extra, explicitly-named AP1-only fixture
     /// (T-UI-AP1-1, PLAN-PHASE-2B D6, T10): AP1 devices are LIVE — `NativeBackend`
     /// `addOutput`s them same as AP2, and the popover renders the row

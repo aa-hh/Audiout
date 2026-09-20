@@ -3189,6 +3189,30 @@ extension AppDelegate: CompanionCoordinatorHost {
         sendAppIconPage(AppIconCache.chunk(Array(wanted)), index: 0, to: clientID)
     }
 
+    /// A licence key bought on the phone. Kept in this target
+    /// because it needs `LicenseValidator`, the gate window and
+    /// `applyLicenseState`, none of which an AppKit-free type owns.
+    @MainActor
+    func activateLicenseKey(_ key: String,
+                            reply: @escaping (CompanionServer.CommandResult) -> Void) {
+        if let gate = licenseGateWindowController {
+            // The gate is still up: its own field already runs the
+            // validate/store/pass sequence, so hand the key to it rather than
+            // racing it with a second validator.
+            gate.submit(key: key)
+            reply(CompanionServer.CommandResult(applied: true))
+            return
+        }
+        CompanionLicenseActivation(settings: settings).activate(key: key) { [weak self] result in
+            reply(result)
+            // `applyLicenseState` is what pushes the companion token that
+            // unlocks the phone.
+            guard result.applied, let self, !self.isTerminating else { return }
+            self.applyLicenseState()
+            LicenseCheckIn(settings: self.settings).checkInIfNeeded()
+        }
+    }
+
     @MainActor
     func devices() -> [Device] { Array(devicesByID.values) }
 

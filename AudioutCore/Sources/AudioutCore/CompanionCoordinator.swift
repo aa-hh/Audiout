@@ -23,6 +23,11 @@ public protocol CompanionCoordinatorHost: AnyObject {
     func runningApplications() -> [(bundleID: String, displayName: String)]
     /// Answer a phone's `requestAppIcons` — reading an icon is AppKit work.
     func serveAppIconPages(_ requested: [String], to clientID: UUID)
+    /// Run a licence key the phone sent, and reply to that command. Needs
+    /// `LicenseValidator`, the gate window and `applyLicenseState`, none of
+    /// which an AppKit-free type owns.
+    func activateLicenseKey(_ key: String,
+                            reply: @escaping (CompanionServer.CommandResult) -> Void)
     /// The live device fleet, unsorted.
     func devices() -> [Device]
     /// The row symbol for `device`, honouring the user's icon overrides.
@@ -258,6 +263,15 @@ public final class CompanionCoordinator {
                         applied: false,
                         refusalReason: "Too many commands. Slow down and try again."))
                     return
+                }
+                // A phone-bought licence key is answered by the HOST, not
+                // in the dispatcher and not here: it needs `LicenseValidator`,
+                // the gate window and `applyLicenseState`, none of which an
+                // AppKit-free, client-agnostic type owns
+                // (CompanionCommandDispatcher.swift).
+                if case .activateLicenseKey(let key) = command {
+                    self.host?.activateLicenseKey(key, reply: reply)
+                    return  // no snapshot broadcast — licence state is not snapshot state
                 }
                 // Icon requests are answered by the HOST, not in the
                 // dispatcher: addressing the icon frames needs the client

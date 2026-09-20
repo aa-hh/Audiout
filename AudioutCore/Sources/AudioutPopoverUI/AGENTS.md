@@ -69,7 +69,7 @@ folder renders; routing arithmetic lives in Core.
 
 ## Map
 
-- `PopoverController` → the Mixer brain: card stack, device ingest, controller calls.
+- `PopoverController` → the Mixer brain: card stack, device ingest, controller calls. Wizard, sync-drawer, Applications-card and test-hook members live in `PopoverController+<Name>.swift`.
 - `PopoverPanelViewController` → the panel view controller every host mounts.
 - `AppSurfaceController` → owns the shell, swaps the three screens.
 - `SurfaceToolbar` → the window's header strip, built from bordered `NSToolbarItem`s.

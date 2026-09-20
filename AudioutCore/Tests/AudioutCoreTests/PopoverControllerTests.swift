@@ -2866,7 +2866,7 @@ import AudioutProtocol
             }
             return nil
         }
-        let banner = try #require(firstDescendant(SilenceFallbackBannerView.self, in: root),
+        let banner = try #require(firstDescendant(SystemAirPlayNoteBannerView.self, in: root),
                                   "the fallback banner is mounted")
         let anyRow = try #require(popover.test_deviceRow(for: "office"))
 

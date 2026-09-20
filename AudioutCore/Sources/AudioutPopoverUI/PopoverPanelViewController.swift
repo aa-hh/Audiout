@@ -1550,7 +1550,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     // MARK: Silence-fallback banner (Wave 2 W2-T2, R11)
 
     private weak var bannerLabel: NSTextField?
-    private weak var bannerView: SilenceFallbackBannerView?
+    private weak var bannerView: SystemAirPlayNoteBannerView?
 
     /// Show (or, with `nil`, clear) a full-width warning banner PINNED above every
     /// card — used by the generalized silence watchdog to say "Speakers unreachable
@@ -1562,18 +1562,19 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// `action`, when non-nil, renders a trailing call-to-action button — the
     /// note slot's shape, so the banner is a place the user can DO something
     /// rather than a dead end.
-    func setBanner(_ text: String?, action: SilenceFallbackBannerView.Action? = nil) {
-        if let existing = stackView.arrangedSubviews.first(where: { $0 is SilenceFallbackBannerView }) {
+    func setBanner(_ text: String?, action: SystemAirPlayNoteBannerView.Action? = nil) {
+        if let existing = stackView.arrangedSubviews.first(where: { $0 is SystemAirPlayNoteBannerView }) {
             stackView.removeArrangedSubview(existing)
             existing.removeFromSuperview()
         }
         bannerLabel = nil
         bannerView = nil
         guard let text else { return }
-        let banner = SilenceFallbackBannerView(
+        let banner = SystemAirPlayNoteBannerView(
             text: text,
             maxTextWidth: panelWidth - 28 - 30,
-            action: action)
+            action: action,
+            severity: .warning)
         bannerLabel = banner.label
         bannerView = banner
         stackView.insertArrangedSubview(banner, at: 0)

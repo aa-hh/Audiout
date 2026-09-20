@@ -338,8 +338,8 @@ public enum Tokens {
 
         /// The **FAILURE-EXCLUSIVE** hue (house rule 8): the failed connection
         /// ring, the failed row's sublabel, the diagnosis panel, and both
-        /// banners' problem tier (`SilenceFallbackBannerView`,
-        /// `SystemAirPlayNoteBannerView`'s `.warning`) — never a meter (a loud
+        /// banners' problem tier (`SystemAirPlayNoteBannerView`'s `.warning`)
+        /// — never a meter (a loud
         /// party can never impersonate a failure) and never remapped by the
         /// accent dial (red stays red in every mode).
         ///

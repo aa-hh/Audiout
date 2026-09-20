@@ -132,8 +132,7 @@ extension SerializedSharedState {
     }
 
     /// A banner's tinted plate: the tier's own token at 12 % over the surface
-    /// ground (`SilenceFallbackBannerView.swift:129`,
-    /// `SystemAirPlayNoteBannerView.swift:183-185`).
+    /// ground (`SystemAirPlayNoteBannerView.swift:183-185`).
     private func bannerTint(_ tint: NSColor, _ appearanceName: NSAppearance.Name) -> NSColor {
         composited(resolved(tint, appearanceName: appearanceName)
                     .withAlphaComponent(Self.bannerTintAlpha),

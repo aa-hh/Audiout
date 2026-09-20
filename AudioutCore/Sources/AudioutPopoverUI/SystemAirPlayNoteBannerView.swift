@@ -7,8 +7,8 @@ import AudioutSharedUI
 /// note (Wave 3 W3-T3, `BackendEvent.systemDefaultIsAirPlayActive`) — shown
 /// when the macOS SYSTEM default output is itself an AirPlay device WHILE this
 /// app is actively streaming a captured whole-system mix to AirPlay, which
-/// risks the same audio going out twice (echo). The iOS Status Banner recipe,
-/// shared with `SilenceFallbackBannerView`: the tier's tint at 12 % on the
+/// risks the same audio going out twice (echo). The iOS Status Banner recipe:
+/// the tier's tint at 12 % on the
 /// control radius, no border, a glyph and a wrapping label. `.info` (the
 /// default) carries this note and the takeover strip; `.warning` carries
 /// T-UI's routing-blocked-needs-default note, the urgent tier that reuses the
@@ -29,9 +29,8 @@ final class SystemAirPlayNoteBannerView: NSView {
 
     /// Tint tier (T-UI, routing-blocked-needs-default). `.info` is a note the
     /// reader can act on later, so it wears `ring`; `.warning` is a real
-    /// problem — routing is dead — so it wears `failure`, the same tint
-    /// `SilenceFallbackBannerView` carries, without forking a second banner
-    /// class. Both fill at 12 % on the control radius with no border.
+    /// problem — routing is dead — so it wears `failure`. Both fill at 12 %
+    /// on the control radius with no border.
     enum Severity {
         case info
         case warning

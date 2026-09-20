@@ -1782,28 +1782,48 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.castEnumerator = castEnumerator
         self.castOutputManager = castOutputManager
         self.btTrimStore = btTrimStore
-        if let loaded = (try? btTrimStore?.load()) ?? nil {
-            self.btTrimsByUID = loaded.mapValues { BTSyncTrim.clamp($0) }
+        do {
+            if let loaded = try btTrimStore?.load() ?? nil {
+                self.btTrimsByUID = loaded.mapValues { BTSyncTrim.clamp($0) }
+            }
+        } catch {
+            StoreRecovery.noteWriteFailure(error)
         }
-        if let latencies = (try? btTrimStore?.loadLatencies()) ?? nil {
-            self.btLatencyMsByUID = latencies.mapValues { Swift.max(0, $0) }
+        do {
+            if let latencies = try btTrimStore?.loadLatencies() ?? nil {
+                self.btLatencyMsByUID = latencies.mapValues { Swift.max(0, $0) }
+            }
+        } catch {
+            StoreRecovery.noteWriteFailure(error)
         }
-        if let indices = (try? btTrimStore?.loadSpeakerIndex()) ?? nil {
-            self.btSpeakerIndexByUID = indices
+        do {
+            if let indices = try btTrimStore?.loadSpeakerIndex() ?? nil {
+                self.btSpeakerIndexByUID = indices
+            }
+        } catch {
+            StoreRecovery.noteWriteFailure(error)
         }
         self.btHardwareVolumeStore = btHardwareVolumeStore
         self.btHardwareVolumeControl = btHardwareVolumeControl
         self.btAbsoluteVolumeClaim = btAbsoluteVolumeClaim
         self.castOffsetStore = castOffsetStore
-        if let castOffsets = (try? castOffsetStore?.load()) ?? nil {
-            self.castOffsetsByID = castOffsets.mapValues {
-                BTSyncTrim.quantise($0, rangeMs: BTSyncTrim.castRangeMs)
+        do {
+            if let castOffsets = try castOffsetStore?.load() ?? nil {
+                self.castOffsetsByID = castOffsets.mapValues {
+                    BTSyncTrim.quantise($0, rangeMs: BTSyncTrim.castRangeMs)
+                }
             }
+        } catch {
+            StoreRecovery.noteWriteFailure(error)
         }
         self.eqStore = eqStore
-        if let loaded = (try? eqStore?.load()) ?? nil {
-            self.storedMainOutEQ = loaded.mainOut ?? .flat
-            self.eqByDeviceID = loaded.devices
+        do {
+            if let loaded = try eqStore?.load() ?? nil {
+                self.storedMainOutEQ = loaded.mainOut ?? .flat
+                self.eqByDeviceID = loaded.devices
+            }
+        } catch {
+            StoreRecovery.noteWriteFailure(error)
         }
         self.dacpServer = dacpEndpoint
         self.systemVolume = systemVolume
@@ -2796,7 +2816,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                let priorUID = self.priorDefaultUID,
                priorUID != AggregateOutputDevice.productUID,
                let priorID = self.aggregateControl.resolveDeviceID(forUID: priorUID) {
-                _ = self.aggregateControl.setDefaultOutputDevice(priorID)
+                let wrote = self.aggregateControl.setDefaultOutputDevice(priorID)
+                // No read-back: `sweepOrphans()` below destroys the aggregate, so
+                // there is nothing left to verify the write against.
+                Telemetry.log(.airplay, "aggregate_default_restore", [
+                    "outcome": wrote ? "wrote" : "write_refused",
+                    "target": priorUID, "site": "stop"])
             }
             self.publicAggregate.sweepOrphans()   // destroys the productUID aggregate we own
             self.aggregateDefaultActive = false
@@ -4471,7 +4496,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             sink.setGain(gain)
             attachSyncedLocalSink(sink)
-            try? sink.start()
+            do {
+                try sink.start()
+            } catch {
+                Telemetry.fail(.localPlayback, "local_playback:start_failed",
+                               local: ["error": "\(error)"], shared: ["site": "synced_local"])
+            }
             sink.startObservingLifecycleEvents()
         } else {
             guard let sink = syncedLocalSink else { return }
@@ -5240,10 +5270,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             for route in plan.localRoutes + plan.leveledLocalRoutes {
                 if case .capturing(let format) = self.perAppCapture.state(for: route.bundleID) {
-                    try? self.localPlaybackEngine?.start()
-                    try? self.localPlaybackEngine?.addApp(
-                        bundleID: route.bundleID, tapFormat: format,
-                        volume: Float(route.volume) / 100.0)
+                    do {
+                        try self.localPlaybackEngine?.start()
+                        try self.localPlaybackEngine?.addApp(
+                            bundleID: route.bundleID, tapFormat: format,
+                            volume: Float(route.volume) / 100.0)
+                    } catch {
+                        Telemetry.fail(.localPlayback, "local_playback:start_failed",
+                                       local: ["error": "\(error)"], shared: ["site": "app_routes"])
+                    }
                 }
                 self.localPlaybackEngine?.setVolume(Float(route.volume) / 100.0, for: route.bundleID)
             }
@@ -5345,8 +5380,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 return Float(vol) / 100.0
             }
             guard let volume else { return }
-            try? localPlaybackEngine?.start()
-            try? localPlaybackEngine?.addApp(bundleID: bundleID, tapFormat: format, volume: volume)
+            do {
+                try localPlaybackEngine?.start()
+                try localPlaybackEngine?.addApp(bundleID: bundleID, tapFormat: format, volume: volume)
+            } catch {
+                Telemetry.fail(.localPlayback, "local_playback:start_failed",
+                               local: ["error": "\(error)"], shared: ["site": "capture_state"])
+            }
         case .idle, .stopping, .failed:
             // Capture stopped/failed. Only pull the player while the app is STILL a
             // local route (a capture failure/hiccup, not a de-route): a de-route
@@ -10214,10 +10254,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // from `handleLocalCaptureStateChange` when it lands.
             for route in routes {
                 if case .capturing(let format) = self.perAppCapture.state(for: route.bundleID) {
-                    try? self.localPlaybackEngine?.start()
-                    try? self.localPlaybackEngine?.addApp(
-                        bundleID: route.bundleID, tapFormat: format,
-                        volume: Float(route.volume) / 100.0)
+                    do {
+                        try self.localPlaybackEngine?.start()
+                        try self.localPlaybackEngine?.addApp(
+                            bundleID: route.bundleID, tapFormat: format,
+                            volume: Float(route.volume) / 100.0)
+                    } catch {
+                        Telemetry.fail(.localPlayback, "local_playback:start_failed",
+                                       local: ["error": "\(error)"], shared: ["site": "leveled"])
+                    }
                 }
                 self.localPlaybackEngine?.setVolume(
                     Float(route.volume) / 100.0, for: route.bundleID)

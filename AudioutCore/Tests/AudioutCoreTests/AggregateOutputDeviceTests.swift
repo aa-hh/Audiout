@@ -1140,6 +1140,36 @@ extension SerializedSharedState {
 
     private static let builtInSpeakers = "com.builtin.speakers"
 
+    /// Quit must REPORT the outcome of the restore write that hands the Mac's
+    /// default output back. The result was discarded and the aggregate destroyed
+    /// on the next line, so a write the HAL refuses left the user on a device
+    /// that no longer exists with nothing recorded anywhere. Dropping the
+    /// `aggregate_default_restore` line from `stop()` turns this red.
+    @Test func theQuitTimeDefaultRestoreReportsItsOutcome() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501,
+            Self.builtInSpeakers: 601])
+        let box = LockedBox<String?>(Self.builtInSpeakers)
+        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+
+        #expect(backend.test_aggregateDefaultActive == true, "precondition: the takeover ran")
+        #expect(backend.test_priorDefaultUID == Self.builtInSpeakers, "precondition: the prior was captured")
+
+        let sink = LinesBox()
+        Telemetry._installTestSink { sink.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.stop()
+
+        // `stop()`'s teardown runs on `stateQueue`, so the line lands after the call returns.
+        func restoreLines() -> [String] {
+            sink.snapshot().filter { $0.contains(#""evt":"aggregate_default_restore""#) }
+        }
+        await pollUntil { restoreLines().contains { $0.contains(#""outcome":"wrote""#) } }
+        #expect(restoreLines().contains { $0.contains(#""outcome":"wrote""#) },
+                "the quit-time restore must record its outcome — a write the HAL refuses is otherwise invisible")
+    }
+
     /// Deselecting the last AirPlay device (Mac-only) must hand the Mac's default
     /// output back to the pre-takeover device — otherwise the aggregate stays the
     /// default until quit, silently swallowing every volume write. The aggregate

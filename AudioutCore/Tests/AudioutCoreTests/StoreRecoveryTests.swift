@@ -103,6 +103,52 @@ extension SerializedSharedState {
             #expect(try store.load() == nil)
         }
 
+        // MARK: Newer schema quarantines the file instead of leaving it in place
+
+        /// An older build that reads a newer-schema file leaves it in place today,
+        /// and the caller's first save atomically overwrites it, destroying the
+        /// newer build's data. The file must be quarantined on the way to the
+        /// nil/empty fallback, same as a corrupt file.
+        @Test func newerSchemaFileIsQuarantinedBeforeReturningEmpty() throws {
+            let cases: [(fileName: String, payload: String, load: (URL) throws -> Void)] = [
+                ("app-routes.json", #"{"schemaVersion": 999, "routes": []}"#, {
+                    _ = try AppRouteStore(directory: $0).load()
+                }),
+                ("groups.json", #"{"schemaVersion": 999, "groups": []}"#, {
+                    _ = try GroupStore(directory: $0).load()
+                }),
+                ("routing.json", #"{"schemaVersion": 999, "state": {"selectedDeviceIDs": [], "mainOutKind": "selected"}}"#, {
+                    _ = try RoutingStore(directory: $0).load()
+                }),
+                ("device-eq.json", #"{"schemaVersion": 999, "devices": {}}"#, {
+                    _ = try DeviceEQStore(directory: $0).load()
+                }),
+                ("device-icons.json", #"{"schemaVersion": 999, "icons": {}}"#, {
+                    _ = try DeviceIconStore(directory: $0).load()
+                }),
+                ("hidden-speakers.json", #"{"schemaVersion": 999, "deviceIDs": []}"#, {
+                    _ = try HiddenSpeakersStore(directory: $0).load()
+                }),
+                ("excluded-apps.json", #"{"schemaVersion": 999, "apps": []}"#, {
+                    _ = try ExcludedAppsStore(directory: $0).load()
+                }),
+                ("bt-sync-trims.json", #"{"schemaVersion": 999, "trims": {}}"#, {
+                    _ = try BTTrimStore(directory: $0).load()
+                }),
+                ("bt-hardware-volume.json", #"{"schemaVersion": 999, "disabledUIDs": []}"#, {
+                    _ = BTHardwareVolumeStore(directory: $0)
+                }),
+            ]
+
+            for testCase in cases {
+                let base = (testCase.fileName as NSString).deletingPathExtension
+                let dir = try directory("newer-\(base)")
+                try Data(testCase.payload.utf8).write(to: dir.appendingPathComponent(testCase.fileName))
+                try testCase.load(dir)
+                try expectSetAside(testCase.fileName, in: dir)
+            }
+        }
+
         // MARK: Nothing to set aside
 
         @Test func quarantineOnMissingFileRecordsNothing() throws {
@@ -147,6 +193,53 @@ extension SerializedSharedState {
             #expect(failures.count == 1)
             #expect(controller.appRoutes.count == 1,
                     "the in-memory change survives — only the disk write failed")
+        }
+
+        // MARK: CompanionApprovalStore — the tenth store, plus its save-failure path
+
+        /// Defect: a newer-schema approvals file is left in place, and the first
+        /// approval this build records overwrites it atomically, losing every
+        /// phone the newer build had approved.
+        @Test func companionApprovalStoreQuarantinesNewerSchemaFile() throws {
+            let dir = try directory("companion-approvals-newer")
+            let json = #"{"schemaVersion": 999, "approvals": []}"#
+            try Data(json.utf8).write(to: dir.appendingPathComponent("companion-approvals.json"))
+            #expect(try CompanionApprovalStore(directory: dir).load() == nil)
+            try expectSetAside("companion-approvals.json", in: dir)
+        }
+
+        /// Defect: a corrupt approvals file is left in place and the first new
+        /// approval overwrites the evidence, with every approved phone
+        /// re-prompting and no record of why.
+        @Test func companionApprovalStoreQuarantinesCorruptFile() throws {
+            let dir = try directory("companion-approvals")
+            try writeGarbage("companion-approvals.json", in: dir)
+            let store = CompanionApprovalStore(directory: dir)
+            #expect(throws: (any Error).self) { try store.load() }
+            try expectSetAside("companion-approvals.json", in: dir)
+            #expect(try store.load() == nil)
+        }
+
+        /// Defect: a failed approvals save goes only to stderr, so the user is
+        /// never told their phone approval did not reach disk.
+        @Test func companionApprovalWriteFailureFiresHandler() throws {
+            // A FILE where the store wants a directory: `createDirectory` cannot
+            // make one underneath it, so the save fails for a real reason.
+            let blocker = scratchDir.appendingPathComponent("blocker-approvals")
+            try Data().write(to: blocker)
+            let controller = CompanionApprovalController(
+                store: CompanionApprovalStore(directory: blocker.appendingPathComponent("x")))
+
+            let failures = FailureCounter()
+            StoreRecovery.onWriteFailure = { _ in failures.count += 1 }
+            defer { StoreRecovery.onWriteFailure = nil }
+
+            controller.presentPrompt = { _, _, respond in respond(true) }
+            controller.handleRequest(clientID: "test-client", clientName: "Test Phone") { _ in }
+
+            #expect(failures.count == 1)
+            #expect(controller.approvals.count == 1,
+                    "the in-memory approval survives — only the disk write failed")
         }
 
         /// Reference box so the handler (an escaping closure) can report back.

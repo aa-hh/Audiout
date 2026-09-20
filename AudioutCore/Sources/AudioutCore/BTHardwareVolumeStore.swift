@@ -101,7 +101,10 @@ public final class BTHardwareVolumeStore {
             StoreRecovery.quarantine(fileURL)
             return []
         }
-        guard envelope.schemaVersion <= currentSchemaVersion else { return [] }
+        guard envelope.schemaVersion <= currentSchemaVersion else {
+            StoreRecovery.quarantine(fileURL)
+            return []
+        }
         return Set(envelope.disabledUIDs)
     }
 

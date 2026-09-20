@@ -1299,6 +1299,17 @@ private final class TelemetryLineBox: @unchecked Sendable {
     func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return lines }
 }
 
+/// Thread-safe capture box for the errors a `StoreRecovery.onWriteFailure`
+/// handler receives: that handler runs on whatever thread the failing store
+/// call was on, so a plain `[Error]` would race the read in the test body.
+/// Mirrors ``TelemetryLineBox`` above.
+private final class StoreFailureBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var errors: [Error] = []
+    func append(_ error: Error) { lock.lock(); errors.append(error); lock.unlock() }
+    func snapshot() -> [Error] { lock.lock(); defer { lock.unlock() }; return errors }
+}
+
 /// A ``LocalPlaybackControlling`` double: records every call so a test can
 /// assert the NativeBackend wiring without an `AVAudioEngine` or audio
 /// hardware (mirrors `FakeCapture` for the whole-system tap seam).
@@ -1407,7 +1418,17 @@ private func float32Buffer(amplitude: Float, frames: Int, atSecond sec: Int) -> 
 private final class SpySyncedLocalSink: SyncedLocalSinkControlling, @unchecked Sendable {
     private let lock = NSLock()
     private var _calls: [String] = []
-    func start() throws { lock.withLock { _calls.append("start") } }
+    private var _startError: Error?
+    /// Scripts a sink that refuses to start (a real one throws when the
+    /// AVAudioEngine will not run), so a test can drive the failure path.
+    var startError: Error? {
+        get { lock.withLock { _startError } }
+        set { lock.withLock { _startError = newValue } }
+    }
+    func start() throws {
+        let failure = lock.withLock { () -> Error? in _calls.append("start"); return _startError }
+        if let failure { throw failure }
+    }
     func stop() { lock.withLock { _calls.append("stop") } }
     func startObservingLifecycleEvents() { lock.withLock { _calls.append("startObserving") } }
     func stopObservingLifecycleEvents() { lock.withLock { _calls.append("stopObserving") } }
@@ -9978,8 +9999,8 @@ extension SerializedSharedState {
 /// nested here so the `.serialized` parent (`SerializedSharedStateSuite.swift`)
 /// mutually excludes them from each other AND from every other suite under it.
 ///
-/// TWO kinds qualify, and nothing else does:
-///  - **`Telemetry._installTestSink` users** (15 of them). The sink is one
+/// THREE kinds qualify, and nothing else does:
+///  - **`Telemetry._installTestSink` users** (17 of them). The sink is one
 ///    process-global slot: a second test's `_installTestSink(nil)` teardown tears
 ///    this one's sink out mid-run, and each reads back a mixture of both tests'
 ///    lines. That is the hazard the parent suite exists for.
@@ -9991,6 +10012,10 @@ extension SerializedSharedState {
 ///    concurrent tests would fight over the same system object. Every other
 ///    construction in this file injects `NoOpAggregateControl`; until these two
 ///    do the same they are not parallel-safe.
+///  - **`StoreRecovery.onWriteFailure` installers.** That handler is one
+///    process-global slot too, with the same hazard: a second test's `nil`
+///    teardown removes this one's handler mid-run, and each reads back a
+///    mixture of both tests' store failures.
 ///
 /// Everything else asserts only on doubles it created itself, so it stays parallel
 /// — those ~183 tests were the bulk of this serialized chain's wall-clock cost.
@@ -9999,8 +10024,55 @@ extension SerializedSharedState {
 ///
 /// NOTE for the inner loop: `--filter NativeBackendTests` reaches this suite
 /// too — it matches all three suites nested here: `NativeBackendGlobalStateTests`,
-/// `SerializedSharedState`, and `NativeBackendTests` itself, 227 tests total.
+/// `SerializedSharedState`, and `NativeBackendTests` itself, 254 tests total.
 @Suite struct NativeBackendGlobalStateTests {
+
+    private let isolation = TestIsolation(owner: "NativeBackendGlobalStateTests")
+
+    /// A corrupt tone store must REPORT its failed load. `DeviceEQStore.load()`
+    /// quarantines the bad file and throws; `init` swallowed that throw, so every
+    /// stored EQ silently reset to flat with nothing said. Putting the `try?`
+    /// back at the `eqStore?.load()` site in `NativeBackend.init` turns this red.
+    @Test func aCorruptEQStoreReportsTheFailedLoad() throws {
+        let directory = isolation.scratchDir
+        try Data("not json".utf8).write(to: directory.appendingPathComponent("device-eq.json"))
+
+        let failures = StoreFailureBox()
+        StoreRecovery.onWriteFailure = { failures.append($0) }
+        defer { StoreRecovery.onWriteFailure = nil }
+
+        // The failure happens in `init` — no `start()` needed.
+        _ = makeBackend(eqStore: DeviceEQStore(directory: directory))
+
+        #expect(!failures.snapshot().isEmpty,
+                "a corrupt tone store must report its failed load — it silently resets every stored EQ to flat")
+    }
+
+    /// A synced-local sink that refuses to start must be REPORTED: "play
+    /// everywhere" then leaves the Mac itself silent while the speakers play,
+    /// and the start was a bare `try?` that said nothing anywhere. Putting that
+    /// `try?` back in `applySyncedLocalSinkTransition` turns this red.
+    @Test func aSyncedLocalSinkThatRefusesToStartIsReported() async {
+        struct SinkRefusedToStart: Error {}
+        let (backend, engine, discovery, _, sink, _) = makeSyncedLocalBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+        sink.startError = SinkRefusedToStart()
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Silent Mac Partner")
+        await startAndDiscover(backend, engine, discovery, device)
+        backend.setOutputSet([device.id])   // Mac + 1 AirPlay -> the sink starts and throws
+
+        func failedLines() -> [String] {
+            box.snapshot().filter { $0.contains("\"evt\":\"local_playback:start_failed\"") }
+        }
+        await pollUntil { !failedLines().isEmpty }
+        #expect(!failedLines().isEmpty,
+                "a synced-local sink that will not start must be reported — otherwise the Mac goes silent in a play-everywhere selection with nothing logged")
+    }
 
     /// Selecting a device (the gate's false->true edge) must re-arm the poll —
     /// and the poll's own immediate synchronous call (inside

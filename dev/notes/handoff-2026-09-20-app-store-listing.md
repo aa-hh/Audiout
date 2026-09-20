@@ -200,3 +200,21 @@ Trap: a remembered Mac (`knownMacs`, `lastUsedMacID` in the simulator's copy of
 the app defaults) leaks the owner's own Mac name into the connect capture. Clear
 it with
 `simctl spawn <udid> defaults delete <container>/Library/Preferences/com.audiout.remote knownMacs`.
+
+## 13. 2026-09-21, early
+
+The phone branch `claude/store-shots` is at `fd5c82a`, plus one `sheet.py`
+commit that lands after it.
+
+Owner rulings. The Apps capture drops the "Demo Music" and "Demo Browser" rows
+and shows Google Chrome and Slack under Not running, with real icons seeded by
+`app-icons.sh` — four icons now. The Scenes capture has Living Room playing and
+Kitchen, Bedroom, Office and Everywhere saved. Slide 4 ships the settled
+verdict, 04b, which answers §9.1. The connect capture is taken 2 seconds after
+launch: the gate's field sweeps one broad crest across the screen, and the
+script's 4-second wait lands in the trough. That was measured, and it needs no
+code change.
+
+Still open: §9.4, the Dynamic Island pill; §9.5, 05a vs 05b; and whether slide
+5's field should read as thinner rings — that one is `GateField`'s
+`ringScaleDeviation`, an app change rather than a capture change.

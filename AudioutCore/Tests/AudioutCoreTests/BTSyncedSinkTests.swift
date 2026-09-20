@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import AVFoundation
 @testable import AudioutCore
 
 /// BT-SINK / BT-REFSEL (PLAN-UNIVERSAL-SYNC Wave 2): the per-device Bluetooth
@@ -504,6 +505,61 @@ import Testing
         manager.setDevices([.init(deviceID: 0, uid: uid)])
         let ramp = enqueueRamp(into: manager)
         return (manager, try #require(manager.sinkForTesting(uid: uid)), ramp)
+    }
+
+    /// The render block rebases `mHostTime` with a fresh two-clock sample
+    /// instead of the sink's cached offset: with the cached offset seeded
+    /// 300 ms ahead of the real one, a cycle whose cached rebase lands exactly
+    /// on the release target must open the gate, while a fresh sample lands
+    /// 300 ms early and stays silent.
+    @Test func renderUsesTheCachedRebaseOffset_notAFreshTwoClockSample() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1, presentationDelayMs: { 100 })
+        manager.setComposition(BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        defer { manager.stop() }
+
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+
+        let real = CoreAudioSystemTap.sampleMachToMonotonicOffsetNanos()
+        sink.machToMonotonicOffsetNanos = real + 300_000_000
+
+        let host = mach_absolute_time()
+        let cycleStart = Int64(CoreAudioSystemTap.machNanoseconds(fromHostTime: host))
+            + sink.machToMonotonicOffsetNanos
+
+        let delayNanos: Int64 = 100_000_000   // anchoredSink()'s 100 ms target
+        let ptsNanos = cycleStart - delayNanos
+        let pts = timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
+                            tv_nsec: Int(ptsNanos % 1_000_000_000))
+        var ramp = [Float](repeating: 0, count: 30_000)
+        for i in 0..<ramp.count { ramp[i] = Float(i + 1) }
+        ramp.withUnsafeBufferPointer { buf in
+            manager.enqueue(interleavedFrames: buf.baseAddress!, frameCount: ramp.count, pts: pts)
+        }
+        sink.test_waitForPendingRebuild()
+
+        var stamp = AudioTimeStamp()
+        stamp.mHostTime = host
+        stamp.mFlags = .hostTimeValid
+        var out = [Float](repeating: 0, count: 512)
+        let abl = AudioBufferList.allocate(maximumBuffers: 1)
+        var status: OSStatus = noErr
+        var isSilence = ObjCBool(false)
+        out.withUnsafeMutableBufferPointer { ob in
+            abl[0] = AudioBuffer(
+                mNumberChannels: 1,
+                mDataByteSize: UInt32(512 * MemoryLayout<Float>.size),
+                mData: ob.baseAddress)
+            status = sink.render(
+                isSilence: &isSilence, timestamp: &stamp,
+                frameCount: 512, audioBufferList: abl.unsafeMutablePointer)
+        }
+        free(abl.unsafeMutablePointer)
+
+        #expect(status == noErr)
+        #expect(isSilence.boolValue == false)
+        #expect(out.first(where: { $0 != 0 }) == ramp[0])
     }
 
     /// Render 512-frame cycles from `startNanos` until the first all-zero cycle

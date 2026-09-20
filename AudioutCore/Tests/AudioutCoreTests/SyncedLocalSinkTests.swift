@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import AVFoundation
 @testable import AudioutCore
 
 /// T-SINK: the synced local sink stays silent until the output device's clock
@@ -420,6 +421,54 @@ import Foundation
                 pts: timespec(tv_sec: rampAnchorPtsSec, tv_nsec: 0))
         }
         return ramp
+    }
+
+    /// The render block rebases `mHostTime` with a fresh two-clock sample
+    /// instead of the sink's cached offset: with the cached offset seeded
+    /// 300 ms ahead of the real one, a cycle whose cached rebase lands exactly
+    /// on the release target must open the gate, while a fresh sample lands
+    /// 300 ms early and stays silent.
+    @Test func renderUsesTheCachedRebaseOffset_notAFreshTwoClockSample() {
+        let sink = Self.rampSink()
+
+        let real = CoreAudioSystemTap.sampleMachToMonotonicOffsetNanos()
+        sink.machToMonotonicOffsetNanos = real + 300_000_000
+
+        let host = mach_absolute_time()
+        let cycleStart = Int64(CoreAudioSystemTap.machNanoseconds(fromHostTime: host))
+            + sink.machToMonotonicOffsetNanos
+
+        let delayNanos: Int64 = 87_000_000   // rampSink()'s 100ms - 10ms - 3ms
+        let ptsNanos = cycleStart - delayNanos
+        let pts = timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
+                            tv_nsec: Int(ptsNanos % 1_000_000_000))
+        var ramp = [Float](repeating: 0, count: 20_000)
+        for i in 0..<ramp.count { ramp[i] = Float(i + 1) }
+        ramp.withUnsafeBufferPointer { buf in
+            sink.enqueue(interleavedFrames: buf.baseAddress!, frameCount: ramp.count, pts: pts)
+        }
+
+        var stamp = AudioTimeStamp()
+        stamp.mHostTime = host
+        stamp.mFlags = .hostTimeValid
+        var out = [Float](repeating: 0, count: 512)
+        let abl = AudioBufferList.allocate(maximumBuffers: 1)
+        var status: OSStatus = noErr
+        var isSilence = ObjCBool(false)
+        out.withUnsafeMutableBufferPointer { ob in
+            abl[0] = AudioBuffer(
+                mNumberChannels: 1,
+                mDataByteSize: UInt32(512 * MemoryLayout<Float>.size),
+                mData: ob.baseAddress)
+            status = sink.render(
+                isSilence: &isSilence, timestamp: &stamp,
+                frameCount: 512, audioBufferList: abl.unsafeMutablePointer)
+        }
+        free(abl.unsafeMutablePointer)
+
+        #expect(status == noErr)
+        #expect(isSilence.boolValue == false)
+        #expect(out.first(where: { $0 != 0 }) == ramp[0])
     }
 
     @Test func noAudioBeforeEnqueue_isSilent() {

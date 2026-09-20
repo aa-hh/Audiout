@@ -135,6 +135,14 @@ public final class SyncedLocalSink: @unchecked Sendable {
     /// T-CORRECTION's control loop nulls; with frame-accurate placement it is < 1
     /// frame at release, and the correction loop keeps it there over time.
     private var lastPhaseErrorNanos: Int64 = 0
+    /// Mach→CLOCK_MONOTONIC rebase offset for the render block, mirroring
+    /// `CoreAudioSystemTap.machToMonotonicOffsetNanos`. Seeded in `start()`
+    /// before `engine.start()`; every lifecycle rebuild (device change, sleep,
+    /// wake) re-enters `start()` past its `guard !started`, so a sleep re-seeds
+    /// this too. Thereafter it is written only by the render thread, through
+    /// `timespec(fromHostTime:offset:)`'s own drift heal, so no lock guards it.
+    /// Internal (not `private`) so a test can seed it while the engine is stopped.
+    var machToMonotonicOffsetNanos: Int64 = 0
     /// `group × device` gain applied to this sink's real-time output — deliberately
     /// EXCLUDING Main, which the Mac's own system volume already applies to this
     /// device; multiplying it again here would double-apply it. Set via `setGain(_:)`
@@ -259,6 +267,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
                 engine.connect(sourceNode, to: engine.mainMixerNode, format: connectionFormat)
             }
             _ = engine.mainMixerNode
+            machToMonotonicOffsetNanos = CoreAudioSystemTap.sampleMachToMonotonicOffsetNanos()
             engine.prepare()
             try engine.start()
             started = engine.isRunning
@@ -355,13 +364,13 @@ public final class SyncedLocalSink: @unchecked Sendable {
     ///
     /// Per the plan's "always rebuild, don't diff" rule (brief §7/§3): every
     /// trigger below — default-output-device change, sleep, or wake — runs this
-    /// SAME full sequence. The mach↔`CLOCK_MONOTONIC` rebase used by the render
-    /// block (`CoreAudioSystemTap.timespec(fromHostTime:)`) re-seeds itself on
-    /// every call already (no cached offset in this file to go stale), so the only
-    /// state this file must explicitly clear is the release anchor (`anchored`/
-    /// `released`/`targetReleaseNanos`/`cachedTotalDelayNanos`/
-    /// `lastPhaseErrorNanos`) — a stale anchor from before the event would target
-    /// the OLD device's latency or a pts from before the sleep gap.
+    /// SAME full sequence. The render block's rebase offset
+    /// (`machToMonotonicOffsetNanos`) is re-seeded by `start()`, which
+    /// `restartEngine` reaches, so the state this file must explicitly clear is
+    /// the release anchor (`anchored`/`released`/`targetReleaseNanos`/
+    /// `cachedTotalDelayNanos`/`lastPhaseErrorNanos`) — a stale anchor from
+    /// before the event would target the OLD device's latency or a pts from
+    /// before the sleep gap.
     struct LifecycleHooks {
         var stopEngine: () -> Void
         var remeasureLatency: () -> Int64
@@ -639,12 +648,13 @@ public final class SyncedLocalSink: @unchecked Sendable {
 
     #if canImport(AVFoundation)
     /// The real-time `AVAudioSourceNode` render block. Rebases the output device's
-    /// `mHostTime` (mach) onto `CLOCK_MONOTONIC` by REUSING
-    /// ``CoreAudioSystemTap/timespec(fromHostTime:)`` (the sleep-aware mach↔
-    /// MONOTONIC helper — not reimplemented here), fills an interleaved scratch via
+    /// `mHostTime` (mach) onto `CLOCK_MONOTONIC` via
+    /// ``CoreAudioSystemTap/timespec(fromHostTime:offset:)`` and this sink's own
+    /// cached ``machToMonotonicOffsetNanos``, fills an interleaved scratch via
     /// ``renderInterleaved(into:frameCount:cycleStartMonotonicNanos:)``, then
-    /// deinterleaves into the node's planar buffers.
-    private func render(
+    /// deinterleaves into the node's planar buffers. Internal (not `private`) so
+    /// a test can drive it directly with a synthetic `AudioTimeStamp`.
+    func render(
         isSilence: UnsafeMutablePointer<ObjCBool>,
         timestamp: UnsafePointer<AudioTimeStamp>,
         frameCount: AVAudioFrameCount,
@@ -665,7 +675,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
         // is ever enqueued — emit silence.
         let cycleStartMonotonicNanos: Int64
         if #available(macOS 14.2, *) {
-            let monoTs = CoreAudioSystemTap.timespec(fromHostTime: timestamp.pointee.mHostTime)
+            let monoTs = CoreAudioSystemTap.timespec(fromHostTime: timestamp.pointee.mHostTime, offset: &machToMonotonicOffsetNanos)
             cycleStartMonotonicNanos = SyncTiming.monotonicNanos(monoTs)
         } else {
             isSilence.pointee = true

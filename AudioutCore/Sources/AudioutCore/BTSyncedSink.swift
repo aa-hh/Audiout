@@ -590,6 +590,16 @@ final class BTDeviceSink: @unchecked Sendable {
     private let scratch: UnsafeMutablePointer<Float>
     private let scratchCapacity: Int
 
+    /// Mach→CLOCK_MONOTONIC rebase offset for the render block, mirroring
+    /// `CoreAudioSystemTap.machToMonotonicOffsetNanos`. Seeded in `startLocked()`
+    /// before `engine.start()`; every `rebuildLocked` pass (`config_change`,
+    /// `rate_change`, `composition_change`, `reanchorAll`) re-enters
+    /// `startLocked()`, so a sleep re-seeds this too. Thereafter it is written
+    /// only by the render thread, through `timespec(fromHostTime:offset:)`'s own
+    /// drift heal, so no lock guards it. Internal (not `private`) so a test can
+    /// seed it while the engine is stopped.
+    var machToMonotonicOffsetNanos: Int64 = 0
+
     /// The device's live nominal sample rate, re-read on every (re)start. Only
     /// the HFP-collapse detection below reads it — there is no drift loop.
     private var nominalRate: Double
@@ -794,6 +804,7 @@ final class BTDeviceSink: @unchecked Sendable {
         // with the session, and the device may have come back on a different
         // configuration.
         rebuildEQProcessorLocked()
+        machToMonotonicOffsetNanos = CoreAudioSystemTap.sampleMachToMonotonicOffsetNanos()
         engine.prepare()
         try engine.start()
         running = engine.isRunning
@@ -1110,7 +1121,8 @@ final class BTDeviceSink: @unchecked Sendable {
         }
     }
 
-    private func render(
+    /// Internal (not `private`) so a test can drive it directly with a synthetic `AudioTimeStamp`.
+    func render(
         isSilence: UnsafeMutablePointer<ObjCBool>,
         timestamp: UnsafePointer<AudioTimeStamp>,
         frameCount: AVAudioFrameCount,
@@ -1123,10 +1135,9 @@ final class BTDeviceSink: @unchecked Sendable {
             isSilence.pointee = true
             return noErr
         }
-        // Rebase the cycle's mach host time onto CLOCK_MONOTONIC with the
-        // shared sleep-aware helper — the pts timeline the gate compares on.
+        // Rebase the cycle's mach host time onto CLOCK_MONOTONIC through this sink's own cached offset, healed by the shared helper.
         let cycleStart = SyncTiming.monotonicNanos(
-            CoreAudioSystemTap.timespec(fromHostTime: timestamp.pointee.mHostTime))
+            CoreAudioSystemTap.timespec(fromHostTime: timestamp.pointee.mHostTime, offset: &machToMonotonicOffsetNanos))
 
         let buffer = UnsafeMutableBufferPointer(start: scratch, count: frames * channelCount)
         let producedAudio = renderInterleaved(

@@ -4177,17 +4177,32 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// Test/convenience entry point: derives a fresh offset every call (no
     /// caching), so unlike the production RT path above it can never itself go
     /// stale across a sleep. Production code must go through the instance path
-    /// (seeded in `startIOProc`, healed in the IOProc block) instead, since
-    /// resampling both clocks on every single call is not something we want to
-    /// pay for on every real captured buffer.
+    /// (seeded in `startIOProc`, healed in the IOProc block) or the `offset:`
+    /// overload below, instead, since resampling both clocks on every single
+    /// call is not something we want to pay for on every real captured buffer.
     static func timespec(fromHostTime hostTime: UInt64) -> timespec {
         let machNanos = machNanoseconds(fromHostTime: hostTime)
         let offset = sampleMachToMonotonicOffsetNanos()
         return timespec(machNanos: machNanos, offset: offset)
     }
 
+    /// Production entry point for a caller that owns a cached mach-to-monotonic
+    /// offset (a synced sink's render block). Pays for one `clock_gettime` call
+    /// per invocation to check the drift heal (`shouldResample`), and only pays
+    /// for a fresh two-clock resample when the cached offset has fallen more
+    /// than 1s out of step with reality — e.g. the box slept. `offset` is
+    /// updated in place when a resample happens, so the caller's cached value
+    /// stays current across calls.
+    static func timespec(fromHostTime hostTime: UInt64, offset: inout Int64) -> timespec {
+        let machNanos = machNanoseconds(fromHostTime: hostTime)
+        if shouldResample(machNanos: machNanos, offset: offset, monotonicNowNanos: currentMonotonicNanos()) {
+            offset = sampleMachToMonotonicOffsetNanos()
+        }
+        return timespec(machNanos: machNanos, offset: offset)
+    }
+
     /// mach host ticks → nanoseconds on the mach-absolute timescale.
-    private static func machNanoseconds(fromHostTime hostTime: UInt64) -> UInt64 {
+    static func machNanoseconds(fromHostTime hostTime: UInt64) -> UInt64 {
         let timebase = cachedTimebase
         return hostTime &* UInt64(timebase.numer) / UInt64(max(1, timebase.denom))
     }
@@ -4216,7 +4231,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// advancing `CLOCK_MONOTONIC` position. Can be negative (CLOCK_MONOTONIC <
     /// mach-absolute when the box has slept), which is why all offset arithmetic
     /// in this file is signed.
-    private static func sampleMachToMonotonicOffsetNanos() -> Int64 {
+    static func sampleMachToMonotonicOffsetNanos() -> Int64 {
         // Sample both clocks as close together as possible.
         let mach = machNanoseconds(fromHostTime: mach_absolute_time())
         let monotonic = currentMonotonicNanos()

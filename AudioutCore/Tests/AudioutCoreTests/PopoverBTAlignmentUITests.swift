@@ -14,6 +14,17 @@ import AppKit
 @MainActor
 @Suite(.serialized) struct PopoverBTAlignmentUITests {
 
+    /// Counts probe stagings from whatever queue `MicProbeSession` calls the
+    /// stage closure on. Locked because that is not this test's thread.
+    private final class StageCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private(set) var count = 0
+        func increment() {
+            lock.lock(); defer { lock.unlock() }
+            count += 1
+        }
+    }
+
     private func tempDirectory() -> URL {
         FileManager.default.temporaryDirectory   // isolation-ok — UUID-suffixed per call
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1352,15 +1363,21 @@ import AppKit
     /// never staged a second probe, so the screen listened to nothing. The
     /// counter proves the host re-stages, and the escalation ends at the
     /// by-ear questions rather than the mic a third time.
-    @Test func aMeasuredProposalsRejectReRunsTheProbeThenHandsToTheQuestions() {
+    @Test func aMeasuredProposalsRejectReRunsTheProbeThenHandsToTheQuestions() async {
         let (popover, recorder) = makePopover()
         popover.ensureMicPermission = { $0(true) }
         popover.makeMicProbe = {
             MicProbeSession(recorder: SilentRecorder(), timeout: 1, pipelineTail: 0.05)
         }
-        var stageCount = 0
+        // `MicProbeSession.start` hops onto its own queue before calling the
+        // stage closure, so each count lands off this thread and AFTER the
+        // click returns. Counting under a lock and waiting for the count is
+        // what makes this a fact about the host re-staging rather than about
+        // whether that queue was scheduled before the next line — asserting it
+        // synchronously lost that race under a loaded full-suite run.
+        let stages = StageCounter()
         popover.onStageBTMicProbe = { started, finished in
-            stageCount += 1
+            stages.increment()
             started()
             finished()
         }
@@ -1370,7 +1387,7 @@ import AppKit
         wizard?.test_clickButton(titled: "Start")
         #expect(wizard?.test_screen == .listening(isRealignment: false),
                 "got \(screenName(wizard))")
-        #expect(stageCount == 1)
+        await SuiteWait.until("the host to stage the first probe") { stages.count == 1 }
 
         popover.test_btWizardSession()?.offerMeasuredProposal(valueMs: 300)
         #expect(wizard?.test_buttonTitles == [BTAlignmentWizardView.soundsRightTitle,
@@ -1382,7 +1399,7 @@ import AppKit
         wizard?.test_clickButton(titled: BTAlignmentWizardView.tryAgainTitle)
         #expect(wizard?.test_screen == .listening(isRealignment: false),
                 "got \(screenName(wizard))")
-        #expect(stageCount == 2, "the host staged a second probe")
+        await SuiteWait.until("the host to stage a second probe") { stages.count == 2 }
         #expect(recorder.ticks == [true, false, true], "a fresh injector replays the sweeps")
 
         popover.test_btWizardSession()?.offerMeasuredProposal(valueMs: 320)
@@ -1397,7 +1414,7 @@ import AppKit
             Issue.record("expected the questions, got \(screenName(wizard))")
             return
         }
-        #expect(stageCount == 2, "no third probe")
+        #expect(stages.count == 2, "no third probe")
         #expect(recorder.ends.isEmpty, "the run is still live")
         #expect(popover.test_btWizardIsOpen())
     }

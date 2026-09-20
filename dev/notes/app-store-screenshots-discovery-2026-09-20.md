@@ -91,6 +91,23 @@ Upload and metadata: App Store Connect by hand (owner's ruling: ASC is Alec's), 
 4. Renderer: **phone repo**, `scripts/store-shots/`, with its own copy of the field evaluator and Clash Display.
 5. Still open. Listing text conflict: the kit says the phone has no purchase flow; the unmerged `claude/app-store-decisions` ADR says the phone sells the Mac licence as an in-app purchase. Which is true for this submission decides the review notes and the App Privacy "Purchases" answer, not the screenshots.
 
+## 8. Outcome (same day)
+
+Six slides rendered at 1320×2868, dark, from real captures. Slide 1 is the Mirror composite with the Mac on the left (names visible), the phone on the right in front, and no menu bar strip (Alec's pick after seeing both at real size; version 1 with the phone on the left hid the Mac's names, the failure §4 predicted).
+
+What was built to get there:
+- Phone repo, branch `claude/store-shots`: `-store-shots` launch argument (demo fleet, Mac named "MacBook Pro", HomePod + Sonos pair playing, no Demo strip, no coach mark, no "Leave demo" row; the flag is `showsDemoAffordances` on the session) and `-store-shots-screen speakers|apps|scenes|sync|connect|settings`. Demo fleet gained "Bedroom HomePod", Apple Music (routed there) and Spotify (routed to the Living Room scene), and a second saved scene "Kitchen". The renderer lives at `scripts/store-shots/`.
+- Mac repo, this branch: `AUDIOUT_MOCK_FLEET=store-shots` serves the same fleet to the mock backend for the popover capture; `ios.sh shot --screen NAME` builds Release, pins the status bar to 9:41, and names the PNG after the screen.
+- The Mac popover capture is the pinned surface window (red close dot, no arrow), captured with `screencapture` from a `com.audiout.Audiout.shots` build; selection seeded in that id's own Application Support folder (per-id since 2026-08-06, so the old "never seed" trap no longer applies to non-default ids).
+
+Traps met:
+- A speaker in the main mix cannot be an app's redirect target (the Mac's one-role rule); Apple Music pointed at a playing HomePod read "Unavailable speaker". Hence Bedroom HomePod.
+- `ConnectionController.setOnMacsChanged` replays its empty list to a new handler, wiping an injected Mac; the connect screen skips that replay.
+- Headless Chrome renders time out under machine load (load average 289 that afternoon); the deadline in build.sh is 90 s and build-all fails loudly on a missing output.
+- Real Apple Music and Spotify icons in the Apps capture came from a stale icon cache on the mule's simulator, not from the app. A clean simulator gives a generic music-note glyph. Shipping real logos needs deliberate seeding, and Spotify's is theirs.
+
+Still open for Alec: hide the two "Not routed" demo rows on the Apps slide under the flag; a gold field for slide 5 (the connect screen paints its own green); the icon question above; the one pre-existing phone test failure (`IntroCardsTests` expects "This iPhone is the ear", shipping copy says "Your phone is the ear"); merging both branches.
+
 ## Sources
 
 Apple screenshot specs: https://developer.apple.com/help/app-store-connect/reference/screenshot-specifications/ · preview specs: https://developer.apple.com/help/app-store-connect/reference/app-preview-specifications/ · guidelines 2.3.3, 2.3.7, 2.3.10: https://developer.apple.com/app-store/review/guidelines/ · bezels: https://developer.apple.com/design/resources/ · xcparse: https://github.com/ChargePoint/xcparse · frameit iPhone 17 gap: https://github.com/fastlane/fastlane/issues/29920 · skills reviewed: https://github.com/adamlyttleapps/claude-skill-aso-appstore-screenshots, https://github.com/UmeshOnAI/claude-skill-app-store-screenshots, https://github.com/Kronop/vibe-aso

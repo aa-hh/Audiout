@@ -343,11 +343,11 @@ public final class CompanionCommandDispatcher {
             return alignment(targetID) { actions, id in actions.playDemo(id, clientID) }
 
         case .activateLicenseKey:
-            // razor: answered the way this Mac answered before the case existed
-            // (it decoded as `.unknown`). The licence-key work adds the real
-            // handling; this line goes when that lands. Same line as on
-            // `claude/bluetooth-latency-drift-6c2d59`, so the merge is a no-op.
-            return .refused("Unknown command: activateLicenseKey.")
+            // Handled in `AppDelegate.onCommand` like `.requestAppIcons`: it
+            // needs `LicenseValidator`, the gate window and `applyLicenseState`,
+            // none of which this AppKit-free type owns. A host that does not
+            // intercept it refuses, same as any other unhandled command.
+            return .refused("This Mac’s Audiout can’t accept a licence from an iPhone. Update Audiout on your Mac.")
 
         case .unknown(let name):
             return .refused("Unknown command: \(name).")

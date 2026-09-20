@@ -21,6 +21,12 @@ import Testing
             respond(true)
         }
         func withdrawApprovalPrompt(clientID: String) {}
+        var activatedKeys: [String] = []
+        func activateLicenseKey(_ key: String,
+                                reply: @escaping (CompanionServer.CommandResult) -> Void) {
+            activatedKeys.append(key)
+            reply(CompanionServer.CommandResult(applied: true))
+        }
         func runningApplications() -> [(bundleID: String, displayName: String)] { [] }
         func serveAppIconPages(_ requested: [String], to clientID: UUID) {}
         func devices() -> [Device] { [] }

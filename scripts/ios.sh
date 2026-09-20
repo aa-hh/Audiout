@@ -38,9 +38,17 @@
 # physical iPhone 15 Pro, always — see audiout-remote's AGENTS.md. `test` and
 # `shot` below drive a resolved simulator, which makes them a compile-and-smoke
 # signal and nothing more: device and Simulator builds are separate paths, and
-# the Simulator cannot discover a real Mac over Bonjour, raise the local-network
-# prompt, or make a speaker play. Never report an iOS change as verified on the
-# strength of this script.
+# the Simulator cannot raise the local-network prompt or make a speaker play
+# (it CAN discover a real Mac over Bonjour, see the correction below). Never
+# report an iOS change as verified on the strength of this script.
+#
+# ONE CORRECTION, measured 2026-09-20. The paragraph above used to say the
+# Simulator cannot discover a real Mac over Bonjour. It can. The Simulator
+# shares the host Mac's network stack, so a Mac running Audiout with
+# AUDIOUT_COMPANION=on is found in about twelve seconds, and the local-network
+# permission prompt never appears because the Simulator does not enforce that
+# gate. What stays true is the rest: no speaker plays, and the prompt a real
+# user sees is not exercised here.
 
 set -eu
 
@@ -234,7 +242,8 @@ newest_iphone='xcrun simctl list devices available 2>/dev/null | awk "
 # convention (9:41, full battery, full signal) so six captures taken minutes
 # apart do not show six different clocks.
 #
-# $1 = output directory, as the machine that runs this will see it.
+# $1 = output directory, $2 = app-icon directory, as the machine that runs
+# this will see them.
 shot_cmd_for() {
     printf '%s' "dev=\$($newest_iphone); \
     [ -n \"\$dev\" ] || { echo 'ios.sh: no iPhone simulator installed' >&2; exit 70; }; \
@@ -251,10 +260,16 @@ shot_cmd_for() {
     bundle=\$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \"\$app/Info.plist\"); \
     xcrun simctl bootstatus \"\$udid\" -b >/dev/null; \
     xcrun simctl install \"\$udid\" \"\$app\"; \
+    if [ -d "$2" ]; then \
+        dest=\"\$(xcrun simctl get_app_container \"\$udid\" \"\$bundle\" data)/Library/Caches/AppIcons\"; \
+        mkdir -p \"\$dest\"; cp "$2"/*.png \"\$dest/\" 2>/dev/null || true; \
+    fi; \
     xcrun simctl terminate \"\$udid\" \"\$bundle\" >/dev/null 2>&1 || true; \
     xcrun simctl status_bar \"\$udid\" override --time 9:41 --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 --operatorName \"\" >/dev/null 2>&1 || true; \
     xcrun simctl launch \"\$udid\" \"\$bundle\" -uitest-isolated -store-shots -store-shots-screen $shot_screen >/dev/null; \
     sleep 3; \
+    xcrun simctl status_bar \"\$udid\" override --time 9:41 --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 --operatorName \"\" >/dev/null 2>&1 || true; \
+    sleep 1; \
     mkdir -p \"$1\"; \
     for look in $appearances; do \
         xcrun simctl ui \"\$udid\" appearance \"\$look\"; \
@@ -285,7 +300,8 @@ shot_remote_out=.shot
 case "$mode" in
     build) cmd=$build_cmd;                            local_cmd=$build_cmd ;;
     test)  cmd=$test_cmd;                             local_cmd=$test_cmd ;;
-    shot)  cmd=$(shot_cmd_for "$shot_remote_out");    local_cmd=$(shot_cmd_for "$out_dir") ;;
+    shot)  cmd=$(shot_cmd_for "$shot_remote_out" "scripts/store-shots/app-icons"); \
+           local_cmd=$(shot_cmd_for "$out_dir" "$root/scripts/store-shots/app-icons") ;;
 esac
 if [ $# -gt 0 ]; then
     cmd="$cmd $*"

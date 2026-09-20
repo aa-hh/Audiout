@@ -409,6 +409,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `wireCompanionServer()`.
     private let companionApprovals = CompanionApprovalController()
 
+    /// Open T24 approval alerts, keyed by clientID — lets
+    /// `withdrawCompanionApprovalPrompt(clientID:)` find and close the one
+    /// whose connection just died.
+    private var companionApprovalAlerts: [String: NSAlert] = [:]
+
     /// Mirrors whether `companionServer` is currently running, so the many
     /// broadcast triggers can no-op cheaply while the feature is off (the
     /// default) and `updateCompanionServerState()` only acts on a real edge.
@@ -3102,8 +3107,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     clientID: clientID, clientName: clientName, decide: decide)
             }
         }
-        companionApprovals.presentPrompt = { [weak self] clientName, respond in
-            self?.presentCompanionApprovalPrompt(clientName: clientName, respond: respond)
+        // The last connection carrying this phone identity died before the
+        // user answered — withdraw its prompt rather than leave it stranded.
+        companionServer.onApprovalAbandoned = { [weak self] clientID in
+            DispatchQueue.main.async {
+                guard let self, !self.isTerminating else { return }
+                self.companionApprovals.abandonRequest(clientID: clientID)
+            }
+        }
+        companionApprovals.presentPrompt = { [weak self] clientID, clientName, respond in
+            self?.presentCompanionApprovalPrompt(clientID: clientID, clientName: clientName, respond: respond)
+        }
+        companionApprovals.withdrawPrompt = { [weak self] clientID in
+            self?.withdrawCompanionApprovalPrompt(clientID: clientID)
         }
         // Revoking a phone in Settings must also disconnect it if it's live.
         companionApprovals.dropClient = { [weak self] clientID in
@@ -3119,8 +3135,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// and modal — the SERVER never blocks (its queue keeps running; only
     /// this app's own UI waits), and the controller guarantees one open
     /// prompt per clientID, so a reconnecting phone can't stack duplicates.
+    /// An abort from `withdrawCompanionApprovalPrompt` is not the user's
+    /// answer and records nothing.
     @MainActor
-    private func presentCompanionApprovalPrompt(clientName: String, respond: @escaping (Bool) -> Void) {
+    private func presentCompanionApprovalPrompt(clientID: String, clientName: String, respond: @escaping (Bool) -> Void) {
         // Headless harnesses must never flash real UI; not answering leaves
         // the decision unmade (no persisted denial) and the server's own
         // approval deadline closes the connection.
@@ -3133,7 +3151,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A menu-bar app usually has no key window; activate so the alert is
         // actually seen (same treatment as SettingsWindowController.showWindow).
         NSApp.activate(ignoringOtherApps: true)
-        respond(alert.runModal() == .alertFirstButtonReturn)
+        companionApprovalAlerts[clientID] = alert
+        let outcome = alert.runModal()
+        companionApprovalAlerts.removeValue(forKey: clientID)
+        guard outcome != .abort else { return }
+        respond(outcome == .alertFirstButtonReturn)
+    }
+
+    /// Close the prompt shown for `clientID`, if it's still the one on
+    /// screen. Only the alert AT THE TOP of the modal stack can be aborted;
+    /// a withdrawn alert buried under a newer nested modal is left for the
+    /// user to answer, whose answer just records today's ordinary decision
+    /// for that phone.
+    /// razor: no queueing to withdraw a covered alert — T24 opens at most
+    /// one prompt per unresolved phone, so nesting is rare and harmless.
+    @MainActor
+    private func withdrawCompanionApprovalPrompt(clientID: String) {
+        guard let alert = companionApprovalAlerts[clientID], NSApp.modalWindow === alert.window else { return }
+        NSApp.abortModal()
     }
 
     /// Start or stop the companion server to match

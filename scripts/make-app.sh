@@ -188,6 +188,21 @@ fi
 # under `set -u` (an empty "${arr[@]}" would be an unbound-variable error there).
 if [ "$CODESIGN_IDENTITY" = "-" ]; then TIMESTAMP_FLAG=""; else TIMESTAMP_FLAG="--timestamp"; fi
 
+# The ptp-helper daemon only honours a release request from a peer whose code
+# signature matches this build's identity (see ptp-helper.plist's
+# AUDIOUT_PTP_PEER_REQUIREMENT and main.c's peer check). That requirement
+# needs the Team ID, which only a Developer ID identity carries — an ad-hoc
+# identity ("-") has none, so the requirement renders empty and the helper
+# refuses every release, relying on idle exit alone.
+TEAM_ID="$(printf '%s' "$CODESIGN_IDENTITY" | sed -n 's/.*(\([A-Z0-9]*\))$/\1/p')"
+if [ -n "$TEAM_ID" ]; then
+  PEER_REQUIREMENT="identifier \"$BUNDLE_ID\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = \"$TEAM_ID\""
+  echo "==> ptp-helper peer requirement (Team ID $TEAM_ID): $PEER_REQUIREMENT"
+else
+  PEER_REQUIREMENT=""
+  echo "==> ptp-helper peer requirement is empty — signing identity carries no Team ID, so the helper will refuse every release"
+fi
+
 # --- Paths ----------------------------------------------------------------
 # Resolve the repo root from this script's location so it runs from anywhere.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -227,6 +242,19 @@ render_bundle_plist() {
   sed "s/__BUNDLE_ID__/$BUNDLE_ID/g" "$1" > "$2"
   if grep -q '__BUNDLE_ID__' "$2"; then
     echo "error: __BUNDLE_ID__ survived rendering $1 → $2" >&2; exit 1
+  fi
+  # __TEAM_ID__ appears only in the ptp-helper launchd plist's peer
+  # requirement; the Info.plist template has no such token, so this pass is a
+  # no-op there. An empty TEAM_ID (ad-hoc build) blanks the whole requirement
+  # string rather than leaving a requirement with an empty Team ID clause —
+  # main.c treats only a truly empty value as "no requirement configured".
+  if [ -n "$TEAM_ID" ]; then
+    sed -i '' "s|__TEAM_ID__|$TEAM_ID|g" "$2"
+  else
+    sed -i '' 's#<string>.*__TEAM_ID__.*</string>#<string></string>#' "$2"
+  fi
+  if grep -q '__TEAM_ID__' "$2"; then
+    echo "error: __TEAM_ID__ survived rendering $1 → $2" >&2; exit 1
   fi
   grep -q "<string>$HELPER_LABEL</string>" "$2" \
     || { echo "error: rendered $2 does not carry $HELPER_LABEL" >&2; exit 1; }
@@ -312,6 +340,10 @@ fi
 REMOTE_BUILT=0
 # shellcheck source=lib/remote.sh
 . "$SCRIPT_DIR/lib/remote.sh"
+# Assigned for real in the icon section below; declared empty here so every
+# EXIT trap installed below can safely expand it at exit time -- empty is a
+# harmless `rm -rf ""`, a real path removes the icon section's temp dirs.
+ICON_TMP=""
 if [ "${AUDIOUT_BUILD_LOCAL:-0}" != "1" ] &&
    [ "${AUDIOUT_BUNDLE_DYLIBS:-0}" != "1" ] &&
    remote_wins; then
@@ -354,7 +386,7 @@ for b in $RESOURCE_BUNDLE_NAMES; do cp -R \"\$BIN/\$b\" .remote-products/ || exi
     # been copied into the bundle. Disk pressure is a recurring problem on this
     # machine (scripts/housekeeping.sh exists for it), so clear them on EVERY
     # exit path rather than leaving a copy behind per build.
-    trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
+    trap 'rm -rf "$STAGE"; rm -rf "$ICON_TMP"' EXIT HUP INT TERM
     fetch_bundles() {
       local b
       for b in $RESOURCE_BUNDLE_NAMES; do
@@ -407,9 +439,9 @@ if [ "$REMOTE_BUILT" -eq 0 ]; then
 # capacity_acquire's own trap would clobber it — so compose by hand.
 AUDIOUT_CAPACITY_NO_TRAP=1 capacity_acquire make-app
 if [ -n "$(trap -p EXIT)" ]; then
-  trap 'rm -rf "$STAGE"; capacity_release' EXIT HUP INT TERM
+  trap 'rm -rf "$STAGE"; capacity_release; rm -rf "$ICON_TMP"' EXIT HUP INT TERM
 else
-  trap 'capacity_release' EXIT HUP INT TERM
+  trap 'capacity_release; rm -rf "$ICON_TMP"' EXIT HUP INT TERM
 fi
 echo "==> Building $EXECUTABLE (release)"
 # Build engine: the SwiftPM default (swiftbuild). These commands used to pin the
@@ -644,9 +676,11 @@ SYMBOL_CATALOGUE_ARG=""
 ICON_MODE="icns"
 ICON_BUNDLE_SRC="$SCRIPT_DIR/Audiout.icon"
 XCODE_MAJOR="$(xcodebuild -version 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1 || true)"
+ICON_TMP="$(mktemp -d)"
 if [ -n "$XCODE_MAJOR" ] && [ "$XCODE_MAJOR" -ge 26 ] && [ -d "$ICON_BUNDLE_SRC" ]; then
   echo "==> Xcode $XCODE_MAJOR detected — attempting Liquid Glass icon compile via actool"
-  ACTOOL_TMP="$(mktemp -d)"
+  ACTOOL_TMP="$ICON_TMP/actool"
+  mkdir -p "$ACTOOL_TMP"
   if xcrun actool \
       --compile "$RESOURCES_DIR" \
       --platform macosx \
@@ -691,7 +725,7 @@ fi
 if [ "$ICON_MODE" = "icns" ] && [ -f "$ICON_SOURCE" ] && [ -f "$ICON_SOURCE_DARK" ] \
    && [ -n "$XCODE_MAJOR" ] && [ "$XCODE_MAJOR" -ge 16 ]; then
   echo "==> Xcode $XCODE_MAJOR detected — attempting light/dark appearance-aware icon compile via actool"
-  XCASSETS_DIR="$(mktemp -d)/Icons.xcassets"
+  XCASSETS_DIR="$ICON_TMP/Icons.xcassets"
   APPICONSET_DIR="$XCASSETS_DIR/AppIcon.appiconset"
   mkdir -p "$APPICONSET_DIR"
   cat > "$XCASSETS_DIR/Contents.json" << 'JEOF'
@@ -726,7 +760,8 @@ with open(path, "w") as f:
     json.dump(data, f, indent=2, sort_keys=True)
     f.write("\n")
 PYEOF
-  ACTOOL_LD_TMP="$(mktemp -d)"
+  ACTOOL_LD_TMP="$ICON_TMP/actool-lightdark"
+  mkdir -p "$ACTOOL_LD_TMP"
   if xcrun actool \
       --compile "$RESOURCES_DIR" \
       --platform macosx \
@@ -738,7 +773,7 @@ PYEOF
       "$XCASSETS_DIR" ${SYMBOL_CATALOGUE_ARG:+"$SYMBOL_CATALOGUE_ARG"} >"$ACTOOL_LD_TMP/actool.log" 2>&1 \
     && [ -f "$RESOURCES_DIR/Assets.car" ]; then
     echo "    actool compiled Assets.car — verifying light and dark actually render differently"
-    VERIFY_SWIFT="$(mktemp -d)/verify_appearance.swift"
+    VERIFY_SWIFT="$ICON_TMP/verify_appearance.swift"
     cat > "$VERIFY_SWIFT" << 'SWIFTEOF'
 import AppKit
 import CryptoKit
@@ -781,7 +816,7 @@ fi
 if [ "$ICON_MODE" = "icns" ]; then
   echo "==> Generating app icon (.icns fallback)"
   test -f "$ICON_SOURCE" || { echo "error: icon source not found at $ICON_SOURCE" >&2; exit 1; }
-  ICONSET_DIR="$(mktemp -d)/AppIcon.iconset"
+  ICONSET_DIR="$ICON_TMP/AppIcon.iconset"
   mkdir -p "$ICONSET_DIR"
   for s in 16 32 128 256 512; do d=$((s * 2)); sips -z "$s" "$s" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${s}x${s}.png" >/dev/null; sips -z "$d" "$d" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${s}x${s}@2x.png" >/dev/null; done
   iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns"
@@ -1283,6 +1318,12 @@ codesign --verify --strict --verbose "$APP_BUNDLE"
 # takes SIGPIPE, and `set -o pipefail` would flag that as a spurious failure.
 SIG_INFO="$(codesign --display --verbose=2 "$APP_BUNDLE" 2>&1 || true)"
 printf '%s\n' "$SIG_INFO" | grep -Eq 'flags=0x[0-9a-f]+\([^)]*runtime' || { echo "ERROR: hardened runtime flag not set on signature" >&2; exit 1; }
+# The ptp-helper peer requirement above was rendered from CODESIGN_IDENTITY's
+# Team ID; prove the app's actual signature carries that same Team ID, or the
+# app would never satisfy its own helper's requirement.
+if [ "$CODESIGN_IDENTITY" != "-" ]; then
+  printf '%s\n' "$SIG_INFO" | grep -q "TeamIdentifier=$TEAM_ID" || { echo "ERROR: app signature does not carry TeamIdentifier=$TEAM_ID (ptp-helper peer requirement would never match)" >&2; exit 1; }
+fi
 # Assert the entitlements actually EMBEDDED. codesign exits 0 even when AMFI
 # rejects a malformed entitlements plist (it just drops them), which would ship a
 # hardened-runtime app with library validation still ON — and that app cannot

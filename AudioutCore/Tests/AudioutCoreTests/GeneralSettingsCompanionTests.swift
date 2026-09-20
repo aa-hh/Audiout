@@ -261,7 +261,7 @@ import AppKit
         let settings = AppSettings(defaults: isolatedDefaults)
         settings.allowRemoteControl = true
         let controller = try makeController(records: [])
-        controller.presentPrompt = { _, respond in respond(true) }
+        controller.presentPrompt = { _, _, respond in respond(true) }
         let pane = GeneralSettingsViewController(loginItem: FakeLoginItem(),
                                                  settings: settings, environment: [:], remoteAppIsOffered: true,
                                                  approvals: controller)
@@ -295,7 +295,7 @@ import AppKit
     /// live — the pane claims the controller's `onChange`.
     @Test func aNewDecisionAppearsInTheOpenList() throws {
         let controller = try makeController(records: [])
-        controller.presentPrompt = { _, respond in respond(true) }
+        controller.presentPrompt = { _, _, respond in respond(true) }
         let pane = makePane(approvals: controller)
         #expect(!pane.test_phoneListIsVisible)
 

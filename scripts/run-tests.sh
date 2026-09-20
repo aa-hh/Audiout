@@ -160,12 +160,8 @@ run_remote() {
 
     # The remote command is a STRING the far shell re-parses, so caller flags
     # must be quoted INTO it: an unquoted `--filter "A|B"` arrived there as a
-    # pipe into a command named `B`. Single-quote each argument, escaping any
-    # single quote it contains ('\'' — the standard sh idiom).
-    qargs=""
-    for a in "$@"; do
-        qargs="$qargs '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"
-    done
+    # pipe into a command named `B`. See remote_quote_args in lib/remote.sh.
+    qargs=$(remote_quote_args "$@")
 
     rrc=0
     remote_run "$repo_root" "cd $pkg && swift test $rargs$qargs" || rrc=$?
@@ -350,7 +346,7 @@ fi
 
 # Clear any compiler left orphaned by a killed wrapper before competing for
 # the lock -- see scripts/reap-orphaned-swift.sh for why this is not paranoia.
-bash "$(dirname "${BASH_SOURCE[0]}")/reap-orphaned-swift.sh" || true
+bash "$(dirname "$0")/reap-orphaned-swift.sh" || true
 
 # --- run --------------------------------------------------------------------
 # `set -e` is off for this one command so a failure reaches the cache logic

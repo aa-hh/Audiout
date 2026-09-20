@@ -174,9 +174,10 @@ public final class CompanionCommandDispatcher {
     /// empty-membership group edit, an excluded app's `addAppRoute`, unknown
     /// device/group targets, an out-of-range `setStartBufferMs`, `.unknown`)
     /// plus the trust-boundary hardening: `Limits` caps, blank/overlong names,
-    /// unknown-id `updateGroup`, duplicate-member-set `createGroup`, device
-    /// writes on a device that can't accept them, and store failures (which
-    /// roll back so the reply matches the state the next snapshot shows).
+    /// unknown-id `updateGroup`, an unknown-group `setGroupMuted`, an
+    /// unrouted-bundle `removeAppRoute`, duplicate-member-set `createGroup`,
+    /// device writes on a device that can't accept them, and store failures
+    /// (which roll back so the reply matches the state the next snapshot shows).
     @discardableResult
     public func execute(_ command: CompanionCommand) -> Result {
         execute(command, clientID: nil)
@@ -232,6 +233,9 @@ public final class CompanionCommandDispatcher {
             return applyDeleteGroup(id: id)
 
         case .setGroupMuted(let id, let muted):
+            guard groupController.groups.contains(where: { $0.id == id }) else {
+                return .refused("That scene no longer exists on the Mac.")
+            }
             groupController.setGroupMuted(muted, groupID: id)
             return .ok
 
@@ -239,6 +243,9 @@ public final class CompanionCommandDispatcher {
             return applyAddAppRoute(bundleID: bundleID, displayName: displayName)
 
         case .removeAppRoute(let bundleID):
+            guard appRouting.appRoutes.contains(where: { $0.bundleID == bundleID }) else {
+                return .refused("That app identifier isn't valid.")
+            }
             appRouting.removeRoute(bundleID: bundleID)
             return .ok
 
@@ -274,8 +281,8 @@ public final class CompanionCommandDispatcher {
             }
             startBufferApplyInFlight = true
             Task {
+                defer { startBufferApplyInFlight = false }
                 await applyStartBuffer(ms)
-                startBufferApplyInFlight = false
             }
             return .ok
 

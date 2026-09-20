@@ -89,11 +89,15 @@ func tempDir() -> URL {
 /// makes the resolution deterministic regardless of what's driving the run.
 let snapshotBackingScale: CGFloat = 2
 
+/// Set on any renderPNG failure so a run that wrote no PNG still exits non-zero.
+var renderFailed = false
+
 /// Render `view` (already laid out, hosted in a window) to a PNG at `url` under
 /// `appearance`. Creates a deterministic @2x bitmap representation regardless of
 /// the host screen's backing scale factor.
 @MainActor
-func renderPNG(view: NSView, to url: URL) {
+@discardableResult
+func renderPNG(view: NSView, to url: URL) -> Bool {
     view.layoutSubtreeIfNeeded()
     let bounds = view.bounds
     let pixelsWide = Int((bounds.width * snapshotBackingScale).rounded())
@@ -103,7 +107,8 @@ func renderPNG(view: NSView, to url: URL) {
                                       samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                       colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
         print("  FAIL  could not make bitmap rep for \(url.lastPathComponent)")
-        return
+        renderFailed = true
+        return false
     }
     rep.size = bounds.size
     // `NSBitmapImageRep(bitmapDataPlanes:...)` doesn't guarantee a zeroed
@@ -117,13 +122,17 @@ func renderPNG(view: NSView, to url: URL) {
     
     guard let data = rep.representation(using: .png, properties: [:]) else {
         print("  FAIL  could not encode PNG for \(url.lastPathComponent)")
-        return
+        renderFailed = true
+        return false
     }
     do {
         try data.write(to: url)
         print("  WROTE \(url.path)  (\(Int(bounds.width))x\(Int(bounds.height)))")
+        return true
     } catch {
         print("  FAIL  write \(url.lastPathComponent): \(error)")
+        renderFailed = true
+        return false
     }
 }
 
@@ -1062,55 +1071,55 @@ func run() -> Int32 {
         snapshotConnectionStates(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotConnectionStates(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
-        return 0
+        return renderFailed ? 1 : 0
     }
     if mode == "live-routing" {
         snapshotLiveRouting(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotLiveRouting(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
-        return 0
+        return renderFailed ? 1 : 0
     }
     if mode == "dormant-group" {
         snapshotDormantGroup(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotDormantGroup(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
-        return 0
+        return renderFailed ? 1 : 0
     }
     if mode == "local-mix-blocked" {
         snapshotLocalMixBlocked(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotLocalMixBlocked(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
-        return 0
+        return renderFailed ? 1 : 0
     }
     if mode == "resting-ring" {
         snapshotRestingRing(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotRestingRing(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
-        return 0
+        return renderFailed ? 1 : 0
     }
     if mode == "rail-depth" {
         snapshotRailDepth(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotRailDepth(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
-        return 0
+        return renderFailed ? 1 : 0
     }
     if mode == "feed-composite" {
         snapshotFeedComposite(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotFeedComposite(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
-        return 0
+        return renderFailed ? 1 : 0
     }
     if mode == "energize-mid-sequence" {
         snapshotEnergizeMidSequence(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotEnergizeMidSequence(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
-        return 0
+        return renderFailed ? 1 : 0
     }
     if mode == "energize-reduce-motion-static" {
         snapshotEnergizeReduceMotion(appearanceName: .aqua, label: "light", outDir: outDir)
         snapshotEnergizeReduceMotion(appearanceName: .darkAqua, label: "dark", outDir: outDir)
         print("Done.")
-        return 0
+        return renderFailed ? 1 : 0
     }
 
     snapshot(appearanceName: .aqua, label: "light", outDir: outDir)
@@ -1119,7 +1128,7 @@ func run() -> Int32 {
     snapshotMeters(appearanceName: .darkAqua, label: "dark", outDir: outDir)
 
     print("Done.")
-    return 0
+    return renderFailed ? 1 : 0
 }
 
 exit(MainActor.assumeIsolated { run() })

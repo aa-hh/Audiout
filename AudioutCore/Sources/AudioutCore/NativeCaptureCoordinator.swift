@@ -1657,7 +1657,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Runs on the tap's delivery thread (the IOProc, in production). Allocation
     /// beyond the converter's own scratch is avoided on this path where practical.
     private func handleBuffer(_ buffer: CapturedBuffer) {
-        // T8 (plan finding F12): REAL-TIME THREAD — never take `queue` here.
+        // T8 (plan finding F12): this is the tap's delivery thread — never take
+        // `queue` here. See the policy at `startIOProc`'s IOProc block.
         //
         // This used to be `queue.sync { (converter, meteringActive, sink,
         // resampler) }`, i.e. the audio thread blocking on the same unqualified,
@@ -1693,6 +1694,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         guard !snapshot.wizardActive else { return }
         guard let converter = snapshot.converter else { return }
 
+        // The converter's own lock is the bounded, single-caller kind point 3
+        // of the policy allows to be taken with `lock()`.
         let converted = converter.convertToAirPlayPCM(buffer)
         // Sampled AFTER the convert attempt and BEFORE the failure early-out,
         // so a converter dropping every buffer still surfaces its counters
@@ -3763,7 +3766,29 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         let err = AudioDeviceCreateIOProcIDWithBlock(
             &newProcID, aggregateID, queue
         ) { [weak self] _, inInputData, inInputTime, _, _ in
-            // ---- REALTIME THREAD ----
+            // ---- THE REAL-TIME POLICY FOR TAP DELIVERY (the one place it
+            // is written down; every other site points here) ----
+            //
+            // 1. This block runs on the `.userInitiated` serial queue it was
+            //    registered on just above, NOT on the HAL's own real-time
+            //    thread. But `AudioHardware.h` says of that queue: "All
+            //    IOBlocks are dispatched synchronously", i.e. the HAL waits
+            //    for this block, so its wall time still counts against the
+            //    device's IO cycle. Everything downstream of here — the
+            //    per-app `onBuffer` closure, `handleBuffer`, `AppRouteMixer`
+            //    and `LeveledAppInjector` — is on that same critical path.
+            // 2. Nothing on this path waits on a serial queue, or on any lock
+            //    whose holder may do unbounded work (build a converter,
+            //    recompute routes, fire callbacks, log). Queue-confined state
+            //    is read as one immutable snapshot through
+            //    `snapshotLock.try()`, and a miss drops the buffer — at most
+            //    one edit stale, so a drop costs nothing.
+            // 3. A lock whose EVERY holder does only bounded in-memory work
+            //    may be taken with `lock()`: the converter's own lock (single
+            //    caller in production), and the mixers' timeline and ring
+            //    locks.
+            // 4. Allocation and the `AVAudioConverter` run are accepted costs
+            //    here. There is no no-allocation contract to honour.
             guard let self else { return }
             let mutablePtr = UnsafeMutablePointer(mutating: inInputData)
             let listPtr = UnsafeMutableAudioBufferListPointer(mutablePtr)
@@ -4177,17 +4202,32 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// Test/convenience entry point: derives a fresh offset every call (no
     /// caching), so unlike the production RT path above it can never itself go
     /// stale across a sleep. Production code must go through the instance path
-    /// (seeded in `startIOProc`, healed in the IOProc block) instead, since
-    /// resampling both clocks on every single call is not something we want to
-    /// pay for on every real captured buffer.
+    /// (seeded in `startIOProc`, healed in the IOProc block) or the `offset:`
+    /// overload below, instead, since resampling both clocks on every single
+    /// call is not something we want to pay for on every real captured buffer.
     static func timespec(fromHostTime hostTime: UInt64) -> timespec {
         let machNanos = machNanoseconds(fromHostTime: hostTime)
         let offset = sampleMachToMonotonicOffsetNanos()
         return timespec(machNanos: machNanos, offset: offset)
     }
 
+    /// Production entry point for a caller that owns a cached mach-to-monotonic
+    /// offset (a synced sink's render block). Pays for one `clock_gettime` call
+    /// per invocation to check the drift heal (`shouldResample`), and only pays
+    /// for a fresh two-clock resample when the cached offset has fallen more
+    /// than 1s out of step with reality — e.g. the box slept. `offset` is
+    /// updated in place when a resample happens, so the caller's cached value
+    /// stays current across calls.
+    static func timespec(fromHostTime hostTime: UInt64, offset: inout Int64) -> timespec {
+        let machNanos = machNanoseconds(fromHostTime: hostTime)
+        if shouldResample(machNanos: machNanos, offset: offset, monotonicNowNanos: currentMonotonicNanos()) {
+            offset = sampleMachToMonotonicOffsetNanos()
+        }
+        return timespec(machNanos: machNanos, offset: offset)
+    }
+
     /// mach host ticks → nanoseconds on the mach-absolute timescale.
-    private static func machNanoseconds(fromHostTime hostTime: UInt64) -> UInt64 {
+    static func machNanoseconds(fromHostTime hostTime: UInt64) -> UInt64 {
         let timebase = cachedTimebase
         return hostTime &* UInt64(timebase.numer) / UInt64(max(1, timebase.denom))
     }
@@ -4216,7 +4256,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// advancing `CLOCK_MONOTONIC` position. Can be negative (CLOCK_MONOTONIC <
     /// mach-absolute when the box has slept), which is why all offset arithmetic
     /// in this file is signed.
-    private static func sampleMachToMonotonicOffsetNanos() -> Int64 {
+    static func sampleMachToMonotonicOffsetNanos() -> Int64 {
         // Sample both clocks as close together as possible.
         let mach = machNanoseconds(fromHostTime: mach_absolute_time())
         let monotonic = currentMonotonicNanos()
@@ -4315,6 +4355,9 @@ final class AVFormatConverter: PCMConverting, @unchecked Sendable {
     private let inputAVFormat: AVAudioFormat?
     private let outputAVFormat: AVAudioFormat?
     private let converter: AVAudioConverter?
+    /// Taken by ``convertToAirPlayPCM(_:)`` on the delivery thread and by the
+    /// `conversionFailureCount` test seam only — no two production threads ever
+    /// contend it.
     private let lock = NSLock()
 
     // Conversion-failure counters, one slot per ``ConversionFailureReason``

@@ -65,7 +65,9 @@
 //     {"release": true} to trigger the same clean exit immediately, so a
 //     seamless handoff can free 319/320 in ~1s instead of waiting out the
 //     idle window. Fire-and-forget, no reply — the idle path above remains
-//     the normal, unsolicited case.
+//     the normal, unsolicited case. The verb is honored only from a peer
+//     that satisfies AUDIOUT_PTP_PEER_REQUIREMENT below; every other peer's
+//     release request is ignored.
 //
 // EXIT-CODE CONTRACT — load-bearing, because the launchd plist runs
 // KeepAlive={SuccessfulExit:false}: a non-zero exit is respawned immediately.
@@ -83,6 +85,10 @@
 //
 //   AUDIOUT_PTP_MACH_SERVICE        launchd Mach service name to check in
 //                                     on. Unset/empty = skip check-in.
+//   AUDIOUT_PTP_PEER_REQUIREMENT    a code-signing requirement string a
+//                                     peer must satisfy before its release
+//                                     verb is honored. Unset/empty = every
+//                                     release is refused, idle exit only.
 //   AUDIOUT_PTP_PORTS               "EVENT,GENERAL" high-port override.
 //   AUDIOUT_PTP_SHM_NAME            shm segment name override, so a test
 //                                     helper never collides with the real
@@ -443,11 +449,19 @@ static void
 ptp_helper_mach_checkin(void)
 {
   const char *name;
+  const char *requirement;
   dispatch_queue_t queue;
 
   name = getenv("AUDIOUT_PTP_MACH_SERVICE");
   if (!name || !name[0])
     return; // Dev/test path: launched directly, no launchd, nothing to check in with.
+
+  requirement = getenv("AUDIOUT_PTP_PEER_REQUIREMENT");
+  if (!requirement || !requirement[0])
+  {
+    requirement = NULL;
+    ptp_helper_logmsg("ptp-helper: no peer code-signing requirement configured - every release request will be refused (idle exit still ends the process)");
+  }
 
   queue = dispatch_queue_create("com.audiout.ptp-helper.machservice", DISPATCH_QUEUE_SERIAL);
 
@@ -464,12 +478,45 @@ ptp_helper_mach_checkin(void)
     if (xpc_get_type(peer) != XPC_TYPE_CONNECTION)
       return; // Listener-level error object (e.g. XPC_ERROR_TERMINATION_IMMINENT).
 
+    // Only a peer whose code signature satisfies the requirement below may
+    // trigger release; every other peer is resumed (so its connect()
+    // completes) but its release requests are ignored.
+    __block bool release_allowed = false;
+    __block bool refusal_logged = false;
+
+    if (requirement)
+    {
+      int rc = xpc_connection_set_peer_code_signing_requirement((xpc_connection_t)peer, requirement);
+      if (rc == 0)
+        release_allowed = true;
+      else
+        ptp_helper_logmsg("ptp-helper: could not apply the peer code-signing requirement (rc=%d) - this peer's release requests will be refused", rc);
+    }
+
     // Resume the peer so the client's connect() completes, then ignore
     // everything it sends except the one recognized shutdown trigger below.
     xpc_connection_set_event_handler((xpc_connection_t)peer, ^(xpc_object_t event) {
+      // XPC reports this only where the peer expected a reply; a plain
+      // release request expects none, so a dropped one logs nothing here.
+      if (event == XPC_ERROR_PEER_CODE_SIGNING_REQUIREMENT)
+      {
+        ptp_helper_logmsg("ptp-helper: a peer failed the code-signing requirement and was ignored");
+        return;
+      }
+
       if (xpc_get_type(event) == XPC_TYPE_DICTIONARY &&
           xpc_dictionary_get_bool(event, "release"))
       {
+        if (!release_allowed)
+        {
+          if (!refusal_logged)
+          {
+            refusal_logged = true;
+            ptp_helper_logmsg("ptp-helper: release refused - no peer code-signing requirement is in force for this peer");
+          }
+          return;
+        }
+
         ptp_helper_logmsg("ptp-helper: release requested - exiting so the PTP ports are freed");
         ptp_helper_should_run = 0;
       }

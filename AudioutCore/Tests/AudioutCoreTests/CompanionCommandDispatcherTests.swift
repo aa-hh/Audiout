@@ -369,6 +369,15 @@ import AudioutProtocol
         #expect(ctx.groupController.isGroupMuted("g1"))
     }
 
+    /// Defect this catches: the dispatcher replied "applied" for a scene mute
+    /// on a group the Mac doesn't have, so the phone showed a mute that never happened.
+    @Test func setGroupMutedRefusesUnknownGroup() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.setGroupMuted(id: "nope", muted: true))
+        #expect(!result.applied)
+        #expect(result.refusalReason == "That scene no longer exists on the Mac.")
+    }
+
     // MARK: addAppRoute — success + excluded refusal
 
     @Test func addAppRouteSucceeds() async throws {
@@ -395,6 +404,15 @@ import AudioutProtocol
         let result = ctx.dispatcher.execute(.removeAppRoute(bundleID: "com.apple.Music"))
         #expect(result.applied)
         #expect(!ctx.appRouting.appRoutes.contains { $0.bundleID == "com.apple.Music" })
+    }
+
+    /// Defect this catches: a removal for a bundle with no route replied
+    /// "applied" though nothing was removed.
+    @Test func removeAppRouteRefusesUnknownBundle() async throws {
+        let ctx = try await makeContext()
+        let result = ctx.dispatcher.execute(.removeAppRoute(bundleID: "com.apple.Music"))
+        #expect(!result.applied)
+        #expect(result.refusalReason == "That app identifier isn't valid.")
     }
 
     // MARK: setAppDestination — noRedirect / currentDevice / device + refusals

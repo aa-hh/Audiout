@@ -95,8 +95,10 @@ public struct CompanionApprovalStore: Sendable {
 ///   list instead of stacking alerts, and the user's single answer resolves
 ///   them all.
 /// - The app layer supplies ``presentPrompt`` (the actual `NSAlert` — this
-///   type is UI-free so it can be tested headlessly) and ``dropClient``
-///   (revoking an approval must also disconnect that phone if it's live).
+///   type is UI-free so it can be tested headlessly) and ``withdrawPrompt``
+///   (close a prompt whose connection died before the user answered), plus
+///   ``dropClient`` (revoking an approval must also disconnect that phone if
+///   it's live).
 /// - Settings › General reads ``approvals`` and calls ``revoke(clientID:)``.
 @MainActor
 public final class CompanionApprovalController {
@@ -113,7 +115,12 @@ public final class CompanionApprovalController {
     /// nil (unwired, e.g. a headless test that never expects a prompt) leaves
     /// the connection held until the server's own approval deadline closes it
     /// — never a silent approval.
-    public var presentPrompt: ((_ clientName: String, _ respond: @escaping (Bool) -> Void) -> Void)?
+    public var presentPrompt: ((_ clientID: String, _ clientName: String, _ respond: @escaping (Bool) -> Void) -> Void)?
+
+    /// Close the prompt shown for this clientID — its connections are gone
+    /// (dropped, or reaped by the server's approval deadline). Wired by the
+    /// app layer; nil (unwired) leaves any on-screen alert as is.
+    public var withdrawPrompt: ((_ clientID: String) -> Void)?
 
     /// Disconnect any live client with this clientID — fired on
     /// ``revoke(clientID:)`` (the app layer wires it to
@@ -163,7 +170,7 @@ public final class CompanionApprovalController {
             return
         }
         pendingDeciders[clientID] = [decide]
-        presentPrompt?(clientName) { [weak self] allowed in
+        presentPrompt?(clientID, clientName) { [weak self] allowed in
             self?.resolvePrompt(clientID: clientID, clientName: clientName, allowed: allowed)
         }
     }
@@ -181,6 +188,17 @@ public final class CompanionApprovalController {
         for decide in waiters {
             decide(allowed ? .approved : .denied)
         }
+    }
+
+    /// The last connection awaiting this clientID's prompt died before the
+    /// user answered (`CompanionServer.onApprovalAbandoned`). Drops the held
+    /// deciders without calling them — their connections are already gone,
+    /// so `resolveApproval` would no-op anyway — and withdraws the on-screen
+    /// prompt. A clientID with no open prompt (already resolved, or never
+    /// prompted) is a no-op: nothing to withdraw.
+    public func abandonRequest(clientID: String) {
+        guard pendingDeciders.removeValue(forKey: clientID) != nil else { return }
+        withdrawPrompt?(clientID)
     }
 
     /// Forget a phone entirely (approval OR denial — a revoked denial simply

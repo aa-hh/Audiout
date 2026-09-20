@@ -64,7 +64,7 @@ folder renders; routing arithmetic lives in Core.
 - An App Routing row may target a saved GROUP. The one-role-per-speaker filter hides a Main Out member from the DEVICE list but never the group containing it — the group entry discloses how much of itself the app gets, and only greys out when no member is free.
 - A group's membership is read LIVE on every rebuild (`groupRouteTargets()`); never cache it.
 - A group edit reaches the surface ONLY through `groupsDidChange()`; no other trigger watches it.
-- Known stability findings in this target carry `STABILITY(id)` inline markers — details and fix sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
+- No `STABILITY(id)` markers remain in this target; the audit's findings and fix sketches are history in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 
 ## Map

@@ -863,6 +863,78 @@ import AudioutProtocol
         #expect(server.test_awaitingCount() == 0)
     }
 
+    @Test func droppedAwaitingConnectionReportsAbandonment() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+        server.onApprovalRequest = { _, _, decide in decide(.pending) }
+        let abandoned = LockedBox<[String]>([])
+        server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
+
+        let (client, _) = try connectClient(via: hub, to: server)
+        try sendHello(over: client)
+
+        #expect(waitUntil { server.test_awaitingCount() == 1 },
+                "the client never reached the awaiting pool")
+        client.cancel()
+
+        #expect(waitUntil { abandoned.value == [Self.validClientID] },
+                "the dropped connection never reported abandonment")
+        #expect(waitUntil { server.test_awaitingCount() == 0 },
+                "the dropped connection's awaiting entry was never removed")
+    }
+
+    @Test func approvalDeadlineReportsAbandonment() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        server.test_approvalTimeoutOverride = 0.3 // real default is 180s
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+        server.onApprovalRequest = { _, _, decide in decide(.pending) } // never answered
+        let abandoned = LockedBox<[String]>([])
+        server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
+
+        let (client, _) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try sendHello(over: client)
+
+        #expect(waitUntil { abandoned.value == [Self.validClientID] },
+                "the approval-deadline reap never reported abandonment")
+    }
+
+    @Test func abandonmentWaitsForTheLastConnectionOfThatPhone() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = CompanionServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+        server.onApprovalRequest = { _, _, decide in decide(.pending) }
+        let abandoned = LockedBox<[String]>([])
+        server.onApprovalAbandoned = { clientID in abandoned.withLock { $0.append(clientID) } }
+
+        let (clientA, _) = try connectClient(via: hub, to: server)
+        try sendHello(over: clientA)
+        let (clientB, _) = try connectClient(via: hub, to: server)
+        try sendHello(over: clientB)
+
+        #expect(waitUntil { server.test_awaitingCount() == 2 },
+                "both connections never reached the awaiting pool")
+        clientA.cancel()
+
+        #expect(waitUntil { server.test_awaitingCount() == 1 },
+                "the first cancelled connection was never removed")
+        #expect(abandoned.value.isEmpty,
+                "abandonment fired while a sibling connection for the same phone is still awaiting")
+
+        clientB.cancel()
+
+        #expect(waitUntil { abandoned.value == [Self.validClientID] },
+                "abandonment never fired once the last awaiting connection for the phone died")
+    }
+
     @Test func helloWithoutClientIDIsRefusedWithAClearReason() throws {
         let hub = try makeHub()
         defer { hub.cancel() }

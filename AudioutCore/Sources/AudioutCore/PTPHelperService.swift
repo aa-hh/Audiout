@@ -201,13 +201,12 @@ public struct PTPHelperReleaser: PTPHelperReleasing {
         self.machServiceName = machServiceName
     }
 
-    // razor: unauthenticated. Any local process can send this and stop our
-    // clock — repeatedly, indefinitely, holding the daemon down as a
-    // persistent denial of AirPlay, not just a one-off blip (impact: our
-    // audio blips and re-establishes; no privilege is gained, DoS only, never
-    // escalation). Upgrade path once hardened:
-    // xpc_connection_set_peer_code_signing_requirement on the helper's peer
-    // connections (macOS 13+, deployment target is 14).
+    // The helper honors this release request only from a peer that satisfies
+    // the code-signing requirement rendered into its launchd plist
+    // (scripts/ptp-helper.plist, AUDIOUT_PTP_PEER_REQUIREMENT) — so only the
+    // app that shipped the helper can stop its clock. An ad-hoc build's
+    // helper has no requirement to satisfy against, so it refuses every
+    // release and relies on idle exit alone.
     public func release() {
         // Nothing running to release — a send would demand-START the root
         // helper (rebinding 319/320) just to kill it, which is self-defeating

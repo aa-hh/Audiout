@@ -39,8 +39,20 @@ import Testing
         var value: UInt16? { lock.withLock { stored } }
     }
 
-    private func startServer(primeMilliseconds: Int = 0) throws -> (server: CastLiveAudioServer, port: UInt16) {
-        let server = CastLiveAudioServer(source: SineSource(), loopbackOnly: true, primeMilliseconds: primeMilliseconds)
+    private func startServer(
+        primeMilliseconds: Int = 0,
+        allowedPeer: String? = nil,
+        maxConnections: Int = 32,
+        idleDeadline: TimeInterval = 30
+    ) throws -> (server: CastLiveAudioServer, port: UInt16) {
+        let server = CastLiveAudioServer(
+            source: SineSource(),
+            loopbackOnly: true,
+            primeMilliseconds: primeMilliseconds,
+            allowedPeer: allowedPeer,
+            maxConnections: maxConnections,
+            idleDeadline: idleDeadline
+        )
         let box = PortBox()
         server.start { result in
             if case .success(let port) = result { box.set(port) }
@@ -49,6 +61,23 @@ import Testing
         while box.value == nil && Date() < deadline { Thread.sleep(forTimeInterval: 0.005) }
         let port = try #require(box.value, "live audio server never bound a loopback port")
         return (server, port)
+    }
+
+    /// Opens a raw client connection and spin-waits for it to reach `.ready`,
+    /// so a test can hold a connection slot open against `maxConnections`
+    /// while it drives a second `exchange` against the server.
+    private func openConnection(port: UInt16) throws -> NWConnection {
+        let readyBox = PortBox()
+        let netQueue = DispatchQueue(label: "CastLiveAudioServerTests.held")
+        let connection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
+        connection.stateUpdateHandler = { state in
+            if case .ready = state { readyBox.set(1) }
+        }
+        connection.start(queue: netQueue)
+        let deadline = Date().addingTimeInterval(2)
+        while readyBox.value == nil && Date() < deadline { Thread.sleep(forTimeInterval: 0.005) }
+        _ = try #require(readyBox.value, "held connection never reached .ready")
+        return connection
     }
 
     /// Sends one request and collects the response until `until` is satisfied,
@@ -199,6 +228,79 @@ import Testing
             $0.count >= 12
         }
         #expect(String(decoding: response, as: UTF8.self).hasPrefix("HTTP/1.1 405"))
+    }
+
+    /// Turns red if `accept(_:)` stops checking the connection's endpoint
+    /// against `allowedPeer` before starting it.
+    @Test func refusesAGetFromAnAddressOtherThanTheReceiver() throws {
+        let (wrongServer, wrongPort) = try startServer(allowedPeer: "10.0.0.1")
+        defer { wrongServer.stop() }
+
+        let (refused, refusedCompleted) = exchange(
+            port: wrongPort,
+            request: "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n",
+            timeout: 2,
+            until: { _ in false }
+        )
+        #expect(refusedCompleted, "a connection from a non-matching peer should be cancelled, not served")
+        #expect(refused.isEmpty, "a refused connection must get no bytes at all")
+
+        let (rightServer, rightPort) = try startServer(allowedPeer: "127.0.0.1")
+        defer { rightServer.stop() }
+
+        let (admitted, _) = exchange(
+            port: rightPort,
+            request: "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n",
+            timeout: 2,
+            until: { self.split($0) != nil }
+        )
+        let (head, _) = try #require(split(admitted), "the real receiver's own address must still be admitted")
+        #expect(head.hasPrefix("HTTP/1.1 200 OK"))
+    }
+
+    /// Turns red if `accept(_:)` stops checking `connections.count` against
+    /// `maxConnections` before storing a new connection.
+    @Test func cancelsConnectionsBeyondTheCapOnArrival() throws {
+        let (server, port) = try startServer(maxConnections: 1)
+        defer { server.stop() }
+
+        let held = try openConnection(port: port)
+        defer { held.cancel() }
+
+        let firstBox = Collector()
+        held.send(content: Data("GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n".utf8), completion: .idempotent)
+        func receiveFirst() {
+            held.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, isComplete, error in
+                if let data, !data.isEmpty { firstBox.append(data) }
+                if isComplete || error != nil { firstBox.end(); return }
+                receiveFirst()
+            }
+        }
+        receiveFirst()
+        let firstDeadline = Date().addingTimeInterval(2)
+        while firstBox.data.isEmpty && Date() < firstDeadline { Thread.sleep(forTimeInterval: 0.01) }
+        #expect(!firstBox.data.isEmpty, "the connection that arrived within the cap should be served")
+
+        let (secondResponse, secondCompleted) = exchange(
+            port: port,
+            request: "GET /live.wav HTTP/1.1\r\nHost: x\r\n\r\n",
+            timeout: 2,
+            until: { _ in false }
+        )
+        #expect(secondCompleted, "a connection past the cap should be cancelled on arrival, not queued")
+        #expect(secondResponse.isEmpty, "a connection past the cap must get no bytes at all")
+    }
+
+    /// Turns red if `accept(_:)` stops arming the idle-deadline work item, or
+    /// if removing it (or never arming it) leaves the silent connection open
+    /// so `completed` never becomes true.
+    @Test func closesAConnectionThatSendsNothingAfterTheIdleDeadline() throws {
+        let (server, port) = try startServer(idleDeadline: 0.3)
+        defer { server.stop() }
+
+        let (response, completed) = exchange(port: port, request: "", timeout: 2, until: { _ in false })
+        #expect(completed, "a connection that never sends a request should be closed after the idle deadline")
+        #expect(response.isEmpty)
     }
 
     @Test func sineSourceIsContinuousAcrossRenders() {

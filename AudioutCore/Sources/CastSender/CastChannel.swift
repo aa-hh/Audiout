@@ -40,6 +40,7 @@ public final class CastChannel: @unchecked Sendable {
     /// for the local address.
     private let stateLock = NSLock()
     private var _localIPv4Address: String?
+    private var _remoteIPv4Address: String?
     private var _pongCount = 0
 
     // Queue-confined below this line.
@@ -64,6 +65,9 @@ public final class CastChannel: @unchecked Sendable {
     /// the host a receiver has to fetch the audio stream back from. Nil until
     /// the connection is ready (or if the path has no IPv4 local endpoint).
     public var localIPv4Address: String? { stateLock.withLock { _localIPv4Address } }
+
+    /// The receiver's own address — the only peer ``CastLiveAudioServer`` may serve.
+    public var remoteIPv4Address: String? { stateLock.withLock { _remoteIPv4Address } }
 
     /// How many PONGs the receiver has answered — the liveness signal the
     /// Phase-0 spike reports on.
@@ -138,6 +142,10 @@ public final class CastChannel: @unchecked Sendable {
     }
 
     private func recordLocalAddress() {
+        if case let .hostPort(host, _)? = connection?.currentPath?.remoteEndpoint,
+           case let .ipv4(address) = host {
+            stateLock.withLock { _remoteIPv4Address = "\(address)" }
+        }
         if case let .hostPort(host, _)? = connection?.currentPath?.localEndpoint,
            case let .ipv4(address) = host {
             stateLock.withLock { _localIPv4Address = "\(address)" }

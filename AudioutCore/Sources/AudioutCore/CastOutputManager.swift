@@ -652,7 +652,8 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         let server = CastLiveAudioServer(
             source: session.ring,
             loopbackOnly: serverBindsLoopbackOnly,
-            primeMilliseconds: Self.primeMilliseconds
+            primeMilliseconds: Self.primeMilliseconds,
+            allowedPeer: session.channel?.remoteIPv4Address
         )
         // The reset fires on the server's queue, synchronously ahead of the
         // prime render, so the receiver's first bytes are the live edge of the

@@ -108,6 +108,12 @@ public final class CompanionServer: @unchecked Sendable {
     /// boundary fails closed.
     public var onApprovalRequest: (@Sendable (_ clientID: String, _ clientName: String, _ decide: @escaping @Sendable (ApprovalDecision) -> Void) -> Void)?
 
+    /// Fires when the last awaiting connection carrying this phone
+    /// `clientID` went away unanswered — dropped, or the approval deadline
+    /// reaped it. Never fires for an answered request (approved or denied).
+    /// The wiring uses this to withdraw the prompt still on screen.
+    public var onApprovalAbandoned: (@Sendable (_ clientID: String) -> Void)?
+
     /// A client went away for any reason — clean close, error, liveness
     /// reaping, or `stop()` — after being accepted (helloed + promoted;
     /// connections that die before their `hello` are removed silently).
@@ -653,9 +659,15 @@ public final class CompanionServer: @unchecked Sendable {
     /// only place that still holds the object. Cancelling an
     /// already-cancelled connection is a no-op.
     private func removeClient(_ id: UUID) {
-        if let waiting = pending.removeValue(forKey: id) ?? awaiting.removeValue(forKey: id) {
+        if let waiting = pending.removeValue(forKey: id) {
             waiting.handshakeTimeout?.cancel()
             waiting.connection.cancel()
+            return // never promoted: no disconnect signal, never counted
+        }
+        if let waiting = awaiting.removeValue(forKey: id) {
+            waiting.handshakeTimeout?.cancel()
+            waiting.connection.cancel()
+            noteApprovalAbandoned(waiting)
             return // never promoted: no disconnect signal, never counted
         }
         guard let client = clients.removeValue(forKey: id) else { return }
@@ -667,6 +679,17 @@ public final class CompanionServer: @unchecked Sendable {
             disconnected?(id)
             countChanged?(count)
         }
+    }
+
+    /// MUST only run on ``queue``, and only for a connection just removed
+    /// from ``awaiting``. Fires ``onApprovalAbandoned`` unless another
+    /// connection still awaiting shares this phone identity — a reconnect
+    /// that joined the open prompt (`CompanionApprovalStore`) must keep it.
+    private func noteApprovalAbandoned(_ client: Client) {
+        guard let phoneClientID = client.phoneClientID else { return }
+        guard !awaiting.values.contains(where: { $0.phoneClientID == phoneClientID }) else { return }
+        let abandoned = onApprovalAbandoned
+        queue.async { abandoned?(phoneClientID) }
     }
 
     // MARK: - Liveness
@@ -845,6 +868,7 @@ public final class CompanionServer: @unchecked Sendable {
                 guard let self, let held = self.awaiting.removeValue(forKey: connectionID) else { return }
                 self.log.notice("companion client refused: approval prompt unanswered")
                 self.refuse(held, reason: CompanionGoodbyeReason.approvalTimedOut)
+                self.noteApprovalAbandoned(held)
             }
             client.handshakeTimeout = approvalWork
             queue.asyncAfter(

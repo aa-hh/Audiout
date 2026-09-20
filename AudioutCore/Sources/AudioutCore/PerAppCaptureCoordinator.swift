@@ -1343,7 +1343,8 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         let err = AudioDeviceCreateIOProcIDWithBlock(
             &newProcID, aggregateID, queue
         ) { [weak self] _, inInputData, inInputTime, _, _ in
-            // ---- REALTIME THREAD ----
+            // ---- The per-app tap's delivery block: see the real-time policy
+            // at `NativeCaptureCoordinator.startIOProc`'s IOProc block. ----
             guard let self else { return }
             let mutablePtr = UnsafeMutablePointer(mutating: inInputData)
             let listPtr = UnsafeMutableAudioBufferListPointer(mutablePtr)

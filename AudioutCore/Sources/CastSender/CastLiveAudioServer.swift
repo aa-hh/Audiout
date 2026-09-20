@@ -94,11 +94,29 @@ public final class CastLiveAudioServer: @unchecked Sendable {
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var timers: [ObjectIdentifier: DispatchSourceTimer] = [:]
+    private var idleTimeouts: [ObjectIdentifier: DispatchWorkItem] = [:]
 
-    public init(source: CastPCMSource, loopbackOnly: Bool, primeMilliseconds: Int = 0) {
+    /// The receiver's own address, from the control connection
+    /// (``CastChannel/remoteIPv4Address``). Nil admits any peer — see
+    /// ``accept(_:)`` for why that's the safe default, not a hole.
+    private let allowedPeer: String?
+    private let maxConnections: Int
+    private let idleDeadline: TimeInterval
+
+    public init(
+        source: CastPCMSource,
+        loopbackOnly: Bool,
+        primeMilliseconds: Int = 0,
+        allowedPeer: String? = nil,
+        maxConnections: Int = 32,
+        idleDeadline: TimeInterval = 30
+    ) {
         self.source = source
         self.loopbackOnly = loopbackOnly
         self.primeMilliseconds = primeMilliseconds
+        self.allowedPeer = allowedPeer
+        self.maxConnections = maxConnections
+        self.idleDeadline = idleDeadline
     }
 
     public var port: UInt16 { portLock.withLock { _port } }
@@ -161,6 +179,8 @@ public final class CastLiveAudioServer: @unchecked Sendable {
             listener = nil
             for (_, timer) in timers { timer.cancel() }
             timers.removeAll()
+            for (_, idleWork) in idleTimeouts { idleWork.cancel() }
+            idleTimeouts.removeAll()
             for (_, connection) in connections { connection.cancel() }
             connections.removeAll()
         }
@@ -168,8 +188,42 @@ public final class CastLiveAudioServer: @unchecked Sendable {
 
     // MARK: - One client
 
+    // `allowedPeer` is nil when the manager never learned the receiver's
+    // IPv4 address — the control connection can ride IPv6 on the owner's
+    // own network (live failure, 2026-08-23), and refusing on nil would
+    // strand every such session, so nil means "no peer check" rather
+    // than "refuse everyone". An IPv4-mapped IPv6 peer (`::ffff:a.b.c.d`,
+    // which a listener bound to all interfaces can report even for an
+    // IPv4 receiver) counts as its IPv4 address.
+    private func peerMatches(_ endpoint: NWEndpoint) -> Bool {
+        guard let allowedPeer else { return true }
+        guard case .hostPort(let host, _) = endpoint else { return false }
+        switch host {
+        case .ipv4(let address):
+            return "\(address)" == allowedPeer
+        case .ipv6(let v6):
+            if let v4 = v6.asIPv4 {
+                return "\(v4)" == allowedPeer
+            }
+            return false
+        case .name:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+
     private func accept(_ connection: NWConnection) {
-        connections[ObjectIdentifier(connection)] = connection
+        guard peerMatches(connection.endpoint) else {
+            connection.cancel()
+            return
+        }
+        guard connections.count < maxConnections else {
+            connection.cancel()
+            return
+        }
+        let key = ObjectIdentifier(connection)
+        connections[key] = connection
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
             case .failed, .cancelled:
@@ -180,11 +234,18 @@ public final class CastLiveAudioServer: @unchecked Sendable {
         }
         connection.start(queue: queue)
         readRequest(connection, buffer: Data())
+
+        let idleWork = DispatchWorkItem { [weak self] in
+            self?.connections[key]?.cancel()
+        }
+        idleTimeouts[key] = idleWork
+        queue.asyncAfter(deadline: .now() + idleDeadline, execute: idleWork)
     }
 
     private func drop(_ connection: NWConnection) {
         let key = ObjectIdentifier(connection)
         timers.removeValue(forKey: key)?.cancel()
+        idleTimeouts.removeValue(forKey: key)?.cancel()
         if connections.removeValue(forKey: key) != nil { connection.cancel() }
     }
 
@@ -206,6 +267,10 @@ public final class CastLiveAudioServer: @unchecked Sendable {
     }
 
     private func respond(to head: String, on connection: NWConnection) {
+        // A complete request head means the connection is no longer idle;
+        // cancel its deadline before it can fire against a request already
+        // in flight.
+        idleTimeouts.removeValue(forKey: ObjectIdentifier(connection))?.cancel()
         let method = head.split(separator: "\r\n").first?.split(separator: " ").first.map(String.init) ?? ""
         onRequest?(head)
         switch method {

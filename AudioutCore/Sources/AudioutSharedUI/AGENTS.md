@@ -37,7 +37,7 @@ or `GroupController`.
   `WarmFaderCell`, the `.well` style and the demo frame each draw one
   inset-shade band; `AlignmentPlateCell` draws two lips (a lit one and a shade
   one) at its own per-state alphas.
-- Stability findings carry `STABILITY(id)` markers; sketches in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
+- No `STABILITY(id)` markers remain in this target; the audit's findings and fix sketches are history in [../../../dev/notes/stability-audit-2026-07-18.md](../../../dev/notes/stability-audit-2026-07-18.md).
 - A permission prompt in flight (`setPermissionPromptInFlight`) suspends the UNPINNED tuck-away on panel AND backing bubble and survives a pin flip; the answer restores manners BEFORE `returnToFront()`, and nothing takes the front while the dialog is up — a TCC dialog that loses focus freezes.
 - Long-form traps and changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md); grep before debugging.
 

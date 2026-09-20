@@ -14,10 +14,11 @@ import Testing
 /// demand-start) a REAL privileged helper that happens to be registered on
 /// the machine.
 ///
-/// ``PTPClockProbe/isReady()`` itself is NOT injected — by design (see
-/// `PTPHelperService.swift`'s doc comment: only the status read is a seam,
-/// reusing ``PTPHelperManaging``/``SimulatedPTPHelper`` rather than inventing
-/// a parallel one) — it reads the real, fixed `/airptp_shm` name. That makes
+/// ``PTPClockProbe/isReady()`` defaults to reading the real, fixed
+/// `/airptp_shm` name, and every test below leaves that default in place
+/// except the one that needs the wait to run its whole course, which injects
+/// `isReady:` (the same shape as the `now:`/`sleep:` seams, and as the
+/// sibling ``PTPHelperReconciler``'s `probe:`). Leaving the default makes
 /// the `.enabled` verdict below environment-dependent (a real helper running
 /// ANYWHERE on the machine, e.g. someone else's live-testing session, makes
 /// it `.ready`), so this suite never asserts which of `.ready` /
@@ -196,7 +197,13 @@ extension SerializedSharedState {
             touchInterval: 0.1,
             onTouch: { counter.increment() },
             now: { clock.now() },
-            sleep: { clock.advance(by: $0) })
+            sleep: { clock.advance(by: $0) },
+            // Never ready, injected rather than assumed: the real probe reads
+            // the fixed `/airptp_shm` name, so ANY live helper on the machine
+            // — including the one a developer's own running copy of the app
+            // demand-started — made the loop break on its first turn and this
+            // test fail with one touch.
+            isReady: { false })
 
         _ = await activator.activate(timeout: 0.35)
 

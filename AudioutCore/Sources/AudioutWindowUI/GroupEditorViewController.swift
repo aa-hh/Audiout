@@ -1075,7 +1075,7 @@ public final class GroupEditorViewController: NSViewController {
     /// The refusal for a name another group already has — same window-guarded
     /// shape as ``presentPersistFailureAlert(message:)``.
     private func presentDuplicateNameAlert(name: String) {
-        guard let window = view.window else { return }
+        guard let window = view.window, !HeadlessRuntime.isActive else { return }
         let alert = NSAlert()
         alert.messageText = "That name is already taken."
         alert.informativeText =
@@ -1088,7 +1088,9 @@ public final class GroupEditorViewController: NSViewController {
     /// sheet when a window hosts the pane, skipped headless (the `test_*`
     /// seams observe the failure instead).
     private func presentPersistFailureAlert(message: String) {
-        guard let window = view.window else { return }
+        // `view.window != nil` is NOT a headless proxy — suites host this pane
+        // in a real (ordered-out) window, so the gate has to be explicit.
+        guard let window = view.window, !HeadlessRuntime.isActive else { return }
         let alert = NSAlert()
         alert.messageText = message
         alert.informativeText = "The scene\u{2019}s saved settings couldn\u{2019}t be updated. Try again."
@@ -1189,10 +1191,10 @@ public final class GroupEditorViewController: NSViewController {
     }
 
     /// Build and present `IconPickerViewController` anchored to `anchor`,
-    /// wiring its `onPick` to ``pickIcon(_:)``. Guarded on `anchor.window !=
-    /// nil` (`PopoverController.presentUnsupportedExplanation`'s pattern) so a
-    /// headless test never needs a real `NSWindow` — ``test_pickIcon(_:)``
-    /// drives ``pickIcon(_:)`` directly instead.
+    /// wiring its `onPick` to ``pickIcon(_:)``. The popover needs a hosting
+    /// window AND a non-headless process: `anchor.window != nil` alone is not a
+    /// headless check, because suites host this pane in a real (ordered-out)
+    /// window. ``test_pickIcon(_:)`` drives ``pickIcon(_:)`` directly instead.
     private func presentIconPicker(anchoredTo anchor: NSView) {
         guard let editingGroupID,
               let group = groupController.groups.first(where: { $0.id == editingGroupID }) else { return }
@@ -1203,7 +1205,7 @@ public final class GroupEditorViewController: NSViewController {
             self?.pickIcon(name)
         }
 
-        guard anchor.window != nil else { return }
+        guard anchor.window != nil, !HeadlessRuntime.isActive else { return }
         let popover = NSPopover()
         popover.behavior = .transient
         popover.contentViewController = picker
@@ -1251,10 +1253,10 @@ public final class GroupEditorViewController: NSViewController {
 
     @objc private func deleteTapped(_ sender: NSButton) {
         guard let group = editingGroup else { return }
-        guard let window = view.window else {
-            // Headless: no window means no confirmation, and deleting the
-            // user's group without one is exactly the thing the sheet is
-            // there to prevent. `test_confirmDelete()` is the headless path.
+        guard let window = view.window, !HeadlessRuntime.isActive else {
+            // No confirmation means no delete: doing it unconfirmed is exactly
+            // the thing the sheet is there to prevent. `test_confirmDelete()`
+            // is the headless path.
             return
         }
         makeDeleteAlert(for: group).beginSheetModal(for: window) { [weak self] response in

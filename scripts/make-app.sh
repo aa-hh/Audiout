@@ -312,6 +312,10 @@ fi
 REMOTE_BUILT=0
 # shellcheck source=lib/remote.sh
 . "$SCRIPT_DIR/lib/remote.sh"
+# Assigned for real in the icon section below; declared empty here so every
+# EXIT trap installed below can safely expand it at exit time -- empty is a
+# harmless `rm -rf ""`, a real path removes the icon section's temp dirs.
+ICON_TMP=""
 if [ "${AUDIOUT_BUILD_LOCAL:-0}" != "1" ] &&
    [ "${AUDIOUT_BUNDLE_DYLIBS:-0}" != "1" ] &&
    remote_wins; then
@@ -354,7 +358,7 @@ for b in $RESOURCE_BUNDLE_NAMES; do cp -R \"\$BIN/\$b\" .remote-products/ || exi
     # been copied into the bundle. Disk pressure is a recurring problem on this
     # machine (scripts/housekeeping.sh exists for it), so clear them on EVERY
     # exit path rather than leaving a copy behind per build.
-    trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
+    trap 'rm -rf "$STAGE"; rm -rf "$ICON_TMP"' EXIT HUP INT TERM
     fetch_bundles() {
       local b
       for b in $RESOURCE_BUNDLE_NAMES; do
@@ -407,9 +411,9 @@ if [ "$REMOTE_BUILT" -eq 0 ]; then
 # capacity_acquire's own trap would clobber it — so compose by hand.
 AUDIOUT_CAPACITY_NO_TRAP=1 capacity_acquire make-app
 if [ -n "$(trap -p EXIT)" ]; then
-  trap 'rm -rf "$STAGE"; capacity_release' EXIT HUP INT TERM
+  trap 'rm -rf "$STAGE"; capacity_release; rm -rf "$ICON_TMP"' EXIT HUP INT TERM
 else
-  trap 'capacity_release' EXIT HUP INT TERM
+  trap 'capacity_release; rm -rf "$ICON_TMP"' EXIT HUP INT TERM
 fi
 echo "==> Building $EXECUTABLE (release)"
 # Build engine: the SwiftPM default (swiftbuild). These commands used to pin the
@@ -644,9 +648,11 @@ SYMBOL_CATALOGUE_ARG=""
 ICON_MODE="icns"
 ICON_BUNDLE_SRC="$SCRIPT_DIR/Audiout.icon"
 XCODE_MAJOR="$(xcodebuild -version 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1 || true)"
+ICON_TMP="$(mktemp -d)"
 if [ -n "$XCODE_MAJOR" ] && [ "$XCODE_MAJOR" -ge 26 ] && [ -d "$ICON_BUNDLE_SRC" ]; then
   echo "==> Xcode $XCODE_MAJOR detected — attempting Liquid Glass icon compile via actool"
-  ACTOOL_TMP="$(mktemp -d)"
+  ACTOOL_TMP="$ICON_TMP/actool"
+  mkdir -p "$ACTOOL_TMP"
   if xcrun actool \
       --compile "$RESOURCES_DIR" \
       --platform macosx \
@@ -691,7 +697,7 @@ fi
 if [ "$ICON_MODE" = "icns" ] && [ -f "$ICON_SOURCE" ] && [ -f "$ICON_SOURCE_DARK" ] \
    && [ -n "$XCODE_MAJOR" ] && [ "$XCODE_MAJOR" -ge 16 ]; then
   echo "==> Xcode $XCODE_MAJOR detected — attempting light/dark appearance-aware icon compile via actool"
-  XCASSETS_DIR="$(mktemp -d)/Icons.xcassets"
+  XCASSETS_DIR="$ICON_TMP/Icons.xcassets"
   APPICONSET_DIR="$XCASSETS_DIR/AppIcon.appiconset"
   mkdir -p "$APPICONSET_DIR"
   cat > "$XCASSETS_DIR/Contents.json" << 'JEOF'
@@ -726,7 +732,8 @@ with open(path, "w") as f:
     json.dump(data, f, indent=2, sort_keys=True)
     f.write("\n")
 PYEOF
-  ACTOOL_LD_TMP="$(mktemp -d)"
+  ACTOOL_LD_TMP="$ICON_TMP/actool-lightdark"
+  mkdir -p "$ACTOOL_LD_TMP"
   if xcrun actool \
       --compile "$RESOURCES_DIR" \
       --platform macosx \
@@ -738,7 +745,7 @@ PYEOF
       "$XCASSETS_DIR" ${SYMBOL_CATALOGUE_ARG:+"$SYMBOL_CATALOGUE_ARG"} >"$ACTOOL_LD_TMP/actool.log" 2>&1 \
     && [ -f "$RESOURCES_DIR/Assets.car" ]; then
     echo "    actool compiled Assets.car — verifying light and dark actually render differently"
-    VERIFY_SWIFT="$(mktemp -d)/verify_appearance.swift"
+    VERIFY_SWIFT="$ICON_TMP/verify_appearance.swift"
     cat > "$VERIFY_SWIFT" << 'SWIFTEOF'
 import AppKit
 import CryptoKit
@@ -781,7 +788,7 @@ fi
 if [ "$ICON_MODE" = "icns" ]; then
   echo "==> Generating app icon (.icns fallback)"
   test -f "$ICON_SOURCE" || { echo "error: icon source not found at $ICON_SOURCE" >&2; exit 1; }
-  ICONSET_DIR="$(mktemp -d)/AppIcon.iconset"
+  ICONSET_DIR="$ICON_TMP/AppIcon.iconset"
   mkdir -p "$ICONSET_DIR"
   for s in 16 32 128 256 512; do d=$((s * 2)); sips -z "$s" "$s" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${s}x${s}.png" >/dev/null; sips -z "$d" "$d" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${s}x${s}@2x.png" >/dev/null; done
   iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns"

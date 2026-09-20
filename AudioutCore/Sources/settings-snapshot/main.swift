@@ -59,8 +59,12 @@ func tempDir() -> URL {
 /// makes the resolution deterministic regardless of what's driving the run.
 let snapshotBackingScale: CGFloat = 2
 
+/// Set on any renderPNG failure so a run that wrote no PNG still exits non-zero.
+var renderFailed = false
+
 @MainActor
-func renderPNG(view: NSView, to url: URL) {
+@discardableResult
+func renderPNG(view: NSView, to url: URL) -> Bool {
     view.layoutSubtreeIfNeeded()
     let bounds = view.bounds
     let pixelsWide = Int((bounds.width * snapshotBackingScale).rounded())
@@ -70,7 +74,8 @@ func renderPNG(view: NSView, to url: URL) {
                                       samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                       colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
         print("  FAIL  could not make bitmap rep for \(url.lastPathComponent)")
-        return
+        renderFailed = true
+        return false
     }
     rep.size = bounds.size
     // `NSBitmapImageRep(bitmapDataPlanes:...)` doesn't guarantee a zeroed
@@ -84,13 +89,17 @@ func renderPNG(view: NSView, to url: URL) {
 
     guard let data = rep.representation(using: .png, properties: [:]) else {
         print("  FAIL  could not encode PNG for \(url.lastPathComponent)")
-        return
+        renderFailed = true
+        return false
     }
     do {
         try data.write(to: url)
         print("  WROTE \(url.path)  (\(Int(bounds.width))x\(Int(bounds.height)))")
+        return true
     } catch {
         print("  FAIL  write \(url.lastPathComponent): \(error)")
+        renderFailed = true
+        return false
     }
 }
 
@@ -302,7 +311,7 @@ func run() -> Int32 {
     }
 
     print("Done.")
-    return 0
+    return renderFailed ? 1 : 0
 }
 
 exit(MainActor.assumeIsolated { run() })

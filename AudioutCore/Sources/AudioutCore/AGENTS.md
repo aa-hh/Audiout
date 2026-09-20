@@ -32,7 +32,7 @@ everything up to the `OutputBackend` seam and never imports AppKit.
 
 - `Device` → domain models, with `ConnectionState`, `ConnectionFailure`, `BackendEvent`.
 - `OutputBackend` → the backend seam; `NativeBackend` and `MockBackend` implement it.
-- `CaptureCoordinator` → whole-system capture, with `NativeCaptureCoordinator` and `AudioProcessResolver`.
+- `NativeCaptureCoordinator` → whole-system capture, with `AudioProcessResolver`.
 - `PerAppCaptureCoordinator` → per-app capture and mix: `AppRouteMixer`, `LeveledAppInjector`.
 - `DefaultOutputDeviceMonitor` → shared capture infrastructure, with `TapRebuildLifecycle`.
 - `GroupController` → the routing brain, with `AppRoutingController` and `PhaseController`.

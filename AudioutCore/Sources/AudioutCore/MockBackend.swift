@@ -132,7 +132,7 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     ///     existing call sites (mainly tests) are unaffected. NOTE the native
     ///     path does NOT use this — `NativeBackend` owns `SystemOutputVolume`,
     ///     which covers the same default-device tracking plus volume/mute. This
-    ///     observer serves the mock and the superseded OwnTone backend only.
+    ///     observer serves the mock only.
     public init(
         fleet: [Device] = .demoFleet,
         staggerDiscovery: Bool = true,

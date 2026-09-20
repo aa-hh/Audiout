@@ -225,7 +225,7 @@ public enum BrowserState: Sendable, Equatable {
 /// ⟷ ``OutputID`` mapping (both forms are naturally in hand here at resolve time).
 ///
 /// All mutable state is confined to one serial queue (same discipline as
-/// `MockBackend`/`OwnToneBackend`); `@unchecked Sendable` is honest because of it.
+/// `MockBackend`); `@unchecked Sendable` is honest because of it.
 public final class NativeDiscovery: @unchecked Sendable {
 
     /// Fires on the discovery queue for every classified change. Set before

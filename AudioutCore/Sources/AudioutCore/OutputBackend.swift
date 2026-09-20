@@ -1,4 +1,5 @@
 import Foundation
+import AirPlayEngine
 
 /// A transport command the user pressed on a connected speaker's OWN playback
 /// controls (or its companion app), surfaced so the app can drive the Mac's
@@ -69,7 +70,7 @@ public enum BackendEvent: Sendable, Equatable {
     /// backend fact does, and no layer is inverted.
     ///
     /// Only ``NativeBackend`` emits it (it's the only backend that owns a
-    /// ``SystemVolumeControlling``); `MockBackend`/`OwnToneBackend` never do.
+    /// ``SystemVolumeControlling``); `MockBackend` never does.
     /// Guarantees a consumer may rely on:
     /// - **External only.** ``SystemOutputVolume`` suppresses echoes of its own
     ///   writes, so this never fires for a volume *we* set — "volume keys" and
@@ -109,8 +110,8 @@ public enum BackendEvent: Sendable, Equatable {
     /// have an active `.device(id:)` route in the backend's last route table;
     /// non-routed apps' lifecycle events are silently ignored. The UI uses this
     /// to show or clear an offline indicator on the app's row in the Applications
-    /// card (T4). Only ``NativeBackend`` emits it; `MockBackend` and
-    /// `OwnToneBackend` never do (they have no per-app capture lifecycle).
+    /// card (T4). Only ``NativeBackend`` emits it; `MockBackend` never does
+    /// (it has no per-app capture lifecycle).
     case routedAppRunning(bundleID: String, isRunning: Bool)
 
     /// The live per-app routing map for one destination device changed (T6):
@@ -126,8 +127,8 @@ public enum BackendEvent: Sendable, Equatable {
     /// non-empty) and never a `Device` field — a redirect target is deliberately
     /// NOT `isSelected`/in the Selected Devices set
     /// (`AudioutCore/AGENTS.md`), so it can't ride the `deviceUpdated`
-    /// echo. Only ``NativeBackend`` emits it organically; `OwnToneBackend` never
-    /// does (no per-app streaming). `MockBackend` also never emits it on its own,
+    /// echo. Only ``NativeBackend`` emits it organically — a backend with no
+    /// per-app streaming never does. `MockBackend` also never emits it on its own,
     /// but exposes `test_emitRoutedApps(deviceID:appNames:)` so offline
     /// demos/tests can exercise the UI without a real per-app-routing backend.
     case routedApps(deviceID: String, appNames: [String])
@@ -153,8 +154,7 @@ public enum BackendEvent: Sendable, Equatable {
     /// Mac" popover banner; it is not a `Device` field because it's a whole-app
     /// condition, not a per-device one (a dead GROUP has zero connected members,
     /// so no single device could carry it). Only ``NativeBackend`` emits it — it's
-    /// the only backend with a real capture gate; `MockBackend`/`OwnToneBackend`
-    /// never do.
+    /// the only backend with a real capture gate; `MockBackend` never does.
     case localFallbackActive(Bool)
 
     /// The "system-AirPlay guard" (Wave 3 W3-T3, PLAN-RELIABILITY.md). `active:
@@ -176,8 +176,7 @@ public enum BackendEvent: Sendable, Equatable {
     /// reason ``localFallbackActive(_:)`` is the only signal for its banner: a
     /// whole-app condition with no home on a single `Device`. Only
     /// ``NativeBackend`` emits it — it's the only backend with a real capture
-    /// gate and a system-output-transport query; `MockBackend`/`OwnToneBackend`
-    /// never do.
+    /// gate and a system-output-transport query; `MockBackend` never does.
     case systemDefaultIsAirPlayActive(Bool)
 
     /// A whole-system or per-app AirPlay stream's health, derived from the same
@@ -199,8 +198,8 @@ public enum BackendEvent: Sendable, Equatable {
     ///
     /// Signal-only (T8): no UI surfaces this yet. Designing how to show a
     /// recovering/silent stream to the user is an explicit follow-up, not part
-    /// of this event's scope. Only ``NativeBackend`` emits it; `MockBackend`/
-    /// `OwnToneBackend` never do (no rebind-recovery machinery to observe).
+    /// of this event's scope. Only ``NativeBackend`` emits it; `MockBackend`
+    /// never does (no rebind-recovery machinery to observe).
     case streamHealth(id: String, recovering: Bool)
 
     /// The public "Audiout" aggregate's off-switch state (Wave 3, T5). `active:
@@ -222,8 +221,7 @@ public enum BackendEvent: Sendable, Equatable {
     /// ``systemDefaultIsAirPlayActive(_:)``. Reflects STEADY STATE, not just the
     /// transition edge, and the backend edge-de-duplicates it so it can never
     /// thrash. Only ``NativeBackend`` emits it (the only backend that owns the
-    /// public aggregate + default-output writes); `MockBackend`/`OwnToneBackend`
-    /// never do.
+    /// public aggregate + default-output writes); `MockBackend` never does.
     case routingBlockedNeedsDefault(Bool)
 
     /// A never-aligned Bluetooth speaker just joined its first mix and is
@@ -243,7 +241,7 @@ public enum BackendEvent: Sendable, Equatable {
     /// repeat of the current state is never re-emitted) so the strip can
     /// never strand showing a stale "taking over" state. Only
     /// ``NativeBackend`` emits it — it's the only backend with a real PTP
-    /// handover to explain; `MockBackend`/`OwnToneBackend` never do.
+    /// handover to explain; `MockBackend` never does.
     case takeoverStatus(TakeoverStatus?)
 
     /// The whole-system capture tap failed, so every selected speaker is
@@ -304,10 +302,9 @@ public enum TakeoverStatus: Sendable, Equatable {
 /// The seam between the app and wherever audio actually goes.
 ///
 /// `MockBackend` implements this with fabricated devices for offline UI work;
-/// the real implementation (`OwnToneBackend`, a stub for now) will implement
-/// the *same* protocol on top of the OwnTone JSON API + AirPlay-2 sender. The
-/// UI is written once, against this protocol, and never learns which it's
-/// talking to.
+/// ``NativeBackend`` implements the *same* protocol on top of the in-process
+/// AirPlay-2 sender. The UI is written once, against this protocol, and never
+/// learns which it's talking to.
 public protocol OutputBackend: AnyObject {
 
     /// Current snapshot of every known device (available or not). Handy for the
@@ -348,8 +345,8 @@ public protocol OutputBackend: AnyObject {
     /// as soon as teardown completes OR `timeout` elapses — never hangs the quit.
     ///
     /// Default no-op: only ``NativeBackend`` holds real streaming sessions whose
-    /// teardown outlives ``stop()``; ``MockBackend``/``OwnToneBackend`` have nothing
-    /// to await, so they inherit the empty default and stay unchanged.
+    /// teardown outlives ``stop()``; ``MockBackend`` has nothing to await, so it
+    /// inherits the empty default and stays unchanged.
     func stopAndWait(timeout: Duration) async
 
     /// Subscribe to backend events. Each call returns an independent stream;
@@ -455,7 +452,7 @@ public extension OutputBackend {
     /// Backends with no post-`stop()` teardown to await inherit this no-op.
     func stopAndWait(timeout: Duration) async {}
 
-    /// Backends with no real streaming sessions (mock / OwnTone) have nothing to
+    /// Backends with no real streaming sessions (the mock) have nothing to
     /// disconnect on sleep and no capture gate/watchdog to drive, so they inherit
     /// these no-ops (B6b). Only ``NativeBackend`` overrides them.
     func handleSystemWillSleep() {}
@@ -481,7 +478,7 @@ public extension OutputBackend {
 /// that can honor the Settings › Audio › Advanced "Audio buffer" control adopts
 /// this; the settings pane shows the section only when
 /// `backend as? LatencyConfigurable` succeeds, so backends without the concept
-/// (`OwnToneBackend` — its buffer belongs to the external server) never render
+/// (a backend that owns no send buffer) never render
 /// a dead knob. Deliberately NOT part of ``OutputBackend``: the base seam stays
 /// capability-free.
 public protocol LatencyConfigurable: AnyObject {
@@ -511,7 +508,7 @@ public protocol LatencyConfigurable: AnyObject {
 /// A backend that computes RMS just to feed `.level` adopts this so the work can
 /// be switched off while nobody's watching a meter — `PopoverController` flips it
 /// on `surfaceDidShow`/`surfaceDidHide` via `backend as? MeteringControlling`, so
-/// a backend without the concept (`OwnToneBackend`) never sees the call.
+/// a backend without the concept never sees the call.
 /// Deliberately NOT part of ``OutputBackend``, mirroring ``LatencyConfigurable``:
 /// the base seam stays capability-free.
 public protocol MeteringControlling: AnyObject {
@@ -530,7 +527,7 @@ public protocol MeteringControlling: AnyObject {
 ///
 /// Deliberately NOT part of ``OutputBackend`` (mirrors ``LatencyConfigurable``):
 /// the base seam stays capability-free. Backends without per-app capture
-/// (`MockBackend`, `OwnToneBackend`) simply don't conform, so
+/// (`MockBackend`) simply don't conform, so
 /// `backend as? AppRouteConfiguring` is nil and the app skips the call — routing an
 /// app is then a no-op on those backends rather than a compile-time requirement.
 public protocol AppRouteConfiguring: AnyObject {
@@ -564,8 +561,8 @@ public protocol AppRouteConfiguring: AnyObject {
     /// republishes the mixer topology so the route becomes live again. A no-op
     /// if `bundleID` has no active `.device(id:)` route. The AppKit layer is
     /// the only caller (observes `NSWorkspace.didLaunchApplicationNotification`).
-    /// Default empty body so non-NativeBackend conformers (`MockBackend`,
-    /// `OwnToneBackend`) compile without change — they have no per-app capture.
+    /// Default empty body so non-NativeBackend conformers (`MockBackend`)
+    /// compile without change — they have no per-app capture.
     func handleAppLaunched(bundleID: String)
 
     /// Set the volume of an app that is rendered from its own capture rather than
@@ -588,4 +585,268 @@ extension AppRouteConfiguring {
     /// implement this. Only `NativeBackend` overrides it (drives
     /// ``LocalPlaybackControlling`` and ``LeveledAppInjector``).
     public func setLocalPlaybackVolume(volume: Int, bundleID: String) {}
+}
+
+// MARK: - Backend selection (unchanged public seam)
+
+/// Which backend the app talks to. Flip this (or drive it from a launch
+/// argument / hidden setting) to develop against fabricated devices vs. real
+/// hardware without touching any UI code.
+public enum BackendKind {
+    case mock
+    case native
+
+    /// The env var that selects a backend when no explicit argument is given.
+    /// Maps onto a future hidden Developer setting in the app (SPEC.md §4 seam).
+    public static let environmentVariableName = "AIRPLAY_BACKEND"
+
+    /// Resolve which backend to use, in priority order: an explicit argument
+    /// (e.g. a CLI flag already parsed by the caller) → the `AIRPLAY_BACKEND`
+    /// env var (`mock` | `native`, case-insensitive) → default
+    /// `.native`.
+    ///
+    /// `.native` is the default so a plain launch drives real speakers — and so
+    /// the native-only onboarding/permission paths run (``SetupModel/shouldPresentOnLaunch(settings:backendKind:)``
+    /// and `AppDelegate`'s reactivate/wake permission re-audit both gate on
+    /// `.native`). Mock is opt-in ONLY: it requires `AIRPLAY_BACKEND=mock`
+    /// explicitly, never as a fallback — a build that can't reach a real backend
+    /// must fail loudly, not silently swap in fabricated demo speakers. An
+    /// unrecognized env value is treated as absent: it falls back to `.native`
+    /// and prints one warning to stderr rather than crashing, since this is a
+    /// dev convenience knob, not user-facing configuration.
+    public static func resolved(
+        explicit: BackendKind? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> BackendKind {
+        if let explicit { return explicit }
+
+        guard let raw = environment[environmentVariableName] else { return .native }
+        switch raw.lowercased() {
+        case "mock":    return .mock
+        case "native":  return .native
+        default:
+            FileHandle.standardError.write(
+                Data("warning: unrecognized \(environmentVariableName) value \"\(raw)\" — falling back to native\n".utf8)
+            )
+            return .native
+        }
+    }
+}
+
+/// The one place that knows about concrete backend types. Everything else in
+/// the app holds an ``OutputBackend``.
+///
+/// Pass `nil` (the default) to resolve the backend via
+/// ``BackendKind/resolved(explicit:environment:)`` — explicit arg → the
+/// `AIRPLAY_BACKEND` env var → `.native`.
+/// - Parameter resolver: resolves a bundle ID to the FULL set of live Core Audio
+///   process objects it owns (main + child/helper processes — the
+///   multi-process-browser leak/silence fix). Core can't import AppKit
+///   (`NSRunningApplication`), so this is threaded in from the AppKit layer
+///   (`AppDelegate`). Defaults to a resolver that resolves nothing, which keeps
+///   the per-app path inert for callers that don't supply it — every non-native
+///   backend ignores it entirely.
+public func makeBackend(
+    _ kind: BackendKind? = nil,
+    resolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses())
+) -> OutputBackend {
+    switch BackendKind.resolved(explicit: kind) {
+    case .mock:
+        // Scenario scripts (connection-status brief §5): with
+        // `AIRPLAY_MOCK_SCENARIO=connection-demo` the mock choreographs
+        // failures/retries/mid-stream drops so every ConnectionState is
+        // demoable offline; any other/missing value resolves to no scripts
+        // (exact pre-existing behaviour). The observer gives the mock's local
+        // row the real default-output name instead of a hardcoded one.
+        // Live diagnosis (2026-08-23, cast pending-fill probe): a lagged Cast
+        // fixture in the offline fleet, so the fixed-volume pending fader can
+        // be reproduced with zero hardware. Opt-in via env; absent = the
+        // exact pre-existing demo fleet.
+        var fleet: [Device] = .demoFleet
+        if let lag = ProcessInfo.processInfo.environment["AUDIOUT_MOCK_CAST_LAG"].flatMap(Int.init) {
+            fleet.append(Device(id: "cast-tv", name: "Google TV", kind: .cast,
+                                supportsAirPlay2: false, volume: 45,
+                                castVolumeLagSeconds: lag))
+        }
+        // A Bluetooth fixture, so the Bluetooth-only UI (SYNC chip, measured
+        // latency, the Bluetooth run of the alignment wizard) is reachable with
+        // no hardware, e.g. in a test VM with no Bluetooth stack. Real Bluetooth
+        // rows only ever come from NativeBackend's HAL/IOBluetooth enumerator.
+        // Opt-in via env; absent = the exact pre-existing demo fleet.
+        if ProcessInfo.processInfo.environment["AUDIOUT_MOCK_BLUETOOTH"] == "1" {
+            fleet.append(Device(id: "bt-headphones", name: "AirPods Pro", kind: .bluetooth,
+                                supportsAirPlay2: false, volume: 50))
+        }
+        return MockBackend(fleet: fleet,
+                           connectScripts: MockBackend.resolveScenarioScripts(),
+                           outputObserver: DefaultOutputObserver())
+    case .native:
+        // In-process AirPlayEngine + app-owned discovery/capture. See
+        // NativeBackend.swift / NativeCaptureCoordinator.swift (T-NB-BACKEND-1,
+        // T-NB-CAPTURE-1) for how the engine-driven path is put together.
+        //
+        // startBufferMs: the product runs a LOWER sender-side start buffer than
+        // the engine's OwnTone-parity default (2250 ms → ~3.5 s click-to-sound
+        // measured on the Sonos fleet, 2026-07-17). 1000 ms cuts the
+        // deterministic scheduling lead from 2.0 s to 0.75 s (expected total
+        // ≈ 2.2 s) while leaving the receivers a 750 ms jitter/multi-room
+        // buffer. Tunable per run via AIRPLAY_START_BUFFER_MS for the gated
+        // by-ear verification — see AirPlayEngine/docs/latency-analysis.md.
+        let startBufferMs = nativeStartBufferMs()
+        // The sender's own log goes beside the decision log so one support
+        // bundle carries both. Off under tests, like the decision log itself.
+        if !HeadlessRuntime.isActive {
+            let logs = Telemetry.defaultDirectory
+            try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+            AirPlayEngine.setLogFile(path: logs.appendingPathComponent("engine.log").path)
+        }
+        let engine = AirPlayEngine(
+            config: EngineConfig(startBufferMs: startBufferMs))
+        // Bundle ID → full process-object set, supplied by the caller
+        // (`AppDelegate` passes an `NSRunningApplication`-backed resolver; other
+        // callers get the "nothing resolves" default). Shared by BOTH the per-app
+        // capture (owned by NativeBackend) and the whole-system tap so their
+        // exclusion/capture views agree.
+        let nativeBackend = NativeBackend(engine: engine, processResolver: resolver)
+        nativeBackend.seedStartBufferMs(startBufferMs)
+        // processResolver: widens each `resolvePID`-found main pid to that app's
+        // full live process family (T1/T3, PLAN-FIREFOX-ROUTING-LEAK.md) — a
+        // multi-process app's real audio producer is often a CHILD pid, so the
+        // whole-system tap's exclusion list must cover the family, not just the
+        // main pid, or a redirected browser leaks into the system mix. Explicit
+        // here (rather than relying on the initializer's own real-resolver
+        // default) so the production wiring is visible at the call site, same
+        // discipline as `resolvePID` above.
+        let captureCoordinator = NativeCaptureCoordinator(
+            engine: engine, processResolver: resolver)
+        nativeBackend.captureCoordinator = captureCoordinator
+        // Passive drift tracking (roadmap 085 ticket 05). Wired here because
+        // the reference it correlates the microphone against is this
+        // coordinator's retained outgoing audio, and this is the only place
+        // that holds both objects.
+        nativeBackend.attachPassiveDriftTracking(ring: captureCoordinator.referenceRing)
+        // Bug T2: the local-playback engine renders `.currentDevice`-routed apps on
+        // the Mac's built-in speakers as independent, individually-levelable streams.
+        nativeBackend.localPlaybackEngine = LocalPlaybackEngine()
+        // T-BACKEND: builds the delayed local sink ("play everywhere") the first
+        // time the selection is Mac + ≥1 AirPlay device. Rendered at the DEFAULT
+        // OUTPUT DEVICE's own native rate (T3 Part B), read here at construction so
+        // opening the sink's `AVAudioEngine` never renegotiates the device between
+        // 48 and 44.1 kHz — the renegotiation that silenced AirPlay when the Mac
+        // was added to a Mac+AirPlay set. `NativeCaptureCoordinator` base-resamples
+        // the 44.1 kHz airplay feed UP to this rate once before the ring. The read
+        // uses `kAudioHardwarePropertyDefaultOutputDevice` (never
+        // `DefaultSystemOutput`); if it fails we fall back to the sink's own
+        // 48 kHz default (the common built-in rate). Read ONCE per sink
+        // construction — a later default-device change is handled by the sink's
+        // own lifecycle rebuild, not a live rate follow (deferred).
+        // `presentationDelayMs` reads the backend's OWN live `startBufferMs`
+        // (T-ENGINE-DELAY / R4) so a later buffer-size change moves local playback
+        // with it, rather than a stale copy of the value at launch.
+        // userOffsetMs: T-OFFSET-UI's manual ms bias (Settings › Audio ›
+        // Advanced), read LIVE from `AppSettings` on every (re)anchor/rebuild —
+        // never a stale copy captured at launch — so a change takes effect on
+        // the next connect or lifecycle rebuild.
+        nativeBackend.syncedLocalSinkFactory = {
+            let deviceNativeRate: Double
+            if let rate = try? LocalOutputLatency.defaultOutputDeviceNominalSampleRate(),
+               rate.isFinite, rate > 0 {
+                deviceNativeRate = rate
+            } else {
+                deviceNativeRate = 48_000
+            }
+            return SyncedLocalSink(
+                renderSampleRate: deviceNativeRate,
+                channelCount: 2,
+                // Wave-4 delay agreement: composition-aware — the start-buffer
+                // when AirPlay is in the selection (or no BT), the BT-only
+                // buffer in a BT+Mac-without-AirPlay selection, so both sink
+                // families share one reference.
+                presentationDelayMs: { [weak nativeBackend] in
+                    nativeBackend?.localSinkReferenceDelayMs() ?? startBufferMs
+                },
+                // Roadmap 056: read through the backend so a wizard PREVIEW
+                // (never stored) beats the stored setting; with no backend and
+                // no preview it is the plain `AppSettings` read it always was.
+                userOffsetMs: { [weak nativeBackend] in
+                    nativeBackend?.currentLocalSyncOffsetMs() ?? AppSettings().syncOffsetMs
+                })
+        }
+        // BT-BACKEND: the N-instance Bluetooth sink manager, reading the SAME
+        // live room reference the synced-local sink reads (risk R4: one buffer
+        // tune must move the AirPlay schedule, the Mac sink, and every BT sink
+        // together) — the start buffer, raised to the Cast term when a Cast
+        // receiver is the furthest-behind output in the room. Rendered at the
+        // manager's 44.1 kHz default — the airplay feed's own rate, so the
+        // fan-out's base resample is identity and each per-device
+        // `AVAudioEngine` bridges to its speaker's real rate itself. Per-device
+        // offsets/trims stay at the manager's 0 defaults until BT-OFFSET-UI
+        // persists real ones.
+        nativeBackend.btSyncedSinkFactory = {
+            // Each sink's clock verdicts feed the timing store, which is
+            // what decides when the phone's Measure button goes live. `nil`
+            // when the poll is switched off — see ``BTClockWatcher/isEnabled``.
+            let clockObserver: (@Sendable (String, BTClockStability.Outcome) -> Void)?
+            if BTClockWatcher.isEnabled {
+                clockObserver = { [weak nativeBackend] uid, outcome in
+                    nativeBackend?.btSpeakerTiming.noteClockOutcome(uid: uid, outcome: outcome)
+                    // A pacing-clock step is the cheap detector the acoustic
+                    // measurement then confirms (spec decision 2): the speaker
+                    // that jumped is the one worth listening to now.
+                    if case .jumped(let magnitudeMs) = outcome {
+                        // Which link stepped and by how much: the only trace a
+                        // speaker that cannot hold its timing leaves in the log
+                        // (live test 2026-09-13: one Move stepped nearly every
+                        // second, audible as a dip that came back re-timed).
+                        var now = timespec()
+                        clock_gettime(CLOCK_MONOTONIC, &now)
+                        Telemetry.log(.localPlayback, "bt_clock_jump", [
+                            "uid": uid, "ms": String(format: "%+.1f", magnitudeMs),
+                            "hostNanos": String(SyncTiming.monotonicNanos(now)),
+                        ])
+                        nativeBackend?.noteDriftTrigger(.clockJump(uid: uid))
+                    }
+                }
+            } else {
+                clockObserver = nil
+            }
+            return BTSyncedSink(
+                presentationDelayMs: { [weak nativeBackend] in
+                    nativeBackend?.btReferenceDelayMs() ?? startBufferMs
+                },
+                clockObserver: clockObserver)
+        }
+        return nativeBackend
+    }
+}
+
+/// The `AIRPLAY_START_BUFFER_MS` env override, when set AND valid (an integer
+/// in the engine shim's accepted 300...5000 range) — the per-launch dev knob,
+/// which beats the persisted user setting (a deliberately-set env var is a
+/// stronger signal than a stored preference). Returns nil when unset; an
+/// invalid value is IGNORED with one stderr warning (behaves like unset — same
+/// dev-knob-not-config policy as `AIRPLAY_BACKEND`). Public so the settings
+/// pane can render its "overridden for this launch" disabled state.
+public func nativeStartBufferEnvOverrideMs(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+) -> Int? {
+    guard let raw = environment["AIRPLAY_START_BUFFER_MS"] else { return nil }
+    guard let ms = Int(raw), (300...5000).contains(ms) else {
+        FileHandle.standardError.write(
+            Data("warning: AIRPLAY_START_BUFFER_MS \"\(raw)\" is not an integer in 300...5000 — ignoring\n".utf8)
+        )
+        return nil
+    }
+    return ms
+}
+
+/// The native backend's launch-time start buffer in ms, resolved
+/// **env override → persisted setting → default** (PLAN-LATENCY-SETTING.md §3;
+/// `AppSettings.startBufferMs` already folds unknown stored values to the
+/// default, so this can only return an offered option or a valid env value).
+func nativeStartBufferMs(
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    settings: AppSettings = AppSettings()
+) -> Int {
+    nativeStartBufferEnvOverrideMs(environment: environment) ?? settings.startBufferMs
 }

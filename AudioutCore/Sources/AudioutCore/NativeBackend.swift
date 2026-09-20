@@ -6,17 +6,14 @@ import CastSender
 /// The native ``OutputBackend`` (T-NB-BACKEND-1): the app-visible seam that
 /// drives the extracted, in-process ``AirPlayEngine`` (an AirPlay-2 sender) plus
 /// an app-owned ``NativeDiscovery`` (`NWBrowser` over `_airplay._tcp` /
-/// `_raop._tcp`). It presents the *exact same* `BackendEvent`-driven contract as
-/// ``OwnToneBackend`` — the UI never learns which backend it's talking to.
+/// `_raop._tcp`). It presents the same `BackendEvent`-driven contract every
+/// ``OutputBackend`` does — the UI never learns which backend it's talking to.
 ///
-/// This is a **fresh implementation of the `OwnToneBackend` pattern, NOT a
-/// refactor of it**: the two share a protocol, not an implementation shape. What
-/// carries over is the *shape* of state ownership (a `known`/`order` map confined
-/// to a serial `stateQueue`, `@unchecked Sendable` honest because of that
-/// discipline) and the mute-via-stashed-volume shim
-/// (`OwnToneBackend.swift:206-220`). What does NOT carry over: the poll loop,
-/// zombie detection, HTTP error handling, and FIFO/library-scan machinery — none
-/// of it applies to an in-process engine whose completions ARE ground truth.
+/// State ownership: a `known`/`order` map confined to a serial `stateQueue`,
+/// which is what makes `@unchecked Sendable` honest here. Mute is a shim — it
+/// stores the current level and writes 0, and unmute writes the stored level
+/// back. There is no poll loop and no zombie detection: an in-process engine's
+/// completions ARE ground truth.
 ///
 /// ## Where each fact comes from (there is no `GET /api/outputs` to poll)
 /// - **Existence / name / kind / AP2-capability / address**: from ``NativeDiscovery``.
@@ -138,10 +135,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// ``NativeCaptureCoordinator`` conforms, so `makeBackend(_:)` wires the real
     /// one unchanged.
     ///
-    /// Mirrors how ``OwnToneBackend/captureCoordinator`` connects the OwnTone path:
-    /// the backend owns the coordinator's lifecycle, the coordinator owns capture.
-    /// The one difference is metering — the native coordinator computes RMS on the
-    /// captured buffer (upstream of the engine, per playback-meter-research.md) and
+    /// The backend owns the coordinator's lifecycle, the coordinator owns capture.
+    /// Metering rides along — the native coordinator computes RMS on the captured
+    /// buffer (upstream of the engine, per playback-meter-research.md) and
     /// hands it back via `onLevel`; the backend fans it out as `.level` for every
     /// currently-selected, unmuted device.
     public var captureCoordinator: CaptureControlling?
@@ -765,8 +761,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     // MARK: State (all confined to `stateQueue`)
 
-    // Same discipline as OwnToneBackend/MockBackend: every mutation of the maps
-    // below happens on `stateQueue`; `@unchecked Sendable` is honest because of it.
+    // Same discipline as MockBackend: every mutation of the maps below happens
+    // on `stateQueue`; `@unchecked Sendable` is honest because of it.
     private let stateQueue = DispatchQueue(label: "NativeBackend.state")
     private var known: [String: Device] = [:]           // last-known snapshot, by id
     private var order: [String] = []                    // stable discovery order
@@ -1172,8 +1168,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private var failedGate: Set<String> = []
 
     /// App-side mute (Q4): the engine has no mute field, so mute is realized as
-    /// volume 0 with the prior value stashed. Same shim as
-    /// `OwnToneBackend.swift:206-220`.
+    /// volume 0 with the prior value stashed.
     private var muted: Set<String> = []
     private var stashedVolume: [String: Int] = [:]      // pre-mute volume by id
 
@@ -1650,8 +1645,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     /// Public seam: the real native backend over the in-process ``AirPlayEngine``
     /// and a live ``NativeDiscovery`` (`NWBrowser`). `EngineControlling` /
-    /// `DiscoverySource` stay internal-facing (tests inject doubles); no engine or
-    /// OwnTone type leaks into the public surface.
+    /// `DiscoverySource` stay internal-facing (tests inject doubles); no engine
+    /// type leaks into the public surface.
     ///
     /// `processResolver` maps a bundle ID to the FULL set of live Core Audio
     /// process objects it owns — main process plus every child/helper
@@ -2366,8 +2361,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
             // 3. Subscribe the engine's device-state stream: every transition
             //    (armed-op terminal AND out-of-band, e.g. RTSP drop → .failed) maps
-            //    to a `deviceUpdated`. This is the native analogue of OwnTone's
-            //    zombie detection — but push, not poll.
+            //    to a `deviceUpdated`. A dead session is noticed by push, never
+            //    by polling for it.
             self.subscribeStateStream()
 
             // 3b. Subscribe the engine's remote-control stream: a user pressing a
@@ -2960,8 +2955,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             guard let outputID = self.outputIDs[id] else { return }
             if muted {
-                // Mute = volume 0 with the pre-mute value stashed (shim pattern,
-                // OwnToneBackend.swift:206-220).
+                // Mute = volume 0 with the pre-mute value stashed.
                 self.muted.insert(id)
                 if self.stashedVolume[id] == nil { self.stashedVolume[id] = self.known[id]?.volume ?? 0 }
                 self.applyLocal(id) { $0.isMuted = true; $0.volume = 0 }
@@ -3708,10 +3702,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     self.wholeSystemStreamByDevice.removeValue(forKey: id)
                 }
 
-                // Connection-status brief §1/§3 semantics (mirrors OwnToneBackend's
-                // `setOutputSet`): a device newly desired ON goes `.connecting`
-                // immediately, before the engine op resolves, so the UI spinner is
-                // immediate. This also clears a sticky `.failed` on a re-toggle
+                // Connection-status brief §1/§3 semantics: a device newly
+                // desired ON goes `.connecting` immediately, before the engine
+                // op resolves, so the UI spinner is immediate. This also clears a sticky `.failed` on a re-toggle
                 // (the `failedGate` clear above is the routing-side twin of
                 // this). A device newly desired OFF drops any in-flight/failed
                 // indication back to `.off` right away — NativeBackend has no
@@ -7277,9 +7270,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // Removal failed — best-effort: surface unavailable but do NOT
                     // park (a stuck-on session should still be retryable). Drop it
                     // from `added` so the loop can re-issue the stop on the next pass.
-                    // Connection state is left alone here (mirrors OwnTone's
-                    // `markUnreachable`, which doesn't touch connectionStates on a
-                    // non-terminal issue) — the device is still desired off, so the
+                    // Connection state is left alone here — a non-terminal issue
+                    // never moves it, and the device is still desired off, so the
                     // dot should already read `.off` from `setOutputSet`'s eager set.
                     stateQueue.sync {
                         self.removeFromAddedLocked(id)
@@ -8997,8 +8989,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if device.isAvailable { device.isAvailable = false; changed = true }
         if device.isSelected { device.isSelected = false; changed = true }
         // Brief §1: a sticky `.failed` clears to `.off` only when the device
-        // disappears entirely — this is that site (mirrors OwnToneBackend's
-        // `.failed → .off` on the poll's removal branch).
+        // disappears entirely — this is that site.
         if device.connectionState != .off { device.connectionState = .off; changed = true }
         if changed {
             // R5: a vanished device is unreachable, so any route aimed at it stops
@@ -9679,8 +9670,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// Heuristic device kind. The TXT `model` key is BETTER signal than a name
-    /// substring (`OwnToneBackend.kind` name-sniffs because OwnTone exposes no
-    /// model); we prefer it and fall back to the service name.
+    /// substring, so we prefer it and fall back to the service name.
     static func kind(for discovered: DiscoveredDevice) -> Device.Kind {
         let txt = discovered.descriptor.txtRecord
         let model = (txt["model"] ?? txt["Model"] ?? "").lowercased()
@@ -9936,9 +9926,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     // MARK: Connection state (dev/notes/p1-connection-status-brief.md §1)
     //
-    // Mirrors OwnToneBackend's `connectionState(of:)`/`setConnectionState(_:for:)`
-    // semantics, not its mechanism: there is no poll loop or confirm re-GET here —
-    // the engine's completions and state-stream transitions ARE ground truth, so
+    // There is no poll loop or confirm re-GET here — the engine's completions
+    // and state-stream transitions ARE ground truth, so
     // `.connecting → .connected`/`.failed` rides the SAME hooks that already drive
     // `isSelected`/`isAvailable` (converge success/failure, `applyEngineState`,
     // discovery loss) rather than a separate poll-derived stability window. AP1 and
@@ -9962,10 +9951,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// Enter the resting `.failed` state (converge add-throw or an out-of-band
-    /// `.failed`/`.passwordRequired` from the engine's state stream). NativeBackend
-    /// still has no diagnostics seam (T3 is OwnTone-only per the brief; the engine's
-    /// completion IS the evidence), so causes come from the evidence already in
-    /// hand: the converge catch maps `passwordRequired → .authRequired` and
+    /// `.failed`/`.passwordRequired` from the engine's state stream). There is no
+    /// separate diagnostics seam — the engine's completion IS the evidence — so
+    /// causes come from the evidence already in hand: the converge catch maps `passwordRequired → .authRequired` and
     /// `opTimedOut → .timedOut` and always carries the engine error as `detail`,
     /// the connect-time PTP gate (T4) passes its own `cause`, and anything else
     /// stays `.unknown`. `detail` is what backs "Copy details" in the UI.
@@ -9974,8 +9962,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     }
 
     /// Recompute the effective (wire) volume after an unmute: push the stashed
-    /// intended level and echo it locally. Mirrors
-    /// `OwnToneBackend.restoreEffectiveVolume`. On `stateQueue`.
+    /// intended level and echo it locally. On `stateQueue`.
     private func restoreEffectiveVolume(_ id: String, outputID: OutputID) {   // on stateQueue
         let intended = stashedVolume[id] ?? known[id]?.volume ?? 0
         stashedVolume[id] = nil
@@ -11027,8 +11014,8 @@ extension NativeCaptureCoordinator: CaptureControlling {}
 /// Optional backend capability for the Bluetooth device-row UI (BT-UI /
 /// BT-OFFSET-UI) — the same `backend as? Capability` pattern as
 /// ``MeteringControlling``/``AppRouteConfiguring``: `NativeBackend` is the only
-/// conformer; on `MockBackend`/`OwnToneBackend` the cast is `nil` and the
-/// popover's Bluetooth affordances degrade gracefully.
+/// conformer; on `MockBackend` the cast is `nil` and the popover's Bluetooth
+/// affordances degrade gracefully.
 public protocol BTOutputControlling: AnyObject {
     /// When macOS last used each known BT pairing, keyed by `Device.id` — the
     /// popover's ghost-pairing sort input (stale pairings to the bottom).

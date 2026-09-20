@@ -973,7 +973,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // for an AirPlay-only group whose Mac is merely still sitting in the
         // untargeted Selected Devices set. For `.selectedDevices` the two are the
         // same read, so this is a group-path-only change.
-        // `backend as? NativeBackend` is nil for `MockBackend`/`OwnToneBackend`,
+        // `backend as? NativeBackend` is nil for `MockBackend`,
         // matching the `MeteringControlling`/`LatencyConfigurable`
         // optional-capability pattern used below.
         (backend as? NativeBackend)?.selectedDevicesQuery = { [weak self] id in
@@ -1063,7 +1063,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // user's own click IS their intent, so re-selecting the public aggregate as
         // the Mac's default output here is the ONLY sanctioned re-select — never
         // programmatic (Q2). No-op on backends without the aggregate
-        // (`MockBackend`/`OwnToneBackend`), matching the other `NativeBackend`-only
+        // (`MockBackend`), matching the other `NativeBackend`-only
         // capability hooks above.
         popoverController.onReselectAudiout = { [weak self] in
             (self?.backend as? NativeBackend)?.reselectAggregateAsDefault()
@@ -1109,7 +1109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Metering-active gate (T-GATE): only compute/emit `.level` while the
         // popover is actually open. `backend as? MeteringControlling` is nil for
-        // backends without the capability (`OwnToneBackend`), so this is a no-op
+        // backends without the capability, so this is a no-op
         // there — mirrors the `LatencyConfigurable` optional-capability pattern.
         popoverController.onMeteringActiveChange = { [weak self] active in
             (self?.backend as? MeteringControlling)?.setMeteringActive(active)
@@ -1118,7 +1118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // renderer immediately (low latency) — a `.currentDevice` app's LOCAL
         // playback stream, or an un-redirected app's leveled intercept — not only
         // after the persisted route round-trips through `updateAppRoutes`. No-ops
-        // on backends without per-app rendering (`MockBackend`/`OwnToneBackend`).
+        // on backends without per-app rendering (`MockBackend`).
         popoverController.onSetLocalPlaybackVolume = { [weak self] volume, bundleID in
             (self?.backend as? AppRouteConfiguring)?.setLocalPlaybackVolume(
                 volume: volume, bundleID: bundleID)
@@ -1141,7 +1141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // BT-UI ghost pairings: recency feed for the Bluetooth subsection's
         // stale-to-the-bottom sort. Capability-gated like the hooks above —
-        // nil on MockBackend/OwnToneBackend, which sorts by name alone.
+        // nil on MockBackend, which sorts by name alone.
         popoverController.btLastUsedProvider = { [weak self] in
             (self?.backend as? BTOutputControlling)?.lastUsedDatesForBTDevices() ?? [:]
         }
@@ -1162,8 +1162,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? BTOutputControlling)?.btHasSyncTrim(forDevice: deviceID) ?? false
         }
         // BT-SYNC-DRAWER T3: the drawer's hard-stop range. `nil` fallback
-        // matches the protocol's own default (full ±range) so a MockBackend/
-        // OwnToneBackend popover keeps working with no BT capability at all.
+        // matches the protocol's own default (full ±range) so a MockBackend
+        // popover keeps working with no BT capability at all.
         popoverController.btTrimRangeProvider = { [weak self] deviceID in
             (self?.backend as? BTOutputControlling)?.btUsableTrimRangeMs(forDevice: deviceID)
                 ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
@@ -1184,8 +1184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.devicesByID[deviceID]?.eq.isFlat == false
         }
         // W4 — the alignment wizard's backend actuators, capability-gated like
-        // everything above (nil casts on MockBackend/OwnToneBackend degrade to
-        // no-ops).
+        // everything above (a nil cast on MockBackend degrades to a no-op).
         popoverController.onBTWizardTrimPreview = { [weak self] ms, deviceID in
             (self?.backend as? BTOutputControlling)?
                 .setBTWizardTrimPreview(ms, forDevice: deviceID)
@@ -1889,7 +1888,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Login Items entry — so it's safe to fire unconditionally. Gated to
     /// `.notRegistered` (skip the no-op call once already registered) and to
     /// the native backend, same posture as `SetupModel.shouldPresentOnLaunch`:
-    /// the mock/OwnTone paths don't use the helper at all.
+    /// the mock path doesn't use the helper at all.
     @MainActor
     private func registerPTPHelperIfNeeded() {
         guard case .native = backendKind else { return }
@@ -1922,8 +1921,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `reconcile()` is async (a bounded XPC probe, ~1.5s worst case), so this
     /// fires it inside its own `Task` rather than awaiting inline — launch must
     /// never block on it. Native-backend-gated, same posture as
-    /// `registerPTPHelperIfNeeded()` above: the mock/OwnTone paths never
-    /// register the helper, so there is nothing to reconcile. On `.healed`
+    /// `registerPTPHelperIfNeeded()` above: the mock path never registers the
+    /// helper, so there is nothing to reconcile. On `.healed`
     /// landing back in `.requiresApproval`, or on `.healFailed` (the auto-heal
     /// itself didn't work and the user needs the manual recovery), presents the
     /// `.permissionLost([.ptpHelper])` approval screen — guarded on
@@ -2508,7 +2507,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Push the current app-routing table + excluded set + the saved groups'
     /// resolved memberships into the backend's per-app
     /// capture path (T7). No-ops on backends without per-app routing
-    /// (`MockBackend` / `OwnToneBackend` don't conform to `AppRouteConfiguring`).
+    /// (`MockBackend` doesn't conform to `AppRouteConfiguring`).
     /// Called from `onRoutesDidChange`, the excluded-apps handler, a group edit,
     /// a device arriving or leaving while an app is group-routed, and once at
     /// launch. Never invoked from inside a backend lock/queue (T6's deadlock

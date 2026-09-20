@@ -69,7 +69,7 @@ protocol LogStreamSpawning: AnyObject, Sendable {
 
 /// `LogStreamSpawning` backed by `Foundation.Process`, spawning
 /// `/usr/bin/log stream` filtered to the PTP-clock category. Shape is
-/// modeled on `AudiocapProcess` (`CaptureProcess.swift`) but deliberately
+/// modeled on the app's earlier subprocess wrapper but deliberately
 /// diverges in three ways a review (D1/D2) found unsafe here: `run()` happens
 /// INSIDE the lock (no window where a live child is unpublished and
 /// therefore unreapable), each launch gets its own one-shot `OnceFlag`
@@ -367,5 +367,45 @@ final class AirPlayHandoffWatcher: @unchecked Sendable {
             self.lock.unlock()
             self.attemptSpawn()
         }
+    }
+}
+
+/// Accumulates stream bytes and yields complete newline-delimited lines.
+///
+/// Internally synchronized: `append` runs on the pipe's `readabilityHandler`
+/// I/O queue while `flush` is called from the `Process` termination queue, and
+/// `readabilityHandler = nil` does NOT wait for an in-flight invocation — so
+/// the two genuinely race during teardown (adversarial finding D9, 2026-07-27;
+/// its consumer is `LogStreamProcess`). The lock makes the interleaving safe;
+/// one benign residual remains by design: a chunk appended AFTER the final
+/// `flush` stays buffered and is dropped with the dead process — a torn tail
+/// line, never a corrupted one.
+final class LineBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var partial = Data()
+
+    func append(_ data: Data) -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        partial.append(data)
+        return drainLines()
+    }
+
+    func flush() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        guard !partial.isEmpty else { return [] }
+        let line = String(decoding: partial, as: UTF8.self)
+        partial.removeAll()
+        return line.isEmpty ? [] : [line]
+    }
+
+    private func drainLines() -> [String] {
+        var lines: [String] = []
+        let newline = UInt8(ascii: "\n")
+        while let idx = partial.firstIndex(of: newline) {
+            let lineData = partial[partial.startIndex..<idx]
+            lines.append(String(decoding: lineData, as: UTF8.self))
+            partial.removeSubrange(partial.startIndex...idx)
+        }
+        return lines
     }
 }

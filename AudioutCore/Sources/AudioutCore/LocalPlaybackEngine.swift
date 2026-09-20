@@ -242,8 +242,8 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     private var meteringActive = false
     /// Token for the `AVAudioEngineConfigurationChange` observer (removed in deinit).
     private var configChangeObserver: NSObjectProtocol?
-    /// TEST SEAM ONLY (default `false` — every production call site, incl.
-    /// `OwnToneBackend`, gets the real path unchanged). When `true`, the engine
+    /// TEST SEAM ONLY (default `false` — every production call site gets the
+    /// real path unchanged). When `true`, the engine
     /// runs in `AVAudioEngine`'s OFFLINE manual-rendering mode instead of against
     /// hardware: it still starts (so `engineRunning` is `true` and the T10
     /// metering path in `receive` fires), players still schedule buffers, and

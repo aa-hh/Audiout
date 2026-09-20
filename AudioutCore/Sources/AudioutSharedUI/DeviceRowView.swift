@@ -481,7 +481,7 @@ public final class DeviceRowView: NSView {
     ///     When empty (nothing confirmed streaming yet — e.g. still connecting,
     ///     or no live backend), the sublabel falls back to `routedAppNames` so
     ///     the row isn't blank while a redirect is pending. Only `NativeBackend`
-    ///     ever populates this; `MockBackend`/`OwnToneBackend` leave it empty
+    ///     ever populates this; `MockBackend` leaves it empty
     ///     unless a test/demo explicitly injects it.
     ///   - masterMuted: whether the Main Out MASTER mute is engaged (spec
     ///     §3.3): folded into the route-armed predicate so master mute drains

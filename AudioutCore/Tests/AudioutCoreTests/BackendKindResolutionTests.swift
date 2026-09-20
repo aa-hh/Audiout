@@ -16,20 +16,10 @@ import Testing
 
     @Test func explicitArgBeatsEnv() {
         let resolved = BackendKind.resolved(
-            explicit: .ownTone,
+            explicit: .native,
             environment: ["AIRPLAY_BACKEND": "mock"]
         )
-        #expect(resolved == .ownTone, "an explicit argument should win over the env var")
-    }
-
-    @Test func envVarSelectsOwnTone() {
-        let resolved = BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "owntone"])
-        #expect(resolved == .ownTone)
-    }
-
-    @Test func envVarIsCaseInsensitive() {
-        let resolved = BackendKind.resolved(explicit: nil, environment: ["AIRPLAY_BACKEND": "OwnTone"])
-        #expect(resolved == .ownTone)
+        #expect(resolved == .native, "an explicit argument should win over the env var")
     }
 
     @Test func unknownEnvValueFallsBackToNative() {

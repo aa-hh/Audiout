@@ -9,7 +9,7 @@ import AudioutSharedUI
 /// the app layer (PLAN-LATENCY-SETTING.md). Built by the app ONLY when the
 /// resolved backend is `LatencyConfigurable` — the pane renders no Advanced
 /// section at all when this is nil, so backends without the concept (mock-less
-/// builds, OwnTone) never show a dead knob.
+/// builds) never show a dead knob.
 public struct LatencySettingModel {
     /// The offered buffer values in ms (`AppSettings.startBufferOptionsMs`).
     public let optionsMs: [Int]

@@ -24,10 +24,9 @@ private nonisolated(unsafe) var delegateKey = 0
 // below, which can log to stderr.
 
 // D1. Mask SIGPIPE process-wide, at the very first instruction. The native
-// engine also masks SIGPIPE once it starts (AirPlayEngine.swift, mirroring
-// OwnTone's main()), but that happens well into launch and only on the
-// native backend — mock/owntone backends and the whole pre-engine-start
-// window are otherwise exposed. A dead stderr pipe (routine for a dev
+// engine also masks SIGPIPE once it starts (AirPlayEngine.swift), but that
+// happens well into launch and only on the native backend — the mock backend
+// and the whole pre-engine-start window are otherwise exposed. A dead stderr pipe (routine for a dev
 // launch from a terminal) or any closed socket write would otherwise kill
 // the process outright on the default SIGPIPE disposition. `SIG_IGN` here is
 // idempotent with the engine's later `engine_mask_sigpipe()` call.

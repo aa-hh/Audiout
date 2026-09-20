@@ -220,15 +220,11 @@ newest_iphone='xcrun simctl list devices available 2>/dev/null | awk "
 # a remote run writes into the synced tree (relative, fetchable), a local run
 # writes straight where the caller asked.
 #
-# WHICH TAB YOU GET: the Connection tab, not Speakers. `-uitest-isolated` (the
-# app's only launch argument, RootView.swift:65) skips Bonjour browsing, and
-# `RootView` starts on `.connection` and only jumps to Speakers once a session
-# goes live. Nothing reaches Speakers from outside the process: the app has no
-# URL scheme and no `onOpenURL`, tab selection is plain `@State` (not
-# `@SceneStorage`), and `simctl` has no tap subcommand. The only clean fix is a
-# launch argument in the app itself.
-# razor: filenames stay `speakers-<mode>.png` as specified; upgrade path is a
-# tab launch argument in RootView, after which the name becomes true.
+# WHICH TAB YOU GET: Speakers, via `-store-shots` (RootView.swift): the app
+# opens straight into the demo fleet with the Demo strip hidden and the Mac
+# named like a real one, which is the App Store screenshot state. `-uitest-
+# isolated` alongside it skips Bonjour browsing so a real Mac on the LAN can't
+# pull the app away mid-capture.
 #
 # $1 = output directory, as the machine that runs this will see it.
 shot_cmd_for() {
@@ -248,7 +244,7 @@ shot_cmd_for() {
     xcrun simctl bootstatus \"\$udid\" -b >/dev/null; \
     xcrun simctl install \"\$udid\" \"\$app\"; \
     xcrun simctl terminate \"\$udid\" \"\$bundle\" >/dev/null 2>&1 || true; \
-    xcrun simctl launch \"\$udid\" \"\$bundle\" -uitest-isolated >/dev/null; \
+    xcrun simctl launch \"\$udid\" \"\$bundle\" -uitest-isolated -store-shots >/dev/null; \
     sleep 2; \
     mkdir -p \"$1\"; \
     for look in $appearances; do \

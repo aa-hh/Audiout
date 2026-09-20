@@ -82,6 +82,12 @@ public final class CastLiveAudioServer: @unchecked Sendable {
     private let primeMilliseconds: Int
     /// Every request head the receiver sends, for the spike log.
     public var onRequest: ((String) -> Void)?
+    /// Every connection ``accept(_:)`` turned away: why (`wrong_peer` or
+    /// `max_connections`) and the peer it arrived from. Both refusals used to
+    /// cancel the socket in silence, which made a wrongly refused GET from the
+    /// receiver's own address look exactly like a receiver that never fetched
+    /// (live failure, 2026-09-20).
+    public var onRefused: ((String, String) -> Void)?
     private let queue = DispatchQueue(label: "CastLiveAudioServer")
 
     /// Lock-guarded for the same reason ``CastChannel``'s accessors are: the
@@ -192,20 +198,25 @@ public final class CastLiveAudioServer: @unchecked Sendable {
     // IPv4 address — the control connection can ride IPv6 on the owner's
     // own network (live failure, 2026-08-23), and refusing on nil would
     // strand every such session, so nil means "no peer check" rather
-    // than "refuse everyone". An IPv4-mapped IPv6 peer (`::ffff:a.b.c.d`,
-    // which a listener bound to all interfaces can report even for an
-    // IPv4 receiver) counts as its IPv4 address.
-    private func peerMatches(_ endpoint: NWEndpoint) -> Bool {
-        guard let allowedPeer else { return true }
+    // than "refuse everyone". An unparseable address is the same bind:
+    // nothing to compare against is not grounds to refuse the receiver.
+    //
+    // Addresses compare by value, never by description. The real listener
+    // binds every interface and is therefore dual-stack, so the receiver's
+    // GET is accepted as an IPv4-mapped IPv6 peer, and a description can
+    // carry an interface scope (`192.168.4.54%en0`) that the control
+    // channel's address does not. Comparing the printed forms refused the
+    // receiver's own fetch and cancelled it silently, which stalled every
+    // Cast session until the 20 s play deadline (live failure, 2026-09-20).
+    static func peerMatches(_ endpoint: NWEndpoint, allowedPeer: String?) -> Bool {
+        guard let allowedPeer, let expected = IPv4Address(allowedPeer) else { return true }
         guard case .hostPort(let host, _) = endpoint else { return false }
         switch host {
         case .ipv4(let address):
-            return "\(address)" == allowedPeer
+            return address.rawValue == expected.rawValue
         case .ipv6(let v6):
-            if let v4 = v6.asIPv4 {
-                return "\(v4)" == allowedPeer
-            }
-            return false
+            guard let v4 = v6.asIPv4 else { return false }
+            return v4.rawValue == expected.rawValue
         case .name:
             return false
         @unknown default:
@@ -214,11 +225,13 @@ public final class CastLiveAudioServer: @unchecked Sendable {
     }
 
     private func accept(_ connection: NWConnection) {
-        guard peerMatches(connection.endpoint) else {
+        guard Self.peerMatches(connection.endpoint, allowedPeer: allowedPeer) else {
+            onRefused?("wrong_peer", "\(connection.endpoint)")
             connection.cancel()
             return
         }
         guard connections.count < maxConnections else {
+            onRefused?("max_connections", "\(connection.endpoint)")
             connection.cancel()
             return
         }

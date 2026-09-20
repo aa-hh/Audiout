@@ -649,12 +649,27 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
             fail(session, CastError.noLocalAddress, stage: .connect)
             return
         }
+        let expectedPeer = session.channel?.remoteIPv4Address
         let server = CastLiveAudioServer(
             source: session.ring,
             loopbackOnly: serverBindsLoopbackOnly,
             primeMilliseconds: Self.primeMilliseconds,
-            allowedPeer: session.channel?.remoteIPv4Address
+            allowedPeer: expectedPeer
         )
+        // A refused GET is indistinguishable from a receiver that never
+        // fetched: the session sits at IDLE until the play deadline fails it.
+        // The peer that arrived against the peer we expected is the whole
+        // diagnosis (live failure, 2026-09-20).
+        server.onRefused = { [weak self] reason, peer in
+            self?.queue.async {
+                Telemetry.log(.cast, "cast_http_refused", [
+                    "device": id,
+                    "reason": reason,
+                    "peer": peer,
+                    "expected_peer": expectedPeer ?? "any",
+                ])
+            }
+        }
         // The reset fires on the server's queue, synchronously ahead of the
         // prime render, so the receiver's first bytes are the live edge of the
         // feed. The log line hops onto ``queue`` — the session's flag is
@@ -747,6 +762,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
                     Telemetry.log(.cast, "cast_load_reply", [
                         "device": id,
                         "state": status.playerState,
+                        "idle_reason": status.idleReason ?? "nil",
                         "media": status.mediaSessionID.map(String.init) ?? "nil",
                     ])
                     guard let media = status.mediaSessionID else { return }
@@ -784,7 +800,12 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
                 }
             }
         }
-        Telemetry.log(.cast, "cast_media_status", ["device": id, "state": status.playerState, "lead_s": lead])
+        Telemetry.log(.cast, "cast_media_status", [
+            "device": id,
+            "state": status.playerState,
+            "idle_reason": status.idleReason ?? "nil",
+            "lead_s": lead,
+        ])
         if let media = status.mediaSessionID { session.mediaSessionID = media }
         if status.playerState == "PLAYING" {
             session.playDeadline?.cancel()

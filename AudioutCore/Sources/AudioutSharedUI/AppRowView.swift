@@ -715,11 +715,18 @@ public final class AppRowView: NSView {
 
     // MARK: Actions
 
-    // STABILITY(D4): the drag flag clears only when the last change callback coincides with .leftMouseUp — Esc/cancelled drags leave it stuck and the row ignores model updates; see dev/notes/stability-audit-2026-07-18.md
     @objc private func volumeChanged(_ sender: NSSlider) {
-        isDraggingSlider = true
-        let event = NSApp?.currentEvent
-        if event?.type == .leftMouseUp { isDraggingSlider = false }
+        // `isDraggingSlider` exists so `apply(...)` won't yank the thumb out from
+        // under a live MOUSE drag. Read it from whether a drag is actually in
+        // flight: a keyboard or VoiceOver change is a single event that is never
+        // a `.leftMouseUp`, so the old "set always, clear only on .leftMouseUp"
+        // latched the flag forever (stability-audit-2026-07-18 §D4).
+        switch NSApp?.currentEvent?.type {
+        case .leftMouseDown, .leftMouseDragged:
+            isDraggingSlider = true
+        default:
+            isDraggingSlider = false
+        }
         readoutLabel.stringValue = VolumePercent.label(sender.integerValue)
         delegate?.appRow(self, didSetVolume: sender.integerValue, for: appID)
     }
@@ -1062,6 +1069,17 @@ public final class AppRowView: NSView {
     /// Simulate the user dragging this row's slider to `volume`.
     public func test_setVolume(_ volume: Int) {
         delegate?.appRow(self, didSetVolume: volume, for: appID)
+    }
+
+    /// Fire the volume slider's OWN `target`/`action` with the slider as
+    /// sender — the exact dispatch AppKit performs during a real change —
+    /// after setting its value. Unlike ``test_setVolume(_:)``, which only
+    /// calls the delegate, this drives the control's wiring end-to-end.
+    public func test_fireSliderAction(settingValueTo value: Int) {
+        slider.integerValue = value
+        guard let action = slider.action,
+              let target = slider.target as? NSObject else { return }
+        _ = target.perform(action, with: slider)
     }
 
     /// Simulate the user picking `destinationID` from the trailing popup.

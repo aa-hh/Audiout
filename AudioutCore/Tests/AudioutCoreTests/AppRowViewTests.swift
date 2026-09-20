@@ -216,6 +216,32 @@ import AppKit
         #expect(row.test_volume == 42, "test_setVolume only fires the delegate; a real reapply drives the model")
     }
 
+    // MARK: 08 — a non-mouse slider change never wedges the drag flag
+
+    @Test func keyboardShapedSliderChangeNeverWedgesTheDragFlag() {
+        // `test_fireSliderAction` fires the slider's real target/action while
+        // `NSApp` is nil headless, so `NSApp?.currentEvent?.type` is nil — the
+        // keyboard / scroll / VoiceOver shape, where no drag is in flight and
+        // the flag must stay false. Before the fix, ANY change set the flag and
+        // only a coincident `.leftMouseUp` cleared it, so this left the row
+        // permanently ignoring model pushes.
+        let (row, _) = makeRow()
+
+        row.test_fireSliderAction(settingValueTo: 30)
+
+        row.apply(AppRowView.Configuration(
+            appID: "com.example.app",
+            name: "Example App",
+            icon: nil,
+            volume: 55,
+            selectedDestinationID: "local",
+            destinations: makeDestinations()
+        ))
+
+        #expect(row.test_volume == 55,
+                "a non-mouse change must not wedge isDraggingSlider and block the model push")
+    }
+
     @Test func removeFiresDelegate() {
         let (row, delegate) = makeRow()
         row.test_remove()

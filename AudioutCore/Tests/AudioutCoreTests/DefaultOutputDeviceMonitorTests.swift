@@ -492,4 +492,32 @@ import CoreAudio
         #expect(recorder.received.count == 1)
         #expect(recorder.received.first?.nominalRate == 44_100)
     }
+
+    /// The trailing fan-out work item's block used to read the item itself
+    /// (`var item: DispatchWorkItem!` closed over by its own block), so the
+    /// item retained itself and never deallocated — one leaked per
+    /// default-output or rate notification on the single process-wide
+    /// monitor, four per Bluetooth connect.
+    @Test func cancelledTrailingFanoutItemIsReleased() async {
+        let hal = FakeHAL()
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: testSettleWindow)
+        let recorder = Recorder(deviceID: 42, rate: 48_000)
+        recorder.attach(to: monitor)
+        monitor.start()
+
+        hal.rate = 44_100; hal.fire(rateSelector)
+
+        weak var weakItem: DispatchWorkItem?
+        do {
+            weakItem = monitor._pendingFanoutForTesting
+        }
+        #expect(weakItem != nil, "the trailing fan-out should be armed after a notification")
+
+        monitor.stop()
+
+        await SuiteWait.until("the cancelled trailing fan-out work item to be released") {
+            weakItem == nil
+        }
+        #expect(weakItem == nil)
+    }
 }

@@ -53,7 +53,7 @@ import Testing
         let store = makeStore()
         let first = CompanionApprovalController(store: store)
         var promptCount = 0
-        first.presentPrompt = { _, respond in
+        first.presentPrompt = { _, _, respond in
             promptCount += 1
             respond(false)
         }
@@ -64,7 +64,7 @@ import Testing
 
         // "Relaunch": a fresh controller over the same directory.
         let second = CompanionApprovalController(store: store)
-        second.presentPrompt = { _, _ in
+        second.presentPrompt = { _, _, _ in
             Issue.record("a remembered denial must never re-prompt")
         }
         var relaunchDecisions: [CompanionServer.ApprovalDecision] = []
@@ -81,7 +81,7 @@ import Testing
             decision: .approved, firstSeen: .distantPast, lastSeen: .distantPast)])
         let lastSeen = Date(timeIntervalSince1970: 5_000)
         let controller = CompanionApprovalController(store: store, now: { lastSeen })
-        controller.presentPrompt = { _, _ in
+        controller.presentPrompt = { _, _, _ in
             Issue.record("an approved phone must never re-prompt")
         }
 
@@ -99,7 +99,7 @@ import Testing
     @Test func unknownPhonePromptsOnceAndTheAnswerResolvesEveryWaiter() throws {
         let controller = CompanionApprovalController(store: makeStore())
         var prompts: [(name: String, respond: (Bool) -> Void)] = []
-        controller.presentPrompt = { name, respond in prompts.append((name, respond)) }
+        controller.presentPrompt = { _, name, respond in prompts.append((name, respond)) }
 
         var firstDecisions: [CompanionServer.ApprovalDecision] = []
         var secondDecisions: [CompanionServer.ApprovalDecision] = []
@@ -121,11 +121,40 @@ import Testing
     @Test func differentPhonesPromptIndependently() throws {
         let controller = CompanionApprovalController(store: makeStore())
         var prompts: [(name: String, respond: (Bool) -> Void)] = []
-        controller.presentPrompt = { name, respond in prompts.append((name, respond)) }
+        controller.presentPrompt = { _, name, respond in prompts.append((name, respond)) }
 
         controller.handleRequest(clientID: Self.phoneID, clientName: "Owner's iPhone") { _ in }
         controller.handleRequest(clientID: UUID().uuidString, clientName: "Guest's iPhone") { _ in }
         #expect(prompts.map(\.name) == ["Owner's iPhone", "Guest's iPhone"])
+    }
+
+    @Test func abandonedRequestFreesTheEntryAndWithdrawsThePrompt() throws {
+        let controller = CompanionApprovalController(store: makeStore())
+        var promptCount = 0
+        var withdrawn: [String] = []
+        controller.presentPrompt = { _, _, _ in promptCount += 1 }
+        controller.withdrawPrompt = { clientID in withdrawn.append(clientID) }
+
+        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone") { _ in }
+        #expect(promptCount == 1)
+
+        controller.abandonRequest(clientID: Self.phoneID)
+        #expect(withdrawn == [Self.phoneID])
+        #expect(controller.approvals.isEmpty, "abandonment must not persist a decision")
+
+        // The entry was freed, not just hidden: the phone's next connect
+        // re-prompts rather than joining a dead prompt.
+        controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone") { _ in }
+        #expect(promptCount == 2)
+    }
+
+    @Test func abandonForAPhoneThatWasNeverPromptedIsANoOp() throws {
+        let controller = CompanionApprovalController(store: makeStore())
+        var withdrawn: [String] = []
+        controller.withdrawPrompt = { clientID in withdrawn.append(clientID) }
+
+        controller.abandonRequest(clientID: Self.phoneID)
+        #expect(withdrawn.isEmpty)
     }
 
     // MARK: - Revocation
@@ -172,7 +201,7 @@ import Testing
         // Now unknown again → the next connect must prompt (a remembered denial
         // would NOT have), and approving replaces the forgotten record.
         var prompts = 0
-        controller.presentPrompt = { _, respond in prompts += 1; respond(true) }
+        controller.presentPrompt = { _, _, respond in prompts += 1; respond(true) }
         var decisions: [CompanionServer.ApprovalDecision] = []
         controller.handleRequest(clientID: Self.phoneID, clientName: "iPhone") { decisions.append($0) }
 

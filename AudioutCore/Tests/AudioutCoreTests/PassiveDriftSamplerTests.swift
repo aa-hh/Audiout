@@ -413,8 +413,14 @@ import Testing
             deviceUID: "bt", kind: .bluetooth, expectedDelayMs: 100)])
         tracker.start()
 
-        try await Task.sleep(nanoseconds: 1_000_000_000)
-        #expect(windowCount.value == 1)
+        // Waited for, not slept past: the periodic window is 10 s away, so a
+        // starved 1 s sleep that resumes late lets the SECOND window fire and
+        // the count reads 2. Returning as soon as the first window lands keeps
+        // the assertion about the start delay, which is what this pins.
+        await SuiteWait.until("the first window to run at its start delay",
+                              timeout: 5) { windowCount.value >= 1 }
+        #expect(windowCount.value == 1,
+                "exactly one window inside the first interval — got \(windowCount.value)")
     }
 
     /// THE DEFECT. Every clock step used to take its own window; the rate

@@ -4232,14 +4232,14 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     }
 
     /// The mach timebase, read once (it never changes for the life of a process).
-    private static let cachedTimebase: mach_timebase_info_data_t = {
+    static let cachedTimebase: mach_timebase_info_data_t = {
         var tb = mach_timebase_info_data_t()
         mach_timebase_info(&tb)
         return tb
     }()
 
     /// Current `CLOCK_MONOTONIC` reading in nanoseconds.
-    private static func currentMonotonicNanos() -> UInt64 {
+    static func currentMonotonicNanos() -> UInt64 {
         var ts = Darwin.timespec()
         clock_gettime(CLOCK_MONOTONIC, &ts)
         return UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)

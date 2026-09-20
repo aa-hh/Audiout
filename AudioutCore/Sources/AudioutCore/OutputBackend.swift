@@ -648,7 +648,7 @@ public enum BackendKind {
 ///   backend ignores it entirely.
 public func makeBackend(
     _ kind: BackendKind? = nil,
-    resolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses())
+    resolver: AudioProcessResolver = AudioProcessResolver(enumerator: EmptyAudioProcessEnumerator())
 ) -> OutputBackend {
     switch BackendKind.resolved(explicit: kind) {
     case .mock:

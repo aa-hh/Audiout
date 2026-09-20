@@ -642,7 +642,7 @@ private func makeBackend(
     systemVolume: SystemVolumeControlling = FakeSystemVolume(),
     ptpHelperActivator: PTPHelperActivating = AlwaysReadyPTPHelperActivator(),
     connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
-    processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses()),
+    processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: EmptyAudioProcessEnumerator()),
     injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
     injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
     captureRetryDelay: TimeInterval = 2.0,
@@ -732,7 +732,7 @@ private func singleProcessResolver(_ bundleIDsToObjectIDs: [String: AudioObjectI
 /// A `ProcessAudioTap` that always succeeds (T8): `createAndStart` never
 /// throws, so a coordinator built over it takes every bundle ID all the way
 /// to `.capturing` — unlike the default empty-`processResolver` setup
-/// (`NoAudioProcesses`), which fails fast at `.processNotYetAudible` by design
+/// (`EmptyAudioProcessEnumerator`), which fails fast at `.processNotYetAudible` by design
 /// and is what most of this file uses to exercise routing TOPOLOGY independent
 /// of real capture. Tests that need `.routedApps`/the mixer to reflect an app
 /// that's actually (fakely) streaming — e.g. it must NOT be excluded as
@@ -1242,7 +1242,7 @@ private func subscribeRoutedApps(
 
 /// A per-app capture that actually reaches `.capturing` for `com.foo.player`
 /// — these tests are about the BIND gate, and a capture left failing (the
-/// default `NoAudioProcesses` resolver) would mark the app dead and
+/// default `EmptyAudioProcessEnumerator` resolver) would mark the app dead and
 /// republish an EMPTY topology mid-test, racing every assertion about the
 /// bind itself.
 private func succeedingPerAppCapture() -> PerAppCaptureCoordinator {

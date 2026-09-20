@@ -469,7 +469,7 @@ extension SerializedSharedState {
 
     @Test @MainActor func auditionZerosRedirectedCaptureWithoutDroppingFrames() async {
         let perApp = PerAppCaptureCoordinator(
-            processResolver: AudioProcessResolver(enumerator: NoAudioProcesses()))
+            processResolver: AudioProcessResolver(enumerator: EmptyAudioProcessEnumerator()))
         let (backend, bt, _, _) = makeBackend(perAppCapture: perApp)
         defer { backend.stop() }
         let local = ScriptedLocalPlayback()
@@ -479,8 +479,8 @@ extension SerializedSharedState {
         // `captureControlQueue`. That queue is immediate on a real Mac but can
         // be starved for seconds under a full parallel test run, and this test
         // is not about the deadline — so it does not race one.
-        backend.test_companionAuditionPreparationSeconds = 60
-        backend.test_companionAuditionStopSeconds = 60
+        backend.companionAuditionPreparationSeconds = 60
+        backend.companionAuditionStopSeconds = 60
         backend.start()
         bt.fire([btMove, btFlip])
         await SuiteWait.until { self.device(backend, self.btFlip.id) != nil }
@@ -520,8 +520,8 @@ extension SerializedSharedState {
         backend.localPlaybackEngine = local
         // Not a deadline test: see the note in
         // `auditionZerosRedirectedCaptureWithoutDroppingFrames`.
-        backend.test_companionAuditionPreparationSeconds = 60
-        backend.test_companionAuditionStopSeconds = 60
+        backend.companionAuditionPreparationSeconds = 60
+        backend.companionAuditionStopSeconds = 60
         backend.start()
         bt.fire([btMove, btFlip])
         await SuiteWait.until { self.device(backend, self.btFlip.id) != nil }
@@ -560,7 +560,7 @@ extension SerializedSharedState {
         local.holdsCompletions = true
         backend.captureCoordinator = capture
         backend.localPlaybackEngine = local
-        backend.test_companionAuditionPreparationSeconds = 0.1
+        backend.companionAuditionPreparationSeconds = 0.1
         backend.start()
         bt.fire([btMove, btFlip])
         await SuiteWait.until { self.device(backend, self.btFlip.id) != nil }
@@ -764,7 +764,7 @@ extension SerializedSharedState {
         let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
-        backend.test_companionAuditionStopSeconds = 0.1
+        backend.companionAuditionStopSeconds = 0.1
         backend.start()
         let ap1 = airPlay1()
         discovery.fire(.appeared(ap1))
@@ -804,7 +804,7 @@ extension SerializedSharedState {
         let local = ScriptedLocalPlayback()
         backend.localPlaybackEngine = local
         backend.captureCoordinator = ProbeStagingCapture()
-        backend.test_companionAuditionStopSeconds = 0.1
+        backend.companionAuditionStopSeconds = 0.1
         backend.start()
         bt.fire([btMove, btFlip])
         await SuiteWait.until { self.device(backend, self.btFlip.id) != nil }
@@ -1049,7 +1049,7 @@ extension SerializedSharedState {
         let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
-        backend.test_companionAuditionStopSeconds = 0.1
+        backend.companionAuditionStopSeconds = 0.1
         backend.start()
         let ap1 = airPlay1()
         discovery.fire(.appeared(ap1))

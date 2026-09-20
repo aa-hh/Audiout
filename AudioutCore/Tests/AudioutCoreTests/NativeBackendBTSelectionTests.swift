@@ -286,7 +286,7 @@ import CoreAudio
     /// A `ProcessAudioTap` that always succeeds: `createAndStart` never throws,
     /// so a coordinator built over it takes every bundle ID all the way to
     /// `.capturing` and keeps it there — unlike the default empty-resolver setup
-    /// (`NoAudioProcesses`), which fails fast at `.processNotYetAudible` and
+    /// (`EmptyAudioProcessEnumerator`), which fails fast at `.processNotYetAudible` and
     /// then marks the bundle dead, retracting its route from the mixer
     /// (`handlePerAppCaptureHealthChange`). A per-app BT claim armed over that
     /// default is torn back down within milliseconds by that cascade — tests

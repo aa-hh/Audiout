@@ -26,7 +26,10 @@ import AudioutSharedUI
     /// orders in.
     private func makeAttached() -> (SurfaceToolbarController, NSWindow) {
         let controller = SurfaceToolbarController()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 400),
+        // Parked far outside every screen: a test must never put anything on
+        // the developer's actual screen.
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000,
+                                                  width: SurfaceLayout.width, height: 400),
                               styleMask: [.titled, .closable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         controller.attach(to: window)
@@ -1012,16 +1015,21 @@ import AudioutSharedUI
 
     @Test func aClickAtTheFarEdgeOfAnOpenTabSelectsIt() {
         let controller = SurfaceToolbarController()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: SurfaceLayout.width, height: 400),
+        // Parked far outside every screen: the reveal below needs a real
+        // ordered-in window, and a test must never put anything on the
+        // developer's actual screen.
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000,
+                                                  width: SurfaceLayout.width, height: 400),
                               styleMask: [.titled, .closable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         controller.attach(to: window)
+        defer { window.orderOut(nil) }
         window.layoutIfNeeded()
 
         // Ordered in and given real runloop turns, because a live strip gets
         // AppKit's own toolbar layout passes after the reveal and the bug is
         // about what those passes leave behind.
-        window.orderFront(nil)
+        window.orderFrontRegardless()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         controller.setSelectedScreen(.settings)
         FoldAnimator.shared.test_settleNow()

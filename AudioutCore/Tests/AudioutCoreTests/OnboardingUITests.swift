@@ -327,11 +327,11 @@ import Testing
     /// Wait for something a background timeout will make true. A fixed sleep is a
     /// flake here: the main actor is shared with every other test in the run, so
     /// how soon that work lands is not this test's to decide.
-    private func waitUntil(_ satisfied: () -> Bool) async {
-        for _ in 0..<600 {                                   // ≤3 s, then give up
-            if satisfied() { return }
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
+    private func waitUntil(
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ satisfied: () -> Bool
+    ) async {
+        await SuiteWait.until(sourceLocation: sourceLocation, satisfied)
     }
 
     // MARK: Sequencing

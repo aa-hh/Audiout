@@ -135,7 +135,7 @@ import AppKit
     /// its attributed string carries the tail-truncating paragraph style — an
     /// `attributedTitle` makes the cell ignore its own `lineBreakMode`, so a
     /// long group name would otherwise clip mid-word with no ellipsis.
-    @Test func pickerTitleIsTheButtonTitleAndTruncatesByTail() {
+    @Test func pickerTitleIsTheButtonTitleAndTruncatesByTail() throws {
         let row = MainOutRowView()
         let longName = "The Extremely Long Upstairs Bedroom Speaker Group"
         row.apply(options: [
@@ -144,8 +144,8 @@ import AppKit
         ], current: .group(id: "g1"), master: 50)
         #expect(row.test_buttonTitle == "→ \(longName)")
 
-        let attributed = try? #require(row.test_buttonAttributedTitle)
-        let style = attributed?.attribute(.paragraphStyle, at: 0, effectiveRange: nil)
+        let attributed = try #require(row.test_buttonAttributedTitle)
+        let style = attributed.attribute(.paragraphStyle, at: 0, effectiveRange: nil)
             as? NSParagraphStyle
         #expect(style?.lineBreakMode == .byTruncatingTail)
     }

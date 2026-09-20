@@ -46,21 +46,21 @@ import Testing
         var value: Value? { lock.withLock { stored } }
     }
 
-    private func waitFor(_ signals: [Signal], timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if signals.allSatisfy(\.fired) { return true }
-            Thread.sleep(forTimeInterval: 0.005)
-        }
+    private func waitFor(
+        _ signals: [Signal], timeout: TimeInterval,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) -> Bool {
+        SuiteWait.untilOnRunLoop("every signal to fire", timeout: timeout,
+                                 sourceLocation: sourceLocation) { signals.allSatisfy(\.fired) }
         return signals.allSatisfy(\.fired)
     }
 
-    private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return true }
-            Thread.sleep(forTimeInterval: 0.005)
-        }
+    private func waitUntil(
+        timeout: TimeInterval,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: () -> Bool
+    ) -> Bool {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, condition)
         return condition()
     }
 

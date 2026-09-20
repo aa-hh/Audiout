@@ -47,9 +47,8 @@ import AppKit
         // empty list, and every row assertion below then measures the "Looking
         // for speakers…" placeholder instead of the speakers.
         backend.start()
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline && backend.devices.count < deviceCount {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        SuiteWait.untilOnRunLoop("the fleet has \(deviceCount) devices") {
+            backend.devices.count >= deviceCount
         }
         popover.update(devices: backend.devices)
         popover.test_panelView.layoutSubtreeIfNeeded()

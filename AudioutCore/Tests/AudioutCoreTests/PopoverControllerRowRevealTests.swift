@@ -59,11 +59,9 @@ import Foundation
     /// roadmap-023 lesson). A missed deadline falls through to the caller's
     /// assertion, which then reports the real value. A test that spins nothing
     /// gets no ticks at all — that is the harness the eviction case below wants.
-    private func settle(until condition: () -> Bool) {
-        let deadline = Date().addingTimeInterval(5)
-        while !condition() && Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        }
+    private func settle(until condition: () -> Bool,
+                        sourceLocation: SourceLocation = #_sourceLocation) {
+        SuiteWait.untilOnRunLoop(sourceLocation: sourceLocation, condition)
     }
 
     // MARK: The published height

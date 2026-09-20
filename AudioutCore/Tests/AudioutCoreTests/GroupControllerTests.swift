@@ -98,7 +98,9 @@ import Testing
         let before = Set(backend.devices.filter(\.isSelected).map(\.id))
 
         _ = controller.setDeviceSelected("office", true)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("office to be composed into the set") {
+            controller.isSpeakerSelected("office")
+        }
         #expect(controller.isSpeakerSelected("office"), "the set was composed")
         #expect(Set(backend.devices.filter(\.isSelected).map(\.id)) == before,
                        "composing didn't re-route (target is a group)")
@@ -108,11 +110,15 @@ import Testing
         let (controller, backend) = try await makeController()
         controller.setMainOut(.selectedDevices)
         _ = controller.setDeviceSelected("office", true)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("office to be selected on the backend") {
+            backend.devices.first { $0.id == "office" }?.isSelected == true
+        }
         #expect(backend.devices.first { $0.id == "office" }?.isSelected == true,
                       "composing live-applies when Main Out targets Selected Devices")
         _ = controller.setDeviceSelected("office", false)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("office to be deselected on the backend") {
+            !(backend.devices.first { $0.id == "office" }?.isSelected == true)
+        }
         #expect(!(backend.devices.first { $0.id == "office" }?.isSelected == true))
     }
 
@@ -131,7 +137,9 @@ import Testing
         controller.onMainOutMembersChanged = { lastMembers = $0 }
 
         _ = controller.setDeviceSelected("office", true)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("the Main Out member set to include office") {
+            lastMembers?.contains("office") == true
+        }
         #expect(lastMembers?.contains("office") == true,
                 "selecting a speaker fires with it in the Main Out member set")
         #expect(lastMembers?.contains("local-mac") != true,
@@ -149,7 +157,9 @@ import Testing
         controller.onMainOutMembersChanged = { lastMembers = $0 }
 
         controller.activateGroup(id: "g1")
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("the hook to fire with the group's members") {
+            lastMembers != nil
+        }
         #expect(lastMembers == ["office", "homepod-bed"],
                 "group activation fires with exactly the group's AirPlay members")
     }
@@ -157,16 +167,15 @@ import Testing
     /// Poll `backend` until `id`'s connection state satisfies `predicate`
     /// (mirrors `PopoverControllerTests.waitForConnectionState`).
     private func waitForConnectionState(
-        _ backend: MockBackend, id: String, timeout: TimeInterval = 3,
-        _ predicate: (ConnectionState) -> Bool
+        _ backend: MockBackend, id: String, timeout: TimeInterval? = nil,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ predicate: @escaping (ConnectionState) -> Bool
     ) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if let device = backend.devices.first(where: { $0.id == id }),
-               predicate(device.connectionState) { return }
-            try await Task.sleep(nanoseconds: 20_000_000)
+        await SuiteWait.until("\(id)'s connection state to satisfy the predicate",
+                              timeout: timeout, sourceLocation: sourceLocation) {
+            guard let device = backend.devices.first(where: { $0.id == id }) else { return false }
+            return predicate(device.connectionState)
         }
-        Issue.record("timed out waiting for \(id)'s connection state")
     }
 
     private func isFailed(_ state: ConnectionState) -> Bool {
@@ -595,7 +604,9 @@ import Testing
         try controller.saveGroup(Group(id: "g1", name: "Pair",
                                         memberIDs: ["sonos-move", "office"], memberVolumes: [:]))
         controller.setMainOut(.group(id: "g1"))
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("group g1 to become the active group") {
+            controller.activeGroupID == "g1"
+        }
         #expect(controller.activeGroupID == "g1")
         #expect(Set(backend.devices.filter(\.isSelected).map(\.id)) == ["sonos-move", "office"])
     }
@@ -608,7 +619,9 @@ import Testing
         try controller.saveGroup(group)
 
         controller.activateGroup(id: "g1")
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("the output set to become exactly the group's members") {
+            Set(backend.devices.filter(\.isSelected).map(\.id)) == ["sonos-move", "office"]
+        }
 
         let selected = Set(backend.devices.filter(\.isSelected).map(\.id))
         #expect(selected == ["sonos-move", "office"])
@@ -625,7 +638,9 @@ import Testing
         try controller.saveGroup(group)
 
         controller.activateGroup(id: "g1")
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("both members to receive their remembered volumes") {
+            volume("sonos-move", in: backend) == 77 && volume("office", in: backend) == 12
+        }
 
         #expect(volume("sonos-move", in: backend) == 77)
         #expect(volume("office", in: backend) == 12)
@@ -648,7 +663,9 @@ import Testing
                                        memberIDs: ["local-mac", "sonos-move"], memberVolumes: [:]))
 
         controller.setMainOut(.group(id: "g1"))
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("the output set to become the group's AirPlay member alone") {
+            Set(backend.devices.filter(\.isSelected).map(\.id)) == ["sonos-move"]
+        }
 
         #expect(Set(backend.devices.filter(\.isSelected).map(\.id)) == ["sonos-move"],
                 "the local Mac must never enter the backend output set")
@@ -666,7 +683,9 @@ import Testing
                                        memberIDs: ["local-mac"], memberVolumes: [:]))
 
         controller.setMainOut(.group(id: "g1"))
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("group g1 to become the active group") {
+            controller.activeGroupID == "g1"
+        }
 
         #expect(Set(backend.devices.filter(\.isSelected).map(\.id)) == [],
                 "a Mac-only group is passthrough — an EMPTY backend output set")
@@ -684,7 +703,9 @@ import Testing
                                        memberVolumes: ["local-mac": 0, "sonos-move": 77]))
 
         controller.setMainOut(.group(id: "g1"))
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("the AirPlay member to receive its remembered volume") {
+            volume("sonos-move", in: backend) == 77
+        }
 
         #expect(volume("sonos-move", in: backend) == 77, "AirPlay members still get their levels")
         #expect(volume("local-mac", in: backend) == macVolumeBefore,
@@ -768,7 +789,10 @@ import Testing
         let group = Group(id: "g1", name: "Downstairs", memberIDs: ["sonos-move"], memberVolumes: [:])
         try controller.saveGroup(group)
         controller.activateGroup(id: "g1")
-        try await Task.sleep(nanoseconds: 100_000_000)
+        await SuiteWait.until("group g1 to be active with its member selected") {
+            controller.activeGroupID == "g1"
+                && backend.devices.contains { $0.id == "sonos-move" && $0.isSelected }
+        }
 
         controller.deactivateGroup()
         #expect(controller.activeGroupID == nil)
@@ -784,7 +808,11 @@ import Testing
         _ = controller.setDeviceSelected("homepod-bed", true)
         backend.setVolume(33, for: "sonos-move")
         backend.setVolume(81, for: "homepod-bed")
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("both speakers to be selected at their new volumes") {
+            controller.isSpeakerSelected("sonos-move") && controller.isSpeakerSelected("homepod-bed")
+                && volume("sonos-move", in: backend) == 33
+                && volume("homepod-bed", in: backend) == 81
+        }
 
         let group = try controller.saveCurrentSetupAsGroup(name: "Party", id: "party").group
 
@@ -813,7 +841,9 @@ import Testing
         let (controller, _) = try await makeController()
         _ = controller.setDeviceSelected("sonos-move", true)
         _ = controller.setDeviceSelected("office", true)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("both speakers to be selected") {
+            controller.isSpeakerSelected("sonos-move") && controller.isSpeakerSelected("office")
+        }
 
         let first = try controller.saveCurrentSetupAsGroup(name: "Group 1")
         #expect(!first.alreadyExisted)
@@ -898,14 +928,16 @@ import Testing
 
         // Main Out at the group → active; syncActiveGroupToSelection keeps it.
         controller.setMainOut(.group(id: "g1"))
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("group g1 to become the active group") {
+            controller.activeGroupID == "g1"
+        }
         #expect(controller.syncActiveGroupToSelection() == "g1")
         #expect(controller.activeGroupID == "g1")
 
         // Main Out back at Selected Devices → no active group even if the output
         // set coincidentally equals the group.
         controller.setMainOut(.selectedDevices)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("no group to be active") { controller.activeGroupID == nil }
         #expect(controller.syncActiveGroupToSelection() == nil)
         #expect(controller.activeGroupID == nil)
     }
@@ -944,7 +976,9 @@ import Testing
         try await Task.sleep(nanoseconds: 200_000_000)
 
         controller.setMainOutMasterVolume(80)
-        try await Task.sleep(nanoseconds: 100_000_000)
+        await SuiteWait.until("Main Out's master gain to reach 80") {
+            controller.mainOutMasterVolume == 80
+        }
 
         #expect(controller.mainOutMasterVolume == 80)
         #expect(volume("sonos-move", in: backend) == 20, "Main never rewrites a member's stored level")
@@ -960,7 +994,7 @@ import Testing
         controller.setMainOutMasterVolume(55)
 
         controller.setMemberVolume(90, for: "office")
-        try await Task.sleep(nanoseconds: 100_000_000)
+        await SuiteWait.until("office to reach 90") { volume("office", in: backend) == 90 }
 
         #expect(volume("office", in: backend) == 90, "the member itself moved")
         #expect(controller.mainOutMasterVolume == 55, "Main is its own value — it echoes no member")
@@ -980,7 +1014,9 @@ import Testing
         try await Task.sleep(nanoseconds: 200_000_000)
 
         controller.setMainOutMasterVolume(0)
-        try await Task.sleep(nanoseconds: 100_000_000)
+        await SuiteWait.until("Main Out's master gain to reach 0") {
+            controller.mainOutMasterVolume == 0
+        }
         #expect(controller.mainOutMasterVolume == 0)
         #expect(volume("sonos-move", in: backend) == 80, "stored levels don't move even at Main 0")
         #expect(volume("office", in: backend) == 20)
@@ -1026,7 +1062,9 @@ import Testing
         controller.activateGroup(id: "g1")
         backend.setVolume(83, for: "sonos-move")
         backend.setVolume(17, for: "office")
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("both members to reach their starting levels") {
+            volume("sonos-move", in: backend) == 83 && volume("office", in: backend) == 17
+        }
 
         let steps = stride(from: 20, through: 95, by: 5).map { $0 }   // 16 steps
         #expect(steps.count == 16)
@@ -1126,12 +1164,16 @@ import Testing
         try await Task.sleep(nanoseconds: 200_000_000)
 
         controller.setMuted(true, for: "sonos-move")
-        try await Task.sleep(nanoseconds: 100_000_000)
+        await SuiteWait.until("sonos-move to be muted at zero") {
+            volume("sonos-move", in: backend) == 0 && controller.isMuted("sonos-move")
+        }
         #expect(volume("sonos-move", in: backend) == 0)
         #expect(controller.isMuted("sonos-move"))
 
         controller.setMuted(false, for: "sonos-move")
-        try await Task.sleep(nanoseconds: 100_000_000)
+        await SuiteWait.until("sonos-move to be unmuted at its pre-mute volume") {
+            volume("sonos-move", in: backend) == 65 && !controller.isMuted("sonos-move")
+        }
         #expect(volume("sonos-move", in: backend) == 65, "unmute restores the pre-mute volume")
         #expect(!controller.isMuted("sonos-move"))
     }
@@ -1146,7 +1188,9 @@ import Testing
         try await Task.sleep(nanoseconds: 200_000_000)
 
         controller.setMuted(true, for: "sonos-move")
-        try await Task.sleep(nanoseconds: 100_000_000)
+        await SuiteWait.until("sonos-move to be muted at zero") {
+            volume("sonos-move", in: backend) == 0
+        }
         #expect(volume("sonos-move", in: backend) == 0)
 
         // Redundant mute (already muted) — must be a no-op, not a re-stash of 0.
@@ -1154,7 +1198,9 @@ import Testing
         try await Task.sleep(nanoseconds: 100_000_000)
 
         controller.setMuted(false, for: "sonos-move")
-        try await Task.sleep(nanoseconds: 100_000_000)
+        await SuiteWait.until("sonos-move to be unmuted at its original level") {
+            volume("sonos-move", in: backend) == 70
+        }
         #expect(volume("sonos-move", in: backend) == 70, "unmute restores the original level, not 0")
     }
 
@@ -1285,7 +1331,9 @@ import Testing
         let (controller, backend) = try await makeController()
         _ = controller.setDeviceSelected("office", true)
         controller.setMainOut(.selectedDevices)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("the output set to become exactly the selected member") {
+            Set(backend.devices.filter(\.isSelected).map(\.id)) == ["office"]
+        }
 
         let outputs = Set(backend.devices.filter(\.isSelected).map(\.id))
         #expect(outputs == ["office"],
@@ -1299,7 +1347,7 @@ import Testing
         let (controller, backend) = try await makeController()
         controller.ensureDefaultSelection()   // seeds {local-mac} = passthrough
         controller.setMainOut(.selectedDevices)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("the controller to reach passthrough") { controller.isPassthrough }
 
         #expect(controller.isPassthrough)
         #expect(backend.devices.filter(\.isSelected).isEmpty,
@@ -1312,7 +1360,9 @@ import Testing
         let (controller, backend) = try await makeController()
         try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["sonos-move"], memberVolumes: [:]))
         controller.setMainOut(.group(id: "g1"))
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("the output set to become exactly the group's members") {
+            Set(backend.devices.filter(\.isSelected).map(\.id)) == ["sonos-move"]
+        }
 
         let outputs = Set(backend.devices.filter(\.isSelected).map(\.id))
         #expect(outputs == ["sonos-move"],
@@ -1329,7 +1379,9 @@ import Testing
         try controller.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office"], memberVolumes: [:]))
         _ = controller.setDeviceSelected("office", true)
         controller.setMainOut(.selectedDevices)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("the selection to resolve to group g1") {
+            controller.groupMatchingCurrentSelection?.id == "g1"
+        }
 
         #expect(!controller.isSpeakerSelected("homepod-bed"),
                        "a non-selected device is not in Selected Devices")
@@ -1810,7 +1862,10 @@ import Testing
         #expect(r.refusalReason == nil)
         #expect(!r.autoSwappedCurrentDevice)
         #expect(controller.selectedDeviceIDs == ["bt-move", "office"])
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("both selected devices to reach the backend output set") {
+            backend.devices.first { $0.id == "bt-move" }?.isSelected == true
+                && backend.devices.first { $0.id == "office" }?.isSelected == true
+        }
         #expect(backend.devices.first { $0.id == "bt-move" }?.isSelected == true)
         #expect(backend.devices.first { $0.id == "office" }?.isSelected == true)
     }

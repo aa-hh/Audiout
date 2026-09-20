@@ -103,12 +103,12 @@ import Network
     /// Spin (not block) until every signal has fired or `timeout` elapses.
     /// Returns whether all fired. Same shape as the listener `.ready` wait
     /// below — deliberately consistent rather than introducing a second idiom.
-    private func waitFor(_ signals: [Signal], timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if signals.allSatisfy(\.fired) { return true }
-            Thread.sleep(forTimeInterval: 0.005)
-        }
+    private func waitFor(
+        _ signals: [Signal], timeout: TimeInterval,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) -> Bool {
+        SuiteWait.untilOnRunLoop("every signal to fire", timeout: timeout,
+                                 sourceLocation: sourceLocation) { signals.allSatisfy(\.fired) }
         return signals.allSatisfy(\.fired)
     }
 

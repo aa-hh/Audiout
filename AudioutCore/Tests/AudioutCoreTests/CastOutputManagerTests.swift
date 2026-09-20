@@ -51,12 +51,12 @@ import Testing
         var all: [Int?] { lock.withLock { values } }
     }
 
-    private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return true }
-            Thread.sleep(forTimeInterval: 0.005)
-        }
+    private func waitUntil(
+        timeout: TimeInterval,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: () -> Bool
+    ) -> Bool {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, condition)
         return condition()
     }
 
@@ -130,7 +130,8 @@ import Testing
         client.getReceiverStatus { result in
             if case .success(let status) = result { box.set(status) }
         }
-        _ = waitUntil(timeout: 3) { box.value != nil }
+        #expect(waitUntil(timeout: 3) { box.value != nil },
+                "the receiver status never came back")
         return box.value?.volumeLevel
     }
 

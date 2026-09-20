@@ -294,10 +294,12 @@ private let tapFormat = TapFormat(
             engine.setMeteringActive(true)
             engine.onAppLevel = { recorder.record($0, $1) }
             engine.receive(buffer: constantBuffer(amplitude: 0.3), for: bundleID)
+            #expect(recorder.count == 1, "a receive while metering is on fires onAppLevel once")
 
             // With metering turned back off, listener still installed.
             engine.setMeteringActive(false)
             engine.receive(buffer: constantBuffer(amplitude: 0.3), for: bundleID)
+            #expect(recorder.count == 1, "the hook must not fire while metering is off")
 
             // Volume/removeApp still behave normally after all the above.
             engine.setVolume(0.5, for: bundleID)
@@ -306,6 +308,9 @@ private let tapFormat = TapFormat(
             // Re-adding after removal (idempotent add path) still works.
             try engine.addApp(bundleID: bundleID, tapFormat: tapFormat, volume: 1.0)
             engine.receive(buffer: constantBuffer(amplitude: 0.3), for: bundleID)
+            engine.setMeteringActive(true)
+            engine.receive(buffer: constantBuffer(amplitude: 0.3), for: bundleID)
+            #expect(recorder.count == 2, "a re-added app still forwards its levels")
         }
 
         /// (e) An output config-change event (the "dies through mic" trigger: the mic

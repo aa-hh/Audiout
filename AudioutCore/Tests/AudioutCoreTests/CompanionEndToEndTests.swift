@@ -240,12 +240,12 @@ import AudioutProtocol
     /// second deadline was measuring the code for. `CompanionServerTests`'
     /// twin helper got this fix in 46897218; this copy was missed. An
     /// explicit `timeout:` still means "I meant this expiry".
-    nonisolated private func waitUntil(timeout: TimeInterval = SuiteWait.timeout, _ condition: () -> Bool) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return true }
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
+    nonisolated private func waitUntil(
+        timeout: TimeInterval? = nil,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: () -> Bool
+    ) async -> Bool {
+        await SuiteWait.until(timeout: timeout, sourceLocation: sourceLocation, condition)
         return condition()
     }
 

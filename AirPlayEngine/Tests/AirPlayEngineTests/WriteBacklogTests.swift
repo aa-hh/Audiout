@@ -226,7 +226,9 @@ extension SerializedEngineState {
             // ALAC-encode/RTP flush path (same constraint as MultiStreamWriteRoutingTests).
             let writes = 6, samplesEach = 50 // 300 total, < 352
             for _ in 0..<writes { engine.write(pcm: pcm(samples: samplesEach), streamId: 5, pts: pts) }
-            try? await Task.sleep(nanoseconds: 20_000_000)
+            await SuiteWait.until("every healthy write to reach the fan-out") {
+                airplay_test_master_session_input_buffer_samples(ams) >= UInt32(writes * samplesEach)
+            }
 
             #expect(airplay_test_master_session_input_buffer_samples(ams) == UInt32(writes * samplesEach),
                        "every healthy write must reach the fan-out — the guard must not spuriously drop")
@@ -277,7 +279,9 @@ extension SerializedEngineState {
             // Release stream 1's backlog (its bodies drained) and write again: it flows.
             engine.writeBacklog.release(stream1Reservation)
             engine.write(pcm: pcm(samples: 100), streamId: 1, pts: pts)
-            try? await Task.sleep(nanoseconds: 20_000_000)
+            await SuiteWait.until("the drained stream 1 to accept a write again") {
+                airplay_test_master_session_input_buffer_samples(ams1) >= 100
+            }
 
             #expect(airplay_test_master_session_input_buffer_samples(ams1) == 100,
                        "once its backlog drains, the previously-saturated stream must flow again")

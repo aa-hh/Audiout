@@ -108,16 +108,15 @@ import CoreFoundation
     /// Spin until `condition` holds or the deadline passes; reports whether it
     /// held. Mirrors `NativeBackendTests.pollUntil` — the resolution completes on
     /// an arbitrary thread, so there is nothing to await. The final re-check
-    /// after the loop matters: without it a change landing during the LAST sleep
-    /// is never seen, because the loop exits on the deadline before testing the
-    /// condition again.
+    /// after the wait matters: without it a change landing during the LAST sleep
+    /// is never seen.
     @discardableResult
-    private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return true }
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
+    private func pollUntil(
+        timeout: TimeInterval? = nil,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: @escaping () -> Bool
+    ) async -> Bool {
+        await SuiteWait.until(timeout: timeout, sourceLocation: sourceLocation, condition)
         return condition()
     }
 

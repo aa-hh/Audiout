@@ -71,7 +71,7 @@ import Testing
     /// THE DEFECT. Attribution is the whole reason this ticket exists: if the
     /// moved peak is matched to the wrong baseline, the tracker corrects a
     /// speaker that was in sync and pushes the one that jumped further out.
-    @Test func oneMovedPeakIsAttributedToThatSpeakerAlone() {
+    @Test func oneMovedPeakIsAttributedToThatSpeakerAlone() throws {
         var sampler = Self.sampler([Self.bluetooth("A", 60), Self.bluetooth("B", 180)])
         let outcome = Self.analyze(&sampler, delaysMs: [60, 200], hostNanos: 42)
         guard case .observations(let observations) = outcome else {
@@ -79,12 +79,12 @@ import Testing
             return
         }
         #expect(observations.count == 2)
-        let a = try? #require(observations.first { $0.deviceUID == "A" })
-        let b = try? #require(observations.first { $0.deviceUID == "B" })
-        #expect(abs(a?.errorMs ?? 99) < 2, "the speaker that did not move reads ~0")
-        #expect(abs((b?.errorMs ?? 0) - 20) < 2, "B sounded 20 ms late")
-        #expect(b?.isBestGuess == false, "one peak moved: the match is unambiguous")
-        #expect(b?.hostNanos == 42)
+        let a = try #require(observations.first { $0.deviceUID == "A" })
+        let b = try #require(observations.first { $0.deviceUID == "B" })
+        #expect(abs(a.errorMs) < 2, "the speaker that did not move reads ~0")
+        #expect(abs(b.errorMs - 20) < 2, "B sounded 20 ms late")
+        #expect(b.isBestGuess == false, "one peak moved: the match is unambiguous")
+        #expect(b.hostNanos == 42)
     }
 
     /// THE DEFECT. Two speakers that each moved onto a peak of their own could
@@ -231,13 +231,10 @@ import Testing
     /// a tracker that never gets there fails.
     private static func waitUntil(_ what: String, seconds: Double = 30,
                                   _ isDone: () -> Bool) async throws {
-        let deadline = Date().addingTimeInterval(seconds)
-        while !isDone() {
-            guard Date() < deadline else {
-                throw WaitTimedOut(
-                    description: "waited \(seconds) s for \(what) and it never happened")
-            }
-            try await Task.sleep(nanoseconds: 5_000_000)
+        await SuiteWait.until(what, timeout: seconds, isDone)
+        guard isDone() else {
+            throw WaitTimedOut(
+                description: "waited \(seconds) s for \(what) and it never happened")
         }
     }
 

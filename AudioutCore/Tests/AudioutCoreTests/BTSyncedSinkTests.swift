@@ -842,14 +842,15 @@ extension SerializedSharedState {
 
             /// The same poll, for any event and any number of lines.
             func pollForLines(evt: String, count: Int = 1,
-                              timeout: TimeInterval = 30) async -> [String]? {
-                let deadline = Date().addingTimeInterval(timeout)
-                while Date() < deadline {
-                    let hits = snapshot().filter { $0.contains("\"evt\":\"\(evt)\"") }
-                    if hits.count >= count { return hits }
-                    try? await Task.sleep(nanoseconds: 5_000_000)
+                              timeout: TimeInterval = 30,
+                              sourceLocation: SourceLocation = #_sourceLocation) async -> [String]? {
+                func hits() -> [String] { snapshot().filter { $0.contains("\"evt\":\"\(evt)\"") } }
+                await SuiteWait.until("\(count) \(evt) line(s)",
+                                      timeout: timeout, sourceLocation: sourceLocation) {
+                    hits().count >= count
                 }
-                return nil
+                let found = hits()
+                return found.count >= count ? found : nil
             }
         }
 

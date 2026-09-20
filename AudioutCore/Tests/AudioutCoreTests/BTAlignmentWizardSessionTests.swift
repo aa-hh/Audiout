@@ -827,14 +827,14 @@ extension SerializedSharedState {
             /// synchronous read races the flush — poll, like the BTSyncedSink
             /// capture does.
             func pollForLines(evt: String, containing needle: String, count: Int,
-                              timeout: TimeInterval = 3) async -> [String] {
-                let deadline = Date().addingTimeInterval(timeout)
-                while Date() < deadline {
-                    let hits = lines(evt: evt).filter { $0.contains(needle) }
-                    if hits.count >= count { return hits }
-                    try? await Task.sleep(nanoseconds: 5_000_000)
+                              timeout: TimeInterval = 3,
+                              sourceLocation: SourceLocation = #_sourceLocation) async -> [String] {
+                func hits() -> [String] { lines(evt: evt).filter { $0.contains(needle) } }
+                await SuiteWait.until("\(count) \(evt) line(s) carrying \(needle)",
+                                      timeout: timeout, sourceLocation: sourceLocation) {
+                    hits().count >= count
                 }
-                return lines(evt: evt).filter { $0.contains(needle) }
+                return hits()
             }
         }
 

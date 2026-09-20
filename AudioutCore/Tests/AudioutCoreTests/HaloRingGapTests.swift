@@ -14,13 +14,13 @@ import Testing
 @MainActor
 @Suite final class HaloRingGapTests: IsolatedSuite {
 
-    @Test func ringPathOpensAtTheDotAndStaysClosedElsewhere() {
+    @Test func ringPathOpensAtTheDotAndStaysClosedElsewhere() throws {
         let ring = HaloRingView()
         ring.frame = NSRect(x: 0, y: 0, width: 42, height: 42)
         ring.apply(.connected)
         ring.layout()
 
-        let path = try! #require(ring.test_ringPath)
+        let path = try #require(ring.test_ringPath)
         let stroked = path.copy(strokingWithWidth: 4, lineCap: .round,
                                  lineJoin: .round, miterLimit: 10)
 

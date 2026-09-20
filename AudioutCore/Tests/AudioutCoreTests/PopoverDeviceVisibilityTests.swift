@@ -34,9 +34,8 @@ import AppKit
         popover.test_isShownOverride = true
         if !fleet.isEmpty {
             backend.start()
-            let deadline = Date().addingTimeInterval(5)
-            while Date() < deadline && backend.devices.count < fleet.count {
-                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            SuiteWait.untilOnRunLoop("the fleet has \(fleet.count) devices") {
+                backend.devices.count >= fleet.count
             }
         }
         return (popover, controller)
@@ -345,10 +344,7 @@ import AppKit
         popover.configure(groupController: controller)
         popover.test_isShownOverride = true
         backend.start()
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline && backend.devices.count < 3 {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
-        }
+        SuiteWait.untilOnRunLoop("the fleet has 3 devices") { backend.devices.count >= 3 }
 
         let now = Date()
         popover.btLastUsedProvider = {
@@ -623,9 +619,8 @@ import AppKit
         popover.configure(groupController: controller)
         popover.test_isShownOverride = true
         backend.start()
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline && backend.devices.count < fleet.count {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        SuiteWait.untilOnRunLoop("the fleet has \(fleet.count) devices") {
+            backend.devices.count >= fleet.count
         }
         popover.update(devices: fleet)
         #expect(popover.test_deviceRow(for: "office") == nil, "precondition: hidden while unselected")
@@ -678,9 +673,8 @@ import AppKit
         popover.configure(groupController: controller)
         popover.test_isShownOverride = true
         backend.start()
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline && backend.devices.count < fleet.count {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        SuiteWait.untilOnRunLoop("the fleet has \(fleet.count) devices") {
+            backend.devices.count >= fleet.count
         }
         popover.update(devices: fleet)
         #expect(popover.test_outputDevicesPlusMenu().item(withTitle: "Connect 'Zed Box'") != nil,

@@ -333,9 +333,9 @@ extension SerializedSharedState {
     /// stand-in is some other mark) and NEVER a hand-drawn rune. Asserting the
     /// card really carries that image is what stops a later pass from quietly
     /// dropping back to `symbolName`.
-    @Test func bluetoothCardCarriesTheSystemBluetoothGlyph() {
+    @Test func bluetoothCardCarriesTheSystemBluetoothGlyph() throws {
         let content = OnboardingViewController.content(for: .bluetooth)
-        let system = try? #require(NSImage(named: NSImage.bluetoothTemplateName))
+        let system = try #require(NSImage(named: NSImage.bluetoothTemplateName))
 
         #expect(content.customIcon != nil,
                 "the Bluetooth row must carry a real glyph override, not fall through to symbolName")

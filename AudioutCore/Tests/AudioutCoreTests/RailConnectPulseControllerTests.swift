@@ -47,9 +47,8 @@ import AppKit
         // `setDeviceSelected` no-ops for a device the backend hasn't
         // discovered — start the mock fleet before any selection.
         backend.start()
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline && backend.devices.count < fleet.count {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        SuiteWait.untilOnRunLoop("the fleet has \(fleet.count) devices") {
+            backend.devices.count >= fleet.count
         }
         popover.test_applyExactFitSize()   // force the panel's view tree to load
         var root: NSView = overlay

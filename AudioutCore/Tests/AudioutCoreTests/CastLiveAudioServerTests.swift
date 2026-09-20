@@ -313,4 +313,56 @@ import Testing
         let oneRender = SineSource().render(frames: 882)
         #expect(twoRenders == oneRender, "phase must carry across renders, or the stream clicks at every chunk boundary")
     }
+
+    /// The peer check runs against endpoints the REAL listener produces, not
+    /// the loopback ones every other test here drives. An address off a real
+    /// network path carries its interface and prints as `192.168.4.54%en0`,
+    /// while the control channel's copy of the same address prints bare, so
+    /// comparing the printed forms refused the receiver's own GET and
+    /// cancelled it in silence (live failure, 2026-09-20). The dual-stack
+    /// listener also reports an IPv4 peer as an IPv4-mapped IPv6 address.
+    /// Addresses therefore compare by value, and all three shapes are one
+    /// receiver.
+    @Test func admitsTheReceiverWhateverShapeItsAddressArrivesIn() throws {
+        let receiver = "192.168.4.54"
+        let mapped = try #require(IPv6Address("::ffff:192.168.4.54"))
+
+        let scoped = try #require(IPv4Address("192.168.4.54%en0"))
+        #expect(CastLiveAudioServer.peerMatches(
+            .hostPort(host: .ipv4(scoped), port: 36_488),
+            allowedPeer: receiver
+        ), "an address carrying its interface is still the receiver")
+
+        #expect(CastLiveAudioServer.peerMatches(
+            .hostPort(host: .ipv6(mapped), port: 36_488),
+            allowedPeer: receiver
+        ), "the receiver's own GET arrives IPv4-mapped on the dual-stack listener")
+
+        #expect(CastLiveAudioServer.peerMatches(
+            .hostPort(host: .ipv4(try #require(IPv4Address(receiver))), port: 36_488),
+            allowedPeer: receiver
+        ))
+    }
+
+    @Test func refusesAPeerThatIsNotTheReceiver() throws {
+        let other = try #require(IPv4Address("192.168.4.99"))
+        #expect(!CastLiveAudioServer.peerMatches(
+            .hostPort(host: .ipv4(other), port: 36_488),
+            allowedPeer: "192.168.4.54"
+        ))
+
+        let v6Only = try #require(IPv6Address("fd00::1"))
+        #expect(!CastLiveAudioServer.peerMatches(
+            .hostPort(host: .ipv6(v6Only), port: 36_488),
+            allowedPeer: "192.168.4.54"
+        ))
+    }
+
+    /// Nothing to compare against is not grounds to refuse: a session whose
+    /// control channel never yielded an IPv4 address still has to play.
+    @Test func admitsEveryPeerWhenTheReceiverAddressIsUnknown() throws {
+        let anyone = try #require(IPv4Address("192.168.4.99"))
+        #expect(CastLiveAudioServer.peerMatches(.hostPort(host: .ipv4(anyone), port: 36_488), allowedPeer: nil))
+        #expect(CastLiveAudioServer.peerMatches(.hostPort(host: .ipv4(anyone), port: 36_488), allowedPeer: "not an address"))
+    }
 }

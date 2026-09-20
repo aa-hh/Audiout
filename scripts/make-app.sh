@@ -188,6 +188,21 @@ fi
 # under `set -u` (an empty "${arr[@]}" would be an unbound-variable error there).
 if [ "$CODESIGN_IDENTITY" = "-" ]; then TIMESTAMP_FLAG=""; else TIMESTAMP_FLAG="--timestamp"; fi
 
+# The ptp-helper daemon only honours a release request from a peer whose code
+# signature matches this build's identity (see ptp-helper.plist's
+# AUDIOUT_PTP_PEER_REQUIREMENT and main.c's peer check). That requirement
+# needs the Team ID, which only a Developer ID identity carries — an ad-hoc
+# identity ("-") has none, so the requirement renders empty and the helper
+# refuses every release, relying on idle exit alone.
+TEAM_ID="$(printf '%s' "$CODESIGN_IDENTITY" | sed -n 's/.*(\([A-Z0-9]*\))$/\1/p')"
+if [ -n "$TEAM_ID" ]; then
+  PEER_REQUIREMENT="identifier \"$BUNDLE_ID\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = \"$TEAM_ID\""
+  echo "==> ptp-helper peer requirement (Team ID $TEAM_ID): $PEER_REQUIREMENT"
+else
+  PEER_REQUIREMENT=""
+  echo "==> ptp-helper peer requirement is empty — signing identity carries no Team ID, so the helper will refuse every release"
+fi
+
 # --- Paths ----------------------------------------------------------------
 # Resolve the repo root from this script's location so it runs from anywhere.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -227,6 +242,19 @@ render_bundle_plist() {
   sed "s/__BUNDLE_ID__/$BUNDLE_ID/g" "$1" > "$2"
   if grep -q '__BUNDLE_ID__' "$2"; then
     echo "error: __BUNDLE_ID__ survived rendering $1 → $2" >&2; exit 1
+  fi
+  # __TEAM_ID__ appears only in the ptp-helper launchd plist's peer
+  # requirement; the Info.plist template has no such token, so this pass is a
+  # no-op there. An empty TEAM_ID (ad-hoc build) blanks the whole requirement
+  # string rather than leaving a requirement with an empty Team ID clause —
+  # main.c treats only a truly empty value as "no requirement configured".
+  if [ -n "$TEAM_ID" ]; then
+    sed -i '' "s|__TEAM_ID__|$TEAM_ID|g" "$2"
+  else
+    sed -i '' 's#<string>.*__TEAM_ID__.*</string>#<string></string>#' "$2"
+  fi
+  if grep -q '__TEAM_ID__' "$2"; then
+    echo "error: __TEAM_ID__ survived rendering $1 → $2" >&2; exit 1
   fi
   grep -q "<string>$HELPER_LABEL</string>" "$2" \
     || { echo "error: rendered $2 does not carry $HELPER_LABEL" >&2; exit 1; }
@@ -1283,6 +1311,12 @@ codesign --verify --strict --verbose "$APP_BUNDLE"
 # takes SIGPIPE, and `set -o pipefail` would flag that as a spurious failure.
 SIG_INFO="$(codesign --display --verbose=2 "$APP_BUNDLE" 2>&1 || true)"
 printf '%s\n' "$SIG_INFO" | grep -Eq 'flags=0x[0-9a-f]+\([^)]*runtime' || { echo "ERROR: hardened runtime flag not set on signature" >&2; exit 1; }
+# The ptp-helper peer requirement above was rendered from CODESIGN_IDENTITY's
+# Team ID; prove the app's actual signature carries that same Team ID, or the
+# app would never satisfy its own helper's requirement.
+if [ "$CODESIGN_IDENTITY" != "-" ]; then
+  printf '%s\n' "$SIG_INFO" | grep -q "TeamIdentifier=$TEAM_ID" || { echo "ERROR: app signature does not carry TeamIdentifier=$TEAM_ID (ptp-helper peer requirement would never match)" >&2; exit 1; }
+fi
 # Assert the entitlements actually EMBEDDED. codesign exits 0 even when AMFI
 # rejects a malformed entitlements plist (it just drops them), which would ship a
 # hardened-runtime app with library validation still ON — and that app cannot

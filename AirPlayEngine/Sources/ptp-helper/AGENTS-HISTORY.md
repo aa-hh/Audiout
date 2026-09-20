@@ -55,6 +55,30 @@ plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
   privilege boundary (design doc §4). This is a hard ceiling, not a start:
   never grow it into a general IPC channel — that would put a message parser
   in the one root process.
+  **2026-09-20:** the release trigger was honored from any local process that
+  could open the Mach service — repeated sends held the daemon down as a
+  persistent denial of AirPlay, not just a one-off blip. Fixed with
+  `xpc_connection_set_peer_code_signing_requirement()` on each accepted peer,
+  before `xpc_connection_resume()`: the requirement string is rendered by
+  `scripts/make-app.sh` from the signing identity's bundle id and Team ID into
+  the launchd plist's `AUDIOUT_PTP_PEER_REQUIREMENT` environment key, so only
+  a peer whose code signature matches the app that shipped the helper can
+  release it. An ad-hoc build carries no Team ID, so the requirement renders
+  empty and the helper refuses every release, relying on idle exit alone.
+  Manual check (owner's live session, not run here): with a Developer ID
+  `.dev` build installed and the helper running (`PTPClockProbe` ready),
+  compile with `clang` a small C program that mirrors
+  `PTPHelperService.swift`'s `release()` (`xpc_connection_create_mach_service`
+  with `XPC_CONNECTION_MACH_SERVICE_PRIVILEGED` on the `.dev` Mach service
+  name, an empty event handler, resume, send a dictionary with `release` true,
+  sleep 2s); run it unsigned. XPC drops a request that fails the requirement
+  and reports the failure to the sender only where a reply was expected, and
+  `release()` expects none, so the helper may log nothing: the check passes
+  when `log show --last 1m --predicate 'process == "ptp-helper"'` shows no
+  "release requested" line and the daemon is still running (`pgrep
+  ptp-helper`). A "failed the code-signing requirement" line may appear too,
+  but is not required. Then release from the app (switch the last AirPlay
+  speaker away) and confirm the existing "release requested" line and exit 0.
 - **XPC, libdispatch, and os_log are all libSystem, so none add a linked
   library** — the Library Validation constraint below is unaffected. `otool
   -L` on the built helper must keep showing `libSystem.B.dylib` and nothing

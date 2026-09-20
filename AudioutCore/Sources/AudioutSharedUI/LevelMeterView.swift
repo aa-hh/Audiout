@@ -165,6 +165,14 @@ public final class LevelMeterView: NSView {
         updateLayerColors()
     }
 
+    /// A meter whose row is discarded by a popover rebuild has nothing left
+    /// to show — zero it and stop the display link rather than ticking off
+    /// screen forever.
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { reset() }
+    }
+
     private func updateLayerColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             // The empty track must stay visible at every level so the meter's
@@ -264,7 +272,7 @@ public final class LevelMeterView: NSView {
 
     /// True while the OS is set to reduce motion — a static bar is shown then.
     private var reduceMotion: Bool {
-        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
     // MARK: Ballistics
@@ -335,4 +343,12 @@ public final class LevelMeterView: NSView {
     public var test_gradientColors: [NSColor] {
         (fillLayer.colors as? [CGColor])?.compactMap { NSColor(cgColor: $0) } ?? []
     }
+
+    /// Whether the display link is currently running — lets tests assert the
+    /// zero-CPU-at-rest teardown without reaching into Core Animation.
+    public var test_isDisplayLinkRunning: Bool { activeLink != nil }
+
+    /// Test seam for Reduce Motion (`nil` = the live system setting), matching
+    /// ``MembershipBusView``/``HaloRingView``.
+    public var test_reduceMotionOverride: Bool?
 }

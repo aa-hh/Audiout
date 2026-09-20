@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import AppKit
 import CoreGraphics
 import Testing
 @testable import AudioutSharedUI
@@ -94,5 +95,40 @@ import Testing
         let stepped = LevelMeterView.ballisticsStep(displayed: displayed, target: 0)
         #expect(stepped <= displayed, "decaying toward zero never increases displayed")
         #expect(stepped >= 0, "the step never goes negative")
+    }
+
+    // MARK: Display link teardown on window loss (task 09)
+
+    /// Defect this test catches: deleting `viewDidMoveToWindow` from
+    /// `LevelMeterView` turns this test red — the meter keeps a live display
+    /// link, keeps ticking off screen, and never deinits.
+    @MainActor @Test func meterLeavingItsWindowStopsTickingAndDeallocates() {
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 60, height: 40),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+
+        weak var weakMeter: LevelMeterView?
+
+        autoreleasepool {
+            do {
+                let meter = LevelMeterView()
+                weakMeter = meter
+                meter.test_reduceMotionOverride = false
+                window.contentView!.addSubview(meter)
+                meter.setLevel(0.5)
+                #expect(meter.test_isDisplayLinkRunning,
+                        "a non-zero level in a window starts the display link")
+                #expect(meter.test_targetLevel > 0,
+                        "precondition: the meter has a live, non-zero target")
+
+                meter.removeFromSuperview()
+                #expect(!meter.test_isDisplayLinkRunning,
+                        "leaving the window must stop the display link")
+                #expect(meter.test_targetLevel == 0,
+                        "leaving the window must zero the target")
+            }
+        }
+
+        #expect(weakMeter == nil,
+                "a stopped display link releases its target, so the orphaned row can die")
     }
 }

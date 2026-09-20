@@ -242,6 +242,12 @@ newest_iphone='xcrun simctl list devices available 2>/dev/null | awk "
 # convention (9:41, full battery, full signal) so six captures taken minutes
 # apart do not show six different clocks.
 #
+# ORDER MATTERS: each look sets the simulator appearance FIRST, then launches
+# the app, then screenshots, then terminates it. A screen that is frozen for
+# the capture repaints its content when the appearance flips but keeps the
+# navigation bar it was built with at launch, so flipping after launch gave a
+# light shot with a white title on a white header.
+#
 # $1 = output directory, $2 = app-icon directory, as the machine that runs
 # this will see them.
 shot_cmd_for() {
@@ -265,16 +271,16 @@ shot_cmd_for() {
         mkdir -p \"\$dest\"; cp "$2"/*.png \"\$dest/\" 2>/dev/null || true; \
     fi; \
     xcrun simctl terminate \"\$udid\" \"\$bundle\" >/dev/null 2>&1 || true; \
-    xcrun simctl status_bar \"\$udid\" override --time 9:41 --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 --operatorName \"\" >/dev/null 2>&1 || true; \
-    xcrun simctl launch \"\$udid\" \"\$bundle\" -uitest-isolated -store-shots -store-shots-screen $shot_screen >/dev/null; \
-    sleep 3; \
-    xcrun simctl status_bar \"\$udid\" override --time 9:41 --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 --operatorName \"\" >/dev/null 2>&1 || true; \
-    sleep 1; \
     mkdir -p \"$1\"; \
     for look in $appearances; do \
         xcrun simctl ui \"\$udid\" appearance \"\$look\"; \
+        xcrun simctl status_bar \"\$udid\" override --time 9:41 --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 --operatorName \"\" >/dev/null 2>&1 || true; \
+        xcrun simctl launch \"\$udid\" \"\$bundle\" -uitest-isolated -store-shots -store-shots-screen $shot_screen >/dev/null; \
+        sleep 3; \
+        xcrun simctl status_bar \"\$udid\" override --time 9:41 --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 --operatorName \"\" >/dev/null 2>&1 || true; \
         sleep 1; \
         xcrun simctl io \"\$udid\" screenshot \"$1/$shot_screen-\$look.png\" >/dev/null || exit 70; \
+        xcrun simctl terminate \"\$udid\" \"\$bundle\" >/dev/null 2>&1 || true; \
     done; \
     xcrun simctl ui \"\$udid\" appearance dark"
 }

@@ -31,8 +31,9 @@ everything up to the `OutputBackend` seam and never imports AppKit.
 ## Map
 
 - `Device` → domain models, with `ConnectionState`, `ConnectionFailure`, `BackendEvent`.
-- `OutputBackend` → the backend seam; `NativeBackend` and `MockBackend` implement it.
-- `CaptureCoordinator` → whole-system capture, with `NativeCaptureCoordinator` and `AudioProcessResolver`.
+- `OutputBackend` → the backend seam; `NativeBackend` and `MockBackend` implement it. Its Bluetooth, Cast, per-app routing, tone, metering, aggregate-output and test-hook members live in `NativeBackend+<Name>.swift` files.
+- `CompanionCoordinator` → companion server wiring; AppKit prompts and icons come from its host.
+- `NativeCaptureCoordinator` → whole-system capture, with `AudioProcessResolver`.
 - `PerAppCaptureCoordinator` → per-app capture and mix: `AppRouteMixer`, `LeveledAppInjector`.
 - `DefaultOutputDeviceMonitor` → shared capture infrastructure, with `TapRebuildLifecycle`.
 - `GroupController` → the routing brain, with `AppRoutingController` and `PhaseController`.

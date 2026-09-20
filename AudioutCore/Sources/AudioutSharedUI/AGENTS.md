@@ -43,7 +43,7 @@ or `GroupController`.
 
 ## Map
 
-- `DeviceRowView` → the shared device row every host mounts.
+- `DeviceRowView` → the shared device row every host mounts. Read-only test hooks live in `DeviceRowView+TestSupport.swift`.
 - `PopoverColumnGrid` → named column geometry for every row.
 - `ControlPanelBackingView` → custom-drawn panel background with the menu-bar beak.
 - `ProminentButton` → the gold call-to-action button, `inkOnFill` ink.

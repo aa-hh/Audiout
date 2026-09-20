@@ -143,10 +143,11 @@ import Testing
         .init(deviceUID: uid, errorMs: errorMs, hostNanos: 0, isBestGuess: false)
     }
 
-    private func waitFor(_ condition: @escaping () -> Bool) async throws {
-        for _ in 0..<200 where !condition() {
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
+    private func waitFor(
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: @escaping () -> Bool
+    ) async throws {
+        await SuiteWait.until(sourceLocation: sourceLocation, condition)
     }
 
     // MARK: - Direction

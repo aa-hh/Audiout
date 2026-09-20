@@ -1317,10 +1317,11 @@ private final class EventCollector: @unchecked Sendable {
     /// Poll until at least `count` events have arrived (or timeout), then
     /// return the snapshot.
     @discardableResult
-    func wait(count: Int, timeout: TimeInterval = 3) -> [DiscoveryEvent] {
-        let deadline = Date().addingTimeInterval(timeout)
-        while snapshot().count < count && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.005)
+    func wait(count: Int, timeout: TimeInterval? = nil,
+              sourceLocation: SourceLocation = #_sourceLocation) -> [DiscoveryEvent] {
+        SuiteWait.untilOnRunLoop("at least \(count) discovery event(s)",
+                                 timeout: timeout, sourceLocation: sourceLocation) {
+            snapshot().count >= count
         }
         return snapshot()
     }

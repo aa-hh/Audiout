@@ -126,10 +126,11 @@ import Testing
         ]
     }
 
-    private func waitFleet(_ backend: MockBackend, count: Int) {
-        let deadline = Date().addingTimeInterval(3)
-        while backend.devices.count < count && Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+    private func waitFleet(_ backend: MockBackend, count: Int,
+                          sourceLocation: SourceLocation = #_sourceLocation) {
+        SuiteWait.untilOnRunLoop("the fleet has \(count) devices",
+                                 sourceLocation: sourceLocation) {
+            backend.devices.count >= count
         }
     }
 

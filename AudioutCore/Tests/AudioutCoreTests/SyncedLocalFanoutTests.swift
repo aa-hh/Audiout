@@ -784,26 +784,31 @@ extension SerializedSharedState {
             /// Matches on the whole `fields` set, because the sink is process-global
             /// and a concurrently-running suite can land its own lines here too.
             func pollForLine(evt: String, containing fields: [String],
-                             timeout: TimeInterval = 5) async -> String? {
-                let deadline = Date().addingTimeInterval(timeout)
-                while Date() < deadline {
-                    let hit = lock.withLock { lines }.first {
+                             timeout: TimeInterval = 5,
+                             sourceLocation: SourceLocation = #_sourceLocation) async -> String? {
+                func hit() -> String? {
+                    lock.withLock { lines }.first {
                         $0.contains("\"evt\":\"\(evt)\"") && fields.allSatisfy($0.contains)
                     }
-                    if let hit { return hit }
-                    try? await Task.sleep(nanoseconds: 5_000_000)
                 }
-                return nil
+                await SuiteWait.until("a \(evt) line carrying \(fields)",
+                                      timeout: timeout, sourceLocation: sourceLocation) {
+                    hit() != nil
+                }
+                return hit()
             }
         }
 
         private let sinkRenderPID: pid_t = 424_242
 
-        private func waitForCapturing(_ c: NativeCaptureCoordinator) async {
-            let deadline = Date().addingTimeInterval(8)
-            while Date() < deadline {
-                if case .capturing = c.state { return }
-                try? await Task.sleep(nanoseconds: 5_000_000)
+        private func waitForCapturing(
+            _ c: NativeCaptureCoordinator,
+            sourceLocation: SourceLocation = #_sourceLocation
+        ) async {
+            await SuiteWait.until("the coordinator to reach .capturing",
+                                  sourceLocation: sourceLocation) {
+                if case .capturing = c.state { return true }
+                return false
             }
         }
 

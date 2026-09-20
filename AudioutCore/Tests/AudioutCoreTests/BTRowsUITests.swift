@@ -979,9 +979,8 @@ import AppKit
         popover.test_isShownOverride = true
         if !fleet.isEmpty {
             backend.start()
-            let deadline = Date().addingTimeInterval(5)
-            while Date() < deadline && backend.devices.count < fleet.count {
-                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            SuiteWait.untilOnRunLoop("the fleet has \(fleet.count) devices") {
+                backend.devices.count >= fleet.count
             }
         }
         return (popover, controller)

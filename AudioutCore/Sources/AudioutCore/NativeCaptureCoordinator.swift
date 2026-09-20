@@ -17,13 +17,12 @@ import AVFoundation
 /// ``PCMSink/write(pcm:pts:)`` with a per-buffer presentation timestamp taken
 /// straight off the IOProc's `AudioTimeStamp.mHostTime`.
 ///
-/// This is the native-path analogue of ``CaptureCoordinator`` — but structurally
-/// SIMPLER, not a port: there is no FIFO, no subprocess, no OwnTone library
-/// rescan and no `pipe_sample_rate` reconcile. Capture runs inside the app
-/// process (D2) so the `pts` comes for free from the tap's own clock and there is
-/// zero IPC. The old coordinator's suspend-to-pause / zombie-replay machinery has
-/// no equivalent here (nothing to re-kick — a session failure is reported by the
-/// engine, not a paused file player).
+/// This is the native capture coordinator: there is no FIFO, no subprocess, no
+/// external library rescan and no `pipe_sample_rate` reconcile. Capture runs
+/// inside the app process (D2) so the `pts` comes for free from the tap's own
+/// clock and there is zero IPC. A subprocess coordinator's suspend-to-pause /
+/// zombie-replay machinery has no equivalent here (nothing to re-kick — a
+/// session failure is reported by the engine, not a paused file player).
 ///
 /// ## The Phase-0 config-follows-tap invariant, applied
 /// The engine is HARDWIRED to S16LE / 44100 / 2ch — there is no engine "quality"
@@ -612,7 +611,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             processResolver: processResolver,
             muteBehavior: muteBehavior,
             // T7: the same engine, as the workgroup target. Wired here (the one
-            // production construction site, via `OwnToneBackend`) rather than
+            // production construction site, via `makeBackend`) rather than
             // through `NativeBackend`, since the engine is already in hand and
             // every join/leave edge belongs to this coordinator's state machine.
             workgroup: EngineIOWorkgroup(engine: engine)
@@ -1994,7 +1993,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 // streaming resampler cannot carry two independent feeds
                 // without corrupting its own filter state. The Bluetooth sink
                 // manager renders at the airplay rate in production
-                // (`OwnToneBackend`'s factory takes `BTSyncedSink`'s 44.1 kHz
+                // (`makeBackend`'s factory takes `BTSyncedSink`'s 44.1 kHz
                 // default), so identity is the real path and this arm is the
                 // honest fallback: one feed for everybody, which measures the
                 // two sweeps together instead of per speaker. Upgrade path if
@@ -4233,14 +4232,14 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     }
 
     /// The mach timebase, read once (it never changes for the life of a process).
-    private static let cachedTimebase: mach_timebase_info_data_t = {
+    static let cachedTimebase: mach_timebase_info_data_t = {
         var tb = mach_timebase_info_data_t()
         mach_timebase_info(&tb)
         return tb
     }()
 
     /// Current `CLOCK_MONOTONIC` reading in nanoseconds.
-    private static func currentMonotonicNanos() -> UInt64 {
+    static func currentMonotonicNanos() -> UInt64 {
         var ts = Darwin.timespec()
         clock_gettime(CLOCK_MONOTONIC, &ts)
         return UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)

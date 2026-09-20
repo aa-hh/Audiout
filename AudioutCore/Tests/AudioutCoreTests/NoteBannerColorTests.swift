@@ -24,10 +24,10 @@ import AppKit
         #expect(abs(a.alphaComponent - b.alphaComponent) <= 0.004, "alpha: \(message)")
     }
 
-    // MARK: SilenceFallbackBannerView (V12a)
+    // MARK: Silence banner (warning tier) (V12a)
 
     @Test func silenceBannerIsFailureAtTwelvePercent() {
-        let banner = SilenceFallbackBannerView(text: "Playing on this Mac", maxTextWidth: 200)
+        let banner = SystemAirPlayNoteBannerView(text: "Playing on this Mac", maxTextWidth: 200, severity: .warning)
         assertSameRGBA(banner.test_backgroundColor, Tokens.Color.failure.withAlphaComponent(0.12), "background")
     }
 
@@ -64,7 +64,7 @@ import AppKit
     /// captured only at init — construction alone already exercises `init`'s
     /// stamp, so this drives the update path explicitly to prove it agrees.
     @Test func updateLayerReStampsFromTheSameToken() {
-        let banner = SilenceFallbackBannerView(text: "Playing on this Mac", maxTextWidth: 200)
+        let banner = SystemAirPlayNoteBannerView(text: "Playing on this Mac", maxTextWidth: 200, severity: .warning)
         banner.updateLayer()
         assertSameRGBA(banner.test_backgroundColor, Tokens.Color.failure.withAlphaComponent(0.12),
                        "background after updateLayer")
@@ -74,19 +74,20 @@ import AppKit
     /// appearance switch: without it AppKit takes the `draw(_:)` path and
     /// `updateLayer()` is never called, so the banner keeps its build-time
     /// colours through a light/dark flip.
-    @Test func bothBannersOptIntoTheUpdateLayerPath() {
-        #expect(SilenceFallbackBannerView(text: "Playing on this Mac", maxTextWidth: 200)
+    @Test func bothSeveritiesOptIntoTheUpdateLayerPath() {
+        #expect(SystemAirPlayNoteBannerView(text: "Playing on this Mac", maxTextWidth: 200, severity: .warning)
             .wantsUpdateLayer)
         #expect(SystemAirPlayNoteBannerView(text: "Note", maxTextWidth: 200).wantsUpdateLayer)
     }
 
     /// A banner is an inset CONTROL-sized rect, not a row or a panel, and it
-    /// carries no border — the fill alone separates it from the canvas.
-    @Test func bannersWearTheControlRadiusWithNoBorder() {
-        let silence = SilenceFallbackBannerView(text: "Playing on this Mac", maxTextWidth: 200)
+    /// carries no border — the fill alone separates it from the canvas. Checked
+    /// at both severities: the tier changes the tint, never the shape.
+    @Test func bothSeveritiesWearTheControlRadiusWithNoBorder() {
+        let warning = SystemAirPlayNoteBannerView(text: "Playing on this Mac", maxTextWidth: 200, severity: .warning)
         let note = SystemAirPlayNoteBannerView(text: "Note", maxTextWidth: 200)
-        #expect(silence.layer?.cornerRadius == Tokens.Layout.Radius.control)
-        #expect(silence.layer?.borderWidth == 0)
+        #expect(warning.layer?.cornerRadius == Tokens.Layout.Radius.control)
+        #expect(warning.layer?.borderWidth == 0)
         #expect(note.layer?.cornerRadius == Tokens.Layout.Radius.control)
         #expect(note.layer?.borderWidth == 0)
     }
@@ -94,16 +95,17 @@ import AppKit
     /// The silence banner is no longer a dead end: given an action it renders a
     /// real button and dispatches through it.
     @Test func theSilenceBannerRendersAndFiresItsAction() {
-        let plain = SilenceFallbackBannerView(text: "Playing on this Mac", maxTextWidth: 200)
+        let plain = SystemAirPlayNoteBannerView(text: "Playing on this Mac", maxTextWidth: 200, severity: .warning)
         #expect(!plain.test_hasActionButton, "no action, no button")
 
         var taps = 0
-        let banner = SilenceFallbackBannerView(
+        let banner = SystemAirPlayNoteBannerView(
             text: "Playing on this Mac",
             maxTextWidth: 200,
             action: .init(title: "Try again",
                           accessibilityLabel: "Try reconnecting to the unreachable speakers",
-                          handler: { taps += 1 }))
+                          handler: { taps += 1 }),
+            severity: .warning)
         #expect(banner.test_hasActionButton)
         banner.test_tapActionButton()
         #expect(taps == 1)

@@ -111,7 +111,9 @@ import Testing
         #expect(backend.mainOutEQ == .flat)
 
         backend.setMainOutEQ(DeviceEQ(trebleDB: -3), commit: false)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("the Main Out EQ to record the new treble") {
+            backend.mainOutEQ == DeviceEQ(trebleDB: -3)
+        }
         #expect(backend.mainOutEQ == DeviceEQ(trebleDB: -3))
         #expect(backend.devices.allSatisfy { $0.eq.isFlat }, "Main Out EQ is not a per-device setting")
     }
@@ -121,7 +123,9 @@ import Testing
         _ = try await collect(demoFleet.count, from: backend)
 
         backend.setOutputSet(["office", "homepod-bed"])
-        try await Task.sleep(nanoseconds: 200_000_000)
+        await SuiteWait.until("the output set to become exactly the given devices") {
+            Set(backend.devices.filter(\.isSelected).map(\.id)) == ["office", "homepod-bed"]
+        }
 
         let selected = Set(backend.devices.filter(\.isSelected).map(\.id))
         #expect(selected == ["office", "homepod-bed"])

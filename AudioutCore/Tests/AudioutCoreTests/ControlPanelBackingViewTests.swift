@@ -119,13 +119,12 @@ import AppKit
     /// hosted view must stay TRANSPARENT (never an opaque fill of its own) so
     /// the backing bubble's live warm canvas shows through, with corners
     /// rounded to the bubble's radius so the two windows read as one shape.
-    @Test func hostedContentStaysTransparentSoWarmFillShowsThrough() {
+    @Test func hostedContentStaysTransparentSoWarmFillShowsThrough() throws {
         let content = NSViewController()
         content.view = NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
         let controller = ControlPanelWindowController(contentViewController: content)
 
-        let hosted = try? #require(controller.window?.contentViewController?.view, "shell should host the content view controller's view")
-        guard let hosted else { return }
+        let hosted = try #require(controller.window?.contentViewController?.view, "shell should host the content view controller's view")
         #expect(hosted.wantsLayer, "hosted view must be layer-backed for the corner mask")
         #expect(hosted.layer?.backgroundColor?.alpha ?? 0 == 0,
                 "hosted content must stay transparent so the warm bubble fill shows through")

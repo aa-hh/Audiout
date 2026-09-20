@@ -1334,7 +1334,7 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         // doc. This write happens-before `AudioDeviceStart` below, which
         // happens-before the IOProc block below ever runs, so no lock is
         // needed for this initial handoff either.
-        self.machToMonotonicOffsetNanos = Self.sampleMachToMonotonicOffsetNanos()
+        self.machToMonotonicOffsetNanos = CoreAudioSystemTap.sampleMachToMonotonicOffsetNanos()
 
         var newProcID: AudioDeviceIOProcID?
         let queue = DispatchQueue(
@@ -1363,13 +1363,13 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
             // only ever touched from this block after the initial seed in
             // `startIOProc`.
             let hostTime = inInputTime.pointee.mHostTime
-            let machNanos = Self.machNanoseconds(fromHostTime: hostTime)
+            let machNanos = CoreAudioSystemTap.machNanoseconds(fromHostTime: hostTime)
             if CoreAudioSystemTap.shouldResample(
                 machNanos: machNanos,
                 offset: self.machToMonotonicOffsetNanos,
-                monotonicNowNanos: Self.currentMonotonicNanos()
+                monotonicNowNanos: CoreAudioSystemTap.currentMonotonicNanos()
             ) {
-                self.machToMonotonicOffsetNanos = Self.sampleMachToMonotonicOffsetNanos()
+                self.machToMonotonicOffsetNanos = CoreAudioSystemTap.sampleMachToMonotonicOffsetNanos()
             }
             let pts = CoreAudioSystemTap.timespec(
                 machNanos: machNanos, offset: self.machToMonotonicOffsetNanos)
@@ -1405,45 +1405,6 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         guard startErr == noErr else {
             throw PerAppCaptureError.aggregateDeviceFailed(reason: "AudioDeviceStart \(startErr)")
         }
-    }
-
-    // MARK: mHostTime → CLOCK_MONOTONIC offset (cached, self-healing)
-    //
-    // Ported from `CoreAudioSystemTap`'s identical trio (architecture review
-    // 2026-07-26, defect A). Duplicated rather than shared because the
-    // originals are `private` to that file; `CoreAudioSystemTap.timespec(
-    // machNanos:offset:)` and `.shouldResample(...)` — the pure arithmetic —
-    // ARE internal and reused directly above, so only the two raw clock reads
-    // and the timebase conversion are repeated here.
-
-    /// mach host ticks → nanoseconds on the mach-absolute timescale.
-    private static func machNanoseconds(fromHostTime hostTime: UInt64) -> UInt64 {
-        let timebase = cachedTimebase
-        return hostTime &* UInt64(timebase.numer) / UInt64(max(1, timebase.denom))
-    }
-
-    /// The mach timebase, read once (it never changes for the life of a process).
-    private static let cachedTimebase: mach_timebase_info_data_t = {
-        var tb = mach_timebase_info_data_t()
-        mach_timebase_info(&tb)
-        return tb
-    }()
-
-    /// Current `CLOCK_MONOTONIC` reading in nanoseconds.
-    private static func currentMonotonicNanos() -> UInt64 {
-        var ts = Darwin.timespec()
-        clock_gettime(CLOCK_MONOTONIC, &ts)
-        return UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
-    }
-
-    /// `CLOCK_MONOTONIC_nanos - mach_absolute_nanos`, sampled fresh by reading
-    /// both clocks back-to-back. See `machToMonotonicOffsetNanos`'s doc for
-    /// why callers cache this instead of calling it on every buffer.
-    private static func sampleMachToMonotonicOffsetNanos() -> Int64 {
-        // Sample both clocks as close together as possible.
-        let mach = machNanoseconds(fromHostTime: mach_absolute_time())
-        let monotonic = currentMonotonicNanos()
-        return Int64(monotonic) &- Int64(mach)
     }
 
     // MARK: Default-output subscription (device identity + nominal sample rate)

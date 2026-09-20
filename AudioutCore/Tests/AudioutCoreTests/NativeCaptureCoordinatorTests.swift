@@ -211,7 +211,7 @@ extension SerializedSharedState {
         tap: FakeTap,
         sink: SpySink,
         converter: FakeConverter,
-        processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses()),
+        processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: EmptyAudioProcessEnumerator()),
         membershipDebounceInterval: DispatchTimeInterval = .milliseconds(300)
     ) -> NativeCaptureCoordinator {
         NativeCaptureCoordinator(

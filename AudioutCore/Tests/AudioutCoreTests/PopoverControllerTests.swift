@@ -763,7 +763,10 @@ import AudioutProtocol
         try await waitForConnectionState(backend, id: "office") { $0 == .connected }
         popover.update(devices: backend.devices)
         #expect(popover.test_diagnosisPanel(for: "office") == nil)
-        try await Task.sleep(nanoseconds: 400_000_000)
+        await SuiteWait.until("the panel view to leave the view tree") { panel.superview == nil }
+        // The view leaves the tree before its slide-out fold finishes; settle the
+        // animator so no tick outlives this test and touches layout under the next.
+        FoldAnimator.shared.test_settleNow()
         #expect(panel.superview == nil, "the panel view is detached from the tree on removal, not just forgotten")
     }
 
@@ -2863,7 +2866,7 @@ import AudioutProtocol
             }
             return nil
         }
-        let banner = try #require(firstDescendant(SilenceFallbackBannerView.self, in: root),
+        let banner = try #require(firstDescendant(SystemAirPlayNoteBannerView.self, in: root),
                                   "the fallback banner is mounted")
         let anyRow = try #require(popover.test_deviceRow(for: "office"))
 
@@ -2972,7 +2975,9 @@ import AudioutProtocol
         #expect(popover.test_diagnosisPanel(for: "office") == nil,
                 "the panel must not outlive the selection that justified it")
         // The VIEW has to leave the tree too, not just the dictionary entry.
-        try await Task.sleep(nanoseconds: 400_000_000)
+        await SuiteWait.until("the panel view to leave the row's stack") { mounted.superview == nil }
+        // Same reason as the retry test above: the fold outlives the detach.
+        FoldAnimator.shared.test_settleNow()
         #expect(mounted.superview == nil, "the panel view detached from the row's stack")
     }
 
@@ -3001,7 +3006,10 @@ import AudioutProtocol
             popover.update(devices: backend.devices)
             _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
             popover.update(devices: backend.devices)
-            try await Task.sleep(nanoseconds: 350_000_000)   // let the animated detach land
+            await SuiteWait.until("the animated detach to return the card to its baseline") {
+                mountedRowCount() == baselineRows
+                    && popover.test_panelFittingSize.height == baselineHeight
+            }
         }
 
         #expect(mountedRowCount() == baselineRows,
@@ -3036,7 +3044,9 @@ import AudioutProtocol
         // The ✕ path: a removal whose detach is deferred into an animation
         // completion. The size must be republished AFTER the row actually leaves.
         try #require(popover.test_diagnosisPanel(for: "office")).test_tapDismiss()
-        try await Task.sleep(nanoseconds: 400_000_000)
+        await SuiteWait.until("the published height to follow the detached row") {
+            popover.test_preferredContentSize.height == popover.test_panelFittingSize.height
+        }
         #expect(popover.test_preferredContentSize.height == popover.test_panelFittingSize.height,
                 "published height == content height once the row has detached")
     }

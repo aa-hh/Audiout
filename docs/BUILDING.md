@@ -102,8 +102,8 @@ concurrency limits that the bare commands opt out of.
 | `scripts/` | Build, packaging, signing and release scripts |
 | `docs/SPEC.md` | The product spec |
 
-The app reaches speakers through an `OutputBackend` protocol with three
-implementations — mock, OwnTone and native. Interface work should target the
+The app reaches speakers through an `OutputBackend` protocol with two
+implementations — mock and native. Interface work should target the
 mock backend and never assume real hardware is attached.
 [AGENTS.md](../AGENTS.md) has the architectural rules and the traps that the
 code alone doesn't convey.

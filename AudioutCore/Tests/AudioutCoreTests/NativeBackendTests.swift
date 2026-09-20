@@ -642,7 +642,7 @@ private func makeBackend(
     systemVolume: SystemVolumeControlling = FakeSystemVolume(),
     ptpHelperActivator: PTPHelperActivating = AlwaysReadyPTPHelperActivator(),
     connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
-    processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses()),
+    processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: EmptyAudioProcessEnumerator()),
     injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
     injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
     captureRetryDelay: TimeInterval = 2.0,
@@ -732,7 +732,7 @@ private func singleProcessResolver(_ bundleIDsToObjectIDs: [String: AudioObjectI
 /// A `ProcessAudioTap` that always succeeds (T8): `createAndStart` never
 /// throws, so a coordinator built over it takes every bundle ID all the way
 /// to `.capturing` — unlike the default empty-`processResolver` setup
-/// (`NoAudioProcesses`), which fails fast at `.processNotYetAudible` by design
+/// (`EmptyAudioProcessEnumerator`), which fails fast at `.processNotYetAudible` by design
 /// and is what most of this file uses to exercise routing TOPOLOGY independent
 /// of real capture. Tests that need `.routedApps`/the mixer to reflect an app
 /// that's actually (fakely) streaming — e.g. it must NOT be excluded as
@@ -927,11 +927,11 @@ private actor EventBox {
     func snapshot() -> [BackendEvent] { events }
 }
 
-private func waitUntilStarted(_ engine: SpyEngine) async {
-    for _ in 0..<200 {
-        if engine.didStart { return }
-        try? await Task.sleep(nanoseconds: 5_000_000)
-    }
+private func waitUntilStarted(
+    _ engine: SpyEngine,
+    sourceLocation: SourceLocation = #_sourceLocation
+) async {
+    await SuiteWait.until("the engine to start", sourceLocation: sourceLocation) { engine.didStart }
 }
 
 private func systemVolumeEvents(in events: [BackendEvent]) -> [Int] {
@@ -1242,7 +1242,7 @@ private func subscribeRoutedApps(
 
 /// A per-app capture that actually reaches `.capturing` for `com.foo.player`
 /// — these tests are about the BIND gate, and a capture left failing (the
-/// default `NoAudioProcesses` resolver) would mark the app dead and
+/// default `EmptyAudioProcessEnumerator` resolver) would mark the app dead and
 /// republish an EMPTY topology mid-test, racing every assertion about the
 /// bind itself.
 private func succeedingPerAppCapture() -> PerAppCaptureCoordinator {
@@ -1284,7 +1284,7 @@ private final class RebindTriggerTap: ProcessAudioTap, @unchecked Sendable {
     /// by then; under swift-testing's in-process concurrency it sometimes
     /// is not. Measured on this branch before the wait was added: the three
     /// tests below failed in 4 of 10 full-suite runs and 7 of 10 runs of
-    /// `--filter 'NativeBackendTests|OwnToneBackendTests'`.
+    /// `--filter NativeBackendTests`.
     var isArmed: Bool { onDefaultDeviceChanged != nil }
 }
 
@@ -1497,16 +1497,16 @@ private func pollUntil(timeout: TimeInterval? = nil,
 /// Poll the spy until a `setVolume(outputID, value)` call lands (the push is
 /// fire-and-forget through a Task, so it's not synchronous with the apply).
 private func waitForVolumePush(
-    _ engine: SpyEngine, _ outputID: OutputID, _ value: Double, timeout: TimeInterval = 30
+    _ engine: SpyEngine, _ outputID: OutputID, _ value: Double,
+    timeout: TimeInterval? = nil,
+    sourceLocation: SourceLocation = #_sourceLocation
 ) async -> Bool {
-    let deadline = Date().addingTimeInterval(timeout)
-    while Date() < deadline {
-        if engine.volumeCalls.contains(where: { $0.0 == outputID && abs($0.1 - value) < 0.001 }) {
-            return true
-        }
-        try? await Task.sleep(nanoseconds: 20_000_000)
+    func landed() -> Bool {
+        engine.volumeCalls.contains { $0.0 == outputID && abs($0.1 - value) < 0.001 }
     }
-    return false
+    await SuiteWait.until("a setVolume(\(outputID), \(value)) call to reach the engine",
+                          timeout: timeout, sourceLocation: sourceLocation, landed)
+    return landed()
 }
 
 /// Thread-safe call counter for the routing hook (fired on the caller's
@@ -3916,7 +3916,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                        "a failed session must not be shown selected")
     }
 
-    // MARK: connectionState wiring (mirrors OwnToneBackend's T2 state machine semantics)
+    // MARK: connectionState wiring (T2 state machine semantics)
 
     /// add → connecting → connected: `setOutputSet` flips the id ON, which must go
     /// `.connecting` immediately (before the engine op resolves), then `.connected`
@@ -4401,7 +4401,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // stop() must leave metering inactive (teardown discipline).
         backend.stop()
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        await pollUntil { !capture.meteringActive }
         #expect(!(capture.meteringActive), "stop() must leave metering inactive")
     }
 
@@ -4919,10 +4919,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         // The watchdog fires (~0.03s) and un-gates: capture stays/returns to OFF
         // even though the device is still selected (intent), so the Mac un-mutes.
-        // The pollUntil below already waits for the watchdog's own effect, so this
-        // trailing sleep is pure async-settle margin at the 100ms floor.
         await pollUntil { capture.ops.last == "stop" }
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        await pollUntil { capture.isCapturing == false }
         #expect(capture.isCapturing == false,
                        "watchdog must leave capture off so the Mac un-mutes when no speaker returns")
         #expect(backend.test_expectedSelected.contains(device.id),
@@ -7564,7 +7562,10 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                      destination: .device(id: "ghost"), volume: 60),
         ])
         await pollUntil { capture.routingUpdates.count >= 1 }
-        try? await Task.sleep(nanoseconds: 60_000_000)
+        await pollUntil {
+            capture.lastExcludedBundleIDs?.contains("com.demoted") == false
+                && perAppCapture.state(for: "com.demoted") == .idle
+        }
 
         #expect(capture.lastExcludedBundleIDs?.contains("com.demoted") == false,
                 "a demoted route plays in the whole-system mix, unattenuated")
@@ -8503,7 +8504,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         let token = UInt32(truncatingIfNeeded: device.outputID.rawValue)
         backend.applyDacpVolume(activeRemote: token, level: 0.8)
-        _ = await waitForVolumePush(engine, device.outputID, 0.8)
+        #expect(await waitForVolumePush(engine, device.outputID, 0.8),
+                "precondition: the first push reached the engine")
         let countAfterFirst = engine.volumeCalls.count
 
         // The "echo": same level again. Give any (wrong) push time to land.

@@ -60,12 +60,12 @@ import AudioutProtocol
     /// test then reports as whatever it asserted next (a reply that never came).
     /// An explicit `timeout:` still means "I meant this expiry" (a negative
     /// check), matching `SuiteWait`'s rule.
-    private func waitUntil(timeout: TimeInterval = SuiteWait.timeout, _ condition: () -> Bool) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return true }
-            Thread.sleep(forTimeInterval: 0.005)
-        }
+    private func waitUntil(
+        timeout: TimeInterval? = nil,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: () -> Bool
+    ) -> Bool {
+        SuiteWait.untilOnRunLoop(timeout: timeout, sourceLocation: sourceLocation, condition)
         return condition()
     }
 

@@ -109,11 +109,13 @@ extension SerializedEngineState {
             engine.write(pcm: pcm(samples: 100), streamId: 1, pts: pts)
             engine.write(pcm: pcm(samples: 40), streamId: 2, pts: pts)
 
-            // Give the (headless-inline) write a moment to land — headless mode runs
-            // the C call synchronously on the calling thread, but `write` itself is
-            // nonisolated/fire-and-forget by contract, so poll briefly rather than
-            // assume same-instant visibility.
-            try? await Task.sleep(nanoseconds: 20_000_000) // 20ms
+            // Headless mode runs the C call synchronously on the calling thread,
+            // but `write` itself is nonisolated/fire-and-forget by contract, so
+            // poll rather than assume same-instant visibility.
+            await SuiteWait.until("both writes to land in their own master sessions") {
+                airplay_test_master_session_input_buffer_samples(amsA) >= 100
+                    && airplay_test_master_session_input_buffer_samples(amsB) >= 40
+            }
 
             #expect(airplay_test_master_session_input_buffer_samples(amsA) == 100,
                 "stream 1's write must land in stream 1's master session, and ONLY there")
@@ -135,7 +137,9 @@ extension SerializedEngineState {
 
             engine.write(pcm: pcm(samples: 30), streamId: 9, pts: pts)
             engine.write(pcm: pcm(samples: 20), streamId: 9, pts: pts)
-            try? await Task.sleep(nanoseconds: 20_000_000)
+            await SuiteWait.until("both writes to accumulate on stream 9's master session") {
+                airplay_test_master_session_input_buffer_samples(ams) >= 50
+            }
 
             #expect(airplay_test_master_session_input_buffer_samples(ams) == 50)
         }
@@ -156,7 +160,9 @@ extension SerializedEngineState {
             // The ORIGINAL, pre-T2 call shape — must still compile and behave as
             // stream_id 0 with no source change required at any existing call site.
             engine.write(pcm: pcm(samples: 60), pts: pts)
-            try? await Task.sleep(nanoseconds: 20_000_000)
+            await SuiteWait.until("the legacy write to land on stream 0") {
+                airplay_test_master_session_input_buffer_samples(ams0) >= 60
+            }
 
             #expect(airplay_test_master_session_input_buffer_samples(ams0) == 60)
             #expect(airplay_test_master_session_input_buffer_samples(ams7) == 0,
@@ -187,7 +193,11 @@ extension SerializedEngineState {
                 ],
                 pts: pts
             )
-            try? await Task.sleep(nanoseconds: 20_000_000)
+            await SuiteWait.until("all three batched entries to land on their own master sessions") {
+                airplay_test_master_session_input_buffer_samples(ams1) >= 11
+                    && airplay_test_master_session_input_buffer_samples(ams2) >= 22
+                    && airplay_test_master_session_input_buffer_samples(ams3) >= 33
+            }
 
             #expect(airplay_test_master_session_input_buffer_samples(ams1) == 11)
             #expect(airplay_test_master_session_input_buffer_samples(ams2) == 22)

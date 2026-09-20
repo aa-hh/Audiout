@@ -222,15 +222,21 @@ extension SerializedSharedState {
     /// else. There are two of those — the device row's and the Main Out row's,
     /// which wear one mute language — and a THIRD consumer is a design
     /// decision, not a refactor, so it fails here first.
+    ///
+    /// `DeviceRowView+TestSupport.swift` is the same consumer, not a new one:
+    /// the read-only hooks that compare the drawn colour live there since the
+    /// row's test scaffolding was split out of the shipping file.
     @Test func theMutedHueOnlyDressesTheTwoMuteButtons() throws {
         try expectTokenIsFencedTo("Tokens.Color.muted",
-                                  ["DeviceRowView.swift", "MainOutRowView.swift"])
+                                  ["DeviceRowView.swift", "DeviceRowView+TestSupport.swift",
+                                   "MainOutRowView.swift"])
     }
 
     /// `Tokens.Color.equalizer` is fenced the same way, to its one consumer:
     /// the device row's engaged Equalizer door.
     @Test func theEqualizerHueOnlyDressesTheEqualizerDoor() throws {
-        try expectTokenIsFencedTo("Tokens.Color.equalizer", ["DeviceRowView.swift"])
+        try expectTokenIsFencedTo("Tokens.Color.equalizer",
+                                  ["DeviceRowView.swift", "DeviceRowView+TestSupport.swift"])
     }
 
     private func expectTokenIsFencedTo(_ token: String, _ expected: Set<String>,

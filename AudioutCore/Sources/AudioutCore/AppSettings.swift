@@ -453,7 +453,7 @@ public struct AppSettings {
     /// dev build gets the feature back to test it.
     ///
     /// This is an explicit knob, never a silent fallback (mirrors
-    /// `BackendKind.resolved`'s policy, OwnToneBackend.swift): an unrecognized
+    /// `BackendKind.resolved`'s policy, OutputBackend.swift): an unrecognized
     /// env value is treated as absent — it falls back to the setting and
     /// prints one warning to stderr rather than silently guessing which way
     /// to go.

@@ -32,7 +32,7 @@ import Foundation
 /// The actual `Process` launch is injected (``SpawnHelper``) so
 /// `TCCProbeRunnerTests` can drive single-flight, timeout, and parsing edge
 /// cases with a fake that never touches `Foundation.Process` — the same
-/// closure-seam idiom `CaptureProcess.swift` uses a protocol for, done as a
+/// closure-seam idiom the app's earlier subprocess wrapper used a protocol for, done as a
 /// closure here because there is exactly one call shape to fake.
 /// ``productionSpawn`` is the real implementation every non-test caller gets
 /// by default.
@@ -261,7 +261,7 @@ public final class TCCProbeRunner {
         // Guards the race between the timeout work item (global queue) and
         // `terminationHandler` (the process's own arbitrary queue) — same
         // "who gets there first, unambiguously" shape as
-        // `AudiocapProcess.terminationFired` in `CaptureProcess.swift`.
+        // the app's earlier subprocess wrapper reported termination.
         let state = SpawnState()
         let timeoutWorkItem = DispatchWorkItem {
             let alreadyDone = state.markTimedOutUnlessCompleted()

@@ -836,9 +836,9 @@ import AppKit
     /// S6 item 6: the composed VoiceOver label reads "…, follows main output"
     /// for an unrouted app — the spoken equivalent of the bridge phrase —
     /// never "routed to No Redirect".
-    @Test func accessibilityLabelReadsFollowsMainOutputWhenUnrouted() {
+    @Test func accessibilityLabelReadsFollowsMainOutputWhenUnrouted() throws {
         let row = makeThreeStateRow(selected: "no-redirect", isRunning: true)
-        let label = try! #require(row.test_accessibilityLabel)
+        let label = try #require(row.test_accessibilityLabel)
         #expect(label.contains("follows main output"), "label was \"\(label)\"")
         #expect(!(label.contains("routed to")), "an unrouted app is not 'routed to' anywhere")
     }
@@ -846,9 +846,9 @@ import AppKit
     /// …and "routed to <device>" when routed, with the clean name (no visual
     /// " (idle)" suffix leaking into speech) plus the discrete "not running"
     /// phrase when idle.
-    @Test func accessibilityLabelReadsRoutedToDeviceAndCleanNameWhenIdle() {
+    @Test func accessibilityLabelReadsRoutedToDeviceAndCleanNameWhenIdle() throws {
         let row = makeThreeStateRow(selected: "device-1", isRunning: false)
-        let label = try! #require(row.test_accessibilityLabel)
+        let label = try #require(row.test_accessibilityLabel)
         #expect(label.contains("routed to Living Room"), "label was \"\(label)\"")
         #expect(!(label.contains("(idle)")), "the visual idle suffix must not leak into the spoken label")
         #expect(label.localizedCaseInsensitiveContains("not running"))

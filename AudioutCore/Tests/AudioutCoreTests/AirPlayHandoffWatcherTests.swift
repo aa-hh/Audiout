@@ -122,7 +122,7 @@ import Testing
         {"subsystem":"com.apple.airplay","category":"APSNetworkClockPTP","eventMessage":"Failed to add peer: kIOReturnExclusiveAccess"}
         """
         fake.pushLine(line)
-        try? await Task.sleep(nanoseconds: 10_000_000) // 10ms for callback
+        await SuiteWait.until("the watcher to fire for the pushed line") { fireCount >= 1 }
 
         #expect(fireCount == 1)
     }
@@ -227,7 +227,7 @@ import Testing
         )
 
         watcher.start()
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        await SuiteWait.until("the watcher's log stream to start") { fake.startCallCount >= 1 }
 
         watcher.stop()
 
@@ -277,10 +277,8 @@ import Testing
         let initialCount = fake.startCallCount
         fake.pushTermination()
 
-        // Poll for respawn with deadline (0.15s is safe since backoff starts at 0.02s)
-        let deadline = Date().addingTimeInterval(0.5)
-        while Date() < deadline && fake.startCallCount == initialCount {
-            try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
+        await SuiteWait.until("the watcher to respawn its log stream") {
+            fake.startCallCount >= initialCount + 1
         }
 
         #expect(fake.startCallCount == initialCount + 1)
@@ -373,10 +371,8 @@ import Testing
         let countAfterFailure = fake.startCallCount
         #expect(countAfterFailure == 1)
 
-        // Poll for respawn (first backoff is 0.02s)
-        let deadline = Date().addingTimeInterval(0.5)
-        while Date() < deadline && fake.startCallCount == countAfterFailure {
-            try? await Task.sleep(nanoseconds: 10_000_000)
+        await SuiteWait.until("the watcher to respawn after the failed start") {
+            fake.startCallCount >= 2
         }
 
         #expect(fake.startCallCount == 2)

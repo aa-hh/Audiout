@@ -842,8 +842,8 @@ import Testing
 
         // Polled, not slept through: the main actor is shared with every other
         // test in the run, so when the timeout lands is not this test's to decide.
-        for _ in 0..<600 where setup.isPrimingBluetooth {
-            try? await Task.sleep(nanoseconds: 5_000_000)
+        await SuiteWait.until("the undecided Bluetooth prompt to release the card") {
+            !setup.isPrimingBluetooth
         }
 
         #expect(!setup.isPrimingBluetooth, "an undecided prompt does not hold the card forever")

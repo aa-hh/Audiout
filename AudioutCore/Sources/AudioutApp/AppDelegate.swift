@@ -389,94 +389,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// entry for that device, same discipline as the popover's copy.
     private var routedAppNamesByDeviceID: [String: [String]] = [:]
 
-    /// The iPhone-companion link (PLAN-COMPANION-APP T7): a Bonjour-advertised
-    /// WebSocket server the phone connects to. Created once; started/stopped
-    /// only by `updateCompanionServerState()` (launch + the Settings › General
-    /// checkbox, both funneled through `AppSettings.resolvedAllowRemoteControl`
-    /// so the `AUDIOUT_COMPANION` env override wins). ON when the setting is
-    /// unset, so a fresh install advertises without being asked twice — the
-    /// Local Network grant is already the user's consent to this.
-    private let companionServer = CompanionServer()
-    /// The last token pushed to connected phones (`applyLicenseState()`), so
-    /// the many callers of that method don't resend an unchanged one.
-    private var pushedCompanionToken: String?
-
-    /// The per-phone approval model (T24): remembers each phone's
-    /// allow/deny answer (`CompanionApprovalStore`, alongside the other
-    /// stores), funnels unknown phones into ONE prompt per clientID, and
-    /// backs the Settings › General "Remembered iPhones" list. Wired to the
-    /// server (gate + revocation-drop) and to the prompt in
-    /// `wireCompanionServer()`.
-    private let companionApprovals = CompanionApprovalController()
+    /// The iPhone companion's Mac-side wiring (PLAN-COMPANION-APP T7): the
+    /// server's lifecycle, the command path, the per-phone approval gate, the
+    /// coalesced snapshot broadcast and the sync-calibration actuators. It
+    /// lives in `AudioutCore` so the test suite can reach it; this file is its
+    /// AppKit host (`CompanionCoordinatorHost`, conformed to at the end of
+    /// this file). Built lazily: it binds to `groupController`/`appRouting`,
+    /// which `applicationDidFinishLaunching` resolves.
+    private lazy var companionCoordinator = CompanionCoordinator(
+        backend: backend,
+        groupController: groupController,
+        appRouting: appRouting,
+        settings: settings,
+        excludedBundleIDs: { [excludedApps] in excludedApps.excludedBundleIDs },
+        serverName: Host.current().localizedName ?? "Mac",
+        host: self)
 
     /// Open T24 approval alerts, keyed by clientID — lets
-    /// `withdrawCompanionApprovalPrompt(clientID:)` find and close the one
-    /// whose connection just died.
+    /// `withdrawApprovalPrompt(clientID:)` find and close the one whose
+    /// connection just died.
     private var companionApprovalAlerts: [String: NSAlert] = [:]
-
-    /// Mirrors whether `companionServer` is currently running, so the many
-    /// broadcast triggers can no-op cheaply while the feature is off (the
-    /// default) and `updateCompanionServerState()` only acts on a real edge.
-    private var companionActive = false
-
-    /// Executes phone commands against the exact controllers the popover
-    /// drives. Built in `wireCompanionServer()` once those controllers exist.
-    private var companionDispatcher: CompanionCommandDispatcher!
-
-    /// The pending coalesced broadcast (~50 ms): every snapshot-affecting
-    /// trigger funnels through `scheduleCompanionBroadcast()`, which arms ONE
-    /// work item per window instead of rebuilding per event — a device burst
-    /// at connect would otherwise build dozens of near-identical snapshots.
-    private var companionBroadcastWork: DispatchWorkItem?
-
-    /// Snapshot inputs that exist only as transient backend events
-    /// (`.localFallbackActive` / `.takeoverStatus` /
-    /// `.systemDefaultIsAirPlayActive`) — cached in `apply(event:)` so the
-    /// coalescer can rebuild the FULL snapshot at any later moment.
-    private var companionLocalFallbackActive = false
-    private var companionTakeoverStatus: TakeoverStatus?
-    private var companionSystemDefaultIsAirPlayActive = false
-
-    /// Last-known display name per `Device.id`, accumulated from
-    /// `deviceAdded`/`deviceUpdated` and NEVER pruned on `deviceRemoved`
-    /// (FIX-B2 finding 7b) — so `GroupState.memberNames` can still label a
-    /// group member that went offline mid-session. Session-scoped only: a
-    /// member never seen since launch stays unnamed (persisting names would
-    /// touch `GroupStore`, owned elsewhere — see the FIX-B2 report).
-    private var companionKnownDeviceNamesByID: [String: String] = [:]
-
-    /// Per-client token bucket over inbound companion commands (FIX-B2
-    /// finding 2a): every command costs main-thread work (dispatcher +
-    /// snapshot rebuild; `setMainOut` adds a `stateQueue.sync` + disk write),
-    /// so a peer looping a tiny command frame could starve the Mac's UI.
-    /// 20/sec sustained (the phone's own slider send policy) + a 40 burst.
-    /// Main-thread only, touched inside the command/disconnect main hops.
-    private var companionRateLimiter = CompanionCommandRateLimiter()
-
-    /// Which phone owns each speaker's calibration, what KIND of work it is,
-    /// and which request made it. One map for the probe, the by-ear metronome,
-    /// the A/B receipt and the audition — but every rule keyed on all three,
-    /// so a refused legacy request cannot orphan a live audition and a reply
-    /// from a replaced request cannot stop its successor. The rules live in
-    /// `CompanionAlignmentOwnership` (Core), because this target is invisible
-    /// to the test suite. Main-thread only, like the rate limiter above.
-    private let alignmentOwners = CompanionAlignmentOwnership()
-
-    /// Cached `.regular` running-app list backing `addableApps`/`isRunning`
-    /// in the snapshot (FIX-B2 finding 2b). `NSWorkspace.runningApplications`
-    /// enumeration per broadcast was the single biggest per-command cost;
-    /// the two app-lifecycle observers below invalidate this (set nil) on the
-    /// only edges that change it, and `broadcastCompanionSnapshotNow()`
-    /// rebuilds lazily.
-    /// razor: an app that flips `activationPolicy` to `.regular` AFTER its
-    /// launch notification is missed until the next launch/quit edge; upgrade
-    /// path = KVO on `NSWorkspace.runningApplications` if that ever matters.
-    private var companionRunningAppsCache: [(bundleID: String, displayName: String)]?
-
-    /// One name for both the Bonjour advertisement (`start(name:)`) and
-    /// `Snapshot.serverName` — the server's `welcome` reads the latter, so the
-    /// two must agree (one source of truth, `CompanionServer.sendWelcome`).
-    private let companionServerName = Host.current().localizedName ?? "Mac"
 
     /// AIRPLAY_DEBUG_LEVELS=1 → log capture RMS ~1/sec (see the `.level` case).
     private let debugLevels = ProcessInfo.processInfo.environment["AIRPLAY_DEBUG_LEVELS"] == "1"
@@ -615,7 +547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Quit while the first is still waiting on `stopAndWait` must not re-enter
     /// `backend.stop()` or reply to `NSApp` a second time — AppKit only expects one
     /// `reply(toApplicationShouldTerminate:)` per terminate request.
-    private var isTerminating = false
+    var isTerminating = false
 
     /// The "Disconnecting…" indicator shown while the terminate reply is pending
     /// (C1, user-requested). Owned here so it can be closed before the reply fires.
@@ -797,6 +729,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
         ) { [weak self] _ in MainActor.assumeIsolated { self?.releaseTouchBar() } }
 
+        installStatusItemAndStoreAlerts()
+        installUpdatesAndLicence()
+        wireBackendAndPopover()
+        wireSystemObservers()
+        runGateOrStart()
+        // The Touch Bar opt-out (Settings › General). Pushed now, and re-pushed
+        // whenever any default changes — the write is a plain bool assignment
+        // and re-pushing is idempotent, so watching the whole store is cheaper
+        // than threading a callback across two targets, and it makes the toggle
+        // take effect the moment the user flips it.
+        if hasTouchBar {
+            touchBarFullBar.setEnabled(settings.touchBarControlsEnabled)
+            NotificationCenter.default.addObserver(
+                forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.touchBarFullBar.setEnabled(self.settings.touchBarControlsEnabled)
+                }
+            }
+        }
+
+        // Companion server (PLAN-COMPANION-APP T7). Wired LAST: the broadcast
+        // triggers it claims (`onStateDidChange`, `excludedApps.onChange`, the
+        // icon-controller chain-wrap) must attach after the popover/controllers
+        // above are fully configured — in particular after
+        // `popoverController.deviceIconController = deviceIconController`,
+        // whose `didSet` installs the popover's own `onChange` wrapper that
+        // this wiring chains onto (risk R2; same idiom as
+        // `MixerWindowController`, which chain-wraps later, on first open, and
+        // therefore wraps this wiring's closure in turn).
+        //
+        // These three triggers stay HERE rather than in `CompanionCoordinator`:
+        // they mix Mac-surface repaints with the broadcast, and
+        // `DeviceIconController` is an `AudioutSharedUI` type the library
+        // cannot see.
+
+        // Group/Main-Out/mute state — the broadest snapshot input, and the only
+        // signal behind a USER-driven Main Out master move: that emits no
+        // `BackendEvent`, so `apply(event:)`'s repaint tail never runs for one (a
+        // phone-driven master change left the Mac's popover frozen until some
+        // unrelated device event arrived). Repaint the two Mac surfaces that read
+        // the master here, then broadcast. Both repaints are idempotent reads of
+        // committed state. The volume-key arm is the exception that costs a second
+        // pass — it rides the `.systemVolumeChanged` handled below, which repaints
+        // too — and `GroupController` keeps that to the master's change edge.
+        groupController.onStateDidChange = { [weak self] in
+            guard let self else { return }
+            self.popoverController.refreshMainOutMaster()
+            self.statusItemController.updateMasterVolume(self.popoverController.statusMasterVolume)
+            self.repaintStructuralStateIfChanged()
+            self.companionCoordinator.scheduleBroadcast()
+        }
+
+        // The denylist feeds `addableApps`/`appRoutes` filtering. Fires on the
+        // model's change edge, independent of which UI mutated it; the
+        // Settings pane's own `onExcludedAppsChanged` (prune + repaint) runs
+        // in the same turn, and the 50 ms coalescer folds both into one build.
+        excludedApps.onChange = { [weak self] in
+            self?.companionCoordinator.scheduleBroadcast()
+        }
+
+        // Icon overrides feed `DeviceState.iconSymbolName`. Chain-wrap AFTER
+        // the popover's `deviceIconController` didSet installed its wrapper
+        // (risk R2) — same previousIconChange idiom as
+        // `MixerWindowController`, which wraps whatever is installed when the
+        // mixer is first opened, i.e. this closure, keeping all three alive.
+        let previousIconChange = deviceIconController.onChange
+        deviceIconController.onChange = { [weak self] in
+            previousIconChange?()
+            self?.companionCoordinator.scheduleBroadcast()
+        }
+
+        companionCoordinator.wire()
+
+        // A link that LAUNCHED the app was handled before any of this existed.
+        if let key = pendingLicenseKeyFromURL {
+            pendingLicenseKeyFromURL = nil
+            openLicenseSheet(registering: key)
+        }
+    }
+
+    /// The status item and the store-failure alerts: immediate UI feedback
+    /// that the app launched, and the one place a failed store read is shown.
+    @MainActor
+    private func installStatusItemAndStoreAlerts() {
         // Status item first so there's immediate UI feedback that we launched.
         // The button's action drives the one surface (SPEC §9) through the
         // policy that lives on `AppSurfaceController` — including the case
@@ -906,6 +924,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 info: "The unreadable settings were set aside so nothing is lost: \(Self.describeQuarantinedFiles(quarantined)). They're back to their defaults. Everything else is untouched.")
         }
 
+    }
+
+    /// Sparkle, the licence state and the analytics identity — after the
+    /// status item, because none of it puts a pixel on screen by itself.
+    @MainActor
+    private func installUpdatesAndLicence() {
         // Updates and licence, AFTER the status item — none of it puts a pixel
         // on screen, and starting an updater (which touches the network and
         // the disk) ahead of the app's only visible affordance just delays the
@@ -957,6 +981,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         applyLicenseState()
 
+    }
+
+    /// The mixer model, the popover and every controller they bind to, in the
+    /// order their `didSet` wrappers require.
+    @MainActor
+    private func wireBackendAndPopover() {
         // The mixer model binds to the resolved backend, then the popover binds
         // to the model. From here the popover drives all group/master/mute/
         // routing math.
@@ -973,7 +1003,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // for an AirPlay-only group whose Mac is merely still sitting in the
         // untargeted Selected Devices set. For `.selectedDevices` the two are the
         // same read, so this is a group-path-only change.
-        // `backend as? NativeBackend` is nil for `MockBackend`/`OwnToneBackend`,
+        // `backend as? NativeBackend` is nil for `MockBackend`,
         // matching the `MeteringControlling`/`LatencyConfigurable`
         // optional-capability pattern used below.
         (backend as? NativeBackend)?.selectedDevicesQuery = { [weak self] id in
@@ -1005,7 +1035,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Companion (T7): a route add/remove/redirect/volume change moves
             // `appRoutes` AND `addableApps` in the snapshot. Extended IN PLACE —
             // this closure is single-assignment, never reassigned elsewhere.
-            self?.scheduleCompanionBroadcast()
+            self?.companionCoordinator.scheduleBroadcast()
             // The popover's own add/remove paths rebuild for themselves, so
             // this is here for the mutations that DON'T come from the popover:
             // the phone's, which reach the model through the companion
@@ -1063,7 +1093,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // user's own click IS their intent, so re-selecting the public aggregate as
         // the Mac's default output here is the ONLY sanctioned re-select — never
         // programmatic (Q2). No-op on backends without the aggregate
-        // (`MockBackend`/`OwnToneBackend`), matching the other `NativeBackend`-only
+        // (`MockBackend`), matching the other `NativeBackend`-only
         // capability hooks above.
         popoverController.onReselectAudiout = { [weak self] in
             (self?.backend as? NativeBackend)?.reselectAggregateAsDefault()
@@ -1109,7 +1139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Metering-active gate (T-GATE): only compute/emit `.level` while the
         // popover is actually open. `backend as? MeteringControlling` is nil for
-        // backends without the capability (`OwnToneBackend`), so this is a no-op
+        // backends without the capability, so this is a no-op
         // there — mirrors the `LatencyConfigurable` optional-capability pattern.
         popoverController.onMeteringActiveChange = { [weak self] active in
             (self?.backend as? MeteringControlling)?.setMeteringActive(active)
@@ -1118,7 +1148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // renderer immediately (low latency) — a `.currentDevice` app's LOCAL
         // playback stream, or an un-redirected app's leveled intercept — not only
         // after the persisted route round-trips through `updateAppRoutes`. No-ops
-        // on backends without per-app rendering (`MockBackend`/`OwnToneBackend`).
+        // on backends without per-app rendering (`MockBackend`).
         popoverController.onSetLocalPlaybackVolume = { [weak self] volume, bundleID in
             (self?.backend as? AppRouteConfiguring)?.setLocalPlaybackVolume(
                 volume: volume, bundleID: bundleID)
@@ -1141,7 +1171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // BT-UI ghost pairings: recency feed for the Bluetooth subsection's
         // stale-to-the-bottom sort. Capability-gated like the hooks above —
-        // nil on MockBackend/OwnToneBackend, which sorts by name alone.
+        // nil on MockBackend, which sorts by name alone.
         popoverController.btLastUsedProvider = { [weak self] in
             (self?.backend as? BTOutputControlling)?.lastUsedDatesForBTDevices() ?? [:]
         }
@@ -1162,8 +1192,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? BTOutputControlling)?.btHasSyncTrim(forDevice: deviceID) ?? false
         }
         // BT-SYNC-DRAWER T3: the drawer's hard-stop range. `nil` fallback
-        // matches the protocol's own default (full ±range) so a MockBackend/
-        // OwnToneBackend popover keeps working with no BT capability at all.
+        // matches the protocol's own default (full ±range) so a MockBackend
+        // popover keeps working with no BT capability at all.
         popoverController.btTrimRangeProvider = { [weak self] deviceID in
             (self?.backend as? BTOutputControlling)?.btUsableTrimRangeMs(forDevice: deviceID)
                 ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
@@ -1184,8 +1214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.devicesByID[deviceID]?.eq.isFlat == false
         }
         // W4 — the alignment wizard's backend actuators, capability-gated like
-        // everything above (nil casts on MockBackend/OwnToneBackend degrade to
-        // no-ops).
+        // everything above (a nil cast on MockBackend degrades to a no-op).
         popoverController.onBTWizardTrimPreview = { [weak self] ms, deviceID in
             (self?.backend as? BTOutputControlling)?
                 .setBTWizardTrimPreview(ms, forDevice: deviceID)
@@ -1339,6 +1368,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if screen == .settings { self?.settingsRootController?.reloadFromSettings() }
         }
 
+    }
+
+    /// Route pruning, the two `NSWorkspace` app-lifecycle observers and the
+    /// sleep/wake pair.
+    @MainActor
+    private func wireSystemObservers() {
         // Enforce the precedence up front: prune any persisted route for an
         // already-excluded app (e.g. excluded in a previous session).
         pruneRoutesForExcludedApps()
@@ -1395,8 +1430,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // this explicit schedule covers the routeless/`currentDevice` case.
             // FIX-B2 finding 2b: this edge (with the launch twin below) is
             // what keeps the cached running-app list honest.
-            self?.companionRunningAppsCache = nil
-            self?.scheduleCompanionBroadcast()
+            self?.companionCoordinator.invalidateRunningAppsCache()
+            self?.companionCoordinator.scheduleBroadcast()
         }
 
         // T4 (bug fix): a routed app that quit and relaunched got no capture
@@ -1420,8 +1455,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Companion (T7): the launched app joins `addableApps` (or flips
             // its existing route row's `isRunning`). FIX-B2 finding 2b: also
             // invalidate the cached running-app list on this edge.
-            self?.companionRunningAppsCache = nil
-            self?.scheduleCompanionBroadcast()
+            self?.companionCoordinator.invalidateRunningAppsCache()
+            self?.companionCoordinator.scheduleBroadcast()
         }
 
         // B6b: the app has ZERO sleep/wake awareness otherwise — sleep silently
@@ -1442,6 +1477,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // can ever wake; the Settings pane re-pushes on change.
         pushWakeRestoreSetting()
 
+    }
+
+    /// The first-open licence gate, the mid-session grant detector and the
+    /// revocation watch — whichever of them this launch needs.
+    @MainActor
+    private func runGateOrStart() {
         // First-open licence gate (owner decision 2026-08-30): a purchased
         // build (`AudioutLicenseServerURL` in Info.plist) links itself to a
         // licence before anything else runs. Its pass runs the exact first-run
@@ -1531,43 +1572,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // The Touch Bar opt-out (Settings › General). Pushed now, and re-pushed
-        // whenever any default changes — the write is a plain bool assignment
-        // and re-pushing is idempotent, so watching the whole store is cheaper
-        // than threading a callback across two targets, and it makes the toggle
-        // take effect the moment the user flips it.
-        if hasTouchBar {
-            touchBarFullBar.setEnabled(settings.touchBarControlsEnabled)
-            NotificationCenter.default.addObserver(
-                forName: UserDefaults.didChangeNotification, object: nil, queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    self.touchBarFullBar.setEnabled(self.settings.touchBarControlsEnabled)
-                }
-            }
-        }
-
-        // Companion server (PLAN-COMPANION-APP T7). Wired LAST: the broadcast
-        // triggers it claims (`onStateDidChange`, `excludedApps.onChange`, the
-        // icon-controller chain-wrap) must attach after the popover/controllers
-        // above are fully configured — in particular after
-        // `popoverController.deviceIconController = deviceIconController`,
-        // whose `didSet` installs the popover's own `onChange` wrapper that
-        // this wiring chains onto (risk R2; same idiom as
-        // `MixerWindowController`, which chain-wraps later, on first open, and
-        // therefore wraps this wiring's closure in turn).
-        wireCompanionServer()
-
-        // Live diagnosis (2026-08-23): offline reproduction of the Cast
-        // pending-fill "pixels never move" report. Inert without its env var.
-        startCastPendingProbeIfEnabled()
-
-        // A link that LAUNCHED the app was handled before any of this existed.
-        if let key = pendingLicenseKeyFromURL {
-            pendingLicenseKeyFromURL = nil
-            openLicenseSheet(registering: key)
-        }
     }
 
     /// The launch step the licence gate defers: the first-run Setup gate
@@ -1889,7 +1893,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Login Items entry — so it's safe to fire unconditionally. Gated to
     /// `.notRegistered` (skip the no-op call once already registered) and to
     /// the native backend, same posture as `SetupModel.shouldPresentOnLaunch`:
-    /// the mock/OwnTone paths don't use the helper at all.
+    /// the mock path doesn't use the helper at all.
     @MainActor
     private func registerPTPHelperIfNeeded() {
         guard case .native = backendKind else { return }
@@ -1922,8 +1926,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `reconcile()` is async (a bounded XPC probe, ~1.5s worst case), so this
     /// fires it inside its own `Task` rather than awaiting inline — launch must
     /// never block on it. Native-backend-gated, same posture as
-    /// `registerPTPHelperIfNeeded()` above: the mock/OwnTone paths never
-    /// register the helper, so there is nothing to reconcile. On `.healed`
+    /// `registerPTPHelperIfNeeded()` above: the mock path never registers the
+    /// helper, so there is nothing to reconcile. On `.healed`
     /// landing back in `.requiresApproval`, or on `.healFailed` (the auto-heal
     /// itself didn't work and the user needs the manual recovery), presents the
     /// `.permissionLost([.ptpHelper])` approval screen — guarded on
@@ -1998,7 +2002,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // contradict what is already happening.
             localNetworkGated: SetupModel.osGatesLocalNetwork,
             usageStatsAvailable: Analytics.isAvailable && !settings.telemetryDefaultOn)
-        model.noteRemoteAppClientCount(companionClientCount)
+        model.noteRemoteAppClientCount(companionCoordinator.clientCount)
         return model
     }
 
@@ -2050,39 +2054,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         backendStarted = true
         subscribeToBackendEvents()
         backend.start()
-        applyDevSelectOnLaunchIfSet()
-    }
-
-    /// Dev-only: `defaults write <bundle id> audiout.devSelectOnLaunch -array
-    /// <deviceID> …` selects those devices as soon as they appear after launch,
-    /// the way a click would (``GroupController/setDeviceSelected(_:_:)``), so
-    /// an unattended live test can relaunch the app and reselect its speakers
-    /// with nobody at the screen (drift live test 4, 2026-09-14). Polls for up
-    /// to 90 s; the key is read once per launch and never cleared.
-    /// razor: no UI, no persistence, no Group support — delete the key when done.
-    @MainActor
-    private func applyDevSelectOnLaunchIfSet() {
-        guard let wanted = UserDefaults.standard.stringArray(forKey: "audiout.devSelectOnLaunch"),
-              !wanted.isEmpty else { return }
-        var remaining = Set(wanted)
-        var polls = 0
-        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
-            MainActor.assumeIsolated {
-                guard let self else { timer.invalidate(); return }
-                polls += 1
-                for id in remaining
-                where self.backend.devices.contains(where: { $0.id == id && $0.isAvailable }) {
-                    self.groupController.setDeviceSelected(id, true)
-                    remaining.remove(id)
-                }
-                guard remaining.isEmpty || polls >= 45 else { return }
-                Telemetry.log(.localPlayback, "dev_select_on_launch", [
-                    "selected": String(wanted.count - remaining.count),
-                    "missing": String(remaining.count),
-                ])
-                timer.invalidate()
-            }
-        }
     }
 
     /// Build (or reuse) a ``SetupModel`` (production probes) + onboarding window
@@ -2374,7 +2345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func makeSettingsRoot() -> SettingsRootViewController {
         let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem(),
                                                     settings: settings,
-                                                    approvals: companionApprovals,
+                                                    approvals: companionCoordinator.approvals,
                                                     saveDiagnostics: { [weak self] in self?.saveDiagnostics() })
         // The way back in for `audiout://register` — weak because the surface
         // owns both for as long as the Settings screen exists.
@@ -2386,7 +2357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // checkbox has already persisted the setting; this starts/stops the
         // server to match.
         general.onAllowRemoteControlChanged = { [weak self] in
-            self?.updateCompanionServerState()
+            self?.companionCoordinator.updateServerState()
         }
         // A committed key changes both the note and the update feed's header.
         general.onLicenseChanged = { [weak self, settings] in
@@ -2419,7 +2390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audio.onChange = { [weak self] in self?.handleExcludedAppsChanged() }
         // Companion (T7): a connect-volume/buffer commit changes the settings
         // slice of the snapshot, so re-broadcast it.
-        audio.onSettingChanged = { [weak self] in self?.scheduleCompanionBroadcast() }
+        audio.onSettingChanged = { [weak self] in self?.companionCoordinator.scheduleBroadcast() }
 
         let root = SettingsRootViewController(sections: [
             .init(title: "General", symbolName: "gearshape", viewController: general),
@@ -2508,7 +2479,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Push the current app-routing table + excluded set + the saved groups'
     /// resolved memberships into the backend's per-app
     /// capture path (T7). No-ops on backends without per-app routing
-    /// (`MockBackend` / `OwnToneBackend` don't conform to `AppRouteConfiguring`).
+    /// (`MockBackend` doesn't conform to `AppRouteConfiguring`).
     /// Called from `onRoutesDidChange`, the excluded-apps handler, a group edit,
     /// a device arriving or leaving while an app is group-routed, and once at
     /// launch. Never invoked from inside a backend lock/queue (T6's deadlock
@@ -2583,9 +2554,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // A licence that lands while phones are connected: push the token
         // their welcome would have carried, once per distinct token.
-        if let token = settings.companionToken, token != pushedCompanionToken {
-            pushedCompanionToken = token
-            companionServer.sendCompanionToken(token)
+        if let token = settings.companionToken {
+            companionCoordinator.pushCompanionToken(token)
         }
 
         // License identity for analytics (PRODUCT.md Data Collection stream 1,
@@ -2671,10 +2641,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Companion (T7): stop the server alongside the backend so connected
         // phones see a clean close instead of a dead socket. `stop()` is a
         // cheap synchronous cancel (see its doc comment) — safe inline here.
-        companionBroadcastWork?.cancel()
-        companionBroadcastWork = nil
-        companionActive = false
-        companionServer.stop()
+        companionCoordinator.shutDown()
         backend.stop()
         // Hand the user's Touch Bar back BEFORE anything that can block. While we
         // own the volume the Mac is in "App Controls only" mode, so a quit that
@@ -2707,516 +2674,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Companion server (iPhone remote — PLAN-COMPANION-APP T7)
 
-    /// Attach every companion trigger + the command/disconnect callbacks, then
-    /// start the server if setting/env allow. Called once, at the END of
-    /// `applicationDidFinishLaunching` (see the call site's ordering comment).
-    /// `appRouting.onRoutesDidChange` and the two `NSWorkspace` app-lifecycle
-    /// observers are the exceptions — they are single-assignment closures the
-    /// launch path already owns, so the companion tail rides inside them at
-    /// their original sites rather than being reassigned here.
-    @MainActor
-    private func handleCompanionAlignmentTick(
-        targetID: String, active: Bool, clientID: UUID,
-        reply: @escaping @Sendable (CompanionServer.CommandResult) -> Void
-    ) {
-        if let reason = CompanionCommandDispatcher.alignmentTargetIDRefusal(targetID) {
-            reply(.init(applied: false, refusalReason: reason))
-            return
-        }
-        guard let bt = backend as? BTOutputControlling else {
-            reply(.init(applied: false, refusalReason: "This Mac can't measure speaker timing right now."))
-            return
-        }
-        guard active else {
-            if let entry = alignmentOwners.current(targetID: targetID),
-               entry.clientID != clientID {
-                reply(.init(applied: false,
-                            refusalReason: "A different speaker click session is running."))
-                return
-            }
-            // A stop ALWAYS reaches the backend, repeat or not — and with
-            // nothing running it is the no-op it has always been. Each command
-            // gets its own one-shot reply from the cleanup it joins, and
-            // ownership stays until the backend says its reservation is gone.
-            _ = alignmentOwners.markExplicitAuditionStop(targetID: targetID, clientID: clientID)
-            bt.endCompanionAlignmentAudition(targetID: targetID) { [weak self] reason in
-                DispatchQueue.main.async {
-                    reply(.init(applied: reason == nil, refusalReason: reason))
-                    self?.scheduleCompanionBroadcast()
-                }
-            }
-            return
-        }
-        let referenceID: String
-        switch CompanionAlignmentPreconditions.evaluate(
-            targetID: targetID, among: companionAlignmentDevices,
-            isAudible: groupController.isMainOutMember
-        ) {
-        case .refused(let reason):
-            reply(.init(applied: false, refusalReason: reason))
-            return
-        case .ready(let id): referenceID = id
-        }
-        let entry: CompanionAlignmentOwnership.Entry
-        let isFreshClaim: Bool
-        switch alignmentOwners.claim(targetID: targetID, clientID: clientID, kind: .audition,
-                                     referenceID: referenceID,
-                                     leaseDeadline: Date().addingTimeInterval(600)) {
-        case .refused(let reason):
-            reply(.init(applied: false, refusalReason: reason))
-            return
-        case .fresh(let fresh):
-            entry = fresh
-            isFreshClaim = true
-            // Armed once, off the ORIGINAL lease. Repeated starts join the
-            // same entry and arm nothing, so the budget cannot be renewed.
-            monitorCompanionAuditionLease(targetID: targetID, requestID: fresh.requestID,
-                                          deadline: fresh.leaseDeadline ?? Date())
-        case .existing(let existing):
-            entry = existing
-            isFreshClaim = false
-        }
-        let requestID = entry.requestID
-        // The one ordinary retirement signal. Nothing here polls or guesses
-        // when the cleanup ended: the backend fires this after its reservation
-        // is actually gone, and a refused start fires it behind its refusal.
-        let onReleased: @Sendable () -> Void = { [weak self] in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if self.alignmentOwners.release(targetID: targetID, kind: .audition,
-                                                requestID: requestID) {
-                    self.scheduleCompanionBroadcast()
-                }
-            }
-        }
-        bt.startCompanionAlignmentAudition(
-            targetID: targetID, referenceID: referenceID, onReleased: onReleased
-        ) { [weak self] reason in
-            DispatchQueue.main.async {
-                guard let self else {
-                    reply(.init(applied: false, refusalReason: "Audiout is shutting down."))
-                    return
-                }
-                if let reason {
-                    reply(.init(applied: false, refusalReason: reason))
-                    self.scheduleCompanionBroadcast()
-                    return
-                }
-                let samePair: Bool
-                switch CompanionAlignmentPreconditions.evaluate(
-                    targetID: targetID, among: self.companionAlignmentDevices,
-                    isAudible: self.groupController.isMainOutMember
-                ) {
-                case .ready(let currentReference): samePair = currentReference == referenceID
-                case .refused: samePair = false
-                }
-                guard samePair, !self.isTerminating else {
-                    // Token-checked like every other cleanup trigger, so this
-                    // completion cannot stand down a request that replaced it.
-                    self.alignmentOwners.requestAuditionCleanup(
-                        targetID: targetID, requestID: requestID,
-                        stop: { [weak self] id in self?.stopCompanionAudition(targetID: id) })
-                    reply(.init(applied: false,
-                        refusalReason: "The speaker pair changed before clicks could start."))
-                    self.scheduleCompanionBroadcast()
-                    return
-                }
-                reply(.init(applied: true))
-                self.scheduleCompanionBroadcast()
-                // One monitor per audition, not per start: it rearms itself
-                // every 0.25 s for the audition's life, so arming it again on
-                // each reopen would leave a stack of them running.
-                if isFreshClaim {
-                    self.monitorCompanionAuditionOwner(targetID: targetID,
-                                                        referenceID: referenceID, requestID: requestID)
-                }
-            }
-        }
-    }
-
-    /// The one backend call every autonomous cleanup trigger makes. Its own
-    /// completion is ignored on purpose: this is not a phone's command, so
-    /// there is nobody to answer — the lifetime signal retires the owner.
-    @MainActor
-    private func stopCompanionAudition(targetID: String) {
-        (backend as? BTOutputControlling)?.endCompanionAlignmentAudition(
-            targetID: targetID, completion: { _ in })
-    }
-
-    @MainActor
-    private func monitorCompanionAuditionLease(targetID: String, requestID: UUID,
-                                               deadline: Date) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, deadline.timeIntervalSinceNow)) {
-            [weak self] in
-            guard let self else { return }
-            self.alignmentOwners.expireAudition(
-                targetID: targetID, requestID: requestID,
-                stopAudition: { [weak self] id in self?.stopCompanionAudition(targetID: id) })
-        }
-    }
-
-    @MainActor
-    private func monitorCompanionAuditionOwner(targetID: String, referenceID: String,
-                                               requestID: UUID) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            guard let self, !self.isTerminating,
-                  let entry = self.alignmentOwners.current(targetID: targetID),
-                  entry.kind == .audition, entry.requestID == requestID,
-                  !entry.cleanupRequested else { return }
-            let samePair: Bool
-            switch CompanionAlignmentPreconditions.evaluate(
-                targetID: targetID, among: self.companionAlignmentDevices,
-                isAudible: self.groupController.isMainOutMember
-            ) {
-            case .ready(let currentReference): samePair = currentReference == referenceID
-            case .refused: samePair = false
-            }
-            if samePair {
-                self.monitorCompanionAuditionOwner(targetID: targetID,
-                                                    referenceID: referenceID, requestID: requestID)
-            } else {
-                self.alignmentOwners.requestAuditionCleanup(
-                    targetID: targetID, requestID: requestID,
-                    stop: { [weak self] id in self?.stopCompanionAudition(targetID: id) })
-                self.scheduleCompanionBroadcast()
-            }
-        }
-    }
-
-    @MainActor
-    private func wireCompanionServer() {
-        companionDispatcher = CompanionCommandDispatcher(
-            groupController: groupController,
-            appRouting: appRouting,
-            settings: settings,
-            isExcluded: { [excludedApps] bundleID in excludedApps.isExcluded(bundleID) },
-            // Mirrors `popoverController.onSetLocalPlaybackVolume` above: a
-            // `.currentDevice` route's local stream moves immediately; no-ops
-            // on backends without per-app local playback.
-            setLocalPlaybackVolume: { [weak self] volume, bundleID in
-                (self?.backend as? AppRouteConfiguring)?.setLocalPlaybackVolume(
-                    volume: volume, bundleID: bundleID)
-            },
-            // Mirrors `makeLatencySettingModel()`'s apply closure: persist
-            // FIRST, then reconnect — a partial reconnect failure must not
-            // lose the chosen setting for the next launch.
-            applyStartBuffer: { [weak self] ms in
-                guard let self else { return }
-                self.settings.startBufferMs = ms
-                if let configurable = self.backend as? LatencyConfigurable {
-                    await configurable.applyStartBuffer(ms: ms)
-                }
-                // FIX-B2 finding 1: this closure runs AFTER the command
-                // turn's reply (it's fired from a Task), so nothing else
-                // broadcasts the new buffer value — without this the phone
-                // got applied:true and no state frame, and its picker
-                // snapped back. Mirrors the Mac pane's own ordering, where
-                // `onSettingChanged` fires after `await latency.apply`.
-                await self.scheduleCompanionBroadcast()
-            },
-            alignmentActions: makeCompanionAlignmentActions())
-
-        // A reconnect (or an alignment landing) changes what the phone's
-        // speaker row says, and nothing else broadcasts for it — the timing
-        // store is the only thing that saw the edge.
-        (backend as? BTOutputControlling)?.onBTAlignmentChanged = { [weak self] in
-            DispatchQueue.main.async {
-                guard let self, !self.isTerminating else { return }
-                self.scheduleCompanionBroadcast()
-            }
-        }
-
-        // Group/Main-Out/mute state — the broadest snapshot input, and the only
-        // signal behind a USER-driven Main Out master move: that emits no
-        // `BackendEvent`, so `apply(event:)`'s repaint tail never runs for one (a
-        // phone-driven master change left the Mac's popover frozen until some
-        // unrelated device event arrived). Repaint the two Mac surfaces that read
-        // the master here, then broadcast. Both repaints are idempotent reads of
-        // committed state. The volume-key arm is the exception that costs a second
-        // pass — it rides the `.systemVolumeChanged` handled below, which repaints
-        // too — and `GroupController` keeps that to the master's change edge.
-        groupController.onStateDidChange = { [weak self] in
-            guard let self else { return }
-            self.popoverController.refreshMainOutMaster()
-            self.statusItemController.updateMasterVolume(self.popoverController.statusMasterVolume)
-            self.repaintStructuralStateIfChanged()
-            self.scheduleCompanionBroadcast()
-        }
-
-        // The denylist feeds `addableApps`/`appRoutes` filtering. Fires on the
-        // model's change edge, independent of which UI mutated it; the
-        // Settings pane's own `onExcludedAppsChanged` (prune + repaint) runs
-        // in the same turn, and the 50 ms coalescer folds both into one build.
-        excludedApps.onChange = { [weak self] in
-            self?.scheduleCompanionBroadcast()
-        }
-
-        // Icon overrides feed `DeviceState.iconSymbolName`. Chain-wrap AFTER
-        // the popover's `deviceIconController` didSet installed its wrapper
-        // (risk R2) — same previousIconChange idiom as
-        // `MixerWindowController`, which wraps whatever is installed when the
-        // mixer is first opened, i.e. this closure, keeping all three alive.
-        let previousIconChange = deviceIconController.onChange
-        deviceIconController.onChange = { [weak self] in
-            previousIconChange?()
-            self?.scheduleCompanionBroadcast()
-        }
-
-        // Command path: server queue → main (ASYNC — a sync hop can deadlock
-        // against `stop()`) → dispatcher → reply → immediate uncoalesced
-        // broadcast for commands whose model effect is synchronous, so the
-        // phone that acted sees the result state without waiting out the
-        // coalescer window (async-echo commands ride the coalescer instead —
-        // see `companionCommandEffectIsAsynchronous`).
-        companionServer.onCommand = { [weak self] _, command, clientID, reply in
-            DispatchQueue.main.async {
-                // FIX-B2 finding 4: `weak self` alone was a dead guard
-                // (main.swift retains the delegate for the process lifetime);
-                // `isTerminating` is the real shutdown signal. A command
-                // decoded just as the user quits must not reach `execute` →
-                // `applyRouting` → a STOPPED backend, racing `stopAndWait`.
-                guard let self, !self.isTerminating else {
-                    reply(CompanionServer.CommandResult(applied: false, refusalReason: "Audiout is shutting down."))
-                    return
-                }
-                // FIX-B2 finding 2a: per-client token bucket, refused before
-                // any main-thread work is spent. A refusal costs the client
-                // nothing once it slows down; the phone's own send policy
-                // (≤20 Hz sliders) never hits it.
-                guard self.companionRateLimiter.allowCommand(
-                    from: clientID, now: ProcessInfo.processInfo.systemUptime) else {
-                    reply(CompanionServer.CommandResult(
-                        applied: false,
-                        refusalReason: "Too many commands. Slow down and try again."))
-                    return
-                }
-                // Icon requests are answered HERE, not in the dispatcher:
-                // addressing the icon frames needs the client identity and
-                // reading an icon needs AppKit, neither of which that
-                // AppKit-free, client-agnostic type has
-                // (CompanionCommandDispatcher.swift:219). Rate-limited like
-                // every other command by the guard above.
-                if case .requestAppIcons(let requested) = command {
-                    reply(CompanionServer.CommandResult(applied: true))
-                    self.serveAppIconPages(requested, to: clientID)
-                    return  // no snapshot broadcast — icons are not snapshot state
-                }
-                if case .setAlignmentTick(let targetID, let active) = command {
-                    self.handleCompanionAlignmentTick(targetID: targetID, active: active,
-                                                      clientID: clientID, reply: reply)
-                    return
-                }
-                let result = self.companionDispatcher.execute(command, clientID: clientID)
-                reply(CompanionServer.CommandResult(
-                    applied: result.applied,
-                    refusalReason: result.refusalReason,
-                    autoSwappedCurrentDevice: result.autoSwappedCurrentDevice))
-                // FIX-B2 finding 6: the immediate broadcast is only honest for
-                // commands whose full snapshot effect landed synchronously in
-                // the controllers (selection, Main Out target, group CRUD,
-                // app routes, connect volume). Volume/mute effects echo
-                // asynchronously (backend `stateQueue` → `deviceUpdated`), so
-                // their immediate snapshot is GUARANTEED to carry pre-command
-                // device volumes (e.g. `isMuted: true, volume: 60`), and a
-                // snapshot-bound phone slider would fight the finger mid-drag
-                // — those ride the coalescer, which the backend echo (and
-                // `onStateDidChange` for mutes) re-arms with settled values.
-                // `setMainOutMasterVolume` is in the SYNCHRONOUS set since the
-                // volume decoupling: Main is `GroupController`'s own stored
-                // value, written before `execute` returns, and moving it
-                // rewrites no device level — the immediate snapshot is exact.
-                // `setStartBufferMs` is async too; finding 1's post-apply
-                // schedule carries it.
-                // The alignment family is asynchronous for the same reason:
-                // what a run or a commit changes in the snapshot lands through
-                // the backend's own queues and the timing store's callback,
-                // so an immediate rebuild is guaranteed to carry the state
-                // from before the command.
-                let effectIsAsynchronous: Bool
-                switch command {
-                case .setDeviceVolume, .setDeviceMuted,
-                     .setMainOutMuted, .setGroupMuted, .setStartBufferMs,
-                     .startAlignmentProbe, .cancelAlignmentProbe,
-                     .reportAlignmentMeasurement, .setAlignmentTick,
-                     .nudgeAlignmentTrim, .revertAlignmentNudge,
-                     .clearAlignmentTuning, .playAlignmentDemo:
-                    effectIsAsynchronous = true
-                default:
-                    effectIsAsynchronous = false
-                }
-                if effectIsAsynchronous {
-                    self.scheduleCompanionBroadcast()
-                } else {
-                    self.broadcastCompanionSnapshotNow()
-                }
-            }
-        }
-
-        // A vanished client only needs its rate-limiter bucket dropped —
-        // there is no per-client server-side state left to strand (the Main
-        // Out drag bracket this used to close is gone with the volume
-        // decoupling; Main is a stateless set now). FIX-B2 finding 4: gated
-        // on `isTerminating` like the command path.
-        // The Setup card and the wizard's iPhone panel both read "is a phone
-        // here right now", and this callback is the only place that knows.
-        // Hops to the main actor — the server fires on its own queue.
-        companionServer.onClientCountChanged = { [weak self] count in
-            DispatchQueue.main.async { self?.noteCompanionClientCount(count) }
-        }
-        companionServer.onClientDisconnected = { [weak self] clientID in
-            DispatchQueue.main.async {
-                guard let self, !self.isTerminating else { return }
-                self.companionRateLimiter.forgetClient(clientID)
-                // A run, a fine-tune session and an A/B receipt are all
-                // per-client state, and a phone that walks out of range would
-                // otherwise leave the room holding a sweep feed with every
-                // other speaker silent, or a metronome nobody can stop. The
-                // backend's cancel is what each of them means when the client
-                // goes: a run is abandoned and its suspended nudge restored, a
-                // receipt is put back, and a fine-tune session ENDS — writing
-                // down what the user had already nudged, rather
-                // than throwing it away.
-                // An audition is stood down at once but stays OWNED while its
-                // cleanup drains, so nothing else starts over a room still
-                // being put back; its lifetime signal retires it.
-                self.alignmentOwners.disconnect(
-                    clientID: clientID,
-                    stopAudition: { [weak self] id in self?.stopCompanionAudition(targetID: id) },
-                    cancelLegacy: { [weak self] id in
-                        (self?.backend as? BTOutputControlling)?
-                            .cancelCompanionAlignmentProbe(targetID: id)
-                    })
-            }
-        }
-
-        // Per-phone approval gate (T24). The server holds every helloed
-        // connection until `companionApprovals` answers — from the store for
-        // a remembered phone (instant, no UI), via the one-per-clientID
-        // prompt below for an unknown one. Server queue → main ASYNC, the
-        // same discipline as onCommand; if we're terminating, don't answer —
-        // the server teardown closes the held connection, and no decision
-        // gets persisted on the way out.
-        // Read per welcome, not captured once: a licence check-in that lands
-        // after the server started still reaches the next phone to connect.
-        companionServer.companionToken = { [settings] in settings.companionToken }
-        companionServer.serverID = { [settings] in settings.companionServerID }
-        companionServer.onApprovalRequest = { [weak self] clientID, clientName, decide in
-            DispatchQueue.main.async {
-                guard let self, !self.isTerminating else { return }
-                self.companionApprovals.handleRequest(
-                    clientID: clientID, clientName: clientName, decide: decide)
-            }
-        }
-        // The last connection carrying this phone identity died before the
-        // user answered — withdraw its prompt rather than leave it stranded.
-        companionServer.onApprovalAbandoned = { [weak self] clientID in
-            DispatchQueue.main.async {
-                guard let self, !self.isTerminating else { return }
-                self.companionApprovals.abandonRequest(clientID: clientID)
-            }
-        }
-        companionApprovals.presentPrompt = { [weak self] clientID, clientName, respond in
-            self?.presentCompanionApprovalPrompt(clientID: clientID, clientName: clientName, respond: respond)
-        }
-        companionApprovals.withdrawPrompt = { [weak self] clientID in
-            self?.withdrawCompanionApprovalPrompt(clientID: clientID)
-        }
-        // Revoking a phone in Settings must also disconnect it if it's live.
-        companionApprovals.dropClient = { [weak self] clientID in
-            self?.companionServer.dropClient(clientID: clientID)
-        }
-
-        updateCompanionServerState()
-    }
-
-    /// The T24 approval alert: names the phone, explains the stakes, and
-    /// reports the answer back to `CompanionApprovalController` (which
-    /// persists it and settles every connection waiting on it). Main-actor
-    /// and modal — the SERVER never blocks (its queue keeps running; only
-    /// this app's own UI waits), and the controller guarantees one open
-    /// prompt per clientID, so a reconnecting phone can't stack duplicates.
-    /// An abort from `withdrawCompanionApprovalPrompt` is not the user's
-    /// answer and records nothing.
-    @MainActor
-    private func presentCompanionApprovalPrompt(clientID: String, clientName: String, respond: @escaping (Bool) -> Void) {
-        // Headless harnesses must never flash real UI; not answering leaves
-        // the decision unmade (no persisted denial) and the server's own
-        // approval deadline closes the connection.
-        guard !HeadlessRuntime.isActive, !isTerminating else { return }
-        let alert = NSAlert()
-        alert.messageText = "Allow \u{201C}\(clientName)\u{201D} to control audio on this Mac?"
-        alert.informativeText = "It will be able to see and control what's playing on this Mac's speakers, including which apps are playing audio. You can change this later in Settings."
-        alert.addButton(withTitle: "Allow")
-        alert.addButton(withTitle: "Don't Allow")
-        // A menu-bar app usually has no key window; activate so the alert is
-        // actually seen (same treatment as SettingsWindowController.showWindow).
-        NSApp.activate(ignoringOtherApps: true)
-        companionApprovalAlerts[clientID] = alert
-        let outcome = alert.runModal()
-        companionApprovalAlerts.removeValue(forKey: clientID)
-        guard outcome != .abort else { return }
-        respond(outcome == .alertFirstButtonReturn)
-    }
-
-    /// Close the prompt shown for `clientID`, if it's still the one on
-    /// screen. Only the alert AT THE TOP of the modal stack can be aborted;
-    /// a withdrawn alert buried under a newer nested modal is left for the
-    /// user to answer, whose answer just records today's ordinary decision
-    /// for that phone.
-    /// razor: no queueing to withdraw a covered alert — T24 opens at most
-    /// one prompt per unresolved phone, so nesting is rare and harmless.
-    @MainActor
-    private func withdrawCompanionApprovalPrompt(clientID: String) {
-        guard let alert = companionApprovalAlerts[clientID], NSApp.modalWindow === alert.window else { return }
-        NSApp.abortModal()
-    }
-
-    /// Start or stop the companion server to match
-    /// `AppSettings.resolvedAllowRemoteControl` (env override → persisted
-    /// checkbox). Called at launch and from the Settings › General checkbox
-    /// callback; a no-op when nothing changed. On start, broadcasts an initial
-    /// snapshot IMMEDIATELY — the server defers a helloed client's `welcome`
-    /// until the first broadcast, so an early client would otherwise hang.
-    @MainActor
-    private func updateCompanionServerState() {
-        let shouldRun = AppSettings.resolvedAllowRemoteControl(settings: settings)
-        guard shouldRun != companionActive else { return }
-        companionActive = shouldRun
-        if shouldRun {
-            companionServer.start(name: companionServerName)
-            broadcastCompanionSnapshotNow()
-            log("companion server started (\(companionServerName))")
-        } else {
-            companionBroadcastWork?.cancel()
-            companionBroadcastWork = nil
-            // `disabled`, not the `shutdown` default: the phone settles
-            // quietly and waits for the Mac to re-advertise instead of
-            // treating the close as a transport error and redialing. The
-            // terminate path (`applicationShouldTerminate`) keeps `shutdown`.
-            companionServer.stop(reason: CompanionGoodbyeReason.disabled)
-            log("companion server stopped")
-        }
-    }
-
-    /// How many phones are connected right now, mirrored off
-    /// `CompanionServer.onClientCountChanged` — the server exposes the edge,
-    /// not a count anyone can read back.
-    private var companionClientCount = 0
-
-    /// A phone arrived or left: the Setup card's completion and the alignment
-    /// wizard's iPhone panel both turn on it.
-    @MainActor
-    private func noteCompanionClientCount(_ count: Int) {
-        companionClientCount = count
-        permissionAuditModel?.noteRemoteAppClientCount(count)
-        popoverController?.refreshRemoteInviteState()
-    }
-
     /// What the alignment wizard's iPhone panel says, per
     /// `shape-mac-invites.md` §2.2. The phone's name is the approval's own —
-    /// the only phone identity this Mac ever shows — and it is named only
-    /// when there is exactly one phone connected and exactly one on file, so
-    /// the Mac never guesses which one is in the room.
+    /// the only phone identity this Mac ever shows — and the coordinator gives
+    /// it only when there is exactly one phone connected and exactly one on
+    /// file, so the Mac never guesses which one is in the room.
     @MainActor
     private func remoteInviteState() -> BTAlignmentWizardView.RemoteInviteState {
         let resolution = AppSettings.resolvedAllowRemoteControlWithSource(settings: settings)
@@ -3224,375 +2686,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // phones keeps it and says how to allow them.
         if resolution.isUnoffered { return .unavailable }
         guard resolution.value else { return .allowOff }
-        guard companionClientCount > 0 else { return .notConnected }
-        let approved = companionApprovals.approvals.filter { $0.decision == .approved }
-        let name = (companionClientCount == 1 && approved.count == 1)
-            ? approved[0].lastKnownName : nil
-        return .connected(phoneName: name)
-    }
-
-    /// Coalesce every snapshot-affecting trigger into one build ~50 ms out.
-    /// Trailing edge only: the first trigger arms the work item, further
-    /// triggers inside the window ride it for free. The server additionally
-    /// suppresses identical snapshots, so a spurious trigger costs one build,
-    /// never a network frame.
-    @MainActor
-    private func scheduleCompanionBroadcast() {
-        guard companionActive, companionBroadcastWork == nil else { return }
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.companionBroadcastWork = nil
-            self.broadcastCompanionSnapshotNow()
-        }
-        companionBroadcastWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
-    }
-
-    /// The cached-or-rebuilt `.regular` running-app list (FIX-B2 finding 2b).
-    /// Mirrors `PopoverController.defaultRunningAppsProvider`'s recipe MINUS
-    /// the per-app `.icon` fetch the snapshot never needs — the enumeration +
-    /// icon reads were the dominant per-broadcast cost. `NSWorkspace` remains
-    /// the ground truth the backend's own `routedAppRunning` events are
-    /// derived from; the launch/terminate observers invalidate the cache on
-    /// exactly the edges that change it.
-    @MainActor
-    private func companionRunningApps() -> [(bundleID: String, displayName: String)] {
-        if let cached = companionRunningAppsCache { return cached }
-        let rebuilt = NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular }
-            .compactMap { app -> (bundleID: String, displayName: String)? in
-                guard let bundleID = app.bundleIdentifier else { return nil }
-                return (bundleID, app.localizedName ?? bundleID)
-            }
-        companionRunningAppsCache = rebuilt
-        return rebuilt
-    }
-
-    /// The apps the phone may still add a route for: running `.regular` apps,
-    /// minus already-routed, minus excluded — the popover picker's own recipe
-    /// (`PopoverController.availableAppsForPicker`). ONE definition, read by
-    /// both the snapshot broadcast and the icon-request allow-set, so what the
-    /// phone can see and what it may ask an icon for can never drift apart.
-    @MainActor
-    private func companionAddableApps() -> [(bundleID: String, displayName: String)] {
-        let routedIDs = Set(appRouting.appRoutes.map(\.bundleID))
-        return companionRunningApps()
-            .filter { !routedIDs.contains($0.bundleID) && !excludedApps.isExcluded($0.bundleID) }
-    }
-
-    /// The live device list in a stable order, for the two Core-level
-    /// alignment rules that read the whole room.
-    @MainActor
-    private var companionAlignmentDevices: [Device] {
-        Array(devicesByID.values).sorted { $0.id < $1.id }
-    }
-
-    /// The speaker a run for `targetID` would be measured against — the SAME
-    /// rule, over the same inputs, that puts `referenceID` in every snapshot.
-    /// One function, so the phone's CTA and what a run actually plays can
-    /// never be two different speakers.
-    ///
-    /// `isMainOutMember` is the audible read, never `isSpeakerSelected`: under
-    /// a saved-group Main Out target the latter is wrong in both directions,
-    /// so it would hide every group member from the run's candidates and
-    /// publish no reference at all for a room that is plainly playing.
-    @MainActor
-    private func companionAlignmentReferenceID(forTarget targetID: String) -> String? {
-        CompanionSnapshotBuilder.alignmentReferenceID(
-            forTarget: targetID,
-            among: companionAlignmentDevices,
-            isAudible: groupController.isMainOutMember)
-    }
-
-    /// The eight sync-calibration actuators the companion dispatcher calls.
-    ///
-    /// Decision 5's preconditions and the sentences they refuse with live in
-    /// `CompanionAlignmentPreconditions` (Core), not here: this target is
-    /// invisible to the test suite, so a rule decided in it is untestable by
-    /// construction. What remains here is wiring — which backend, which live
-    /// device list, and which phone asked. The backend answers only what it
-    /// alone knows: whether the target has a live delay line, and whether
-    /// anything else is already running.
-    @MainActor
-    private func makeCompanionAlignmentActions() -> CompanionAlignmentActions {
-        CompanionAlignmentActions(
-            startProbe: { [weak self] targetID, clientID in
-                guard let self, let bt = self.backend as? BTOutputControlling else {
-                    return "This Mac can't measure speaker timing."
-                }
-                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
-                let referenceID: String
-                switch CompanionAlignmentPreconditions.evaluate(
-                    targetID: targetID,
-                    among: self.companionAlignmentDevices,
-                    isAudible: self.groupController.isMainOutMember
-                ) {
-                case .refused(let reason):
-                    return reason
-                case .ready(let id):
-                    referenceID = id
-                }
-                // Claimed BEFORE the backend call, so a second phone is refused
-                // rather than racing it, and given back if the run never staged
-                // — but ONLY if this call is what created it. A repeat request
-                // joins the run already going, and giving THAT back would erase
-                // the owner the first run's events are addressed to.
-                var claim: CompanionAlignmentOwnership.Claim?
-                if let clientID {
-                    let attempt = self.alignmentOwners.claim(
-                        targetID: targetID, clientID: clientID, kind: .probe,
-                        referenceID: referenceID, leaseDeadline: nil)
-                    if case .refused(let reason) = attempt { return reason }
-                    claim = attempt
-                }
-                let refusal = bt.startCompanionAlignmentProbe(
-                    targetID: targetID, referenceID: referenceID,
-                    onStarted: { [weak self] in
-                        self?.sendCompanionProbeEvent(targetID: targetID, started: true)
-                    },
-                    onFinished: { [weak self] in
-                        self?.sendCompanionProbeEvent(targetID: targetID, started: false)
-                    })
-                if refusal != nil, let claim {
-                    self.alignmentOwners.releaseFresh(claim, targetID: targetID)
-                }
-                return refusal
-            },
-            cancelProbe: { [weak self] targetID, clientID in
-                guard let self else { return nil }
-                // Cancel is the legacy family's exit, never the audition's:
-                // that one is stopped by its own tick command.
-                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
-                // And it is the OWNER's exit. Another phone's cancel neither
-                // erases this owner nor reaches the backend to stop its run —
-                // erasing it would also disarm the disconnect that is supposed
-                // to put the room back, leaving a metronome nobody can stop.
-                if self.alignmentOwners.current(targetID: targetID) != nil {
-                    guard let clientID,
-                          self.alignmentOwners.releaseOwned(targetID: targetID,
-                                                            clientID: clientID) != nil else {
-                        return "Another phone is using these speaker clicks."
-                    }
-                }
-                (self.backend as? BTOutputControlling)?
-                    .cancelCompanionAlignmentProbe(targetID: targetID)
-                return nil
-            },
-            reportMeasurement: { [weak self] targetID, offsetMs, confidence in
-                // `confidence` rides the wire for the PHONE's own gate — it
-                // decides whether a recording was clean enough to report at
-                // all. A measurement that arrives has already passed that, and
-                // the Mac has nothing better to judge it with, so it does not
-                // gate on it — it only records it, for the measurement log.
-                guard let self, let bt = self.backend as? BTOutputControlling else {
-                    return "This Mac can't measure speaker timing."
-                }
-                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
-                let clientID = self.alignmentOwners.takeProbeForReport(targetID: targetID)
-                switch bt.applyCompanionAlignmentMeasurement(
-                    targetID: targetID, offsetMs: offsetMs, confidence: confidence) {
-                case .refused(let reason):
-                    return reason
-                case .applied(let measuredMs, let correctedMs):
-                    // Enqueued on the server queue before this command's own
-                    // reply is, so it reaches the phone first — but the phone
-                    // does not lean on that order.
-                    if let clientID {
-                        // Read back rather than returned: the row's source is
-                        // the timing module's to decide, and reading it here
-                        // is what keeps this message and the snapshot that
-                        // follows it saying the same thing.
-                        self.companionServer.sendAlignmentApplied(
-                            deviceID: targetID, measuredMs: measuredMs,
-                            correctedMs: correctedMs,
-                            source: bt.btAlignmentReport(forDevice: targetID)?.source?.rawValue,
-                            to: clientID)
-                    }
-                    // T16: `correctedMs` already carries how far this
-                    // measurement moved the stored latency — 0 when it left
-                    // it unchanged — so its size is the same fact
-                    // `recordMeasurement`'s replace/keep decision turns on,
-                    // without asking the backend a second question. Fires
-                    // whether or not a phone is still attached to read it.
-                    if abs(correctedMs) >= AlignmentThresholds.tellUserMs {
-                        self.popoverController?.noteAlignmentMovedSinceLastTime(
-                            deviceID: targetID, byMs: correctedMs)
-                    }
-                    return nil
-                }
-            },
-            setTick: { [weak self] targetID, active, clientID in
-                guard let self, let bt = self.backend as? BTOutputControlling else {
-                    return "This Mac can't measure speaker timing."
-                }
-                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
-                // A fine-tune session is per-client state exactly as a run is,
-                // and it is the half that leaves a metronome in the room and
-                // the user's nudges unwritten if the phone vanishes.
-                if active {
-                    var claim: CompanionAlignmentOwnership.Claim?
-                    if let clientID {
-                        let attempt = self.alignmentOwners.claim(
-                            targetID: targetID, clientID: clientID, kind: .legacyTick,
-                            referenceID: nil, leaseDeadline: nil)
-                        if case .refused(let reason) = attempt { return reason }
-                        claim = attempt
-                    }
-                    let refusal = bt.setCompanionAlignmentTick(targetID: targetID, active: true)
-                    // Only a claim this call created; a repeat joins the session
-                    // already running and has nothing of its own to give back.
-                    if refusal != nil, let claim {
-                        self.alignmentOwners.releaseFresh(claim, targetID: targetID)
-                    }
-                    return refusal
-                }
-                // Switching the metronome off is the owner's exit, like Cancel:
-                // checked BEFORE the backend, so another phone neither ends this
-                // session nor stops the ticks it is still listening to.
-                if self.alignmentOwners.current(targetID: targetID)?.kind == .legacyTick {
-                    guard let clientID,
-                          self.alignmentOwners.releaseOwned(targetID: targetID,
-                                                            clientID: clientID) != nil else {
-                        return "Another phone is using these speaker clicks."
-                    }
-                }
-                return bt.setCompanionAlignmentTick(targetID: targetID, active: false)
-            },
-            nudgeTrim: { [weak self] targetID, deltaMs in
-                guard let bt = self?.backend as? BTOutputControlling else {
-                    return "This Mac can't measure speaker timing."
-                }
-                return bt.nudgeCompanionAlignmentTrim(targetID: targetID, deltaMs: deltaMs)
-            },
-            revertNudge: { [weak self] targetID in
-                guard let bt = self?.backend as? BTOutputControlling else {
-                    return "This Mac can't measure speaker timing."
-                }
-                return bt.revertCompanionAlignmentNudge(targetID: targetID)
-            },
-            clearTuning: { [weak self] targetID in
-                guard let self, let bt = self.backend as? BTOutputControlling else {
-                    return "This Mac can't measure speaker timing."
-                }
-                // The phone's own Clear is ordered AFTER its stop is
-                // acknowledged; one arriving while the clicks still own the
-                // speaker is the legacy path, and it waits.
-                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
-                bt.clearCompanionAlignmentTuning(targetID: targetID)
-                return nil
-            },
-            playDemo: { [weak self] targetID, clientID in
-                guard let self, let bt = self.backend as? BTOutputControlling else {
-                    return "This Mac can't measure speaker timing."
-                }
-                if let busy = self.legacyAlignmentRefusal(targetID: targetID) { return busy }
-                var claim: CompanionAlignmentOwnership.Claim?
-                if let clientID {
-                    let attempt = self.alignmentOwners.claim(
-                        targetID: targetID, clientID: clientID, kind: .demo,
-                        referenceID: nil, leaseDeadline: nil)
-                    if case .refused(let reason) = attempt { return reason }
-                    claim = attempt
-                }
-                let refusal = bt.playCompanionAlignmentDemo(
-                    targetID: targetID,
-                    referenceID: self.companionAlignmentReferenceID(forTarget: targetID))
-                guard let claim else { return refusal }
-                if refusal != nil {
-                    self.alignmentOwners.releaseFresh(claim, targetID: targetID)
-                    return refusal
-                }
-                let entry: CompanionAlignmentOwnership.Entry
-                switch claim {
-                case .fresh(let created): entry = created
-                case .existing(let joined): entry = joined
-                case .refused: return refusal
-                }
-                // Four seconds of held-silent speakers is short, but a phone
-                // that drops inside it must still put the room back — and the
-                // backend ends a receipt on its own clock and reports nothing,
-                // so the owner retires on the same clock. A SECOND receipt
-                // started inside that window is a new run with its own four
-                // seconds, so the release quotes the run it belongs to and the
-                // earlier one's timer finds a newer run and does nothing.
-                let requestID = entry.requestID
-                let run = self.alignmentOwners.noteDemoStarted(targetID: targetID)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4.1) { [weak self] in
-                    self?.alignmentOwners.releaseDemoRun(targetID: targetID,
-                                                         requestID: requestID, run: run)
-                }
-                return refusal
-            })
-    }
-
-    /// The sentence every legacy alignment action is refused with while the
-    /// speaker clicks own the speaker, and `nil` when they do not. None of
-    /// those paths may reach a backend method that would stand an audition
-    /// down: the phone's own stop command is the only thing that ends it.
-    @MainActor
-    private func legacyAlignmentRefusal(targetID: String) -> String? {
-        guard alignmentOwners.current(targetID: targetID)?.kind == .audition else { return nil }
-        return "This Mac is already playing or restoring speaker clicks. Finish that first."
-    }
-
-    /// Address one of the run's two moments back to the phone that staged it,
-    /// and to nobody else. Fired from the pacer's own thread, so it hops.
-    private func sendCompanionProbeEvent(targetID: String, started: Bool) {
-        DispatchQueue.main.async { [weak self] in
-            // A probe event goes only to a CURRENT probe owner: an audition or
-            // a later job on the same speaker is not this run's audience.
-            guard let self, !self.isTerminating,
-                  let entry = self.alignmentOwners.current(targetID: targetID),
-                  entry.kind == .probe else { return }
-            let clientID = entry.clientID
-            if started {
-                // The Mac runs one alignment at a time, so a by-ear sheet
-                // open on this same speaker has been superseded.
-                self.popoverController?.noteCompanionAlignmentRunStarted(deviceID: targetID)
-                self.companionServer.sendAlignmentProbeStarted(deviceID: targetID, to: clientID)
-            } else {
-                self.companionServer.sendAlignmentProbeFinished(deviceID: targetID, to: clientID)
-            }
-        }
-    }
-
-    /// Build the full snapshot from the live controllers and hand it to the
-    /// server (which owns encoding + identical-snapshot suppression).
-    @MainActor
-    private func broadcastCompanionSnapshotNow() {
-        guard companionActive else { return }
-        let running = companionRunningApps()
-        let routedIDs = Set(appRouting.appRoutes.map(\.bundleID))
-        let addable = companionAddableApps()
-        let snapshot = CompanionSnapshotBuilder.build(
-            // Sorted for a deterministic wire order: `devicesByID` is a
-            // dictionary, and an order flap would defeat the server's
-            // identical-snapshot suppression.
-            devices: Array(devicesByID.values).sorted { $0.id < $1.id },
-            groupController: groupController,
-            appRouting: appRouting,
-            excludedBundleIDs: excludedApps.excludedBundleIDs,
-            iconFor: deviceIconController.symbolName(for:),
-            addableApps: addable,
-            runningRouted: routedIDs.intersection(running.map(\.bundleID)),
-            liveRoutedAppNames: routedAppNamesByDeviceID,
-            localFallbackActive: companionLocalFallbackActive,
-            takeoverStatus: companionTakeoverStatus.map(Self.companionTakeoverText),
-            systemDefaultIsAirPlayActive: companionSystemDefaultIsAirPlayActive,
-            knownDeviceNames: companionKnownDeviceNamesByID,
-            serverName: companionServerName,
-            connectVolume: settings.connectVolume,
-            connectVolumeMin: AppSettings.minConnectVolume,
-            connectVolumeMax: AppSettings.maxConnectVolume,
-            startBufferMs: settings.startBufferMs,
-            startBufferOptionsMs: AppSettings.startBufferOptionsMs,
-            // Bluetooth rows only, and only under a backend that keeps the
-            // store and watches the link edges — everything else reports no
-            // alignment at all, which the phone reads as "not reported".
-            alignmentFor: { [weak self] device in
-                (self?.backend as? BTOutputControlling)?.btAlignmentReport(forDevice: device.id)
-            })
-        companionServer.broadcast(snapshot)
+        guard companionCoordinator.clientCount > 0 else { return .notConnected }
+        return .connected(phoneName: companionCoordinator.invitePhoneName)
     }
 
     /// Mirrors `CompanionCommandDispatcher`'s private `bundleIDAllowed`
@@ -3602,27 +2697,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// that type; the two must stay identical.
     private static let bundleIDAllowed = CharacterSet(
         charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-_")
-
-    /// Answer one phone's `requestAppIcons` with paged icon frames.
-    ///
-    /// TRUST BOUNDARY: the only bundle IDs answered are ones this phone can
-    /// already see in the snapshot — its routed apps plus `companionAddableApps()`.
-    /// So an approved phone learns nothing new from an answer, and this must
-    /// never become an "is app X installed?" oracle for the rest of the Mac.
-    /// Shape is checked as well (non-empty, ≤128 chars, bundle-ID alphabet):
-    /// the id becomes a cache filename downstream, so a malformed one is
-    /// refused here rather than relied on being caught later.
-    @MainActor
-    private func serveAppIconPages(_ requested: [String], to clientID: UUID) {
-        var allowed = Set(appRouting.appRoutes.map(\.bundleID))
-        allowed.formUnion(companionAddableApps().map(\.bundleID))
-        let wanted = requested.filter { bundleID in
-            allowed.contains(bundleID)
-                && !bundleID.isEmpty && bundleID.count <= 128
-                && bundleID.unicodeScalars.allSatisfy { Self.bundleIDAllowed.contains($0) }
-        }.prefix(CompanionAppIcons.maxRequestedBundleIDs)
-        sendAppIconPage(AppIconCache.chunk(Array(wanted)), index: 0, to: clientID)
-    }
 
     /// razor: ONE page (8 icons) per main-queue turn, recursing between pages.
     /// A cold cache live-fetches, draws and PNG-encodes each icon at roughly
@@ -3638,31 +2712,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let payloads = pages[index].map {
             AppIconPayload(bundleID: $0, png: AppIconCache.pngData(forBundleID: $0))
         }
-        companionServer.sendAppIcons(payloads, page: index, pageCount: pages.count, to: clientID)
+        companionCoordinator.server.sendAppIcons(payloads, page: index,
+                                                 pageCount: pages.count, to: clientID)
         guard index + 1 < pages.count else { return }
         DispatchQueue.main.async { [weak self] in
             self?.sendAppIconPage(pages, index: index + 1, to: clientID)
         }
     }
-
-    /// The wire copy for `Snapshot.takeoverStatus` — the same plain language
-    /// as the popover's takeover strip. Duplicated because
-    /// `PopoverController.takeoverStatusText(for:)` is internal to
-    /// `AudioutPopoverUI` and this wave owns only this file; keep the two in
-    /// sync (follow-up: make that helper public and delete this copy).
-    private static func companionTakeoverText(_ status: TakeoverStatus) -> String {
-        switch status {
-        case .needsApproval:
-            return "Speaker Sync needs permission to run. Open Login Items to approve it."
-        case .helperMissing:
-            return "Speaker Sync is missing from this copy of Audiout. Reinstall Audiout to fix it."
-        case .takingOver:
-            return "Taking audio back from macOS…"
-        case .timedOut:
-            return "Another app is using AirPlay's timing right now, so this connection couldn't complete. Try again in a moment."
-        }
-    }
-
     // MARK: Backend event plumbing
 
     /// Drive the app's device model from the backend's event stream (the ONLY
@@ -3688,7 +2744,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Companion (FIX-B2 finding 7b): remember the name past a later
             // `deviceRemoved`, so a saved group can still label an offline
             // member in `GroupState.memberNames`.
-            companionKnownDeviceNamesByID[device.id] = device.name
+            companionCoordinator.noteDeviceName(id: device.id, name: device.name)
             // A group route resolves against the fleet snapshot, so a member
             // that only just turned up has to be re-resolved for the app to
             // start playing on it. Reachability of an ALREADY-known member is
@@ -3777,8 +2833,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popoverController.setLocalFallbackActive(active)
             // Companion (T7): in the snapshot, and this case returns early
             // (no device model changed), so it schedules its own broadcast.
-            companionLocalFallbackActive = active
-            scheduleCompanionBroadcast()
+            companionCoordinator.noteLocalFallbackActive(active)
+            companionCoordinator.scheduleBroadcast()
             logEvent(event)
             return
         case .systemDefaultIsAirPlayActive(let active):
@@ -3791,8 +2847,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Companion (FIX-B2 finding 7a): in the snapshot, and this case
             // returns early (no device model changed), so it caches + schedules
             // its own broadcast — same shape as `.localFallbackActive`.
-            companionSystemDefaultIsAirPlayActive = active
-            scheduleCompanionBroadcast()
+            companionCoordinator.noteSystemDefaultIsAirPlayActive(active)
+            companionCoordinator.scheduleBroadcast()
             logEvent(event)
             return
         case .streamHealth:
@@ -3810,8 +2866,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popoverController.setTakeoverStatus(status)
             // Companion (T7): in the snapshot, and this case returns early
             // (no device model changed), so it schedules its own broadcast.
-            companionTakeoverStatus = status
-            scheduleCompanionBroadcast()
+            companionCoordinator.noteTakeoverStatus(status)
+            companionCoordinator.scheduleBroadcast()
             logEvent(event)
             return
         case .captureFailed(let message, _):
@@ -3928,7 +2984,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Companion (T7): every event that reaches this shared tail changed
         // the device model (or the live-route map) — coalesce a broadcast.
         // Early-return cases above schedule their own where snapshot-relevant.
-        scheduleCompanionBroadcast()
+        companionCoordinator.scheduleBroadcast()
     }
 
     // MARK: stderr logging (T-U1 — real UI in T-U2)
@@ -3983,7 +3039,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         log("event: \(describe(event))")
     }
 
-    private func log(_ message: String) {
+    func log(_ message: String) {
         audioutEmergencyWriteStderr("[Audiout] \(message)\n")
     }
 
@@ -4043,6 +3099,126 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let url = components.url { NSWorkspace.shared.open(url) }
     }
 }
+
+// MARK: - CompanionCoordinatorHost
+
+/// The AppKit half of the companion wiring. Everything else moved to
+/// `CompanionCoordinator` (AudioutCore) in the 2026-09-17 review; what is left
+/// here is what only this target can do — an `NSAlert`, an `NSWorkspace`
+/// enumeration, app icons, popover repaints, and the app's own lifecycle flag.
+extension AppDelegate: CompanionCoordinatorHost {
+
+    /// The T24 approval alert: names the phone, explains the stakes, and
+    /// reports the answer back to `CompanionApprovalController` (which
+    /// persists it and settles every connection waiting on it). Main-actor
+    /// and modal — the SERVER never blocks (its queue keeps running; only
+    /// this app's own UI waits), and the controller guarantees one open
+    /// prompt per clientID, so a reconnecting phone can't stack duplicates.
+    /// An abort from `withdrawApprovalPrompt` is not the user's answer and
+    /// records nothing.
+    @MainActor
+    func presentApprovalPrompt(clientID: String, clientName: String,
+                               respond: @escaping (Bool) -> Void) {
+        // Headless harnesses must never flash real UI; not answering leaves
+        // the decision unmade (no persisted denial) and the server's own
+        // approval deadline closes the connection.
+        guard !HeadlessRuntime.isActive, !isTerminating else { return }
+        let alert = NSAlert()
+        alert.messageText = "Allow \u{201C}\(clientName)\u{201D} to control audio on this Mac?"
+        alert.informativeText = "It will be able to see and control what's playing on this Mac's speakers, including which apps are playing audio. You can change this later in Settings."
+        alert.addButton(withTitle: "Allow")
+        alert.addButton(withTitle: "Don't Allow")
+        // A menu-bar app usually has no key window; activate so the alert is
+        // actually seen (same treatment as SettingsWindowController.showWindow).
+        NSApp.activate(ignoringOtherApps: true)
+        companionApprovalAlerts[clientID] = alert
+        let outcome = alert.runModal()
+        companionApprovalAlerts.removeValue(forKey: clientID)
+        guard outcome != .abort else { return }
+        respond(outcome == .alertFirstButtonReturn)
+    }
+
+    /// Close the prompt shown for `clientID`, if it's still the one on
+    /// screen. Only the alert AT THE TOP of the modal stack can be aborted;
+    /// a withdrawn alert buried under a newer nested modal is left for the
+    /// user to answer, whose answer just records today's ordinary decision
+    /// for that phone.
+    /// razor: no queueing to withdraw a covered alert — T24 opens at most
+    /// one prompt per unresolved phone, so nesting is rare and harmless.
+    @MainActor
+    func withdrawApprovalPrompt(clientID: String) {
+        guard let alert = companionApprovalAlerts[clientID], NSApp.modalWindow === alert.window else { return }
+        NSApp.abortModal()
+    }
+
+    /// The `.regular` running apps. Mirrors
+    /// `PopoverController.defaultRunningAppsProvider`'s recipe MINUS the
+    /// per-app `.icon` fetch the snapshot never needs — the enumeration + icon
+    /// reads were the dominant per-broadcast cost. `NSWorkspace` remains the
+    /// ground truth the backend's own `routedAppRunning` events are derived
+    /// from; the coordinator caches this, and the launch/terminate observers
+    /// invalidate that cache on exactly the edges that change it.
+    @MainActor
+    func runningApplications() -> [(bundleID: String, displayName: String)] {
+        NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .compactMap { app -> (bundleID: String, displayName: String)? in
+                guard let bundleID = app.bundleIdentifier else { return nil }
+                return (bundleID, app.localizedName ?? bundleID)
+            }
+    }
+
+    /// Answer one phone's `requestAppIcons` with paged icon frames.
+    ///
+    /// TRUST BOUNDARY: the only bundle IDs answered are ones this phone can
+    /// already see in the snapshot — its routed apps plus the coordinator's
+    /// `addableApps()`. So an approved phone learns nothing new from an
+    /// answer, and this must never become an "is app X installed?" oracle for
+    /// the rest of the Mac. Shape is checked as well (non-empty, ≤128 chars,
+    /// bundle-ID alphabet): the id becomes a cache filename downstream, so a
+    /// malformed one is refused here rather than relied on being caught later.
+    @MainActor
+    func serveAppIconPages(_ requested: [String], to clientID: UUID) {
+        var allowed = Set(appRouting.appRoutes.map(\.bundleID))
+        allowed.formUnion(companionCoordinator.addableApps().map(\.bundleID))
+        let wanted = requested.filter { bundleID in
+            allowed.contains(bundleID)
+                && !bundleID.isEmpty && bundleID.count <= 128
+                && bundleID.unicodeScalars.allSatisfy { Self.bundleIDAllowed.contains($0) }
+        }.prefix(CompanionAppIcons.maxRequestedBundleIDs)
+        sendAppIconPage(AppIconCache.chunk(Array(wanted)), index: 0, to: clientID)
+    }
+
+    @MainActor
+    func devices() -> [Device] { Array(devicesByID.values) }
+
+    @MainActor
+    func symbolName(for device: Device) -> String {
+        deviceIconController.symbolName(for: device)
+    }
+
+    @MainActor
+    func routedAppNames() -> [String: [String]] { routedAppNamesByDeviceID }
+
+    /// A phone arrived or left: the Setup card's completion and the alignment
+    /// wizard's iPhone panel both turn on it.
+    @MainActor
+    func clientCountDidChange(_ count: Int) {
+        permissionAuditModel?.noteRemoteAppClientCount(count)
+        popoverController?.refreshRemoteInviteState()
+    }
+
+    @MainActor
+    func alignmentRunStarted(deviceID: String) {
+        popoverController?.noteCompanionAlignmentRunStarted(deviceID: deviceID)
+    }
+
+    @MainActor
+    func alignmentMoved(deviceID: String, byMs: Double) {
+        popoverController?.noteAlignmentMovedSinceLastTime(deviceID: deviceID, byMs: byMs)
+    }
+}
+
 
 /// Small floating "Disconnecting…" indicator shown while `applicationShouldTerminate`
 /// waits on `stopAndWait(timeout:)` (C1, user-requested) — so a multi-hundred-ms quit
@@ -4118,123 +3294,5 @@ final class QuittingIndicatorPanel: NSPanel {
         ])
 
         contentView = effectView
-    }
-}
-
-// MARK: - Cast pending-fill live probe (TEMPORARY diagnostic, 2026-08-23)
-
-extension AppDelegate {
-
-    /// `AUDIOUT_DEBUG_CAST_PROBE=<dir>` (mock backend + `AUDIOUT_MOCK_CAST_LAG`):
-    /// scripted offline reproduction of the live "pending fader fill never
-    /// shows" report. Opens the ⌘1 surface, selects the mock Cast device,
-    /// fires the REAL slider action (the same dispatch a drag performs), and
-    /// captures the Cast row's slider three times (gold / pending / after)
-    /// through BOTH render paths:
-    ///   - `*-draw.png`   — `cacheDisplay`, the draw-path truth (what the
-    ///     passing pixel test measures), and
-    ///   - `*-layer.png`  — `CALayer.render(in:)`, the layer BACKING STORE
-    ///     the compositor actually puts on screen. A stale backing store
-    ///     (needsDisplay never reaching the layer) shows up ONLY here.
-    /// Remove with the rest of the 2026-08-23 diagnostics once the root cause
-    /// is pinned.
-    func startCastPendingProbeIfEnabled() {
-        guard let dir = ProcessInfo.processInfo.environment["AUDIOUT_DEBUG_CAST_PROBE"],
-              !dir.isEmpty else { return }
-        let out = URL(fileURLWithPath: dir, isDirectory: true)
-        try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
-        let castID = "cast-tv"
-        let logURL = out.appendingPathComponent("probe.log")
-
-        func note(_ s: String) {
-            let line = "[cast-probe] \(s)\n"
-            FileHandle.standardError.write(Data(line.utf8))
-            if let h = try? FileHandle(forWritingTo: logURL) {
-                defer { try? h.close() }
-                h.seekToEndOfFile()
-                h.write(Data(line.utf8))
-            } else {
-                try? Data(line.utf8).write(to: logURL)
-            }
-        }
-
-        func drawPNG(_ view: NSView) -> Data? {
-            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
-            view.cacheDisplay(in: view.bounds, to: rep)
-            return rep.representation(using: .png, properties: [:])
-        }
-
-        func layerPNG(_ view: NSView) -> Data? {
-            guard let layer = view.layer else { return nil }
-            let scale = view.window?.backingScaleFactor ?? 2
-            let w = Int(view.bounds.width * scale), h = Int(view.bounds.height * scale)
-            guard w > 0, h > 0,
-                  let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
-                                             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-                                             isPlanar: false, colorSpaceName: .deviceRGB,
-                                             bytesPerRow: 0, bitsPerPixel: 0),
-                  let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
-            NSGraphicsContext.saveGraphicsState()
-            NSGraphicsContext.current = ctx
-            ctx.cgContext.scaleBy(x: scale, y: scale)
-            layer.render(in: ctx.cgContext)
-            NSGraphicsContext.restoreGraphicsState()
-            return rep.representation(using: .png, properties: [:])
-        }
-
-        func capture(_ tag: String) {
-            guard let row = popoverController.test_deviceRow(for: castID) else {
-                note("\(tag): NO ROW for \(castID)")
-                return
-            }
-            let slider = row.test_slider
-            note("\(tag): pending=\(row.test_isFaderPending)"
-                 + " inWindow=\(slider.window != nil)"
-                 + " windowVisible=\(slider.window?.isVisible == true)"
-                 + " sliderLayer=\(slider.layer != nil)"
-                 + " needsDisplay=\(slider.needsDisplay)")
-            try? drawPNG(slider)?.write(to: out.appendingPathComponent("\(tag)-slider-draw.png"))
-            try? layerPNG(slider)?.write(to: out.appendingPathComponent("\(tag)-slider-layer.png"))
-            if let content = slider.window?.contentView {
-                try? layerPNG(content)?.write(to: out.appendingPathComponent("\(tag)-window-layer.png"))
-            }
-        }
-
-        func after(_ s: Double, _ block: @escaping @MainActor () -> Void) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + s) {
-                MainActor.assumeIsolated(block)
-            }
-        }
-
-        note("probe armed; out=\(out.path)")
-        after(2.0) { [self] in
-            showSurface(.mixer)
-            note("surface shown")
-        }
-        after(3.5) { [self] in
-            let result = popoverController.test_toggleDeviceEnabled(deviceID: castID, on: true)
-            note("selected \(castID): \(String(describing: result))")
-        }
-        after(6.5) { [self] in
-            capture("1-gold")
-            popoverController.test_deviceRow(for: castID)?.test_fireSliderAction(settingValueTo: 30)
-            note("slider action fired (30)")
-        }
-        after(8.0) { capture("2-pending") }
-        after(13.5) { capture("3-after") }
-        after(14.5) {
-            note("probe done")
-            NSApp.terminate(nil)
-        }
-        // `applicationShouldTerminate` can defer/park termination (measured:
-        // three probe instances outlived their own terminate call), and a
-        // leftover instance fights the live app over the default output.
-        // Mock mode holds no aggregate device, so a hard exit backstop is
-        // safe here. The other hard exit is the move-to-Applications path
-        // in `moveToApplicationsAndRelaunch()`, where nothing has started yet.
-        after(17.0) {
-            note("probe exit backstop")
-            exit(0)
-        }
     }
 }

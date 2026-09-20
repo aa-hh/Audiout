@@ -23,7 +23,7 @@ events, and — optionally — devices drop off and reconnect.
 
 The app links `AudioutCore` and talks only to the `OutputBackend`
 protocol, so switching mock ↔ real is one line (`makeBackend(.mock)` /
-`makeBackend(.ownTone)`).
+`makeBackend(.native)`).
 
 ```bash
 cd ../AudioutCore
@@ -40,21 +40,17 @@ at `makeBackend(.mock)`. Options on `MockBackend.init`:
 
 ## Runtime dev toggle — `AIRPLAY_BACKEND`
 
-`makeBackend()` (`OwnToneBackend.swift`) resolves which `OutputBackend` to use,
+`makeBackend()` (`OutputBackend.swift`) resolves which `OutputBackend` to use,
 in order: an explicit argument → the `AIRPLAY_BACKEND` env var → default `mock`.
 
 ```bash
 AIRPLAY_BACKEND=mock    swift run mock-speakers-demo   # default, same as unset
-AIRPLAY_BACKEND=owntone swift run mock-speakers-demo   # see caveat below
 AIRPLAY_BACKEND=native  swift run mock-speakers-demo   # see "Layer 3" below
 ```
 
-- Values are case-insensitive: `mock` | `owntone` | `native`.
+- Values are case-insensitive: `mock` | `native`.
 - An unrecognized value (or anything else unexpected) prints one warning to
   stderr and falls back to `mock` rather than crashing.
-- **Caveat:** `owntone` currently traps. `OwnToneBackend` is still a stub whose
-  methods `assertionFailure` — wiring it to real OwnTone/AirPlay is 0f/Phase 1
-  work (see `PLAN-0e-0f.md`, T-TOGGLE-1). Use `mock` for all offline work today.
 - This maps onto a future hidden Developer setting in the app — the app will
   always hold an `OutputBackend`, never a concrete type (SPEC.md §4 seam).
 
@@ -67,9 +63,8 @@ AIRPLAY_BACKEND=native  swift run mock-speakers-demo   # see "Layer 3" below
 `../AirPlayEngine/README.md`) driven by app-owned `NativeDiscovery`
 (Bonjour, both `_airplay._tcp` and `_raop._tcp`) and
 `NativeCaptureCoordinator` (an in-process Core Audio process tap — no
-external process, no IPC, unlike the `audiocap` subprocess). **Unlike
-`mock`/`owntone`, this is a real sender** — it opens real sockets, binds real
-PTP ports, and needs a real AirPlay 2 receiver on the LAN and the macOS
+external process, no IPC). **Unlike `mock`, this is a real sender** — it opens
+real sockets, binds real PTP ports, and needs a real AirPlay 2 receiver on the LAN and the macOS
 system-audio-recording TCC permission granted to the app.
 
 - Headless build/test is still fully offline and hermetic (spy engine /

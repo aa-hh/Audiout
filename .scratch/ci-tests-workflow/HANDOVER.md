@@ -1,8 +1,9 @@
 # Handover: full test suite on GitHub Actions
 
-Branch `claude/disable-github-actions-tests-cda23f`, worktree
-`.claude/worktrees/audiout-1-2-0-release-711e7a`, pushed to origin at 7c37712c.
-Not merged. Written 2026-09-20 00:50 UTC.
+Branch `claude/ci-runner-performance-33258a` (merged the earlier
+`claude/disable-github-actions-tests-cda23f` in), worktree
+`.claude/worktrees/ci-runner-performance-33258a`, pushed to origin at b00a35b4.
+Not merged. Written 2026-09-20 00:50 UTC, runner-speed section added 01:45 UTC.
 
 ## What Alec asked for
 
@@ -117,3 +118,62 @@ until this is fixed.
 - `gh run rerun --failed` refuses while a sibling job is still running.
 - The repo's Bash hook blocks any command line containing the bare words for
   running Swift tests or builds, even inside a grep pattern.
+
+## Runner speed discovery (2026-09-20, second session)
+
+Where a warm-cache job's 9.7 min went before this session: checkout 5 s,
+cache restore 24 s, brew 8 s, compile 203 s, tests 305 s, cache save 9 s.
+The compile split: app modules 66 s, the single 43k-LOC test target 136 s.
+The cache spared none of it because `actions/checkout` stamps every file
+with "now" and SwiftPM recompiles on mtime; only the dependency checkouts
+(Sparkle, PostHog, audiout-shared, the C libs) came back warm.
+
+**Fixed (commit 2301e791):** a step after checkout gives each tracked file
+the time of the commit that last touched it (`git log --name-only` newest
+first, `touch -t`). Needs `fetch-depth: 0` + `filter: blob:none` (trees
+only, 7 s). Measured on a realistic push (one comment line in
+`AudioutCore/Sources/AudioutCore/Analytics.swift`, run 35481425256):
+
+| | before (35479212448) | after (35481425256) |
+|---|---|---|
+| compile | 203 s, 447 files | **42 s, 19 files** |
+| tests | 305 s | 329 s |
+| job total | 9.7 min | **6.5 min** (7.3 with cache save) |
+
+Run 35480288970 was the cold run that populated this branch's cache
+(compile 237 s). Commit b00a35b4 is the comment touch used for the
+measurement; harmless, revert if you like.
+
+**Cache scope trap:** GitHub hands a cache only to the branch that saved it
+and to the default branch's children. Every branch starts cold until
+tests.yml has run on main once; after that every branch reads main's cache.
+Key includes `github.sha`, so each push saves a fresh 680 MB entry; the
+10 GB repo limit means ~14 entries before eviction. Fine, just know it.
+
+**What's left is the test phase, and it is the suite, not the runner.**
+The same 3947 tests take 208–271 s on Alec's 8-core Mac and 305–329 s on
+the 3-core runner. The critical path is the @MainActor chain
+(PopoverControllerTests spans the whole run), same as memory
+`test-suite-profile-2026-08-06.md` found. Levers, in order of payoff:
+
+1. **Make the suite runner-clean** (open item 1). Several failing tests sit
+   on that chain and burn 30–135 s waiting for a timeout (the
+   CaptureCoordinator `waitForState` at 30 s ×11, `commandRoundTrip` 40 s,
+   the row-reveal set at 135 s). Removing them likely cuts a minute or two
+   as a side effect. Unmeasured until it's done. The failure count varies
+   run to run (25, 31, 37), so some are flaky, not just slow.
+2. **Shard the tests across jobs** with `--filter` regexes, one job per
+   shard. Compile is now 42 s per job, so 3 shards ≈ 42 s + ~110 s ≈ 3 min
+   wall, versus 6.5. Free on a public repo (5 macOS jobs at once). The
+   split must spread the @MainActor UI suites across shards or one shard
+   keeps the whole chain. Not built.
+3. **Skip the 14 dev executables** during the test build (`swift build
+   --build-tests --target AudioutCoreTests` then `--skip-build`). Worth
+   ≤15 s and only on a cold compile. Skipped as not worth the churn.
+4. Bigger runners (macos-*-xlarge) are paid, ~$0.16/min. Not proposed.
+
+Open item 4 resolved as far as the log allows: run 35478553383's test
+process died with `swiftpm-testing-helper ... exited with unexpected signal
+code 1` after ~5 min with hundreds of tests still unfinished — a crash in
+the test process, no crash log in the job output. Not reproduced in the
+four runs since.

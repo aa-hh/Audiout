@@ -9,7 +9,8 @@ the model, never the reverse.
 ## Rules
 
 - `scripts/run-tests.sh --filter <Suite>` for the inner loop, never a bare `swift test`.
-- Tests must stay invisible: nothing a test does may reach the screen.
+- Tests must stay invisible: nothing a test does may reach the screen. Guard 9 blocks a commit whose new lines present anything.
+- A titled window is NOT parked off screen by its `contentRect`; `.borderless` is. A titled one needs `constrainFrameRect(_:to:)` overridden AND `setFrameOrigin` after init — `makeParkedWindow` in `Tests/AudioutCoreTests/SurfaceToolbarTests.swift`.
 - This Mac's own AirPlay receiver is never surfaced as a device (2026-08-07).
 - `.passwordRequired` never flattens to `.unknown`; keep the auth cause and its honest copy.
 - Every `show*()` entry gates on-screen presentation behind `HeadlessRuntime.isActive`.

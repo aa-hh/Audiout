@@ -971,7 +971,9 @@ public final class DeviceDetailViewController: NSViewController {
         }
         test_picker = picker
 
-        if iconWell.window != nil {
+        // `iconWell.window != nil` is NOT a headless proxy — suites host this
+        // pane in a real (ordered-out) window, so the gate has to be explicit.
+        if iconWell.window != nil, !HeadlessRuntime.isActive {
             let popover = NSPopover()
             popover.behavior = .transient
             popover.contentViewController = picker

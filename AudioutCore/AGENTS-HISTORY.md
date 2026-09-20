@@ -826,9 +826,42 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     target/action only), and `.titled` + `makeFirstResponder` for text editing —
     first responder is not visibility.
   Ordering a window in but parking it offscreen is a LAST resort, and the only
-  sanctioned reason is an assertion that needs a real render-server-attached
-  layer tree (CA animation timing). Then: an origin that intersects no
-  `NSScreen`, and `defer { window.orderOut(nil) }` right after ordering in.
+  sanctioned reason is an assertion that needs AppKit's own layout passes, which
+  a window that is never ordered in does not get (a real `NSToolbar`'s item
+  layout; CA animation timing). Then: an origin that intersects no `NSScreen`
+  (assert that), and `defer { window.orderOut(nil) }` right after ordering in.
+  **Parking it is harder than it looks, and getting it wrong is how this rule
+  was last broken on main** (fixed 2026-09-20, `40243524`, in
+  `SurfaceToolbarTests`):
+  - `NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, …))` does NOT park a
+    TITLED window. AppKit constrains a titled frame onto a real display twice —
+    inside `init(contentRect:…)` and again when the window is ordered in.
+    Measured on a 1680x1050 screen: the frame is already (80, 816) straight out
+    of `init`, and `orderFrontRegardless()` draws it at (80, 620), in the corner
+    of the developer's display.
+  - A `.borderless` window is never constrained and stays at -10_000. Prefer it
+    whenever the test does not need the title bar or a toolbar.
+  - For a titled window: subclass `NSWindow`, override
+    `constrainFrameRect(_:to:)` to return the rect unchanged, AND call
+    `setFrameOrigin` after `init` — the override is not consulted during init,
+    so the constructor's own constraint has to be undone afterwards. The
+    working example is `makeParkedWindow` in
+    `Tests/AudioutCoreTests/SurfaceToolbarTests.swift`. A toolbar out there
+    still reports `isVisible` and still gets its layout passes, which is the
+    whole point.
+  **`view.window != nil` is NOT a headless check** and never was: suites host
+  panes in real, ordered-out windows, so that condition is TRUE under test and
+  the sheet/popover/menu presents anyway. It was the single most common way
+  this rule got re-broken (fixed in `GroupEditorViewController`'s failure
+  alert, duplicate-name alert, delete sheet and icon picker, and
+  `DeviceDetailViewController`'s icon picker); `AudioSettingsViewController`'s
+  "+" menu and Finder open panel had no gate at all — the open panel being the
+  worst case, a modal that wedges the remote Mac. Because prose alone did not
+  hold, **Guard 9** (`.githooks/no-visible-tests-check.py`) now BLOCKS a commit
+  whose newly-added lines present anything: a library hunk passes by mentioning
+  `HeadlessRuntime`, a test file may not present at all, executables
+  (`main.swift` present — the app, the harness and snapshot tools) are exempt,
+  and the escape is a trailing `screen-ok` comment saying why.
   New UI-showing code paths must ship with one of the two escapes above — a
   `HeadlessRuntime.isActive` gate or a `test_*` seam. Both menu presenters
   (`presentOutputDevicesPlusMenu`, `presentAddApplicationPicker`) are gated;

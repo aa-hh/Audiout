@@ -3,7 +3,7 @@
 
 import Foundation
 
-/// Anonymous per-install usage-analytics facade (PRODUCT.md Data
+/// Anonymous, per-install usage-analytics facade (PRODUCT.md Data
 /// Collection stream 1). On by default through the free trial; a paid install
 /// is asked once before anything is collected, and the Settings toggle can
 /// turn it off at any time. Foundation-only by design: PostHog is deliberately

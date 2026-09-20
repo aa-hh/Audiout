@@ -236,6 +236,9 @@ import Testing
     @Test func setVolumeAppliesToTheNextBuffer() {
         let injector = injector([("a", 100)])
         injector.setVolume(50, for: "a")
+        // The setter is async on the state queue and `handleBuffer` no longer
+        // serializes behind it, so this sync read drains the queue first.
+        _ = injector.test_hasConverter(for: "a")
         injector.handleBuffer(bundleID: "a", buffer: s16Buffer([(1000, 1000)]))
 
         var block = program(0, frames: 1)
@@ -265,6 +268,9 @@ import Testing
         #expect(sink.isEmpty, "no meter is shown, so nothing is measured")
 
         injector.setMeteringActive(true)
+        // The setter is async on the state queue and `handleBuffer` no longer
+        // serializes behind it, so this sync read drains the queue first.
+        _ = injector.test_hasConverter(for: "a")
         injector.handleBuffer(bundleID: "a", buffer: s16Buffer([(16_000, 16_000)]))
 
         let levels = sink.all
@@ -274,6 +280,61 @@ import Testing
         // (which would read ≈ 0.05).
         #expect((levels.first?.rms ?? 0) > 0.4,
                 "the meter shows how loud the app plays, not how far its slider is down")
+    }
+
+    /// Lets a test hold the injector's state queue inside `makeConverter`:
+    /// while the gate is closed the converter build signals `entered` and parks
+    /// on `release`, so the queue stays held for as long as the test wants.
+    private final class ConverterGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isOpen = true
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        func close() { lock.lock(); isOpen = false; lock.unlock() }
+        func passThrough() {
+            lock.lock(); let open = isOpen; lock.unlock()
+            guard !open else { return }
+            entered.signal()
+            release.wait()
+        }
+    }
+
+    /// Turns red if `handleBuffer` takes the injector's state queue again,
+    /// because a state or volume edit holding that queue then parks the tap
+    /// delivery thread for the edit's whole duration.
+    @Test func handleBufferDoesNotParkBehindAStateEditHoldingTheQueue() {
+        let gate = ConverterGate()
+        let injector = LeveledAppInjector(makeConverter: { _ in
+            gate.passThrough()
+            return IdentityConverter()
+        })
+        let capturingState = capturing
+        injector.updateLeveled([("a", 50)])
+        injector.handleStateChange(bundleID: "a", state: capturingState)
+        injector.setActive(true)
+
+        // From here the converter build for "b" holds the state queue.
+        gate.close()
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            injector.handleStateChange(bundleID: "b", state: capturingState)
+            finished.signal()
+        }
+        gate.entered.wait()
+
+        let buffer = s16Buffer([(1000, 1000)])
+        let returned = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            injector.handleBuffer(bundleID: "a", buffer: buffer)
+            returned.signal()
+        }
+        // 10 s is a hang-stop, not a speed claim.
+        #expect(returned.wait(timeout: .now() + 10) == .success,
+                "delivery must not wait on the state queue a converter build holds")
+
+        gate.release.signal()
+        finished.wait()
+        #expect(injector.test_pendingSamples(for: "a") == 2)
     }
 
     // MARK: - 8. Removal

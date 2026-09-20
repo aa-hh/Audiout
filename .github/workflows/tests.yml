@@ -34,7 +34,11 @@ jobs:
       # Keyed on the lockfile so a dependency bump starts clean; restore-keys
       # takes the newest cache otherwise, and SwiftPM rebuilds only what
       # changed. Without this every run is a cold compile of everything.
-      - uses: actions/cache@v4
+      # Restore and save are separate steps so the compiled tree is kept even
+      # when a test fails — the plain cache action only saves after a green
+      # job, and a red run's compile is worth exactly as much next time.
+      - uses: actions/cache/restore@v4
+        id: build-cache
         with:
           path: AudioutCore/.build
           key: audioutcore-build-${{ runner.os }}-${{ hashFiles('AudioutCore/Package.resolved') }}-${{ github.sha }}
@@ -45,6 +49,11 @@ jobs:
         run: brew install libevent libsodium libgcrypt libgpg-error libplist ffmpeg
       - name: AudioutCore suite
         run: bash scripts/run-tests.sh
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: AudioutCore/.build
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
   airplayengine:
     runs-on: macos-26
     env:
@@ -53,7 +62,8 @@ jobs:
       AUDIOUT_TEST_NO_CACHE: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: build-cache
         with:
           path: AirPlayEngine/.build
           key: airplayengine-build-${{ runner.os }}-${{ github.sha }}
@@ -62,3 +72,8 @@ jobs:
         run: brew install libevent libsodium libgcrypt libgpg-error libplist ffmpeg
       - name: AirPlayEngine suite
         run: AUDIOUT_TEST_PACKAGE=AirPlayEngine bash scripts/run-tests.sh
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: AirPlayEngine/.build
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}

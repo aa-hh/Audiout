@@ -1,4 +1,3 @@
-import "./index.css";
 import { Composition } from "remotion";
 import { SCENES_DURATION, ScenesVideo } from "./ScenesVideo";
 

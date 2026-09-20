@@ -439,5 +439,43 @@ extension SerializedEngineState {
 
             #expect(await engine.boundStreamId(for: id) == nil)
         }
+
+        /// Two overlapping binds on one output: the first holds the per-output
+        /// gate while its session is being created, so the second must wait at
+        /// the gate BEFORE it reads the idempotency state or writes
+        /// `device->stream_id`. Without the gate in `bind` itself both binds pass
+        /// the idempotency read, the second overwrites `stream_id` under the
+        /// first's in-flight `device_start`, and the second issues its own
+        /// `device_start` (which here can only time out).
+        @Test func secondBindWaitsForTheGateBeforeTouchingStreamId() async throws {
+            let id = OutputID(rawValue: 0xC016)
+            makeRegistryDevice(id: id.rawValue)
+            guard let device = outputs_device_get(id.rawValue) else {
+                Issue.record("device must exist in the registry")
+                return
+            }
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { _, _ in 1 }, opTimeout: 0.5)
+            await engine.registerKnownOutputForTest(id)
+
+            async let a: OutputBindResult = engine.addOutput(id, streamId: 1)
+            for _ in 0..<200 {
+                if await engine.hasArmedWaiterForTest(callbackId: 0) { break }
+                try await Task.sleep(nanoseconds: 1_000_000) // 1ms
+            }
+            #expect(await engine.hasArmedWaiterForTest(callbackId: 0), "bind A never armed its waiter")
+            #expect(device.pointee.stream_id == 1)
+
+            async let b: OutputBindResult = engine.addOutput(id, streamId: 2)
+            for _ in 0..<50 { try await Task.sleep(nanoseconds: 1_000_000) } // 50ms in 1ms steps
+            #expect(device.pointee.stream_id == 1,
+                "a second bind wrote stream_id before taking the per-output gate")
+
+            fireCompletion(id: id.rawValue, cbIdSlot: 0, state: OUTPUT_STATE_STREAMING)
+            #expect(try await a == .bound)
+            #expect(try await b == .alreadyBound(streamId: 1))
+            #expect(device.pointee.stream_id == 1)
+            await engine.stop()
+        }
     }
 }

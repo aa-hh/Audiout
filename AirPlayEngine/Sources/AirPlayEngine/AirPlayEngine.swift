@@ -788,7 +788,9 @@ public actor AirPlayEngine {
     ///
     /// The stream_id write happens BEFORE `device_start` is issued — it MUST
     /// land before `session_make` runs, same ordering constraint `setVolume`
-    /// has for `device->volume`. Devices already streaming/connected take the
+    /// has for `device->volume`. The per-output gate is taken before the
+    /// idempotency read and the `stream_id` write, so those are atomic with the
+    /// `device_start` that follows. Devices already streaming/connected take the
     /// existing idempotency no-op path (below) and do NOT get re-bound to a
     /// new `streamId` — the session already exists. THAT NO-OP IS NOW VISIBLE:
     /// the return value is ``OutputBindResult/alreadyBound(streamId:)`` carrying
@@ -854,6 +856,12 @@ public actor AirPlayEngine {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
 
+        // The per-output gate is taken here, before the idempotency read and the
+        // stream_id write below, so those are atomic with the device_start that
+        // follows (startOp runs unserialized because this call owns the slot).
+        if serialize { await acquireOp(id) }
+        defer { if serialize { releaseOp(id) } }
+
         // Idempotency guard (first-light hardening #5): an output already in a
         // live session is a no-op success — don't re-issue device_start, which
         // would arm a second RTSP SETUP against a receiver that's already
@@ -888,7 +896,7 @@ public actor AirPlayEngine {
         // device->stream_id at session-creation time; see the doc comment above).
         await applyStreamIdOnDevice(id: id, streamId: streamId)
 
-        let terminal = try await startOp(id: id, serialize: serialize) { device, cbId in
+        let terminal = try await startOp(id: id, serialize: false) { device, cbId in
             // Dispatch by the device's backend (output_airplay OR output_raop)
             // so a RAOP-typed device runs raop_device_start, not the AP2 sender.
             return outputs_device_start(device, cbId)
@@ -914,6 +922,10 @@ public actor AirPlayEngine {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
 
+        // Gate before the live-state read, same reasoning as `bind`.
+        if serialize { await acquireOp(id) }
+        defer { if serialize { releaseOp(id) } }
+
         // Idempotency guard (first-light hardening #5): stopping an output that
         // isn't in a session is a no-op success. device_stop on an already-idle
         // device would arm a completion the vendored teardown never fires (no
@@ -927,7 +939,7 @@ public actor AirPlayEngine {
         let liveState = await liveDeviceState(id)
         if liveState == .stopped { knownOutputs[id] = .stopped; return }
 
-        let terminal = try await startOp(id: id, serialize: serialize) { device, cbId in
+        let terminal = try await startOp(id: id, serialize: false) { device, cbId in
             // TOCTOU guard: a receiver-side RTSP drop can free the session and
             // NULL device->session (shims/outputs.c outputs_device_session_remove)
             // between the liveState check above and this closure running on the
@@ -1553,9 +1565,10 @@ public actor AirPlayEngine {
                 }
                 guard armed else {
                     // B5.3: a waiter was already armed for this id (should be
-                    // unreachable given per-id serialization). Release the C slot
-                    // we just took and fail this op rather than strand it.
-                    outputs_callback_remove(device)
+                    // unreachable given per-id serialization). Release exactly
+                    // the slot this call took and fail this op rather than
+                    // strand it.
+                    outputs_callback_clear(cbId)
                     cont.resume(throwing: AirPlayEngineError.operationRejected)
                     return
                 }
@@ -1755,11 +1768,18 @@ final class StateStreamHub: @unchecked Sendable {
     /// Install this hub as the process-wide target and wire the C hook. Called on
     /// the engine thread right after the dispatcher is initialised (alongside
     /// `CompletionRegistry.install()`).
-    func install() {
+    @discardableResult
+    func install() -> Bool {
+        let displaced = StateStreamHub.shared.map { $0 !== self } ?? false
+        if displaced {
+            Logger(subsystem: "com.airplayengine", category: "state-stream")
+                .fault("StateStreamHub.install: a second hub is replacing a live one; the first engine's state stream goes silent")
+        }
         StateStreamHub.shared = self
         outputs_engine_state_set({ deviceId, state, _ in
             StateStreamHub.shared?.deliver(deviceId: deviceId, state: state)
         }, nil)
+        return !displaced
     }
 
     /// Tear down the hook and finish every live stream (on stop).
@@ -1820,11 +1840,18 @@ final class RemoteEventHub: @unchecked Sendable {
 
     /// Install this hub as the process-wide target and wire the C hook. MUST run
     /// before airplay_init spawns the events thread (see the type doc).
-    func install() {
+    @discardableResult
+    func install() -> Bool {
+        let displaced = RemoteEventHub.shared.map { $0 !== self } ?? false
+        if displaced {
+            Logger(subsystem: "com.airplayengine", category: "remote-events")
+                .fault("RemoteEventHub.install: a second hub is replacing a live one; the first engine's remote events go silent")
+        }
         RemoteEventHub.shared = self
         airplayengine_remote_event_set({ deviceId, event, volume, _ in
             RemoteEventHub.shared?.deliver(deviceId: deviceId, event: event, volume: volume)
         }, nil)
+        return !displaced
     }
 
     /// Tear down the hook and finish every live stream (on stop). MUST run after

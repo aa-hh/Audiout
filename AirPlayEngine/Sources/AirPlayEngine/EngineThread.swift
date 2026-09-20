@@ -20,11 +20,23 @@ final class EngineThread: @unchecked Sendable {
 
     /// The owned base. Set on `start()`, read by the wrapper to assign
     /// `evbase_player`. `OpaquePointer` bridges libevent's `struct event_base *`.
-    private(set) var base: OpaquePointer?
+    /// Guarded by `baseLock`: `enqueue` on the hot write path reads it from any
+    /// thread while the engine thread may be freeing it in `stop()`'s wake.
+    private var _base: OpaquePointer?
+    var base: OpaquePointer? {
+        baseLock.lock(); defer { baseLock.unlock() }
+        return _base
+    }
 
     private let thread: Thread
     private let startSem = DispatchSemaphore(value: 0)
+    /// Set by `stop()`; read by `enqueue`. Guarded by `baseLock`.
     private var stopped = false
+
+    /// Test-only seam, `nil` in production. Invoked inside `enqueue` immediately
+    /// before `event_base_once`, so a test can park a caller between its base
+    /// check and the schedule and race `stop()` against it.
+    var beforeScheduleForTesting: (() -> Void)?
 
     private let log = Logger(subsystem: "com.airplayengine", category: "engine-thread")
 
@@ -39,6 +51,13 @@ final class EngineThread: @unchecked Sendable {
     private var pending: [UInt64: () -> Void] = [:]
     private var pendingSeq: UInt64 = 0
     private let pendingLock = NSLock()
+
+    /// Guards `_base` and `stopped`. Held across `event_base_once` in `enqueue`
+    /// and across `event_base_free` in `threadMain`, so a scheduler that has
+    /// passed its base check can never race the free.
+    /// Lock order: `baseLock` may wrap `pendingLock`; `pendingLock` never wraps
+    /// `baseLock`.
+    private let baseLock = NSLock()
 
     /// How long `stop()` will wait for the engine thread to unwind before it
     /// gives up and deliberately leaks the thread/base rather than hang (C3).
@@ -214,11 +233,11 @@ final class EngineThread: @unchecked Sendable {
         defer { leaveWorkgroupOnEngineThread() }
 
         guard EngineThread.evthreadEnabled, let b = event_base_new() else {
-            base = nil
+            baseLock.lock(); _base = nil; baseLock.unlock()
             startSem.signal()
             return
         }
-        base = b
+        baseLock.lock(); _base = b; baseLock.unlock()
 
         // Register a long-period persistent timer so the loop has a pending
         // event and event_base_dispatch blocks (rather than returning). It
@@ -241,8 +260,10 @@ final class EngineThread: @unchecked Sendable {
             event_free(ka)
             keepAlive = nil
         }
+        baseLock.lock()
         event_base_free(b)
-        base = nil
+        _base = nil
+        baseLock.unlock()
     }
 
     /// Marshal `work` onto the engine thread. If already on the engine thread,
@@ -250,7 +271,8 @@ final class EngineThread: @unchecked Sendable {
     /// thread) and returns immediately (fire-and-forget).
     ///
     /// Returns `false` when the work could NOT be scheduled — the base doesn't
-    /// exist yet (pre-`start()`) or was torn down (post-`stop()`). A caller that
+    /// exist yet (pre-`start()`) or `stop()` has begun (including on the
+    /// leaked-thread path, where the base outlives the deadline). A caller that
     /// carries a continuation MUST resume/fail it itself when this returns false,
     /// otherwise it freezes forever (B4). Previously this silently `return`ed on a
     /// nil base and the caller's `withCheckedContinuation` never resumed.
@@ -262,11 +284,17 @@ final class EngineThread: @unchecked Sendable {
     /// frame on teardown is correct, and it avoids a per-write dict op.
     @discardableResult
     func enqueue(_ work: @escaping () -> Void, tracked: Bool = true) -> Bool {
-        guard let base else { return false }
+        baseLock.lock()
+        guard let base = _base, !stopped else {
+            baseLock.unlock()
+            return false
+        }
         if isEngineThread {
+            baseLock.unlock()
             work()
             return true
         }
+        defer { baseLock.unlock() }
 
         let token: UInt64?
         if tracked {
@@ -291,6 +319,7 @@ final class EngineThread: @unchecked Sendable {
             }
         }
         let box = Unmanaged.passRetained(payload).toOpaque()
+        beforeScheduleForTesting?()
         event_base_once(
             base,
             -1,
@@ -367,8 +396,13 @@ final class EngineThread: @unchecked Sendable {
     /// DELIBERATELY LEAK the thread + event_base rather than hang: a leaked thread
     /// is a bounded one-time cost; a hung actor wedges every later engine call.
     func stop() {
-        guard !stopped, let base else { return }
+        baseLock.lock()
+        guard !stopped, let base = _base else {
+            baseLock.unlock()
+            return
+        }
         stopped = true
+        baseLock.unlock()
         // loopbreak is thread-safe; it unblocks event_base_dispatch.
         event_base_loopbreak(base)
         // Give the loop a moment to unwind; the thread frees the base itself.

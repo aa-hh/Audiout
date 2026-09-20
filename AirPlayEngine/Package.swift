@@ -7,11 +7,9 @@ import PackageDescription
 // the shipped product). See docs/seam-map.md for the extraction blueprint
 // this Package.swift follows, and README.md for the package-level status.
 //
-// STATUS (T-PKG-1 — scaffold only): this package defines the target/module
-// layout and vendors the source files, but the C target does NOT compile
-// yet. That's intentional — see the TODO markers below for where T-BUILD-1
-// (make CAirPlayEngine compile + link) and T-SHIM-1 (implement the shim .c
-// bodies) continue.
+// This package builds and ships: the C target compiles and links, and the
+// Swift layer on top of it is what the app talks to. One C target, with
+// license-labelled subdirectories — the reasons are below.
 //
 // ONE C TARGET, LICENSE-LABELED SUBDIRECTORIES (not one SwiftPM target per
 // license). Rationale: GPL/MIT/BSD compliance rides on per-file license

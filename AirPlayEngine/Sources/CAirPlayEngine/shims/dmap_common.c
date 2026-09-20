@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// dmap_common.c — no-op shim (T-BUILD-1). Metadata path is cut (Q6). Returns
-// -1. Dead at runtime (reached only via the stubbed metadata_prepare) but must
-// compile+link.
-//
-// TODO(T-SHIM-1): keep as a no-op.
+// dmap_common.c — a no-op by design. The metadata path is cut (Q6), so this
+// returns -1. Dead at runtime (reached only via the no-op metadata_prepare)
+// but must compile+link.
 
 #include "dmap_common.h"
 

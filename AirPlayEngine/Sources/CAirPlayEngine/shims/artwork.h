@@ -12,11 +12,7 @@
 // uint32_t — the T-PKG-1 scaffold got this wrong) are copied VERBATIM from
 // OwnTone src/artwork.h.
 //
-// STUB STATUS (T-BUILD-1): artwork.c returns -1 (no artwork). Since the caller
-// (airplay_metadata_prepare) is only reached via the metadata path — which is
-// cut — this is dead at runtime but must compile.
-//
-// TODO(T-SHIM-1): keep as a no-op (audio-only, no artwork).
+// artwork.c is a permanent no-op by design (audio-only sender; metadata path cut).
 
 #ifndef CAIRPLAYENGINE_SHIM_ARTWORK_H
 #define CAIRPLAYENGINE_SHIM_ARTWORK_H

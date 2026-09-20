@@ -402,6 +402,42 @@ extension SerializedEngineState {
         // in the shim is caught.
         #expect(firstFrameByte == 0x20, "unexpected ALAC element header — channel layout / frame shape changed")
     }
+
+    // MARK: - uuid_make
+
+    // Every session calls uuid_make twice back to back (airplay.c:1624-1625,
+    // session_uuid then group_uuid). Seeding srand() from time(NULL) on each
+    // call made both strings identical within the same wall-clock second.
+    @Test func uuidMakeProducesDistinctValuesOnConsecutiveCalls() {
+        var first = [CChar](repeating: 0, count: 37)
+        var second = [CChar](repeating: 0, count: 37)
+        first.withUnsafeMutableBufferPointer { uuid_make($0.baseAddress) }
+        second.withUnsafeMutableBufferPointer { uuid_make($0.baseAddress) }
+
+        let a = String(cString: first)
+        let b = String(cString: second)
+        #expect(a != b, "two consecutive uuid_make calls returned the same string, so session_uuid == group_uuid for every session")
+
+        for s in [a, b] {
+            let c = Array(s)
+            #expect(c.count == 36, "uuid_make wrote \(c.count) characters, expected 36: \(s)")
+            guard c.count == 36 else { continue }
+            #expect(c[8] == "-" && c[13] == "-" && c[18] == "-" && c[23] == "-", "dashes are not at offsets 8/13/18/23: \(s)")
+            #expect(c[14] == "4", "version nibble at offset 14 is not 4: \(s)")
+        }
+    }
+
+    // O_CLOEXEC handed to F_SETFL is ignored (it is a descriptor flag, set with
+    // F_SETFD), so every RTSP/data socket used to survive into any child the
+    // process execs. UDP connect() to loopback returns immediately, so this
+    // opens a real socket with no listener and no firewall prompt.
+    @Test func netConnectSocketIsCloseOnExec() throws {
+        let fd = net_connect("127.0.0.1", 9, SOCK_DGRAM, "cloexec-test")
+        try #require(fd >= 0)
+        defer { close(fd) }
+
+        #expect(fcntl(fd, F_GETFD) & FD_CLOEXEC != 0, "net_connect socket is not close-on-exec")
+    }
 }
 
 } // extension SerializedEngineState

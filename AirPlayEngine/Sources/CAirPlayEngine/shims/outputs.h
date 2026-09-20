@@ -32,18 +32,7 @@
 // outputs_cb(callback_id, device_id, state) exactly N times, or the engine
 // hangs. That dispatcher is T-SHIM-1's real work.
 //
-// STUB STATUS (T-BUILD-1): shims/outputs.c provides MINIMAL bodies so the
-// cluster LINKS: a trivial singly-linked device registry (add/remove/get/list),
-// session attach/detach as no-ops, outputs_cb as a no-op (DOES NOT yet dispatch
-// to Swift — R-A dispatcher is UNIMPLEMENTED), outputs_name returns "AirPlay 2",
-// quality subscribe/unsubscribe return 0, buffer_duration returns the default
-// 2250 ms, exclusive_mode returns false. This links but does NOT drive a real
-// session — see build-notes.md for the exact T-SHIM-1 starting state.
-//
-// TODO(T-SHIM-1): implement the REAL device registry + the outputs_cb
-// async-callback dispatcher that turns C completions into Swift-visible events
-// (risk R-A — needs a dynamic trace of the N-callbacks accounting), plus the
-// quality-subscription + buffer-duration trackers wired to config.
+// outputs.c is the real implementation: device registry, callback-id register, deferred completion dispatcher (docs/outputs-dispatcher-contract.md).
 
 #ifndef CAIRPLAYENGINE_SHIM_OUTPUTS_H
 #define CAIRPLAYENGINE_SHIM_OUTPUTS_H

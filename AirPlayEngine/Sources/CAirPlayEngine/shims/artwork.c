@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// artwork.c — no-op shim (T-BUILD-1). Metadata path is cut (Q6). Returns -1
-// (no artwork). This call site is dead at runtime (reached only via the stubbed
-// metadata_prepare) but must compile+link.
-//
-// TODO(T-SHIM-1): keep as a no-op (audio-only, no artwork).
+// artwork.c — a no-op by design. The metadata path is cut (Q6), so this
+// returns -1 (no artwork). The call site is dead at runtime (reached only via
+// the no-op metadata_prepare) but must compile+link.
 
 #include "artwork.h"
 

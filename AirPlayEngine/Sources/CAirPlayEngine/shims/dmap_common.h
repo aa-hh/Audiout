@@ -11,9 +11,7 @@
 // Signature copied VERBATIM from OwnTone src/dmap_common.h (three args:
 // songlist, song, queue_item — the T-PKG-1 scaffold had only two).
 //
-// STUB STATUS (T-BUILD-1): dmap_common.c returns -1. Dead at runtime.
-//
-// TODO(T-SHIM-1): keep as a no-op.
+// dmap_common.c is a permanent no-op by design (audio-only sender; metadata path cut).
 
 #ifndef CAIRPLAYENGINE_SHIM_DMAP_COMMON_H
 #define CAIRPLAYENGINE_SHIM_DMAP_COMMON_H

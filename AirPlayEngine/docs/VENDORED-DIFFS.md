@@ -8,8 +8,9 @@ intact, and be recorded here: file, license, rationale, exact hunk.
 
 This ledger is built directly from `git log`/`git diff` over the vendored
 directories (`sender/`, `evrtsp/`, `pair_ap/`, `libairptp/`) — **not** from
-memory or task summaries. `git log` shows exactly two changes that touched
-vendored source: `99209de` ("Engine first light PASSED"), Entry 1 below, and
+memory or task summaries. The entry list below is the count: every commit
+that touched vendored source has an entry, and nothing else does. The first
+two are `99209de` ("Engine first light PASSED"), Entry 1 below, and
 the P2b/T1 multi-stream `stream_id` change (Entry 2, on branch
 `claude/per-app-routing-engine-73f40c`, 2026-07-17), which is the only
 uncommitted vendored change in this worktree at time of writing. Every Phase 2b
@@ -23,11 +24,19 @@ Entry 5 (T1, 2026-07-26) adds a daemon-side active-peer-count publish to
 `libairptp/src/airptp.c` / `airptp_internal.h` / `daemon.c` and the public
 `libairptp/airptp.h`; Entry 6 (T1b, 2026-07-26) is the loopback peer-control
 delivery fix in `ptp_msg_handle.c` that Entry 5's own new test assertions
-surfaced as red.
-**Total vendored files touched: 7** (`airplay.c`, `raop.c`, `ptp_msg_handle.c`,
-`libairptp/airptp.h`, `libairptp/src/airptp.c`, `libairptp/src/airptp_internal.h`,
-`libairptp/src/daemon.c`); `raop.c` (Entry 3) and `ptp_msg_handle.c` (Entries 1
-and 6) each now carry two distinct diffs. (Note: the sibling `stream_id`
+surfaced as red. Entries 7-10 (2026-09-20 backfill) cover four commits that
+had gone unrecorded: the speaker-input `device_id` threading and inbound
+volume parse (`83dc9483`), four verified memory leaks (`a10defd3`), the
+pair-verify double-free (`5c1f5969`), and the overridable PTP shared-memory
+name (`b961398e`). The stream-cap raise the 2026-09-17 review listed as
+missing is not missing: it is Entry 2, item 8.
+**Total vendored files touched: 11** (`sender/airplay.c`,
+`sender/airplay_events.c`, `sender/airplay_events.h`, `sender/raop.c`,
+`pair_ap/pair_fruit.c`, `pair_ap/pair_homekit.c`,
+`libairptp/src/ptp_msg_handle.c`, `libairptp/airptp.h`,
+`libairptp/src/airptp.c`, `libairptp/src/airptp_internal.h`,
+`libairptp/src/daemon.c`); several carry more than one distinct diff — see
+the closing paragraph for the per-file list. (Note: the sibling `stream_id`
 additions to `shims/outputs.h` and `shims/engine_bridge.h`, and T3's
 `shims/misc.{h,c}` / `shims/conffile.c` / `shims/engine_bridge.h` additions, are
 in `shims/`, which is engine-owned code, NOT the byte-identical vendored set —
@@ -571,8 +580,364 @@ the "Total vendored diffs to date" count at the top of this file.
   "should return to 0 after peer_remove") pass. Full `swift test`: 173/173
   pass.
 
-**Total vendored files touched: 7** (`airplay.c`, `raop.c`, `ptp_msg_handle.c`,
-`libairptp/airptp.h`, `libairptp/src/airptp.c`, `libairptp/src/airptp_internal.h`,
-`libairptp/src/daemon.c`); `airplay.c` and `raop.c` each carry more than one
-distinct diff (Entries 2/4 and 3a/3b/4 respectively), and `ptp_msg_handle.c`
-now carries two (Entries 1 and 6).
+---
+
+## Entry 7 — `sender/airplay_events.{c,h}` and `sender/airplay.c`: thread the owning `device_id` into the events channel and parse the speaker's own volume (speaker-input task, 2026-07-22)
+
+- **Files**: `AirPlayEngine/Sources/CAirPlayEngine/sender/airplay_events.c`,
+  `sender/airplay_events.h`, `sender/airplay.c`
+- **License**: GPL-2.0-or-later (`AirPlayEngine/COPYING`)
+- **Landed in**: commit `83dc9483` (2026-07-22, "Speaker-input
+  responsiveness: respond to controls pressed on the speaker")
+- **Rationale**: a volume knob turned ON the speaker, and its transport keys,
+  arrive on the reverse RTSP events channel that `airplay_events.c` owns.
+  OwnTone fed the inbound value into its own player; an audio-only sender
+  dropped it. Two things were needed inside the vendored file: the parse of
+  the inbound `SET_PARAMETER volume: <dB>` line (and a best-effort bplist
+  search for receivers that report a plist instead), and the identity of the
+  speaker the channel belongs to, so `airplayengine_remote_fire` routes the
+  change to the right output. The events client is created inside
+  `airplay_events_listen`, called from `airplay.c`'s SETUP response handler —
+  the only place that knows `session->device_id` — so the id has to be
+  threaded through the vendored signature. A shim cannot reach either point:
+  the read loop, the decrypt and the client struct all live in this file.
+- **Exact hunks**: `airplay_events.c` is +287/−4 across hunks at
+  `@@ -39`, `@@ -54`, `@@ -129`, `@@ -138`, `@@ -326`, `@@ -401`, `@@ -429`,
+  `@@ -476`, `@@ -487`. The signature and struct changes:
+
+  ```c
+   #include "pair_ap/pair.h"
+  +#include "engine_bridge.h" /* airplayengine_remote_fire — inbound device volume */
+  ```
+
+  ```c
+   struct airplay_events_client
+   {
+     char *name;
+  +  uint64_t device_id; /* engine-added: which output_device this channel belongs
+  +                       * to, so an inbound volume change routes to that speaker. */
+     int fd;
+  ```
+
+  ```c
+   static int
+  -client_add(const char *name, int fd, const uint8_t *key, size_t key_len)
+  +client_add(const char *name, uint64_t device_id, int fd, const uint8_t *key, size_t key_len)
+   {
+  ...
+  +  client->device_id = device_id;
+     client->fd = fd;
+  ```
+
+  ```c
+   int
+  -airplay_events_listen(const char *name, const char *address, unsigned short port, const uint8_t *key, size_t key_len)
+  +airplay_events_listen(const char *name, uint64_t device_id, const char *address, unsigned short port, const uint8_t *key, size_t key_len)
+  ...
+  -  ret = client_add(name, fd, key, key_len);
+  +  ret = client_add(name, device_id, fd, key, key_len);
+  ```
+
+  `airplay_events.h` (the matching declaration):
+
+  ```c
+   int
+  -airplay_events_listen(const char *name, const char *address, unsigned short port, const uint8_t *key, size_t key_len);
+  +airplay_events_listen(const char *name, uint64_t device_id, const char *address, unsigned short port, const uint8_t *key, size_t key_len);
+  ```
+
+  `airplay.c` `@@ -3315,8 +3315,10 @@ response_handler_setup_session`:
+
+  ```c
+  -  // Reverse connection, used to receive playback events from device
+  -  ret = airplay_events_listen(session->devname, session->address, session->events_port, session->shared_secret, session->shared_secret_len);
+  +  // Reverse connection, used to receive playback events from device (transport
+  +  // keys + the speaker's own volume). device_id is threaded through so an inbound
+  +  // volume change routes to the right speaker (engine-added, speaker-input task).
+  +  ret = airplay_events_listen(session->devname, session->device_id, session->address, session->events_port, session->shared_secret, session->shared_secret_len);
+  ```
+
+  The new inbound-volume parser, in full (the `@@ -326` hunk also adds
+  `volume_normalize`, `key_is_volume`, `plist_number_val`,
+  `plist_find_volume` and `event_bplist_volume`, the bplist fallback path;
+  `@@ -429` wires both into `incoming_cb`):
+
+  ```c
+  /* Some receivers report a change to their OWN volume back to the sender on this
+   * event channel as an RTSP SET_PARAMETER carrying a `volume: <dB>` line — the
+   * same text/parameters shape the sender sends outbound (airplay.c
+   * payload_make_set_volume). OwnTone fed the inbound value through
+   * device_volume_to_pct; an audio-only sender never parsed it, so a knob turn on
+   * the speaker was silently dropped here.
+   *
+   * Scan for a `volume:` header line and map its dB to a normalized 0..1 level.
+   * The dB<->level map mirrors the outbound path for the default max_volume
+   * (airplay_volume_from_pct: -30..0 dB <-> 0..1), and <= -30 dB (including the
+   * -144 mute sentinel) clamps to 0. Returns 0 and sets *out on a match, -1 if no
+   * valid volume line is present (the caller then tries the transport path). */
+  static int
+  volume_parse(const uint8_t *in, size_t in_len, double *out)
+  {
+    static const char key[] = "volume:";
+    const size_t keylen = sizeof(key) - 1;
+    const uint8_t *p;
+    const uint8_t *end = in + in_len;
+
+    for (p = in; p + keylen <= end; p++)
+      {
+        // Only match at the very start or at the start of a header line, so we
+        // don't false-match "volume:" bytes buried inside a binary plist body.
+        if (p != in && p[-1] != '\n')
+  	continue;
+        if (memcmp(p, key, keylen) != 0)
+  	continue;
+
+        p += keylen;
+        while (p < end && (*p == ' ' || *p == '\t'))
+  	p++;
+
+        // strtod needs a NUL-terminated token; copy up to the line end.
+        char buf[32];
+        size_t n = 0;
+        while (p < end && n < sizeof(buf) - 1 && *p != '\r' && *p != '\n')
+  	buf[n++] = (char)*p++;
+        buf[n] = '\0';
+
+        char *endp = NULL;
+        double db = strtod(buf, &endp);
+        if (endp == buf) // not a number after "volume:" — keep scanning
+  	continue;
+
+        if (db <= -30.0)
+  	*out = 0.0;
+        else if (db >= 0.0)
+  	*out = 1.0;
+        else
+  	*out = (db + 30.0) / 30.0;
+        return 0;
+      }
+
+    return -1;
+  }
+  ```
+- **No in-file marker**: commit `83dc9483` added no
+  `[AirPlayEngine vendored change ...]` comment to `airplay_events.c`,
+  `airplay_events.h` or the `airplay.c` hunk (the hunk's own comment mentions
+  "engine-added" but is not the standard marker). This entry is the only
+  record of the change. Adding markers would itself be a vendored edit, so it
+  is deliberately not done here.
+
+---
+
+## Entry 8 — `pair_ap/pair_fruit.c`, `pair_ap/pair_homekit.c`, `sender/airplay_events.c`, `sender/raop.c`: fix four verified memory leaks (2026-07-24)
+
+- **Files**: `AirPlayEngine/Sources/CAirPlayEngine/pair_ap/pair_fruit.c`,
+  `pair_ap/pair_homekit.c` (MIT, `SPDX-License-Identifier: MIT` in
+  `pair_ap/pair.h`); `sender/airplay_events.c`, `sender/raop.c`
+  (GPL-2.0-or-later, `AirPlayEngine/COPYING`)
+- **Landed in**: commit `a10defd3` (2026-07-24, "Waves 1-2: fix verified
+  memory leaks + damp the coreaudiod rebuild storm")
+- **Rationale**: four leaks found with the allocation instruments, each inside
+  a vendored free/teardown function that no shim can reach: `srp_user_new`'s
+  error path never freed `usr->ng` (both pairing backends carry the same
+  copy of the SRP code); `client_free` never closed the events-channel fd;
+  `respond()` leaked both evbuffers when the encrypt step failed; and
+  `session_free` left the pair-verify/pair-setup contexts allocated when a
+  session was torn down mid-handshake.
+- **Exact hunks**:
+
+  `pair_fruit.c` `@@ -260` and `pair_homekit.c` `@@ -369`, one identical line
+  in each `srp_user_new` error path:
+
+  ```c
+     if (!usr)
+       return NULL;
+
+  +  free_ng(usr->ng);
+     bnum_free(usr->a);
+  ```
+
+  `airplay_events.c` `@@ -109` (`client_free`), `@@ -610` (`respond`) and
+  `@@ -773` (`airplay_events_listen`, dropping the now-double close):
+
+  ```c
+     free(client->name);
+     pair_cipher_free(client->cipher_ctx);
+
+  +  if (client->fd >= 0)
+  +    close(client->fd);
+  +
+     free(client);
+  ```
+
+  ```c
+         DPRINTF(E_WARN, L_AIRPLAY, "Could not encrypt AirPlay event data response: %s\n", pair_cipher_errmsg(client->cipher_ctx));
+  +      evbuffer_free(encrypted);
+  +      evbuffer_free(response);
+         return -1;
+  ```
+
+  ```c
+     ret = client_add(name, device_id, fd, key, key_len);
+     if (ret < 0)
+       {
+  -      close(fd);
+  +      /* client_add's error path already ran client_free(), which now closes
+  +       * fd itself -- closing it again here would double-close (a race with
+  +       * any thread that has since reopened the same fd number). */
+         return -1;
+       }
+  ```
+
+  `raop.c` `@@ -2047` (`session_free`):
+
+  ```c
+     if (rs->server_fd >= 0)
+       close(rs->server_fd);
+
+  +  /* A session torn down mid-handshake (external stop/deinit racing an
+  +   * in-flight pair-verify/pair-setup exchange) bypasses the handshake state
+  +   * machine's own pair_verify_free()/pair_setup_free() calls -- free them
+  +   * here too. Both are NULL-safe, matching every other call site. */
+  +  pair_verify_free(rs->pair_verify_ctx);
+  +  pair_setup_free(rs->pair_setup_ctx);
+  +
+     free(rs->realm);
+  ```
+- **No in-file marker**: no `[AirPlayEngine vendored change ...]` comment was
+  added in `pair_fruit.c`, `pair_homekit.c` or `airplay_events.c`; this entry
+  is the record.
+
+---
+
+## Entry 9 — `sender/raop.c`: fix the pair-verify double-free and the OOM-path body leak (W0.3, 2026-07-24)
+
+- **File**: `AirPlayEngine/Sources/CAirPlayEngine/sender/raop.c`
+- **License**: GPL-2.0-or-later (`AirPlayEngine/COPYING`)
+- **Landed in**: commit `5c1f5969` (2026-07-24, "W0.3: fix pair-verify
+  double-free + OOM leak in raop.c")
+- **Rationale**: Entry 8 made `session_free` free `rs->pair_verify_ctx`, and
+  `raop_cb_pair_verify_step2` frees it too — without nulling the pointer the
+  second free is a double-free (`pair_verify_free` is NULL-safe, not
+  double-free-safe). The second hunk frees the request body on the path where
+  the RTSP request could not be created. Both sit inside vendored
+  callbacks.
+- **Exact hunks**:
+
+  ```c
+     if (!req)
+       {
+         DPRINTF(E_LOG, L_RAOP, "Could not create RTSP request for verification step %d\n", step);
+  +      free(body);
+         return -1;
+       }
+  ```
+
+  ```c
+     pair_verify_free(rs->pair_verify_ctx);
+  +  rs->pair_verify_ctx = NULL; /* null-out after free: session_free() frees it again (NULL-safe, not double-free-safe) */
+  ```
+
+---
+
+## Entry 10 — `libairptp`: let a test override the shared-memory name so it cannot collide with the production daemon (2026-07-22)
+
+- **Files**: `AirPlayEngine/Sources/CAirPlayEngine/libairptp/airptp.h`,
+  `libairptp/src/airptp.c`, `libairptp/src/airptp_internal.h`,
+  `libairptp/src/daemon.c`
+- **License**: MIT (`AirPlayEngine/Sources/CAirPlayEngine/libairptp/LICENSE`)
+- **Landed in**: commit `b961398e` (2026-07-22, "Isolate PTP IPC test
+  shared-memory name from the production daemon")
+- **Rationale**: the PTP IPC tests start their own unprivileged daemon, and
+  upstream hard-codes the shared-memory object as `/airptp_shm`. On a machine
+  where the real root-owned helper is running, the test `shm_unlink`s and
+  re-creates the production daemon's own segment. The name is consumed by
+  `shm_open`/`shm_unlink` inside the vendored `daemon.c` and `airptp.c`, so no
+  shim can redirect it; the smallest change is a mutable buffer plus a public
+  override called before bind/start/find.
+- **Exact hunks**:
+
+  ```c
+  +// By default airptp publishes its shared clock state under the name
+  +// /airptp_shm, but for testing you can override that here - e.g. so an
+  +// unprivileged test process doesn't collide with a real, root-owned daemon
+  +// of the same name already running on the host. Must be called before
+  +// airptp_daemon_bind()/airptp_daemon_start()/airptp_daemon_find().
+  +void
+  +airptp_shm_name_override(const char *name);
+  ```
+
+  ```c
+   #define AIRPTP_SHM_NAME "/airptp_shm"
+  +#define AIRPTP_SHM_NAME_MAXLEN 64
+  +
+  +// Mutable, overridable via airptp_shm_name_override() (declared in
+  +// ../airptp.h, defined in airptp.c alongside airptp_event_port/
+  +// airptp_general_port). A fixed buffer, not a `const char *`, because the
+  +// override copies its argument in rather than just storing the pointer - a
+  +// caller (e.g. a Swift test using String.withCString {}) may not be able to
+  +// keep the original storage alive past the override call. daemon.c and
+  +// airptp.c must read this instead of the AIRPTP_SHM_NAME macro directly so a
+  +// test override actually takes effect.
+  +extern char airptp_shm_name[AIRPTP_SHM_NAME_MAXLEN];
+  ```
+
+  ```c
+   unsigned short airptp_general_port = PTP_GENERAL_PORT;
+  +char airptp_shm_name[AIRPTP_SHM_NAME_MAXLEN] = AIRPTP_SHM_NAME;
+  ...
+  -  fd = shm_open(AIRPTP_SHM_NAME, O_RDONLY, 0);
+  +  fd = shm_open(airptp_shm_name, O_RDONLY, 0);
+  ...
+  +void
+  +airptp_shm_name_override(const char *name)
+  +{
+  +  snprintf(airptp_shm_name, sizeof(airptp_shm_name), "%s", name);
+  +}
+  ```
+
+  `daemon.c`, three call sites (`daemon_shm_destroy`'s `shm_unlink`, and
+  `daemon_shm_create`'s `shm_unlink` + `shm_open`):
+
+  ```c
+  -  shm_unlink(AIRPTP_SHM_NAME);
+  +  shm_unlink(airptp_shm_name);
+  ...
+  -  shm_unlink(AIRPTP_SHM_NAME);
+  +  shm_unlink(airptp_shm_name);
+
+  -  fd = shm_open(AIRPTP_SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0644);
+  +  fd = shm_open(airptp_shm_name, O_CREAT | O_EXCL | O_RDWR, 0644);
+  ```
+- **No in-file marker**: the four files carry no
+  `[AirPlayEngine vendored change ...]` comment for these hunks; this entry is
+  the record.
+
+---
+
+## Not a vendored diff — `libairptp/module.modulemap`
+
+`libairptp/module.modulemap` (added in commit `9c082f06`) sits inside a
+vendored directory but is not upstream source: it is a hand-written SwiftPM
+module map for the `Clibairptp` target, written by this project. It exists
+precisely so the vendored `airptp.h` can stay byte-identical — SwiftPM's
+generated map would scan the directory as an umbrella and drag `src/`'s
+private headers into the module. Its own header comment says so. No upstream
+file is modified by it, so it needs no entry above.
+
+---
+
+**Total vendored files touched: 11** — `sender/airplay.c`,
+`sender/airplay_events.c`, `sender/airplay_events.h`, `sender/raop.c`,
+`pair_ap/pair_fruit.c`, `pair_ap/pair_homekit.c`,
+`libairptp/src/ptp_msg_handle.c`, `libairptp/airptp.h`,
+`libairptp/src/airptp.c`, `libairptp/src/airptp_internal.h`,
+`libairptp/src/daemon.c`. Several carry more than one distinct diff:
+`airplay.c` (Entries 2, 4, 7), `raop.c` (Entries 3a, 3b, 4, 8, 9),
+`airplay_events.c` (Entries 7, 8), `ptp_msg_handle.c` (Entries 1, 6), and the
+four libairptp files (Entries 5, 10). (Note: the sibling `stream_id`
+additions to `shims/outputs.h` and `shims/engine_bridge.h`, and T3's
+`shims/misc.{h,c}` / `shims/conffile.c` / `shims/engine_bridge.h` additions,
+are in `shims/`, which is engine-owned code, NOT the byte-identical vendored
+set — so they are documented in Entries 2 and 3 for context but do not
+themselves count as vendored diffs.)

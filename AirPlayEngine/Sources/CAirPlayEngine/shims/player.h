@@ -17,14 +17,7 @@
 // enum play_status keeps OwnTone's integer values (PLAY_PLAYING = 4) so the
 // `status.status == PLAY_PLAYING` compare in airplay_events.c behaves the same.
 //
-// STUB STATUS (T-BUILD-1): player.c bodies are MINIMAL no-ops that LINK —
-// player_device_add/remove return 0 (TODO(T-SHIM-1): call into the outputs.c
-// registry + emit a Swift deviceAdded/Removed event); player_get_status zeroes
-// the struct and returns 0; the four playback controls return 0.
-//
-// TODO(T-SHIM-1): wire player_device_add/remove into shims/outputs.c's
-// registry and surface Swift-visible events; keep the playback controls as
-// no-ops (or forward as optional "remote-control received" events).
+// player.c: the outputs registry lives in outputs.c; these entry points forward or no-op by design.
 
 #ifndef CAIRPLAYENGINE_SHIM_PLAYER_H
 #define CAIRPLAYENGINE_SHIM_PLAYER_H

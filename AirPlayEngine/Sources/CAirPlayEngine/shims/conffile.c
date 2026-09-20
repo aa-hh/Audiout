@@ -27,10 +27,11 @@
 // The engine surfaces per-device overrides through the Swift addOutput
 // descriptor (seam-map §3.1 "Shim decision"), not through this config.
 //
-// TODO(seam-map §3.1 / T-API-1): derive `libhash` from the Swift-provided
-// client/library name (OwnTone murmur-hashes the expanded library name — see
-// conffile.c:475 upstream) so the AirPlay device id + PTP clock-id seed is
-// stable and unique per install. conffile_set_libhash() is provided for that.
+// `libhash` (the AirPlay device id + PTP clock-id seed) is derived in Swift
+// from the client name and the install seed and pushed in through
+// conffile_set_libhash() — AirPlayEngine.start does this before airplay_init.
+// OwnTone instead murmur-hashes the expanded library name (conffile.c:475
+// upstream); seam-map §3.1.
 
 #include "conffile.h"
 #include "logger.h"

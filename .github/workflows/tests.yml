@@ -30,6 +30,23 @@ jobs:
       AUDIOUT_TEST_NO_CACHE: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history (trees only, no blobs) for the mtime step below.
+          fetch-depth: 0
+          filter: blob:none
+      # SwiftPM decides what to recompile by each source file's mtime, and
+      # checkout stamps every file with "now", so the restored .build below
+      # looked stale for every module in this repo and the cache only ever
+      # spared the dependency checkouts (measured: 447 of 716 compile steps
+      # re-ran on a push that touched no Swift). Give each tracked file the
+      # time of the commit that last touched it: identical across runs for
+      # untouched files, newer for the ones this push changed.
+      - name: Restore source mtimes from git history
+        run: |
+          git -c core.quotePath=false log --format='@@%cd' --date=format:%Y%m%d%H%M.%S --name-only --no-renames HEAD \
+            | awk '/^@@/ {t=substr($0,3); next} $0 != "" && !seen[$0]++ {print t "\t" $0}' \
+            | while IFS="$(printf '\t')" read -r t f; do [ -f "$f" ] && touch -t "$t" "$f"; done
+          echo "restored $(git ls-files | wc -l | tr -d ' ') tracked files"
       # Compiled dependencies and the app's own modules from the last run.
       # Keyed on the lockfile so a dependency bump starts clean; restore-keys
       # takes the newest cache otherwise, and SwiftPM rebuilds only what

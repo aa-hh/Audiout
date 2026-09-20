@@ -234,7 +234,7 @@ extension SerializedSharedState {
             StoreRecovery.onWriteFailure = { _ in failures.count += 1 }
             defer { StoreRecovery.onWriteFailure = nil }
 
-            controller.presentPrompt = { _, respond in respond(true) }
+            controller.presentPrompt = { _, _, respond in respond(true) }
             controller.handleRequest(clientID: "test-client", clientName: "Test Phone") { _ in }
 
             #expect(failures.count == 1)

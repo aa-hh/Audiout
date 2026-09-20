@@ -5,9 +5,13 @@ import AudioutCore
 
 /// The first-open licence gate window (owner decision 2026-08-30): on a
 /// purchased build (`AudioutLicenseServerURL` present — see `LicenseGate`),
-/// the app's first act is this window, and nothing else starts until it
-/// opens. It is the welcome: brand mark and key field over the live emitter
-/// field, ahead of Setup, the backend, and the menu-bar surface's first use.
+/// this window is the first thing the user sees. It is the welcome: brand
+/// mark and key field over the live emitter field, and the deferred
+/// first-run block — Setup, the backend, the menu-bar surface's first use —
+/// waits on it. The status item, analytics and, when remote control is on,
+/// the companion server already run underneath it, which is why
+/// `AppDelegate` routes a phone-sent key into this window's field via
+/// `submit(key:)` rather than waiting for it to close.
 ///
 /// **Dismissal contract:** `onPassed` fires exactly once when a key is
 /// accepted (verified active, or saved-unverified while the server is

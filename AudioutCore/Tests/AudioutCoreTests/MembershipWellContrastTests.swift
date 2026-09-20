@@ -232,8 +232,9 @@ import AppKit
                 "gold must not converge with (or drop below) its own dim companion"))
     }
 
-    /// …and darkening it must not walk it into `gold`. The two are the rail's
-    /// idle/armed pair, so they have to stay visibly different inks. Since
+    /// …and darkening it must not walk it into `gold`. The two are the accent
+    /// pair the dot and the meter draw with, so they have to stay visibly
+    /// different inks (the rail's own pair is measured below). Since
     /// light gold went to `#E8B84B` (2026-09-17) that separation is
     /// luminance, as in dark, so the old chroma-gap floor is gone; the hue
     /// family still holds.
@@ -246,17 +247,18 @@ import AppKit
     }
 
     /// The light idle/armed gap has a floor. `spineTone(armed:)` resolves to
-    /// `gold` or `ember`; under ~1.40:1 the two are one visible colour on a
-    /// 2 pt line and the rail cannot report armed vs idle. The 1.60:1 ceiling
-    /// that guarded ember from sinking into brown went with the light gold
-    /// move of 2026-09-17: the gap is now bought by gold lifting, ember's
-    /// depth unchanged.
-    @Test func lightEmberStaysTellableFromGold() {
-        let gold = resolved(Tokens.Color.gold, appearanceName: .aqua)
-        let ember = resolved(Tokens.Color.ember, appearanceName: .aqua)
-        let gap = contrastRatio(gold, ember)
+    /// `railLive` or `ember`; under ~1.40:1 the two are one visible colour on a
+    /// 2 pt line and the rail cannot report armed vs idle. Measured through
+    /// `spineTone` itself rather than the tokens behind it: the armed half is
+    /// not `gold` (light `gold` sits at 1.77:1 on paper, which the rail cannot
+    /// wear), so a test naming the tokens directly measures a pair the rail
+    /// does not draw.
+    @Test func lightEmberStaysTellableFromTheArmedSpineTone() {
+        let armed = resolved(Tokens.Color.spineTone(armed: true), appearanceName: .aqua)
+        let idle = resolved(Tokens.Color.spineTone(armed: false), appearanceName: .aqua)
+        let gap = contrastRatio(armed, idle)
 
-        #expect(gap >= 1.40, Comment(rawValue: "gold vs ember \(gap):1 — the idle rail merges into the armed one"))
+        #expect(gap >= 1.40, Comment(rawValue: "armed vs idle spine tone \(gap):1 — the idle rail merges into the armed one"))
     }
 
     // MARK: Structural — the editor's checklist actually wears the new surface

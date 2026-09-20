@@ -111,14 +111,15 @@ public final class MainOutRowView: NSView {
     /// coerces incoming meter pushes to 0 so the drained master meter stays
     /// down while muted (S3).
     private var isMasterMuted = false
-    /// Whether the Main Audio spine is LIVE — the continuous rail overlay reads
-    /// this to tone the origin hook AND the member segments below it, gold vs
-    /// ember. Live = the armed target (connected ∧ unmuted) **or** the
+    /// Whether the Main Audio spine is LIVE — whether audio is flowing through
+    /// it this instant. It tones nothing: the whole instrument takes
+    /// `BusRailOverlayView.spineArmed`. The continuous rail overlay reads this
+    /// through `railHookAnchor` for one decision only — whether a joining room
+    /// has a carrying wire to announce itself up.
+    /// Live = the armed target (connected ∧ unmuted) **or** the
     /// local-only armed case, where audio genuinely plays through the
     /// Mac and no remote handshake exists for `connectionState` to report. Both
-    /// carry real audio to a member node, so both must read live: the hook's
-    /// corner and the rail leaving it are one stroke, and a truth that covers
-    /// only the remote case draws them in two tones.
+    /// carry real audio to a member node, so both count as live.
     private var isSpineLive = false
     /// Whether a rail exists at all — the host pushes it through
     /// ``setRailLive(_:)``, resolved from the same rule the wire itself draws by
@@ -235,8 +236,11 @@ public final class MainOutRowView: NSView {
         // row hands over the armed STATE only — `HaloRingView` resolves the
         // tone through the same `Tokens.Color.spineTone` the rail overlay
         // uses, at stamp time, so the two cannot drift and the accent dial
-        // moves both.
-        haloRingView.connectedSpineArmed = isSpineLive
+        // moves both. The popover's spine IS the live signal path
+        // (`BusRailOverlayView.spineArmed`), and this ring is part of that one
+        // instrument: it may not drop to ember while the wire curving into it
+        // and the discs below it stay live-toned.
+        haloRingView.connectedSpineArmed = true
         armedDotView.apply(armed: armed)
         // The master fader's engaged (gold) fill reuses the EXACT same armed
         // predicate the dot renders — one armed truth, two instruments.
@@ -939,9 +943,10 @@ extension MainOutRowView: RailHookProviding {
     /// The Main Audio ring's own geometry (Warm Signal nitpicks — "rail into
     /// the ring"): the icon's centre, converted into `view`'s coordinates,
     /// plus the ring's radius (a distance, unaffected by the sibling-view
-    /// coordinate conversion) and whether the spine is armed (gold vs ember).
-    /// The overlay curves the rail up to meet this ring's left edge directly,
-    /// replacing the old bare gutter-dot terminus.
+    /// coordinate conversion) and whether the spine is carrying audio right now
+    /// (the connect pulse's gate — the instrument's TONE is the overlay's own
+    /// `spineArmed`). The overlay curves the rail up to meet this ring's left
+    /// edge directly, replacing the old bare gutter-dot terminus.
     public func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
         layoutSubtreeIfNeeded()
         let iconRectInSelf = iconView.convert(iconView.bounds, to: self)

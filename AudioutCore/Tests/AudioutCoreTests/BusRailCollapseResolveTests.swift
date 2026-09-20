@@ -94,7 +94,7 @@ import Testing
     /// are what state the failure — a line running down to it said the signal
     /// arrives there, which is the one thing that is not happening.
     @Test func theWireStopsAboveAFailedRoom() {
-        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.member, .failed]))
+        let plan = RailPlan.resolve(toneInput(armed: true, nodes: [.member, .failed]))
         #expect(plan.signalTerminusIndex == 0, "the lowest room the wire REACHES is the member")
         let runs = BusRailOverlayView().wireRuns(for: plan)
         #expect(runs.count == 2, "hook + the one segment into the member; nothing below it")
@@ -112,7 +112,7 @@ import Testing
     /// A band whose ONLY on-spine room has failed has no rail at all — the
     /// failed node keeps its own red rim, and nothing curves out of Main Audio.
     @Test func aBandOfNothingButAFailedRoomHasNoRail() {
-        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.nonMember, .failed]))
+        let plan = RailPlan.resolve(toneInput(armed: true, nodes: [.nonMember, .failed]))
         #expect(plan.signalTerminusIndex == nil, "a failed room is never the wire's terminus")
         #expect(BusRailOverlayView().wireRuns(for: plan).isEmpty, "nothing reached ⇒ no rail")
     }
@@ -289,9 +289,14 @@ import Testing
             && abs(a.blueComponent - b.blueComponent) <= 0.005
     }
 
-    private func toneInput(gold: Bool, nodes: [MembershipBusView.Node]) -> RailPlan.Input {
+    /// `armed` is the SPINE's own flag — the surface truth that tones the whole
+    /// instrument. `gold` (audio is flowing this instant) rides along with it
+    /// here because no fixture in this file separates them; the connect pulse
+    /// is the only thing that reads them apart.
+    private func toneInput(armed: Bool, nodes: [MembershipBusView.Node]) -> RailPlan.Input {
         var input = expandedInput()
-        input.gold = gold
+        input.gold = armed
+        input.spineArmed = armed
         input.stops = zip([420, 380, 340, 300], nodes).map { .init(y: $0, node: $1) }
         return input
     }
@@ -300,7 +305,7 @@ import Testing
     /// line carries the same signal past that node as it does into the member
     /// below, so nothing on the wire changes colour between hook and terminus.
     @Test func detourPastNonMembersKeepsTheArmedSpineTone() {
-        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.nonMember, .nonMember, .member]))
+        let plan = RailPlan.resolve(toneInput(armed: true, nodes: [.nonMember, .nonMember, .member]))
         let runs = BusRailOverlayView().wireRuns(for: plan)
         #expect(runs.count > 1, "hook plus at least one segment")
         let spine = Tokens.Color.spineTone(armed: true)
@@ -308,7 +313,7 @@ import Testing
     }
 
     @Test func detourPastNonMembersKeepsTheIdleSpineTone() {
-        let plan = RailPlan.resolve(toneInput(gold: false, nodes: [.nonMember, .nonMember, .member]))
+        let plan = RailPlan.resolve(toneInput(armed: false, nodes: [.nonMember, .nonMember, .member]))
         let runs = BusRailOverlayView().wireRuns(for: plan)
         #expect(runs.count > 1, "hook plus at least one segment")
         let spine = Tokens.Color.spineTone(armed: false)
@@ -318,7 +323,7 @@ import Testing
     /// The one segment that IS allowed to step is the connecting one — the
     /// energize sweep's ember, brightening to gold once the node connects.
     @Test func onlyTheConnectingSegmentWearsEmber() {
-        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.connecting, .member]))
+        let plan = RailPlan.resolve(toneInput(armed: true, nodes: [.connecting, .member]))
         let runs = BusRailOverlayView().wireRuns(for: plan)
         let spine = Tokens.Color.spineTone(armed: true)
         let ember = Tokens.Color.ember

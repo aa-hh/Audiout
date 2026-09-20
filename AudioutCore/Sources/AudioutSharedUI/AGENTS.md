@@ -24,6 +24,7 @@ or `GroupController`.
 - No rail, no ring: `BusRailOverlayView.railReaches` decides both, and a failed room is never reached.
 - The rail overlay paints ABOVE every row, so the gutter is the spine's alone: anything that opens under a device row (sync drawer, alignment note, connection diagnosis) starts its content at `PopoverColumnGrid.firstElementLeading`, never inside the gutter.
 - A node can fill with the checkbox off: `localFallbackOutput` draws the Mac as a rail member while the engine plays on it, and edits no selection.
+- One instrument, one colour: wire, hook, arcs, Main Audio ring and EVERY node — hollow rings included — take `Tokens.Color.spineTone(armed:)`. Membership is fill-vs-stroke and size; only `.failed` may leave the tone. TRAP: the tone follows `BusRailOverlayView.spineArmed` (a surface truth), never the anchor's `gold`, which now gates the connect pulse alone.
 - Warm ink and gold wash mean `isRouteArmed`; cool means silent. Instruments are flat, no `CALayer` blooms.
 - `Tokens.Color.muted` is fenced to the device row's engaged mute button; a second consumer fails a test.
 - `setContent`'s `defaultSize:` seeds only the first mount of a content controller.

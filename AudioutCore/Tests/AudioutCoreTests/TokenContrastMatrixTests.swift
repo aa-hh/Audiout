@@ -207,6 +207,14 @@ extension SerializedSharedState {
                                                   ("raised", raised), ("well", well)])),
             ContrastEntry(name: "ember", token: Tokens.Color.ember, floor: 3.0,
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
+            // The membership rail's live tone. It carries NO exception — the
+            // whole reason it exists is that `gold`'s light half (1.77:1) is a
+            // fill the dot can wear and a 2 pt wire cannot, and the rail is
+            // drawn in one tone end to end, so the wire's floor is the node's
+            // floor too.
+            ContrastEntry(name: "railLive", token: Tokens.Color.railLive, floor: 3.0,
+                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel),
+                                                  ("raised", raised), ("well", well)])),
             ContrastEntry(name: "ring", token: Tokens.Color.ring, floor: 3.0,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
             // The mute pill is OPAQUE, so it is measured on every ground a
@@ -283,7 +291,8 @@ extension SerializedSharedState {
         let grounds: [(String, NSColor)] = [("well", well), ("panel", panel)]
 
         let nonTextFloor: CGFloat = 3.0
-        for (name, token) in [("ember", Tokens.Color.ember), ("gold", Tokens.Color.gold)] {
+        for (name, token) in [("ember", Tokens.Color.ember), ("gold", Tokens.Color.gold),
+                              ("railLive", Tokens.Color.railLive)] {
             for (groundName, ground) in grounds {
                 let ratio = measuredRatio(token, over: ground, appearanceName: .aqua)
                 #expect(ratio >= nonTextFloor,
@@ -355,7 +364,8 @@ extension SerializedSharedState {
                 Tokens.test_increaseContrastOverride = increaseContrast
                 for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
                     let seat = resolved(Tokens.Color.socket, appearanceName: appearanceName)
-                    for (rimName, rim) in [("ember", Tokens.Color.ember), ("gold", Tokens.Color.gold)] {
+                    for (rimName, rim) in [("ember", Tokens.Color.ember),
+                                           ("railLive", Tokens.Color.railLive)] {
                         let ratio = contrastRatio(seat, resolved(rim, appearanceName: appearanceName))
                         #expect(ratio >= floor, Comment(rawValue:
                             "socket vs \(rimName) (\(style), " +

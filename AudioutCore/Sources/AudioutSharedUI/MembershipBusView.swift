@@ -22,13 +22,15 @@ import QuartzCore
 /// host row) to place the rail's gap (on-spine) or detour arc (off-spine).
 ///
 /// **Node vocabulary (v4 §Call-1, the static states the energize agent drives):**
-/// `.member` (filled gold — connected member), `.connecting` (gold dashed
-/// hollow), `.failed` (failure-red ring), `.nonMember` (hollow, detoured).
-/// The energize "pending" beat has NO node form of
-/// its own — an ember dashed rim is indistinguishable from the gold dashed one
-/// at node size, so the beat renders as `.connecting`. **Rail segment tone:**
-/// GOLD through a connected member, `ember` otherwise — ember survives as a
-/// SEGMENT tone only, which is where Call 3's energize sequence reads.
+/// `.member` (filled — connected member), `.connecting` (dashed hollow),
+/// `.failed` (failure-red ring), `.nonMember` (hollow, detoured). Every one of
+/// them but `.failed` is drawn in the spine's own tone
+/// (`Tokens.Color.spineTone`), the same value the wire and the arcs wear:
+/// membership is fill versus stroke, and size, never a second hue (owner's
+/// call, 2026-09-20). The energize "pending" beat has NO node form of its own
+/// — a dashed rim is a dashed rim at node size — so the beat renders as
+/// `.connecting`. **Rail segment tone:** the spine tone throughout, except the
+/// `connecting` segment, which is where Call 3's energize sequence reads.
 ///
 /// **Determinism:** at rest node + rails are steady drawing, so
 /// `cacheDisplay(in:to:)` captures them identically every run. The ONE
@@ -40,11 +42,11 @@ public final class MembershipBusView: NSView {
     /// connected member sits ON the line (straight run), an unselected/blocked
     /// node is DETOURED around (the hop arc) — wherever in the band it sits.
     public enum Node: Equatable {
-        /// A connected member — a FILLED gold disc with a gold rim, the line
-        /// running straight through it in gold (spec §Call-1 "member / connected
-        /// = filled gold").
+        /// A connected member — a FILLED disc in the spine's tone, rimmed in
+        /// the same tone, with the line running straight through it (spec
+        /// §Call-1 "member / connected = filled gold").
         case member
-        /// A member whose session is establishing — a HOLLOW node with a GOLD
+        /// A member whose session is establishing — a HOLLOW node with a
         /// DASHED rim (spec §Call-1 "connecting = gold dashed"). The controls
         /// render muted (not adjustable yet). The energize "press-play" beat
         /// (v4.1 item 9) also renders here: a host-raised
@@ -84,23 +86,26 @@ public final class MembershipBusView: NSView {
     /// The seat is NOT `railDormant`, which is the WIRE's dormancy tone and is
     /// pinned to a 3:1 floor against the surfaces. That floor is what parks it
     /// beside the rim it has to be told from: `railDormant` measures 1.09:1
-    /// against dark `ember` and 1.09:1 against light `gold`, so on an idle
-    /// dark rail — or an armed light one — the rim was a hue edge with no
+    /// against dark `ember` and 1.09:1 against the light live tone, so on an
+    /// idle dark rail — or an armed light one — the rim was a hue edge with no
     /// brightness behind it. A disc ringed by its own rim carries no ground
     /// floor (the rim does that job), so the seat is free to drop clear of
     /// both rim tones instead. Measured (WCAG luminance ratios): dark
-    /// `#4A443B` sits 1.92:1 from `ember` and 5.22:1 from `gold`; light
-    /// `#E0D8C6` sits 4.28:1 from `ember` and 2.92:1 from `gold`. Every dial
+    /// `#2A2E33` sits 2.72:1 from `ember` and 7.41:1 from `railLive`; light
+    /// `#DFE1E4` sits 4.63:1 from `ember` and 3.14:1 from `railLive`. Every dial
     /// column x appearance x Increase-Contrast cell is swept by
     /// `TokenContrastMatrixTests.dimmedNodeSeatSeparatesFromBothRimTones`.
     private var dimmed = false
     /// Whether this row's rail is ARMED — audio is (or would be) flowing through
     /// it. Gold is the LIVE color everywhere in Audiout, so an idle context
     /// (the Groups editor showing a group that is NOT the active Main Out — pure
-    /// configuration, no audio moving) renders its `.member` discs in the quiet
-    /// `ember` idle tone instead, matching the wire's own armed/idle split
-    /// (`Tokens.Color.spineTone`). Defaults to true: the popover's rows ARE the
-    /// live signal path and keep their gold unchanged.
+    /// configuration, no audio moving) renders its nodes in the quiet `ember`
+    /// idle tone instead, matching the wire's own armed/idle split
+    /// (`Tokens.Color.spineTone`). It reaches the WHOLE node — a hollow ring as
+    /// much as a filled disc — so a row can never draw its node in a tone the
+    /// wire running past it has left behind. Defaults to true: the popover's
+    /// rows ARE the live signal path, and `MainOutRowView` hands the overlay
+    /// and the Main Audio ring the same answer for the same reason.
     private var armed = true
     /// Whether a dimmed `.member`'s rim draws at `busNodeDimmedRimWidth`
     /// instead of the standard `busNodeRimWidth`. Off by default — the
@@ -260,18 +265,19 @@ public final class MembershipBusView: NSView {
             let cy = bounds.midY
             let rect = NSRect(x: cx - r, y: cy - r, width: 2 * r, height: 2 * r)
             if node == .member {
-                // Rim in the spine's own tone: gold on an armed rail, ember on
-                // an idle one (same split the wire draws with). The fill is the
-                // same tone, or the unlit `socket` seat when dimmed — see
-                // `dimmed`.
+                // Rim in the spine's own tone: the live tone on an armed rail,
+                // ember on an idle one (same split the wire draws with). The
+                // fill is the same tone, or the unlit `socket` seat when
+                // dimmed — see `dimmed`.
                 let rim = Tokens.Color.spineTone(armed: armed)
                 let fill = dimmed ? Tokens.Color.socket : rim
                 fill.setFill()
                 NSBezierPath(ovalIn: rect).fill()
                 strokeNodeRim(in: rect, color: rim, dashed: false)
             } else {
-                // Hollow node: connecting = gold dashed, failed = heavier
-                // failure-red ring, non-member/blocked = plain ember rim.
+                // Hollow node, rimmed in the same spine tone the filled disc
+                // wears: connecting = dashed, failed = a heavier failure-red
+                // ring, non-member/blocked = a plain rim.
                 // `dimmed` has nothing to reach here — there is no fill.
                 strokeNodeRim(in: rect, color: rimColor(for: node),
                               dashed: isDashed(node))
@@ -300,12 +306,21 @@ public final class MembershipBusView: NSView {
     }
 
     /// The rim colour for a hollow node. Never dimmed: the rim is the rail's.
+    /// Every rim but the failed one is the SPINE TONE — the same value the
+    /// wire, the detour arc bowing around this very node and the filled discs
+    /// above it are drawn in (owner's call, 2026-09-20: one instrument, one
+    /// colour). Membership is a FILL difference, never a hue one: a hollow
+    /// ring in `ember` beside a gold disc reads as two instruments touching,
+    /// and on light paper the pair inverts — ember measures 5.82:1 on the
+    /// light ground against gold's 1.77:1, which makes "not in the mix" the
+    /// louder mark. Only `.failed` keeps a colour of its own: failure-red is
+    /// not a rail tone, it is the one thing on the spine that has to break out
+    /// of it.
     private func rimColor(for node: Node) -> NSColor {
         switch node {
-        case .connecting:              return Tokens.Color.gold
         case .failed:                  return Tokens.Color.failure
-        case .nonMember, .member,
-             .origin:                  return Tokens.Color.ember
+        case .connecting, .nonMember,
+             .member, .origin:         return Tokens.Color.spineTone(armed: armed)
         }
     }
 

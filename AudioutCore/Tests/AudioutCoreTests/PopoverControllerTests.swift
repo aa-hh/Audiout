@@ -880,20 +880,29 @@ import AudioutProtocol
         #expect(popover.test_mainOutRow.test_ringForm == .resting, "local-only armed playback shows the quiet resting ring")
     }
 
-    /// Muting does not un-select anything, so the rail (and the ring) stay —
-    /// what changes is the TONE: both drop from gold to the idle ember.
-    @Test func mutingTheLocalOnlyTargetKeepsTheRingAndDropsItToTheIdleTone() async throws {
+    /// Muting does not un-select anything, so the rail, the ring and their tone
+    /// all stay. The spine is ONE instrument in one colour (owner's call,
+    /// 2026-09-20): a mute that re-tints the ring leaves it a different colour
+    /// from the discs strung below it. The mute reports itself one row over —
+    /// the armed dot drops back to its unlit seat.
+    @Test func mutingTheLocalOnlyTargetKeepsTheRingInTheSpineTone() async throws {
         let (popover, controller, backend) = try await makePopover()
         controller.setMainOutMuted(true)
         popover.update(devices: backend.devices)
         #expect(popover.test_mainOutRow.test_ringForm == .resting,
                 "a muted room is still selected — the wire is still drawn, so the ring is too")
         let ink = popover.test_mainOutRow.test_ringStrokeColor?.usingColorSpace(.sRGB)
-        let idle = Tokens.Color.spineTone(armed: false).usingColorSpace(.sRGB)
-        #expect(abs((ink?.redComponent ?? -1) - (idle?.redComponent ?? 0)) <= 0.02
-                && abs((ink?.greenComponent ?? -1) - (idle?.greenComponent ?? 0)) <= 0.02
-                && abs((ink?.blueComponent ?? -1) - (idle?.blueComponent ?? 0)) <= 0.02,
-                "muted ⇒ the idle spine tone on the ring, matching the wire")
+        let spine = Tokens.Color.spineTone(armed: true).usingColorSpace(.sRGB)
+        #expect(abs((ink?.redComponent ?? -1) - (spine?.redComponent ?? 0)) <= 0.02
+                && abs((ink?.greenComponent ?? -1) - (spine?.greenComponent ?? 0)) <= 0.02
+                && abs((ink?.blueComponent ?? -1) - (spine?.blueComponent ?? 0)) <= 0.02,
+                "muted ⇒ the ring still wears the spine tone, matching the wire and every node on it")
+        let dot = popover.test_mainOutRow.test_dotFillColor?.usingColorSpace(.sRGB)
+        let seat = Tokens.Color.socket.usingColorSpace(.sRGB)
+        #expect(abs((dot?.redComponent ?? -1) - (seat?.redComponent ?? 0)) <= 0.02
+                && abs((dot?.greenComponent ?? -1) - (seat?.greenComponent ?? 0)) <= 0.02
+                && abs((dot?.blueComponent ?? -1) - (seat?.blueComponent ?? 0)) <= 0.02,
+                "…and the mute is reported where it always was — the armed dot drops to its unlit seat")
     }
 
     /// A FAILED room is not reached by the wire, so a mix of nothing but failed

@@ -19,7 +19,7 @@ import AppKit
 ///
 /// These tests lock BOTH halves of the fix:
 ///  - the drawn rail ink and the ring's stamped stroke agree for every accent
-///    dial position x light/dark x armed/ember — sampled from a real
+///    dial position x light/dark x connection state — sampled from a real
 ///    `cacheDisplay` render of `BusRailOverlayView` and from the ring's actual
 ///    layer colour, never from a re-derived expectation;
 ///  - a dial change re-tints the ring with NO rebuild and no `apply` — the
@@ -159,10 +159,16 @@ extension SerializedSharedState {
     // MARK: 1 — the sweep: every dial position x appearance x armed/ember
 
     /// The whole matrix. For each accent-dial position and each appearance, the
-    /// ring's stamped stroke must equal the rail's drawn ink — for the armed
-    /// (gold) tone AND the unarmed (ember) tone, and for the RESTING ring as
+    /// ring's stamped stroke must equal the rail's drawn ink — in every
+    /// connection state the popover can be in, and for the RESTING ring as
     /// well as the connected one. The resting ring used to be stamped a flat
     /// grey `rim` while the wire curving into it was gold.
+    ///
+    /// The popover's spine wears ONE tone whatever the audio is doing
+    /// (`BusRailOverlayView.spineArmed`), so the states below do not move the
+    /// colour — they are swept anyway, because the pair drifting apart in one
+    /// of them is exactly the regression this file exists for. `plan.gold` is
+    /// asserted alongside: it gates the connect pulse.
     @Test func ringStrokeMatchesRailInkAcrossEveryDialPositionAndAppearance() throws {
         // (connection state, armed, local-only armed) — the last pairing is the
         // resting ring: a rail exists, nothing has connected, the Mac is playing.
@@ -186,15 +192,17 @@ extension SerializedSharedState {
                                             "the overlay must resolve a plan from the laid-out row")
                     let live = armed || localOnly
                     #expect(plan.gold == live,
-                            "the rail's own armed bit must track the row's (\(style)/\(appearanceName.rawValue))")
+                            "the rail's own carrying bit must track the row's (\(style)/\(appearanceName.rawValue))")
+                    #expect(plan.spineArmed,
+                            "the popover's spine is the live signal path in every state (\(style)/\(appearanceName.rawValue))")
 
                     let railInk = try sampledRailInk(of: overlay)
                     expectSameInk(railInk, row.test_ringStrokeColor,
-                                  "\(style)/\(appearanceName.rawValue)/armed=\(live): the hook and the ring it lands on must be one colour")
+                                  "\(style)/\(appearanceName.rawValue)/carrying=\(live): the hook and the ring it lands on must be one colour")
 
                     // …and both must be THE shared spine tone, not a coincidence.
-                    expectSameInk(railInk, resolved(Tokens.Color.spineTone(armed: live), appearanceName),
-                                  "\(style)/\(appearanceName.rawValue)/armed=\(live): the drawn ink must be Tokens.Color.spineTone")
+                    expectSameInk(railInk, resolved(Tokens.Color.spineTone(armed: true), appearanceName),
+                                  "\(style)/\(appearanceName.rawValue)/carrying=\(live): the drawn ink must be Tokens.Color.spineTone")
                 }
             }
         }
@@ -223,7 +231,7 @@ extension SerializedSharedState {
                     let ink = try sampledRailInk(of: overlay)
                     expectSameInk(ink, row.test_ringStrokeColor,
                                   "after flipping the dial to \(style) with no rebuild (\(appearanceName.rawValue)/armed=\(armed)), the ring must re-tint with the rail")
-                    expectSameInk(ink, resolved(Tokens.Color.spineTone(armed: armed), appearanceName),
+                    expectSameInk(ink, resolved(Tokens.Color.spineTone(armed: true), appearanceName),
                                   "after flipping the dial to \(style), both must be the current spine tone")
                 }
             }

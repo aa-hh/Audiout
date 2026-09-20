@@ -314,6 +314,52 @@ import AudioutCore
                 "sanity: the resting sizes the two hovers trade between are the real ones")
     }
 
+    /// The defect this locks: a hollow ring drawn in `ember` beside a filled
+    /// disc drawn in gold makes membership a hue difference as well as a fill
+    /// one — and on light paper the hue inverts, leaving "not in the mix" the
+    /// louder mark. Both nodes are sampled off a real render, in both
+    /// appearances, and both must be the spine's one tone.
+    @Test func aHollowRingIsDrawnInTheSameToneAsAFilledDisc() {
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            let spine = resolved(Tokens.Color.spineTone(armed: true), appearanceName)
+            for node in [MembershipBusView.Node.nonMember, .member] {
+                let bus = makeBusView(node: node)
+                bus.appearance = NSAppearance(named: appearanceName)
+                guard let ink = drawnNodeInk(bus) else {
+                    Issue.record("the node drew nothing (\(node), \(appearanceName.rawValue))")
+                    continue
+                }
+                #expect(abs(ink.redComponent - spine.redComponent) <= 0.02
+                        && abs(ink.greenComponent - spine.greenComponent) <= 0.02
+                        && abs(ink.blueComponent - spine.blueComponent) <= 0.02,
+                        Comment(rawValue: "\(node)/\(appearanceName.rawValue): drew \(ink), spine tone is \(spine)"))
+            }
+        }
+    }
+
+    private func resolved(_ color: NSColor, _ appearanceName: NSAppearance.Name) -> NSColor {
+        var out = color
+        NSAppearance(named: appearanceName)?.performAsCurrentDrawingAppearance {
+            out = color.usingColorSpace(.sRGB) ?? color
+        }
+        return out
+    }
+
+    /// The node's own ink: the most opaque pixel of a real render of the view.
+    private func drawnNodeInk(_ bus: MembershipBusView) -> NSColor? {
+        guard let rep = bus.bitmapImageRepForCachingDisplay(in: bus.bounds) else { return nil }
+        bus.cacheDisplay(in: bus.bounds, to: rep)
+        var best: NSColor?
+        var bestAlpha: CGFloat = 0
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                if c.alphaComponent > bestAlpha { bestAlpha = c.alphaComponent; best = c }
+            }
+        }
+        return bestAlpha >= 0.99 ? best : nil
+    }
+
     private func makeBusView(node: MembershipBusView.Node = .nonMember) -> MembershipBusView {
         let bus = MembershipBusView()
         bus.frame = NSRect(x: 0, y: 0, width: PopoverColumnGrid.busColumnWidth, height: 40)

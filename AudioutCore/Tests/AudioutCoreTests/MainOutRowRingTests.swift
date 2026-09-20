@@ -77,17 +77,19 @@ import AppKit
                 "the resting ring wears the rail's own ink, never the grey rim")
     }
 
-    /// A rail that exists but is not armed (speakers selected, none connected,
-    /// nothing playing locally) rests in the wire's IDLE tone — still never the
-    /// grey rim.
-    @Test func restingRingWearsTheIdleToneWhenTheRailIsNotArmed() {
+    /// A rail that exists but carries nothing yet (speakers selected, none
+    /// connected, nothing playing locally) keeps the SAME tone as one that is
+    /// carrying: the popover's spine is one instrument in one colour (owner's
+    /// call, 2026-09-20), and the wire curving into this ring does not change
+    /// tone with the audio either. Still never the grey rim.
+    @Test func restingRingWearsTheSpineToneEvenWhileNothingIsCarried() {
         let row = MainOutRowView()
         row.setRailLive(true)
         row.apply(options: makeOptions(), current: .selectedDevices, master: 50,
                   connectionState: .off)
         #expect(row.test_ringForm == .resting, "a live rail always has a ring to land on")
-        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.spineTone(armed: false)),
-                "an idle rail's ring is the idle spine tone")
+        #expect(sameInk(row.test_ringStrokeColor, Tokens.Color.spineTone(armed: true)),
+                "the ring wears the spine tone the wire and every node wear")
     }
 
     @Test func noRingWhileThereIsNoRail() {

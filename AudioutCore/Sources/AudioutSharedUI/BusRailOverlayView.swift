@@ -14,8 +14,8 @@ import AppKit
 /// non-interactive (`hitTest` returns `nil`).
 ///
 /// **One wire, one tone.** The rail is a single stroked line — no channel, no
-/// pad, nothing under it: gold while the spine is armed, ember while it idles,
-/// one quiet tone end to end while it is dormant. It runs from the origin hook
+/// pad, nothing under it: the live tone while the spine is armed, ember while
+/// it idles, one quiet tone end to end while it is dormant. It runs from the origin hook
 /// to its terminus, the LOWEST node it REACHES, detouring around every off-spine
 /// node it passes on the way. Rows below the terminus draw their node disc and
 /// no line — a FAILED room is one of them, never reached. With nothing to reach
@@ -53,8 +53,23 @@ import AppKit
 public final class BusRailOverlayView: NSView {
 
     /// The Main Audio row supplying the origin-hook anchor (the meter's leading
-    /// edge / centre-y) and whether the spine is armed (gold vs ember).
+    /// edge / centre-y) and whether audio is flowing through the spine right
+    /// now (the anchor's `gold`, which gates the connect pulse and nothing
+    /// else; the wire's TONE is ``spineArmed``).
     public weak var mainOutRow: RailHookProviding?
+    /// Whether this surface's spine is the LIVE signal path — the tone the
+    /// whole instrument is drawn in (``Tokens/Color/spineTone(armed:)``), and
+    /// the same answer the rows hand their own nodes. The popover leaves it
+    /// `true`: its rows ARE the live path, so its wire, nodes and ring read as
+    /// one instrument whether or not audio happens to be moving this instant
+    /// (the route-armed dot, the live wash and the meters say that). The Groups
+    /// editor sets it from the group it is editing — a group that is not the
+    /// active Main Out target is configuration, not audio, and its whole spine
+    /// goes quiet.
+    ///
+    /// Not the same question as the anchor's `gold`, which carries the
+    /// moment-to-moment "is audio flowing" truth the connect pulse needs.
+    public var spineArmed = true
     /// The device rows contributing nodes, in top-to-bottom display order. The
     /// overlay reads each one's live frame + rail state every draw.
     public var deviceRows: [RailNodeProviding] = []
@@ -264,6 +279,7 @@ public final class BusRailOverlayView: NSView {
 
         let input = RailPlan.Input(
             gold: anchor.gold,
+            spineArmed: spineArmed,
             ringCenterY: anchor.centerY,
             ringCenterX: anchor.ringCenterX,
             ringRadius: anchor.ringRadius,
@@ -331,15 +347,22 @@ public final class BusRailOverlayView: NSView {
         }
     }
 
-    /// The hook/terminus tone. The Main Audio ring's connected stroke comes from
-    /// the SAME resolution (`Tokens.Color.spineTone`), so the curve and the ring
-    /// it lands on can never be two different colors — including mid-flight
-    /// through an accent-dial change. A DORMANT rail (spec §4.7) takes one quiet
-    /// tone for its whole path — hook, every segment and the terminus dot —
-    /// rather than the gold/grey patchwork per-stop tones drew on a wire that is
-    /// feeding nothing.
+    /// The hook/terminus tone. The Main Audio ring's connected stroke and every
+    /// node on the rail come from the SAME resolution
+    /// (`Tokens.Color.spineTone`), so the curve, the ring it lands on and the
+    /// discs and rings strung along it can never be two different colors —
+    /// including mid-flight through an accent-dial change. A DORMANT rail (spec
+    /// §4.7) takes one quiet tone for its whole path — hook, every segment and
+    /// the terminus dot — rather than the gold/grey patchwork per-stop tones
+    /// drew on a wire that is feeding nothing.
+    ///
+    /// It reads ``BusRailOverlayView/spineArmed``, the surface's own truth, NOT
+    /// the anchor's `gold`: the rows hand their own nodes that same surface
+    /// truth, and a wire toned by the moment-to-moment audio drops to ember
+    /// while the discs strung on it stay gold — one instrument in two colours
+    /// (owner's call, 2026-09-20).
     private static func originColor(for plan: RailPlan) -> NSColor {
-        plan.dormant ? Tokens.Color.railDormant : Tokens.Color.spineTone(armed: plan.gold)
+        plan.dormant ? Tokens.Color.railDormant : Tokens.Color.spineTone(armed: plan.spineArmed)
     }
 
     /// The wire's stroked runs in path order, origin → terminus. Warm Signal
@@ -921,7 +944,13 @@ public struct RailPlan: Equatable {
     /// The dormant-divergent condition (spec §4.7), resolved ONCE for the whole
     /// rail so the wire takes one tone end to end instead of a per-stop patchwork.
     public var dormant: Bool
+    /// Whether audio is flowing through this spine right now. The connect
+    /// pulse is its one consumer — a wire carrying nothing has nothing to
+    /// announce. The wire's own tone follows ``spineArmed``.
     public var gold: Bool
+    /// Whether this spine is the live signal path — the tone every part of the
+    /// instrument is drawn in (``BusRailOverlayView/spineArmed``).
+    public var spineArmed: Bool
 
     /// Whether there is a rail at all: the wire reaches a member somewhere in
     /// the band, or a fold is hiding one below the cut. Nothing is drawn when
@@ -938,7 +967,10 @@ public struct RailPlan: Equatable {
     /// so an input equal to the last drawn one resolves to the same figure and
     /// the overlay can skip the redraw entirely (`needsDisplay`'s setter).
     public struct Input: Equatable {
+        /// Audio is flowing right now (the connect pulse's gate).
         public var gold: Bool
+        /// This spine is the live signal path (the instrument's tone).
+        public var spineArmed: Bool
         public var ringCenterY: CGFloat
         public var ringCenterX: CGFloat
         public var ringRadius: CGFloat
@@ -967,13 +999,15 @@ public struct RailPlan: Equatable {
         /// Every device stop, unclipped, sorted top-to-bottom (highest y first).
         public var stops: [Stop]
 
-        public init(gold: Bool, ringCenterY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat,
+        public init(gold: Bool, spineArmed: Bool = true,
+                    ringCenterY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat,
                     landingDrop: CGFloat, originSectionCollapsed: Bool,
                     originClipBand: ClosedRange<CGFloat>?, originHeaderY: CGFloat?,
                     deviceSectionCollapsed: Bool, deviceFloorY: CGFloat?,
                     dropsHiddenRows: Bool = false,
                     dormant: Bool = false, stops: [Stop]) {
             self.gold = gold
+            self.spineArmed = spineArmed
             self.ringCenterY = ringCenterY
             self.ringCenterX = ringCenterX
             self.ringRadius = ringRadius
@@ -1061,7 +1095,8 @@ public struct RailPlan: Equatable {
 
         return RailPlan(origin: origin, railTopY: railTopY, stops: drawnStops,
                         terminusDotY: terminusDotY, signalTerminusIndex: signalTerminusIndex,
-                        dormant: input.dormant, gold: input.gold)
+                        dormant: input.dormant, gold: input.gold,
+                        spineArmed: input.spineArmed)
     }
 }
 

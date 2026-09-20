@@ -784,8 +784,9 @@ public final class GroupEditorViewController: NSViewController {
         // moves nothing either way, so its line only says edits are saved.
         playingBadge.isHidden = !isActive
         reassuranceLabel.stringValue = isActive ? Self.savedAsYouGoActive : Self.savedAsYouGo
-        // The origin hook's tone follows the same active-group truth the well's
-        // gold ring does (`railHookAnchor`), so repaint the rail with it.
+        // The whole spine's tone follows the same active-group truth the well's
+        // gold ring does — wire, hook and every node — so push it and repaint.
+        railOverlay.spineArmed = isActive
         railOverlay.needsDisplay = true
         rebuildCandidates(memberSet: Set(group.memberIDs))
         refreshPrimaryTitle()

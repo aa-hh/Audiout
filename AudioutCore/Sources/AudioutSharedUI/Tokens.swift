@@ -557,13 +557,13 @@ public enum Tokens {
 
         // MARK: Gold accent instruments (spec §1, S-BUS)
         //
-        // THE accent (spec §1.1/§1.2): `gold` is the bus-node fill / route-armed
-        // dot / meter hot end; `ember` is gold's dim companion (bus LINE ink /
-        // meter low end). S-BUS (the membership bus, spec §4) is their FIRST
-        // consumer — the filled node is a `gold` disc with an `ember` rim, and the
-        // bus line is drawn in `ember` (spec §4.1/§4.2). `glow` (the bloom/halo,
+        // THE accent (spec §1.1/§1.2): `gold` is the route-armed dot and the
+        // meter hot end; `ember` is gold's dim companion (the idle rail, the
+        // meter low end). The membership rail (spec §4) draws from ``railLive``
+        // instead, which is gold's own value in dark and a deeper one in light
+        // — see that token for why. `glow` (the bloom/halo,
         // §3.3) lives in the S2+S3 block below with its consumer, the
-        // route-armed dot. Per the accent dial (spec §1.3) these three and
+        // route-armed dot. Per the accent dial (spec §1.3) these and
         // their text companions `goldText`/`emberText` are the ONLY tokens the
         // Full-gold/Subtle remap touches.
         //
@@ -711,18 +711,56 @@ public enum Tokens {
                                                light: 0x71613B, lightHighContrast: 0x584C2E))
         }
 
-        /// **The membership rail's SPINE TONE** — `gold` while the spine is
-        /// armed, its `ember` companion otherwise (Warm Signal v4 §Call-1
-        /// rail-segment tone).
+        /// The membership rail's LIVE tone — the gold the whole instrument is
+        /// drawn in while its spine is armed: the wire, the origin hook, the
+        /// detour arcs, the Main Audio ring the hook lands on, the member
+        /// discs AND the hollow rings of the rooms the wire bows around. One
+        /// instrument, one value; membership is carried by fill versus stroke,
+        /// never by a second hue (owner's call, 2026-09-20).
         ///
-        /// It exists so the rail's line/hook/terminus (`BusRailOverlayView`)
-        /// and the Main Audio ring the hook LANDS ON (`HaloRingView`'s
-        /// connected stroke) resolve their tone from ONE place: the two are
-        /// required to read as a single continuous line, and while each picked
-        /// `gold`/`ember` for itself that agreement was pure convention — the
-        /// accent dial moved one and not the other. Nothing else may consume
-        /// this; a non-rail instrument wanting gold asks for ``gold``.
-        public static func spineTone(armed: Bool) -> NSColor { armed ? gold : ember }
+        /// It is ``gold``'s own value in dark, and a deeper one in light. Light
+        /// Full `gold` is `#E8B84B` at 1.77:1 on paper — a floor exception its
+        /// own doc records and the dot and meter still take. The rail cannot:
+        /// a 2 pt wire and a 5.5 pt ring at 1.77:1 on white is the faintest
+        /// mark on the surface, which is the defect this token was cut for. The
+        /// light value is fixed by two measurements at once — at least 3:1 on
+        /// the light grounds, and 1.40–1.55:1 from light ``ember`` so the idle
+        /// spine stays tellable from the armed one — and that band holds one
+        /// warm value, `#8F7B4A`, which both dial columns therefore take.
+        ///
+        /// CONTRAST RATIONALE (measured; ≥3:1 non-text floor, every cell
+        /// clears it — unlike `gold`, this token carries no exception). FULL:
+        /// dark `#E8B84B` = 10.73:1 vs `canvas` / 9.74:1 vs `panel` / 8.55:1
+        /// vs `raised` / 11.04:1 vs `well`, dark Increase Contrast `#F2C75E` =
+        /// 12.35 / 11.21 / 9.84 / 12.71; light `#8F7B4A` = 3.95:1 vs the flat
+        /// ground / 3.42:1 vs `well`, light Increase Contrast `#8A6614` = 5.04
+        /// / 4.37. SUBTLE: dark `#B99B53` = 5.91:1 vs `raised` (IC `#CBAF6A`
+        /// 7.42:1); light `#8F7B4A` = 3.95 / 3.42 (IC `#6F5E33` 6.06 / 5.25).
+        /// Armed-vs-idle separation in light: 1.47:1 from `ember` on both dial
+        /// columns, pinned by `MembershipWellContrastTests`.
+        public static var railLive: NSColor {
+            accentDynamic(name: "railLive",
+                          full: WarmVariants(dark: 0xE8B84B, darkHighContrast: 0xF2C75E,
+                                             light: 0x8F7B4A, lightHighContrast: 0x8A6614),
+                          subtle: WarmVariants(dark: 0xB99B53, darkHighContrast: 0xCBAF6A,
+                                               light: 0x8F7B4A, lightHighContrast: 0x6F5E33))
+        }
+
+        /// **The membership rail's SPINE TONE** — ``railLive`` while the spine
+        /// is armed, `ember` otherwise (Warm Signal v4 §Call-1 rail-segment
+        /// tone).
+        ///
+        /// It exists so the rail's line/hook/terminus (`BusRailOverlayView`),
+        /// the nodes sitting on it (`MembershipBusView` — discs and hollow
+        /// rings alike) and the Main Audio ring the hook LANDS ON
+        /// (`HaloRingView`'s connected stroke) resolve their tone from ONE
+        /// place: they are required to read as a single instrument, and while
+        /// each picked `gold`/`ember` for itself that agreement was pure
+        /// convention — the accent dial moved one and not the other, and the
+        /// hollow rings kept an ember the discs had left behind. Nothing else
+        /// may consume this; a non-rail instrument wanting gold asks for
+        /// ``gold``.
+        public static func spineTone(armed: Bool) -> NSColor { armed ? railLive : ember }
 
         // MARK: Glow + socket (accent halo and the routed dot's seat)
 

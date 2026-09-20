@@ -20,6 +20,7 @@ colors:
   glow: "#FFD97A"
   ember: "#8A6A2F"
   emberText: "#A98341"
+  railLive: "#E8B84B"
   inkOnFill: "#171104"
   ring: "#7FB4C4"
   failure: "#D9564A"
@@ -227,8 +228,8 @@ constant.
 **The Accent Dial Rule.** Two positions remain: Full gold and Subtle
 (`Tokens.accentStyle`, `AccentStyle.fullGold` / `.subtle`; Follow-System was
 deleted this migration, per the owner's decision F3). The dial remaps exactly eleven
-tokens: the five accent instruments `gold`, `goldText`, `ember`, `emberText`,
-`glow` (via `accentDynamic`), and the six permission identity hues
+tokens: the six accent instruments `gold`, `goldText`, `ember`, `emberText`,
+`glow`, `railLive` (via `accentDynamic`), and the six permission identity hues
 `permissionSystemAudio`, `permissionLocalNetwork`, `permissionRemoteControl`,
 `permissionSpeakerSync`, `permissionUsageStats`, `permissionAudioutRemote`
 (via `permissionDynamic`,
@@ -737,6 +738,21 @@ names and glyphs, `label` on the live one, pinned by
 `railDormant`, the same hex as `rim`, so a dormant wire, an idle connected
 ring and an unarmed fader fill read as one tone — a Mac-only instrument with
 no iOS equivalent (the phone has no membership rail).
+
+**The rail is one instrument in one colour** (owner's call, 2026-09-20). The
+wire, the origin hook, the detour arcs, the Main Audio ring the hook lands on,
+the filled member discs and the hollow rings of the rooms the wire bows around
+all resolve `Tokens.Color.spineTone(armed:)` — `railLive` on a live spine,
+`ember` on an idle one. Membership is carried by FILL versus STROKE and by
+node size, never by a second hue: a hollow ring keeping `ember` while the
+discs took gold made "not in the mix" the louder mark on light paper, where
+gold measures 1.77:1 and ember 5.82:1. `railLive` exists for that reason — it
+is `gold`'s own value in dark and the deeper `#8F7B4A` in light, so every part
+of the instrument clears the 3:1 non-text floor in both appearances and both
+dial positions. The tone follows `BusRailOverlayView.spineArmed`, a surface
+truth (the popover's rows ARE the live path; an inactive group's editor is
+not), not the moment-to-moment "is audio flowing" bit — that one now gates the
+connect pulse alone.
 
 ### QR Tile (invitations to Audiout Remote, Mac-only)
 `RemoteInviteView` (`AudioutSharedUI`) is one view hosted three times: the

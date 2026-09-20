@@ -812,7 +812,12 @@ public final class PopoverController: NSObject {
     ///   - appRouting: backs the Applications card's collapse default (T-5) and
     ///     the running-app picker (T-7). Defaulted so existing call sites
     ///     (AppDelegate, popover-harness, popover-snapshot, tests) compile
-    ///     unchanged; tests inject one over a temp store.
+    ///     unchanged; tests inject one over a temp store. The default does NOT
+    ///     load persistence, for the same reason `hiddenSpeakers` below does
+    ///     not: a bare `PopoverController()` must never read the machine's real
+    ///     `app-routes.json`. It used to, and a developer's own saved route
+    ///     tinted the Applications card gold in a suite that had seeded none —
+    ///     a failure that reproduced only on a machine that had used the app.
     ///   - runningAppsProvider: supplies the "+ Add application…" picker's
     ///     candidate list (T-7). Defaults to `NSWorkspace.shared
     ///     .runningApplications` filtered to `.regular`-activation-policy apps
@@ -822,7 +827,7 @@ public final class PopoverController: NSObject {
     ///     deliberately does NOT load persistence — the many bare
     ///     `PopoverController()` call sites (tests, harnesses) must never read
     ///     the machine's real hidden list; the app injects a persisted one.
-    public init(appRouting: AppRoutingController = AppRoutingController(),
+    public init(appRouting: AppRoutingController = AppRoutingController(loadPersisted: false),
                 runningAppsProvider: @escaping () -> [RunningAppInfo] = PopoverController.defaultRunningAppsProvider,
                 hiddenSpeakers: HiddenSpeakersController = HiddenSpeakersController(loadPersisted: false)) {
         self.appRouting = appRouting

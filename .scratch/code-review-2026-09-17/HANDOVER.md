@@ -65,21 +65,59 @@ assertion, a retry-count assertion, and a wizard stage count. At the time of tha
 pipelines plus their executors were competing for one build permit, and the machine was heavily
 loaded.
 
-So the working hypothesis is **flakes under load, not a regression**. It is a hypothesis. A
-control run of exactly those four tests on the clean base tree was started and did not finish
-before the session ended. **Run that control before you conclude anything:**
+A control run of those four tests on the clean base tree settles half of it. Run in
+`.claude/worktrees/unslop-code-ca8d54`, which is the base commit with no ticket changes:
 
-```bash
-cd ".claude/worktrees/unslop-code-ca8d54" && AUDIOUT_TEST_NO_CACHE=1 bash scripts/run-tests.sh --filter 'deRouteCancelsThePendingRetryRatherThanLettingItResurrectTheTap|aMeasuredProposalsRejectReRunsTheProbeThenHandsToTheQuestions|cardTitlesTintGoldWhileTheirRowsSound|enabledRetouchesMoreThanOnceAcrossAWaitThatNeverBecomesReady'
+```
+Test run with 4 tests in 5 suites failed after 1.506 seconds with 5 issues.
 ```
 
-That worktree is the base commit with no ticket changes in it, so it is the control. If those
-four fail there too, they are pre-existing and ticket 01 is exonerated; note them as a separate
-defect and carry on. If they pass there and fail in `cr-01`, stop and investigate ticket 01 for
-real before committing it.
+**Two fail on the clean base, with no ticket-01 code present at all:**
 
-Either way, trust only a line reading `Test run with N tests`. A filter that matches nothing
-reports green.
+- `cardTitlesTintGoldWhileTheirRowsSound` — 4 issues, red and blue components outside a 0.004
+  tolerance
+- `enabledRetouchesMoreThanOnceAcrossAWaitThatNeverBecomesReady` — 1 issue, retry counter not
+  above 1
+
+These are **pre-existing failures unrelated to any review ticket**, and since the base is `main`
+plus review documents only, they are failing on `main` as well. See the separate section below.
+
+The other two — `deRouteCancelsThePendingRetryRatherThanLettingItResurrectTheTap` and
+`aMeasuredProposalsRejectReRunsTheProbeThenHandsToTheQuestions` — **passed** in that control.
+That is suggestive but not conclusive: the control ran four tests in isolation on an idle
+machine, while the run that failed them was 3,950 tests in parallel under heavy load. Passing in
+isolation does not prove they pass in a full-suite run on the base.
+
+**To settle it, run the full suite on the clean base** and compare:
+
+```bash
+cd ".claude/worktrees/unslop-code-ca8d54" && AUDIOUT_FULL_SUITE=1 AUDIOUT_TEST_NO_CACHE=1 bash scripts/run-tests.sh
+```
+
+If the same four fail there, ticket 01 is fully exonerated and you commit it. If only the two
+known ones fail, investigate those other two against ticket 01's diff before committing it —
+though note that ticket 01 touches only the Cast server and neither test goes near it, so a
+load-sensitivity explanation stays more likely than a causal one.
+
+Trust only a line reading `Test run with N tests`. A filter that matches nothing reports green,
+and repeated runs are served from a pass cache unless `AUDIOUT_TEST_NO_CACHE=1` is set.
+
+## Two tests are failing on `main`, unrelated to any of this
+
+Worth its own attention, and worth telling the owner before it gets buried:
+
+- `cardTitlesTintGoldWhileTheirRowsSound` (PopoverControllerTests.swift:3881 and :3883) asserts
+  two colour components within 0.004. The most recent merge on `main` is `aec62105`, "Tokens:
+  light mode takes the light gold for graphics" — a gold token change. A colour-tolerance test
+  failing directly after a colour token change looks far more like a real regression, or a test
+  that needed updating with that merge, than a flake. Check that merge first.
+- `enabledRetouchesMoreThanOnceAcrossAWaitThatNeverBecomesReady` (PTPHelperActivationTests.swift:203)
+  asserts a retry counter exceeds 1. This is the shape the repo already knows to be
+  machine-speed sensitive, so it may be a genuine flake, but it failed in 0.002 seconds on an
+  idle machine, which argues against timing.
+
+Neither is caused by the review work. Neither should block the wave-1 merge. Both should be
+raised as their own tickets.
 
 ## Resuming the commit and merge
 

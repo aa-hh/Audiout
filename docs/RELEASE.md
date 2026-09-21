@@ -10,7 +10,7 @@ already running.
 
 ## Purchase terms (state once, exactly)
 
-**€30, one-time. Covers the current major version and every update until the
+**€24.99, one-time. Covers the current major version and every update until the
 next major release.**
 
 Any other copy about price or what it includes (site, receipts, support

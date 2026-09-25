@@ -401,7 +401,7 @@ import Testing
     /// steps twice a second, while these tests render one cycle per step.
     /// Running each step through `queue.sync` between two renders removes the
     /// overlap rather than tolerating it.
-    private final class RenderLoopSlewClock: @unchecked Sendable {
+    fileprivate final class RenderLoopSlewClock: @unchecked Sendable {
 
         private let lock = NSLock()
         private var queue: DispatchQueue?
@@ -577,3 +577,74 @@ import Testing
                 "advanced \(advanced) over \(played) samples played")
     }
 }
+
+/// `bt_sync:drift_corrected` against the shared doc's promise: sent after the
+/// move lands, never before. Nested under ``SerializedSharedState`` because
+/// `Analytics.install(_:consent:)` is process-global.
+extension SerializedSharedState {
+
+@Suite struct DriftCorrectionApplierAnalyticsTests {
+
+    private final class Events: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [(String, [String: String])] = []
+        func append(_ name: String, _ properties: [String: String]) {
+            lock.withLock { items.append((name, properties)) }
+        }
+        /// The applier suites above run in parallel with this one and their
+        /// corrections land in this sink too. None of them moves 100 ms or
+        /// more, so that bucket is this test's alone.
+        var mine: [[String: String]] {
+            lock.withLock {
+                items.filter { $0.0 == "bt_sync:drift_corrected" && $0.1["magnitude_ms_bucket"] == "100+" }
+                    .map(\.1)
+            }
+        }
+    }
+
+    private final class Latency: @unchecked Sendable {
+        private let lock = NSLock()
+        private var ms = 150.0
+        var value: Double {
+            get { lock.withLock { ms } }
+            set { lock.withLock { ms = newValue } }
+        }
+    }
+
+    // Turns red if the slew's event goes out when the slew STARTS rather than
+    // when it lands. Stepped by hand, so no timing decides the result.
+    @Test func aSlewReportsItsCorrectionOnlyOnceItHasLanded() {
+        let events = Events()
+        Analytics.install(Analytics.Sink(capture: { events.append($0, $1) },
+                                         captureError: { _, _ in },
+                                         consentChanged: { _ in }), consent: true)
+        defer { Analytics.install(nil, consent: false) }
+
+        let latency = Latency()
+        let clock = DriftCorrectionApplierSinkTests.RenderLoopSlewClock()
+        let applier = DriftCorrectionApplier(
+            isBluetooth: { _ in true },
+            currentLatencyMs: { _ in latency.value },
+            writeLatencyMs: { ms, _, _ in latency.value = ms },
+            markCalibrationStale: { _ in },
+            programIsSilent: { false },
+            scheduleVerify: { _ in },
+            slewClock: clock.clock)
+
+        applier.handle([.init(deviceUID: "C4-38-75-0E-BF-4A:output", errorMs: 120,
+                              hostNanos: 0, isBestGuess: false)])
+        clock.waitForFirstStep()
+        for _ in 0..<118 { clock.step() }
+        #expect(latency.value == 269, "one step short of the whole 120 ms")
+        #expect(events.mine.isEmpty, "the slew has not landed yet")
+
+        clock.step()
+        #expect(latency.value == 270)
+        #expect(events.mine == [[
+            "action": "correct", "placement": "slew",
+            "magnitude_ms_bucket": "100+", "surfaced": "true",
+        ]])
+    }
+}
+
+} // extension SerializedSharedState

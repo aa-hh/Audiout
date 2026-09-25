@@ -46,7 +46,9 @@ remote_bias=${AUDIOUT_TEST_REMOTE_BIAS:-$(git config --get audiout.testRemoteBia
 # survives neither quoting on the remote `cd` (it is not expanded inside quotes,
 # so `cd '~/foo'` fails) nor safe quoting of paths containing spaces. ssh starts
 # in $HOME, so a relative path is both simpler and correct.
-remote_root=${AUDIOUT_TEST_REMOTE_ROOT:-audiout-remote-tests}
+# The .noindex suffix keeps Spotlight out: each synced tree carries ~1.6 GB of
+# build products, and indexing them pinned the mule's CPU (load 96, 2026-09-26).
+remote_root=${AUDIOUT_TEST_REMOTE_ROOT:-audiout-remote-tests.noindex}
 # The binary whose presence proves the remote can do this KIND of work. SwiftPM
 # callers want `swift`; the iOS target is built by `xcodebuild`, which can sit on
 # a machine with no Swift on PATH and vice versa. A caller sets this before

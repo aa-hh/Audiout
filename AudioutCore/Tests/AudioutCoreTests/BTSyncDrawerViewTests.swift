@@ -181,6 +181,32 @@ import AppKit
         #expect((repeatSpec?.interval ?? 0) > 0)
     }
 
+    /// Field defect: a held `+` committed every 60 ms auto-repeat tick, and
+    /// each commit rewrote the trim store and sent `bt_sync:trim_committed`
+    /// (244 events from one customer in four holds). Every tick now applies
+    /// live; the release commits once, with the final value.
+    @Test func holdingPlusAppliesEachRepeatLiveAndCommitsOnceOnRelease() {
+        let (drawer, spy) = makeDrawer(trimMs: 24)
+        drawer.test_holdPlus(repeats: 5)
+        #expect(spy.changes.map(\.ms) == [25, 26, 27, 28, 29, 29])
+        #expect(spy.changes.map(\.committed) == [false, false, false, false, false, true])
+    }
+
+    @Test func holdingPlusWithShiftStepsTenLiveAndCommitsOnce() {
+        let (drawer, spy) = makeDrawer(trimMs: 24)
+        drawer.test_shiftModifierOverride = true
+        drawer.test_holdPlus(repeats: 3)
+        #expect(spy.changes.map(\.ms) == [34, 44, 54, 54])
+        #expect(spy.changes.map(\.committed) == [false, false, false, true])
+    }
+
+    @Test func aSingleClickCommitsExactlyOnce() {
+        let (drawer, spy) = makeDrawer(trimMs: 24)
+        drawer.test_firePlusClick()
+        #expect(spy.changes.map(\.ms) == [25])
+        #expect(spy.changes.map(\.committed) == [true])
+    }
+
     // MARK: The value cluster reads as one control around a typeable field
 
     /// The field is a STOCK bezeled `NSTextField`, not a custom drawing cell.

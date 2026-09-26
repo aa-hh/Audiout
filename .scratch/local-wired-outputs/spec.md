@@ -19,8 +19,9 @@ the owner 2026-09-26 (decisions below).
   The public "Audiout" aggregate becomes the default output and wraps ONLY the
   built-in output (`AggregateOutputDevice.swift`, `builtInOutputDeviceUID`); the
   synced local copy renders through the default. A user whose Mac normally
-  plays through a USB DAC therefore hears the Mac's copy on the laptop speakers.
-  Unverified on hardware from this session; ticket 06.
+  plays through anything else — a USB DAC, headphones in the jack, a monitor's
+  speakers — therefore hears the Mac's copy on the laptop speakers. Unverified
+  on hardware from this session; ticket 06, reproducible with headphones.
 - **Bluetooth is the precedent for "a Core Audio output as its own row".**
   `BTDeviceEnumerator` lists HAL devices by transport type; each becomes a
   `Device(kind: .bluetooth)` keyed by its Core Audio UID; each selected one gets
@@ -90,8 +91,10 @@ the owner 2026-09-26 (decisions below).
 
 See ticket 01. Specifically: whether the headphone jack is a separate HAL device
 (Apple Silicon) or a data-source flip on one device (Intel) — the row model must
-tolerate both; what UID/transport/name a USB DAC and an HDMI display report;
-whether HDMI reports any latency at all; and ticket 06's suspected DAC bug.
+tolerate both; what UID/transport/name a USB audio output and an HDMI display
+report (the owner has no USB DAC; a USB-C headphone dongle or a USB-C monitor
+is the stand-in); whether HDMI reports any latency at all; and ticket 06's
+suspected bug.
 
 ## Open questions for the owner (not yet decided)
 
@@ -116,11 +119,13 @@ whether HDMI reports any latency at all; and ticket 06's suspected DAC bug.
 
 ## Done means
 
-- A Mac with headphones plugged in and a USB DAC attached shows "This Mac"
-  (the default), plus one row each for the others; plugging/unplugging updates
-  the list; the default's own row never duplicates "This Mac".
-- Speakers + DAC + one Sonos selected together play in time (owner's ear, then
-  the passive drift sampler shows no widening baseline); trim moves the DAC.
-- An app routed to the DAC plays only there; a saved group naming the DAC
+- A Mac with headphones in the jack and a display with speakers attached shows
+  "This Mac" (the default), plus one row each for the others; plugging and
+  unplugging updates the list; the default's own row never duplicates "This Mac".
+- Speakers + headphones + one Sonos selected together play in time (owner's
+  ear, then the passive drift sampler shows no widening baseline); trim moves
+  the headphones.
+- An app routed to the headphones plays only there; a saved group naming them
   restores it; the companion snapshot lists it with the right flags.
+- USB is confirmed on the first USB audio output that turns up (ticket 01).
 - Tests stay invisible; `run-tests.sh --filter`, never bare `swift test`.

@@ -7,7 +7,23 @@ AGENTS.md: "when a fix rests on a claim about live system state, verify that
 claim with a real command before writing the fix." Everything in ticket 02
 rests on these. Record answers under `## Answer`.
 
-## Run, with headphones plugged in and a USB DAC (and an HDMI monitor) attached
+## What to plug in (owner has no USB DAC, 2026-09-26)
+
+A DAC was only ever a stand-in for "a USB-transport output". Anything below
+reports `kAudioDeviceTransportTypeUSB` and answers the same questions:
+
+- Apple's USB-C to 3.5 mm adapter, or any USB-C hub/dongle with a headphone
+  socket, with wired headphones in it.
+- A monitor with speakers connected over USB-C/Thunderbolt (Studio Display,
+  LG UltraFine and most USB-C monitors show as USB audio, not HDMI).
+- USB-C headphones, a USB conference speaker, or a webcam with a speaker.
+
+If none is to hand, do the jack and HDMI questions now and leave question 3
+open; ticket 02's filter is a pure unit-tested table, so the USB arm can land
+on the transport constant alone and be confirmed the first time such a device
+turns up.
+
+## Run, with headphones in the jack and a display with speakers attached
 
 ```bash
 system_profiler SPAudioDataType
@@ -28,8 +44,8 @@ output scope, nominal sample rate, settable volume yes/no.
 2. Intel (if one is reachable, or from the VM notes): single device with a
    data-source flip? Then speakers + jack together is impossible there and the
    row model must show ONE row whose name follows the data source.
-3. USB DAC: transport constant, UID stability across replug, reported latency
-   in ms, settable HAL volume?
+3. USB output (any stand-in above): transport constant, UID stability across
+   replug, reported latency in ms, settable HAL volume?
 4. HDMI/DisplayPort: transport constant, reported latency (expected ~0, the
    TV's real delay is invisible), settable volume (expected no).
 5. With the DAC as the system default, select one AirPlay speaker + "This Mac"

@@ -637,6 +637,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// on `stateQueue`, which is also where ``localSinkReferenceDelayMs()``
     /// reads it, so the two sides can never disagree about where the timeline is.
     var btReferenceBufferMs = BTSyncedSink.defaultBTOnlyBufferMs
+    /// The Bluetooth share of the room delay when a presentation timeline is
+    /// the reference (ms), or `nil` when no selected Bluetooth speaker needs
+    /// one — the `max` reduction's absent operand, the same shape as
+    /// ``_castTermMs``. A speaker whose measured latency plus headroom exceeds
+    /// the AirPlay start buffer cannot be fed early enough to meet it, so the
+    /// room waits for the speaker instead (owner's call, 2026-09-26:
+    /// delay-to-worst across every transport). A high-water mark while it
+    /// stands, like the Cast term: a latency that comes back DOWN leaves it
+    /// where it is, because every move of `R` is one gap for the whole house.
+    /// Derived by ``updateBTRoomTermLocked()``; on `stateQueue`.
+    var btRoomTermMs: Int?
     /// A Bluetooth-target wizard run is under way, so the reference is pinned
     /// wide open (``btWizardReferenceBufferMs``) for the duration. On `stateQueue`.
     var btWizardReferenceRaised = false
@@ -2557,6 +2568,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.btSelectedUIDs = []
             self.btPerAppClaimedUIDs = []
             self.btComposition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
+            let hadBTTerm = self.btRoomTermMs != nil
+            self.btRoomTermMs = nil
             // CAST-OUT: same shape — reset the decisions here, enqueue the
             // teardown below so the FIFO's last Cast op is the disable.
             self.castSelectedIDs = []
@@ -2610,7 +2623,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             self.captureControlQueue.async { [weak self] in
                 self?.applyCastTransition(enable: false, records: [], levels: [:])
-                if hadCastTerm { self?.captureCoordinator?.setAirPlayPreDelay(ms: 0) }
+                if hadCastTerm || hadBTTerm { self?.captureCoordinator?.setAirPlayPreDelay(ms: 0) }
             }
             let ids = self.order
             self.known.removeAll()
@@ -3815,7 +3828,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     func roomDelayLocked() -> Int {   // on stateQueue
         let today = (btSinkEnabled && !btComposition.usesPresentationReference)
             ? btReferenceBufferMs : _startBufferMs
-        return _castTermMs.map { Swift.max(today, $0) } ?? today
+        return [_castTermMs, btRoomTermMs].compactMap { $0 }.reduce(today) { Swift.max($0, $1) }
     }
 
     /// The reference delay (ms) the Mac-local sink renders on (Wave-4 delay
@@ -3827,10 +3840,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     /// The reference delay (ms) every Bluetooth sink renders on — the AirPlay
     /// start buffer, raised to the Cast term when a Cast receiver is the
-    /// furthest-behind output in the room (sync architecture brief §3).
+    /// furthest-behind output in the room (sync architecture brief §3), or to
+    /// the Bluetooth term when the slowest Bluetooth speaker is.
     func btReferenceDelayMs() -> Int {
         stateQueue.sync {
-            _castTermMs.map { Swift.max(_startBufferMs, $0) } ?? _startBufferMs
+            [_castTermMs, btRoomTermMs].compactMap { $0 }.reduce(_startBufferMs) { Swift.max($0, $1) }
         }
     }
 
@@ -3926,7 +3940,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Cast term for the invariant's sake: with no Cast device there is no
         // line, and this must not be what creates one.
         stateQueue.sync {
-            guard _castTermMs != nil else { return }
+            // The Bluetooth term is measured against the start buffer, so a
+            // buffer that grew past it retires it here, before the room delay
+            // is read.
+            let btTermMoved = updateBTRoomTermLocked()
+            guard _castTermMs != nil || btRoomTermMs != nil || btTermMoved else { return }
             roomDelayChangedLocked(cause: "start_buffer")
         }
 

@@ -443,7 +443,26 @@ public final class MicProbeSession {
         } ?? correlator.relativeOffset(probeA: down, probeB: up,
                                        recording: recording, ambientNoise: nil)
         guard let m = measurement else { return nil }
-        return Result(deltaMs: m.offsetSeconds * 1000,
-                      confidence: min(m.arrivalA.peakToSidelobe, m.arrivalB.peakToSidelobe))
+        return accepting(Result(deltaMs: m.offsetSeconds * 1000,
+                                confidence: min(m.arrivalA.peakToSidelobe,
+                                                m.arrivalB.peakToSidelobe)))
+    }
+
+    /// The weakest arrival the wizard trusts. ProbeKit's own floor (5) only
+    /// tells a sweep from pure noise; live on 2026-09-26 a room sound matched
+    /// at 7.2 and read −4,876 ms, while every true arrival that day scored 55
+    /// or more.
+    static let minConfidence = 20.0
+
+    /// A Bluetooth-target run pins its reference this far ahead, so no
+    /// alignable speaker can sound further than this from the reference.
+    static let maxPlausibleDeltaMs = Double(NativeBackend.btWizardReferenceBufferMs)
+
+    /// A weak or physically impossible measurement is refused rather than
+    /// proposed: the wizard then falls back to asking by ear.
+    static func accepting(_ result: Result) -> Result? {
+        guard result.confidence >= minConfidence,
+              abs(result.deltaMs) <= maxPlausibleDeltaMs else { return nil }
+        return result
     }
 }

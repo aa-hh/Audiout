@@ -168,6 +168,21 @@ import Testing
         #expect(abs(result.deltaMs - 7.5) < 0.3,
                 "the fallback still measures the true Δ: got \(result.deltaMs)")
     }
+
+    /// Live, 2026-09-26: the third listen matched a room sound at confidence
+    /// 7.2, read −4,876 ms, and the wizard proposed it. The good readings that
+    /// day scored 55 to 1,724.
+    @Test func aWeakOrImpossibleMeasurementIsRefused() {
+        let accept = MicProbeSession.accepting
+        #expect(accept(.init(deltaMs: -4_876.46, confidence: 7.2)) == nil,
+                "the live false match is refused")
+        #expect(accept(.init(deltaMs: 441.28, confidence: 7.2)) == nil,
+                "a weak match is refused even at a plausible delay")
+        #expect(accept(.init(deltaMs: -4_876.46, confidence: 683.8)) == nil,
+                "a delay beyond the reference buffer is refused however strong")
+        #expect(accept(.init(deltaMs: 668.42, confidence: 55.3)) != nil,
+                "the weakest true reading of the day still lands")
+    }
 }
 
 /// A measured value arriving mid-run becomes the wizard's proposal — the

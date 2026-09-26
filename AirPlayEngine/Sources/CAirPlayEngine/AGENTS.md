@@ -18,6 +18,7 @@ responsibility ends at the C ABI the umbrella header exposes.
 - TXT key-value records passed across the discovery seam stay owned by the caller.
 - Test-only C symbols are not the shipping API; production Swift never calls them.
 - The idle silence fill lives in `shims/outputs.c` and bypasses the Swift write guards and telemetry, so `writes` and `silent_s` stay host-side truth.
+- The idle fill must never write to a device once its teardown has begun: `device->session` is freed only at the end of teardown and the stopped `device->state` arrives through a deferred callback, so both lag by ~1 s. `outputs_device_stop` sets `device->idle_fill_suppressed`; `outputs_device_session_add` clears it; the fill scan skips suppressed devices and re-validates each stream at write time.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it before debugging anything here.
 
 ## Map

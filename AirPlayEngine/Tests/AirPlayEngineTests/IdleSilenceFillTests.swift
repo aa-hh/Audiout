@@ -252,6 +252,64 @@ extension SerializedEngineState {
             #expect(written == 0, "one device on another format must disqualify the whole stream")
         }
 
+        /// Catches a fill that keeps writing into a session that is being torn down.
+        /// This is the SIGSEGV the fill first shipped with: a deselect starts the
+        /// RTSP teardown, but `device->session` is freed only at the very end and the
+        /// stopped `device->state` arrives through a deferred callback, so both read
+        /// "live" for about a second. The shim's `outputs_device_stop` sets the
+        /// suppression flag this test sets directly, and the very next cycle must
+        /// write nothing.
+        @Test func fillStopsWhenDeviceTeardownBegins() async {
+            var q = defaultQuality()
+            #expect(airplay_test_master_session_make(38, &q, false) != nil)
+            makeDevice(id: 0xF009, streamId: 38)
+
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode()
+
+            let t0 = monotonicNow()
+            primeStream(at: t0)
+            let endAfterHost = await hostWrite(engine: engine, streamId: 38, pts: t0, samples: 200)
+            #expect(outputs_idle_fill_tick_for_test(ts(fromNanos: nanos(endAfterHost) + 108_000_000)) > 0,
+                "a live device must be filled before its teardown starts")
+
+            // Deselect: teardown begins. session and state still read "live" here,
+            // exactly as they do during the RTSP TEARDOWN window.
+            outputs_device_get(0xF009)!.pointee.idle_fill_suppressed = 1
+
+            let written = outputs_idle_fill_tick_for_test(ts(fromNanos: nanos(endAfterHost) + 216_000_000))
+            #expect(written == 0, "a device whose teardown has begun must get no fill")
+        }
+
+        /// Catches a device that stays muted after it is selected again: a fresh
+        /// session means the device is restarting, so attaching one must clear the
+        /// teardown suppression and let the fill serve it once more.
+        @Test func sessionAddClearsTeardownSuppression() async {
+            var q = defaultQuality()
+            #expect(airplay_test_master_session_make(39, &q, false) != nil)
+            makeDevice(id: 0xF00A, streamId: 39)
+
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode()
+
+            let t0 = monotonicNow()
+            primeStream(at: t0)
+            let endAfterHost = await hostWrite(engine: engine, streamId: 39, pts: t0, samples: 200)
+
+            outputs_device_get(0xF00A)!.pointee.idle_fill_suppressed = 1
+            #expect(outputs_idle_fill_tick_for_test(ts(fromNanos: nanos(endAfterHost) + 108_000_000)) == 0,
+                "a suppressed device gets no fill")
+
+            // Re-select: a fresh session attaches, which must lift the suppression.
+            // The stream was released while suppressed, so the first cycle after
+            // re-adding re-seeds it and owes nothing; the next cycle fills.
+            _ = outputs_device_session_add(0xF00A, UnsafeMutableRawPointer(bitPattern: 0xDEAD_BEEF))
+            #expect(outputs_idle_fill_tick_for_test(ts(fromNanos: nanos(endAfterHost) + 216_000_000)) == 0,
+                "the first cycle after a fresh session re-seeds the stream")
+            let written = outputs_idle_fill_tick_for_test(ts(fromNanos: nanos(endAfterHost) + 324_000_000))
+            #expect(written > 0, "attaching a fresh session must let the fill serve the device again")
+        }
+
         /// Catches a flood after the engine stops and starts again: the clock keeps
         /// running while the engine is down, so bookkeeping left from the previous
         /// run would show the whole downtime as owed and fill at the per-cycle

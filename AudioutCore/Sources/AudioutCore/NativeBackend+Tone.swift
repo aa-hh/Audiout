@@ -582,6 +582,7 @@ extension NativeBackend {
                 || referenceMoved {
                 self.btSinkEnabled = wantBT
                 self.btSelectedUIDs = sinkUIDs
+                self.reconcileAggregateSubDeviceLocked(reason: "bt_selection")
                 self.btComposition = composition
                 // The manager arms for BOTH domains, so the set it is handed is
                 // the union — while the reference below stays a function of the

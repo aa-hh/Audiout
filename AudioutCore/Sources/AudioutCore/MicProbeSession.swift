@@ -452,9 +452,10 @@ public final class MicProbeSession {
     /// tells a sweep from pure noise. Live on 2026-09-26, with the Bluetooth
     /// speaker silent, two false matches scored 7.2 (−4,876 ms) and 55.3
     /// (668 ms, a believable number); the speaker's real arrivals that day
-    /// scored 684, 734 and 1,724. Refusing costs only a by-ear run; a false
-    /// proposal costs a wrong trim the user has to hear out.
-    static let minConfidence = 100.0
+    /// scored 684, 734 and 1,724. The floor cannot go above the 55: a true
+    /// reading taken over a music tail scores about 23 (see the music-tail
+    /// test), so a score alone refuses the 7.2 but not the 55.
+    static let minConfidence = 20.0
 
     /// A Bluetooth-target run pins its reference this far ahead, so no
     /// alignable speaker can sound further than this from the reference.

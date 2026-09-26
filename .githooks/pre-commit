@@ -7,6 +7,10 @@
 
 git_dir=$(git rev-parse --git-dir 2>/dev/null) || exit 0
 hook_dir=$(dirname "$0")
+# Is this a merge commit? A conflict resolution has MERGE_HEAD; a clean merge
+# arrives via pre-merge-commit, which runs before git writes MERGE_HEAD and so
+# sets AUDIOUT_IN_MERGE itself. Exported for the helper scripts below.
+[ -f "$git_dir/MERGE_HEAD" ] && export AUDIOUT_IN_MERGE=1
 
 # ---------------------------------------------------------------------------
 # GUARD 1 (BLOCKING): no direct commits onto main.
@@ -24,12 +28,12 @@ hook_dir=$(dirname "$0")
 # have to travel together as one merge.
 #
 # Merges are deliberately exempt, and this is verified behaviour, not a guess:
-#   - a clean `git merge` never invokes pre-commit at all
-#   - a conflict-resolution merge commit DOES invoke it, but has MERGE_HEAD
+#   - a clean `git merge` runs pre-merge-commit, which sets AUDIOUT_IN_MERGE
+#   - a conflict-resolution merge commit runs pre-commit, but has MERGE_HEAD
 # So merging a branch into main — the correct way to land anything — is
 # untouched. Only typing `git commit` while standing on main is refused.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
-if [ "$branch" = "main" ] && [ ! -f "$git_dir/MERGE_HEAD" ]; then
+if [ "$branch" = "main" ] && [ -z "${AUDIOUT_IN_MERGE:-}" ]; then
     echo "" >&2
     echo "  REFUSED: direct commit to main." >&2
     echo "" >&2
@@ -202,7 +206,7 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     # A merge onto main is the last gate before main, so it never runs filtered
     # and never accepts the runner's "these sources already passed" cache.
     merge_env=""
-    if [ "$branch" = "main" ] && [ -f "$git_dir/MERGE_HEAD" ]; then
+    if [ "$branch" = "main" ] && [ -n "${AUDIOUT_IN_MERGE:-}" ]; then
         scope=FULL
         merge_env="AUDIOUT_TEST_NO_CACHE=1"
     fi

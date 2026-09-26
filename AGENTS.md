@@ -194,6 +194,21 @@ repo. `AudioutCore` pins it by version.
   uncapped with a loud warning (never refuses). Sweep on acquire reclaims stale
   permits (dead holder, unrecognised job, or held >45 min). `bash scripts/capacity.sh status`
   shows local and mule permits; `bash scripts/test-capacity.sh` self-tests the pool.
+- **A green run is reused, not repeated.** `run-tests.sh` stamps each pass by
+  source hash and what it covered, so a later run on the same sources skips
+  what already passed: a full pass covers any filter, and a `--filter A` pass
+  leaves a later `--filter A|B` running only `B`. Run the filter for what you
+  changed once; Guard 4 at commit reuses it. `bash scripts/test-suite-cache.sh`
+  and `bash scripts/test-guard-test-scope.sh` self-test the cache and the
+  commit-time scoping.
+- **A merge onto `main` runs the full suite uncached, even a clean one.**
+  `.githooks/pre-merge-commit` runs for a merge without conflicts and calls
+  `pre-commit` with `AUDIOUT_IN_MERGE=1`; `pre-commit` sets the same flag itself
+  when `MERGE_HEAD` exists. Guards test that flag, never `MERGE_HEAD` alone,
+  because git writes `MERGE_HEAD` only after `pre-merge-commit` returns. Guard 7
+  skips its self-review record check on merges. A fast-forward creates no
+  commit and runs no hook: land branches with `git merge --no-ff`.
+  `bash scripts/test-pre-merge-hook.sh` self-tests the hook.
 - **Hold the live-test slot before building or launching the shared dev id.**
   Only one native Audiout can run at a time (the PTP helper binds UDP 319/320
   exclusively) and the dev loop reuses one bundle id,

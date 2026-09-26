@@ -1,0 +1,6 @@
+#!/bin/sh
+# A clean `git merge` skips pre-commit and runs this instead, with the merged
+# tree staged. Git writes MERGE_HEAD only after this hook returns, so the flag
+# below is how pre-commit knows it is gating a merge (full uncached suite).
+export AUDIOUT_IN_MERGE=1
+exec "$(dirname "$0")/pre-commit" "$@"

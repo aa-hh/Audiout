@@ -69,15 +69,20 @@ private let tapFormat = TapFormat(
         private var _defaultDevice: UInt32?
         private let _builtIn: UInt32?
         private let _loopRiskIDs: Set<UInt32>
-        init(defaultDevice: UInt32?, builtIn: UInt32?, loopRiskIDs: Set<UInt32> = []) {
+        /// Our public aggregate's id → the device it wraps.
+        private let _subDeviceOf: [UInt32: UInt32]
+        init(defaultDevice: UInt32?, builtIn: UInt32?, loopRiskIDs: Set<UInt32> = [],
+             subDeviceOf: [UInt32: UInt32] = [:]) {
             self._defaultDevice = defaultDevice
             self._builtIn = builtIn
             self._loopRiskIDs = loopRiskIDs
+            self._subDeviceOf = subDeviceOf
         }
         func setDefaultDevice(_ id: UInt32?) { lock.withLock { _defaultDevice = id } }
         func defaultOutputDevice() -> UInt32? { lock.withLock { _defaultDevice } }
         func builtInOutputDevice() -> UInt32? { _builtIn }
         func isLoopRisk(_ device: UInt32) -> Bool { _loopRiskIDs.contains(device) }
+        func wrappedOutputDevice(of device: UInt32) -> UInt32? { _subDeviceOf[device] }
     }
 
     private let builtInID: UInt32 = 1
@@ -112,6 +117,19 @@ private let tapFormat = TapFormat(
         let engine = LocalPlaybackEngine(outputResolver: resolver)
         #expect(engine.resolveTargetDeviceID() == builtInID,
                 "one of our own tap aggregates as the default must fall back to built-in (loop guard)")
+    }
+
+    /// Our public aggregate as the default wraps the device the user listens
+    /// through. Falling straight back to built-in turns this red: an app
+    /// redirected to This Mac plays on the laptop speakers while the whole-system
+    /// copy plays through the device the aggregate wraps.
+    @Test func ownAggregateDefaultFollowsTheDeviceItWraps() {
+        let ourAggregate: UInt32 = 77
+        let wrapped: UInt32 = 55
+        let resolver = FakeOutputResolver(defaultDevice: ourAggregate, builtIn: builtInID,
+                                          loopRiskIDs: [ourAggregate], subDeviceOf: [ourAggregate: wrapped])
+        let engine = LocalPlaybackEngine(outputResolver: resolver)
+        #expect(engine.resolveTargetDeviceID() == wrapped)
     }
 
     /// When neither the default nor built-in resolves, the target is `nil` (the

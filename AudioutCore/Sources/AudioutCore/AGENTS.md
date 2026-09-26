@@ -27,6 +27,7 @@ everything up to the `OutputBackend` seam and never imports AppKit.
 - A drift baseline exists only for a speaker with a MEASURED latency, and drift tracking runs only with two such speakers or one plus an anchor: `room + trim` presumes the latency the sink subtracts, and a lone speaker's moved peak is equally the microphone's. A slew step never moves the BT-only reference floor — only the committed write that ends it does, because a floor move rebuilds every sink.
 - An AirPlay or Cast arrival in a `PassiveDriftSampler` window is read-only: those receivers run on the room reference clock, so a peak off baseline measures the MIC, never that speaker.
 - `BTAlignmentWizardSession` enters `.listening` only when its host's `requestListening` answers true; a rejected proposal never ends a run — only the wing rule, a stagnant belief, or the spent answer budget do. A MEASURED proposal's first rejection listens again, its second falls to the by-ear questions; the mic runs at most `maxMicAttempts` times a run.
+- The public aggregate wraps the output the user was listening through (never a Bluetooth device a BT row already feeds) and re-points on device-list and BT-selection changes; a re-point rebuilds the whole-system tap, because the default-output monitor cannot see a sub-device swap.
 - Long-form traps, dated decisions and the changelog: [AGENTS-HISTORY.md](AGENTS-HISTORY.md). Grep it first.
 
 ## Map

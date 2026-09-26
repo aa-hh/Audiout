@@ -66,12 +66,37 @@ protocol AggregateDeviceControlling: Sendable {
     func aggregateDeviceUIDs() -> [String]
     /// Read a device's own persistent UID string, or `nil` if unreadable.
     func deviceUID(_ deviceID: AudioObjectID) -> String?
-    /// The Mac's built-in output device's UID (the sub-device our aggregate
-    /// wraps), or `nil` if the Mac publishes none.
+    /// The Mac's FIRST built-in output's UID: headphones if present, else
+    /// speakers — the order macOS falls back in. `nil` if the Mac publishes
+    /// none. The fallback both for what the aggregate wraps and for handing
+    /// the default output back.
     func builtInOutputDeviceUID() -> String?
+    /// Whether the aggregate may wrap `uid`: it resolves now and is a real
+    /// local output (built-in, USB, display, Thunderbolt, PCI, FireWire, AVB
+    /// or Bluetooth) — never AirPlay, an aggregate, or a virtual device.
+    func isWrappableOutput(uid: String) -> Bool
+    /// Call `onChange` whenever the HAL's device list changes, until
+    /// ``stopObservingDeviceList()``. One observer at a time.
+    func observeDeviceList(_ onChange: @escaping @Sendable () -> Void)
+    func stopObservingDeviceList()
     /// Point the system default output at `deviceID`. `false` if nothing was
     /// written.
     func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool
+    /// The UID of aggregate `deviceID`'s main sub-device, or `nil` if unreadable.
+    func mainSubDeviceUID(ofAggregate deviceID: AudioObjectID) -> String?
+    /// Make `subDeviceUID` aggregate `deviceID`'s sole (and main) sub-device.
+    /// `true` only if every write returned `noErr`.
+    func setSubDevice(_ subDeviceUID: String, ofAggregate deviceID: AudioObjectID) -> Bool
+}
+
+/// Doubles that never adopt an existing aggregate have nothing to repair:
+/// "unreadable" leaves the device alone, and nothing is plugged or unplugged.
+extension AggregateDeviceControlling {
+    func isWrappableOutput(uid: String) -> Bool { resolveDeviceID(forUID: uid) != nil }
+    func observeDeviceList(_ onChange: @escaping @Sendable () -> Void) {}
+    func stopObservingDeviceList() {}
+    func mainSubDeviceUID(ofAggregate deviceID: AudioObjectID) -> String? { nil }
+    func setSubDevice(_ subDeviceUID: String, ofAggregate deviceID: AudioObjectID) -> Bool { false }
 }
 
 /// Owns the lifecycle (adopt-or-create, off-switch classification, orphan
@@ -138,18 +163,62 @@ public struct AggregateOutputDevice: Sendable {
         self.control = control
     }
 
+    /// The device the aggregate should wrap: `candidate` (the output the user was
+    /// listening through) when it is a wrappable local output not in `excluding`
+    /// (Bluetooth devices a Bluetooth row already feeds), else the Mac's first
+    /// built-in output. `nil` only when neither exists.
+    func wantedSubDeviceUID(candidate: String?, excluding: Set<String>) -> String? {
+        if let candidate, candidate != Self.productUID, !excluding.contains(candidate),
+           control.isWrappableOutput(uid: candidate) {
+            return candidate
+        }
+        return control.builtInOutputDeviceUID()
+    }
+
+    /// Make aggregate `aggregateID` wrap `wanted`, in place, and log the outcome
+    /// as `aggregate_subdevice`. The sub-device is read back after the write
+    /// rather than trusting its return: a HAL can accept a write and change
+    /// nothing. `true` iff the aggregate now wraps `wanted` and did not before.
+    @discardableResult
+    func ensureSubDevice(_ wanted: String, ofAggregate aggregateID: AudioObjectID, reason: String) -> Bool {
+        let current = control.mainSubDeviceUID(ofAggregate: aggregateID)
+        guard current != wanted else {
+            Telemetry.log(.airplay, "aggregate_subdevice", [
+                "reason": reason, "outcome": "unchanged", "from": wanted, "to": wanted, "now": wanted])
+            return false
+        }
+        let setReturned = control.setSubDevice(wanted, ofAggregate: aggregateID)
+        let after = control.mainSubDeviceUID(ofAggregate: aggregateID)
+        let changed = setReturned && after == wanted
+        Telemetry.log(.airplay, "aggregate_subdevice", [
+            "reason": reason, "outcome": changed ? "set" : "failed",
+            "from": current ?? "unreadable", "to": wanted, "now": after ?? "unreadable"])
+        return changed
+    }
+
     /// Adopt-vs-create (spike §1, §4): resolve `productUID` fresh — a hit
     /// means adopt (reuse the existing device, whatever its current id is,
     /// e.g. surviving a previous launch or a crash); a miss means create a
-    /// fresh one wrapping the Mac's current built-in output. Never caches the
-    /// returned id past this call's caller — resolve by UID again next time.
-    func adoptOrCreate() -> AudioObjectID? {
+    /// fresh one wrapping ``wantedSubDeviceUID(candidate:excluding:)`` for
+    /// `candidateUID`. Never caches the returned id past this call's caller —
+    /// resolve by UID again next time.
+    ///
+    /// An adopted device wrapping the wrong sub-device is repaired IN PLACE,
+    /// not destroyed and recreated: `NativeBackend.start()` sweeps (destroys by
+    /// UID) just before this, so a hit here means that destroy already failed —
+    /// Core Audio keeps an aggregate that is the current system output — and a
+    /// second destroy would fail the same way. In place also keeps the id.
+    func adoptOrCreate(candidateUID: String?) -> AudioObjectID? {
+        let wanted = wantedSubDeviceUID(candidate: candidateUID, excluding: [])
         if let existing = control.resolveDeviceID(forUID: Self.productUID) {
+            if let wanted {
+                ensureSubDevice(wanted, ofAggregate: existing, reason: "launch")
+            }
             return existing
         }
-        guard let subDeviceUID = control.builtInOutputDeviceUID() else { return nil }
+        guard let wanted else { return nil }
         return control.createAggregate(uid: Self.productUID, name: Self.productName,
-                                        subDeviceUID: subDeviceUID)
+                                        subDeviceUID: wanted)
     }
 
     /// Off-switch classification (spike §5): given the new system default
@@ -178,10 +247,8 @@ public struct AggregateOutputDevice: Sendable {
     }
 }
 
-/// Production ``AggregateDeviceControlling``. Reuses existing helpers rather
-/// than re-deriving them: the built-in-output lookup is
-/// ``SystemLocalOutputResolver`` (already used by `LocalPlaybackEngine`'s loop
-/// guard and `DefaultOutputSwitcher`'s takeover switch-away), and the
+/// Production ``AggregateDeviceControlling``. `builtInOutputDeviceUID()` is
+/// ``SystemLocalOutputResolver``'s first built-in output. The
 /// default-output WRITE is ``CoreAudioDefaultOutputControl`` (`DefaultOutputSwitcher.swift`)
 /// — house rule: `kAudioHardwarePropertyDefaultOutputDevice`, NEVER
 /// `…DefaultSystemOutputDevice` (`OutputSelectorGuardTests` fails the build on
@@ -190,6 +257,8 @@ public struct AggregateOutputDevice: Sendable {
 /// `NativeCaptureCoordinator.createAggregate()` — same call shapes, `IsPrivateKey`
 /// flipped to `false` since this device must be user-visible.
 struct CoreAudioAggregateDeviceControl: AggregateDeviceControlling {
+
+    private let deviceList = DeviceListObserver()
 
     func resolveDeviceID(forUID uid: String) -> AudioObjectID? {
         var address = AudioObjectPropertyAddress(
@@ -240,20 +309,7 @@ struct CoreAudioAggregateDeviceControl: AggregateDeviceControlling {
     }
 
     func aggregateDeviceUIDs() -> [String] {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize) == noErr else { return [] }
-        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
-        guard count > 0 else { return [] }
-        var deviceIDs = [AudioObjectID](repeating: AudioObjectID(kAudioObjectUnknown), count: count)
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &deviceIDs) == noErr else { return [] }
-
-        return deviceIDs.compactMap { deviceID -> String? in
+        allDeviceIDs().compactMap { deviceID -> String? in
             guard transportType(deviceID) == kAudioDeviceTransportTypeAggregate else { return nil }
             return deviceUID(deviceID)
         }
@@ -282,8 +338,82 @@ struct CoreAudioAggregateDeviceControl: AggregateDeviceControlling {
         return deviceUID(AudioObjectID(builtIn))
     }
 
+    /// razor: an allowlist of transport types, not ``SystemLocalOutputResolver``'s
+    /// loop-risk check; a new local transport stays unwrapped until it is added here.
+    private static let wrappableTransports: Set<UInt32> = [
+        kAudioDeviceTransportTypeBuiltIn, kAudioDeviceTransportTypeUSB,
+        kAudioDeviceTransportTypeHDMI, kAudioDeviceTransportTypeDisplayPort,
+        kAudioDeviceTransportTypeThunderbolt, kAudioDeviceTransportTypePCI,
+        kAudioDeviceTransportTypeFireWire, kAudioDeviceTransportTypeAVB,
+        kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE,
+    ]
+
+    func isWrappableOutput(uid: String) -> Bool {
+        guard let deviceID = resolveDeviceID(forUID: uid),
+              let transport = transportType(deviceID) else { return false }
+        return Self.wrappableTransports.contains(transport)
+    }
+
+    func observeDeviceList(_ onChange: @escaping @Sendable () -> Void) { deviceList.start(onChange) }
+    func stopObservingDeviceList() { deviceList.stop() }
+
     func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool {
         CoreAudioDefaultOutputControl().setDefaultOutputDevice(UInt32(deviceID))
+    }
+
+    func mainSubDeviceUID(ofAggregate deviceID: AudioObjectID) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioAggregateDevicePropertyMainSubDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        var uid: CFString?
+        let err = withUnsafeMutablePointer(to: &uid) { ptr -> OSStatus in
+            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, ptr)
+        }
+        guard err == noErr, let uid else { return nil }
+        return uid as String
+    }
+
+    func setSubDevice(_ subDeviceUID: String, ofAggregate deviceID: AudioObjectID) -> Bool {
+        var listAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioAggregateDevicePropertyFullSubDeviceList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var list = [subDeviceUID] as CFArray
+        let listErr = withUnsafePointer(to: &list) { ptr -> OSStatus in
+            AudioObjectSetPropertyData(deviceID, &listAddress, 0, nil,
+                                       UInt32(MemoryLayout<CFArray>.size), ptr)
+        }
+        var mainAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioAggregateDevicePropertyMainSubDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var main = subDeviceUID as CFString
+        let mainErr = withUnsafePointer(to: &main) { ptr -> OSStatus in
+            AudioObjectSetPropertyData(deviceID, &mainAddress, 0, nil,
+                                       UInt32(MemoryLayout<CFString>.size), ptr)
+        }
+        if listErr != noErr || mainErr != noErr {
+            AudioDiag.log("CoreAudioAggregateDeviceControl.setSubDevice failed: list \(listErr), main \(mainErr)")
+        }
+        return listErr == noErr && mainErr == noErr
+    }
+
+    private func allDeviceIDs() -> [AudioObjectID] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize) == noErr else { return [] }
+        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        guard count > 0 else { return [] }
+        var deviceIDs = [AudioObjectID](repeating: AudioObjectID(kAudioObjectUnknown), count: count)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &deviceIDs) == noErr else { return [] }
+        return deviceIDs
     }
 
     private func transportType(_ deviceID: AudioObjectID) -> UInt32? {
@@ -295,5 +425,43 @@ struct CoreAudioAggregateDeviceControl: AggregateDeviceControlling {
         var size = UInt32(MemoryLayout<UInt32>.size)
         guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr else { return nil }
         return value
+    }
+}
+
+/// The HAL device-list listener behind ``CoreAudioAggregateDeviceControl``'s
+/// observer pair: the control is a struct, so the installed block lives here.
+private final class DeviceListObserver: @unchecked Sendable {
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "com.audiout.aggregate.device-list")
+    private var installed: AudioObjectPropertyListenerBlock?
+
+    private static func address() -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+    }
+
+    /// Replaces any observer already installed.
+    func start(_ onChange: @escaping @Sendable () -> Void) {
+        lock.withLock {
+            removeLocked()
+            let block: AudioObjectPropertyListenerBlock = { _, _ in onChange() }
+            var addr = Self.address()
+            if AudioObjectAddPropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &addr, queue, block) == noErr {
+                installed = block
+            }
+        }
+    }
+
+    func stop() { lock.withLock { removeLocked() } }
+
+    private func removeLocked() {
+        guard let block = installed else { return }
+        var addr = Self.address()
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &addr, queue, block)
+        installed = nil
     }
 }

@@ -511,6 +511,11 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// no-op so lifecycle-only spies compile unchanged; ``BTSyncedSink``
     /// provides the real one (same-value writes are already guarded there).
     func setTrimMs(_ ms: Double, forDeviceUID uid: String)
+    /// Re-anchor this device's sink if a live trim since its anchor could not
+    /// be applied in full — see
+    /// ``BTSyncedSink/reanchorIfTrimClamped(forDeviceUID:)``. Called on a
+    /// COMMITTED trim only. Same default-no-op posture as `setTrimMs`.
+    func reanchorIfTrimClamped(forDeviceUID uid: String)
     /// The usable trim range for a device (D11/T3) — see
     /// ``BTSyncedSink/usableTrimRangeMs(forDeviceUID:)``. Default returns the
     /// full ±`BTSyncTrim.rangeMs` so lifecycle-only spies compile unchanged;
@@ -560,6 +565,7 @@ extension BTSyncedSinkControlling {
     func setKeepAliveWindow(nanos: Int64) {}
     func lastAudibleRenderNanos() -> Int64? { nil }
     func setTrimMs(_ ms: Double, forDeviceUID uid: String) {}
+    func reanchorIfTrimClamped(forDeviceUID uid: String) {}
     func reanchorAll(cause: String) {}
     func setOffsetMs(_ ms: Int, forDeviceUID uid: String) {}
     func setBTOnlyBufferMs(_ ms: Int) {}

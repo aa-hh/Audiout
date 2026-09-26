@@ -3567,13 +3567,18 @@ import AudioutProtocol
         #expect(popover.test_systemAirPlayNoteText == nil, "the note clears once a key is in place")
     }
 
-    /// Red if a refunded or revoked key were told its trial ended — a customer
-    /// who paid and was refunded never had a trial to end.
-    @Test func keyRefusedNoteSaysTheKeyWasRefused() async throws {
+    /// Red if a refused key were told its trial ended, or the note stopped
+    /// naming the server's reason — a refunded buyer would read "revoked".
+    @Test(arguments: [
+        ("refund", "This key was refunded, so Audiout plays on one speaker at a time."),
+        ("chargeback", "This key\u{2019}s payment was reversed, so Audiout plays on one speaker at a time."),
+        ("manual", "This key was revoked, so Audiout plays on one speaker at a time."),
+        (nil, "This key was revoked, so Audiout plays on one speaker at a time."),
+    ] as [(String?, String)])
+    func keyRefusedNoteNamesTheReason(reason: String?, expected: String) async throws {
         let (popover, _, _) = try await makePopover()
-        popover.setUnregisteredNote(.keyRefused)
-        #expect(popover.test_systemAirPlayNoteText
-                == "This key was refunded or revoked, so Audiout plays on one speaker at a time.")
+        popover.setUnregisteredNote(.keyRefused(reason: reason))
+        #expect(popover.test_systemAirPlayNoteText == expected)
         #expect(popover.test_systemAirPlayNoteHasTextAction)
     }
 
@@ -3668,6 +3673,9 @@ import AudioutProtocol
         #expect(popover.test_systemAirPlayNoteHasActionButton)
         popover.test_tapSystemAirPlayNoteAction()
         #expect(buyTaps == 1, "the pill opens the purchase page through the host")
+        // Red if the pill lost "I have a key": a trialist who already bought
+        // would have no way to the key sheet from the note.
+        #expect(popover.test_systemAirPlayNoteHasTextAction, "the pill offers I have a key")
     }
 
     /// Red if the pill lost its singular on the last day ("Trial · 1 days
@@ -3709,6 +3717,7 @@ import AudioutProtocol
         #expect(popover.test_systemAirPlayNoteText
                 == "Your trial ends in 3 days. €30 once keeps everything, including updates.")
         #expect(raised.banners == [.threeDays], "reported as it goes up")
+        #expect(popover.test_systemAirPlayNoteHasTextAction, "the nudge offers I have a key")
 
         popover.update(devices: backend.devices)
         popover.rebuild()

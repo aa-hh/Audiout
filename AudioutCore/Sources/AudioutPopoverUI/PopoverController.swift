@@ -1314,14 +1314,23 @@ public final class PopoverController: NSObject {
     }
 
     /// Why this install plays on one speaker at a time, which picks the
-    /// standing note's copy.
-    public enum UnregisteredNote {
+    /// standing note's copy. `reason` is the licence server's word for a
+    /// refused key (`AppSettings.licenseReason`), or `nil` when it gave none.
+    public enum UnregisteredNote: Equatable {
         case trialEnded
-        case keyRefused
+        case keyRefused(reason: String?)
     }
 
     static let unregisteredTrialEndedNoteText = "Your trial has ended. Audiout plays on one speaker at a time until you buy."
-    static let unregisteredKeyRefusedNoteText = "This key was refunded or revoked, so Audiout plays on one speaker at a time."
+    /// A refused key's note names what happened to it: a refund, a reversed
+    /// payment, or, for any other or no reason, a revoke.
+    static func unregisteredKeyRefusedNoteText(reason: String?) -> String {
+        switch reason {
+        case "refund": return "This key was refunded, so Audiout plays on one speaker at a time."
+        case "chargeback": return "This key\u{2019}s payment was reversed, so Audiout plays on one speaker at a time."
+        default: return "This key was revoked, so Audiout plays on one speaker at a time."
+        }
+    }
     /// Shown for the rest of an open once a trial-ended install hits the limit.
     static let oneSpeakerLimitNoteText = "Your trial has ended, so Audiout plays on one speaker at a time."
 
@@ -1530,9 +1539,10 @@ public final class PopoverController: NSObject {
     /// note; none active means no note. `action` is non-nil for routing-blocked
     /// (the "Use <productName>" button), for the takeover strip's
     /// `.needsApproval` (state 1) and `.timedOut` (state 4, "Try Again"), for
-    /// both trial nudges and the one-speaker note ("Buy Audiout") — the states
-    /// with an actual remedy a button can offer. Only the one-speaker note
-    /// carries a `textAction` ("I have a key"). The capture-failure message
+    /// both trial nudges, the trial pill and the one-speaker note ("Buy
+    /// Audiout") — the states with an actual remedy a button can offer. Those
+    /// same trial states, and only they, carry a `textAction` ("I have a
+    /// key"). The capture-failure message
     /// names its own remedy in prose, so it has none.
     private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?, textAction: SystemAirPlayNoteBannerView.Action?, severity: SystemAirPlayNoteBannerView.Severity) {
         if let captureFailureMessage {
@@ -1553,10 +1563,10 @@ public final class PopoverController: NSObject {
             return (Self.systemAirPlayNoteText, nil, nil, .info)
         }
         if let raisedTrialBanner {
-            return (Self.trialBannerText(for: raisedTrialBanner), trialBuyAction, nil, .info)
+            return (Self.trialBannerText(for: raisedTrialBanner), trialBuyAction, enterLicenseKeyAction, .info)
         }
         if let trialDaysLeft {
-            return (Self.trialPillText(daysLeft: trialDaysLeft), trialBuyAction, nil, .info)
+            return (Self.trialPillText(daysLeft: trialDaysLeft), trialBuyAction, enterLicenseKeyAction, .info)
         }
         if let unregisteredNote {
             // A refused-key install keeps its standing text when it hits the
@@ -1565,15 +1575,15 @@ public final class PopoverController: NSObject {
             switch unregisteredNote {
             case .trialEnded:
                 text = limitNoteRaised ? Self.oneSpeakerLimitNoteText : Self.unregisteredTrialEndedNoteText
-            case .keyRefused:
-                text = Self.unregisteredKeyRefusedNoteText
+            case .keyRefused(let reason):
+                text = Self.unregisteredKeyRefusedNoteText(reason: reason)
             }
             return (text, trialBuyAction, enterLicenseKeyAction, .info)
         }
         return (nil, nil, nil, .info)
     }
 
-    /// The one-speaker note's "I have a key" text action.
+    /// The trial notes' "I have a key" text action.
     private var enterLicenseKeyAction: SystemAirPlayNoteBannerView.Action {
         SystemAirPlayNoteBannerView.Action(
             title: "I have a key",

@@ -139,4 +139,34 @@ import AppKit
         banner.test_tapTextAction()
         #expect(taps == 1, "the text action dispatches its handler")
     }
+
+    /// Red if the glyph went back to the label's first line (or any other
+    /// line of its own) instead of the controls' centre: on a wrapped note the
+    /// icon would sit above the buttons.
+    @Test(arguments: [("Trial · 9 days left", false),
+                      ("Your trial has ended. Audiout plays on one speaker at a time until you buy.", true)])
+    func theIconSharesTheControlsCentre(text: String, wraps: Bool) {
+        let banner = SystemAirPlayNoteBannerView(
+            text: text,
+            maxTextWidth: 360,
+            action: .init(title: "Buy Audiout", accessibilityLabel: "Buy an Audiout license", handler: {}),
+            textAction: .init(title: "I have a key", accessibilityLabel: "Enter a license key", handler: {}))
+        guard let link = banner.test_textActionButton, let button = banner.test_actionButton else {
+            Issue.record("expected both controls")
+            return
+        }
+        banner.frame = NSRect(x: 0, y: 0, width: 400, height: banner.fittingSize.height)
+        banner.layoutSubtreeIfNeeded()
+        let lineHeight = banner.label.font.map { ceil($0.ascender - $0.descender + $0.leading) } ?? 16
+        let labelHeight = banner.convert(banner.label.bounds, from: banner.label).height
+        #expect((labelHeight > lineHeight * 1.5) == wraps, "the label wraps only in the long case")
+        // Alignment rects: the visible glyph and bezel, not the padding
+        // AppKit adds around a symbol image, which is uneven top and bottom.
+        func visibleMidY(_ view: NSView) -> CGFloat {
+            banner.convert(view.alignmentRect(forFrame: view.frame), from: view.superview).midY
+        }
+        let iconMidY = visibleMidY(banner.test_iconView)
+        #expect(abs(iconMidY - visibleMidY(button)) <= 0.5, "icon and button share one centre")
+        #expect(abs(iconMidY - visibleMidY(link)) <= 0.5, "icon and text action share one centre")
+    }
 }

@@ -60,6 +60,7 @@ final class SystemAirPlayNoteBannerView: NSView {
     private let actionButton: NSButton?
     private var actionHandler: (() -> Void)?
     private let textActionButton: NSButton?
+    private let iconView: NSImageView
     private var textActionHandler: (() -> Void)?
     private let severity: Severity
 
@@ -76,6 +77,7 @@ final class SystemAirPlayNoteBannerView: NSView {
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.setContentHuggingPriority(.required, for: .horizontal)
         icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+        self.iconView = icon
 
         var button: NSButton?
         if let action {
@@ -138,9 +140,12 @@ final class SystemAirPlayNoteBannerView: NSView {
         // an all-in-one-stack layout left the button hugging the text with
         // any leftover width stranded past it, against the banner's true
         // trailing edge, instead of where the eye expects a CTA to sit.
+        // The icon centres on the text, and every control centres on the
+        // banner, so glyph and controls share one line however far the text
+        // wraps (owner's call, 2026-09-26).
         let leading = NSStackView(views: [icon, text])
         leading.orientation = .horizontal
-        leading.alignment = .firstBaseline
+        leading.alignment = .centerY
         leading.spacing = 10
         leading.translatesAutoresizingMaskIntoConstraints = false
         addSubview(leading)
@@ -150,8 +155,6 @@ final class SystemAirPlayNoteBannerView: NSView {
             leading.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
         ])
         if let linkButton {
-            // With a text action both controls centre on the banner, not the
-            // icon: two controls side by side read as one row of choices.
             addSubview(linkButton)
             var pins = [
                 leading.trailingAnchor.constraint(lessThanOrEqualTo: linkButton.leadingAnchor, constant: -10),
@@ -173,7 +176,7 @@ final class SystemAirPlayNoteBannerView: NSView {
             NSLayoutConstraint.activate([
                 leading.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -10),
                 button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-                button.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
+                button.centerYAnchor.constraint(equalTo: centerYAnchor),
             ])
         } else {
             leading.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14).isActive = true
@@ -216,6 +219,7 @@ final class SystemAirPlayNoteBannerView: NSView {
     /// The two controls, for layout and styling assertions.
     var test_textActionButton: NSButton? { textActionButton }
     var test_actionButton: NSButton? { actionButton }
+    var test_iconView: NSImageView { iconView }
 
     /// Keep the CGColor-backed fills correct across light/dark appearance
     /// switches (layer colors don't auto-resolve dynamic `NSColor`s).

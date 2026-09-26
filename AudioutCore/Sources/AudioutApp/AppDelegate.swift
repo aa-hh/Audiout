@@ -1126,7 +1126,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Analytics.capture("license:buy_link_opened", ["source": "note"])
             NSWorkspace.shared.open(url)
         }
-        // The one-speaker note's "I have a key": the Enter License sheet on
+        // "I have a key" on the one-speaker note, the trial pill and the
+        // trial nudges: the Enter License sheet on
         // General, once the surface is really on screen to host it.
         popoverController.onEnterLicenseKey = { [weak self] in
             guard let self else { return }
@@ -2593,7 +2594,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             note = nil
         } else if (status == .revoked || status == .unknown || status == .invalid),
                   !TrialClock.hasEnded(settings: settings) {
-            note = .keyRefused
+            note = .keyRefused(reason: settings.licenseReason)
         } else {
             note = .trialEnded
         }

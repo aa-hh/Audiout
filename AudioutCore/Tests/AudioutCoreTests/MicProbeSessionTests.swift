@@ -223,6 +223,21 @@ import Testing
         #expect(result.map { abs($0.deltaMs - 300) < 0.5 } == true,
                 "the sweeps themselves are still found: got \(String(describing: result))")
     }
+
+    /// Live, 2026-09-26, with the Bluetooth speaker silent: false matches at
+    /// confidence 7.2 (−4,876 ms) and 55.3 (668 ms). The speaker's real
+    /// arrivals that day scored 684 to 1,724.
+    @Test func aWeakOrImpossibleMeasurementIsRefused() {
+        let accept = MicProbeSession.accepting
+        #expect(accept(.init(deltaMs: -4_876.46, confidence: 7.2)) == nil,
+                "the live false match is refused")
+        #expect(accept(.init(deltaMs: 441.28, confidence: 7.2)) == nil,
+                "a weak match is refused even at a plausible delay")
+        #expect(accept(.init(deltaMs: -4_876.46, confidence: 683.8)) == nil,
+                "a delay beyond the reference buffer is refused however strong")
+        #expect(accept(.init(deltaMs: 441.28, confidence: 683.8)) != nil,
+                "the weakest true reading of the day still lands")
+    }
 }
 
 /// A measured value arriving mid-run becomes the wizard's proposal — the

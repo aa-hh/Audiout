@@ -303,7 +303,7 @@ public final class MicProbeSession {
     static let sweepSeconds = 1.0
     /// Air lags the feed by the sinks' pipeline delay (reference timeline,
     /// Bluetooth buffers). Generous ceiling; the correlator finds the arrivals
-    /// wherever they land inside the capture.
+    /// wherever they land after the sweeps entered the feed.
     public static let pipelineTailSeconds = 3.0
 
     private let recorder: MicProbeRecording
@@ -311,8 +311,9 @@ public final class MicProbeSession {
     private let pipelineTail: TimeInterval
     private let queue = DispatchQueue(label: "mic-probe-session")
     private var sampleRate: Double = 0
-    private var startedAt: Date?
-    private var recordingBegan: Date?
+    /// Monotonic nanoseconds, the clock `firstSampleHostNanos` is on.
+    private var startedAt: Int64?
+    private var recordingBegan: Int64?
     private var finished = false
     private var completion: ((Result?) -> Void)?
 
@@ -338,9 +339,9 @@ public final class MicProbeSession {
                 finish(analyze: false)
                 return
             }
-            recordingBegan = Date()
+            recordingBegan = Self.nowNanos()
             stage({ [weak self] in
-                self?.queue.async { self?.startedAt = Date() }
+                self?.queue.async { self?.startedAt = Self.nowNanos() }
             }, { [weak self] in
                 guard let self else { return }
                 self.queue.asyncAfter(deadline: .now() + self.pipelineTail) {
@@ -386,9 +387,7 @@ public final class MicProbeSession {
             Telemetry.log(.localPlayback, "mic_probe_dump", [
                 "path": url.path,
                 "rate": String(Int(sampleRate)),
-                "startedAtSeconds": startedAt.flatMap { started in
-                    recordingBegan.map { String(format: "%.2f", started.timeIntervalSince($0)) }
-                } ?? "-",
+                "startedAtSeconds": startedSeconds().map { String(format: "%.2f", $0) } ?? "-",
             ])
         }
         Telemetry.log(.localPlayback, "mic_probe_finished", [
@@ -405,19 +404,49 @@ public final class MicProbeSession {
 
     private func measure(recording: [Float]) -> Result? {
         guard sampleRate > 0, !recording.isEmpty else { return nil }
-        // Ambient = the capture up to just before the sweeps entered the feed
-        // (air can only lag the feed, so this slice is provably probe-free).
+        // Ambient = the capture up to just before the arm gate opened; the
+        // search starts just before the sweeps entered the feed, a probe lead
+        // after the gate. Air can only lag the feed, so nothing ahead of that
+        // is a sweep. Both keep 0.25 s of slack for the main-queue hop that
+        // stamps `startedAt` late.
         var ambientEnd = 0
-        if let startedAt, let recordingBegan {
-            let seconds = startedAt.timeIntervalSince(recordingBegan) - 0.25
-            ambientEnd = min(Int(seconds * sampleRate), recording.count)
+        var searchFrom = 0
+        if let seconds = startedSeconds() {
+            func index(_ s: Double) -> Int { min(max(0, Int(s * sampleRate)), recording.count) }
+            ambientEnd = index(seconds - 0.25)
+            searchFrom = index(seconds + AlignmentTickInjector.probeLeadSeconds - 0.25)
         }
         return Self.analyze(recording: recording, sampleRate: sampleRate,
-                            ambientEnd: ambientEnd)
+                            ambientEnd: ambientEnd, searchFrom: searchFrom)
+    }
+
+    /// Seconds from `recording[0]` to the arm gate opening. Dated from the
+    /// recorder's first sample when it offers one: a cold or restarted mic
+    /// can deliver its first sample most of a second after `start()`
+    /// returned (live, v1.2.0: 6.1 s captured of a 6.5 s listen), and dating
+    /// from the return would place the sweeps that much later in the capture
+    /// than they sit, cutting a real one out of the search.
+    private func startedSeconds() -> Double? {
+        guard let startedAt, let origin = recorder.firstSampleHostNanos ?? recordingBegan
+        else { return nil }
+        return Double(startedAt - origin) / 1e9
+    }
+
+    private static func nowNanos() -> Int64 {
+        var now = timespec()
+        clock_gettime(CLOCK_MONOTONIC, &now)
+        return SyncTiming.monotonicNanos(now)
     }
 
     /// The analysis, split from the wall-clock bookkeeping so tests can hand
     /// it a scene with an exact ambient boundary.
+    ///
+    /// Arrivals are searched for only from `searchFrom` on. Searched over the
+    /// whole capture, a missing Bluetooth sweep's best match comes from
+    /// whatever played before the sweeps (live, v1.2.0: Δ −778 to −3748 ms
+    /// at confidence 5.9–7.9, shown as an implausible reading). Such a match
+    /// scores with the loudness of that earlier sound, so no confidence
+    /// floor can tell it from a weak real arrival; where it sits can.
     ///
     /// The SNR weighting gets first go, but its failure is never the run's:
     /// the ambient slice describes the room BEFORE the sweeps, and during a
@@ -429,7 +458,7 @@ public final class MicProbeSession {
     /// an optimization for noise that is genuinely stationary; when it finds
     /// nothing, the plain matched filter decides.
     static func analyze(recording: [Float], sampleRate: Double,
-                        ambientEnd: Int) -> Result? {
+                        ambientEnd: Int, searchFrom: Int = 0) -> Result? {
         let down = SyncProbe.samples(.downSweep(sampleRate: sampleRate,
                                                 duration: sweepSeconds))
         let up = SyncProbe.samples(.upSweep(sampleRate: sampleRate,
@@ -437,11 +466,12 @@ public final class MicProbeSession {
         let correlator = SyncProbeCorrelator(sampleRate: sampleRate)
         let ambient: [Float]? = ambientEnd > Int(0.3 * sampleRate)
             ? Array(recording[0..<ambientEnd]) : nil
+        let searched = Array(recording[min(max(0, searchFrom), recording.count)...])
         let measurement = ambient.flatMap {
             correlator.relativeOffset(probeA: down, probeB: up,
-                                      recording: recording, ambientNoise: $0)
+                                      recording: searched, ambientNoise: $0)
         } ?? correlator.relativeOffset(probeA: down, probeB: up,
-                                       recording: recording, ambientNoise: nil)
+                                       recording: searched, ambientNoise: nil)
         guard let m = measurement else { return nil }
         return Result(deltaMs: m.offsetSeconds * 1000,
                       confidence: min(m.arrivalA.peakToSidelobe, m.arrivalB.peakToSidelobe))

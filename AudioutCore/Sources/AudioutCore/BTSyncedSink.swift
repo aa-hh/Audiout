@@ -400,6 +400,17 @@ final class BTDelayLine {
         let delta = requested &- appliedShiftFrames.pointee
         guard delta != 0 else { return }
         appliedShiftFrames.pointee = requested
+        shift(byFrames: delta)
+    }
+
+    /// Consumer side: move the read position by `delta` frames now, behind the
+    /// same crossfade a trim gets, and return the move the ring actually made
+    /// (forward stops at the write pointer, backward at the oldest history).
+    /// The render thread's own re-alignment calls this directly because it IS
+    /// the consumer; the control thread goes through ``requestShift(frames:)``.
+    @discardableResult
+    func shift(byFrames delta: Int) -> Int {
+        guard delta != 0 else { return 0 }
 
         // Capture what the output WOULD have been for the next `crossfadeFrames`
         // frames — mixing any fade still in flight, so overlapping shifts during
@@ -413,7 +424,7 @@ final class BTDelayLine {
             captured += 1
         }
         ring.seek(byFrames: -captured)          // rewind the peek
-        ring.seek(byFrames: delta)              // then the shift the user asked for
+        let applied = ring.seek(byFrames: delta)
 
         // Swapped by hand rather than with `swap(&_:&_:)`: that takes both
         // properties `inout`, which on a class is an exclusivity-checked access,
@@ -423,6 +434,7 @@ final class BTDelayLine {
         captureFrames = previousTail
         fadeLength = captured
         fadeIndex = 0
+        return applied
     }
 
     /// One crossfade step, in place: `dst` holds the new (post-seek) side on
@@ -466,9 +478,15 @@ enum BTDeviceSinkError: Error, CustomStringConvertible {
 /// the reference timeline reaches `capture_pts + delay`, then drains the ring
 /// through the shared `FractionalResampler` at unity rate.
 ///
-/// There is no drift correction: A2DP sinks servo to the host delivery rate, and
+/// There is no rate correction: A2DP sinks servo to the host delivery rate, and
 /// measured inter-speaker drift was −0.02 ppm (≈ 0 over 30 minutes) on
-/// 2026-08-12, so a fixed trim holds for a whole session.
+/// 2026-08-12, so a fixed trim holds for a whole session. What a link CAN do is
+/// pull unevenly — a Sonos Move whose Bluetooth pacing clock stepped every
+/// second pulled 958 ms of audio in one second and 1092 ms in another — and a
+/// plain first-in-first-out ring keeps every such step as a permanent offset.
+/// So once released, the render path re-aligns the read position whenever the
+/// device's own cycles have fallen ``pullRealignThresholdMs`` behind or ahead
+/// of wall time (``realignToDevicePulls(cycleStartMonotonicNanos:frameCount:)``).
 ///
 /// NEVER install a tap on `engine.outputNode` — that raises an uncatchable
 /// AVFAudio exception at install time (spike gotcha, live-verified); if a tap
@@ -554,6 +572,22 @@ final class BTDeviceSink: @unchecked Sendable {
     /// the wizard's permanent silence (roadmap 056). 100 ms is a few render
     /// cycles' worth of headroom, well below the smallest reference.
     static let seekSafetyMarginMs: Double = 100
+
+    /// How far the device's pulls may run behind or ahead of wall time before
+    /// the read position follows. Ordinary render-cycle jitter never adds up
+    /// to this; one bad second on a stepping link does.
+    /// razor: one fixed dead band for every speaker; nothing measured so far
+    /// needs a per-device one.
+    static let pullRealignThresholdMs: Double = 20
+
+    /// Render-thread only, like the resampler. Where the device's pulls are
+    /// measured from: the first cycle after release, and how many frames the
+    /// device has pulled since. `nil` until the gate opens.
+    private var pullOriginNanos: Int64?
+    private var framesPulledSinceOrigin = 0
+    private var lastCycleStartNanos: Int64 = 0
+    /// How much of the device's pull deficit the read position already absorbed.
+    private var pullRealignedNanos: Int64 = 0
 
     // Engine (all mutation on `graphQueue`).
     private let graphQueue: DispatchQueue
@@ -916,6 +950,7 @@ final class BTDeviceSink: @unchecked Sendable {
         }
         delayLine.reset()
         resampler.reset()
+        pullOriginNanos = nil
     }
 
     // MARK: Producer (capture → delay line)
@@ -1178,6 +1213,8 @@ final class BTDeviceSink: @unchecked Sendable {
         // correction to apply and the resampler runs at unity.
         let ratio = 1.0
         var processor: EQProcessor?
+        // Before the lock: a cycle the lock turns away was still pulled.
+        realignToDevicePulls(cycleStartMonotonicNanos: cycleStartMonotonicNanos, frameCount: frameCount)
         guard stateLock.try() else { return false }   // no snapshot → silent cycle
         processor = eqProcessor
         let keepAliveWindow = keepAliveWindowNanos
@@ -1193,6 +1230,10 @@ final class BTDeviceSink: @unchecked Sendable {
                 if plan.releasesThisCycle {
                     released = true
                     catchUpToTargetLocked(cycleStartMonotonicNanos: cycleStartMonotonicNanos)
+                    pullOriginNanos = cycleStartMonotonicNanos
+                    lastCycleStartNanos = cycleStartMonotonicNanos
+                    framesPulledSinceOrigin = frameCount
+                    pullRealignedNanos = 0
                 }
             }
         }
@@ -1223,6 +1264,36 @@ final class BTDeviceSink: @unchecked Sendable {
         let lastAudible = lastAudibleRenderNanosPtr.pointee
         return keepAliveWindow > 0 && lastAudible > 0
             && cycleStartMonotonicNanos &- lastAudible < keepAliveWindow
+    }
+
+    /// Keep playout pts-true on a link that pulls unevenly. Render thread only.
+    ///
+    /// Wall time since the gate opened minus the audio the device has pulled in
+    /// it is how late (positive) or early the ring now plays: the capture side
+    /// writes on wall time, so a second in which the device pulls 958 ms leaves
+    /// 42 ms more between read and write. Once that passes
+    /// ``pullRealignThresholdMs``, the read position moves by it behind the
+    /// trim crossfade. Measured from the render cycles, never from
+    /// `BTClockWatcher`: a pacing clock that steps while the cycles stay even
+    /// moves nothing.
+    private func realignToDevicePulls(cycleStartMonotonicNanos t: Int64, frameCount: Int) {
+        guard let origin = pullOriginNanos else { return }
+        let gap = t &- lastCycleStartNanos
+        lastCycleStartNanos = t
+        if gap < 0 || Double(gap) >= BTClockStability.lostBaselineThresholdMs * 1_000_000 {
+            // A stall of a second or more is an IO restart, not uneven pulls
+            // (the same bound the clock watcher uses): measure from here.
+            pullOriginNanos = t
+            framesPulledSinceOrigin = frameCount
+            pullRealignedNanos = 0
+            return
+        }
+        let pulledNanos = Int64((Double(framesPulledSinceOrigin) / renderSampleRate * 1e9).rounded())
+        framesPulledSinceOrigin += frameCount
+        let pending = (t &- origin) &- pulledNanos &- pullRealignedNanos
+        guard Double(abs(pending)) >= Self.pullRealignThresholdMs * 1_000_000 else { return }
+        let applied = delayLine.shift(byFrames: Int((Double(pending) / 1e9 * renderSampleRate).rounded()))
+        pullRealignedNanos &+= Int64((Double(applied) / renderSampleRate * 1e9).rounded())
     }
 
     /// The gate has just opened; make the first frame released the frame that

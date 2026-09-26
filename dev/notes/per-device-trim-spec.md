@@ -44,8 +44,9 @@ it (Airfoil's advanced sliders).
   Settings-only, not on the device row.
 - **AirPlay**: nothing, by design (Decision 1).
 - **Drift**: settled acoustically 2026-08-12 — A2DP sinks servo to the host
-  delivery rate; measured inter-speaker drift −0.02 ppm (~0 over 30 min). A
-  fixed trim holds for a whole session. `BTDriftCorrector` servos on the
+  delivery rate; one 120-second run (commit efb67775) measured inter-speaker
+  drift of −0.02 ppm, which extrapolates to ~0 over 30 min (not measured over
+  30 min). A fixed trim is expected to hold for a whole session. `BTDriftCorrector` servos on the
   host-side pacing clock, i.e. compares that clock to itself — it is inert.
 
 ## Part 1 — one SYNC surface for every trimmable device

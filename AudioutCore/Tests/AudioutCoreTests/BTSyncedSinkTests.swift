@@ -276,6 +276,84 @@ import AVFoundation
                 == -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
     }
 
+    // MARK: - A trim the ring cannot apply (customer 1.2.0, two Sonos Moves)
+
+    /// Feed and play `ms` of a global ramp in real time: each 10 ms the
+    /// producer writes the chunk whose pts is "now" and the render thread
+    /// plays the cycle due "now", so the ring holds the delay's worth of audio
+    /// and no more — the shape a live session has, which one big up-front
+    /// enqueue does not. Returns the delay (ms) the last sample played at:
+    /// the ramp's value is its frame index + 1, so the frame playing at cycle
+    /// time `t` says how far behind `t` it was captured.
+    static func streamRealTime(
+        _ manager: BTSyncedSink, _ sink: BTDeviceSink, clock: inout Int, ms: Int
+    ) -> Double {
+        let chunk = 480
+        var played: Float = 0
+        for _ in 0..<(ms / 10) {
+            let first = clock
+            let frames = (0..<chunk).map { Float(first + $0 + 1) }
+            let ptsNanos = anchorNanos + Int64((Double(first) * nsPerFrame).rounded())
+            frames.withUnsafeBufferPointer {
+                manager.enqueue(interleavedFrames: $0.baseAddress!, frameCount: chunk,
+                                pts: timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
+                                              tv_nsec: Int(ptsNanos % 1_000_000_000)))
+            }
+            let cycle = renderCycle(sink, at: ptsNanos, frames: chunk)
+            if let last = cycle.samples.last, last != 0 { played = last }
+            clock += chunk
+        }
+        // The last frame of the last cycle played at index `clock - 1`.
+        return Double(clock - Int(played)) / sampleRate * 1_000
+    }
+
+    /// A sink on the BT-only timeline whose delay is `referenceMs − latencyMs`.
+    static func btOnlySink(referenceMs: Int, latencyMs: Int) throws -> (BTSyncedSink, BTDeviceSink) {
+        let manager = BTSyncedSink(
+            renderSampleRate: sampleRate, channelCount: 1, presentationDelayMs: { 0 })
+        manager.setComposition(BTGroupComposition(airPlayPresent: false, macLocalPresent: false))
+        manager.setBTOnlyBufferMs(referenceMs)
+        manager.setOffsetMs(latencyMs, forDeviceUID: "dev-a")
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        return (manager, try #require(manager.sinkForTesting(uid: "dev-a")))
+    }
+
+    /// DEFECT (customer, 1.2.0): Move 2 — latency 483, room 583 — sits 100 ms
+    /// behind the timeline, which is exactly the forward seek's safety margin,
+    /// so a live −10 ms seek has no room and applies nothing. 14 of 15 presses
+    /// logged `appliedMs=0.0` while the drawer and the store took the value.
+    /// The committed edit must re-anchor so the delay the store now describes
+    /// is the one that plays.
+    @Test func aClampedTrim_reanchorsOnCommitAndPlaysTheStoredValue() throws {
+        let (manager, sink) = try Self.btOnlySink(referenceMs: 583, latencyMs: 483)
+        defer { manager.stop() }
+        var clock = 0
+        let before = Self.streamRealTime(manager, sink, clock: &clock, ms: 500)
+        #expect(abs(before - 100) < 1, "anchored on the 100 ms floor: \(before)")
+
+        manager.setTrimMs(-10, forDeviceUID: "dev-a")
+        manager.reanchorIfTrimClamped(forDeviceUID: "dev-a")
+        sink.test_waitForPendingRebuild()
+        let after = Self.streamRealTime(manager, sink, clock: &clock, ms: 500)
+        #expect(abs(after - 90) < 1, "trim −10 must play 10 ms earlier: \(before) → \(after) ms")
+    }
+
+    /// The other half: a trim the seek applied in full is already playing, and
+    /// the commit must leave the music alone (`trimChangeNeverRebuildsTheSink`).
+    @Test func aTrimThatApplied_isNotReanchoredOnCommit() throws {
+        let (manager, sink) = try Self.btOnlySink(referenceMs: 583, latencyMs: 283)
+        defer { manager.stop() }
+        var clock = 0
+        _ = Self.streamRealTime(manager, sink, clock: &clock, ms: 500)
+
+        manager.setTrimMs(-10, forDeviceUID: "dev-a")
+        manager.reanchorIfTrimClamped(forDeviceUID: "dev-a")
+        sink.test_waitForPendingRebuild()
+        #expect(sink.hasStartedRendering, "no rebuild: the session is still released")
+        let after = Self.streamRealTime(manager, sink, clock: &clock, ms: 500)
+        #expect(abs(after - 290) < 1, "the live seek applied it: \(after) ms")
+    }
+
     // MARK: - BT-SYNC-DRAWER T2: live trim as a delay-line seek
 
     /// A mono delay line whose ring is big enough that nothing here ever wraps.

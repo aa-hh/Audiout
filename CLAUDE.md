@@ -12,6 +12,7 @@ A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers
 | `AirPlayEngine/` | Standalone Swift package: vendored AirPlay 2 C sender wrapped in a Swift actor. Separate package on purpose — licensing boundary, no app concepts inside |
 | _(external)_ `audiout-shared` | Two products: ProbeKit (the sync-probe DSP) and AudioutProtocol (the companion wire protocol), at https://github.com/aa-hh/audiout-shared. MIT, not GPL — the closed-source iPhone app links the same code, so it has one home outside both apps. Pinned by version in `AudioutCore/Package.swift` |
 | `dev/` | Offline dev tooling (fake speakers, dev scripts); `dev/notes/` holds research briefs |
+| `marketing/video/` | Remotion demo videos for YouTube and the feeds — the only JavaScript in the repo. Rendered by the `Marketing videos` GitHub Actions workflow, not locally |
 | `docs/SPEC.md` | Product spec — the source of truth for *what* to build |
 | `scripts/make-app.sh` | Wraps the executable into a signed `.app` bundle (required for TCC/process-tap) |
 | `scripts/make-staging.sh` | The staging environment: a standing `com.audiout.Audiout.staging` build pointed at the staging licence server |

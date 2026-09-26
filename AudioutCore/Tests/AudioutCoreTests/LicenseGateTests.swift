@@ -63,12 +63,16 @@ import Testing
         #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
     }
 
+    /// A refunded or revoked key keeps the app running on one speaker. Red if
+    /// a declined verdict brought the blocking window back, whose only exit is
+    /// Quit.
     @Test(arguments: [LicenseStatus.revoked, .unknown, .invalid])
-    func declinedKeyGates(status: LicenseStatus) {
+    func declinedKeyLimitsInsteadOfGating(status: LicenseStatus) {
         let settings = settings()
         settings.licenseKey = Self.key
         settings.licenseStatus = status
-        #expect(LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        #expect(LicenseGate.limitsToOneSpeaker(settings: settings))
     }
 
     /// A trial started on this Mac but not yet answered for by the server has
@@ -82,12 +86,59 @@ import Testing
         #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
     }
 
-    /// The trial ends by the gate coming back. Red if a spent trial started
-    /// passing too — the app would then be free for good.
-    @Test func anExpiredTrialGatesAgain() {
+    /// The trial ends by the one-speaker limit, not the gate. Red if a spent
+    /// trial met the blocking window again, or ran unlimited for good.
+    @Test func anExpiredTrialIsLimitedNotGated() {
         let settings = settings()
         startTrial(settings, daysAgo: 20)
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        #expect(LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
+    /// Red if a key typed after the trial ended were limited before the server
+    /// answered — an offline buyer would pay and still get one speaker.
+    @Test func anUnverifiedKeyAfterAnExpiredTrialIsNotLimited() {
+        let settings = settings()
+        startTrial(settings, daysAgo: 20)
+        settings.licenseKey = Self.key
+        #expect(settings.licenseStatus == nil)
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
+    /// Red if an expired trial key whose last verdict was `.active` escaped
+    /// the limit — the stored trial key would keep every speaker for good.
+    @Test func anExpiredTrialWithAnActiveLastVerdictIsLimited() {
+        let settings = settings()
+        startTrial(settings, daysAgo: 20)
+        settings.licenseKey = Self.key
+        settings.licenseStatus = .active
+        #expect(LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
+    /// Red if day one of a trial, before its key arrives, were gated or
+    /// limited — the trial exists to remove both.
+    @Test func aRunningTrialWithoutAKeyIsNeitherGatedNorLimited() {
+        let settings = settings()
+        startTrial(settings, daysAgo: 1)
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: settings))
+    }
+
+    /// Red if a build from source ever limited speakers — GPL keeps that path
+    /// free.
+    @Test func aSourceBuildIsNeverLimited() {
+        let settings = settings(withServer: false)
+        startTrial(settings, daysAgo: 20)
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: settings))
+        #expect(!LicenseGate.limitsToOneSpeaker(settings: self.settings(withServer: false, store: isolation.makeDefaults())))
+    }
+
+    /// Red if a fresh official install with no key and no trial skipped the
+    /// welcome, or ran unlimited behind it.
+    @Test func noKeyAndNoTrialGatesAndIsLimited() {
+        let settings = settings()
         #expect(LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        #expect(LicenseGate.limitsToOneSpeaker(settings: settings))
     }
 
     @Test func forceOverridesEvenASourceBuild() {
@@ -520,39 +571,10 @@ import Testing
         #expect(settings.trialExpiresAt == nil, "no second trial was written")
     }
 
-    /// A Mac reinstalled mid-trial has no local dates left, so only the
-    /// server's reason can say what happened. Red if the gate stopped reading
-    /// it: that user is welcomed to an app they have already spent a fortnight
-    /// in, with no hint of why the window is back.
+    /// Every gate welcomes. Red if the words changed per trial state — the
+    /// gate is first-open only, so no other copy belongs on it.
     @MainActor
-    @Test func theServersTrialExpiredReasonAlsoEndsTheTrial() {
-        let settings = settings()
-        settings.licenseKey = Self.key
-        settings.licenseStatus = .revoked
-        settings.licenseReason = "trial_expired"
-        #expect(TrialClock.state(settings: settings) == .none, "the dates are gone")
-
-        let content = makeContent(settings, Transport())
-        #expect(content.test_headlineText == "Your 14-day trial has ended.")
-        #expect(content.test_bodyText
-            == "Buy Audiout for €30, once, and keep everything you set up. "
-            + "Your scenes and speaker settings are still here.")
-    }
-
-    /// A gate raised by a trial running out says so; every other gate still
-    /// welcomes. Red if the two sets of words merged — a returning user would
-    /// be welcomed to an app they have already used for a fortnight, with no
-    /// hint of why the window is back.
-    @MainActor
-    @Test func theExpiredGateSaysTheTrialEndedInsteadOfWelcoming() {
-        let spent = settings()
-        startTrial(spent, daysAgo: 20)
-        let expired = makeContent(spent, Transport())
-        #expect(expired.test_headlineText == "Your 14-day trial has ended.")
-        #expect(expired.test_bodyText
-            == "Buy Audiout for €30, once, and keep everything you set up. "
-            + "Your scenes and speaker settings are still here.")
-
+    @Test func theGateAlwaysWelcomes() {
         let welcome = "Welcome to Audiout"
         let why = "It takes one key to open. Yours is in your receipt email, starting with AUDT."
         let fresh = makeContent(settings(store: isolation.makeDefaults()), Transport())
@@ -560,7 +582,7 @@ import Testing
         #expect(fresh.test_bodyText == why)
 
         // A running trial never reaches the gate (the rule above), but if one
-        // ever did it gets the ordinary words, not the ending ones.
+        // ever did it gets the same words.
         let running = settings(store: isolation.makeDefaults())
         startTrial(running, daysAgo: 1)
         let midTrial = makeContent(running, Transport())
@@ -751,28 +773,6 @@ extension SerializedSharedState {
             withSink { captured in
                 content.test_tapTrial()
                 #expect(captured.names() == ["license:trial_started"])
-            }
-        }
-
-        /// Red if the gate a spent trial lands on stopped reporting itself —
-        /// that count is the denominator every conversion is measured against.
-        /// It must also stay silent on a FIRST open, or every fresh install
-        /// would land in it.
-        @Test func onlyTheExpiredGateReportsThatItWasShown() {
-            withSink { captured in
-                let firstOpen = gateSettings(isolation.makeDefaults())
-                _ = LicenseGateViewController(settings: firstOpen,
-                                              openURL: { _ in }, onPassed: {}).view
-                #expect(captured.names().isEmpty, "nobody's trial has ended here")
-
-                let spent = gateSettings(isolation.makeDefaults())
-                TrialClock.apply(settings: spent,
-                                 startedAt: Date(timeIntervalSinceNow: -20 * 86_400),
-                                 expiresAt: Date(timeIntervalSinceNow: -6 * 86_400),
-                                 key: Self.key)
-                _ = LicenseGateViewController(settings: spent,
-                                              openURL: { _ in }, onPassed: {}).view
-                #expect(captured.names() == ["license:expired_gate_shown"])
             }
         }
 

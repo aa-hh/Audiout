@@ -191,7 +191,7 @@ import AudioutSharedUI
                                                     settings: settings)
         general.licenseTransport = transport.closure
 
-        #expect(general.test_licenseStatusText == "Unregistered. Audiout keeps working for this session, and asks for a license key the next time it opens.")
+        #expect(general.test_licenseStatusText == "Unregistered. Audiout keeps working, on one speaker at a time, until it has a license key.")
         #expect(general.test_enterLicenseButtonTitle == "Enter license…")
 
         transport.replies(#"{"status":"active"}"#)
@@ -263,6 +263,22 @@ import AudioutSharedUI
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
         #expect(general.test_buyButtonIsVisible, "a key the server won’t honour is worth re-buying")
+    }
+
+    /// Red if a trial that ran out with an active verdict cached (offline, or
+    /// before the launch check answers) hid Buy and called the key active
+    /// while the app plays on one speaker.
+    @Test func anExpiredTrialWithACachedActiveVerdictShowsBuyAndTheTrialEndedLine() {
+        let settings = makePaidBuildSettings()
+        settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        settings.licenseStatus = .active
+        settings.trialStartedAt = Date().addingTimeInterval(-20 * 86_400)
+        settings.trialExpiresAt = Date().addingTimeInterval(-6 * 86_400)
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: settings)
+        #expect(general.test_buyButtonIsVisible)
+        #expect(general.test_licenseStatusText
+                == "Your trial has ended. Audiout plays on one speaker at a time until you buy.")
     }
 
     /// The sheet is the ONE commit path, and its edges hold: Cancel discards
@@ -667,5 +683,53 @@ import AudioutSharedUI
         appearance.test_selectTheme(.dark)
         #expect(appearance.test_isTileAccessibilitySelected(.dark))
         #expect(!appearance.test_isTileAccessibilitySelected(.light))
+    }
+}
+
+/// `license:enter_sheet_opened` says which door opened the sheet. Nested under
+/// `SerializedSharedState` because `Analytics.install` mutates process-global
+/// state — the rule in `SerializedSharedStateSuite.swift`.
+extension SerializedSharedState {
+    @MainActor
+    @Suite struct SettingsRootViewControllerTests_LicenseSheetSource {
+
+        private final class StillLoginItem: LoginItemManaging {
+            var isEnabled: Bool { false }
+            func setEnabled(_ newValue: Bool) throws {}
+        }
+
+        private final class Captured: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [(String, [String: String])] = []
+            func append(_ name: String, _ props: [String: String]) {
+                lock.withLock { items.append((name, props)) }
+            }
+            func properties(of event: String) -> [[String: String]] {
+                lock.withLock { items.filter { $0.0 == event }.map(\.1) }
+            }
+        }
+
+        private let isolation = TestIsolation(owner: "SettingsRootViewControllerTests_LicenseSheetSource")
+
+        /// Red if the Settings button and the Mixer note's "I have a key" stop
+        /// being told apart, so the funnel cannot say which door sells keys.
+        @Test func theSheetReportsWhichDoorOpenedIt() {
+            let captured = Captured()
+            Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             captureError: { _, _ in },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+
+            let settings = AppSettings(defaults: isolation.makeDefaults(),
+                                       licenseServerURL: URL(string: "https://license.example.com"))
+            let fromButton = GeneralSettingsViewController(loginItem: StillLoginItem(), settings: settings)
+            fromButton.test_tapEnterLicense()
+            let fromNote = GeneralSettingsViewController(loginItem: StillLoginItem(), settings: settings)
+            _ = fromNote.view
+            fromNote.presentLicenseSheetFromNote()
+
+            #expect(captured.properties(of: "license:enter_sheet_opened")
+                    == [["source": "settings"], ["source": "note"]])
+        }
     }
 }

@@ -626,19 +626,33 @@ import Testing
     }
 
     /// Red if a trial that has not reached the server yet started inventing a
-    /// `t` for the checkout to look up, or if an expired trial kept sending
-    /// its dead key.
-    @Test func buyURLCarriesNoTrialIDBeforeAKeyOrAfterExpiry() {
+    /// `t` for the checkout to look up.
+    @Test func buyURLCarriesNoTrialIDBeforeAKey() {
         let settings = buySettings()
         TrialClock.start(settings: settings)
         #expect(settings.buyURL == Self.buyPage, "an unregistered trial has no key to send")
+    }
 
+    /// Red if an expired trial stopped sending its key — the checkout could no
+    /// longer activate that Mac without a pasted key.
+    @Test func buyURLCarriesTheTrialIDAfterExpiry() {
         let expired = AppSettings(defaults: isolation.makeDefaults(), buyURL: Self.buyPage)
         TrialClock.apply(settings: expired,
                          startedAt: Date(timeIntervalSinceNow: -20 * 86_400),
                          expiresAt: Date(timeIntervalSinceNow: -6 * 86_400),
                          key: Self.trialKey)
-        #expect(expired.buyURL == Self.buyPage, "a spent trial converts nothing")
+        #expect(expired.buyURL == URL(string: "https://audiout.app/buy?t=\(Self.trialKey)"))
+    }
+
+    /// Red if a converted trial sent its paid key as a trial id.
+    @Test func buyURLCarriesNoTrialIDAfterConversion() {
+        let converted = AppSettings(defaults: isolation.makeDefaults(), buyURL: Self.buyPage)
+        TrialClock.apply(settings: converted,
+                         startedAt: Date(timeIntervalSinceNow: -3 * 86_400),
+                         expiresAt: Date(timeIntervalSinceNow: 11 * 86_400),
+                         key: Self.trialKey)
+        converted.trialExpiresAt = nil
+        #expect(converted.buyURL == Self.buyPage)
     }
 
     @Test func checkInURLDefaultsNilAndRoundTrips() {

@@ -59,9 +59,15 @@ final class SystemAirPlayNoteBannerView: NSView {
     let label: NSTextField
     private let actionButton: NSButton?
     private var actionHandler: (() -> Void)?
+    private let textActionButton: NSButton?
+    private let iconView: NSImageView
+    private var textActionHandler: (() -> Void)?
     private let severity: Severity
 
-    init(text: String, maxTextWidth: CGFloat, action: Action? = nil, severity: Severity = .info) {
+    /// `textAction` is an optional underlined text link drawn left of the
+    /// action button ("I have a key" beside "Buy Audiout").
+    init(text: String, maxTextWidth: CGFloat, action: Action? = nil,
+         textAction: Action? = nil, severity: Severity = .info) {
         self.severity = severity
         let icon = NSImageView()
         icon.image = NSImage(systemSymbolName: severity.symbolName,
@@ -71,6 +77,7 @@ final class SystemAirPlayNoteBannerView: NSView {
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.setContentHuggingPriority(.required, for: .horizontal)
         icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+        self.iconView = icon
 
         var button: NSButton?
         if let action {
@@ -86,13 +93,34 @@ final class SystemAirPlayNoteBannerView: NSView {
         self.actionButton = button
         self.actionHandler = action?.handler
 
-        // Reserve the button's fitted width (plus its stack spacing) out of the
+        let labelFont = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
+        var linkButton: NSButton?
+        if let textAction {
+            let b = NSButton(title: textAction.title, target: nil, action: nil)
+            b.bezelStyle = .accessoryBar
+            b.isBordered = false
+            b.attributedTitle = NSAttributedString(string: textAction.title, attributes: [
+                .font: labelFont,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+                .foregroundColor: NSColor.labelColor,
+            ])
+            b.translatesAutoresizingMaskIntoConstraints = false
+            b.setContentHuggingPriority(.required, for: .horizontal)
+            b.setContentCompressionResistancePriority(.required, for: .horizontal)
+            b.setAccessibilityLabel(textAction.accessibilityLabel)
+            linkButton = b
+        }
+        self.textActionButton = linkButton
+        self.textActionHandler = textAction?.handler
+
+        // Reserve the buttons' fitted widths (plus their spacing) out of the
         // text's wrap width so a button doesn't force the whole banner wider
-        // than `maxTextWidth` — computed from the real button, not a guess.
-        let buttonReserve = button.map { $0.fittingSize.width + 10 } ?? 0
+        // than `maxTextWidth` — computed from the real buttons, not a guess.
+        let buttonReserve = (button.map { $0.fittingSize.width + 10 } ?? 0)
+            + (linkButton.map { $0.fittingSize.width + 10 } ?? 0)
 
         let text = NSTextField(wrappingLabelWithString: text)
-        text.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
+        text.font = labelFont
         text.textColor = .labelColor
         text.isSelectable = false
         text.translatesAutoresizingMaskIntoConstraints = false
@@ -112,9 +140,12 @@ final class SystemAirPlayNoteBannerView: NSView {
         // an all-in-one-stack layout left the button hugging the text with
         // any leftover width stranded past it, against the banner's true
         // trailing edge, instead of where the eye expects a CTA to sit.
+        // The icon centres on the text, and every control centres on the
+        // banner, so glyph and controls share one line however far the text
+        // wraps (owner's call, 2026-09-26).
         let leading = NSStackView(views: [icon, text])
         leading.orientation = .horizontal
-        leading.alignment = .firstBaseline
+        leading.alignment = .centerY
         leading.spacing = 10
         leading.translatesAutoresizingMaskIntoConstraints = false
         addSubview(leading)
@@ -123,12 +154,29 @@ final class SystemAirPlayNoteBannerView: NSView {
             leading.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
             leading.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
         ])
-        if let button {
+        if let linkButton {
+            addSubview(linkButton)
+            var pins = [
+                leading.trailingAnchor.constraint(lessThanOrEqualTo: linkButton.leadingAnchor, constant: -10),
+                linkButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            ]
+            if let button {
+                addSubview(button)
+                pins += [
+                    linkButton.trailingAnchor.constraint(equalTo: button.leadingAnchor, constant: -10),
+                    button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+                    button.centerYAnchor.constraint(equalTo: centerYAnchor),
+                ]
+            } else {
+                pins.append(linkButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14))
+            }
+            NSLayoutConstraint.activate(pins)
+        } else if let button {
             addSubview(button)
             NSLayoutConstraint.activate([
                 leading.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -10),
                 button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-                button.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
+                button.centerYAnchor.constraint(equalTo: centerYAnchor),
             ])
         } else {
             leading.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14).isActive = true
@@ -136,6 +184,8 @@ final class SystemAirPlayNoteBannerView: NSView {
 
         button?.target = self
         button?.action = #selector(actionButtonTapped)
+        linkButton?.target = self
+        linkButton?.action = #selector(textActionButtonTapped)
 
         // A GROUP, not one static string: the banner carries a label and — when
         // it has one — a real button, so VoiceOver must be able to step into it
@@ -149,6 +199,7 @@ final class SystemAirPlayNoteBannerView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     @objc private func actionButtonTapped() { actionHandler?() }
+    @objc private func textActionButtonTapped() { textActionHandler?() }
 
     // MARK: Test-support hooks
 
@@ -158,6 +209,17 @@ final class SystemAirPlayNoteBannerView: NSView {
     var test_actionButtonAccessibilityLabel: String? { actionButton?.accessibilityLabel() }
     /// Simulate a click on the action button. No-op if there isn't one.
     func test_tapActionButton() { actionButtonTapped() }
+    /// Whether this instance was built with an underlined text action.
+    var test_hasTextAction: Bool { textActionButton != nil }
+    /// Click the text action through the button's own target/action.
+    func test_tapTextAction() {
+        guard let b = textActionButton else { return }
+        _ = b.target?.perform(b.action, with: b)
+    }
+    /// The two controls, for layout and styling assertions.
+    var test_textActionButton: NSButton? { textActionButton }
+    var test_actionButton: NSButton? { actionButton }
+    var test_iconView: NSImageView { iconView }
 
     /// Keep the CGColor-backed fills correct across light/dark appearance
     /// switches (layer colors don't auto-resolve dynamic `NSColor`s).

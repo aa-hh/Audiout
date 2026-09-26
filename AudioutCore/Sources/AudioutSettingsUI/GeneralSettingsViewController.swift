@@ -411,10 +411,10 @@ public final class GeneralSettingsViewController: NSViewController {
     private static func licenseStatusLine(keyIsEmpty: Bool,
                                           status: LicenseStatus?) -> String {
         if keyIsEmpty {
-            // Post-gate truth (2026-08-30): an official build asks for its key
-            // at launch, so "fully functional without a license" would lie here.
-            return "Unregistered. Audiout keeps working for this session, and asks "
-                + "for a license key the next time it opens."
+            // Since 2026-09-26 an unregistered install is not gated; it runs
+            // limited to one speaker (dev/notes/unregistered-mode-spec-2026-09-26.md).
+            return "Unregistered. Audiout keeps working, on one speaker at a time, "
+                + "until it has a license key."
         }
         guard let status else {
             return "Your key is saved. Audiout hasn’t been able to verify it yet."
@@ -440,9 +440,13 @@ public final class GeneralSettingsViewController: NSViewController {
 
         let key = settings.licenseKey ?? ""
         let status = settings.licenseStatus
+        // An expired trial with a cached `.active` verdict is limited but not
+        // `licenseUnregistered`; the row must agree with the limit.
+        let limited = LicenseGate.limitsToOneSpeaker(settings: settings)
         if serverConfigured {
-            licenseStatusHint.stringValue = Self.licenseStatusLine(keyIsEmpty: key.isEmpty,
-                                                                   status: status)
+            licenseStatusHint.stringValue = limited && status == .active
+                ? "Your trial has ended. Audiout plays on one speaker at a time until you buy."
+                : Self.licenseStatusLine(keyIsEmpty: key.isEmpty, status: status)
         }
 
         // Only where it can do something: a key is stored, and no verdict has
@@ -467,7 +471,7 @@ public final class GeneralSettingsViewController: NSViewController {
 
         // Buying is offered only where it can work (a server) and only where it
         // would help (no key, or a key the server won’t honour).
-        buyButton.isHidden = !(serverConfigured && settings.licenseUnregistered && settings.buyURL != nil)
+        buyButton.isHidden = !(serverConfigured && (limited || settings.licenseUnregistered) && settings.buyURL != nil)
 
         onLicenseChanged?()
     }
@@ -477,10 +481,20 @@ public final class GeneralSettingsViewController: NSViewController {
     /// only when a visible window can host it — headless tests drive the held
     /// controller's hooks directly).
     @objc private func enterLicenseTapped() {
+        presentLicenseSheet(source: "settings")
+    }
+
+    /// Open the Enter License… sheet from the Mixer note's "I have a key".
+    public func presentLicenseSheetFromNote() {
+        presentLicenseSheet(source: "note")
+    }
+
+    /// `source` names the door for `license:enter_sheet_opened`.
+    private func presentLicenseSheet(source: String) {
         // A second click while one is up would replace the held sheet and
         // orphan the presented one.
         guard licenseSheet == nil else { return }
-        Analytics.capture("license:enter_sheet_opened")
+        Analytics.capture("license:enter_sheet_opened", ["source": source])
         let sheet = LicenseSheetViewController(settings: settings,
                                                transport: licenseTransport,
                                                openURL: openURL)

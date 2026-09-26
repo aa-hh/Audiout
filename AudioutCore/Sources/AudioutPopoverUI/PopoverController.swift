@@ -679,6 +679,12 @@ public final class PopoverController: NSObject {
     /// How long the live-removal offer stands before it retires itself.
     private static let removalUndoWindow: TimeInterval = 5
 
+    /// The "Play here instead" offer: the row whose selection the one-speaker
+    /// limit just refused, and the timer that retires the offer. Host state,
+    /// the same shape as the removal undo above.
+    var switchOfferDeviceID: String?
+    private var switchOfferTimer: Timer?
+
     /// Cast fixed-volume (feed-gain) receivers whose fader is currently
     /// holding the pending "not yet gold" tone, keyed by device id — HOST
     /// state, mirroring the removal-undo idiom above. Each id's own timer
@@ -1236,14 +1242,17 @@ public final class PopoverController: NSObject {
     // speaker is silent while its row still says Connected) outranks routing-blocked
     // (T-UI, WARNING — audio is dead right now), which outranks the takeover status,
     // which outranks the double-path guard note, which outranks a one-time trial
-    // banner, which outranks the trial pill, which outranks the unregistered-build
-    // note (lowest — it is a standing condition, never something happening right now);
-    // each lower note reappears underneath the instant the one above it clears. Each
-    // condition keeps its own idempotence-check state var (`captureFailureMessage` /
-    // `routingBlockedNeedsDefault` / `takeoverStatus` / `systemAirPlayNoteActive` /
-    // `raisedTrialBanner` / `trialDaysLeft` / `unregisteredNoteActive`);
-    // `applyNoteSlot()` is the one place that resolves precedence and actually
-    // pushes to the panel, called by every setter and by the tail of `rebuild()`.
+    // banner, which outranks the trial pill, which outranks the one-speaker-limit
+    // note (`unregisteredNote`, lowest — a standing condition, never something
+    // happening right now; it reads the limit text for the rest of an open once the
+    // limit is hit, `limitNoteRaised`). With no note at all, the slot may hold the
+    // one-time thank-you card instead. Each lower note reappears underneath the
+    // instant the one above it clears. Each condition keeps its own idempotence-check
+    // state var (`captureFailureMessage` / `routingBlockedNeedsDefault` /
+    // `takeoverStatus` / `systemAirPlayNoteActive` / `raisedTrialBanner` /
+    // `trialDaysLeft` / `unregisteredNote`); `applyNoteSlot()` is the one place that
+    // resolves precedence and actually pushes to the panel, called by every setter
+    // and by the tail of `rebuild()`.
 
     /// The exact note copy from PLAN-RELIABILITY Wave 3's "System-AirPlay guard"
     /// bullet: non-blocking, informational — this never changes what's actually
@@ -1304,27 +1313,113 @@ public final class PopoverController: NSObject {
         applyNoteSlot()
     }
 
-    /// The unregistered-build note's copy: a standing fact stated once, not a
-    /// nag — the app is doing everything it always does either way.
-    static let unregisteredNoteText = "Audiout is unregistered. Buying a license keeps it updated and funds the work of improving it."
+    /// Why this install plays on one speaker at a time, which picks the
+    /// standing note's copy. `reason` is the licence server's word for a
+    /// refused key (`AppSettings.licenseReason`), or `nil` when it gave none.
+    public enum UnregisteredNote: Equatable {
+        case trialEnded
+        case keyRefused(reason: String?)
+    }
 
-    /// Whether this build has a license server but no key the server honours.
-    /// Drives the LOWEST-precedence note (see PRECEDENCE above); re-applied on
-    /// every `rebuild()` so a rebuild while unregistered keeps it pinned.
-    private var unregisteredNoteActive = false
+    static let unregisteredTrialEndedNoteText = "Your trial has ended. Audiout plays on one speaker at a time until you buy."
+    /// A refused key's note names what happened to it: a refund, a reversed
+    /// payment, or, for any other or no reason, a revoke.
+    static func unregisteredKeyRefusedNoteText(reason: String?) -> String {
+        switch reason {
+        case "refund": return "This key was refunded, so Audiout plays on one speaker at a time."
+        case "chargeback": return "This key\u{2019}s payment was reversed, so Audiout plays on one speaker at a time."
+        default: return "This key was revoked, so Audiout plays on one speaker at a time."
+        }
+    }
+    /// Shown for the rest of an open once a trial-ended install hits the limit.
+    static let oneSpeakerLimitNoteText = "Your trial has ended, so Audiout plays on one speaker at a time."
+
+    /// The standing one-speaker-limit note, or `nil` when the install is not
+    /// limited. Drives the LOWEST-precedence note (see PRECEDENCE above).
+    private var unregisteredNote: UnregisteredNote?
+
+    /// Session state: the limit was hit during this open, so a trial-ended
+    /// note reads the limit text. Cleared on every open and every hide.
+    var limitNoteRaised = false
 
     /// Opens the purchase page. The host owns the URL (`AppSettings.buyURL`),
     /// exactly as it owns every other note action's remedy.
     public var onBuyAudiout: (() -> Void)?
 
-    /// Show or clear the unregistered-build note. Called by the host
-    /// (`AppDelegate`) directly — a whole-app condition with no home on
-    /// `Device`, same shape as ``setSystemAirPlayNoteActive(_:)``. Idempotent:
-    /// a repeat of the current state is a no-op.
-    public func setUnregisteredNoteActive(_ active: Bool) {
-        guard active != unregisteredNoteActive else { return }
-        unregisteredNoteActive = active
+    /// Opens the Enter License sheet — the note's "I have a key".
+    public var onEnterLicenseKey: (() -> Void)?
+
+    /// Show or clear the one-speaker-limit note. Called by the host
+    /// (`AppDelegate`) directly. Idempotent: a repeat is a no-op.
+    public func setUnregisteredNote(_ note: UnregisteredNote?) {
+        guard note != unregisteredNote else { return }
+        unregisteredNote = note
         applyNoteSlot()
+    }
+
+    // MARK: Thank-you card
+
+    /// Whether the one-time thank-you card is owed (the host reads
+    /// `AppSettings.licenseThankYouShown`).
+    public var thankYouCardOwedProvider: (() -> Bool)?
+    /// The card was closed, or the popover hid with it up: the host writes the
+    /// shown flag. Never called on raise.
+    public var onThankYouShown: (() -> Void)?
+    /// Session state: the card was raised during this open.
+    var thankYouCardRaised = false
+    /// The raised card, kept so a rebuild re-mounts the same view rather than
+    /// a fresh one that never ran `appear()`.
+    private var thankYouCard: ThankYouCardView?
+
+    /// Close the card: the Close button, and Escape through
+    /// ``dismissThankYouCardForEscape()``.
+    private func closeThankYouCard() {
+        Analytics.capture("license:thank_you_closed")
+        onThankYouShown?()
+        thankYouCardRaised = false
+        thankYouCard = nil
+        applyNoteSlot()
+    }
+
+    /// Escape on the Mixer closes a showing card first. Returns whether a card
+    /// was showing (and so whether Escape was handled).
+    public func dismissThankYouCardForEscape() -> Bool {
+        guard thankYouCardRaised, thankYouCard?.superview != nil else { return false }
+        closeThankYouCard()
+        return true
+    }
+
+    /// The popover hid with the card up: it counts as seen, but was not closed.
+    public func retireThankYouCardOnHide() {
+        guard thankYouCardRaised else { return }
+        onThankYouShown?()
+        thankYouCardRaised = false
+        thankYouCard = nil
+    }
+
+    /// Push the resolved note — or, with no note, an owed thank-you card — to
+    /// the panel. Shared by `applyNoteSlot()` and the tail of `rebuild()`.
+    private func mountNoteSlot() {
+        let note = resolvedSystemAirPlayNote
+        guard note.text == nil, thankYouCardRaised || thankYouCardOwedProvider?() == true else {
+            panel.setSystemAirPlayNote(note.text, action: note.action,
+                                       textAction: note.textAction, severity: note.severity)
+            return
+        }
+        let card: ThankYouCardView
+        if let thankYouCard {
+            card = thankYouCard
+        } else {
+            card = ThankYouCardView(width: SurfaceLayout.width - 28)
+            card.onClose = { [weak self] in self?.closeThankYouCard() }
+            thankYouCard = card
+        }
+        panel.setNoteView(card)
+        guard !thankYouCardRaised else { return }
+        thankYouCardRaised = true
+        Analytics.capture("license:thank_you_shown")
+        postAnnouncement(ThankYouCardView.headline)
+        card.appear()
     }
 
     // MARK: Trial pill + the two one-time trial banners
@@ -1373,7 +1468,7 @@ public final class PopoverController: NSObject {
         case .threeDays:
             return "Your trial ends in 3 days. €30 once keeps everything, including updates."
         case .lastDay:
-            return "Last day of your trial. Tomorrow Audiout asks for a key."
+            return "Last day of your trial. From tomorrow Audiout plays on one speaker at a time."
         }
     }
 
@@ -1394,7 +1489,7 @@ public final class PopoverController: NSObject {
         onTrialBannerShown?(owed)
     }
 
-    /// The trial nudges' action button — the same remedy the unregistered note
+    /// The trial nudges' action button — the same remedy the one-speaker note
     /// offers, through the same host closure, under the spec's own words.
     private var trialBuyAction: SystemAirPlayNoteBannerView.Action {
         SystemAirPlayNoteBannerView.Action(
@@ -1427,10 +1522,9 @@ public final class PopoverController: NSObject {
     /// Resolve which note currently owns the single note slot (the PRECEDENCE
     /// rule above) and push it to the panel. Not a full rebuild — the cards are
     /// unchanged, only the pinned note appears/disappears/changes.
-    private func applyNoteSlot() {
+    func applyNoteSlot() {
         guard isEffectivelyShown else { return }
-        let note = resolvedSystemAirPlayNote
-        panel.setSystemAirPlayNote(note.text, action: note.action, severity: note.severity)
+        mountNoteSlot()
         panel.panelContentDidChangeHeight(animated: true)
         // When not shown, the next `rebuildForOpen()` re-applies this from the
         // tail of `rebuild()`.
@@ -1441,19 +1535,21 @@ public final class PopoverController: NSObject {
     /// behind rows that still read Connected) outranks routing-blocked (T-UI,
     /// WARNING — audio is dead right now), which outranks a takeover status
     /// (T6), which outranks the double-path guard (W3-T3), which outranks a
-    /// one-time trial banner, then the trial pill, then the unregistered-build
+    /// one-time trial banner, then the trial pill, then the one-speaker-limit
     /// note; none active means no note. `action` is non-nil for routing-blocked
     /// (the "Use <productName>" button), for the takeover strip's
     /// `.needsApproval` (state 1) and `.timedOut` (state 4, "Try Again"), for
-    /// both trial nudges ("Buy Audiout") and for the unregistered note
-    /// ("Buy…") — the states with an actual remedy a button can offer. The
-    /// capture-failure message names its own remedy in prose, so it has none.
-    private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?, severity: SystemAirPlayNoteBannerView.Severity) {
+    /// both trial nudges, the trial pill and the one-speaker note ("Buy
+    /// Audiout") — the states with an actual remedy a button can offer. Those
+    /// same trial states, and only they, carry a `textAction` ("I have a
+    /// key"). The capture-failure message
+    /// names its own remedy in prose, so it has none.
+    private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?, textAction: SystemAirPlayNoteBannerView.Action?, severity: SystemAirPlayNoteBannerView.Severity) {
         if let captureFailureMessage {
-            return (captureFailureMessage, nil, .warning)
+            return (captureFailureMessage, nil, nil, .warning)
         }
         if routingBlockedNeedsDefault {
-            return (Self.routingBlockedNeedsDefaultText, routingBlockedNeedsDefaultAction, .warning)
+            return (Self.routingBlockedNeedsDefaultText, routingBlockedNeedsDefaultAction, nil, .warning)
         }
         if let takeoverStatus {
             // State 4 (`.timedOut`) is a genuine failure — the connection did
@@ -1461,29 +1557,38 @@ public final class PopoverController: NSObject {
             // uses, rather than the informational tier the other three
             // (still-in-progress or explains-a-remedy) states keep.
             let severity: SystemAirPlayNoteBannerView.Severity = takeoverStatus == .timedOut ? .warning : .info
-            return (Self.takeoverStatusText(for: takeoverStatus), takeoverStatusAction(for: takeoverStatus), severity)
+            return (Self.takeoverStatusText(for: takeoverStatus), takeoverStatusAction(for: takeoverStatus), nil, severity)
         }
         if systemAirPlayNoteActive {
-            return (Self.systemAirPlayNoteText, nil, .info)
+            return (Self.systemAirPlayNoteText, nil, nil, .info)
         }
         if let raisedTrialBanner {
-            return (Self.trialBannerText(for: raisedTrialBanner), trialBuyAction, .info)
+            return (Self.trialBannerText(for: raisedTrialBanner), trialBuyAction, enterLicenseKeyAction, .info)
         }
         if let trialDaysLeft {
-            return (Self.trialPillText(daysLeft: trialDaysLeft), trialBuyAction, .info)
+            return (Self.trialPillText(daysLeft: trialDaysLeft), trialBuyAction, enterLicenseKeyAction, .info)
         }
-        if unregisteredNoteActive {
-            return (Self.unregisteredNoteText, unregisteredNoteAction, .info)
+        if let unregisteredNote {
+            // A refused-key install keeps its standing text when it hits the
+            // limit: the spec gives no refused-key limit copy.
+            let text: String
+            switch unregisteredNote {
+            case .trialEnded:
+                text = limitNoteRaised ? Self.oneSpeakerLimitNoteText : Self.unregisteredTrialEndedNoteText
+            case .keyRefused(let reason):
+                text = Self.unregisteredKeyRefusedNoteText(reason: reason)
+            }
+            return (text, trialBuyAction, enterLicenseKeyAction, .info)
         }
-        return (nil, nil, .info)
+        return (nil, nil, nil, .info)
     }
 
-    /// The unregistered note's action button.
-    private var unregisteredNoteAction: SystemAirPlayNoteBannerView.Action {
+    /// The trial notes' "I have a key" text action.
+    private var enterLicenseKeyAction: SystemAirPlayNoteBannerView.Action {
         SystemAirPlayNoteBannerView.Action(
-            title: "Buy…",
-            accessibilityLabel: "Buy an Audiout license",
-            handler: { [weak self] in self?.onBuyAudiout?() })
+            title: "I have a key",
+            accessibilityLabel: "Enter a license key",
+            handler: { [weak self] in self?.onEnterLicenseKey?() })
     }
 
     /// The routing-blocked warning's action button (T-UI, the owner's Q6 — the
@@ -1546,6 +1651,14 @@ public final class PopoverController: NSObject {
     var test_systemAirPlayNoteHasActionButton: Bool { panel.test_systemAirPlayNoteHasActionButton }
     /// Test-only: simulate a click on the note's action button, if any.
     func test_tapSystemAirPlayNoteAction() { panel.test_tapSystemAirPlayNoteAction() }
+    /// Test-only: whether the currently-shown note has a text action.
+    var test_systemAirPlayNoteHasTextAction: Bool { panel.test_systemAirPlayNoteHasTextAction }
+    /// Test-only: simulate a click on the note's text action, if any.
+    func test_tapSystemAirPlayNoteTextAction() { panel.test_tapSystemAirPlayNoteTextAction() }
+    /// Test-only: whether the note slot holds the thank-you card.
+    var test_noteViewIsThankYouCard: Bool { panel.test_noteViewIsThankYouCard }
+    /// Test-only: the mounted thank-you card, if any.
+    var test_thankYouCard: ThankYouCardView? { panel.test_thankYouCard }
 
     /// The master volume (0…1) the status symbol should reflect: the Main Out
     /// master of the current target (SPEC §9b — status icon reflects Main Out).
@@ -1623,6 +1736,7 @@ public final class PopoverController: NSObject {
     func rebuildForOpen() {
         isRebuildingForOpen = true
         transientCollapsed.removeAll()
+        limitNoteRaised = false
         // Every open starts the search story over: an empty AirPlay section
         // reads as "looking" again rather than inheriting a previous session's
         // verdict. Armed BEFORE the rebuild so the first render sees the state.
@@ -1900,8 +2014,7 @@ public final class PopoverController: NSObject {
         // The trial's own two rungs are re-read first: this is the cycle the pill
         // follows, and the one that raises a one-time banner.
         refreshTrialNudge()
-        let note = resolvedSystemAirPlayNote
-        panel.setSystemAirPlayNote(note.text, action: note.action, severity: note.severity)
+        mountNoteSlot()
         // The device list this rebuild just re-mounted is a fresh scrolling card,
         // and a fresh one starts at height 0. Callers that publish a size get the
         // reconcile from `fittingSizeSettled`; the app-routing callbacks don't
@@ -2448,13 +2561,19 @@ public final class PopoverController: NSObject {
         // filtered here defensively rather than shown as a dead entry).
         let routableGroups = controller.groups.filter { !$0.memberIDs.isEmpty }
         if !routableGroups.isEmpty {
-            options.append(.init(title: "Scenes", isHeader: true))
+            // Under the one-speaker limit the groups stay listed, dimmed, under a
+            // header that says why; a click is answered in `mainOutRow(_:didSelect:)`.
+            let limited = controller.limitsToOneSpeaker
+            options.append(.init(title: limited
+                                    ? "Groups need more than one speaker. Buy Audiout to use them."
+                                    : "Scenes",
+                                 isHeader: true))
             for group in routableGroups {
                 // A saved GROUP names ITSELF on the collapsed button ("→ Kitchen"),
                 // never its member devices — shorter, never truncates, and matches
                 // exactly what the user picked from this same menu.
                 options.append(.init(title: group.name, target: .group(id: group.id),
-                                      buttonTitle: "→ \(group.name)"))
+                                      buttonTitle: "→ \(group.name)", isDimmed: limited))
             }
         }
         mainOutRow.apply(options: options,
@@ -2678,6 +2797,30 @@ public final class PopoverController: NSObject {
         removalUndoTimer?.invalidate()
         removalUndoTimer = nil
         removalUndoDeviceID = nil
+    }
+
+    /// Raise "Play here instead" on `id` for the same 5 s window.
+    private func offerSwitch(for id: String) {
+        switchOfferTimer?.invalidate()
+        switchOfferDeviceID = id
+        switchOfferTimer = Timer.scheduledTimer(withTimeInterval: Self.removalUndoWindow,
+                                                repeats: false) { [weak self] _ in
+            self?.expireSwitchOffer()
+        }
+    }
+
+    /// The timer's end of the switch offer: drop it, then repaint.
+    func expireSwitchOffer() {
+        guard switchOfferDeviceID != nil else { return }
+        clearSwitchOffer()
+        refreshDeviceRows()
+    }
+
+    /// Drop the switch offer without repainting.
+    func clearSwitchOffer() {
+        switchOfferTimer?.invalidate()
+        switchOfferTimer = nil
+        switchOfferDeviceID = nil
     }
 
     /// Raise (or re-arm) the Cast feed-gain pending fill on `id`'s fader after
@@ -3038,6 +3181,7 @@ public final class PopoverController: NSObject {
                   // re-joining the mix (undo, or a re-select from anywhere)
                   // withdraws it without needing its own edge to watch.
                   removalUndoOffered: removalUndoDeviceID == device.id && !selected,
+                  switchOfferOffered: switchOfferDeviceID == device.id && !selected,
                   // A stale id (device no longer Cast/lagged) renders nothing;
                   // its own timer self-expires it — no pruning machinery needed.
                   volumePendingApply: castVolumePendingIDs.contains(device.id)
@@ -3623,6 +3767,30 @@ extension PopoverController: DeviceRowView.Delegate {
         } else {
             clearRemovalUndo()
         }
+        // A second speaker refused by the one-speaker limit raises the limit
+        // note and the row's "Play here instead"; any other edit retires it.
+        if on && result.refusalReason == GroupController.oneSpeakerLimitReason {
+            Analytics.capture("license:limit_hit", ["attempted": "speaker"])
+            limitNoteRaised = true
+            offerSwitch(for: id)
+            applyNoteSlot()
+        } else {
+            clearSwitchOffer()
+        }
+        handleSelection(result, deviceID: id)
+    }
+
+    /// "Play here instead": the clicked speaker replaces the whole selection
+    /// in one routing apply (`GroupController.switchSelection(to:)`).
+    public func deviceRowDidRequestSwitchHere(_ row: DeviceRowView) {
+        Analytics.capture("license:switch_offer_used")
+        clearSwitchOffer()
+        let id = row.device.id
+        let result = groupController?.switchSelection(to: id) ?? .ok
+        var props: [String: String] = [:]
+        if let kind = devicesByID[id]?.kind { props["kind"] = kind.rawValue }
+        if let reason = result.refusalReason { props["refusal_reason"] = reason }
+        Analytics.capture("mixer:device_selected", props)
         handleSelection(result, deviceID: id)
     }
 
@@ -3713,6 +3881,13 @@ private extension ConnectionState {
 extension PopoverController: MainOutRowView.Delegate {
 
     public func mainOutRow(_ row: MainOutRowView, didSelect target: MainOutTarget) {
+        if case .group = target, groupController?.limitsToOneSpeaker == true {
+            Analytics.capture("license:limit_hit", ["attempted": "group"])
+            limitNoteRaised = true
+            applyNoteSlot()
+            refreshMainOutRow()
+            return
+        }
         let targetProp: String
         switch target {
         case .selectedDevices: targetProp = "selected_devices"

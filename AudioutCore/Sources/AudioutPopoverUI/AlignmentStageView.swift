@@ -1759,7 +1759,7 @@ final class AlignmentStageView: NSView {
         return [light(targetHalo), light(referenceHalo)]
     }
 
-    private static func shaderTint(_ color: CGColor?) -> SIMD3<Float> {
+    static func shaderTint(_ color: CGColor?) -> SIMD3<Float> {
         guard let srgb = CGColorSpace(name: CGColorSpace.sRGB),
               let converted = color?.converted(to: srgb, intent: .defaultIntent,
                                                options: nil),

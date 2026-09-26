@@ -89,6 +89,10 @@ public final class DeviceRowView: NSView {
         /// back through the SAME path a checkbox re-check takes. Default no-op
         /// for hosts that never offer the undo.
         func deviceRowDidRequestUndoRemoval(_ row: DeviceRowView)
+        /// The user clicked the transient "Play here instead" offer the host
+        /// raised after refusing a second speaker under the one-speaker limit.
+        /// Default no-op for hosts that never offer it.
+        func deviceRowDidRequestSwitchHere(_ row: DeviceRowView)
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
@@ -256,6 +260,10 @@ public final class DeviceRowView: NSView {
     /// Whether the host is currently offering the undo (mirrors the stack's
     /// visibility; read by the test hook and the FEED/SYNC suppression above).
     var removalUndoOffered = false
+    /// The second transient offer in the same slot, "Play here instead": host
+    /// state, raised when a second speaker is refused under the one-speaker limit.
+    let switchOfferButton = NSButton()
+    var switchOfferOffered = false
     /// The FEED column's main-mix segment text, or `nil` when this row is not
     /// currently a member of the ACTIVE main-mix target (a redirect-only row
     /// can still show app segments alone). "System" for a manual Selected-
@@ -533,6 +541,7 @@ public final class DeviceRowView: NSView {
                       movedSinceLastTimeMs: Double? = nil,
                       syncDrawerExpanded: Bool = false,
                       removalUndoOffered: Bool = false,
+                      switchOfferOffered: Bool = false,
                       volumePendingApply: Bool = false,
                       isEQShaped: Bool = false,
                       localFallbackOutput: Bool = false) {
@@ -542,6 +551,7 @@ public final class DeviceRowView: NSView {
         self.localFallbackOutput = localFallbackOutput
         self.energizePending = energizePending
         self.removalUndoOffered = removalUndoOffered
+        self.switchOfferOffered = switchOfferOffered
         // Any model refresh (select OR deselect) clears a transient hover so the
         // row can't keep a stale hover wash after the pointer left the popover
         // (T-U8 root-cause fix — hover is transient, selection is model-driven).
@@ -1615,6 +1625,15 @@ public final class DeviceRowView: NSView {
         removalUndoStack.addArrangedSubview(removalUndoLabel)
         removalUndoStack.addArrangedSubview(removalUndoButton)
         removalUndoStack.isHidden = true
+        switchOfferButton.translatesAutoresizingMaskIntoConstraints = false
+        switchOfferButton.bezelStyle = .accessoryBar
+        switchOfferButton.isBordered = false
+        switchOfferButton.attributedTitle = NSAttributedString(
+            string: "Play here instead",
+            attributes: [.font: Tokens.Font.caption, .foregroundColor: Tokens.Color.gold])
+        switchOfferButton.target = self
+        switchOfferButton.action = #selector(switchHereClicked(_:))
+        switchOfferButton.isHidden = true
 
         slider.translatesAutoresizingMaskIntoConstraints = false
         // Warm fader skin: install the drawing-only cell BEFORE the value/
@@ -1689,6 +1708,7 @@ public final class DeviceRowView: NSView {
         if busActive {
             addSubview(feedStack)
             addSubview(removalUndoStack)   // same slot, shown only while offered
+            addSubview(switchOfferButton)  // same slot, shown only while offered
         }
         // Bluetooth SYNC chip (T6), sharing that slot's left portion — sync
         // rows re-anchor the FEED pill to the far right below.
@@ -1801,6 +1821,12 @@ public final class DeviceRowView: NSView {
                     equalTo: trailingAnchor,
                     constant: -PopoverColumnGrid.feedColumnLeadingFromTrailing),
                 removalUndoStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+                switchOfferButton.leadingAnchor.constraint(
+                    equalTo: trailingAnchor,
+                    constant: -PopoverColumnGrid.feedColumnLeadingFromTrailing),
+                switchOfferButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+                switchOfferButton.heightAnchor.constraint(
+                    greaterThanOrEqualToConstant: PopoverColumnGrid.removalUndoButtonHeight),
                 // ≥24 pt of hit height for the inline link button.
                 removalUndoButton.heightAnchor.constraint(
                     greaterThanOrEqualToConstant: PopoverColumnGrid.removalUndoButtonHeight),
@@ -2164,6 +2190,10 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRowDidRequestUndoRemoval(self)
     }
 
+    @objc private func switchHereClicked(_ sender: NSButton) {
+        delegate?.deviceRowDidRequestSwitchHere(self)
+    }
+
     /// Show/hide the offer. It borrows the reserved trailing slot, so whatever
     /// normally lives there yields for as long as the offer stands: the FEED
     /// pills (empty anyway on a just-removed device) and, on a Bluetooth row,
@@ -2173,7 +2203,9 @@ public final class DeviceRowView: NSView {
         removalUndoStack.isHidden = !removalUndoOffered
         removalUndoButton.setAccessibilityLabel(
             "Undo removing \(device.name) from Main Audio")
-        if removalUndoOffered {
+        switchOfferButton.isHidden = !switchOfferOffered
+        switchOfferButton.setAccessibilityLabel("Play on \(device.name) instead")
+        if removalUndoOffered || switchOfferOffered {
             feedStack.isHidden = true
             if showsSyncControls { syncChipButton.isHidden = true }
         } else if showsSyncControls {
@@ -2437,6 +2469,8 @@ public final class DeviceRowView: NSView {
     /// Drive the Undo button through REAL AppKit action dispatch (the click the
     /// user makes), not the delegate shortcut.
     public func test_clickUndoRemoval() { removalUndoButton.performClick(nil) }
+    /// Drive "Play here instead" through real AppKit action dispatch.
+    public func test_clickSwitchOffer() { switchOfferButton.performClick(nil) }
 
     /// Drive the gutter hover through the same private path the tracking area
     /// uses (a real pointer crossing can't be synthesized headlessly).
@@ -2982,6 +3016,8 @@ public extension DeviceRowView.Delegate {
     func deviceRowDidRequestEqualizer(_ row: DeviceRowView, fromButton: Bool) {}
     /// Default no-op — only the popover offers the live-removal undo.
     func deviceRowDidRequestUndoRemoval(_ row: DeviceRowView) {}
+    /// Default no-op — only the popover offers "Play here instead".
+    func deviceRowDidRequestSwitchHere(_ row: DeviceRowView) {}
 }
 
 // MARK: - Invisible switch cell (spec §4.8)

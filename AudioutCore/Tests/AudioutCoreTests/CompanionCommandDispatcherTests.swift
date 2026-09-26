@@ -184,6 +184,18 @@ import AudioutProtocol
         #expect(ctx.groupController.mainOut == .group(id: "g1"))
     }
 
+    /// Red if the phone could turn a group on for an install limited to one
+    /// speaker, or refused it without saying why.
+    @Test func setMainOutGroupIsRefusedUnderTheOneSpeakerLimit() async throws {
+        let ctx = try await makeContext()
+        try ctx.groupController.saveGroup(Group(id: "g1", name: "Pair", memberIDs: ["office"], memberVolumes: [:]))
+        ctx.groupController.limitsToOneSpeaker = true
+        let result = ctx.dispatcher.execute(.setMainOut(MainOutState(kind: "group", groupID: "g1")))
+        #expect(!result.applied)
+        #expect(result.refusalReason == "Groups need more than one speaker. Buy Audiout to use them.")
+        #expect(ctx.groupController.mainOut == .selectedDevices)
+    }
+
     @Test func setMainOutUnknownGroupIsRefused() async throws {
         let ctx = try await makeContext()
         let result = ctx.dispatcher.execute(.setMainOut(MainOutState(kind: "group", groupID: "does-not-exist")))

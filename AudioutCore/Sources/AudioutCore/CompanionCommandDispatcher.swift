@@ -586,6 +586,9 @@ public final class CompanionCommandDispatcher {
                   groupController.groups.contains(where: { $0.id == groupID }) else {
                 return .refused("Unknown scene.")
             }
+            if groupController.limitsToOneSpeaker {
+                return .refused("Groups need more than one speaker. Buy Audiout to use them.")
+            }
             groupController.setMainOut(.group(id: groupID))
             return .ok
         default:

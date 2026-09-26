@@ -249,11 +249,11 @@ import Testing
         #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
     }
 
-    /// A trial ends by the server saying so, and the gate is what the user
-    /// then meets. Red if the reason stopped being stored — the expired gate
-    /// cannot tell a spent trial from a refunded key without it — or if the
-    /// gate stopped coming back.
-    @Test func aSpentTrialIsRevokedWithAReasonAndTheGateReturns() async {
+    /// A trial ends by the server saying so, and the one-speaker limit is what
+    /// the user then meets, never the gate (2026-09-26). Red if the reason
+    /// stopped being stored — the standing note cannot tell a spent trial from
+    /// a refunded key without it — or if the gate came back.
+    @Test func aSpentTrialIsRevokedWithAReasonAndTheLimitHolds() async {
         let settings = settingsMidTrial()
         let transport = Transport()
         transport.stub(status: 200,
@@ -263,7 +263,8 @@ import Testing
         #expect(settings.licenseReason == "trial_expired")
         #expect(TrialClock.state(settings: settings, now: Self.trialExpires.addingTimeInterval(1))
                 == .expired(expiresAt: Self.trialExpires))
-        #expect(LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        #expect(!LicenseGate.shouldPresent(settings: settings, presentation: .auto))
+        #expect(LicenseGate.limitsToOneSpeaker(settings: settings))
     }
 
     /// The mechanism the conversion rides on, pinned here because nothing else

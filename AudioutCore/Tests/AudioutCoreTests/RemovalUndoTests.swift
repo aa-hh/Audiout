@@ -66,6 +66,27 @@ import Testing
         #expect(spy.undoRequests == 1, "the real NSButton click reaches the delegate")
     }
 
+    /// Red if the row raised "Play here instead" on its own, or stopped
+    /// handing the click to the host: the row draws the offer, the host decides.
+    @Test func switchOfferRendersOnlyWhenRaisedAndDrivesTheDelegate() {
+        final class Spy: DeviceRowView.Delegate {
+            var switchRequests = 0
+            func deviceRow(_ row: DeviceRowView, didSetVolume volume: Int, for id: String) {}
+            func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {}
+            func deviceRowDidRequestSwitchHere(_ row: DeviceRowView) { switchRequests += 1 }
+        }
+        let row = makeBusRow(makeDevice())
+        let spy = Spy()
+        row.delegate = spy
+        row.apply(makeDevice(), selected: false)
+        #expect(!row.test_switchOfferOffered, "no offer unless the host raises it")
+
+        row.apply(makeDevice(), selected: false, switchOfferOffered: true)
+        #expect(row.test_switchOfferOffered)
+        row.test_clickSwitchOffer()
+        #expect(spy.switchRequests == 1, "the real NSButton click reaches the delegate")
+    }
+
     // MARK: Controller level
 
     private func waitFleet(_ backend: MockBackend, count: Int,

@@ -170,6 +170,14 @@ extension PopoverController {
         // no ±500 ms bisection converges on that. Its row's own doors are
         // absent (`DeviceRowView.supportsAlignmentWizard`).
         guard !device.isCast else { return }
+        // Under the one-speaker limit the doors stay, and each one shows the
+        // limit note instead of the wizard.
+        if groupController?.limitsToOneSpeaker == true {
+            Analytics.capture("license:limit_hit", ["attempted": "sync"])
+            limitNoteRaised = true
+            applyNoteSlot()
+            return
+        }
         tearDownBTWizard()
         // The run measures a speaker that is PLAYING, so a target outside the
         // mix has to join before it can be aligned — and clicking Align is

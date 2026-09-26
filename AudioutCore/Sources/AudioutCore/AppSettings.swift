@@ -110,6 +110,7 @@ public struct AppSettings {
         static let telemetryOptIn = "telemetry.optIn"
         static let telemetryAsked = "telemetry.asked"
         static let telemetryConversionAskShown = "telemetry.conversionAskShown"
+        static let licenseThankYouShown = "license.thankYouShown"
         static let telemetryDailyActiveDay = "telemetry.dailyActiveDay"
         static let touchBarControls = "general.touchBarControls"
         static let mixerMembershipHintDismissed = "mixer.membershipHintDismissed"
@@ -728,16 +729,21 @@ public struct AppSettings {
     /// is what hides every buy affordance — the Settings button and the
     /// Mixer note's action alike read this one value.
     ///
-    /// While a trial is running it carries `?t=<trial key>`, which is what lets
-    /// the checkout mark that trial converted and activate this Mac without
-    /// anyone pasting a key. It is added HERE, not at the four places that open
-    /// the page, so no call site can forget it. Two cases deliberately get the
-    /// plain page: a trial that has not registered yet holds no key, and an
-    /// invented `t` would name nothing; and a trial that is over is no longer
-    /// converting, so its expired key has nothing to say to the checkout.
+    /// While a trial is running, and after it has ended, it carries
+    /// `?t=<trial key>`, which is what lets the checkout mark that trial
+    /// converted and activate this Mac without anyone pasting a key. It is added
+    /// HERE, not at the places that open the page, so no call site can forget
+    /// it. Two cases deliberately get the plain page: a trial that has not
+    /// registered yet holds no key, and an invented `t` would name nothing; and
+    /// a converted trial (state `.none`) holds a paid key, not a trial id.
     public var buyURL: URL? {
         guard let page = buyPageURL else { return nil }
-        guard case .active = TrialClock.state(settings: self),
+        let trialHoldsKey: Bool
+        switch TrialClock.state(settings: self) {
+        case .active, .expired: trialHoldsKey = true
+        case .none: trialHoldsKey = false
+        }
+        guard trialHoldsKey,
               let key = licenseKey, !key.isEmpty,
               var components = URLComponents(url: page, resolvingAgainstBaseURL: false)
         else { return page }
@@ -831,6 +837,14 @@ public struct AppSettings {
     public var telemetryConversionAskShown: Bool {
         get { defaults.bool(forKey: Keys.telemetryConversionAskShown) }
         nonmutating set { defaults.set(newValue, forKey: Keys.telemetryConversionAskShown) }
+    }
+
+    /// Whether the one-time thank-you card after a trial converts has been
+    /// seen. Written when the card is closed or the popover closes with it
+    /// showing. Defaults to `false`.
+    public var licenseThankYouShown: Bool {
+        get { defaults.bool(forKey: Keys.licenseThankYouShown) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.licenseThankYouShown) }
     }
 
     /// The local-calendar day (`yyyy-MM-dd`) the `streaming:daily_active` event

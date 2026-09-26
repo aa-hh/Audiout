@@ -62,6 +62,11 @@ import AppKit
         Device(id: "cast-1", name: "Living Room TV", kind: .cast, supportsAirPlay2: false)
     }
 
+    private func wiredDevice(available: Bool = true) -> Device {
+        Device(id: "BuiltInHeadphoneOutputDevice", name: "External Headphones", kind: .wired,
+               isAvailable: available, supportsAirPlay2: false, wiredTransport: .headphoneJack)
+    }
+
     /// The popover's real BT row shape: bus + meter + SYNC chip.
     private func makeRow(_ device: Device, delegate: SpyDelegate,
                          syncTrimMs: Double = 0, syncTrimIsSet: Bool = false,
@@ -412,6 +417,20 @@ import AppKit
         #expect(spy.wizardRequests.isEmpty)
     }
 
+    /// Defect: a never-aligned wired row's chip opens an empty drawer instead
+    /// of the wizard — a wired sink hears the same alignment tick a Bluetooth
+    /// one does, so it needs the same door.
+    @Test func anUntunedWiredChipIsTheWizardDoor() {
+        let spy = SpyDelegate()
+        let row = makeRow(wiredDevice(), delegate: spy, syncTrimIsSet: false)
+        #expect(row.test_syncChipTitle == "Align by ear")
+
+        row.test_fireSyncChipClick()
+        #expect(spy.wizardRequests.map(\.id) == [wiredDevice().id])
+        #expect(spy.wizardRequests.map(\.door) == [.chip])
+        #expect(spy.drawerToggles.isEmpty, "the untuned chip never opens the drawer")
+    }
+
     /// The Mac's own trim is a SETTING, not a measurement, and no run can
     /// bisect it — its chip keeps "Not set" and its drawer.
     @Test func theMacsOwnUntunedChipStillOpensTheDrawer() {
@@ -688,6 +707,13 @@ import AppKit
                isAvailable: available, supportsAirPlay2: false, connectionState: state)
     }
 
+    private func wired(_ id: String = "BuiltInHeadphoneOutputDevice",
+                       name: String = "External Headphones",
+                       available: Bool = true) -> Device {
+        Device(id: id, name: name, kind: .wired,
+               isAvailable: available, supportsAirPlay2: false, wiredTransport: .headphoneJack)
+    }
+
     // MARK: Subsection — always renders (BT-LIST) + recency sort
 
     @Test func bluetoothSubsectionHeaderAlwaysRendersWithAConnectRowWhenEmpty() {
@@ -953,6 +979,47 @@ import AppKit
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: true)])
         popover.test_deviceRow(for: "bt-a:output")?.test_clickName()
         #expect(controller.selectedDeviceIDs.contains("bt-a:output"))
+    }
+
+    // MARK: Wired rows stay selected through unplug, and edit through the Bluetooth closures
+
+    /// Defect: a deselect on unplug that makes replug come back silent — the
+    /// backend keeps and re-arms only a still-selected row (02b), so the
+    /// popover must not deselect a wired row on the availability edge the way
+    /// it does for Bluetooth. This test passes before the change too (the
+    /// edge is already Bluetooth-only); it pins the decision.
+    @Test func selectedWiredRowStaysSelectedThroughUnplug() {
+        let (popover, controller, _) = makePopover(fleet: [local(), wired()])
+        popover.update(devices: [local(), wired()])
+        _ = popover.test_toggleDeviceEnabled(deviceID: wired().id, on: true)
+        #expect(controller.selectedDeviceIDs.contains(wired().id))
+
+        popover.update(devices: [local(), wired(available: false)])
+        #expect(controller.selectedDeviceIDs.contains(wired().id),
+                "unplug keeps the selection — the backend keeps the greyed row")
+        #expect(popover.test_deviceRow(for: wired().id)?.test_isEnabledOn == true)
+    }
+
+    /// Defect: a wired row's drawer edit reaching the local or Cast closure,
+    /// or the wrong id, instead of the Bluetooth closure keyed by the wired
+    /// row's own uid.
+    @Test func wiredTrimEditsFlowThroughTheBluetoothClosureKeyedByUID() {
+        let (popover, _, _) = makePopover()
+        var written: [(ms: Double, id: String, persist: Bool)] = []
+        popover.btTrimProvider = { _ in 120 }
+        popover.btTrimIsSetProvider = { _ in true }
+        popover.onSetBTTrim = { ms, id, persist in written.append((ms, id, persist)) }
+        popover.update(devices: [local(), wired()])
+
+        let row = popover.test_deviceRow(for: wired().id)
+        #expect(row?.test_syncChipTitle == "120 ms")
+
+        popover.test_toggleSyncDrawer(deviceID: wired().id)
+        popover.test_syncDrawer?.test_shiftModifierOverride = true
+        popover.test_syncDrawer?.test_firePlusClick()
+        #expect(written.last?.ms == 130)
+        #expect(written.last?.id == wired().id)
+        #expect(written.last?.persist == true)
     }
 }
 

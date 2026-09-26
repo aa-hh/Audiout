@@ -27,7 +27,7 @@ folder renders; routing arithmetic lives in Core.
 - The wizard's mic ask goes quiet like Setup's: only an undecided mic (`micPermissionIsUndecided`) marks a prompt in flight, the answer ALWAYS restores the shell's manners, and the app returns to front only while the run that asked is still live — an abandoned run must never reopen a closed surface.
 - A selected Bluetooth device that loses availability is deselected here, on the edge.
 - The Mixer carries an equalizer DOOR (the row button beside mute, and the row menu) and one mark (magenta border when the curve is not flat). No editor, no curve, no tone control on the Mixer (2026-08-22, amended 2026-09-03).
-- A never-aligned Bluetooth row's chip IS the wizard's door; a measured one opens the drawer.
+- A never-aligned Bluetooth or wired row's chip IS the wizard's door; a measured one opens the drawer.
 - A first-join alignment note is session state: ✕ hides it, nothing is written down.
 - The header strip is BORDERED `NSToolbarItem`s — every tab and Pin alike — and the
   current screen is AppKit's own `selectedItemIdentifier`, never an authored fill

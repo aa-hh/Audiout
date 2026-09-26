@@ -642,7 +642,33 @@ import AudioutProtocol
         #expect(alignment.source == AlignmentSource.fromLastTime)
         #expect(alignment.settleRemainingSeconds == nil)
         #expect(snapshot.devices.first { $0.id == "local" }?.alignment == nil,
-                "only Bluetooth rows ever carry an alignment")
+                "only Bluetooth and wired rows ever carry an alignment")
+    }
+
+    /// Defect: a wired row sent as `isLocalDevice: true`, which makes the
+    /// builder's local-row volume overlay substitute Main's volume for its
+    /// fader and makes the phone treat it as the Mac.
+    @Test func aWiredRowReachesThePhoneAsANonLocalSpeaker() async throws {
+        let backend = try await makeBackend([
+            Device(id: "wired-a", name: "External Headphones", kind: .wired, supportsAirPlay2: false),
+        ])
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs,
+            alignmentFor: { _ in nil }
+        )
+        let wired = try #require(snapshot.devices.first { $0.id == "wired-a" })
+        #expect(wired.kind == "wired")
+        #expect(wired.isLocalDevice == false)
+        #expect(wired.supportsAirPlay2 == false)
     }
 }
 

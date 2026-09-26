@@ -13,10 +13,12 @@ extension NativeBackend {
     /// feeds by UID and which therefore never holds an `outputIDs` entry. On
     /// `stateQueue`.
     ///
-    /// The second arm tests the POSITIVE kind (`isBluetooth`), never `!isCast`
-    /// or `supportsAirPlay2`: Cast is the third R-partition arm with no per-app
-    /// delivery path at all, and AP1 receivers share `supportsAirPlay2: false`
-    /// with Bluetooth while being engine-driven.
+    /// The second arm tests the POSITIVE kinds (`isBluetooth`, `isWired`),
+    /// never `!isCast` or `supportsAirPlay2`: Cast is the third R-partition arm
+    /// with no per-app delivery path at all, and AP1 receivers share
+    /// `supportsAirPlay2: false` with Bluetooth and wired outputs while being
+    /// engine-driven. A wired output, like a Bluetooth one, is fed by UID
+    /// through the sink manager and never holds an `outputIDs` entry.
     ///
     /// This is the whole basis of the effective route table below (R5). A route
     /// aimed at an unreachable receiver is intent, not a live redirect: honouring
@@ -27,7 +29,7 @@ extension NativeBackend {
     /// device shows up.
     private func isRouteTargetReachableLocked(_ id: String) -> Bool {   // on stateQueue
         guard let device = known[id], device.isAvailable else { return false }
-        return outputIDs[id] != nil || device.isBluetooth
+        return outputIDs[id] != nil || device.isBluetooth || device.isWired
     }
 
     /// Whether whole-system routing CLAIMS `id` at the DECISION layer —
@@ -252,6 +254,9 @@ extension NativeBackend {
             // resolves against, so a group edit re-pushing an unchanged route
             // table still moves the audio.
             self.lastGroupTargets = groupTargets
+            // A cleared route or a group edit/delete can drop a greyed wired
+            // row's only remaining reference — both re-push through here.
+            self.pruneUnusedWiredLocked()
             // Retained so the metering-only target set can subtract it and so a
             // denylist change alone re-reconciles the metering taps (T3, PRIVACY).
             self.lastExcludedBundleIDs = excludedBundleIDs
@@ -1730,11 +1735,11 @@ extension NativeBackend {
             self.reconcileHandoffWatcherLocked()
 
             // BT-BACKEND (R-partition): the per-app half of what the binding
-            // loop above structurally skipped. A Bluetooth speaker a route names
-            // is fed by UID through the sink manager, so the manager has to be
-            // armed for it even with nothing selected whole-system — and armed
-            // WITHOUT joining `btSelectedUIDs`, which is the only input the
-            // room's timing has.
+            // loop above structurally skipped. A Bluetooth or wired speaker a
+            // route names is fed by UID through the sink manager, so the
+            // manager has to be armed for it even with nothing selected
+            // whole-system — and armed WITHOUT joining `btSelectedUIDs`, which
+            // is the only input the room's timing has.
             //
             // razor: a per-app GROUP route spanning an AirPlay receiver and a BT
             // speaker will not agree — `airPlayPresent` is computed from the
@@ -1744,7 +1749,7 @@ extension NativeBackend {
             // `BTGroupComposition`; not taken because it re-anchors every BT
             // sink and the Mac's own sink for the sake of one app's route.
             let perAppBTUIDs = Set(sets.flatMap(\.deviceIDs))
-                .filter { self.known[$0]?.isBluetooth == true }
+                .filter { self.known[$0]?.isBluetooth == true || self.known[$0]?.isWired == true }
                 .sorted()
             if perAppBTUIDs != self.btPerAppClaimedUIDs {
                 self.btPerAppClaimedUIDs = perAppBTUIDs
@@ -1752,6 +1757,7 @@ extension NativeBackend {
                 let composition = self.btComposition
                 let gains = self.btSinkGains(forUIDs: armedUIDs)
                 let eqs = self.btSinkEQs(forUIDs: armedUIDs)
+                let reportedLatencyUIDs = self.wiredSinkUIDs(forUIDs: armedUIDs)
                 // The reference ALREADY IN FORCE, never a fresh derivation: a
                 // per-app claim reads the room's timeline and must not move it.
                 let referenceMs = self.btReferenceBufferMs
@@ -1759,7 +1765,8 @@ extension NativeBackend {
                 self.captureControlQueue.async { [weak self] in
                     self?.applyBTSinkTransition(
                         enable: armed, uids: armedUIDs, composition: composition,
-                        gains: gains, eqs: eqs, referenceBufferMs: referenceMs)
+                        gains: gains, eqs: eqs, reportedLatencyUIDs: reportedLatencyUIDs,
+                        referenceBufferMs: referenceMs)
                     // What the whole-system fan-out must now skip, so a speaker
                     // this topology feeds never also hears the system mix.
                     self?.btSink?.setPerAppClaimedUIDs(claimed)
@@ -1778,7 +1785,7 @@ extension NativeBackend {
             ?? Double(PCMFormat.airplay.sampleRate)
         var feeds: [Int: BTPerAppStreamFeed] = [:]
         for set in sets {
-            let uids = set.deviceIDs.filter { known[$0]?.isBluetooth == true }.sorted()
+            let uids = set.deviceIDs.filter { known[$0]?.isBluetooth == true || known[$0]?.isWired == true }.sorted()
             guard !uids.isEmpty else { continue }
             feeds[set.streamID] = BTPerAppStreamFeed(
                 uids: uids,

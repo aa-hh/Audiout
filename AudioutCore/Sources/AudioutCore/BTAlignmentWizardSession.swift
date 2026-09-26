@@ -145,8 +145,8 @@ public final class BTAlignmentWizardSession {
     public var rejectReRunsMic: Bool { proposalIsMeasured && micAttempts < Self.maxMicAttempts }
 
     /// How many times one run may listen: the opening pass plus one retry
-    /// earned by rejecting a measured proposal. After that a rejection falls to
-    /// the by-ear questions.
+    /// earned by rejecting a measured proposal, or by Try again on an
+    /// implausible reading. After that either falls to the by-ear questions.
     public static let maxMicAttempts = 2
 
     /// How many listening passes this run has started so far.
@@ -442,7 +442,26 @@ public final class BTAlignmentWizardSession {
         if wasListening {
             let outcome: String
             if case .macIsLate = screen { outcome = "implausible" } else { outcome = "measured" }
-            Analytics.capture("bt_sync:listening_ended", ["outcome": outcome, "attempt": String(micAttempts)])
+            Analytics.capture("bt_sync:listening_ended", [
+                "outcome": outcome,
+                "attempt": String(micAttempts),
+                "value_ms_bucket": Self.valueMsBucket(valueMs),
+            ])
+        }
+    }
+
+    /// The measured value as a coarse band for analytics — a raw number never
+    /// leaves the Mac. The labels are an external contract
+    /// (`docs/analytics-events.md` in audiout-shared).
+    static func valueMsBucket(_ valueMs: Double) -> String {
+        switch valueMs {
+        case ..<(-4): "below_-4"
+        case ..<0: "-4_to_0"
+        case ..<10: "0-9"
+        case ..<40: "10-39"
+        case ..<100: "40-99"
+        case ..<200: "100-199"
+        default: "200+"
         }
     }
 
@@ -498,6 +517,12 @@ public final class BTAlignmentWizardSession {
         setTick(false)
         lastTempoBPM = nil
         setTick(true)
+        listenAgain(requestListening)
+    }
+
+    /// The retry listen shared by a rejected measurement and an implausible
+    /// one's Try again. The caller has already put the tick on a fresh edge.
+    private func listenAgain(_ requestListening: (@escaping (Bool) -> Void) -> Void) {
         enterListening()
         Analytics.capture("bt_sync:mic_retried")
         requestListening { [weak self] granted in
@@ -511,10 +536,22 @@ public final class BTAlignmentWizardSession {
     /// and from every screen the run can bow out on, and the two arrive in
     /// opposite states — hence the split. Either way a SECOND edge of the tick
     /// or the preview costs the backend a re-anchor of every sink for nothing.
+    /// A mic reading that landed on ``Screen/macIsLate`` listens once more
+    /// while the mic budget (``maxMicAttempts``) allows, instead of dropping
+    /// to the by-ear questions.
     public func tryAgain() {
         switch screen {
         case .proposal, .unsettled, .unreachable, .macIsLate: break
         case .intro, .listening, .question, .kept: return
+        }
+        if case .macIsLate = screen, proposalCameFromMic,
+           micAttempts < Self.maxMicAttempts, let requestListening {
+            ended = false
+            lastTempoBPM = nil
+            setTick(true)
+            estimator = makeEstimator()
+            listenAgain(requestListening)
+            return
         }
         if ended {
             // A bow-out already restored the prior value and silenced the tick;

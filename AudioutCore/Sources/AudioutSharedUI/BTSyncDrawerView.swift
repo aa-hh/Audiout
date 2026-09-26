@@ -6,12 +6,11 @@ import AudioutCore
 /// Reports every gesture out of a ``BTSyncDrawerView`` (PLAN-BT-SYNC-DRAWER
 /// T5) back to its host.
 public protocol BTSyncDrawerViewDelegate: AnyObject {
-    /// A committed trim change — a stepper click or a typed field commit.
-    /// Apply AND persist. (There is no longer a live-scrub /
-    /// don't-persist case: the scrubbing ruler that needed it was cut. Every
-    /// change the drawer now makes is a discrete, complete gesture, so
-    /// `committed` is always true — the parameter stays for the host's
-    /// existing wiring and in case a live control returns later.)
+    /// A trim change. `committed == false` is one tick of a held `−`/`+` or
+    /// a repeating ↑/↓ in the field: apply it live, do not persist it.
+    /// `committed == true` is a finished gesture — a click, the release that
+    /// ends a hold (carrying the final value, once), a key-up after arrow
+    /// nudges, a typed Return or focus loss: apply AND persist.
     func syncDrawer(_ d: BTSyncDrawerView, didChangeTrimMs ms: Double, committed: Bool)
     /// The tick (metronome) toggle, moved off the row into the drawer (D9).
     func syncDrawer(_ d: BTSyncDrawerView, didToggleAlignTick active: Bool)
@@ -130,8 +129,8 @@ public final class BTSyncDrawerView: NSView {
     private let resetButton = NSButton()
     private let hintLabel = NSTextField(labelWithString: "")
     private let captionLabel = NSTextField(labelWithString: "")
-    private let minusButton = NSButton()
-    private let plusButton = NSButton()
+    private let minusButton = StepperButton()
+    private let plusButton = StepperButton()
     private let valueField = NSTextField()
 
     private lazy var valueFieldEditor = SyncValueFieldEditor(field: valueField, initialValue: 0)
@@ -263,7 +262,7 @@ public final class BTSyncDrawerView: NSView {
         // glyph says best. (The four labelled `[−10] [−1] [+1] [+10]` pills
         // this replaces had to spell their amounts out, and that is what made
         // them too wide to bind to the value.)
-        let steppers: [(button: NSButton, symbol: String, fallback: String, label: String)] = [
+        let steppers: [(button: StepperButton, symbol: String, fallback: String, label: String)] = [
             (minusButton, "minus", "\u{2212}", "Decrease sync offset"),
             (plusButton, "plus", "+", "Increase sync offset"),
         ]
@@ -293,6 +292,7 @@ public final class BTSyncDrawerView: NSView {
             (button.cell as? NSButtonCell)?.setPeriodicDelay(Self.stepperRepeatDelay,
                                                              interval: Self.stepperRepeatInterval)
             button.target = self
+            button.onRelease = { [weak self] in self?.stepperReleased() }
         }
         minusButton.action = #selector(minusTapped)
         plusButton.action = #selector(plusTapped)
@@ -593,8 +593,12 @@ public final class BTSyncDrawerView: NSView {
 
     // MARK: Actions
 
-    @objc private func minusTapped() { stepTrim(by: -stepAmountMs) }
-    @objc private func plusTapped() { stepTrim(by: stepAmountMs) }
+    @objc private func minusTapped(_ sender: StepperButton) {
+        stepTrim(by: -stepAmountMs, held: sender.isTracking)
+    }
+    @objc private func plusTapped(_ sender: StepperButton) {
+        stepTrim(by: stepAmountMs, held: sender.isTracking)
+    }
 
     /// One millisecond, or ten while ⇧ is held — the coarse/fine pair the two
     /// cut `±10` buttons used to carry.
@@ -602,11 +606,28 @@ public final class BTSyncDrawerView: NSView {
         shiftIsHeld ? BTSyncTrim.coarseStepMs : BTSyncTrim.fineStepMs
     }
 
-    private func stepTrim(by deltaMs: Double) {
+    /// True between the first step of a mouse hold and its release.
+    private var stepCommitPending = false
+
+    /// `held` steps come from inside the button's mouse tracking — the first
+    /// action of a click and every auto-repeat tick — and apply live only;
+    /// ``stepperReleased()`` commits once. Any other step (keyboard Space,
+    /// `performClick`) is a whole gesture and commits at once.
+    private func stepTrim(by deltaMs: Double, held: Bool) {
         // `snap`, not `quantise`: the host's usable range is the ONE bound a
         // drawer answers to (a Cast row's reaches past ±`BTSyncTrim.rangeMs`),
         // and `clampToUsableRange` right here is what applies it.
-        applyCommit(clampToUsableRange(BTSyncTrim.snap(trimMs + deltaMs)))
+        let ms = clampToUsableRange(BTSyncTrim.snap(trimMs + deltaMs))
+        if held { stepCommitPending = true }
+        apply(ms, committed: !held)
+    }
+
+    /// The mouse came up. A press released outside the button sent no step,
+    /// so it has nothing to commit.
+    private func stepperReleased() {
+        guard stepCommitPending else { return }
+        stepCommitPending = false
+        apply(trimMs, committed: true)
     }
 
     @objc private func alignAgainTapped(_ sender: NSButton) {
@@ -651,19 +672,19 @@ public final class BTSyncDrawerView: NSView {
         Swift.min(usableRangeMs.upperBound, Swift.max(usableRangeMs.lowerBound, ms))
     }
 
-    /// A discrete, complete gesture (stepper click or typed commit): apply
-    /// AND persist.
+    /// Apply a value and report it: live only, or (`committed`) apply AND
+    /// persist.
     ///
     /// `fromField` marks the typed-Return / focus-loss path, which arrives via
     /// the field editor's own commit and has already written the field. Every
     /// OTHER gesture has to say so, because `refreshDisplay` cannot write text
     /// the user is editing — see `SyncValueFieldEditor.overrideEditedValue`.
-    private func applyCommit(_ ms: Double, fromField: Bool = false) {
+    private func apply(_ ms: Double, committed: Bool, fromField: Bool = false) {
         trimMs = ms
         isSet = true
         refreshDisplay()
         if !fromField { valueFieldEditor.overrideEditedValue(ms) }
-        delegate?.syncDrawer(self, didChangeTrimMs: ms, committed: true)
+        delegate?.syncDrawer(self, didChangeTrimMs: ms, committed: committed)
     }
 
     private func refreshDisplay() {
@@ -772,6 +793,12 @@ public final class BTSyncDrawerView: NSView {
 
     public func test_fireMinusClick() { minusButton.performClick(nil) }
     public func test_firePlusClick() { plusButton.performClick(nil) }
+    /// A mouse hold on `+`: the same tracking bracket `mouseDown` runs, with
+    /// `repeats` actions fired inside it the way AppKit's auto-repeat fires
+    /// them, then the release.
+    public func test_holdPlus(repeats: Int) {
+        plusButton.track { for _ in 0..<repeats { plusButton.performClick(nil) } }
+    }
     public func test_fireAlignAgainClick() { alignAgainButton.performClick(nil) }
     public func test_fireAlignClick() { alignButton.performClick(nil) }
     public func test_fireResetClick() { resetButton.performClick(nil) }
@@ -782,6 +809,31 @@ public final class BTSyncDrawerView: NSView {
 
 extension BTSyncDrawerView: SyncValueFieldEditorDelegate {
     public func syncValueFieldEditor(_ editor: SyncValueFieldEditor, didCommit ms: Double) {
-        applyCommit(ms, fromField: true)
+        apply(ms, committed: true, fromField: true)
+    }
+
+    public func syncValueFieldEditor(_ editor: SyncValueFieldEditor, didNudgeLive ms: Double) {
+        apply(ms, committed: false, fromField: true)
+    }
+}
+
+/// `−`/`+`. A continuous button's whole press — the first action, every
+/// auto-repeat tick, the release — runs inside `NSButton.mouseDown`, which
+/// returns only when the mouse comes up. So that return IS the release, and
+/// the drawer commits there. (A `.leftMouseUp` local monitor cannot do this:
+/// the tracking loop consumes the mouse-up before monitors see it.)
+final class StepperButton: NSButton {
+    private(set) var isTracking = false
+    var onRelease: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        track { super.mouseDown(with: event) }
+    }
+
+    func track(_ press: () -> Void) {
+        isTracking = true
+        press()
+        isTracking = false
+        onRelease?()
     }
 }

@@ -349,7 +349,7 @@ extension DeviceRowView {
     }
 
     /// Whether the mute button is currently drawing its ENGAGED symbol — the
-    /// filled square in ``Tokens/Color/muted``, speaker and slash cut through it.
+    /// slashed outline square in ``Tokens/Color/muted``.
     public var test_isMutePillEngaged: Bool {
         muteButton.state == .on && test_mutePillIsMutedHue
     }

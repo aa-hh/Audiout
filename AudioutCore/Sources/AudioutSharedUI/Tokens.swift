@@ -375,10 +375,9 @@ public enum Tokens {
         /// deliberately silent". Its consumers are the device row's and the
         /// Main Out row's engaged mute buttons
         /// (`DeviceRowView.updateMuteTint()`,
-        /// `MainOutRowView.updateMuteTint()`), which fill the
-        /// `custom.speaker.slash.square.fill` symbol's enclosing square
-        /// OPAQUELY in this tone, the speaker and slash cut through it as
-        /// transparency.
+        /// `MainOutRowView.updateMuteTint()`), which draw the slashed OUTLINE
+        /// `custom.speaker.slash.square` (square, speaker and slash) in this
+        /// tone.
         ///
         /// ONE VALUE IN BOTH APPEARANCES, unlike almost every other token
         /// here. Two reasons, and the second is the owner's rule. First
@@ -411,19 +410,18 @@ public enum Tokens {
         /// WHY OPAQUE, not the translucent pill it replaces. A tint of this
         /// hue tops out at 2.3:1 against the row ground even at 45% — under
         /// the 3:1 non-text floor in every appearance, which is exactly why
-        /// the old 22% neutral pill did not read as anything. Opaque, the
-        /// square clears the floor with room to spare and the marks read as a
-        /// knock-out.
+        /// the old 22% neutral pill did not read as anything. The mark draws
+        /// this hue at full opacity; the next paragraph covers what that
+        /// measures.
         ///
         /// TWO VALUES NOW, and the single-value rule above is retired for this
         /// token (owner's call, 2026-09-05: light mode was "impossible to
-        /// see"). The engaged mark is a FILL again since 2026-09-26, and the
-        /// deepened light value stays: the owner approved the deeper indigo
-        /// fill on the light row that day. Measured on `panel`: `#8E93F0` is
-        /// 5.18:1 on the dark row and 2.45:1 on the light one, fill or
-        /// outline. Deepened for light only, the same move `goldText` makes:
-        /// `#585EC7` measures 5.24:1 on light and the dark half does not move
-        /// a pixel.
+        /// see"). The reason is the outline stroke: the engaged mark is a
+        /// 1.5 pt stroke, and a stroke that thin has no area to carry a
+        /// marginal ratio. Measured on `panel`: `#8E93F0` is 5.18:1 on the
+        /// dark row and 2.45:1 on the light one. Deepened for light only, the
+        /// same move `goldText` makes for the same reason: `#585EC7` measures
+        /// 5.24:1 on light and the dark half does not move a pixel.
         public static var muted: NSColor {
             warmDynamic(name: "muted", dark: 0x8E93F0, light: 0x585EC7)
         }

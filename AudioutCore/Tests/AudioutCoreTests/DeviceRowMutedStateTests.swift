@@ -5,9 +5,9 @@ import Testing
 import AudioutCore
 @testable import AudioutSharedUI
 
-/// The engaged mute state's two carriers — the FILLED
+/// The engaged mute state's two carriers — the slashed OUTLINE
 /// ``RowAccessorySymbol/muteEngaged`` square and the reserved
-/// ``Tokens/Color/muted`` hue inside it — asserted as DRAWN, in all four
+/// ``Tokens/Color/muted`` hue it is drawn in — asserted as DRAWN, in all four
 /// appearances (light/dark x Increase Contrast), plus the fence that keeps
 /// the hue to its two consumers.
 ///
@@ -86,39 +86,38 @@ extension SerializedSharedState {
 
     // MARK: The muted row
 
-    @Test func mutedRowDrawsTheFilledSquareInEveryAppearance() {
+    @Test func mutedRowDrawsTheSlashedOutlineInEveryAppearance() {
         defer { Tokens.test_increaseContrastOverride = nil }
         for (appearanceName, ic) in cells {
             let row = makeRow(muted: true, appearanceName: appearanceName, increaseContrast: ic)
             #expect(row.test_mutePillIsMutedHue,
-                    "\(describe(appearanceName, ic)): muted must draw the filled square")
+                    "\(describe(appearanceName, ic)): muted must draw the slashed outline")
             #expect(!row.test_muteDrawsRestSymbol,
-                    "\(describe(appearanceName, ic)): muted must not keep the outline square")
+                    "\(describe(appearanceName, ic)): muted must not keep the slash-free outline")
         }
     }
 
-    /// The engaged square is `muted` with the marks PUNCHED THROUGH it as
-    /// transparency — the row shows through them (owner, 2026-09-05, from the
-    /// approved mock). Defect caught: a symbol re-export that paints the marks
-    /// instead of erasing them, or a second palette colour sneaking back into
-    /// the engaged draw, puts a solid ink where the hole belongs.
-    @Test func mutedRowPaintsTheReservedHueWithMarksPunchedThrough() {
+    /// The slashed outline is drawn in `muted` and in nothing else. Defect
+    /// caught: a second palette colour sneaking back into the engaged draw
+    /// paints the speaker and slash in another ink (white, when the old
+    /// filled-square treatment's marks came back painted).
+    @Test func mutedRowDrawsTheReservedHueAndNoWhite() {
         defer { Tokens.test_increaseContrastOverride = nil }
         for (appearanceName, ic) in cells {
             let row = makeRow(muted: true, appearanceName: appearanceName, increaseContrast: ic)
-            #expect(row.test_isMutePillEngaged, "\(describe(appearanceName, ic)): no fill drawn")
+            #expect(row.test_isMutePillEngaged, "\(describe(appearanceName, ic)): no engaged mark drawn")
             let inks = row.test_muteDrawnInks
             #expect(contains(inks, resolved(Tokens.Color.muted, appearanceName)),
-                    "\(describe(appearanceName, ic)): the square is not the muted hue — drew \(inks)")
+                    "\(describe(appearanceName, ic)): the mark is not the muted hue — drew \(inks)")
             #expect(!contains(inks, .white),
-                    "\(describe(appearanceName, ic)): the marks must be punched through, not painted white — drew \(inks)")
+                    "\(describe(appearanceName, ic)): the mark must be one ink, never painted white — drew \(inks)")
         }
     }
 
     /// The mark has to CLEAR ITS GROUND in both appearances — which replaces
     /// the single-value rule (owner's call, 2026-09-04, retired 2026-09-05:
     /// one value left light mode "impossible to see"). One value only worked
-    /// while the hue was a filled square; as a 0.875 pt outline it measured
+    /// while the hue was a filled square; as an outline stroke it measured
     /// 2.45:1 on the light row. What matters is the ratio, so that is what
     /// this asserts, in each appearance against the ground the row actually
     /// draws on.
@@ -153,13 +152,13 @@ extension SerializedSharedState {
 
     // MARK: The unmuted row
 
-    @Test func unmutedRowDrawsTheOutlineSquareAndNoFillInAnyAppearance() {
+    @Test func unmutedRowDrawsTheSlashFreeOutlineInAnyAppearance() {
         defer { Tokens.test_increaseContrastOverride = nil }
         for (appearanceName, ic) in cells {
             let row = makeRow(muted: false, appearanceName: appearanceName, increaseContrast: ic)
             #expect(row.test_muteDrawsRestSymbol,
-                    "\(describe(appearanceName, ic)): unmuted must draw the outline square")
-            #expect(!row.test_isMutePillEngaged, "\(describe(appearanceName, ic)): unmuted drew a fill")
+                    "\(describe(appearanceName, ic)): unmuted must draw the slash-free outline")
+            #expect(!row.test_isMutePillEngaged, "\(describe(appearanceName, ic)): unmuted drew the engaged mark")
             #expect(!row.test_mutePillIsMutedHue,
                     "\(describe(appearanceName, ic)): unmuted painted the muted hue")
             let inks = row.test_muteDrawnInks
@@ -209,11 +208,11 @@ extension SerializedSharedState {
         #expect(row.test_muteDrawsRestSymbol)
 
         row.test_toggleMute(true)
-        #expect(row.test_mutePillIsMutedHue, "the click must land the fill immediately")
+        #expect(row.test_mutePillIsMutedHue, "the click must land the slashed outline immediately")
 
         row.test_toggleMute(false)
-        #expect(row.test_muteDrawsRestSymbol, "unmuting must put the outline square back")
-        #expect(!row.test_mutePillIsMutedHue, "unmuting must clear the fill")
+        #expect(row.test_muteDrawsRestSymbol, "unmuting must put the slash-free outline back")
+        #expect(!row.test_mutePillIsMutedHue, "unmuting must clear the engaged mark")
     }
 
     // MARK: The fence

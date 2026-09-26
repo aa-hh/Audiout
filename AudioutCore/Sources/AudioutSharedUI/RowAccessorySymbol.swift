@@ -27,17 +27,19 @@ import AppKit
 /// `engagedSeatCornerRadius`, retired 2026-09-04. Two views, two layers, two
 /// appearance re-stamps and a size that had to be pinned by hand because an
 /// `.accessoryBar` `NSButton` frames larger than its alignment rect. The
-/// enclosing square is part of the symbol now, so the mark is ONE image: the
-/// `.fill` variant when engaged, the outline variant at rest. Mute's at-rest
-/// outline (`custom.speaker.square`) carries no slash; the slash appears only
-/// in its engaged `.fill`.
+/// enclosing square is part of the symbol now, so the mark is ONE image.
 ///
-/// HOW THE ENGAGED STATES PUNCH THROUGH, and why this draws MONOCHROME.
-/// In each `.fill` template the marks are not paint — they are erase actions
-/// (`-sfsymbols-clear-behind`), so the speaker, the slash and the two sliders
-/// cut holes in the enclosing square and the row's own background shows
-/// through them. That is the approved look, and it survives only under
-/// monochrome rendering.
+/// Mute draws two OUTLINE symbols that share one square: at rest
+/// `custom.speaker.square`, the speaker with no slash, in the row's neutral
+/// ink; muted `custom.speaker.slash.square`, the same square with the slash
+/// added, in ``Tokens/Color/muted``. The slash and the ink both change, so the
+/// state does not rest on colour alone.
+///
+/// HOW THE EQUALIZER'S `.fill` PUNCHES THROUGH, and why this draws
+/// MONOCHROME. In `custom.slider.horizontal.2.square.fill` the marks are not
+/// paint — they are erase actions (`-sfsymbols-clear-behind`), so the two
+/// sliders cut holes in the enclosing square and the row's own background
+/// shows through them. That survives only under monochrome rendering.
 ///
 /// A palette configuration destroys it, which is what shipped on 2026-09-04
 /// and what the owner saw: palette rendering treats every layer as paintable,
@@ -49,8 +51,8 @@ import AppKit
 public enum RowAccessorySymbol {
     /// Mute at rest — the outline square with the speaker and no slash.
     public static let muteRest = "custom.speaker.square"
-    /// Mute engaged — the filled square, speaker and slash cut through it.
-    public static let muteEngaged = "custom.speaker.slash.square.fill"
+    /// Mute engaged — the same outline square with the slash added.
+    public static let muteEngaged = "custom.speaker.slash.square"
     /// The Equalizer door on a flat curve — the outline square.
     public static let equalizerRest = "custom.slider.horizontal.2.square"
     /// The Equalizer door on a shaped curve — the filled square.
@@ -118,8 +120,8 @@ public enum RowAccessorySymbol {
         return NSImage(named: name)
     }
 
-    /// The symbol in one ink, with the `.fill` variants' erased marks left as
-    /// transparent holes.
+    /// The symbol in one ink, with the Equalizer `.fill` variant's erased
+    /// marks left as transparent holes.
     ///
     /// The tint is painted through the rendered symbol's alpha channel — fill
     /// the bounds with `ink`, then keep only the pixels the symbol covers. A

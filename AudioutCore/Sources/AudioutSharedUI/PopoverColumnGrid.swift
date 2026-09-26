@@ -680,10 +680,10 @@ public enum PopoverColumnGrid {
     /// body row without crowding the row's vertical rhythm.
     public static let syncChipHeight: CGFloat = 18
     /// Corner radius of the SYNC value chip. A soft rounded rect ("this is a
-    /// control you can press"). What tells it apart from the engaged marks up
-    /// the row is the FILL, not the corner: this chip is an OUTLINE around a
-    /// value it is showing you, where the mute button and the Equalizer door
-    /// wear a solid filled square to say "engaged".
+    /// control you can press"). What tells it apart from the mute button and
+    /// the Equalizer door up the row is what sits inside, not the corner:
+    /// this chip is an OUTLINE around a value it is showing you, where those
+    /// two are symbols that change ink to say "engaged".
     public static let syncChipCornerRadius: CGFloat = 5
     /// Stroke width of the chip's border, solid (tuned) or dashed (untuned).
     public static let syncChipBorderWidth: CGFloat = 1

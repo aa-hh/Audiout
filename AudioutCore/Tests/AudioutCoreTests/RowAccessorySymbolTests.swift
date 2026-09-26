@@ -45,31 +45,30 @@ import Testing
         }
     }
 
-    /// The engaged treatment is ONE ink with the marks punched through as
-    /// transparency (owner, 2026-09-05). Two defects it catches, both of which
-    /// shipped: a symbol re-export that loses the erase action, and a drawing
-    /// configuration that PAINTS the marks instead of cutting them — a palette
-    /// or hierarchical configuration does exactly that, and the result is a
-    /// solid square with no glyph in it, no nil and no crash.
-    @Test func engagedFillPunchesTheMarksThrough() throws {
-        for name in [RowAccessorySymbol.muteEngaged, RowAccessorySymbol.equalizerEngaged] {
-            let image = try #require(RowAccessorySymbol.image(named: name, ink: .red))
-            let rep = try #require(image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)))
-            var opaque = 0, holes = 0
-            // The middle band of the square, where every mark lives. The
-            // square's own corners are outside it, so a hole counted here is
-            // a mark and not the rounding at the enclosure's edge.
-            for y in (rep.pixelsHigh / 3)...(2 * rep.pixelsHigh / 3) {
-                for x in (rep.pixelsWide / 4)...(3 * rep.pixelsWide / 4) {
-                    let a = rep.colorAt(x: x, y: y)?.alphaComponent ?? 0
-                    if a > 0.9 { opaque += 1 } else if a < 0.1 { holes += 1 }
-                }
+    /// The Equalizer's `.fill` symbol is ONE ink with the marks punched
+    /// through as transparency (owner, 2026-09-05). Two defects it catches,
+    /// both of which shipped: a symbol re-export that loses the erase action,
+    /// and a drawing configuration that PAINTS the marks instead of cutting
+    /// them — a palette or hierarchical configuration does exactly that, and
+    /// the result is a solid square with no glyph in it, no nil and no crash.
+    @Test func equalizerFillPunchesTheMarksThrough() throws {
+        let name = RowAccessorySymbol.equalizerEngaged
+        let image = try #require(RowAccessorySymbol.image(named: name, ink: .red))
+        let rep = try #require(image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)))
+        var opaque = 0, holes = 0
+        // The middle band of the square, where every mark lives. The
+        // square's own corners are outside it, so a hole counted here is
+        // a mark and not the rounding at the enclosure's edge.
+        for y in (rep.pixelsHigh / 3)...(2 * rep.pixelsHigh / 3) {
+            for x in (rep.pixelsWide / 4)...(3 * rep.pixelsWide / 4) {
+                let a = rep.colorAt(x: x, y: y)?.alphaComponent ?? 0
+                if a > 0.9 { opaque += 1 } else if a < 0.1 { holes += 1 }
             }
-            #expect(opaque > 0, "\(name): the fill never painted")
-            #expect(holes > 0, Comment(rawValue:
-                "\(name): no transparent marks inside the square — the punch-through is gone " +
-                "(\(opaque) opaque px, \(holes) holes in the mark band)"))
         }
+        #expect(opaque > 0, "\(name): the fill never painted")
+        #expect(holes > 0, Comment(rawValue:
+            "\(name): no transparent marks inside the square — the punch-through is gone " +
+            "(\(opaque) opaque px, \(holes) holes in the mark band)"))
     }
 
     /// The symbol is the control's whole mark now, so the drawn square has to
@@ -94,11 +93,11 @@ import Testing
                 "the square draws \(ink.size) — too small to read as the control's mark")
     }
 
-    /// Mute at rest is the slash-free outline, engaged the filled slashed
-    /// square: the same square, and less ink at rest. Defects caught: the
-    /// at-rest symbolset pointed at a slashed or filled SVG (the at-rest mark
-    /// inks as much as the engaged one), or an at-rest derivation that dropped
-    /// the wrong subpath (the square changes size).
+    /// Mute at rest and engaged are two outlines sharing one square; the
+    /// engaged one adds the slash, so it inks more. Defects caught: the
+    /// at-rest symbolset pointed at the slashed SVG (the at-rest mark inks as
+    /// much as the engaged one), or an at-rest derivation that dropped the
+    /// wrong subpath (the square changes size).
     @Test func theSlashDrawsOnlyWhenMuted() throws {
         let rest = try #require(
             RowAccessorySymbol.image(named: RowAccessorySymbol.muteRest, ink: .black))

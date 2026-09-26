@@ -200,10 +200,21 @@ import AudioutSharedUI
         #expect(general.test_licenseStatusText == "Registered. Thank you for supporting Audiout.")
         #expect(general.test_enterLicenseButtonTitle == "Change…")
 
-        transport.replies(#"{"status":"revoked"}"#)
-        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
-        await drainMainQueue()
-        #expect(general.test_licenseStatusText == "This key was refunded or revoked. Buy a new one to keep using Audiout.")
+        // A revoked answer names the server's reason; a reason the app does
+        // not know, or none, reads as a plain revocation.
+        let revokedLines: [(reason: String?, line: String)] = [
+            ("trial_expired", "Your trial has ended. Buy Audiout to keep using it."),
+            ("refund", "This key was refunded. Buy a new one to keep using Audiout."),
+            ("chargeback", "This key’s payment was reversed. Buy a new one to keep using Audiout."),
+            ("manual", "This key was revoked. Buy a new one to keep using Audiout."),
+            (nil, "This key was revoked. Buy a new one to keep using Audiout."),
+        ]
+        for (reason, line) in revokedLines {
+            transport.replies(reason.map { #"{"status":"revoked","reason":"\#($0)"}"# } ?? #"{"status":"revoked"}"#)
+            general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+            await drainMainQueue()
+            #expect(general.test_licenseStatusText == line, Comment(rawValue: "reason \(reason ?? "nil")"))
+        }
 
         transport.replies(#"{"status":"unknown"}"#)
         general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
@@ -412,19 +423,56 @@ import AudioutSharedUI
                 "the in-flight key stands — the second link never committed")
     }
 
-    /// A paying customer opening Change… is not a sales prospect.
-    @Test func aRegisteredSheetDoesNotOfferToSell() async {
+    /// The owner's 2026-09-26 screenshot: a revoked key shows the longest
+    /// verdict sentence AND Remove, and the old one-row strip of four buttons
+    /// squeezed Register to "Re" (which button AppKit squeezes is arbitrary
+    /// when they tie, so every button is checked). Putting a third button back
+    /// in the Cancel/Register row turns this red; so does a result line that
+    /// stops wrapping and widens the sheet.
+    @Test func revokedKeySheetNeverClipsRegister() async throws {
         let transport = StubTransport()
         let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
                                                     settings: makePaidBuildSettings())
         general.licenseTransport = transport.closure
-
-        transport.replies(#"{"status":"active"}"#)
-        general.test_setLicenseKey("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
-        await drainMainQueue()
+        transport.replies(#"{"status":"revoked"}"#)
 
         general.test_tapEnterLicense()
-        #expect(general.test_licenseSheet?.test_buyIsVisible == false)
+        let sheet = try #require(general.test_licenseSheet)
+        sheet.test_setKeyText("AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        sheet.test_tapRegister()
+        await drainMainQueue()
+        #expect(sheet.test_removeIsVisible)
+        #expect(sheet.test_resultText == LicenseCopy.statusLine(for: .revoked, reason: nil))
+
+        let container = sheet.view
+        container.layoutSubtreeIfNeeded()
+        let fitting = container.fittingSize
+        #expect(abs(fitting.width - 360) <= 1,
+                Comment(rawValue: "the sheet must stay 320pt of content plus 20pt insets, got \(fitting.width)"))
+        container.setFrameSize(fitting)
+        container.layoutSubtreeIfNeeded()
+
+        let register = sheet.test_registerButton
+        #expect(register.frame.width >= register.intrinsicContentSize.width - 0.5,
+                Comment(rawValue: "Register is \(register.frame.width)pt wide, needs \(register.intrinsicContentSize.width)"))
+        let inContainer = register.convert(register.bounds, to: container)
+        #expect(container.bounds.insetBy(dx: -0.5, dy: -0.5).contains(inContainer),
+                Comment(rawValue: "Register at \(inContainer) falls outside the sheet's \(container.bounds)"))
+
+        func visibleButtons(in view: NSView) -> [NSButton] {
+            view.subviews.filter { !$0.isHidden }.flatMap { sub in
+                (sub as? NSButton).map { [$0] } ?? visibleButtons(in: sub)
+            }
+        }
+        let buttons = visibleButtons(in: container)
+        #expect(buttons.count == 3, "Remove, Cancel, Register")
+        for button in buttons {
+            #expect(button.frame.width >= button.intrinsicContentSize.width - 0.5,
+                    Comment(rawValue: "\(button.title) is \(button.frame.width)pt wide, needs \(button.intrinsicContentSize.width)"))
+        }
+        let rows = Dictionary(grouping: buttons) { Int(($0.convert($0.bounds, to: container).midY).rounded()) }
+        #expect(rows.values.allSatisfy { $0.count <= 2 },
+                Comment(rawValue: "no row may hold more than two buttons: \(rows.values.map { $0.map(\.title) })"))
     }
 
     /// `SMAppService.register()` succeeds into `.requiresApproval` without

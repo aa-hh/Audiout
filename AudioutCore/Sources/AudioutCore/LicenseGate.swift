@@ -97,10 +97,19 @@ public enum LicenseCopy {
     /// worker issues.
     public static let keyFormatHint = "AUDT-XXXXX-XXXXX-XXXXX-XXXXX"
 
-    public static func statusLine(for status: LicenseStatus) -> String {
+    /// `reason` is the server's `reason` for a `revoked` answer
+    /// (`AppSettings.licenseReason`); the line names it rather than lumping
+    /// every revocation together. Other statuses ignore it.
+    public static func statusLine(for status: LicenseStatus, reason: String?) -> String {
         switch status {
         case .active: return "Registered. Thank you for supporting Audiout."
-        case .revoked: return "This key was refunded or revoked. Buy a new one to keep using Audiout."
+        case .revoked:
+            switch reason {
+            case "trial_expired": return "Your trial has ended. Buy Audiout to keep using it."
+            case "refund": return "This key was refunded. Buy a new one to keep using Audiout."
+            case "chargeback": return "This key’s payment was reversed. Buy a new one to keep using Audiout."
+            default: return "This key was revoked. Buy a new one to keep using Audiout."
+            }
         case .unknown: return "This key isn’t recognized. Check it against your receipt."
         case .invalid: return "That doesn’t look like an Audiout key (\(keyFormatHint))."
         }

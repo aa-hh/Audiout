@@ -202,7 +202,7 @@ import Testing
         #expect(passed == 0)
         #expect(!gate.test_didFinish)
         #expect(gate.test_contentViewController.test_resultText
-            == LicenseCopy.statusLine(for: .unknown))
+            == LicenseCopy.statusLine(for: .unknown, reason: nil))
     }
 
     /// An unreachable server saves the key AND opens the gate — "couldn't
@@ -430,7 +430,7 @@ import Testing
         content.test_tapRegister()
         await drainMain()
 
-        #expect(content.test_resultText == LicenseCopy.statusLine(for: .revoked))
+        #expect(content.test_resultText == LicenseCopy.statusLine(for: .revoked, reason: nil))
         #expect(content.test_buyIsVisible)
         #expect(content.test_buyAlpha == 1)
     }

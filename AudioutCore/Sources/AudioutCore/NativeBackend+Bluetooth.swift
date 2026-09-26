@@ -175,8 +175,16 @@ extension NativeBackend {
     /// its delay does not hit `SyncTiming.totalDelayNanos`'s ≥ 0 clamp. Devices
     /// with no measurement contribute nothing — an unknown latency is treated
     /// as within the floor until the wizard says otherwise.
-    static func btOnlyReferenceMs(latencies: [String: Double], uids: [String]) -> Int {
-        let slowest = uids.compactMap { latencies[$0] }.max() ?? 0
+    ///
+    /// A NEGATIVE trim counts as latency. It asks the speaker to play earlier,
+    /// and on the speaker that sets the floor the only way to give that is to
+    /// play every other output later. Left out, the trim shortened that
+    /// speaker's delay below the live seek's safety margin
+    /// (`BTDeviceSink.seekSafetyMarginMs`), the seek applied nothing, and the
+    /// stored value then re-anchored it at a delay of 0 on the next reselect.
+    static func btOnlyReferenceMs(latencies: [String: Double], trims: [String: Double] = [:],
+                                  uids: [String]) -> Int {
+        let slowest = uids.map { (latencies[$0] ?? 0) - Swift.min(0, trims[$0] ?? 0) }.max() ?? 0
         return Swift.max(BTSyncedSink.defaultBTOnlyBufferMs,
                          Int(slowest.rounded()) + btReferenceHeadroomMs)
     }
@@ -193,10 +201,10 @@ extension NativeBackend {
     /// speaker's sink too.
     @discardableResult
     func updateBTReferenceBufferLocked(pushToSink: Bool = true) -> Int {   // on stateQueue
-        let latencies = btTrimLock.withLock { btLatencyMsByUID }
+        let (latencies, trims) = btTrimLock.withLock { (btLatencyMsByUID, btTrimsByUID) }
         let desired = btWizardReferenceRaised
             ? Self.btWizardReferenceBufferMs
-            : Self.btOnlyReferenceMs(latencies: latencies, uids: btSelectedUIDs)
+            : Self.btOnlyReferenceMs(latencies: latencies, trims: trims, uids: btSelectedUIDs)
         guard desired != btReferenceBufferMs else { return desired }
         btReferenceBufferMs = desired
         let localRides =
@@ -1303,6 +1311,11 @@ extension NativeBackend: BTOutputControlling {
             btTrimsByUID[id] = value
             return btTrimsByUID
         }
+        // Enqueued before the commit's hop below, which queues its clamp check
+        // behind this on the same serial queue.
+        captureControlQueue.async { [weak self] in
+            self?.btSink?.setTrimMs(value, forDeviceUID: id)
+        }
         // The in-memory map updates on a scrub too — only the DISK write is
         // skipped. `btSyncTrim`/`btHasSyncTrim` are read-back seams, and a
         // reader mid-drag should see what the user is hearing.
@@ -1315,10 +1328,25 @@ extension NativeBackend: BTOutputControlling {
             // tracker expects to hear it at moved with it. A drift correction
             // never comes through here — it moves the MEASURED LATENCY, which
             // the baselines do not contain, so it leaves them alone.
-            stateQueue.async { self.refreshDriftTrackingLocked() }
-        }
-        captureControlQueue.async { [weak self] in
-            self?.btSink?.setTrimMs(value, forDeviceUID: id)
+            //
+            // A negative trim can move the floor (`btOnlyReferenceMs`), and a
+            // floor move re-anchors every sink on the new delays. When it does
+            // not move, the live seek may still have fallen short, so the sink
+            // re-anchors that one speaker if it did: the stored trim is then
+            // the one playing. Commits only — a held stepper's ticks would
+            // each cost a full-delay silence.
+            stateQueue.async {
+                let before = self.btReferenceBufferMs
+                self.updateBTReferenceBufferLocked()
+                let floorRebuilt = self.btReferenceBufferMs != before
+                    && !self.btComposition.usesPresentationReference
+                if !floorRebuilt {
+                    self.captureControlQueue.async { [weak self] in
+                        self?.btSink?.reanchorIfTrimClamped(forDeviceUID: id)
+                    }
+                }
+                self.refreshDriftTrackingLocked()
+            }
         }
     }
 

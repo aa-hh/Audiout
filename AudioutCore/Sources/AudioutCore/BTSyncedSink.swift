@@ -529,6 +529,10 @@ final class BTDeviceSink: @unchecked Sendable {
     /// can carry it (below) instead of re-deriving it from a provider whose
     /// inputs moved. Maintained at the anchor and by ``applyTrimDelta(ms:)``.
     private var sessionDelayNanos: Int64 = 0
+    /// A live trim since the anchor was clamped short of what it asked, so
+    /// `sessionDelayNanos` no longer matches the delay the stored trim
+    /// describes. Cleared with the session.
+    private var trimClampedSinceAnchor = false
     /// Set when a `config_change` rebuild tore down an anchored session: the
     /// next anchor uses THIS delay instead of asking the provider, so adding or
     /// removing a speaker cannot shift an alignment the user has already made
@@ -947,6 +951,7 @@ final class BTDeviceSink: @unchecked Sendable {
             anchorPtsNanos = 0
             targetReleaseNanos = 0
             sessionDelayNanos = 0
+            trimClampedSinceAnchor = false
         }
         delayLine.reset()
         resampler.reset()
@@ -1123,6 +1128,7 @@ final class BTDeviceSink: @unchecked Sendable {
             // one: a clamped seek that booked the full delta would leave the
             // session's mapping describing audio the ring never moved.
             sessionDelayNanos &+= Int64((appliedMs * 1_000_000).rounded())
+            if frames != requestedFrames { trimClampedSinceAnchor = true }
         }
         stateLock.unlock()
         guard isAnchored, hasReleased else { return }
@@ -1140,6 +1146,17 @@ final class BTDeviceSink: @unchecked Sendable {
         }
         guard frames != 0 else { return }
         delayLine.requestShift(frames: -frames)
+    }
+
+    /// A committed trim landed: if any live seek since the anchor was clamped,
+    /// rebuild so the next buffer re-anchors on the full delay the provider
+    /// now describes. A seek that applied in full leaves the music alone.
+    func reanchorIfTrimClamped() {
+        let clamped = stateLock.withLock { () -> Bool in
+            defer { trimClampedSinceAnchor = false }
+            return trimClampedSinceAnchor
+        }
+        if clamped { requestRebuild(cause: "trim_clamped") }
     }
 
     // MARK: Consumer (delay line → render)
@@ -1640,6 +1657,14 @@ final class BTSyncedSink: @unchecked Sendable {
             return (sink, ms - previous)
         }
         if let change { change.sink.applyTrimDelta(ms: change.deltaMs) }
+    }
+
+    /// Called on a COMMITTED trim: re-anchor this device if a live seek since
+    /// its anchor could not apply in full (the ring held less than the move
+    /// plus ``BTDeviceSink/seekSafetyMarginMs``), so the stored trim is the
+    /// one playing. See ``BTDeviceSink/reanchorIfTrimClamped()``.
+    func reanchorIfTrimClamped(forDeviceUID uid: String) {
+        tableLock.withLock { sinksByUID[uid] }?.reanchorIfTrimClamped()
     }
 
     /// D11/T3: the trim range this device's drawer may actually move within.

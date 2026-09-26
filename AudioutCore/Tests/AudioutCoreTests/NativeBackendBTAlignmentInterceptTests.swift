@@ -268,6 +268,11 @@ extension SerializedSharedState {
         func setTrimMs(_ ms: Double, forDeviceUID uid: String) {
             lock.withLock { _trims.append((ms, uid)) }
         }
+        private var _clampChecks: [String] = []
+        func reanchorIfTrimClamped(forDeviceUID uid: String) {
+            lock.withLock { _clampChecks.append(uid) }
+        }
+        var clampChecks: [String] { lock.withLock { _clampChecks } }
         /// Hold every `setGain` on the queue that calls it, so a test can assert
         /// what happens while a Bluetooth hold has not yet reached the sink.
         private let gate = NSCondition()
@@ -1634,6 +1639,51 @@ extension SerializedSharedState {
         #expect(NativeBackend.btOnlyReferenceMs(latencies: ["a": 650, "b": 900],
                                                 uids: ["a"]) == 750,
                 "…and only the selected ones count")
+    }
+
+    /// A negative trim is a speaker asking to play earlier, which on the
+    /// speaker that sets the floor only "every other speaker later" can give:
+    /// it counts as extra latency when the floor is chosen.
+    @Test func aNegativeTrimRaisesTheBTOnlyReferenceLikeLatency() {
+        let latencies = ["move2": 483.0, "move": 295.0]
+        #expect(NativeBackend.btOnlyReferenceMs(latencies: latencies, trims: ["move2": -10],
+                                                uids: ["move2", "move"]) == 593)
+        #expect(NativeBackend.btOnlyReferenceMs(latencies: latencies, trims: ["move2": 40],
+                                                uids: ["move2", "move"]) == 583,
+                "a positive trim plays later — it never needs the floor to move")
+        #expect(NativeBackend.btOnlyReferenceMs(latencies: latencies, trims: ["move": -150],
+                                                uids: ["move2", "move"]) == 583,
+                "a speaker still inside the floor leaves it alone")
+    }
+
+    /// DEFECT (customer, 1.2.0): Move 2 set the floor (483 + 100 = 583), sat
+    /// 100 ms behind it, and every committed −10 ms was stored while the sink
+    /// applied none of it. The commit must raise the floor so the trim plays.
+    /// A speaker whose trim leaves the floor where it is gets the sink's own
+    /// clamp check instead; the one that moved the floor does not need it — a
+    /// floor move re-anchors every sink already.
+    @Test func aCommittedNegativeTrimOnTheFloorSpeakerRaisesTheReference() throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).saveLatencies([btMove.id: 483, btFlip.id: 295])
+        let (backend, bt, sink, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove, btFlip])
+        waitFor { self.device(backend, self.btMove.id) != nil
+            && self.device(backend, self.btFlip.id) != nil }
+        backend.setOutputSet([btMove.id, btFlip.id])
+        waitFor { sink.buffers.last == 583 }
+
+        backend.setBTSyncTrim(-10, forDevice: btMove.id, persist: false)
+        backend.setBTSyncTrim(-10, forDevice: btMove.id, persist: true)
+        waitFor { sink.buffers.last == 593 }
+        #expect(sink.buffers.last == 593, "483 + 10 + 100: the other speaker plays 10 ms later")
+
+        backend.setBTSyncTrim(-20, forDevice: btFlip.id, persist: true)
+        waitFor { sink.clampChecks.contains(self.btFlip.id) }
+        #expect(sink.clampChecks == [btFlip.id],
+                "only the commit that left the floor alone asks the sink")
+        #expect(sink.buffers.last == 593)
     }
 
     // MARK: - Passive drift tracking (roadmap 085 ticket 05)

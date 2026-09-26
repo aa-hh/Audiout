@@ -16,7 +16,7 @@ or `GroupController`.
 - A greyed Bluetooth row's name click CONNECTS, never selects.
 - Always write `NSApp?.`; bare `NSApp.` force-unwraps and crashes.
 - TRAP: `CATransition` ignores a custom animation key; it files under "transition".
-- The "Removed, Undo" offer is host state; the row draws it and decides nothing.
+- Both transient offers ("Removed, Undo" and "Play here instead") are host state; the row draws them and decides nothing.
 - A never-measured Bluetooth row's SYNC chip is the alignment wizard's door, not a readout.
 - The row's Equalizer button is a DOOR plus one mark; the row edits and stores no tone.
 - The identity stack yields the Equalizer slot on EVERY row, so names truncate alike.

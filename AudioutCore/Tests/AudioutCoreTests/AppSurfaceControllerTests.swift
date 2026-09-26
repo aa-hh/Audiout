@@ -331,6 +331,30 @@ import AppKit
         #expect(closes == 1, "with nothing to pop, Escape closes the surface")
     }
 
+    /// Red if Escape with the thank-you card up closed the whole surface: the
+    /// customer loses the card and the Mixer in one press, where the first
+    /// Escape should take the card only.
+    @Test func escapeWithTheThankYouCardUpClosesTheCardNotTheSurface() {
+        let (surface, popover, _, _) = makeSurface()
+        var closes = 0
+        surface.onClose = { closes += 1 }
+        var owed = true
+        popover.thankYouCardOwedProvider = { owed }
+        popover.onThankYouShown = { owed = false }
+
+        surface.show(anchorRect: nil)
+        surface.shell.test_isPanelVisibleOverride = true
+        #expect(popover.test_noteViewIsThankYouCard, "the owed card is up on open")
+
+        surface.shell.test_panel?.cancelOperation(nil)
+        #expect(closes == 0, "the first Escape took the card, not the surface")
+        #expect(!popover.test_noteViewIsThankYouCard)
+        #expect(!owed, "closing the card records it as seen")
+
+        surface.shell.test_panel?.cancelOperation(nil)
+        #expect(closes == 1, "with no card left, Escape closes the surface")
+    }
+
     @Test func escapeOnTheMixerScreenClosesWithoutAskingTheGroupsScreen() {
         let (surface, _, _, _) = makeSurface()
         var closes = 0

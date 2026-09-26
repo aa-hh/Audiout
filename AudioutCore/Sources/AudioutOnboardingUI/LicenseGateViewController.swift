@@ -55,12 +55,6 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private let trialButton = NSButton()
     private var didPass = false
 
-    /// Whether this gate is the one a finished trial lands on. Read ONCE, in
-    /// `loadView`: it decides the headline and the body line, and neither may
-    /// change while the window is up — the surface's whole contract is that
-    /// nothing on it moves.
-    private var trialHasEnded = false
-
     /// What the shared controls currently mean. The lost-key path MORPHS this
     /// one field and one button rather than opening anything: same geometry,
     /// different question.
@@ -106,9 +100,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     private static let glassVInset: CGFloat = 12
 
     /// The gate's trial copy, owner-verbatim from
-    /// `dev/notes/trial-spec-2026-09-05.md` § Copy. The expired pair replaces
-    /// the welcome; the offer is only ever shown to a Mac that has never
-    /// started a trial.
+    /// `dev/notes/trial-spec-2026-09-05.md` § Copy. The offer is only ever
+    /// shown to a Mac that has never started a trial.
     ///
     /// The spec's caption under the offer — "No card, no email. Every feature.
     /// Buy any time." — is NOT here: at 560 x 440 the column has room for the
@@ -116,10 +109,6 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     /// `theContentColumnClearsTheBottomButtonRow` measures it). Either the
     /// window grows or the caption borrows the gutter, and both are the
     /// owner's call, not this ticket's.
-    private static let expiredHeadline = "Your 14-day trial has ended."
-    private static let expiredBody =
-        "Buy Audiout for €30, once, and keep everything you set up. "
-        + "Your scenes and speaker settings are still here."
     private static let trialTitle = "Try Audiout free for 14 days"
 
     /// Rest and lifted opacity for the bottom-edge pair. They sit under the
@@ -150,13 +139,6 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override func loadView() {
-        trialHasEnded = TrialClock.hasEnded(settings: settings)
-        if trialHasEnded {
-            // The gate is only ever built in order to be shown, so building it
-            // IS the impression — and it is the one moment a test can reach,
-            // since nothing here may put a window on screen.
-            Analytics.capture("license:expired_gate_shown")
-        }
         field.translatesAutoresizingMaskIntoConstraints = false
 
         let mark = NSImageView()
@@ -180,24 +162,14 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         // path under `swift run`, `swift test` and the snapshot tools.
         let centred = NSMutableParagraphStyle()
         centred.alignment = .center
-        let line: NSMutableAttributedString
-        if trialHasEnded {
-            // The expired headline names no product, so it has no wordmark run
-            // and stays one plain run at the same size.
-            line = NSMutableAttributedString(
-                string: Self.expiredHeadline,
-                attributes: [.font: Tokens.Font.displayLarge,
-                             .foregroundColor: Tokens.Color.label])
-        } else {
-            line = NSMutableAttributedString(
-                string: "Welcome to ",
-                attributes: [.font: Tokens.Font.displayLarge,
-                             .foregroundColor: Tokens.Color.label])
-            line.append(NSAttributedString(
-                string: "Audiout",
-                attributes: [.font: Tokens.Font.wordmark(size: 25),
-                             .foregroundColor: Tokens.Color.label]))
-        }
+        let line = NSMutableAttributedString(
+            string: "Welcome to ",
+            attributes: [.font: Tokens.Font.displayLarge,
+                         .foregroundColor: Tokens.Color.label])
+        line.append(NSAttributedString(
+            string: "Audiout",
+            attributes: [.font: Tokens.Font.wordmark(size: 25),
+                         .foregroundColor: Tokens.Color.label]))
         line.addAttribute(.paragraphStyle, value: centred,
                           range: NSRange(location: 0, length: line.length))
         headlineLabel.attributedStringValue = line
@@ -205,12 +177,8 @@ public final class LicenseGateViewController: NSViewController, NSTextFieldDeleg
         headlineLabel.setAccessibilityRole(.staticText)
         headlineLabel.setAccessibilitySubrole(NSAccessibility.Subrole(rawValue: "AXHeading"))
 
-        if trialHasEnded {
-            whyLabel.stringValue = Self.expiredBody
-        } else {
-            whyLabel.stringValue =
-                "It takes one key to open. Yours is in your receipt email, starting with AUDT."
-        }
+        whyLabel.stringValue =
+            "It takes one key to open. Yours is in your receipt email, starting with AUDT."
         whyLabel.font = Tokens.Font.titleLarge
         whyLabel.textColor = Tokens.Color.label2
         whyLabel.alignment = .center

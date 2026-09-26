@@ -2,24 +2,25 @@
 
 import Foundation
 
-/// The first-open licence gate's decision: whether this launch must present the
-/// blocking "enter your key" window before anything else (owner decision
-/// 2026-08-30, superseding the earlier "the app never blocks" line for OFFICIAL
-/// builds only).
+/// The first-open licence gate's decision, and the one-speaker limit that
+/// replaced the trial-end gate (owner's call 2026-09-26,
+/// dev/notes/unregistered-mode-spec-2026-09-26.md).
 ///
 /// The differentiation is the build, not the user: a purchased build carries
 /// `AudioutLicenseServerURL` in its Info.plist (written by scripts/make-app.sh
 /// from `AUDIOUT_LICENSE_URL`; required by scripts/make-release.sh), and THAT
-/// build is the paid product, so it links itself to a licence before it runs. A
-/// build from source carries no server URL and never sees the gate — GPL keeps
-/// that path free and this type keeps it structurally unreachable there.
+/// build is the paid product. A build from source carries no server URL and
+/// never sees the gate or the limit — GPL keeps that path free and this type
+/// keeps it structurally unreachable there.
 ///
-/// The gate is still offline-tolerant: `licenseUnregistered` treats a stored
-/// key with no verdict as registered (the soft-check posture), so a key
-/// accepted while the server was unreachable passes the gate and gets verified
-/// by the normal launch validation on a later run.
+/// The gate is the first-open welcome for an install with no key and no trial.
+/// Everything else the server declines — an ended trial, a refunded or revoked
+/// key — keeps running, limited to one speaker (`limitsToOneSpeaker`).
 ///
-/// A running trial passes it too — see `trialIsRunningWithoutAKey`.
+/// Both stay offline-tolerant: `licenseUnregistered` treats a stored key with
+/// no verdict as registered (the soft-check posture), so a key accepted while
+/// the server was unreachable passes and gets verified by the normal launch
+/// validation on a later run.
 public enum LicenseGate {
 
     public static func shouldPresent(
@@ -30,25 +31,37 @@ public enum LicenseGate {
         case .forceShow: return true
         case .forceHide: return false
         case .auto:
-            guard settings.licenseServerURL != nil, settings.licenseUnregistered else {
+            guard settings.licenseServerURL != nil,
+                  (settings.licenseKey ?? "").isEmpty,
+                  case .none = TrialClock.state(settings: settings) else {
                 return false
             }
-            return !trialIsRunningWithoutAKey(settings: settings)
+            return true
         }
+    }
+
+    /// Whether this install plays on one speaker at a time: an official build
+    /// the server declined, or whose trial ended with a verdict on record. A
+    /// freshly typed key with no verdict yet (`licenseStatus == nil`) is not
+    /// limited — the soft-check posture.
+    public static func limitsToOneSpeaker(settings: AppSettings) -> Bool {
+        guard settings.licenseServerURL != nil else { return false }
+        var declined = settings.licenseUnregistered
+        if case .expired = TrialClock.state(settings: settings), settings.licenseStatus != nil {
+            declined = true
+        }
+        return declined && !trialIsRunningWithoutAKey(settings: settings)
     }
 
     /// A trial running on this Mac that the licence server has not yet handed a
     /// key back for.
     ///
     /// A trial IS a licence key, so once `TrialRegistrar` has the key the
-    /// ordinary rule already passes such a Mac (a stored key with no verdict is
-    /// registered) and already gates it again when the server answers
-    /// `revoked`. The window this covers is the one before that key arrives:
-    /// there is nothing stored for ``AppSettings/licenseUnregistered`` to read,
-    /// and without this clause a Mac on day one of its trial would meet the
-    /// gate at every launch. An `.expired` trial needs no clause of its own —
-    /// no key, so the ordinary rule gates it, which is what the trial ending
-    /// means.
+    /// ordinary rule already treats such a Mac as registered (a stored key with
+    /// no verdict is registered). The window this covers is the one before that
+    /// key arrives: there is nothing stored for
+    /// ``AppSettings/licenseUnregistered`` to read, and without this clause a
+    /// Mac on day one of its trial would run limited to one speaker.
     private static func trialIsRunningWithoutAKey(settings: AppSettings) -> Bool {
         guard (settings.licenseKey ?? "").isEmpty else { return false }
         if case .active = TrialClock.state(settings: settings) { return true }

@@ -991,6 +991,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // to the model. From here the popover drives all group/master/mute/
         // routing math.
         groupController = GroupController(backend: backend)
+        // The licence step ran before the controller existed.
+        groupController.limitsToOneSpeaker = LicenseGate.limitsToOneSpeaker(settings: settings)
         // T-BACKEND: NativeBackend needs to know when the Mac is ALSO part of
         // what Main Out points at (not just which AirPlay devices are) to detect
         // "play everywhere" — neither `GroupController.applyRouting` nor
@@ -1116,18 +1118,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             Analytics.capture("takeover:retry_tapped")
         }
-        // The unregistered note's "Buy…" button. Nil URL (a build with no
-        // `AudioutBuyURL`) never gets the note in the first place, since
-        // `applyLicenseState()` needs a license server to arm it.
+        // "Buy Audiout" on the one-speaker note and the trial nudges. Only a
+        // build with a license server is ever limited, so a build with no
+        // `AudioutBuyURL` never shows the one-speaker note.
         popoverController.onBuyAudiout = { [settings] in
             guard let url = settings.buyURL else { return }
-            Analytics.capture("license:buy_link_opened", ["source": "mixer_note"])
+            Analytics.capture("license:buy_link_opened", ["source": "note"])
             NSWorkspace.shared.open(url)
         }
+        // The one-speaker note's "I have a key": the Enter License sheet on
+        // General, once the surface is really on screen to host it.
+        popoverController.onEnterLicenseKey = { [weak self] in
+            guard let self else { return }
+            showSurface(.settings)
+            surface.whenRevealed { [weak self] in
+                self?.settingsRootController?.selectSection(at: 0)
+                self?.generalSettingsController?.presentLicenseSheetFromNote()
+            }
+        }
+        // The one-time thank-you card, owed to a trial that converted to a
+        // paid key and has not seen it yet.
+        popoverController.thankYouCardOwedProvider = { [settings] in
+            settings.licenseServerURL != nil
+                && settings.licenseStatus == .active
+                && !(settings.licenseKey ?? "").isEmpty
+                && settings.trialStartedAt != nil
+                && settings.trialExpiresAt == nil
+                && !settings.licenseThankYouShown
+        }
+        popoverController.onThankYouShown = { [settings] in
+            settings.licenseThankYouShown = true
+        }
         // The trial's own two rungs of the same note slot, above the
-        // unregistered note `applyLicenseState()` drives: a Mac mid-trial is
-        // not an unregistered install. Both are asked fresh on every rebuild,
-        // so the pill follows every open with no clock of its own.
+        // one-speaker note `applyLicenseState()` drives: a Mac mid-trial is
+        // not limited. Both are asked fresh on every rebuild, so the pill
+        // follows every open with no clock of its own.
         popoverController.trialStateProvider = { [settings] in
             TrialClock.state(settings: settings)
         }
@@ -1366,6 +1391,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // than on the write: nobody can be dragging a control on a screen
             // that is only now becoming visible.
             if screen == .settings { self?.settingsRootController?.reloadFromSettings() }
+            if screen == .mixer, let self {
+                // A limited install re-asks the server on every open, so a key
+                // bought elsewhere lifts the limit without a relaunch.
+                if LicenseGate.limitsToOneSpeaker(settings: settings) {
+                    LicenseValidator(settings: settings).validate { [weak self] _ in
+                        self?.applyLicenseState()
+                    }
+                }
+                // The consent ask comes on the open after the thank-you card.
+                if settings.licenseThankYouShown { presentConversionConsentAskIfDue() }
+            }
         }
 
     }
@@ -1483,12 +1519,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// revocation watch — whichever of them this launch needs.
     @MainActor
     private func runGateOrStart() {
-        // First-open licence gate (owner decision 2026-08-30): a purchased
-        // build (`AudioutLicenseServerURL` in Info.plist) links itself to a
-        // licence before anything else runs. Its pass runs the exact first-run
-        // block this used to be, so Setup's permission priming and the backend
-        // deferral are preserved behind it; its abort quits. A build from
-        // source carries no server URL and never gates (`LicenseGate`).
+        // First-open licence gate: the welcome for a purchased build
+        // (`AudioutLicenseServerURL` in Info.plist) with no key and no trial.
+        // Its pass runs the exact first-run block this used to be, so Setup's
+        // permission priming and the backend deferral are preserved behind it;
+        // its abort quits. An ended trial or a refused key never meets it — it
+        // runs limited to one speaker (`LicenseGate.limitsToOneSpeaker`). A
+        // build from source carries no server URL and never gates.
         if LicenseGate.shouldPresent(settings: settings) {
             log("Audiout launched — first-open license gate")
             presentLicenseGate()
@@ -2533,23 +2570,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Push the stored licence state at the two things that read it: the
-    /// Mixer's lowest-precedence note, and the update feed's authorization
-    /// header (the server serves the appcast and the download only to a key).
-    /// Called at launch, on every validator answer, and whenever the General
-    /// pane commits a key. Idempotent by construction — both writes are plain
-    /// assignments of a computed value.
+    /// Push the stored licence state at the things that read it: the
+    /// one-speaker limit on `GroupController`, the Mixer's standing note that
+    /// explains it, and the update feed's authorization header (the server
+    /// serves the appcast and the download only to a key). Called at launch,
+    /// on every validator answer, on a popover open while limited, and whenever
+    /// the General pane commits a key. Idempotent by construction — every write
+    /// is a plain assignment of a computed value.
     ///
-    /// A build with no licence server is the free build: no note, no matter
-    /// what is stored. `popoverController` is still nil at the launch call
-    /// (it is built later in `applicationDidFinishLaunching`); the validator's
-    /// answer always lands after that, so the note is never missed.
+    /// A build with no licence server is the free build: no limit and no note,
+    /// no matter what is stored. `groupController` and `popoverController` are
+    /// still nil at the launch call; the controller takes the limit when it is
+    /// built, and the validator's answer always lands after the popover exists,
+    /// so the note is never missed.
     private func applyLicenseState() {
         let key = settings.licenseKey ?? ""
         let status = settings.licenseStatus
-        let unregistered = settings.licenseServerURL != nil
-            && (key.isEmpty || status == .unknown || status == .invalid || status == .revoked)
-        popoverController?.setUnregisteredNoteActive(unregistered)
+        let limited = LicenseGate.limitsToOneSpeaker(settings: settings)
+        groupController?.limitsToOneSpeaker = limited
+        let note: PopoverController.UnregisteredNote?
+        if !limited {
+            note = nil
+        } else if (status == .revoked || status == .unknown || status == .invalid),
+                  !TrialClock.hasEnded(settings: settings) {
+            note = .keyRefused
+        } else {
+            note = .trialEnded
+        }
+        popoverController?.setUnregisteredNote(note)
         updaterController?.updater.httpHeaders = key.isEmpty ? nil : ["Authorization": "Bearer \(key)"]
 
         // A licence that lands while phones are connected: push the token
@@ -2580,7 +2628,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // trial keeps its default-on across every answer. Safe to call every
             // time — `setConsent` ignores an unchanged value.
             Analytics.setConsent(settings.telemetryEnabled)
-            presentConversionConsentAskIfDue()
         }
     }
 
@@ -2617,6 +2664,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.telemetryOptIn = granted
         Analytics.setConsent(granted)
         if granted { Analytics.capture("license:conversion_consent_opted_in") }
+    }
+
+    /// Quitting with the thank-you card up counts as seen, the same as hiding
+    /// the popover with it up.
+    func applicationWillTerminate(_ notification: Notification) {
+        popoverController?.retireThankYouCardOnHide()
     }
 
     /// Gives graceful AirPlay teardown a bounded window before the process exits

@@ -138,8 +138,14 @@ consent ask (ADR 0002). After that the note slot is empty for a registered insta
 ### J8. Someone with a key
 
 Bought on the website or another Mac: **I have a key** on the note, or Settings.
-The Settings licence row already says "Buy Audiout…" while unregistered; its
-copy gains no trial wording.
+The Settings licence row shows "Buy Audiout…" whenever the install is limited or
+unregistered. When a trial has ended but the last server answer was still
+"active" (it ran out offline), the row's status reads the J2 sentence, "Your
+trial has ended. Audiout plays on one speaker at a time until you buy.", so it
+never says Licensed beside a Buy button (owner's call, 2026-09-26, after review).
+The no-key status reads "Unregistered. Audiout keeps working, on one speaker at a
+time, until it has a license key." The last-day banner reads "Last day of your
+trial. From tomorrow Audiout plays on one speaker at a time."
 
 ## Copy rules
 

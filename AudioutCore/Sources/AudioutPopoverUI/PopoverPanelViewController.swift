@@ -1615,25 +1615,45 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// the routing-blocked-needs-default note.
     func setSystemAirPlayNote(_ text: String?,
                                action: SystemAirPlayNoteBannerView.Action? = nil,
+                               textAction: SystemAirPlayNoteBannerView.Action? = nil,
                                severity: SystemAirPlayNoteBannerView.Severity = .info) {
-        if let existing = stackView.arrangedSubviews.first(where: { $0 is SystemAirPlayNoteBannerView }) {
+        systemAirPlayNoteLabel = nil
+        systemAirPlayNoteView = nil
+        guard let text else {
+            setNoteView(nil)
+            return
+        }
+        let note = SystemAirPlayNoteBannerView(
+            text: text,
+            maxTextWidth: panelWidth - 28 - 30,
+            action: action,
+            textAction: textAction,
+            severity: severity)
+        setNoteView(note)
+        systemAirPlayNoteLabel = note.label
+        systemAirPlayNoteView = note
+    }
+
+    /// The view currently in the note slot: a note banner or the thank-you card.
+    private weak var mountedNoteView: NSView?
+
+    /// Put `view` in the note slot above every card, replacing whatever was
+    /// there; `nil` empties the slot.
+    func setNoteView(_ view: NSView?) {
+        if let existing = stackView.arrangedSubviews.first(where: {
+            $0 === mountedNoteView || $0 is SystemAirPlayNoteBannerView
+        }) {
             stackView.removeArrangedSubview(existing)
             existing.removeFromSuperview()
         }
         systemAirPlayNoteLabel = nil
         systemAirPlayNoteView = nil
-        guard let text else { return }
-        let note = SystemAirPlayNoteBannerView(
-            text: text,
-            maxTextWidth: panelWidth - 28 - 30,
-            action: action,
-            severity: severity)
-        systemAirPlayNoteLabel = note.label
-        systemAirPlayNoteView = note
-        stackView.insertArrangedSubview(note, at: 0)
+        mountedNoteView = view
+        guard let view else { return }
+        stackView.insertArrangedSubview(view, at: 0)
         NSLayoutConstraint.activate([
-            note.leadingAnchor.constraint(equalTo: stackView.leadingAnchor),
-            note.trailingAnchor.constraint(equalTo: stackView.trailingAnchor),
+            view.leadingAnchor.constraint(equalTo: stackView.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: stackView.trailingAnchor),
         ])
     }
 
@@ -1643,6 +1663,14 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     var test_systemAirPlayNoteHasActionButton: Bool { systemAirPlayNoteView?.test_hasActionButton ?? false }
     /// Test-only: simulate a click on the note's action button, if any.
     func test_tapSystemAirPlayNoteAction() { systemAirPlayNoteView?.test_tapActionButton() }
+    /// Test-only: whether the note slot holds the thank-you card.
+    var test_noteViewIsThankYouCard: Bool { mountedNoteView is ThankYouCardView }
+    /// Test-only: the mounted thank-you card, if any.
+    var test_thankYouCard: ThankYouCardView? { mountedNoteView as? ThankYouCardView }
+    /// Test-only: whether the currently-shown note has a text action.
+    var test_systemAirPlayNoteHasTextAction: Bool { systemAirPlayNoteView?.test_hasTextAction ?? false }
+    /// Test-only: simulate a click on the note's text action, if any.
+    func test_tapSystemAirPlayNoteTextAction() { systemAirPlayNoteView?.test_tapTextAction() }
 
     /// Seat the card stack below the surface window's toolbar strip. The
     /// caller republishes the exact-fit size afterward; this only moves the

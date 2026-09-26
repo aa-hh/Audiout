@@ -110,4 +110,33 @@ import AppKit
         banner.test_tapActionButton()
         #expect(taps == 1)
     }
+
+    /// Red if "I have a key" lost its underline (it would read as a label, not
+    /// a link) or if the two controls stopped sharing the banner's centre line
+    /// (they would sit at different heights on a wrapped note).
+    @Test func aTextActionIsUnderlinedAndSharesTheBannersCentre() {
+        var taps = 0
+        let banner = SystemAirPlayNoteBannerView(
+            text: "Your trial has ended. Audiout plays on one speaker at a time until you buy.",
+            maxTextWidth: 400,
+            action: .init(title: "Buy Audiout", accessibilityLabel: "Buy an Audiout license", handler: {}),
+            textAction: .init(title: "I have a key", accessibilityLabel: "Enter a license key",
+                              handler: { taps += 1 }))
+        #expect(banner.test_hasTextAction)
+        guard let link = banner.test_textActionButton, let button = banner.test_actionButton else {
+            Issue.record("expected both controls")
+            return
+        }
+        let underline = link.attributedTitle.attribute(.underlineStyle, at: 0, effectiveRange: nil) as? Int
+        #expect(underline == NSUnderlineStyle.single.rawValue, "the text action is underlined")
+
+        banner.frame = NSRect(x: 0, y: 0, width: 600, height: 80)
+        banner.layoutSubtreeIfNeeded()
+        #expect(abs(link.frame.midY - banner.bounds.midY) <= 0.5, "text action centred on the banner")
+        #expect(abs(button.frame.midY - banner.bounds.midY) <= 0.5, "button centred on the banner")
+        #expect(link.frame.maxX <= button.frame.minX - 9.5, "the text action sits left of the button")
+
+        banner.test_tapTextAction()
+        #expect(taps == 1, "the text action dispatches its handler")
+    }
 }

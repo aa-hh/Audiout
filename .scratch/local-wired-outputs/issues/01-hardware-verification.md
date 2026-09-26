@@ -1,6 +1,6 @@
 # 01 — Verify the wired-output facts on a real Mac
 
-Status: ready-for-human
+Status: ready-for-human (partial: Q1 answered)
 Type: research
 
 AGENTS.md: "when a fix rests on a claim about live system state, verify that
@@ -54,4 +54,28 @@ output scope, nominal sample rate, settable volume yes/no.
 
 ## Answer
 
-(pending)
+Partial, 2026-09-26, owner's MacBook Pro (Apple Silicon), headphones in the
+jack, no display, USB device or DAC attached. Dump from
+`swift .scratch/local-wired-outputs/hal-dump.swift`.
+
+1. **Yes, separate devices.** "External Headphones" (UID
+   `BuiltInHeadphoneOutputDevice`, transport `'bltn'`, 1 output stream,
+   reported 4.8 ms) sits beside "MacBook Pro Speakers" (UID
+   `BuiltInSpeakerDevice`, `'bltn'`, 1 stream, 7.8 ms). Each has one data
+   source named after itself, so there is no flip on this machine. Both
+   settable HAL volume on the main element. Two `AVAudioEngine`s pinned to the
+   two device ids ran together for 2 s with a silent source: 178 and 172
+   render passes. Proven by render passes, not by ear.
+2. Open. No Intel Mac reached. Ticket 02 keeps the data-source-name fallback.
+3. Open. No USB output attached.
+4. Open. No display attached.
+5. Open. Needs an audible run with the shipping build; headphones as the
+   default reproduce it, so no DAC is needed.
+
+Found along the way, for ticket 02: the default output during this run was
+"Audiout BT Wake" (`com.audiout.Audiout.btwake.aggregate`), and a second
+aggregate `com.audiout.Audiout.shots.aggregate` also existed. Both are
+transport `'grup'` wrapping the built-in speakers. So "drop the default's UID,
+resolved through our aggregate" must resolve through ANY aggregate that is the
+default (read its sub-device list), not only the one UID this bundle owns; the
+`'grup'` transport filter already keeps all of them out of the row list.

@@ -29,11 +29,14 @@ import Testing
         let rate: Double
         let scene: [Float]
         let failsToStart: Bool
+        let firstSampleHostNanos: Int64?
         private(set) var stopped = false
-        init(rate: Double = 24_000, scene: [Float] = [], failsToStart: Bool = false) {
+        init(rate: Double = 24_000, scene: [Float] = [], failsToStart: Bool = false,
+             firstSampleHostNanos: Int64? = nil) {
             self.rate = rate
             self.scene = scene
             self.failsToStart = failsToStart
+            self.firstSampleHostNanos = firstSampleHostNanos
         }
         struct StartFailure: Error {}
         func start() throws -> Double {
@@ -167,6 +170,58 @@ import Testing
             "stale ambient noise must never veto a clean sweep pair")
         #expect(abs(result.deltaMs - 7.5) < 0.3,
                 "the fallback still measures the true Δ: got \(result.deltaMs)")
+    }
+
+    /// A 6.5 s capture whose first sample was taken 3 s before the arm gate
+    /// opened: two seconds of loud broadband sound at the head (music still
+    /// draining out of the speakers), then quiet room, the reference sweep at
+    /// 3.6 s and, when `bluetoothSweepMs` is set, the Bluetooth sweep that
+    /// much later.
+    private func loudHeadRun(bluetoothSweepMs: Double?) async -> MicProbeSession.Result? {
+        let rate = 24_000.0
+        let down = SyncProbe.SweepDesign.downSweep(sampleRate: rate, duration: MicProbeSession.sweepSeconds)
+        let up = SyncProbe.SweepDesign.upSweep(sampleRate: rate, duration: MicProbeSession.sweepSeconds)
+        let downAt = 3.6
+        var rng = SeededRNG(seed: 7)
+        func gauss() -> Double {
+            let u1 = Double.random(in: 1e-12..<1, using: &rng)
+            let u2 = Double.random(in: 0..<1, using: &rng)
+            return (-2 * Foundation.log(u1)).squareRoot() * Foundation.cos(2 * .pi * u2)
+        }
+        let scene: [Float] = (0..<Int(6.5 * rate)).map { i in
+            let t = Double(i) / rate
+            var sample = 0.002 * gauss() + (t < 2 ? 0.05 * gauss() : 0)
+            sample += 0.0875 * SyncProbe.value(down, at: t - downAt)
+            if let bluetoothSweepMs {
+                sample += 0.02 * SyncProbe.value(up, at: t - downAt - bluetoothSweepMs / 1000)
+            }
+            return Float(sample)
+        }
+        var now = timespec()
+        clock_gettime(CLOCK_MONOTONIC, &now)
+        let recorder = FakeRecorder(rate: rate, scene: scene,
+                                    firstSampleHostNanos: SyncTiming.monotonicNanos(now) - 3_000_000_000)
+        let session = MicProbeSession(recorder: recorder, timeout: 5, pipelineTail: 0.05)
+        return await withCheckedContinuation { cont in
+            session.start(stage: { onStarted, onFinished in onStarted(); onFinished() },
+                          completion: { cont.resume(returning: $0) })
+        }
+    }
+
+    /// Customer, v1.2.0: the Bluetooth sweep never reached the mic, and the
+    /// loudest stretch of what played BEFORE the sweeps was taken for it —
+    /// `ok=1 confidence=5.9–7.9`, Δ −778 to −3748 ms, shown as "implausible".
+    /// Nothing before the sweeps can be a sweep, so the run must fail.
+    @Test func soundBeforeTheSweepsIsNeverTakenForAMissingSweep() async {
+        let result = await loudHeadRun(bluetoothSweepMs: nil)
+        #expect(result == nil,
+                "a missing Bluetooth sweep is a failed listen, not a Δ: got \(String(describing: result))")
+    }
+
+    @Test func aRealPairAfterALoudHeadStillMeasures() async {
+        let result = await loudHeadRun(bluetoothSweepMs: 300)
+        #expect(result.map { abs($0.deltaMs - 300) < 0.5 } == true,
+                "the sweeps themselves are still found: got \(String(describing: result))")
     }
 }
 

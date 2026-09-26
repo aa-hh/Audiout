@@ -650,6 +650,61 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         session.cancel()
     }
 
+    /// An implausible mic reading's Try again listens once more instead of
+    /// dropping to the by-ear questions; a second implausible reading does
+    /// drop to them, with no third listen. Reddens if `tryAgain` stops
+    /// re-listening from `.macIsLate`, or keeps re-listening past
+    /// `maxMicAttempts`.
+    @Test func anImplausibleReadingsTryAgainListensOnceMoreThenFallsToTheQuestions() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           targetIsBluetooth: true)
+        var listenCalls = 0
+        session.requestListening = { proceed in
+            listenCalls += 1
+            proceed(true)
+        }
+        session.start()
+        session.offerMeasuredProposal(valueMs: -60)
+        #expect(session.screen == .macIsLate, "got \(session.screen)")
+        #expect(recorder.ticks == [true, false])
+        #expect(recorder.ends == [nil])
+
+        session.tryAgain()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(listenCalls == 2)
+        #expect(session.micAttempts == 2)
+        #expect(recorder.ticks == [true, false, true], "a fresh injector replays the sweeps")
+        #expect(recorder.previews.last == 0, "the probe re-measures at the stored value")
+        #expect(recorder.ends == [nil], "the bow-out already restored; no second restore")
+
+        session.offerMeasuredProposal(valueMs: -60)
+        #expect(session.screen == .macIsLate, "got \(session.screen)")
+
+        session.tryAgain()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
+        #expect(listenCalls == 2, "no third listen")
+        #expect(session.micAttempts == 2)
+        session.cancel()
+    }
+
+    /// The bands `bt_sync:listening_ended` reports in place of a raw value.
+    /// Reddens on any boundary moving or label changing.
+    @Test func valueBucketsSplitAtTheirBoundaries() {
+        let cases: [(Double, String)] = [
+            (-5, "below_-4"), (-4, "-4_to_0"), (-0.5, "-4_to_0"), (0, "0-9"),
+            (9, "0-9"), (10, "10-39"), (39, "10-39"), (40, "40-99"),
+            (99, "40-99"), (100, "100-199"), (199, "100-199"), (200, "200+"),
+        ]
+        for (valueMs, bucket) in cases {
+            #expect(BTAlignmentWizardSession.valueMsBucket(valueMs) == bucket, "\(valueMs)")
+        }
+    }
+
     /// The measured flag must not outlive its measurement: after a failed
     /// retry, a proposal the run then EARNS from answers reads "Still off", not
     /// "Try again". Reddens if `presentEstimatorPhase` leaves
@@ -917,11 +972,46 @@ extension SerializedSharedState {
             #expect(events[0].0 == "bt_sync:mic_permission_answered")
             #expect(events[0].1 == ["granted": "true"])
             #expect(events[1].0 == "bt_sync:listening_ended")
-            #expect(events[1].1 == ["outcome": "measured", "attempt": "1"])
+            #expect(events[1].1 == ["outcome": "measured", "attempt": "1", "value_ms_bucket": "200+"])
             #expect(events[2].0 == "bt_sync:mic_retried")
             #expect(events[2].1 == [:])
             #expect(events[3].0 == "bt_sync:listening_ended")
             #expect(events[3].1 == ["outcome": "failed", "attempt": "2"])
+        }
+
+        /// An implausible reading's Try again reports as a retry, and both
+        /// listens carry their attempt number and band. Reddens if the
+        /// re-listen stops firing `mic_retried` or the second listen never
+        /// happens.
+        @Test func anImplausibleReadingsRetryIsReported() {
+            let captured = AnalyticsCapture()
+            Analytics.install(Analytics.Sink(capture: { captured.append($0, $1) },
+                                             captureError: { _, _ in },
+                                             consentChanged: { _ in }), consent: true)
+            defer { Analytics.install(nil, consent: false) }
+
+            let recorder = Recorder()
+            let session = recorder.makeSession(candidateRangeMs: -500...1_500,
+                                               invertsEstimate: true,
+                                               targetIsBluetooth: true)
+            session.requestListening = { $0(true) }
+            session.start()
+            session.offerMeasuredProposal(valueMs: -60)
+            session.tryAgain()
+            session.offerMeasuredProposal(valueMs: -2)
+            session.cancel()
+
+            let events = captured.btSyncEvents()
+            guard events.count == 4 else {
+                Issue.record("expected 4 bt_sync events, got \(events)")
+                return
+            }
+            #expect(events[1].0 == "bt_sync:listening_ended")
+            #expect(events[1].1 == ["outcome": "implausible", "attempt": "1", "value_ms_bucket": "below_-4"])
+            #expect(events[2].0 == "bt_sync:mic_retried")
+            #expect(events[2].1 == [:])
+            #expect(events[3].0 == "bt_sync:listening_ended")
+            #expect(events[3].1 == ["outcome": "measured", "attempt": "2", "value_ms_bucket": "-4_to_0"])
         }
     }
 }

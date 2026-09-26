@@ -2158,8 +2158,10 @@ extension SerializedSharedState {
     /// A customer's 1.2.0 session (two Sonos Moves) replayed: deselecting and
     /// reselecting a speaker keeps both stored halves, and the reselected sink
     /// is handed reference − latency + trim. That trim was −205, reached by 76
-    /// persisted steps the live sink refused, so the reselect anchored at 0 —
-    /// the formula doing its job on a trim nobody heard.
+    /// persisted steps the live sink refused; in 1.2.0 the reselect anchored at
+    /// 0. A negative trim now counts as latency when the reference is chosen,
+    /// so the reference rises to 295 + 205 + 100 and the speaker anchors on the
+    /// 100 ms seek floor — the stored value is the one playing.
     @Test @MainActor func aReselectedSpeakerKeepsItsStoredAlignment() async throws {
         let dir = scratchDir
         let sonos = BTDeviceSnapshot(id: "54-2A-1B-79-08-9E:output", name: "Sonos Move", isConnected: true)
@@ -2190,13 +2192,14 @@ extension SerializedSharedState {
         let offset = try #require(sink.offsets.last { $0.uid == sonos.id }?.ms)
         let trim = try #require(sink.trims.last { $0.uid == sonos.id }?.ms)
         let buffer = try #require(sink.buffers.last)
-        #expect((offset, trim, buffer) == (295, -205, 500))
-        // 500 − 295 + (−205): the stored trim is honoured, and it lands on 0.
+        #expect((offset, trim, buffer) == (295, -205, 600), "got \((offset, trim, buffer))")
+        // 600 − 295 + (−205): the stored trim is honoured, and it lands on the
+        // 100 ms floor rather than 0.
         let delay = BTReferenceTimeline.delayNanos(
             composition: BTGroupComposition(airPlayPresent: false, macLocalPresent: false),
             presentationDelayMs: 0, btOnlyBufferMs: buffer,
             deviceOffsetMs: offset, trimMs: trim)
-        #expect(delay == 0)
+        #expect(delay == 100_000_000, "got \(delay)")
     }
 
     /// A Reset on a playing speaker left no line at all (both of its seeks run

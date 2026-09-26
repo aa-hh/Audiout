@@ -449,10 +449,12 @@ public final class MicProbeSession {
     }
 
     /// The weakest arrival the wizard trusts. ProbeKit's own floor (5) only
-    /// tells a sweep from pure noise; live on 2026-09-26 a room sound matched
-    /// at 7.2 and read −4,876 ms, while every true arrival that day scored 55
-    /// or more.
-    static let minConfidence = 20.0
+    /// tells a sweep from pure noise. Live on 2026-09-26, with the Bluetooth
+    /// speaker silent, two false matches scored 7.2 (−4,876 ms) and 55.3
+    /// (668 ms, a believable number); the speaker's real arrivals that day
+    /// scored 684, 734 and 1,724. Refusing costs only a by-ear run; a false
+    /// proposal costs a wrong trim the user has to hear out.
+    static let minConfidence = 100.0
 
     /// A Bluetooth-target run pins its reference this far ahead, so no
     /// alignable speaker can sound further than this from the reference.

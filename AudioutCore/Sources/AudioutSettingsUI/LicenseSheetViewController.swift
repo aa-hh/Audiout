@@ -27,11 +27,9 @@ public final class LicenseSheetViewController: NSViewController {
 
     private let settings: AppSettings
     private let transport: LicenseValidator.Transport?
-    private let openURL: (URL) -> Void
 
     private let keyField = NSTextField()
     private let resultLine = SettingsForm.hintLabel()
-    private let buyButton = NSButton()
     private let removeButton = NSButton()
     private let cancelButton = NSButton()
     private var registerButton: ProminentButton!
@@ -57,12 +55,14 @@ public final class LicenseSheetViewController: NSViewController {
     /// sites reading naturally.
     static let keyFormatHint = LicenseCopy.keyFormatHint
 
+    /// `openURL` is no longer called (the sheet dropped its Buy button); it
+    /// stays in the signature so `GeneralSettingsViewController` and any
+    /// caller keep compiling unchanged.
     public init(settings: AppSettings,
                 transport: LicenseValidator.Transport?,
                 openURL: @escaping (URL) -> Void) {
         self.settings = settings
         self.transport = transport
-        self.openURL = openURL
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -70,8 +70,8 @@ public final class LicenseSheetViewController: NSViewController {
 
     /// The one wording for each server verdict, owned by Core (`LicenseCopy`)
     /// so the pane, this sheet, and the first-open gate can never drift apart.
-    static func statusLine(for status: LicenseStatus) -> String {
-        LicenseCopy.statusLine(for: status)
+    static func statusLine(for status: LicenseStatus, reason: String?) -> String {
+        LicenseCopy.statusLine(for: status, reason: reason)
     }
 
     public override func loadView() {
@@ -95,20 +95,23 @@ public final class LicenseSheetViewController: NSViewController {
         keyField.usesSingleLineMode = true
         keyField.cell?.isScrollable = true
 
+        // The verdict sentences (`LicenseCopy.statusLine`) run to two lines at
+        // this width. `hintLabel` already wraps; the preferred width stops the
+        // label asking for its unwrapped single-line width, which would push
+        // the sheet wider than 320.
         resultLine.isHidden = true
         resultLine.preferredMaxLayoutWidth = Self.sheetContentWidth
 
-        buyButton.title = "Buy Audiout…"
-        buyButton.bezelStyle = .rounded
-        buyButton.controlSize = .small
-        buyButton.target = self
-        buyButton.action = #selector(buyTapped)
-
-        // Only offered when there is something to remove; a fresh sheet
-        // opened from "Enter License…" never shows it.
+        // The tertiary action: a quiet link-style button on its own row, never
+        // a third bezel beside Cancel and Register. Only offered when there is
+        // something to remove; a fresh sheet opened from "Enter License…"
+        // never shows it. No Buy button here: the General pane behind the
+        // sheet has its own, and the revoked verdict already says to buy.
         removeButton.title = "Remove license…"
-        removeButton.bezelStyle = .rounded
+        removeButton.isBordered = false
         removeButton.controlSize = .small
+        removeButton.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+        removeButton.contentTintColor = .linkColor
         removeButton.target = self
         removeButton.action = #selector(removeTapped)
         removeButton.hasDestructiveAction = true
@@ -127,23 +130,29 @@ public final class LicenseSheetViewController: NSViewController {
         // It is also the folder's exception to "every view sets
         // `translatesAutoresizingMaskIntoConstraints = false`": this button is
         // an arranged subview of `buttonRow` below, which owns that flag, and
-        // setting it here would fight the stack. The sheet's four other buttons
-        // never set it either, and `onboardingActionButton` sets it only for
-        // the constraint-hosted card slot.
+        // setting it here would fight the stack. Cancel and Remove never set
+        // it either, and `onboardingActionButton` sets it only for the
+        // constraint-hosted card slot.
         registerButton = ProminentButton(title: "Register", target: self,
                                          action: #selector(registerTapped))
         registerButton.keyEquivalent = "\r"
+        // The primary action is never clipped: the row gives way anywhere else
+        // first. A four-button row once squeezed it to "Re".
+        registerButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        cancelButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
+        // The ONLY side-by-side pair on the sheet: Cancel, then Register
+        // rightmost, pushed right by the spacer.
         let spacer = NSView()
         spacer.translatesAutoresizingMaskIntoConstraints = false
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let buttonRow = NSStackView(views: [buyButton, removeButton, spacer, cancelButton, registerButton])
+        let buttonRow = NSStackView(views: [spacer, cancelButton, registerButton])
         buttonRow.orientation = .horizontal
         buttonRow.alignment = .centerY
         buttonRow.spacing = 8
         buttonRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView(views: [heading, explainer, keyField, resultLine, buttonRow])
+        let stack = NSStackView(views: [heading, explainer, keyField, resultLine, removeButton, buttonRow])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -163,22 +172,19 @@ public final class LicenseSheetViewController: NSViewController {
         view = container
 
         // Tab order, authored rather than inferred from frames: the field
-        // first, then the two commit buttons, then the two optional ones, and
-        // back to the field.
+        // first, then the two commit buttons, then Remove when shown, and back
+        // to the field.
         keyField.nextKeyView = registerButton
         registerButton.nextKeyView = cancelButton
-        cancelButton.nextKeyView = buyButton
-        buyButton.nextKeyView = removeButton
+        cancelButton.nextKeyView = removeButton
         removeButton.nextKeyView = keyField
 
         refreshButtons()
     }
 
-    /// The ONE place the sheet's two optional buttons decide whether they are
-    /// on screen, so every state change lands the same way: Buy only where it
-    /// can work AND would help, Remove exactly when there is a stored key.
+    /// The ONE place Remove decides whether it is on screen, so every state
+    /// change lands the same way: shown exactly when there is a stored key.
     private func refreshButtons() {
-        buyButton.isHidden = !(settings.buyURL != nil && settings.licenseUnregistered)
         removeButton.isHidden = (settings.licenseKey ?? "").isEmpty
     }
 
@@ -186,13 +192,6 @@ public final class LicenseSheetViewController: NSViewController {
         super.viewDidAppear()
         // The field is why the sheet exists — typing starts without a click.
         view.window?.makeFirstResponder(keyField)
-    }
-
-    @objc private func buyTapped() {
-        guard let url = settings.buyURL else { return }
-        Analytics.capture("license:buy_link_opened", ["source": "license_sheet"])
-        // Leaves the sheet open: the buyer comes back with a key to paste.
-        openURL(url)
     }
 
     /// Removing is destructive and the key may be the only copy the user can
@@ -275,7 +274,7 @@ public final class LicenseSheetViewController: NSViewController {
                 self.keyField.isEnabled = true
                 self.registerButton.isEnabled = true
                 self.keyField.stringValue = self.settings.licenseKey ?? ""
-                self.show(result: Self.statusLine(for: status))
+                self.show(result: Self.statusLine(for: status, reason: self.settings.licenseReason))
                 self.refreshButtons()
                 self.onStateChange?()
             case .unreachable, .noServer, .noKey:
@@ -351,9 +350,9 @@ public final class LicenseSheetViewController: NSViewController {
         return !removeButton.isHidden
     }
 
-    /// Whether "Buy Audiout…" is offered (a registered customer never sees it).
-    public var test_buyIsVisible: Bool {
+    /// The Register button, for layout assertions (it must never be clipped).
+    public var test_registerButton: NSButton {
         _ = view
-        return !buyButton.isHidden
+        return registerButton
     }
 }

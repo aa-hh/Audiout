@@ -60,10 +60,12 @@ public struct CompanionLicenseActivation {
                 // purchase the phone already confirmed with Apple.
                 completion(CompanionServer.CommandResult(applied: true))
             case .verified(.revoked):
-                // `.revoked`'s shared line ("refunded or revoked ... buy a new
-                // one") names no receipt and no typing, so it reads fine on
-                // the phone too — unlike `.unknown`/`.invalid`, which do not.
-                completion(CompanionServer.CommandResult(applied: false, refusalReason: LicenseCopy.statusLine(for: .revoked)))
+                // `.revoked`'s shared line (the reason, then "buy a new one")
+                // names no receipt and no typing, so it reads fine on the
+                // phone too — unlike `.unknown`/`.invalid`, which do not.
+                completion(CompanionServer.CommandResult(
+                    applied: false,
+                    refusalReason: LicenseCopy.statusLine(for: .revoked, reason: settings.licenseReason)))
             case .verified:
                 completion(CompanionServer.CommandResult(applied: false, refusalReason: "Your Mac didn’t recognise this licence. Tap Restore purchase."))
             case .noServer:

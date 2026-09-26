@@ -2553,8 +2553,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updaterController?.updater.httpHeaders = key.isEmpty ? nil : ["Authorization": "Bearer \(key)"]
 
         // A licence that lands while phones are connected: push the token
-        // their welcome would have carried, once per distinct token.
-        if let token = settings.companionToken {
+        // their welcome would have carried, once per distinct token. The first
+        // pass runs from `installUpdatesAndLicence()` before `groupController`
+        // exists, and building the lazy coordinator then traps on its
+        // force-unwrap — a launch crash on any Mac holding a stored token
+        // (2026-09-26). No phone is connected that early, so there is nobody
+        // to push to; the passes after wiring cover every later licence change.
+        if groupController != nil, let token = settings.companionToken {
             companionCoordinator.pushCompanionToken(token)
         }
 

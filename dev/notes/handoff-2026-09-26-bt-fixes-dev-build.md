@@ -80,8 +80,8 @@ branch the same way; if you don't, say so.
    you picked and why (CLAUDE.md requires this): the standing dev id, because
    none of this touches permissions.
 7. **After his verdict**, release the slot (`bash scripts/livetest.sh done`).
-   Then merge what passed to `main`, both as a local `git merge` and as a
-   GitHub PR (CLAUDE.md "Critical workflow rules"). Merge in this order:
+   Then merge what passed to `main`, both as a local `git merge --no-ff`
+   (a fast-forward skips the full-suite merge hook) and as a GitHub PR (CLAUDE.md "Critical workflow rules"). Merge in this order:
    3, 4, 5, 6 (low risk, independent), then 2, then 1 last and only if it
    passed the listening test. 7 waits for the shared doc.
 8. **Shared analytics rows.** audiout-shared branch

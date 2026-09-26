@@ -15,6 +15,7 @@ everything up to the `OutputBackend` seam and never imports AppKit.
 - Over budget, a speaker shares stream 0 and streams flat, and says so through `eqBypassReason`.
 - A device the per-app domain claims leaves the EQ domain, and says so through `eqBypassReason`.
 - A Bluetooth trim is a ring seek and must never clear session state: the anchor and ring survive.
+- A released Bluetooth sink re-aligns its read position from its own render cycles once the device's pulls run 20 ms off wall time; `bt_clock_jump` and `drift_clock_step_storm` never move audio.
 - A Bluetooth EQ change bakes a new processor on `graphQueue`, never re-parameterizing a live one.
 - The PTP activation wait must strictly exceed the helper's bind-retry budget, or a late success goes unseen.
 - A PTP `register()` throw is first-run normal; only `.notFound` after it is a fault.

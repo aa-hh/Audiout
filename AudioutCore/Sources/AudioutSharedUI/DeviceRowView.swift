@@ -316,10 +316,11 @@ public final class DeviceRowView: NSView {
     /// Mounted only when ``supportsEqualizer``; the layout reserves its slot on
     /// every row either way, so the name truncates identically across rows.
     let eqButton = NSButton()
-    /// The mute button's at-rest symbol — the outline square.
+    /// The mute button's at-rest symbol — the outline square with the
+    /// speaker and no slash.
     private static let muteRestSymbolName = RowAccessorySymbol.muteRest
-    /// The mute button's ENGAGED symbol — the filled square. The mark inside
-    /// is the same slashed speaker either way; what changes is the square.
+    /// The mute button's ENGAGED symbol — the same outline square with the
+    /// slash added. The slash belongs to this state only.
     private static let muteEngagedSymbolName = RowAccessorySymbol.muteEngaged
     /// The Equalizer door's at-rest symbol — the outline square.
     private static let eqRestSymbolName = RowAccessorySymbol.equalizerRest
@@ -942,20 +943,20 @@ public final class DeviceRowView: NSView {
     }
 
     /// Updates the mute button for the current `muteButton.state`. `.on`
-    /// (muted) draws ``RowAccessorySymbol/muteEngaged`` — the FILLED square,
-    /// its enclosure in an opaque ``Tokens/Color/muted`` and the speaker and
-    /// slash inside it in white. `.off` draws
-    /// ``RowAccessorySymbol/muteRest``, the same mark as an outline square in
-    /// one neutral ink. Drawing only: behavior, keyboard and VoiceOver are
-    /// untouched.
+    /// (muted) draws ``RowAccessorySymbol/muteEngaged`` — the slashed OUTLINE
+    /// square, drawn whole in ``Tokens/Color/muted``. `.off`
+    /// draws ``RowAccessorySymbol/muteRest``, the same outline square with
+    /// the speaker and no slash, in one neutral ink. Two symbols sharing one
+    /// square, told apart by the slash and the ink. Drawing only: behavior,
+    /// keyboard and VoiceOver are untouched.
     ///
     /// Called from `apply` (model refresh) AND `muteToggled` (a live click) so
     /// both paths land the treatment instantly, and from
     /// `viewDidChangeEffectiveAppearance` — the ink is baked into the image,
     /// so a light/dark switch has to re-make it.
     ///
-    /// WHAT IT MAY NOT GO BACK TO. Two treatments are retired here, and
-    /// neither may return. The first was an `engagedChrome` capsule at
+    /// WHAT IT MAY NOT GO BACK TO. Three treatments are retired here, and
+    /// none may return. The first was an `engagedChrome` capsule at
     /// ``PopoverColumnGrid/mutePillFillAlpha`` behind an unslashed speaker — a
     /// faint grey pill that read as nothing (owner's call, 2026-09-04: "the
     /// active mute state does not look like any other mute state I have seen
@@ -963,15 +964,16 @@ public final class DeviceRowView: NSView {
     /// rectangle painted on a sibling `NSView` behind a system
     /// `speaker.slash.fill`: correct on measurement, but two views and two
     /// hand-pinned sizes to draw one mark. The enclosing square belongs to the
-    /// symbol now.
+    /// symbol now. The third is the FILLED square
+    /// (`custom.speaker.slash.square.fill`, the speaker and slash cut through
+    /// a `muted` enclosure): dropped 2026-09-05, restored 2026-09-26, and
+    /// rejected by the owner on the live build the same day ("looks better
+    /// unfilled"). Do not restore it.
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
-        // ONE shape in two inks (owner, 2026-09-05). The filled square is
-        // retired: it drew the marks as holes, so the mark's own glyph read
-        // white on a light row and near-black on a dark one. Colour carries
-        // the state now and the shape never changes.
+        // The slash belongs to the muted state only; both states are outlines.
         muteButton.image = RowAccessorySymbol.image(
-            named: Self.muteRestSymbolName,
+            named: engaged ? Self.muteEngagedSymbolName : Self.muteRestSymbolName,
             ink: engaged ? Self.engagedInk(fill: Tokens.Color.muted, in: effectiveAppearance)
                          : Self.restInk(in: effectiveAppearance))
         muteButton.setAccessibilityLabel(engaged ? "Unmute \(device.name)" : "Mute \(device.name)")
@@ -1000,7 +1002,7 @@ public final class DeviceRowView: NSView {
         guard supportsEqualizer else { return }
         eqButton.setAccessibilityLabel("Equalizer for \(device.name)")
         eqButton.setAccessibilityValue(isEQShaped ? "Shaped" : "Flat")
-        // One shape, two inks — see `updateMuteTint()`.
+        // One shape, two inks.
         eqButton.image = RowAccessorySymbol.image(
             named: Self.eqRestSymbolName,
             ink: isEQShaped
@@ -1008,9 +1010,9 @@ public final class DeviceRowView: NSView {
                 : Self.restInk(in: effectiveAppearance))
     }
 
-    /// The engaged ink: `fill` on the symbol's enclosing square, with the
-    /// marks left as the holes the template cuts in it — the row shows
-    /// through them, so the state needs no second colour.
+    /// The engaged ink: `fill` over everything the symbol draws — on mute's
+    /// slashed outline that is the square, the speaker and the slash — so
+    /// the state needs no second colour.
     ///
     /// Resolved in the row's own appearance before it reaches the drawing: a
     /// dynamic `NSColor` would otherwise resolve against whatever appearance

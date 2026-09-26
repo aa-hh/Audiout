@@ -414,7 +414,7 @@ public final class MainOutRowView: NSView {
         // Speaker mute button, LEFT of the master slider (same visual pattern as
         // `DeviceRowView`'s per-device mute): `pushOnPushOff` so the mute STATE
         // still toggles and the delegate still fires, while the SYMBOL swaps
-        // between its outline and filled squares. The mark used to stay fixed
+        // between its slash-free and slashed outlines. The mark used to stay fixed
         // in both states (an earlier call); they reversed that on 2026-09-04 — a
         // mute that changes nothing but its tint reads as no mute at all. This
         // is only the seeded image; `updateMuteTint()` owns both states and
@@ -616,25 +616,26 @@ public final class MainOutRowView: NSView {
     // MARK: Private Helpers
 
     /// Updates the mute button for the current state: `.on` draws
-    /// ``RowAccessorySymbol/muteEngaged``, the filled square with a
-    /// ``Tokens/Color/muted`` enclosure and the marks punched out of it;
-    /// `.off` draws
-    /// ``RowAccessorySymbol/muteRest``, the outline square in one neutral ink.
+    /// ``RowAccessorySymbol/muteEngaged``, the slashed outline square in
+    /// ``Tokens/Color/muted``; `.off` draws ``RowAccessorySymbol/muteRest``,
+    /// the same outline square with the speaker and no slash, in one neutral
+    /// ink.
     /// Drawing only — behavior, keyboard and VoiceOver untouched. The SAME two
     /// symbols every device row below wears, so the two rows cannot present
     /// one state as two different objects.
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
-        // One shape, two inks — see `DeviceRowView.updateMuteTint()`.
+        // The slash belongs to the muted state only; both states are
+        // outlines — see `DeviceRowView.updateMuteTint()`.
         muteButton.image = RowAccessorySymbol.image(
-            named: RowAccessorySymbol.muteRest,
+            named: engaged ? RowAccessorySymbol.muteEngaged : RowAccessorySymbol.muteRest,
             ink: engaged ? Self.engagedInk(in: effectiveAppearance)
                          : Self.restInk(in: effectiveAppearance))
         configureAccessibility()
     }
 
-    /// ``Tokens/Color/muted`` on the enclosing square, the marks punched
-    /// through it as transparency. Resolved in this row's own appearance,
+    /// ``Tokens/Color/muted`` over the whole slashed outline — square,
+    /// speaker and slash. Resolved in this row's own appearance,
     /// because a dynamic `NSColor` would otherwise resolve against whichever
     /// appearance is current when the image is composited.
     private static func engagedInk(in appearance: NSAppearance) -> NSColor {
@@ -803,7 +804,7 @@ public final class MainOutRowView: NSView {
         guard muteButton.state == .on,
               let drawn = muteButton.image?.tiffRepresentation,
               let reference = RowAccessorySymbol.image(
-                named: RowAccessorySymbol.muteRest,
+                named: RowAccessorySymbol.muteEngaged,
                 ink: Self.engagedInk(in: effectiveAppearance))?.tiffRepresentation
         else { return false }
         return drawn == reference

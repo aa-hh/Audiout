@@ -12,15 +12,27 @@ extension NativeBackend {
     /// removed row would take a saved group's or an app route's reference to
     /// it with it. The availability edge, both ways, goes through
     /// `commitKnownDevice` so a replug reaches a kept row the same way an
-    /// unplug demoted it. Ticket 03 owns re-arming a kept selected row's
-    /// Bluetooth-style connect on replug; this file never touches that.
+    /// unplug demoted it.
+    ///
+    /// A selected or app-claimed row's availability edge also re-runs the sink
+    /// decision, as `applyBTSnapshots` does: an unplugged UID no longer
+    /// resolves, so its sink drops out before the HAL can reuse the
+    /// `AudioObjectID` it was pinned to; a replugged one re-enters the sink set
+    /// and, when selected, breathes `.connecting` until it renders.
     func applyWiredSnapshots(_ snapshots: [WiredOutputSnapshot]) {   // on stateQueue
+        var desiredAvailabilityMoved = false
         for snapshot in snapshots {
             if var device = known[snapshot.id] {
+                let replugged = device.isAvailable == false
                 device.name = snapshot.name
                 device.wiredTransport = snapshot.transport
                 device.isAvailable = true
                 if device != known[snapshot.id] { commitKnownDevice(snapshot.id, device) }
+                if replugged,
+                   expectedSelected.contains(snapshot.id) || btPerAppClaimedUIDs.contains(snapshot.id) {
+                    desiredAvailabilityMoved = true
+                    beginBTConnectingLocked(snapshot.id)
+                }
             } else {
                 let device = Device(
                     id: snapshot.id, name: snapshot.name, kind: .wired,
@@ -37,7 +49,11 @@ extension NativeBackend {
         for id in unplugged {
             guard var device = known[id] else { continue }
             if device.isAvailable == false { continue }
+            if expectedSelected.contains(id) || btPerAppClaimedUIDs.contains(id) {
+                desiredAvailabilityMoved = true
+            }
             device.isAvailable = false
+            btConnectingDeadlines[id] = nil
             // Mirror the Bluetooth deselect arm (`NativeBackend+Tone.swift`):
             // a `.failed` story survives so a "Try again" affordance still
             // has something to explain; every other unplug clears to `.off`.
@@ -45,6 +61,10 @@ extension NativeBackend {
                 device.connectionState = .off
             }
             commitKnownDevice(id, device)
+        }
+        if desiredAvailabilityMoved {
+            reconcileSilenceWatchdog()
+            reapplyBTSinkLocked()
         }
         pruneUnusedWiredLocked()
     }

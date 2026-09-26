@@ -612,6 +612,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// go stale across a disconnect/rejoin while UIDs don't.
     var btDeviceIDForUID: (@Sendable (String) -> AudioObjectID?)?
 
+    /// Test seam: a wired output's `AudioObjectID` → its reported Core Audio
+    /// output latency in ms, the offset its sink is seeded with when no
+    /// measured latency exists. `nil` (production) means
+    /// `LocalOutputLatency.measure(deviceID:)`'s `totalMilliseconds`, rounded,
+    /// and `nil` when that throws.
+    var wiredReportedLatencyMs: (@Sendable (AudioObjectID) -> Int?)?
+
     /// The last BT decisions `setOutputSet` committed — enable, selected uids,
     /// and group composition — so a routing call that changes none of them
     /// re-applies nothing. All on `stateQueue`; the apply they gate runs on
@@ -2805,7 +2812,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // engine guard below would drop the write (the reason a BT slider did
             // nothing). Same stash-under-mute semantics as the engine arm; the
             // push is the composed sink gain instead of an engine volume.
-            if self.known[id]?.isBluetooth == true {
+            if self.known[id]?.isBluetooth == true || self.known[id]?.isWired == true {
                 if self.muted.contains(id) {
                     self.stashedVolume[id] = clamped
                     self.applyLocal(id) { $0.volume = clamped }
@@ -2869,7 +2876,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // BT arm: the same stash/restore shim as the engine arm below (the
             // sink has no mute field either) — mute pushes the composed 0,
             // unmute restores the stashed level and pushes its composed gain.
-            if self.known[id]?.isBluetooth == true {
+            if self.known[id]?.isBluetooth == true || self.known[id]?.isWired == true {
                 if muted {
                     self.muted.insert(id)
                     if self.stashedVolume[id] == nil { self.stashedVolume[id] = self.known[id]?.volume ?? 0 }
@@ -3094,6 +3101,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// a sink transition to apply on `captureControlQueue`. On `stateQueue`.
     func btSinkGains(forUIDs uids: [String]) -> [String: Float] {   // on stateQueue
         Dictionary(uniqueKeysWithValues: uids.map { ($0, btSinkGain(forUID: $0)) })
+    }
+
+    /// The wired rows among `uids` — the ones whose sink offset is seeded from
+    /// the reported latency. On `stateQueue`.
+    func wiredSinkUIDs(forUIDs uids: [String]) -> Set<String> {   // on stateQueue
+        Set(uids.filter { known[$0]?.isWired == true })
     }
 
     // MARK: Connect-time PTP takeover gate (T4+T5, PLAN-AIRPLAY-COEXISTENCE.md)
@@ -4403,7 +4416,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// row leaves `.connecting`, and the countdown arms then (R11 intact).
     func desiredDeviceAudibleLocked(_ id: String) -> Bool {   // on stateQueue
         guard let device = known[id] else { return false }
-        if device.isBluetooth { return device.isAvailable }
+        if device.isBluetooth || device.isWired { return device.isAvailable }
         if device.isCast {
             return castPlaying.contains(id) || device.connectionState == .connecting
         }

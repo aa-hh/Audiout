@@ -1,6 +1,6 @@
 # 04 — Mixer rows, glyphs, and the sync drawer for wired outputs
 
-Status: needs-info
+Status: ready-for-human (built 2026-09-26; live check owed)
 Blocked by: 03
 
 ## Change
@@ -8,7 +8,8 @@ Blocked by: 03
 - `PopoverController`: list `.wired` rows directly under "This Mac" in the
   Current Device subsection (decision 5); the row matching the default is never
   listed (enumerator already drops it, but the
-  ingest guards too). Selected-then-unplugged → deselected on the edge.
+  ingest guards too). Selected-then-unplugged stays selected and greyed until
+  replug (team call 2026-09-26).
 - Sync drawer / trim store / wizard: generalise the "Bluetooth row" gates in
   `PopoverController+SyncDrawer.swift`, `PopoverController+BTWizard.swift` and
   `BTTrimStore` to "locally rendered sink" (BT or wired), keyed by UID. The
@@ -20,10 +21,11 @@ Blocked by: 03
 - A wired row selectable alone (decision 7): the auto-swap rule treats it like
   a Bluetooth row — toggling it on while "This Mac" is the only selection
   untoggles "This Mac"; `isPassthrough` stays "selected set == just the Mac".
-- Analytics: `wired:row_selected` / `wired:row_deselected` (properties:
-  `transport` enum string, `selected_count`), `bt_sync:*` events reused for the
-  drawer with a `transport` property added — register in
-  `audiout-shared/docs/analytics-events.md` first.
+- Analytics: no new `wired:*` events — `mixer:device_selected` /
+  `mixer:device_deselected` gain a `transport` property when `kind` is
+  `wired`; `bt_sync:wizard_started`'s `target` gains `wired`;
+  `bt_sync:trim_committed` gains a `target` property (`local`, `bluetooth`,
+  `wired`) — registered in `audiout-shared/docs/analytics-events.md` first.
 
 ## Tests
 

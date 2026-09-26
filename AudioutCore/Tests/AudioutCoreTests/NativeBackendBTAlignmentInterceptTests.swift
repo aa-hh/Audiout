@@ -391,6 +391,11 @@ extension SerializedSharedState {
     @Test @MainActor func auditionReservesTheTickSlotUntilStopCompletes() async {
         let (backend, bt, _, _) = makeBackend()
         defer { backend.stop() }
+        // In a mixed run, other suites' run-loop waits hold the main queue past
+        // the 4 s real-time preparation window, so the audition's main-queue
+        // activation lands after the deadline and reports "pair changed".
+        backend.companionAuditionPreparationSeconds = 60
+        backend.companionAuditionStopSeconds = 60
         backend.captureCoordinator = ProbeStagingCapture()
         backend.start()
         bt.fire([btMove, btFlip])

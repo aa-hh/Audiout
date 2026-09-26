@@ -230,11 +230,12 @@ extension PopoverController {
             // The transport of each side, which is what decides whether the two
             // speakers make different SOUNDS this run (the tick's two timbres
             // are split by fan-out, never by role) and so whether the intro
-            // names them.
+            // names them. A wired sink is fed by the same fan-out as
+            // Bluetooth, so it plays the Bluetooth-side sound.
             reference: reference.map {
-                .init(id: $0.id, name: $0.name, isBluetooth: $0.isBluetooth)
+                .init(id: $0.id, name: $0.name, isBluetooth: $0.isBluetooth || $0.isWired)
             },
-            targetIsBluetooth: device.isBluetooth,
+            targetIsBluetooth: device.isBluetooth || device.isWired,
             baseValueMs: base,
             candidateRangeMs: candidateRange,
             // A larger latency feeds the speaker EARLIER, so an early target
@@ -335,7 +336,7 @@ extension PopoverController {
         }
         btWizardSession = session
         Analytics.capture("bt_sync:wizard_started",
-                          ["target": isLocalTarget ? "local" : "bluetooth",
+                          ["target": isLocalTarget ? "local" : (device.isWired ? "wired" : "bluetooth"),
                            "door": door.rawValue])
         reconcileBTAlignmentNotes(animated: true)
         refreshDeviceRows()
@@ -427,8 +428,8 @@ extension PopoverController {
     }
 
     /// Every other speaker the target could be compared against, in the order
-    /// the rows themselves render (locals, AirPlay, Bluetooth). Unavailable
-    /// devices are left out — a greyed row can't carry a tick.
+    /// the rows themselves render (locals, wired, AirPlay, Bluetooth).
+    /// Unavailable devices are left out — a greyed row can't carry a tick.
     private func btWizardReferenceOptions(excluding deviceID: String)
         -> [BTAlignmentWizardView.ReferenceOption]
     {
@@ -441,7 +442,8 @@ extension PopoverController {
         // Cast is never offered: a Cast receiver plays ~5.5 s behind live, which
         // no ±500 ms bisection can resolve against.
         return ordered.filter(\.isLocalDevice)
-            + ordered.filter { !$0.isLocalDevice && !$0.isBluetooth && !$0.isCast }
+            + ordered.filter(\.isWired)
+            + ordered.filter { !$0.isLocalDevice && !$0.isBluetooth && !$0.isCast && !$0.isWired }
             + orderedBluetoothDevices(in: ordered)
     }
 
@@ -502,7 +504,7 @@ extension PopoverController {
             groupController?.setDeviceSelected(previous, false)
         }
         session.setReference(.init(id: id, name: device.name,
-                                   isBluetooth: device.isBluetooth))
+                                   isBluetooth: device.isBluetooth || device.isWired))
         // The session restarts the questions but never re-fires the tick, so
         // the backend still has the OLD reference on its participant hold —
         // which would leave the new one silent. Re-push while the run is live.

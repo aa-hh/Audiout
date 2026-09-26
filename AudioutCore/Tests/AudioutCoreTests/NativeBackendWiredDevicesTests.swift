@@ -105,6 +105,81 @@ import CoreAudio
         func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool { false }
     }
 
+    /// A scripted `AudioProcessEnumerating` fake: hands back a fixed process
+    /// list so an `AudioProcessResolver` built on it resolves deterministically,
+    /// with no live Core Audio. Copied from `NativeBackendBTSelectionTests`.
+    private struct FakeProcessEnumerator: AudioProcessEnumerating {
+        let processes: [RawAudioProcess]
+        var parents: [pid_t: pid_t] = [:]
+        func enumerateProcesses() -> [RawAudioProcess] { processes }
+        func parentPID(of pid: pid_t) -> pid_t? { parents[pid] }
+    }
+
+    /// A `ProcessAudioTap` that always succeeds: `createAndStart` never throws,
+    /// so a coordinator built over it takes every bundle ID all the way to
+    /// `.capturing` and keeps it there. Copied from `NativeBackendBTSelectionTests`.
+    private final class AlwaysSucceedsTap: ProcessAudioTap, @unchecked Sendable {
+        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+        var onDefaultDeviceChanged: (@Sendable () -> Void)?
+        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+            TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+        }
+        func teardown() {}
+    }
+
+    /// Records the gate's capture ops in order, plus every route table +
+    /// denylist handed to `updateRouting`, with no Core Audio tap / TCC prompt.
+    /// Copied from `NativeBackendTests.swift`'s `FakeCapture`.
+    private final class FakeCapture: CaptureControlling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _onLevel: (@Sendable (Float) -> Void)?
+        private var _onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)?
+        private var _onDeviceRateRebuild: (@Sendable () -> Void)?
+        private var _ops: [String] = []
+        private var _meteringActive = false
+
+        var onLevel: (@Sendable (_ rms: Float) -> Void)? {
+            get { lock.withLock { _onLevel } }
+            set { lock.withLock { _onLevel = newValue } }
+        }
+        var onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)? {
+            get { lock.withLock { _onStateChange } }
+            set { lock.withLock { _onStateChange = newValue } }
+        }
+        var onDeviceRateRebuild: (@Sendable () -> Void)? {
+            get { lock.withLock { _onDeviceRateRebuild } }
+            set { lock.withLock { _onDeviceRateRebuild = newValue } }
+        }
+        func start() { lock.withLock { _ops.append("start") } }
+        func stop() { lock.withLock { _ops.append("stop") } }
+        func setEQPlan(_ plan: WholeSystemEQPlan) {}
+        func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
+        func refreshExcludedProcessSet(forRelaunchedBundleID bundleID: String) {}
+
+        /// R5: records the route table + denylist handed to `updateRouting`, in
+        /// order, so a test can assert exactly WHICH bundle IDs the whole-system
+        /// tap was told to exclude.
+        private var _routingUpdates: [(appRoutes: [AppRoute], excludedBundleIDs: Set<String>)] = []
+        func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>) {
+            lock.withLock { _routingUpdates.append((appRoutes, excludedBundleIDs)) }
+        }
+        var routingUpdates: [(appRoutes: [AppRoute], excludedBundleIDs: Set<String>)] {
+            lock.withLock { _routingUpdates }
+        }
+        /// The bundle IDs the LAST `updateRouting` call would have the
+        /// whole-system tap exclude: every `.device`-routed bundle ID unioned
+        /// with the denylist.
+        var lastExcludedBundleIDs: Set<String>? {
+            guard let last = routingUpdates.last else { return nil }
+            let routedAway = last.appRoutes
+                .filter(\.destination.isDeviceRoute)
+                .map(\.bundleID)
+            return last.excludedBundleIDs.union(routedAway)
+        }
+        func setAirPlayPreDelay(ms: Int) {}
+        var ops: [String] { lock.withLock { _ops } }
+    }
+
     /// Collects emitted `BackendEvent`s off the real event stream.
     private final class EventCollector: @unchecked Sendable {
         private let lock = NSLock()
@@ -124,7 +199,35 @@ import CoreAudio
 
     // MARK: Helpers
 
-    private func makeBackend() -> (NativeBackend, FakeWiredEnumerator) {
+    /// Builds an `AudioProcessResolver` where each bundle id resolves to
+    /// exactly ONE process object, at `pid = objectID`. Copied from
+    /// `NativeBackendBTSelectionTests`.
+    private func singleProcessResolver(_ bundleIDsToObjectIDs: [String: AudioObjectID]) -> AudioProcessResolver {
+        let processes = bundleIDsToObjectIDs.map { bundleID, objectID in
+            RawAudioProcess(objectID: objectID, pid: pid_t(objectID), bundleID: bundleID)
+        }
+        return AudioProcessResolver(enumerator: FakeProcessEnumerator(processes: processes))
+    }
+
+    /// A `PerAppCaptureCoordinator` whose every `start(bundleID:)` reaches
+    /// `.capturing` and stays there. Copied from `NativeBackendBTSelectionTests`.
+    private func workingPerAppCapture(bundleIDs: [String]) -> PerAppCaptureCoordinator {
+        var mapping: [String: AudioObjectID] = [:]
+        for (offset, bundleID) in bundleIDs.enumerated() {
+            mapping[bundleID] = AudioObjectID(9000 + offset)
+        }
+        return PerAppCaptureCoordinator(
+            makeTap: { AlwaysSucceedsTap() }, processResolver: singleProcessResolver(mapping), muteBehavior: .mutedWhenTapped)
+    }
+
+    /// A `.device(id:)` route fixture. Copied from `NativeBackendBTSelectionTests`.
+    private func route(_ bundleID: String, name: String, toDevice deviceID: String, volume: Int = 100) -> AppRoute {
+        AppRoute(bundleID: bundleID, displayName: name, destination: .device(id: deviceID), volume: volume)
+    }
+
+    private func makeBackend(
+        injectedPerAppCapture: PerAppCaptureCoordinator? = nil
+    ) -> (NativeBackend, FakeWiredEnumerator) {
         let wired = FakeWiredEnumerator()
         let backend = NativeBackend(
             engineControl: NoOpEngine(),
@@ -132,6 +235,7 @@ import CoreAudio
             wiredEnumerator: wired,
             dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: NoOpSystemVolume(),
+            injectedPerAppCapture: injectedPerAppCapture,
             aggregateControl: NoOpAggregateControl())
         return (backend, wired)
     }
@@ -286,5 +390,34 @@ import CoreAudio
             return false
         }.count
         #expect(addedCount == 1, "the row was updated on replug, not re-added")
+    }
+
+    /// Defect: `isRouteTargetReachableLocked` returns false for a wired UID (it
+    /// never holds an `outputIDs` entry — that's engine-only), so a route to the
+    /// headphones is silently demoted and the app keeps playing in the system
+    /// mix instead of being honoured on the wired row.
+    @Test func routeToAWiredRowIsHonouredUntilWholeSystemClaimsIt() {
+        let capture = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, wired) = makeBackend(injectedPerAppCapture: capture)
+        defer { backend.stop() }
+        let fakeCapture = FakeCapture()
+        backend.captureCoordinator = fakeCapture
+        backend.start()
+
+        wired.fire([jack])
+        waitFor { self.device(backend, self.jack.id) != nil }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: jack.id)])
+        waitFor { fakeCapture.lastExcludedBundleIDs?.contains("com.foo") == true }
+        #expect(fakeCapture.lastExcludedBundleIDs?.contains("com.foo") == true)
+
+        backend.setOutputSet([jack.id])
+        waitFor { backend.test_scopeConflict(deviceID: self.jack.id) != nil }
+        let conflict = backend.test_scopeConflict(deviceID: jack.id)
+        #expect(conflict?.bundleIDs == ["com.foo"])
+        waitFor { fakeCapture.lastExcludedBundleIDs?.contains("com.foo") == false }
+
+        backend.setOutputSet([])
+        waitFor { fakeCapture.lastExcludedBundleIDs?.contains("com.foo") == true }
     }
 }

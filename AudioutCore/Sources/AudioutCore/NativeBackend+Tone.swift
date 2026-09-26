@@ -51,7 +51,7 @@ extension NativeBackend {
             self.eqByDeviceID[id] = eq
             self.applyLocal(id) { $0.eq = eq }
             if commit { self.saveEQLocked() }
-            if self.known[id]?.isBluetooth == true {
+            if self.known[id]?.isBluetooth == true || self.known[id]?.isWired == true {
                 self.pushBTSinkEQLocked(id)
                 return
             }
@@ -498,8 +498,8 @@ extension NativeBackend {
             }
 
             // BT-BACKEND (R-partition): the other half of the partition the
-            // engine loop above skipped. Selected `.bluetooth` ids drive the BT
-            // sink manager — enable/disable on the empty↔non-empty edge, the
+            // engine loop above skipped. Selected `.bluetooth` and `.wired` ids
+            // drive the BT sink manager — enable/disable on the empty↔non-empty edge, the
             // per-device set reconciled, and the group composition (BT-REFSEL)
             // recomputed on every selection change (AirPlay joining/leaving a
             // BT-containing selection moves every BT delay to a new reference).
@@ -507,7 +507,10 @@ extension NativeBackend {
             // on `captureControlQueue`; unchanged decisions enqueue nothing, so
             // unrelated routing traffic never touches the running sinks.
             let btUIDs = ids.filter { self.known[$0]?.isBluetooth == true }.sorted()
-            let wantBT = !btUIDs.isEmpty
+            let sinkUIDs = ids.filter {
+                self.known[$0]?.isBluetooth == true || self.known[$0]?.isWired == true
+            }.sorted()
+            let wantBT = !sinkUIDs.isEmpty
             // BT-LIFECYCLE: the row's own connect story, the twin of the engine
             // loop's eager `.connecting` above. A newly-selected AVAILABLE BT id
             // breathes until its per-device sink is genuinely audible; a
@@ -518,7 +521,7 @@ extension NativeBackend {
             // offer "Try again" regardless of membership, so the failure the
             // button explains must survive the deselect the loss edge triggers.
             for id in previouslySelected.symmetricDifference(ids)
-            where self.known[id]?.isBluetooth == true {
+            where self.known[id]?.isBluetooth == true || self.known[id]?.isWired == true {
                 if ids.contains(id) {
                     if self.known[id]?.isAvailable == true { self.beginBTConnectingLocked(id) }
                 } else {
@@ -541,7 +544,7 @@ extension NativeBackend {
             let composition = BTGroupComposition(
                 airPlayPresent: ids.contains {
                     self.known[$0].map {
-                        !$0.isBluetooth && !$0.isLocalDevice && !$0.isCast
+                        !$0.isBluetooth && !$0.isLocalDevice && !$0.isCast && !$0.isWired
                     } == true
                 },
                 macLocalPresent: macSelected,
@@ -575,10 +578,10 @@ extension NativeBackend {
                 && composition.usesPresentationReference
                     != self.btComposition.usesPresentationReference
             let localReferenceMoved = (wantBT != self.btSinkEnabled) || referenceMoved
-            if wantBT != self.btSinkEnabled || btUIDs != self.btSelectedUIDs
+            if wantBT != self.btSinkEnabled || sinkUIDs != self.btSelectedUIDs
                 || referenceMoved {
                 self.btSinkEnabled = wantBT
-                self.btSelectedUIDs = btUIDs
+                self.btSelectedUIDs = sinkUIDs
                 self.btComposition = composition
                 // The manager arms for BOTH domains, so the set it is handed is
                 // the union — while the reference below stays a function of the
@@ -589,10 +592,12 @@ extension NativeBackend {
                 // is a function of the selected devices' measured latencies.
                 let referenceMs = self.updateBTReferenceBufferLocked()
                 let eqs = self.btSinkEQs(forUIDs: armedUIDs)
+                let reportedLatencyUIDs = self.wiredSinkUIDs(forUIDs: armedUIDs)
                 self.captureControlQueue.async { [weak self] in
                     self?.applyBTSinkTransition(
                         enable: armed, uids: armedUIDs, composition: composition,
-                        gains: gains, eqs: eqs, referenceBufferMs: referenceMs)
+                        gains: gains, eqs: eqs, reportedLatencyUIDs: reportedLatencyUIDs,
+                        referenceBufferMs: referenceMs)
                 }
                 // The selection decides both halves of drift tracking: which
                 // speakers are measured, and whether anything is measured at
@@ -999,7 +1004,7 @@ extension NativeBackend {
         // only refreshed when the Bluetooth side moves, so in an AirPlay+Cast
         // room with no Bluetooth in it it never becomes true at all.
         let airPlayPresent = expectedSelected.contains { id in
-            known[id].map { !$0.isBluetooth && !$0.isLocalDevice && !$0.isCast } == true
+            known[id].map { !$0.isBluetooth && !$0.isLocalDevice && !$0.isCast && !$0.isWired } == true
         }
         let ms = airPlayPresent ? Swift.max(0, roomDelayLocked() - _startBufferMs) : 0
         captureControlQueue.async { [weak self] in

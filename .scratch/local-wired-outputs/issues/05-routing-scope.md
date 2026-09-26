@@ -1,6 +1,6 @@
 # 05 — Per-app destinations, saved groups, companion snapshot
 
-Status: needs-info
+Status: ready-for-human (built 2026-09-26; live check owed)
 Blocked by: 03
 
 ## Change

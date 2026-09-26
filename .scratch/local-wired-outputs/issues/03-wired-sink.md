@@ -1,13 +1,12 @@
 # 03 — A pinned synced sink per selected wired output
 
-Status: needs-info
+Status: ready-for-human (built 2026-09-26; live check owed)
 Blocked by: 02
 
 ## Change
 
-- Decide: reuse `BTDeviceSink`/the BT sink manager under a transport-neutral
-  name, or a sibling built from the same licence-clean pieces (`SyncCore.swift`
-  ring/resampler/`PhaseController`). Either way: pinned via
+- Decided: reuse `BTSyncedSink` and `BTDeviceSink` unchanged for wired rows,
+  keyed by UID, with no rename and no sibling sink. Either way: pinned via
   `outputNode.auAudioUnit.setDeviceID` BEFORE first start, aggregate/virtual
   transports refused, nominal-rate listener rebuilds, sleep/wake rebuild.
   Never copy from the GPL `SyncedLocalSink.swift`.
@@ -25,8 +24,6 @@ Blocked by: 02
   `btSelectedUIDs` does; the meter for a wired row counts its sink's applied
   state, never the desired flag (the synced-local trap).
 - Gain: `group × row fader × Main` as software gain; mute = 0.
-- Telemetry: `Telemetry.log(.localPlayback, "wired_sink_*")` lines mirroring the
-  `bt_sink_*` set; failures through `Telemetry.fail` with the UID in `local:`.
 
 ## Tests
 

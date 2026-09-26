@@ -316,10 +316,11 @@ public final class DeviceRowView: NSView {
     /// Mounted only when ``supportsEqualizer``; the layout reserves its slot on
     /// every row either way, so the name truncates identically across rows.
     let eqButton = NSButton()
-    /// The mute button's at-rest symbol — the outline square.
+    /// The mute button's at-rest symbol — the outline square with the
+    /// speaker and no slash.
     private static let muteRestSymbolName = RowAccessorySymbol.muteRest
-    /// The mute button's ENGAGED symbol — the filled square. The mark inside
-    /// is the same slashed speaker either way; what changes is the square.
+    /// The mute button's ENGAGED symbol — the filled square, the speaker and
+    /// slash cut through it. The slash belongs to this state only.
     private static let muteEngagedSymbolName = RowAccessorySymbol.muteEngaged
     /// The Equalizer door's at-rest symbol — the outline square.
     private static let eqRestSymbolName = RowAccessorySymbol.equalizerRest
@@ -944,18 +945,18 @@ public final class DeviceRowView: NSView {
     /// Updates the mute button for the current `muteButton.state`. `.on`
     /// (muted) draws ``RowAccessorySymbol/muteEngaged`` — the FILLED square,
     /// its enclosure in an opaque ``Tokens/Color/muted`` and the speaker and
-    /// slash inside it in white. `.off` draws
-    /// ``RowAccessorySymbol/muteRest``, the same mark as an outline square in
-    /// one neutral ink. Drawing only: behavior, keyboard and VoiceOver are
-    /// untouched.
+    /// slash cut through it as transparency. `.off` draws
+    /// ``RowAccessorySymbol/muteRest``, the outline square with the speaker
+    /// and no slash, in one neutral ink. Drawing only: behavior, keyboard and
+    /// VoiceOver are untouched.
     ///
     /// Called from `apply` (model refresh) AND `muteToggled` (a live click) so
     /// both paths land the treatment instantly, and from
     /// `viewDidChangeEffectiveAppearance` — the ink is baked into the image,
     /// so a light/dark switch has to re-make it.
     ///
-    /// WHAT IT MAY NOT GO BACK TO. Two treatments are retired here, and
-    /// neither may return. The first was an `engagedChrome` capsule at
+    /// WHAT IT MAY NOT GO BACK TO. Three treatments are retired here, and
+    /// none may return. The first was an `engagedChrome` capsule at
     /// ``PopoverColumnGrid/mutePillFillAlpha`` behind an unslashed speaker — a
     /// faint grey pill that read as nothing (owner's call, 2026-09-04: "the
     /// active mute state does not look like any other mute state I have seen
@@ -963,15 +964,17 @@ public final class DeviceRowView: NSView {
     /// rectangle painted on a sibling `NSView` behind a system
     /// `speaker.slash.fill`: correct on measurement, but two views and two
     /// hand-pinned sizes to draw one mark. The enclosing square belongs to the
-    /// symbol now.
+    /// symbol now. The third was the 2026-09-05 "one shape in two inks"
+    /// outline: the slashed outline square in both states, told apart by ink
+    /// alone. Retired 2026-09-26 because a 1.5 pt periwinkle outline was
+    /// invisible on a light row (owner: "almost impossible to see when
+    /// something is muted"). The size half of the 2026-09-05 call stands:
+    /// 20 pt, a 17.5 pt square (``RowAccessorySymbol/pointSize``).
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
-        // ONE shape in two inks (owner, 2026-09-05). The filled square is
-        // retired: it drew the marks as holes, so the mark's own glyph read
-        // white on a light row and near-black on a dark one. Colour carries
-        // the state now and the shape never changes.
+        // The slash and the fill both belong to the muted state only.
         muteButton.image = RowAccessorySymbol.image(
-            named: Self.muteRestSymbolName,
+            named: engaged ? Self.muteEngagedSymbolName : Self.muteRestSymbolName,
             ink: engaged ? Self.engagedInk(fill: Tokens.Color.muted, in: effectiveAppearance)
                          : Self.restInk(in: effectiveAppearance))
         muteButton.setAccessibilityLabel(engaged ? "Unmute \(device.name)" : "Mute \(device.name)")

@@ -377,8 +377,8 @@ public enum Tokens {
         /// (`DeviceRowView.updateMuteTint()`,
         /// `MainOutRowView.updateMuteTint()`), which fill the
         /// `custom.speaker.slash.square.fill` symbol's enclosing square
-        /// OPAQUELY in this tone and draw the speaker and slash inside it in
-        /// WHITE.
+        /// OPAQUELY in this tone, the speaker and slash cut through it as
+        /// transparency.
         ///
         /// ONE VALUE IN BOTH APPEARANCES, unlike almost every other token
         /// here. Two reasons, and the second is the owner's rule. First
@@ -417,15 +417,13 @@ public enum Tokens {
         ///
         /// TWO VALUES NOW, and the single-value rule above is retired for this
         /// token (owner's call, 2026-09-05: light mode was "impossible to
-        /// see"). The rule assumed the hue was a FILL, where one value reads on
-        /// both grounds. It is a thin outline since the marks stopped being
-        /// filled — 0.875 pt of stroke at the `.thin` weight of the day, 1.5 pt
-        /// since 2026-09-14 — and a stroke that thin has no area to carry a
-        /// marginal ratio. Measured on `panel`: `#8E93F0` is 5.18:1 on
-        /// the dark row and 2.45:1 on the light one, which is what they were
-        /// looking at. Deepened for light only, the same move `goldText` makes
-        /// for the same reason: `#585EC7` measures 5.24:1 on light and the dark
-        /// half does not move a pixel.
+        /// see"). The engaged mark is a FILL again since 2026-09-26, and the
+        /// deepened light value stays: the owner approved the deeper indigo
+        /// fill on the light row that day. Measured on `panel`: `#8E93F0` is
+        /// 5.18:1 on the dark row and 2.45:1 on the light one, fill or
+        /// outline. Deepened for light only, the same move `goldText` makes:
+        /// `#585EC7` measures 5.24:1 on light and the dark half does not move
+        /// a pixel.
         public static var muted: NSColor {
             warmDynamic(name: "muted", dark: 0x8E93F0, light: 0x585EC7)
         }

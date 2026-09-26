@@ -617,23 +617,24 @@ public final class MainOutRowView: NSView {
 
     /// Updates the mute button for the current state: `.on` draws
     /// ``RowAccessorySymbol/muteEngaged``, the filled square with a
-    /// ``Tokens/Color/muted`` enclosure and the marks punched out of it;
-    /// `.off` draws
-    /// ``RowAccessorySymbol/muteRest``, the outline square in one neutral ink.
+    /// ``Tokens/Color/muted`` enclosure and the speaker and slash cut through
+    /// it; `.off` draws ``RowAccessorySymbol/muteRest``, the outline square
+    /// with the speaker and no slash, in one neutral ink.
     /// Drawing only — behavior, keyboard and VoiceOver untouched. The SAME two
     /// symbols every device row below wears, so the two rows cannot present
     /// one state as two different objects.
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
-        // One shape, two inks — see `DeviceRowView.updateMuteTint()`.
+        // The slash and the fill both belong to the muted state only — see
+        // `DeviceRowView.updateMuteTint()`.
         muteButton.image = RowAccessorySymbol.image(
-            named: RowAccessorySymbol.muteRest,
+            named: engaged ? RowAccessorySymbol.muteEngaged : RowAccessorySymbol.muteRest,
             ink: engaged ? Self.engagedInk(in: effectiveAppearance)
                          : Self.restInk(in: effectiveAppearance))
         configureAccessibility()
     }
 
-    /// ``Tokens/Color/muted`` on the enclosing square, the marks punched
+    /// ``Tokens/Color/muted`` on the enclosing square, the marks cut
     /// through it as transparency. Resolved in this row's own appearance,
     /// because a dynamic `NSColor` would otherwise resolve against whichever
     /// appearance is current when the image is composited.
@@ -803,7 +804,7 @@ public final class MainOutRowView: NSView {
         guard muteButton.state == .on,
               let drawn = muteButton.image?.tiffRepresentation,
               let reference = RowAccessorySymbol.image(
-                named: RowAccessorySymbol.muteRest,
+                named: RowAccessorySymbol.muteEngaged,
                 ink: Self.engagedInk(in: effectiveAppearance))?.tiffRepresentation
         else { return false }
         return drawn == reference

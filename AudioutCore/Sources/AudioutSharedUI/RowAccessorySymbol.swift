@@ -28,7 +28,9 @@ import AppKit
 /// appearance re-stamps and a size that had to be pinned by hand because an
 /// `.accessoryBar` `NSButton` frames larger than its alignment rect. The
 /// enclosing square is part of the symbol now, so the mark is ONE image: the
-/// `.fill` variant when engaged, the outline variant at rest.
+/// `.fill` variant when engaged, the outline variant at rest. Mute's at-rest
+/// outline (`custom.speaker.square`) carries no slash; the slash appears only
+/// in its engaged `.fill`.
 ///
 /// HOW THE ENGAGED STATES PUNCH THROUGH, and why this draws MONOCHROME.
 /// In each `.fill` template the marks are not paint — they are erase actions
@@ -45,9 +47,9 @@ import AppKit
 /// instead of cutting them. So: one ink, monochrome, and the tint is applied
 /// through the alpha channel below rather than by a configuration.
 public enum RowAccessorySymbol {
-    /// Mute at rest — the outline square.
-    public static let muteRest = "custom.speaker.slash.square"
-    /// Mute engaged — the filled square.
+    /// Mute at rest — the outline square with the speaker and no slash.
+    public static let muteRest = "custom.speaker.square"
+    /// Mute engaged — the filled square, speaker and slash cut through it.
     public static let muteEngaged = "custom.speaker.slash.square.fill"
     /// The Equalizer door on a flat curve — the outline square.
     public static let equalizerRest = "custom.slider.horizontal.2.square"

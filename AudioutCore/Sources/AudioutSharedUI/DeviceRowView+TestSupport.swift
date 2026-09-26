@@ -349,7 +349,7 @@ extension DeviceRowView {
     }
 
     /// Whether the mute button is currently drawing its ENGAGED symbol — the
-    /// filled square with a ``Tokens/Color/muted`` enclosure and white marks.
+    /// filled square in ``Tokens/Color/muted``, speaker and slash cut through it.
     public var test_isMutePillEngaged: Bool {
         muteButton.state == .on && test_mutePillIsMutedHue
     }
@@ -358,7 +358,7 @@ extension DeviceRowView {
     /// ``Tokens/Color/muted`` ink resolved in this row's own appearance —
     /// a raster comparison, so the test reads pixels rather than intent.
     public var test_mutePillIsMutedHue: Bool {
-        matchesSymbol(muteButton.image, RowAccessorySymbol.muteRest,
+        matchesSymbol(muteButton.image, RowAccessorySymbol.muteEngaged,
                       ink: Self.engagedInk(fill: Tokens.Color.muted,
                                            in: effectiveAppearance))
     }

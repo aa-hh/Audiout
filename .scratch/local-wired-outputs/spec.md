@@ -96,15 +96,20 @@ report (the owner has no USB DAC; a USB-C headphone dongle or a USB-C monitor
 is the stand-in); whether HDMI reports any latency at all; and ticket 06's
 suspected bug.
 
-## Open questions for the owner (not yet decided)
+## Further decisions (owner, 2026-09-26, second round)
 
-- Where wired rows sit in the Mixer: inside the "Current Device" subsection under
-  "This Mac", or grouped with Bluetooth under a "Wired & Bluetooth" heading.
-- Glyph per transport (`hifispeaker`, `headphones`, `cable.connector`, `display`)
-  — SF Symbols only, template-rendered.
-- Should a wired row be selectable ALONE (no "This Mac")? Today "only the Mac"
-  is passthrough; "only the DAC" would be a real synced sink with the default
-  output taken over by the aggregate. Proposed: allowed, same as a lone BT row.
+5. **Placement:** wired rows list directly under "This Mac" inside the Current
+   Device subsection — the Mac and its other outputs. Bluetooth and AirPlay
+   sections are untouched.
+6. **Glyphs, one per transport**, SF Symbols template-rendered: jack →
+   `headphones`, USB → `cable.connector`, HDMI/DisplayPort → `display`,
+   built-in speakers when not the default → `laptopcomputer`.
+7. **A wired row may be selected alone**, with "This Mac" deselected, exactly
+   like a lone Bluetooth row: the aggregate takes the default output and the
+   pinned sink plays. Volume keys then go through the app, as they do today
+   whenever the aggregate is the default.
+
+No open owner questions remain; ticket 01 (hardware) is the only gate.
 
 ## Tickets
 
@@ -113,7 +118,7 @@ suspected bug.
 | 01 | `issues/01-hardware-verification.md` | ready-for-human |
 | 02 | `issues/02-wired-kind-and-enumerator.md` | needs-info (blocked by 01) |
 | 03 | `issues/03-wired-sink.md` | needs-info (blocked by 02) |
-| 04 | `issues/04-popover-rows-and-drawer.md` | needs-info (blocked by 03 + open questions) |
+| 04 | `issues/04-popover-rows-and-drawer.md` | needs-info (blocked by 03) |
 | 05 | `issues/05-routing-scope.md` | needs-info (blocked by 03) |
 | 06 | `issues/06-this-mac-plays-on-built-in-with-dac-default.md` | needs-triage |
 

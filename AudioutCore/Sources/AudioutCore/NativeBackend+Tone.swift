@@ -331,6 +331,8 @@ extension NativeBackend {
             // end of this critical section can log the actual added/removed diff.
             let previouslySelected = self.expectedSelected
             self.expectedSelected = ids
+            // A deselected greyed wired row is no longer "used" — let it leave.
+            self.pruneUnusedWiredLocked()
             // Seamless handoff T3.8-2: an in-app routing action IS the user asking
             // for Audiout back — don't leave `suspended` set from a prior handoff
             // release, which would connect speakers with the capture tap gated off

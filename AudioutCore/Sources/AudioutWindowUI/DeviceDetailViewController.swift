@@ -714,15 +714,15 @@ public final class DeviceDetailViewController: NSViewController {
     }
 
     /// Which AirPlay this speaker speaks, or `nil` when the question does not
-    /// apply and the row is dropped: `.bluetooth` is not an AirPlay receiver
-    /// at all (it carries `supportsAirPlay2 == false` for an unrelated
-    /// reason), and `.localMac` is where the audio comes FROM.
+    /// apply and the row is dropped: `.bluetooth`, `.cast` and `.wired` are not
+    /// AirPlay receivers at all (they carry `supportsAirPlay2 == false` for an
+    /// unrelated reason), and `.localMac` is where the audio comes FROM.
     ///
     /// Says what AirPlay 1 COSTS rather than only its version number — the
     /// number alone tells the person reading it nothing.
     private static func airPlayText(for device: Device) -> String? {
         switch device.kind {
-        case .bluetooth, .localMac, .cast:
+        case .bluetooth, .localMac, .cast, .wired:
             return nil
         case .homePod, .appleTV, .airportExpress, .sonos, .generic:
             return device.supportsAirPlay2 ? "AirPlay 2" : "AirPlay 1: sync not exact"
@@ -742,6 +742,7 @@ public final class DeviceDetailViewController: NSViewController {
         case .generic:        return "AirPlay Speaker"
         case .bluetooth:      return "Bluetooth Speaker"
         case .cast:           return "Cast Speaker"
+        case .wired:          return "Wired Output"
         }
     }
 

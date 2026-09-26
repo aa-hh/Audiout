@@ -60,6 +60,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// engine — structurally unroutable until BT-BACKEND partitions the output
     /// set (plan risk R-partition).
     let btEnumerator: BTDeviceEnumerating?
+    /// Wired Core Audio outputs as `.wired` rows; `nil` (the designated init's default) means none.
+    let wiredEnumerator: WiredOutputEnumerating?
     /// BT-CONNECT: IOBluetooth connect/disconnect for paired BT speakers.
     /// `nil` under most tests (like `btEnumerator`), which keeps every BT
     /// reconnect path inert unless a fake is injected.
@@ -1589,6 +1591,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             btConnectionManager: BTConnectionManager(),
             castEnumerator: CastDeviceEnumerator(),
             castOutputManager: CastOutputManager(),
+            wiredEnumerator: WiredOutputEnumerator(),
             btTrimStore: BTTrimStore(),
             castOffsetStore: BTTrimStore(fileName: BTTrimStore.castFileName),
             btHardwareVolumeStore: BTHardwareVolumeStore(),
@@ -1638,6 +1641,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         btConnectionManager: BTConnectionManaging? = nil,
         castEnumerator: CastDeviceEnumerating? = nil,
         castOutputManager: CastOutputControlling? = nil,
+        wiredEnumerator: WiredOutputEnumerating? = nil,
         btTrimStore: BTTrimStore? = nil,
         castOffsetStore: BTTrimStore? = nil,
         btHardwareVolumeStore: BTHardwareVolumeStore? = nil,
@@ -1691,6 +1695,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.btConnectionManager = btConnectionManager
         self.castEnumerator = castEnumerator
         self.castOutputManager = castOutputManager
+        self.wiredEnumerator = wiredEnumerator
         self.btTrimStore = btTrimStore
         do {
             if let loaded = try btTrimStore?.load() ?? nil {
@@ -2070,6 +2075,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self?.stateQueue.async { self?.applyCastSnapshots(records) }
             }
             castEnumerator.start()
+        }
+        if let wiredEnumerator {
+            wiredEnumerator.onSnapshot = { [weak self] snapshots in
+                self?.stateQueue.async { self?.applyWiredSnapshots(snapshots) }
+            }
+            wiredEnumerator.start()
         }
         if let castOutputManager {
             castOutputManager.onStateChange = { [weak self] id, state in
@@ -2468,6 +2479,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         btConnectionManager?.stopObservingConnections()
         castEnumerator?.onSnapshot = nil
         castEnumerator?.stop()
+        wiredEnumerator?.onSnapshot = nil
+        wiredEnumerator?.stop()
         castOutputManager?.onStateChange = nil
         castOutputManager?.onVolumeLagChange = nil
         castOutputManager?.onLeadSample = nil

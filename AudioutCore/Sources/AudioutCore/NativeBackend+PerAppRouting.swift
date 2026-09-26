@@ -252,6 +252,9 @@ extension NativeBackend {
             // resolves against, so a group edit re-pushing an unchanged route
             // table still moves the audio.
             self.lastGroupTargets = groupTargets
+            // A cleared route or a group edit/delete can drop a greyed wired
+            // row's only remaining reference — both re-push through here.
+            self.pruneUnusedWiredLocked()
             // Retained so the metering-only target set can subtract it and so a
             // denylist change alone re-reconciles the metering taps (T3, PRIVACY).
             self.lastExcludedBundleIDs = excludedBundleIDs

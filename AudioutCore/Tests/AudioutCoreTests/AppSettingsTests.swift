@@ -434,9 +434,8 @@ import Testing
 
     // MARK: Companion - a build that does not carry the phone app
     //
-    // `remoteAppIsOffered` is false until Audiout Remote is on the App Store.
-    // Every companion surface reads the resolution, so these three pin what
-    // that build resolves to.
+    // Every companion surface reads the resolution, so these three pin what a
+    // build with `remoteAppIsOffered` off resolves to.
 
     @Test func anUnofferedBuildResolvesOffEvenWhenTheSettingSaysOn() {
         // The setting defaults to TRUE, so a build that forgot to consult

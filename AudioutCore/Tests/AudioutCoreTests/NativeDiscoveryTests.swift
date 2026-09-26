@@ -23,6 +23,7 @@ import AirPlayEngine
     private final class FakeBrowser: ServiceBrowsing, @unchecked Sendable {
         var onResolve: (@Sendable (ResolvedService) -> Void)?
         var onRemove: (@Sendable (RemovedService) -> Void)?
+        var onReappear: (@Sendable (RemovedService) -> Void)?
         var onStateChange: (@Sendable (BrowserState) -> Void)?
 
         private(set) var startCount = 0
@@ -33,6 +34,7 @@ import AirPlayEngine
 
         func resolve(_ service: ResolvedService) { onResolve?(service) }
         func remove(_ removed: RemovedService) { onRemove?(removed) }
+        func reappear(_ reappeared: RemovedService) { onReappear?(reappeared) }
         func state(_ s: BrowserState) { onStateChange?(s) }
     }
 
@@ -595,6 +597,74 @@ import AirPlayEngine
                 "a transient airplay-advert drop that heals within the grace must not emit a vanish")
         #expect(discovery.devices.first?.isAvailable == true,
                 "the row stays available across a transient blip")
+
+        discovery.stop()
+    }
+
+    /// THE POST-FIX REGRESSION: in production the re-resolve (`onResolve`) fires
+    /// only AFTER an address probe, and that probe is charged against the grace —
+    /// under network churn it routinely outlasts the 3 s window, so the removal
+    /// commits and floods `connection:failed(.vanished)`. The reappearance signal
+    /// (`onReappear`) arrives from the browse result WITHOUT a probe, so it must
+    /// cancel the pending removal on its own. This test drives ONLY the
+    /// reappearance inside the window and lets the (slow) re-resolve land after
+    /// it: no vanish may fire.
+    @Test func reappearInsideGraceCancelsVanishEvenWhenResolveIsSlow() {
+        let browser = FakeBrowser()
+        let discovery = makeDiscovery(browser: browser, removeGrace: 0.3)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        let id = "AA:BB:CC:DD:EE:4A"
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        browser.resolve(raopService(id: id, name: "Sonos"))
+        _ = events.wait(count: 1)
+
+        // The advert drops, then reappears in the browse results within the
+        // window — but WITHOUT the address re-resolving yet (a slow probe).
+        browser.remove(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+        browser.reappear(RemovedService(serviceType: .airplay, deviceID: id, name: "Sonos"))
+
+        #expect(events.waitCountStaysAt(1, timeout: 0.6),
+                "a reappearance inside the grace cancels the vanish before the slow probe lands")
+        #expect(discovery.devices.first?.isAvailable == true,
+                "the row stays available across a churn blip the probe could not keep up with")
+
+        // The delayed re-resolve finally lands after the grace — an unchanged
+        // rebuild, so it is suppressed and still no event fires.
+        browser.resolve(airplayService(id: id, name: "Sonos", features: ap2Features))
+        #expect(events.waitCountStaysAt(1, timeout: 0.2),
+                "the late re-resolve is an unchanged rebuild and emits nothing")
+
+        discovery.stop()
+    }
+
+    /// A reappearance for a device with no `deviceid` TXT (a name-derived raop
+    /// receiver) still correlates by instance name, exactly as removal does, and
+    /// cancels the pending removal.
+    @Test func reappearWithoutDeviceIDCorrelatesByInstanceName() {
+        let browser = FakeBrowser()
+        let discovery = makeDiscovery(browser: browser, removeGrace: 0.3)
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        // A shairport-style raop-only receiver: id derived from the "@"-prefixed
+        // instance name, no deviceid TXT, so the browse layer reports a nil id.
+        let name = "6B2E52B73717@Dev Speaker"
+        browser.resolve(ResolvedService(serviceType: .raop, name: name, hostname: name,
+                                        address: "192.168.1.30", family: .ipv4, port: 5000,
+                                        txtRecord: ["model": "Speaker1,1"]))
+        _ = events.wait(count: 1)
+
+        browser.remove(RemovedService(serviceType: .raop, deviceID: nil, name: name))
+        browser.reappear(RemovedService(serviceType: .raop, deviceID: nil, name: name))
+
+        #expect(events.waitCountStaysAt(1, timeout: 0.6),
+                "a name-correlated reappearance cancels the pending removal too")
+        #expect(discovery.devices.first?.isAvailable == true,
+                "the AP1-only row stays available across the blip")
 
         discovery.stop()
     }

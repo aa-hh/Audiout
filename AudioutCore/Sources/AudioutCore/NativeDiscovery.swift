@@ -194,6 +194,15 @@ public protocol ServiceBrowsing: AnyObject, Sendable {
     var onResolve: (@Sendable (ResolvedService) -> Void)? { get set }
     /// Called when a service leaves the network.
     var onRemove: (@Sendable (RemovedService) -> Void)? { get set }
+    /// Called the moment a service instance is BACK in the browse results,
+    /// BEFORE its address is re-resolved. `onResolve` only fires after the
+    /// address probe finishes, and that probe is slowest during the very
+    /// network churn the removal grace exists to absorb (see `removeGrace`), so
+    /// `NativeDiscovery` cancels a pending removal off this earlier, probe-free
+    /// signal instead. Carries the same correlation fields as `onRemove` (the
+    /// browse result exposes the TXT deviceid and instance name without a
+    /// probe); it never creates device state — that stays `onResolve`'s job.
+    var onReappear: (@Sendable (RemovedService) -> Void)? { get set }
     /// Called on every state transition, including terminal `.failed`/
     /// `.cancelled`. Purely informational to `NativeDiscovery` — it does not
     /// retry anything itself. `.failed` is NOT self-recovering in
@@ -261,21 +270,26 @@ public final class NativeDiscovery: @unchecked Sendable {
     /// mDNSResponder cache refresh, a roam), so ONE `.removed` change is a blip,
     /// not a departure: applying it at once deselects the speaker and tears down
     /// its live stream out from under the user, then flaps back when the advert
-    /// re-resolves seconds later. A re-resolve of the SAME leg within the window
-    /// cancels that removal (`handleResolve`); only a removal that outlasts the
-    /// window is applied, and the ordinary offline/disappear rules then run
-    /// (`commitRemove`). Mirrors the Cast absence grace in `NativeBackend`
-    /// (`castAbsenceGrace`). Injectable so tests shrink it; never mutated after
-    /// init.
+    /// re-resolves seconds later. The SAME leg reappearing within the window
+    /// cancels that removal; only a removal that outlasts the window is applied,
+    /// and the ordinary offline/disappear rules then run (`commitRemove`).
+    /// Mirrors the Cast absence grace in `NativeBackend` (`castAbsenceGrace`).
+    /// Injectable so tests shrink it; never mutated after init.
     ///
-    /// razor: the cancel arrives from `handleResolve`, which fires only after
-    /// `NetworkFrameworkBrowser`'s `NWConnection` probe reaches `.ready`, so the
-    /// probe's latency is charged against this grace. Cancelling on the browse
-    /// `.added` change instead would need a new callback on the
-    /// `ServiceBrowsing` seam, and the production side of it,
-    /// `NetworkFrameworkBrowser` mapping an `NWBrowser` `.added` result to that
-    /// callback, cannot be covered by a hermetic test because
-    /// `NWBrowser.Result` has no public initialiser.
+    /// The cancel comes from TWO signals, because one of them is too slow on its
+    /// own. `handleResolve` cancels, but it fires only after
+    /// `NetworkFrameworkBrowser`'s `NWConnection` address probe reaches `.ready`,
+    /// so the probe's latency is charged against this grace — and that probe is
+    /// slowest during the very churn the grace exists to absorb (a cache flush
+    /// drops many adverts at once, then the contended re-probes routinely outlast
+    /// 3 s and the removals commit, flooding `connection:failed(.vanished)`).
+    /// `handleReappear` closes that: the browse layer's `.added`/`.changed`
+    /// result carries the advert's identity WITHOUT a probe, so `NativeDiscovery`
+    /// cancels off that earlier signal (`onReappear`) and the grace races the
+    /// fast browse re-add rather than the slow probe. The one production line the
+    /// seam cannot cover hermetically — `NetworkFrameworkBrowser` calling
+    /// `onReappear` off an `NWBrowser` result — is a single unconditional call;
+    /// the cancel LOGIC it drives is fully exercised through the seam.
     private let removeGrace: TimeInterval
 
     /// The default removal grace (seconds). Matches the Cast absence grace
@@ -332,6 +346,10 @@ public final class NativeDiscovery: @unchecked Sendable {
         self.browser.onRemove = { [weak self] removed in
             guard let self else { return }
             self.queue.async { self.handleRemove(removed) }
+        }
+        self.browser.onReappear = { [weak self] reappeared in
+            guard let self else { return }
+            self.queue.async { self.handleReappear(reappeared) }
         }
         self.browser.onStateChange = { [weak self] state in
             guard let self else { return }
@@ -466,21 +484,24 @@ public final class NativeDiscovery: @unchecked Sendable {
         }
     }
 
+    /// Correlate a browse-layer signal (a removal or a reappearance) to a known
+    /// device id: prefer the resolved deviceid, else match the service instance
+    /// name against the leg we last stored. Returns nil when nothing correlates.
+    /// Shared by `handleRemove` and `handleReappear` so the two never drift.
+    private func correlate(serviceType: ResolvedService.ServiceType,
+                           deviceID: String?, name: String) -> String? {
+        if let did = deviceID, known[did] != nil { return did }
+        return known.first { entry in
+            switch serviceType {
+            case .airplay: return entry.value.airplay?.name == name
+            case .raop:    return entry.value.raop?.name == name
+            }
+        }?.key
+    }
+
     private func handleRemove(_ removed: RemovedService) {
-        // Correlate by deviceid when the browse layer resolved it; else by the
-        // service instance name against the descriptor we stored.
-        let key: String?
-        if let did = removed.deviceID, known[did] != nil {
-            key = did
-        } else {
-            key = known.first { entry in
-                switch removed.serviceType {
-                case .airplay: return entry.value.airplay?.name == removed.name
-                case .raop:    return entry.value.raop?.name == removed.name
-                }
-            }?.key
-        }
-        guard let id = key, known[id] != nil else { return }
+        guard let id = correlate(serviceType: removed.serviceType,
+                                 deviceID: removed.deviceID, name: removed.name) else { return }
 
         // Hold every removal for `removeGrace` and apply it in `commitRemove`.
         // The leg is NOT cleared here, so a second removal of the same leg
@@ -493,6 +514,28 @@ public final class NativeDiscovery: @unchecked Sendable {
         }
         pendingRemoves[id, default: [:]][serviceType] = work
         queue.asyncAfter(deadline: .now() + removeGrace, execute: work)
+    }
+
+    /// A leg that was pending removal is BACK in the browse results — cancel its
+    /// removal at once, before the address re-resolves. `handleResolve` also
+    /// cancels, but only after `NetworkFrameworkBrowser`'s address probe reaches
+    /// `.ready`, and that probe is charged against `removeGrace` (see the razor
+    /// note there). A network churn event drops many adverts at once and then
+    /// re-adds them; the contended re-probes routinely outlast the grace, so the
+    /// removals commit and flood `connection:failed(.vanished)` — exactly the
+    /// failure this cancel-on-reappear closes. Purely cancels a pending timer:
+    /// it creates no entry and emits no event (`handleResolve` still owns that),
+    /// so a reappearance whose probe later fails leaves the device exactly as it
+    /// was, available and unchanged.
+    private func handleReappear(_ reappeared: RemovedService) {
+        // `onReappear` fires on every browse re-announce, not just after a drop;
+        // a cancel only matters when a removal is actually pending, so skip the
+        // correlation scan in the common steady state where nothing is held.
+        guard !pendingRemoves.isEmpty else { return }
+        guard let id = correlate(serviceType: reappeared.serviceType,
+                                 deviceID: reappeared.deviceID, name: reappeared.name) else { return }
+        pendingRemoves[id]?.removeValue(forKey: reappeared.serviceType)?.cancel()
+        if pendingRemoves[id]?.isEmpty == true { pendingRemoves[id] = nil }
     }
 
     /// Applies a removal that outlasted `removeGrace`: clears the departed leg,
@@ -780,6 +823,7 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
 
     public var onResolve: (@Sendable (ResolvedService) -> Void)?
     public var onRemove: (@Sendable (RemovedService) -> Void)?
+    public var onReappear: (@Sendable (RemovedService) -> Void)?
     public var onStateChange: (@Sendable (BrowserState) -> Void)?
 
     private let queue = DispatchQueue(label: "Audiout.NetworkFrameworkBrowser")
@@ -958,6 +1002,12 @@ public final class NetworkFrameworkBrowser: ServiceBrowsing, @unchecked Sendable
         let deviceID = txt["deviceid"] ?? txt["DeviceID"]
         let resultKey = "\(serviceType.rawValue)|\(name)|\(type)|\(domain)"
         resultTXT[resultKey] = (name: name, deviceID: deviceID)
+
+        // The advert is present in the browse results NOW (a `.added`/`.changed`
+        // result), so cancel any pending removal for this leg before the address
+        // probe below — that probe can outlast the grace under network churn.
+        // Identity comes straight off the browse metadata, no probe needed.
+        onReappear?(RemovedService(serviceType: serviceType, deviceID: deviceID, name: name))
 
         probeIPv4First(endpoint: result.endpoint, resultKey: resultKey, name: name, serviceType: serviceType, txt: txt)
     }

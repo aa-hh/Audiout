@@ -2009,7 +2009,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // actually routes audio through the app (see `reconcileAggregateDefault`).
             // razor: create-only at launch; no default takeover, no volume surface.
             self.publicAggregate.sweepOrphans()
-            _ = self.publicAggregate.adoptOrCreate()
+            _ = self.publicAggregate.adoptOrCreate(candidateUID: self.currentDefaultOutputUIDProvider())
             self.aggregateDefaultActive = false
             self.priorDefaultUID = nil
             self.expectedDefaultWriteUID = nil
@@ -2265,6 +2265,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 }
             }
         }
+        // A plug or unplug can take away the device the public aggregate wraps, or
+        // bring back the one the user was listening through.
+        aggregateControl.observeDeviceList { [weak self] in
+            self?.stateQueue.async { self?.reconcileAggregateSubDeviceLocked(reason: "device_list") }
+        }
         systemVolume.start()
 
         // 2. Start the engine, THEN discovery. The engine's descriptor feed
@@ -2474,6 +2479,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Drop the local row's two-way sync (the row itself is removed below).
         systemVolume.onExternalChange = nil
         systemVolume.stop()
+        aggregateControl.stopObservingDeviceList()
         // Stop advertising / listening for DACP (speaker-initiated volume).
         dacpServer.onVolume = nil
         dacpServer.onVolumeStep = nil
@@ -2983,15 +2989,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
-    /// Where the Main mirror and the local row's mute actually aim: the Mac's
-    /// BUILT-IN output device, but only while our own aggregate is the current
-    /// default output.
+    /// Where the Main mirror and the local row's mute actually aim: the device our
+    /// aggregate wraps, else the Mac's first built-in output, but only while that
+    /// aggregate is the current default output.
     ///
-    /// The aggregate wraps the built-in as its sole sub-device
+    /// The aggregate wraps the output the user was listening through as its sole sub-device
     /// (``AggregateOutputDevice``) and ACCEPTS volume writes while discarding them,
     /// so a write aimed at "whatever is currently default" during a routing session
     /// leaves the real speakers' hardware knob stale — and the user hears the jump
-    /// on deselect. The built-in is the knob that changes what is heard.
+    /// on deselect. The wrapped device is the knob that changes what is heard.
     ///
     /// Deliberately NOT ``weOwnSystemVolume``: that is also true for a real output
     /// with an unreadable volume (HDMI), where writing the built-in would move
@@ -3005,8 +3011,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let provider = currentDefaultOutputUIDProvider
         return {
             guard provider() == AggregateOutputDevice.productUID else { return nil }
-            return Self.firstResolvableDevice(
-                uids: [control.builtInOutputDeviceUID()], using: control)?.id
+            let wrapped = control.resolveDeviceID(forUID: AggregateOutputDevice.productUID)
+                .flatMap { control.mainSubDeviceUID(ofAggregate: $0) }
+            return Self.firstResolvableDevice(uids: [wrapped], using: control)?.id
+                ?? Self.firstResolvableDevice(uids: [control.builtInOutputDeviceUID()], using: control)?.id
         }
     }
 
@@ -3672,7 +3680,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         guard devErr == noErr, deviceID != AudioObjectID(kAudioObjectUnknown) else { return fallback }
 
         // Guard against self-referential labeling: if the default output is our
-        // public aggregate, return the wrapped built-in speaker's name instead.
+        // public aggregate, return the name of the device it wraps instead, else
+        // the first built-in output's.
         // Read the UID inline (the same one-shot HAL read this function already
         // uses for the name) rather than via `CoreAudioSystemTap.readDeviceUID`,
         // which is gated `@available(macOS 14.2, *)` and would raise this
@@ -3687,7 +3696,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             AudioObjectGetPropertyData(deviceID, &uidAddr, 0, nil, &uidSize, ptr)
         }
         if uidErr == noErr, (uid as String?) == AggregateOutputDevice.productUID {
-            if let builtInID = SystemLocalOutputResolver().builtInOutputDevice() {
+            let control = CoreAudioAggregateDeviceControl()
+            let wrappedID = control.mainSubDeviceUID(ofAggregate: deviceID)
+                .flatMap { control.resolveDeviceID(forUID: $0) }
+            if let builtInID = wrappedID ?? SystemLocalOutputResolver().builtInOutputDevice() {
                 var builtInNameAddr = AudioObjectPropertyAddress(
                     mSelector: kAudioObjectPropertyName,
                     mScope: kAudioObjectPropertyScopeGlobal,

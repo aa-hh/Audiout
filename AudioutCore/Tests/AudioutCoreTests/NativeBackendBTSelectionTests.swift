@@ -116,6 +116,38 @@ import CoreAudio
         func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool { false }
     }
 
+    /// An aggregate control that resolves a scripted set of UIDs and records every
+    /// sub-device write, so a test can see which device the aggregate wraps.
+    private final class RecordingAggregateControl: AggregateDeviceControlling, @unchecked Sendable {
+        private let lock = NSLock()
+        private let resolvable: [String: AudioObjectID]
+        private var mainSubDevice: [AudioObjectID: String]
+        private var _setSubDeviceCalls: [String] = []
+        var setSubDeviceCalls: [String] { lock.withLock { _setSubDeviceCalls } }
+
+        init(resolvable: [String: AudioObjectID], mainSubDevice: [AudioObjectID: String]) {
+            self.resolvable = resolvable
+            self.mainSubDevice = mainSubDevice
+        }
+        func resolveDeviceID(forUID uid: String) -> AudioObjectID? { resolvable[uid] }
+        func createAggregate(uid: String, name: String, subDeviceUID: String) -> AudioObjectID? { nil }
+        func destroyAggregate(_ deviceID: AudioObjectID) -> Bool { false }
+        func aggregateDeviceUIDs() -> [String] { [] }
+        func deviceUID(_ deviceID: AudioObjectID) -> String? { resolvable.first { $0.value == deviceID }?.key }
+        func builtInOutputDeviceUID() -> String? { "com.builtin.speakers" }
+        func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool { false }
+        func mainSubDeviceUID(ofAggregate deviceID: AudioObjectID) -> String? {
+            lock.withLock { mainSubDevice[deviceID] }
+        }
+        func setSubDevice(_ subDeviceUID: String, ofAggregate deviceID: AudioObjectID) -> Bool {
+            lock.withLock {
+                _setSubDeviceCalls.append(subDeviceUID)
+                mainSubDevice[deviceID] = subDeviceUID
+                return true
+            }
+        }
+    }
+
     private struct AlwaysReadyPTPHelperActivator: PTPHelperActivating {
         var willWaitForClock: Bool { false }
         func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome { .ready }
@@ -392,7 +424,9 @@ import CoreAudio
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
         btConnection: BTConnectionManaging? = nil,
         btRenderStartTimeout: TimeInterval = 6,
-        injectedPerAppCapture: PerAppCaptureCoordinator? = nil
+        injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
+        aggregateControl: AggregateDeviceControlling = NoOpAggregateControl(),
+        currentDefaultOutputUID: @escaping @Sendable () -> String? = { nil }
     ) -> (NativeBackend, RecordingEngine, FakeDiscovery, FakeBTEnumerator, SpyBTSink, FakeCapture) {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
@@ -408,7 +442,8 @@ import CoreAudio
             injectedPerAppCapture: injectedPerAppCapture,
             silenceFallbackDelay: silenceFallbackDelay,
             systemDefaultOutputIsAirPlayClass: { false },
-            aggregateControl: NoOpAggregateControl(),
+            aggregateControl: aggregateControl,
+            currentDefaultOutputUID: currentDefaultOutputUID,
             handoffWatcherFactory: { onBlockedAttempt in
                 AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
             })
@@ -502,6 +537,58 @@ import CoreAudio
                 "exactly the BT id lands in the sink manager — never the AirPlay id")
         #expect(sink.compositions.last?.airPlayPresent == true,
                 "an AirPlay member makes the AirPlay presentation timeline the reference")
+    }
+
+    /// The Move is the Mac's default and also a selected Bluetooth row: wrapping
+    /// it in the aggregate would feed it the whole-system copy AND its own
+    /// `BTSyncedSink` feed at once. Dropping the Bluetooth exclusion from the
+    /// aggregate's sub-device choice turns this red.
+    @Test func aBluetoothRowAlreadyFedIsNeverAlsoWrappedByTheAggregate() {
+        let moveUID = btMove.id
+        let control = RecordingAggregateControl(
+            resolvable: [AggregateOutputDevice.productUID: 501, moveUID: 777],
+            mainSubDevice: [501: moveUID])   // launch found the Move as the default and wrapped it
+        let (backend, engine, discovery, bt, _, _) = makeBackend(
+            aggregateControl: control, currentDefaultOutputUID: { moveUID })
+        defer { backend.stop() }
+        backend.start()
+
+        let ap = ap2Device()
+        discovery.fire(.appeared(ap))
+        bt.fire([btMove])
+        waitFor { self.device(backend, ap.id) != nil && self.device(backend, self.btMove.id) != nil }
+        waitFor { engine.fedIDs.contains(ap.outputID) }
+
+        backend.setOutputSet([ap.id, btMove.id])
+        waitFor { !control.setSubDeviceCalls.isEmpty }
+
+        #expect(!control.setSubDeviceCalls.contains(moveUID), "calls: \(control.setSubDeviceCalls)")
+        #expect(control.setSubDeviceCalls.last == "com.builtin.speakers")
+    }
+
+    /// The per-app twin: an app routed to the Move (the Mac's default) feeds it
+    /// through `BTSyncedSink`, so the aggregate must stop wrapping it or the Move
+    /// plays the whole-system copy as well. Dropping the per-app reconcile turns
+    /// this red.
+    @Test func aBluetoothDeviceAnAppIsRoutedToIsNeverAlsoWrappedByTheAggregate() {
+        let moveUID = btMove.id
+        let control = RecordingAggregateControl(
+            resolvable: [AggregateOutputDevice.productUID: 501, moveUID: 777],
+            mainSubDevice: [501: moveUID])   // launch found the Move as the default and wrapped it
+        let perAppCapture = workingPerAppCapture(bundleIDs: ["com.foo"])
+        let (backend, _, _, bt, _, _) = makeBackend(
+            injectedPerAppCapture: perAppCapture,
+            aggregateControl: control, currentDefaultOutputUID: { moveUID })
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: btMove.id)])
+        waitFor { !control.setSubDeviceCalls.isEmpty }
+
+        #expect(!control.setSubDeviceCalls.contains(moveUID), "calls: \(control.setSubDeviceCalls)")
+        #expect(control.setSubDeviceCalls.last == "com.builtin.speakers")
     }
 
     /// The composition is recomputed on every selection change: AirPlay

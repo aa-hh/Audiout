@@ -535,7 +535,7 @@ import Testing
         let content = makeContent(settings, Transport())
         #expect(content.test_headlineText == "Your 14-day trial has ended.")
         #expect(content.test_bodyText
-            == "Buy Audiout for €30, once, and keep everything you set up. "
+            == "Buy Audiout for €24.99, once, and keep everything you set up. "
             + "Your scenes and speaker settings are still here.")
     }
 
@@ -550,7 +550,7 @@ import Testing
         let expired = makeContent(spent, Transport())
         #expect(expired.test_headlineText == "Your 14-day trial has ended.")
         #expect(expired.test_bodyText
-            == "Buy Audiout for €30, once, and keep everything you set up. "
+            == "Buy Audiout for €24.99, once, and keep everything you set up. "
             + "Your scenes and speaker settings are still here.")
 
         let welcome = "Welcome to Audiout"

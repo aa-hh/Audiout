@@ -3646,7 +3646,7 @@ import AudioutProtocol
 
         popover.rebuild()
         #expect(popover.test_systemAirPlayNoteText
-                == "Your trial ends in 3 days. €30 once keeps everything, including updates.")
+                == "Your trial ends in 3 days. €24.99 once keeps everything, including updates.")
         #expect(raised.banners == [.threeDays], "reported as it goes up")
 
         popover.update(devices: backend.devices)

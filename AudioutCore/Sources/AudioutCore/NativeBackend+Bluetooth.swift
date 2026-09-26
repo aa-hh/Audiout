@@ -2615,7 +2615,7 @@ extension NativeBackend: BTOutputControlling {
     /// `captureControlQueue`.
     private func beginWizardArmGate(expecting uids: Set<String>) {   // captureControlQueue
         cancelWizardArmGate()
-        scheduleWizardArmPoll(started: Date(), expecting: uids)
+        scheduleWizardArmPoll(started: Date(), releasedAt: nil, expecting: uids)
     }
 
     /// `captureControlQueue`. Idempotent.
@@ -2624,9 +2624,10 @@ extension NativeBackend: BTOutputControlling {
         wizardArmPollWork = nil
     }
 
-    private func scheduleWizardArmPoll(started: Date, expecting uids: Set<String>) {
+    private func scheduleWizardArmPoll(started: Date, releasedAt: Date?,
+                                       expecting uids: Set<String>) {
         let work = DispatchWorkItem { [weak self] in
-            self?.pollWizardArmGate(started: started, expecting: uids)
+            self?.pollWizardArmGate(started: started, releasedAt: releasedAt, expecting: uids)
         }
         wizardArmPollWork = work
         captureControlQueue.asyncAfter(
@@ -2636,9 +2637,11 @@ extension NativeBackend: BTOutputControlling {
     /// One arm-gate poll. `captureControlQueue`, which owns both sinks — and is
     /// not a render or tap thread, so the one telemetry line at the end is
     /// emitted where it belongs.
-    private func pollWizardArmGate(started: Date, expecting uids: Set<String>) {
+    private func pollWizardArmGate(started: Date, releasedAt: Date?,
+                                   expecting uids: Set<String>) {
         wizardArmPollWork = nil
-        let waited = Date().timeIntervalSince(started)
+        let now = Date()
+        let waited = now.timeIntervalSince(started)
         let rendering = btSink?.renderingDeviceUIDs() ?? []
         // `true` when there is no local sink at all: nothing to wait for.
         let localReleased = syncedLocalSink?.hasStartedRendering ?? true
@@ -2646,14 +2649,33 @@ extension NativeBackend: BTOutputControlling {
         // A minimum stretch of bed regardless (the Sonos Move power-gates its
         // amplifier and swallows the first transients after silence), and a
         // ceiling so a speaker that never releases cannot stall the run.
-        let ready = everyoneReleased && waited >= wizardArmMinimumBedSeconds
-        guard ready || waited >= wizardArmCeilingSeconds else {
-            scheduleWizardArmPoll(started: started, expecting: uids)
+        //
+        // The bed is timed from the RELEASE, never from the gate opening. A
+        // sink plays nothing until its delay gate opens, which under the
+        // wizard's raised reference is most of two seconds after the gate
+        // starts, so a floor counted from the start runs out before a single
+        // bed frame is audible. A speaker that has not played since it
+        // connected needs that stretch to start its link and wake its amp;
+        // without it the sweeps land on a speaker that is still waking and
+        // nothing comes out, while one that played music a moment earlier is
+        // still awake. A release seen between two polls is dated to the poll
+        // that saw it, which errs long by at most one interval.
+        let releasedAt = releasedAt ?? (everyoneReleased ? now : nil)
+        let bedSeconds = releasedAt.map { now.timeIntervalSince($0) } ?? 0
+        let ready = everyoneReleased && bedSeconds >= wizardArmMinimumBedSeconds
+        // The ceiling is for a speaker that never releases. One that has
+        // released is owed its bed however late it got there.
+        let timedOut = !everyoneReleased && waited >= wizardArmCeilingSeconds
+        guard ready || timedOut else {
+            scheduleWizardArmPoll(
+                started: started, releasedAt: everyoneReleased ? releasedAt : nil,
+                expecting: uids)
             return
         }
         captureCoordinator?.armWizardTicks()
         Telemetry.log(.localPlayback, "wizard_ticks_armed", [
             "waitedMs": String(Int((waited * 1_000).rounded())),
+            "bedMs": String(Int((bedSeconds * 1_000).rounded())),
             "released": rendering.sorted().joined(separator: " "),
             "localReleased": localReleased ? "1" : "0",
             "timedOut": ready ? "0" : "1",

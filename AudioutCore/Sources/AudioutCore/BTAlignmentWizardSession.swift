@@ -144,9 +144,10 @@ public final class BTAlignmentWizardSession {
     /// reject plate's title) and ``rejectProposal()``.
     public var rejectReRunsMic: Bool { proposalIsMeasured && micAttempts < Self.maxMicAttempts }
 
-    /// How many times one run may listen: the opening pass plus one retry
-    /// earned by rejecting a measured proposal. After that a rejection falls to
-    /// the by-ear questions.
+    /// How many times one run may listen: the opening pass plus one retry,
+    /// earned either by the opening pass hearing nothing or by rejecting a
+    /// measured proposal. After that a failure or a rejection falls to the
+    /// by-ear questions.
     public static let maxMicAttempts = 2
 
     /// How many listening passes this run has started so far.
@@ -393,11 +394,40 @@ public final class BTAlignmentWizardSession {
     /// REALIGNMENT drops the stored value rather than proposing it: the mic
     /// just tried and could not confirm it, so asking "still right?" would be
     /// leaning on the one thing that was checked and not confirmed.
+    ///
+    /// A failed FIRST listen plays the sweeps once more before giving up. The
+    /// commonest reason nothing was heard is a Bluetooth speaker that had not
+    /// played since it connected and was still waking when the sweeps
+    /// arrived; the first pass woke it, so the second is heard. That spends
+    /// the run's second mic attempt, so a measurement the retry produces is
+    /// judged by ear if rejected, never listened to a third time.
     public func endListening() {
         guard case .listening = screen, !ended else { return }
         Analytics.capture("bt_sync:listening_ended", ["outcome": "failed", "attempt": String(micAttempts)])
+        if micAttempts < Self.maxMicAttempts, requestListening != nil {
+            listenAgain()
+            return
+        }
         if estimator.openingProposalStands { estimator = makeEstimator() }
         presentEstimatorPhase()
+    }
+
+    /// Replay the sweeps and listen again, under the run's mic budget. A
+    /// fresh injector (a tick off→on edge) is the only way to replay them —
+    /// the same cost ``tryAgain()`` pays — and its fresh beat clock voids the
+    /// pushed tempo. The host stages the probe from its `requestListening`
+    /// answer; a refusal there ends the listen the ordinary way.
+    private func listenAgain() {
+        guard let requestListening else { return }
+        setTick(false)
+        lastTempoBPM = nil
+        setTick(true)
+        enterListening()
+        requestListening { [weak self] granted in
+            guard let self, !self.ended, granted == false,
+                  case .listening = self.screen else { return }
+            self.endListening()
+        }
     }
 
     /// One which-side (or they-sound-together) answer folded in.
@@ -488,23 +518,12 @@ public final class BTAlignmentWizardSession {
         logProposal(valueMs: valueMs, accepted: false)
         let reRunMic = rejectReRunsMic
         estimator.rejectProposal()
-        guard reRunMic, let requestListening else {
+        guard reRunMic, requestListening != nil else {
             presentEstimatorPhase()
             return
         }
-        // A fresh injector (a tick off→on edge) is the only way to replay the
-        // sweeps — the same cost `tryAgain()` pays — and its fresh beat clock
-        // voids the pushed tempo.
-        setTick(false)
-        lastTempoBPM = nil
-        setTick(true)
-        enterListening()
         Analytics.capture("bt_sync:mic_retried")
-        requestListening { [weak self] granted in
-            guard let self, !self.ended, granted == false,
-                  case .listening = self.screen else { return }
-            self.endListening()
-        }
+        listenAgain()
     }
 
     /// Try again: a fresh run from a flat prior. Reachable from the proposal

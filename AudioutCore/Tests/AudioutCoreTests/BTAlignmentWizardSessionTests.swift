@@ -566,8 +566,9 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         session.cancel()
     }
 
-    /// The mic tried and could not confirm the stored value, so proposing it
-    /// anyway would lean on the one thing that was just checked and failed.
+    /// The mic tried twice and could not confirm the stored value, so
+    /// proposing it anyway would lean on the one thing that was just checked
+    /// and failed.
     @Test func aFailedListenOnARealignmentGoesToTheQuestions() {
         let recorder = Recorder()
         let session = recorder.makeSession(baseTrimMs: 244,
@@ -580,12 +581,60 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         #expect(session.screen == .listening(isRealignment: true), "got \(session.screen)")
 
         session.endListening()
+        #expect(session.screen == .listening(isRealignment: true), "got \(session.screen)")
+        session.endListening()
         guard case .question = session.screen else {
             Issue.record("expected the questions, got \(session.screen)")
             return
         }
         #expect(recorder.ends.isEmpty, "the run is still live")
-        #expect(recorder.ticks == [true])
+        #expect(recorder.ticks == [true, false, true])
+        session.cancel()
+    }
+
+    /// THE DEFECT (live, a freshly connected Bluetooth speaker): the first
+    /// sweeps land while the speaker is still waking, the mic hears nothing,
+    /// and the run went straight to the by-ear questions although a second
+    /// pass would have been heard. A failed first listen replays the sweeps
+    /// once — through a fresh injector, with the host asked to stage the
+    /// probe again — and a measurement from that pass is proposed as usual.
+    @Test func aFailedFirstListenPlaysTheSweepsOnceMore() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        var listenCalls = 0
+        session.requestListening = { proceed in
+            listenCalls += 1
+            proceed(true)
+        }
+        session.start()
+        #expect(session.micAttempts == 1)
+
+        session.endListening()
+        #expect(session.screen == .listening(isRealignment: false), "got \(session.screen)")
+        #expect(listenCalls == 2, "the host re-stages the probe")
+        #expect(session.micAttempts == 2)
+        #expect(recorder.ticks == [true, false, true], "a fresh injector replays the sweeps")
+        #expect(recorder.ends.isEmpty, "the run is still live")
+
+        session.offerMeasuredProposal(valueMs: 300)
+        #expect(session.screen == .proposal(valueMs: 300), "got \(session.screen)")
+        #expect(session.rejectReRunsMic == false, "the retry spent the mic budget")
+        session.cancel()
+    }
+
+    /// A host that refuses the second listen ends it the ordinary way.
+    @Test func aRefusedRetryFallsToTheQuestions() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(targetIsBluetooth: true)
+        var grant = true
+        session.requestListening = { proceed in proceed(grant) }
+        session.start()
+        grant = false
+        session.endListening()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
+        }
         session.cancel()
     }
 

@@ -1885,6 +1885,47 @@ extension SerializedSharedState {
         backend.setBTWizardTickActive(false, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
     }
 
+    /// THE DEFECT (live, freshly connected speaker: the sweeps never came out
+    /// until music had played once). The bed floor used to be counted from the
+    /// gate opening, and a sink plays nothing until its delay gate releases —
+    /// most of two seconds under the wizard's raised reference. So the floor
+    /// had always run out before release and the sweeps followed half a second
+    /// after the first audible frame, into a link and amp still waking up. The
+    /// floor now runs from the release, however long the gate waited for it.
+    @Test func theBedFloorIsTimedFromTheReleaseNotTheGateOpening() {
+        let capture = LineCapture()
+        let (backend, bt, sink, _) = makeBackend()
+        defer { backend.stop(); Telemetry._installTestSink(nil) }
+        backend.wizardArmPollInterval = 0.01
+        backend.wizardArmMinimumBedSeconds = 0.4
+        backend.wizardArmCeilingSeconds = 60
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { !sink.buffers.isEmpty }
+
+        Telemetry._installTestSink { capture.append($0) }
+        backend.setBTWizardTickActive(true, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+        // The gate waits longer than the whole floor with nothing released.
+        waitFor(timeout: 0.6) { !capture.armedLines().isEmpty }
+        #expect(capture.armedLines().isEmpty, "no tick while the speaker is silent")
+
+        let releasedAt = Date()
+        sink.rendering = [btMove.id]
+        waitFor { !capture.armedLines().isEmpty }
+        let bedHeard = Date().timeIntervalSince(releasedAt)
+        #expect(bedHeard >= 0.4,
+                "the arm waited a full floor after the release, not after the gate: \(bedHeard) s")
+        let line = capture.armedLines().first ?? ""
+        #expect(line.contains("\"timedOut\":\"0\""), "\(line)")
+        let bedMs = line.range(of: #""bedMs":"(\d+)""#, options: .regularExpression)
+            .map { String(line[$0]).filter(\.isNumber) }.flatMap { Int($0) }
+        #expect((bedMs ?? 0) >= 400, "the line records the audible bed: \(line)")
+
+        backend.setBTWizardTickActive(false, btTargetDeviceID: btMove.id, btReferenceDeviceID: nil)
+    }
+
     /// A speaker that never reports rendering must not stall the run: the
     /// ceiling arms it anyway, and says so.
     @Test func theArmGateHasACeiling() {

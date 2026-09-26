@@ -1496,15 +1496,11 @@ final class BTSyncedSink: @unchecked Sendable {
     /// while the manager is armed), vanished devices' sinks stop and drop.
     /// Unchanged devices are untouched — their sessions keep playing.
     func setDevices(_ specs: [DeviceSpec]) {
+        removeDevices(notIn: Set(specs.map(\.uid)))
         var added: [(sink: BTDeviceSink, gain: Float, eq: DeviceEQ)] = []
-        var removed: [BTDeviceSink] = []
         var shouldStart = false
         tableLock.lock()
         let wantedByUID = Dictionary(specs.map { ($0.uid, $0) }, uniquingKeysWith: { first, _ in first })
-        for (uid, sink) in sinksByUID where wantedByUID[uid] == nil {
-            sinksByUID[uid] = nil
-            removed.append(sink)
-        }
         for (uid, spec) in wantedByUID where sinksByUID[uid] == nil {
             let sink = makeSink(spec)
             sinksByUID[uid] = sink
@@ -1514,7 +1510,6 @@ final class BTSyncedSink: @unchecked Sendable {
         let keepAlive = keepAliveWindowNanos
         tableLock.unlock()
 
-        for sink in removed { sink.stop() }
         if keepAlive > 0 {
             for (sink, _, _) in added { sink.setKeepAliveWindow(nanos: keepAlive) }
         }
@@ -1531,6 +1526,20 @@ final class BTSyncedSink: @unchecked Sendable {
         if shouldStart {
             for (sink, _, _) in added { startSink(sink) }
         }
+    }
+
+    /// Stop and drop every sink whose UID is not in `uids`; the rest keep
+    /// playing untouched. The half of ``setDevices(_:)`` a caller runs FIRST
+    /// when the same change also moves the reference: a composition or buffer
+    /// change rebuilds every sink still held, so a departing speaker left in
+    /// the table would restart its engine once on its way out.
+    func removeDevices(notIn uids: Set<String>) {
+        let removed = tableLock.withLock { () -> [BTDeviceSink] in
+            let gone = sinksByUID.filter { !uids.contains($0.key) }
+            for uid in gone.keys { sinksByUID[uid] = nil }
+            return Array(gone.values)
+        }
+        for sink in removed { sink.stop() }
     }
 
     /// BT-REFSEL: recompute every device's delay when the group's composition

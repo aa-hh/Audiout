@@ -585,7 +585,7 @@ extension NativeBackend {
                 let gains = self.btSinkGains(forUIDs: armedUIDs)
                 // Derived AFTER the new selection is committed — the reference
                 // is a function of the selected devices' measured latencies.
-                let referenceMs = self.updateBTReferenceBufferLocked()
+                let referenceMs = self.updateBTReferenceBufferLocked(pushToSink: false)
                 let eqs = self.btSinkEQs(forUIDs: armedUIDs)
                 self.captureControlQueue.async { [weak self] in
                     self?.applyBTSinkTransition(

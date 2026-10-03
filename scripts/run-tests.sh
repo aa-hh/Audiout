@@ -368,7 +368,12 @@ set +e
 # every later build queues behind it silently -- the failure looks like a slow
 # build and cost hours on 2026-09-04. `wait` still yields the real exit status.
 set -m
-( cd "$core" && swift test $test_args "$@" ) >&2 &
+# Output also lands in $suite_log so a failure can be NAMED after the fact.
+# The commit guard's 4001-test merge run on 2026-10-04 reported "1 issue" and
+# nothing else, which cost a second 5-minute full run just to learn which test.
+# `pipefail` inside the subshell makes its exit status swift's, not tee's.
+suite_log="${AUDIOUT_TEST_LOG:-/tmp/audiout-suite-last.log}"
+( set -o pipefail; cd "$core" && swift test $test_args "$@" 2>&1 | tee "$suite_log" >&2 ) &
 swift_pgid=$!
 # `|| true`: by the time this trap fires the group is usually already reaped
 # by the `wait` below, so kill fails with "no such process" -- and under
@@ -389,7 +394,16 @@ else
     # exit code — 0, always — and then reads a green status over a red suite.
     # (That is exactly how this script got accused of swallowing failures.) One
     # unmistakable line survives any tail, so the transcript cannot look green.
-    [ "$status" -eq 0 ] || echo "  suite: FAILED — swift test exited $status." >&2
+    echo "  suite: FAILED — swift test exited $status." >&2
+    # Same classification as remote_run's: name the failed tests from the log,
+    # stripping the SF Symbol glyphs and colour codes around each line.
+    failed=$(tr -d '\r' < "$suite_log" | grep ' Test ' | grep ' failed after ' \
+        | sed -e 's/.* Test //' -e 's/ failed after .*//' | grep -v '^run with ' || true)
+    nfailed=$(printf '%s' "$failed" | grep -c . || true)
+    if [ "$nfailed" -gt 0 ]; then
+        echo "  suite: $nfailed test(s) failed: $(printf '%s' "$failed" | tr '\n' ' ')" >&2
+    fi
+    echo "  suite: full output in $suite_log — grep 'recorded an issue' for the assertion." >&2
 fi
 
 exit "$status"

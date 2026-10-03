@@ -73,6 +73,8 @@ B_PAUSE_S=90
 C_S=3600
 JUMP_MS=5            # an offset change bigger than this between 3 s rows is a jump
 OSA_TIMEOUT_S=30     # an osascript call longer than this is waiting on a permission prompt
+BT_CONNECT_S=45      # per connect attempt: wait this long for blueutil --is-connected 1 (two attempts)
+CA_WAIT_S=10         # then wait this long for the speaker to show as a Core Audio output
 LOAD_EVERY_S=60      # load.csv sample interval
 LOAD_WARN=4          # summary.md warns, and the watchdog alerts, above this 1-minute load average
 WATCH_EVERY_S=60     # watchdog interval during a block
@@ -210,6 +212,60 @@ BLUE_PROBLEM=""
 if ! command -v blueutil >/dev/null; then BLUE_PROBLEM="blueutil not installed"
 elif ! to 15 blueutil --power >/dev/null 2>&1; then BLUE_PROBLEM="blueutil cannot reach Bluetooth (Terminal needs Bluetooth access in Privacy & Security)"; fi
 HAVE_BLUEUTIL=$([[ -z $BLUE_PROBLEM ]] && print 1 || print 0)
+(( DRY )) || [[ -z $BLUE_PROBLEM ]] || die "$BLUE_PROBLEM. A real run needs it: quitting Audiout Dev drops the Moves' links, and the driver must reconnect them before every relaunch."
+
+# ---- Bluetooth links ---------------------------------------------------------
+# Quitting Audiout Dev drops the A2DP links, and the launch-time restore
+# (GroupController.ensureDefaultSelection, applied once) drops any id the device
+# list does not hold yet. So before every launch the wanted Moves are connected
+# and visible to Core Audio, and the unwanted ones are disconnected.
+bt_addr() { local a=${1%:output}; print -n -- ${a//-/:} }       # blueutil form, colons
+bt_connected() { [[ $(to 15 blueutil --is-connected "$1" 2>/dev/null) == 1 ]] }
+bt_name() { to 15 blueutil --info "$1" --format json 2>/dev/null | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get("name",""))' 2>/dev/null }
+ca_has_output() {  # name: true when Core Audio lists a Bluetooth output with that name
+  system_profiler SPAudioDataType -json 2>/dev/null | "$PYTHON" -c '
+import json, sys
+name = sys.argv[1]
+items = [i for g in json.load(sys.stdin).get("SPAudioDataType", []) for i in g.get("_items", [])]
+sys.exit(0 if any(i.get("_name") == name and "bluetooth" in i.get("coreaudio_device_transport", "")
+                  and i.get("coreaudio_device_output") for i in items) else 1)' "$1"
+}
+bt_connect_wait() {  # Bluetooth id; connect, wait for the link, then for Core Audio
+  local a=$(bt_addr $1) try end name
+  for try in 1 2; do
+    bt_connected $a && break
+    log "connecting $a (attempt $try)"; to $BT_CONNECT_S blueutil --connect $a >/dev/null 2>&1 || true
+    end=$(( SECONDS + BT_CONNECT_S ))
+    while (( SECONDS < end )) && ! bt_connected $a; do sleep 1; done
+  done
+  bt_connected $a || { log "$a did not connect after 2 attempts of $BT_CONNECT_S s"; return 1; }
+  name=$(bt_name $a)
+  end=$(( SECONDS + CA_WAIT_S ))
+  while (( SECONDS < end )); do
+    [[ -n $name ]] && ca_has_output "$name" && { log "$a connected and listed by Core Audio as \"$name\""; return 0; }
+    sleep 1
+  done
+  log "$a connected, but Core Audio did not list \"$name\" as an output within $CA_WAIT_S s; launching anyway"
+  return 0
+}
+bt_disconnect_wait() {  # Bluetooth id
+  local a=$(bt_addr $1) end=$(( SECONDS + 15 ))
+  bt_connected $a || return 0
+  log "disconnecting $a"; to 15 blueutil --disconnect $a >/dev/null 2>&1 || true
+  while (( SECONDS < end )) && bt_connected $a; do sleep 1; done
+  bt_connected $a && { log "$a is still connected"; return 1; }
+  return 0
+}
+bt_prepare() {  # wanted ids...; connect the wanted Moves, disconnect the other Moves
+  local id
+  for id in $MOVE1_ID $MOVE2_ID; do
+    (( ${@[(Ie)$id]} )) || bt_disconnect_wait $id || return 1
+  done
+  for id in "$@"; do
+    [[ $id == *:output ]] && { bt_connect_wait $id || return 1; }
+  done
+  return 0
+}
 
 KEY_PROBLEM=""
 if [[ ! -d $APP ]]; then KEY_PROBLEM="Audiout Dev not found at $APP. Install it there (README step 2)."
@@ -232,6 +288,8 @@ if (( ! DRY )); then
   [[ -z $KEY_PROBLEM$ids_problem ]] || die "$ids_problem$KEY_PROBLEM"
 fi
 if [[ $MODE == check ]]; then
+  bt_connect_wait $MOVE1_ID || die "blueutil could not connect $MOVE1_ID; a real run reconnects the Moves before every relaunch"
+  log "check: blueutil connected $MOVE1_ID (left connected)"
   log "check passed: tools present, ids known, build has $RECONNECT_KEY; recorder $RECORDER; ${BLUE_PROBLEM:-blueutil works}"
   exit 0
 fi
@@ -382,17 +440,6 @@ preflight() {
   note "DRY RUN FALLBACK: $why. Playback and recording are replaced by a synthetic recording (two clicks per 3 s, the second 42 ms later)."
 }
 
-bt_connected() { [[ $(to 15 blueutil --is-connected "$1") == 1 ]] }
-bt_addr() { print -n -- ${1%:output} }
-ensure_connected() {  # Bluetooth ids...
-  (( DRY || ! HAVE_BLUEUTIL )) && return 0
-  local a; for a in "$@"; do
-    a=$(bt_addr $a)
-    bt_connected $a && continue
-    log "connecting $a"; to 30 blueutil --connect $a || true; sleep 5
-    bt_connected $a || { log "$a did not connect"; return 1; }
-  done
-}
 
 # routing.json as RoutingStore.save writes it: schema 1, Main Out = Selected Speakers.
 write_routing() {  # file ids...
@@ -469,6 +516,7 @@ select_speakers() {  # ids...
     pgrep -f "$APP/Contents/MacOS/" >/dev/null && { log "Audiout Dev did not quit, sending TERM"; pkill -f "$APP/Contents/MacOS/"; sleep 3; }
     osascript -e "set volume output volume $MAC_VOLUME"
     write_routing "$ROUTING" "$@"
+    bt_prepare "$@" || { log "try $try: the Bluetooth links could not be set up"; continue; }
     from=$(tel_size); t0=$SECONDS
     open "$APP"
     play_start || log "playback did not start"   # sinks only build with audio flowing
@@ -634,25 +682,23 @@ block_skip() { print -r -- "$1"$'\tskipped: '"$2"$'\t0\t0\t0\t\t' >> "$OUT/block
 preflight
 
 # Block A: both Moves.
-if ensure_connected $IDS_A && select_speakers $IDS_A; then
+if select_speakers $IDS_A; then
   probe_check $IDS_A
   play_start; block_begin A $IDS_A
   watch_sleep $A_FIRST_S
   if (( B_ABORT )); then :
   elif (( DRY )); then mark toggle_skipped_dry_run; watch_sleep $A_OFF_S
   elif (( HAVE_BLUEUTIL )); then
-    mark disconnect; to 30 blueutil --disconnect $(bt_addr $MOVE2_ID) || log "disconnect failed"
+    mark disconnect; bt_disconnect_wait $MOVE2_ID || log "disconnect failed"
     watch_sleep $A_OFF_S
-    mark reconnect; to 30 blueutil --connect $(bt_addr $MOVE2_ID) || log "reconnect failed"
-    watch_sleep 5; bt_connected $(bt_addr $MOVE2_ID) || note "block A: second Move did not reconnect"
+    mark reconnect; bt_connect_wait $MOVE2_ID || note "block A: second Move did not reconnect"
   else mark toggle_skipped_no_blueutil; watch_sleep $A_OFF_S; fi
   watch_sleep $A_REST_S
   block_end
 else block_skip A "both Moves could not be connected or selected (see driver.log)"; fi
 
 # Block B: Move 1 plus This Mac. The second Move is disconnected so it cannot play.
-(( ! DRY && HAVE_BLUEUTIL )) && { to 30 blueutil --disconnect $(bt_addr $MOVE2_ID) || true; }
-if ensure_connected $MOVE1_ID && select_speakers $IDS_B; then
+if select_speakers $IDS_B; then
   play_start; block_begin B $IDS_B
   watch_sleep $B_PLAY_S
   if (( ! B_ABORT )); then
@@ -683,13 +729,13 @@ wait_for_wifi_switch() {
 }
 if (( WITH_AIRPLAY )); then
   if ! wait_for_wifi_switch; then block_skip C "nobody confirmed the switch to Wi-Fi mode within $WAIT_C_S s"
-  elif ensure_connected $C_MOVE_ID && select_speakers $IDS_C; then
+  elif select_speakers $IDS_C; then
     play_start; block_begin C $IDS_C
     watch_sleep $C_S
     block_end
   else block_skip C "the Bluetooth Move or the Move in Wi-Fi mode could not be selected (see driver.log)"; fi
 fi
-(( ! DRY && HAVE_BLUEUTIL && ! WITH_AIRPLAY )) && { to 30 blueutil --connect $(bt_addr $MOVE2_ID) || true; }
+(( ! DRY && ! WITH_AIRPLAY )) && { bt_connect_wait $MOVE2_ID || true; }
 if [[ $RECONNECT_WAS == off || $RECONNECT_WAS == 0 ]]; then
   defaults write $BUNDLE_ID $RECONNECT_KEY -bool false; log "set $RECONNECT_KEY back to off"
 fi

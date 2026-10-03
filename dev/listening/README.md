@@ -15,7 +15,9 @@ loops the click track, records the built-in mic during each block, and writes
 Before each block the driver quits Audiout Dev, writes the speakers into
 `~/Library/Application Support/com.audiout.Audiout.dev/routing.json`
 (`{"schemaVersion":1,"state":{"mainOutKind":"selected","selectedDeviceIDs":[...]}}`),
-sets the output volume to 50 and relaunches. Launch restores that file only with
+sets the volume to 50, connects the wanted Moves with blueutil (until Core Audio
+lists them; quitting drops the links and launch keeps only speakers it already
+sees) and disconnects the others, then relaunches. Launch restores that file only with
 "Reconnect last speakers when Audiout starts" on (`general.reconnectAtLaunch`,
 off by default); the driver turns it on, notes it, and turns it off at the end.
 90 s after launch the file and telemetry must both show exactly those speakers
@@ -64,8 +66,8 @@ AirPlay id is a colon-separated address; `--list-devices` marks AirPlay ids that
 share a Move's first three octets "(a Sonos Move in Wi-Fi mode)". A Move in Wi-Fi
 mode must have been selected once on that Mac so the log knows its id. The alignment store
 (`bt-sync-trims.json`) is per Mac, so the wizard has to run on the second Mac.
-The driver refuses, by name, an id that neither that store nor `telemetry.jsonl`
-has seen. No telemetry line carries an id and a name; names come from blueutil.
+The driver refuses, by name, an id neither that store nor `telemetry.jsonl` has
+seen. Names come from blueutil; no telemetry line has both an id and a name.
 
 ### Why it starts inside the logged-in session
 
@@ -95,7 +97,6 @@ checks once and any ALERT stops the run with what to fix. The QuickTime recorder
 has no file until it stops, so its mic and click checks show `n/a`.
 
 Watch from another Mac (the driver prints the folder at start):
-
 ```
 ssh alechamilton@SUMUP-M9Y197RFVG.local tail -F '<results path>/status.log' | grep --line-buffered -E 'ALERT|ABORT|BLOCK|WAITING|DONE'
 ```

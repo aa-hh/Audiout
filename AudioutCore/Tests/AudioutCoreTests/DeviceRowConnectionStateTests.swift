@@ -512,15 +512,15 @@ import AudioutCore
         #expect(row.test_statusText == "System · Safari")
     }
 
-    // MARK: V1 — the mute mark (filled square while muted, outline otherwise)
+    // MARK: V1 — the mute mark (slashed outline while muted, slash-free otherwise)
 
-    @Test func muteDrawsTheFilledSquareWhenMutedViaApply() {
+    @Test func muteDrawsTheSlashedOutlineWhenMutedViaApply() {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isMuted: true)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
 
         #expect(row.test_mutePillIsMutedHue,
-                "apply() must land the filled square in the reserved muted hue")
+                "apply() must land the slashed outline in the reserved muted hue")
     }
 
     @Test func muteDrawsTheOutlineSquareWhenUnmutedViaApply() {

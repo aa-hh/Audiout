@@ -22,6 +22,14 @@ import AudioutCore
 @MainActor
 @Suite struct DeviceRowAirPlay1LiveTests {
 
+    /// The mute check below reads the drawn symbol, which needs the compiled
+    /// catalogue; without it the check depends on another suite running first.
+    init() {
+        if CompiledSymbolFixture.install() == nil {
+            Issue.record("the symbol fixture failed to compile — actool or the source catalogue is broken")
+        }
+    }
+
     private func makeAP1Device(isSelected: Bool = false) -> Device {
         Device(id: "attic-ap1", name: "Attic Speaker", kind: .generic,
                supportsAirPlay2: false, volume: 20, isSelected: isSelected)

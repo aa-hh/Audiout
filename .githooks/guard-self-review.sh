@@ -62,6 +62,8 @@ if [ -n "$warn_hits" ]; then
 fi
 
 # --- Part B: the self-review receipt (BLOCKING) --------------------------
+# A merge's staged diff only exists inside `git merge`, so no receipt can match it; the branch commits were reviewed.
+[ -n "${AUDIOUT_IN_MERGE:-}" ] && exit 0
 expected=$(git diff --cached -- '*.swift' 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
 receipt=$(cat "$git_dir/audiout-review-receipt" 2>/dev/null || echo none)
 if [ "$receipt" != "$expected" ]; then

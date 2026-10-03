@@ -9,9 +9,11 @@
 # Two mechanisms:
 #   1. A machine-wide slot cap on concurrent RUNS (/tmp, so it spans every
 #      worktree). A run that finds every slot taken queues for one to free.
-#   2. A content-addressed pass cache. Agents routinely run the suite by hand
-#      and then commit, which fires Guard 4 on byte-identical sources
-#      immediately afterwards. The second run is pure waste; the cache skips it.
+#   2. A content-addressed pass cache (scripts/lib/suite-cache.sh). Agents
+#      routinely run the suite by hand and then commit, which fires Guard 4 on
+#      byte-identical sources immediately afterwards. The cache skips whatever
+#      an earlier pass already covered: a full pass covers any filter, and a
+#      `--filter A` pass covers the A part of a later `--filter A|B`.
 #
 # Usage:  scripts/run-tests.sh [extra swift-test args...]
 # Env:
@@ -202,51 +204,28 @@ run_remote() {
     return 0
 }
 
-# Lock and cache live in /tmp on purpose: they must be shared by EVERY worktree
-# and every clone on this machine, so they cannot live under $repo_root (each
-# worktree has its own) or under .git (ditto). The lock path itself is resolved
-# by capacity_lock_base in lib/remote.sh (same AUDIOUT_TEST_LOCK_FILE override).
-cache_dir=${AUDIOUT_TEST_CACHE_DIR:-/tmp/audiout-suite-cache}
+# The pass cache (source hash, stamps, which earlier passes cover this run)
+# lives in scripts/lib/suite-cache.sh, resolved beside this script for the same
+# reason remote.sh is above.
+. "$(cd "$(dirname "$0")" && pwd)/lib/suite-cache.sh"
+key=$(suite_cache_source_hash "$repo_root" "$pkg")
 
-# --- content key ------------------------------------------------------------
-# Hash what the suite's result actually depends on: the Swift sources and tests
-# of the package under test, plus the engine package it links
-# and their manifests. Hashing files on disk (not the git index) is deliberate — it is
-# correct both for a pre-commit run, where the working tree IS what is about to
-# be committed, and for a manual run mid-edit.
-suite_key() {
-    {
-        find "$repo_root/AudioutCore/Sources" "$repo_root/AudioutCore/Tests" \
-             "$repo_root/AirPlayEngine/Sources" \
-             -type f \( -name '*.swift' -o -name '*.c' -o -name '*.h' \) \
-             -exec shasum -a 256 {} + 2>/dev/null
-        # The manifests MUST be in the key and are not under any Sources/ dir:
-        # they carry the target graph, dependencies and the brew include flags,
-        # so a manifest-only edit changes what the suite links and can flip a
-        # result with every source file byte-identical.
-        # Package.resolved earns its place for the same reason the manifests
-        # do: the shared package is pinned by RANGE, so resolution can land on
-        # a new tag with every file in this repo byte-identical. Without it a
-        # suite that linked different code would be handed the old pass.
-        shasum -a 256 "$repo_root/AudioutCore/Package.swift" \
-                      "$repo_root/AirPlayEngine/Package.swift" \
-                      "$repo_root/AudioutCore/Package.resolved" 2>/dev/null
-    } | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}'
-}
-
-key=$(suite_key)
-# The cache records "these exact sources passed", so it must also be keyed on
-# the arguments — a `--filter Foo` pass says nothing about the full suite — and
-# on WHICH package ran: the source hash above spans every package in this
-# repo, so an AirPlayEngine pass would otherwise stamp the AudioutCore suite
-# green without running it.
-args_key=$(printf '%s\n%s' "$pkg" "$*" | shasum -a 256 | awk '{print $1}')
-stamp="$cache_dir/$key.$args_key"
-
-if [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ] && [ -f "$stamp" ]; then
+if suite_cache_satisfied "$key" "$@"; then
     echo "  suite: sources unchanged since a passing run — skipping." >&2
     echo "  (AUDIOUT_TEST_NO_CACHE=1 to force)" >&2
     exit 0
+fi
+# A plain-name filter where some names already passed on these sources runs
+# only the rest. This is what lets Guard 4's `--filter A|B|C` at commit reuse an
+# earlier hand-run `--filter A`.
+if [ "$suite_cache_kind" = "suites" ] && [ "$suite_cache_missing" != "$suite_cache_names" ]; then
+    skipped=
+    for n in $suite_cache_names; do
+        case " $suite_cache_missing " in *" $n "*) ;; *) skipped="$skipped $n" ;; esac
+    done
+    echo "  suite: already passed on these sources, skipping:$skipped" >&2
+    set -- --filter "$(printf '%s' "$suite_cache_missing" | tr ' ' '|')"
+    echo "  suite: running $*" >&2
 fi
 
 # --- prefer-remote ----------------------------------------------------------
@@ -270,10 +249,7 @@ if [ "$try_remote_first" -eq 1 ] && [ "$remote_tried" -eq 0 ]; then
     rrc=0
     run_remote "$@" || rrc=$?
     if [ "$rrc" -eq 0 ]; then
-        if [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ]; then
-            mkdir -p "$cache_dir"
-            : > "$stamp"
-        fi
+        suite_cache_record "$key" "$@"
         exit 0
     elif [ "$rrc" -eq 3 ]; then
         # The remote's verdict is final. No pass stamp, no local re-run, and
@@ -319,10 +295,7 @@ if [ "${AUDIOUT_TEST_NO_LOCK:-0}" != "1" ] && [ "$remote_tried" -eq 0 ]; then
             # A remote PASS is a real pass of these exact sources, so record
             # it — otherwise the very next commit re-runs the whole suite and
             # the cache silently does nothing for every overflowed run.
-            if [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ]; then
-                mkdir -p "$cache_dir"
-                : > "$stamp"
-            fi
+            suite_cache_record "$key" "$@"
             # Nothing local was started, so there is no permit to unwind.
             exit 0
         fi
@@ -408,9 +381,8 @@ status=$?
 set +m
 set -e
 
-if [ "$status" -eq 0 ] && [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ]; then
-    mkdir -p "$cache_dir"
-    : > "$stamp"
+if [ "$status" -eq 0 ]; then
+    suite_cache_record "$key" "$@"
 else
     # Say it in our own voice, last. The exit code below is correct and always
     # has been, but a caller who writes `run-tests.sh | tail -15` gets TAIL's

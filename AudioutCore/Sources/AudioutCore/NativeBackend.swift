@@ -4115,6 +4115,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.pendingRebindRecoveries.removeAll()
         for deviceID in self.rebindConverging {
             self.converging.remove(deviceID)
+            // The slot's own release is skipped here, so do its stream release
+            // too: a deselect that waited on this slot gives the stream back.
+            if self.streamReleaseOnSettle.remove(deviceID) != nil, !self.added.contains(deviceID) {
+                self.wholeSystemStreamByDevice.removeValue(forKey: deviceID)
+            }
             self.emit(.streamHealth(id: deviceID, recovering: false))
         }
         self.rebindConverging.removeAll()

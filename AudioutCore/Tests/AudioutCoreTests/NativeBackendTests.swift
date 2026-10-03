@@ -9832,6 +9832,43 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "the deselect released the refused stream, so the retry takes a fresh one")
     }
 
+    /// The same deferred release when sleep, not the slot's own release, frees
+    /// the slot: a rebind recovery holds it through its backoff, the session
+    /// dies under it, the user deselects. Sleep frees rebind-held slots
+    /// directly, so drop the release there and the reselect after wake lands
+    /// back on the old stream.
+    @Test func aDeselectWaitingOnARebindSlotStillReleasesTheStreamAcrossSleep() async throws {
+        let retries = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(delayClock: retries.clock)
+        let capture = FakeCapture()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:6D", name: "Sleep-Release Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        defer { backend.stop() }
+        let home = try #require(engine.liveStream(of: device.outputID))
+
+        // Recovery attempt 1 is refused; its retry waits out the backoff,
+        // holding the device's converge slot.
+        engine.flushFailures = [device.outputID.rawValue]
+        engine.addFailures = [device.outputID.rawValue]
+        capture.fireDeviceRateRebuild()
+        await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
+
+        // The session dies out of band, then the user deselects.
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+        backend.setOutputSet([])
+
+        backend.handleSystemWillSleep()
+        backend.handleSystemDidWake()
+        engine.addFailures = []
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            (engine.liveStream(of: device.outputID) ?? 0) >= SpyEngine.wholeSystemStreamIDBase
+        }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) > home,
+                "the deselect released the old stream, so the reselect takes a fresh one")
+    }
+
     /// A session that dies under a speaker the user still wants keeps its home
     /// stream. The engine can re-establish that session itself, out of band and
     /// on the stream id it still holds, so dropping the home on `.failed` leaves

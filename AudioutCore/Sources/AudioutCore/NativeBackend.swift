@@ -1455,6 +1455,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// thrash a receiver. Best-effort (a work item already running when cancelled
     /// still no-ops via its own guards), same D4 tolerance as `pendingRetries`.
     var pendingRebindRecoveries: [String: DispatchWorkItem] = [:]
+    /// Whether the chain behind each `pendingRebindRecoveries` entry is a
+    /// verify-first settle (written with that entry; read only while one exists).
+    /// A recapture must not supersede one: its plain flush would succeed on the
+    /// per-app stream the settle exists to move the session off.
+    var pendingRebindIsVerifyFirst: [String: Bool] = [:]
 
     /// How many whole-system-tap `.failed` retries have already fired in a row
     /// (T16, E10) — kept ONLY to grow the capped-exponential backoff delay, not

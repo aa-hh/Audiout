@@ -219,8 +219,15 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// Records BOTH halves into the same arrays/`opLog` the separate
     /// `removeOutput`/`addOutput` pair used to, so every pre-T7 assertion about
     /// a rebind's observable ops keeps holding.
+    /// Output ids whose receiver refuses a `rebindOutput` outright, leaving the
+    /// live session where it was (unlike `addFailures`, which fails it torn down).
+    var rebindRefusals: Set<UInt64> = []
+
     func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws {
         try await runOp(id) {
+            if self.lock.withLock({ self.rebindRefusals.contains(id.rawValue) }) {
+                throw self.addFailureError
+            }
             self.lock.withLock {
                 self.rebinds.append((id, streamId))
                 self.removed.append(id)
@@ -657,7 +664,8 @@ private func makeBackend(
     /// The synced-local settle timing. The rapid-toggle tests shrink these; the
     /// production defaults are pinned by tests that construct the backend directly.
     syncedLocalSettleWindow: TimeInterval = 0.5,
-    syncedLocalTransitionHorizon: TimeInterval = 2.0
+    syncedLocalTransitionHorizon: TimeInterval = 2.0,
+    delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
 ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
     let engine = SpyEngine()
     let discovery = FakeDiscovery()
@@ -672,6 +680,7 @@ private func makeBackend(
         syncedLocalTransitionHorizon: syncedLocalTransitionHorizon,
         captureRetryDelay: captureRetryDelay,
         captureRetryMaxBackoff: captureRetryMaxBackoff,
+        delayClock: delayClock,
         // 0 = the old synchronous `.takingOver` emit. The suite's scripted
         // activators resolve instantly, so the production debounce (which
         // exists to SUPPRESS the strip on fast resolutions) would hide the
@@ -10883,6 +10892,56 @@ extension SerializedSharedState {
         await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
         #expect(backend.test_scopeConflict(deviceID: device.id) != nil,
                 "no per-app bookkeeping survives — the demotion is queryable")
+    }
+
+    /// Test 9's settle, refused once and waiting out its backoff when a
+    /// sample-rate rebuild recaptures. The recapture must leave the settle
+    /// alone: let it supersede a verify-first chain and its plain flush
+    /// "succeeds" on stream 1, the settle is cancelled, and the speaker stays
+    /// in the per-app domain.
+    @Test func aRecaptureLeavesAVerifyFirstSettleInBackoffToFinish() async {
+        let retries = ManualDelayClock()
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]),
+            delayClock: retries.clock)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let perAppHold = HoldPoint()
+        let wsHold = HoldPoint()
+        engine.onAddOutputHold = { id, stream in
+            guard id == device.outputID else { return }
+            if SpyEngine.isWholeSystem(stream) {
+                await wsHold.hold()
+            } else {
+                await perAppHold.hold()
+            }
+        }
+        engine.rebindRefusals = [device.outputID.rawValue]
+
+        // Test 9's interleaving: the session lands astray on stream 1.
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { perAppHold.entered }
+        backend.setOutputSet([device.id])
+        await pollUntil { wsHold.entered }
+        perAppHold.open()
+        await pollUntil { engine.liveStream(of: device.outputID) == 1 }
+        wsHold.open()
+
+        // The settle's rebind is refused; its retry waits out the backoff.
+        await pollUntil { backend.test_hasPendingRebindRecovery(deviceID: device.id) }
+        #expect(engine.liveStream(of: device.outputID) == 1, "precondition: still astray")
+
+        capture.fireDeviceRateRebuild()
+        engine.rebindRefusals = []
+        retries.fireAll()
+
+        await pollUntil { onAWholeSystemStream(engine, device.outputID) }
+        #expect(onAWholeSystemStream(engine, device.outputID),
+                "the settle's retry must still move the session home")
     }
 
     /// Test 10 (defect found in the final adversarial review): an `.unbind`

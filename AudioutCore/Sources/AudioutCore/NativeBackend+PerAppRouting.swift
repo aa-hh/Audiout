@@ -825,9 +825,12 @@ extension NativeBackend {
                 // (cancels its timer, bumps the generation) and keeps its slot.
                 // Bowing out here made the earlier chain's delayed retry the
                 // only thing that could rebind the device, on that chain's
-                // clock and attempt budget.
+                // clock and attempt budget. Not a verify-first settle, though:
+                // this chain's flush would succeed on the per-app stream that
+                // settle exists to move the session off.
                 let supersedesBackoff = self.rebindConverging.contains(deviceID)
                     && self.pendingRebindRecoveries[deviceID] != nil
+                    && self.pendingRebindIsVerifyFirst[deviceID] != true
                 guard !self.converging.contains(deviceID) || supersedesBackoff else {
                     Telemetry.log(.airplay, "whole_system_rebind_skipped", [
                         "device": deviceID, "reason": "already_converging",
@@ -1094,6 +1097,7 @@ extension NativeBackend {
                 }
                 self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                 self.pendingRebindRecoveries[deviceID] = work
+                self.pendingRebindIsVerifyFirst[deviceID] = verifyFirst
                 self.delayClock(delay, .global(), work)
                 return .none // still in progress — keep the `converging` slot held
             }

@@ -22,11 +22,11 @@ import QuartzCore
 /// host row) to place the rail's gap (on-spine) or detour arc (off-spine).
 ///
 /// **Node vocabulary (v4 §Call-1, the static states the energize agent drives):**
-/// `.member` (filled gold — connected member), `.connecting` (gold dashed
-/// hollow), `.failed` (failure-red ring), `.nonMember` (hollow, detoured).
-/// The energize "pending" beat has NO node form of
-/// its own — an ember dashed rim is indistinguishable from the gold dashed one
-/// at node size, so the beat renders as `.connecting`. **Rail segment tone:**
+/// `.member` (filled gold — connected member), `.connecting` (`ember` dashed
+/// hollow, the same colour the glyph ring wears while connecting),
+/// `.failed` (failure-red ring), `.nonMember` (hollow, detoured).
+/// The energize "pending" beat has NO node form of its own; it renders as
+/// `.connecting`. Every node rim strokes at `ringStrokeWidth`. **Rail segment tone:**
 /// GOLD through a connected member, `ember` otherwise — ember survives as a
 /// SEGMENT tone only, which is where Call 3's energize sequence reads.
 ///
@@ -44,8 +44,8 @@ public final class MembershipBusView: NSView {
         /// running straight through it in gold (spec §Call-1 "member / connected
         /// = filled gold").
         case member
-        /// A member whose session is establishing — a HOLLOW node with a GOLD
-        /// DASHED rim (spec §Call-1 "connecting = gold dashed"). The controls
+        /// A member whose session is establishing — a HOLLOW node with an
+        /// `ember` DASHED rim, matching the glyph ring beside it. The controls
         /// render muted (not adjustable yet). The energize "press-play" beat
         /// (v4.1 item 9) also renders here: a host-raised
         /// `DeviceRowView.energizePending` on a still-`.off` member draws this
@@ -103,7 +103,7 @@ public final class MembershipBusView: NSView {
     /// live signal path and keep their gold unchanged.
     private var armed = true
     /// Whether a dimmed `.member`'s rim draws at `busNodeDimmedRimWidth`
-    /// instead of the standard `busNodeRimWidth`. Off by default — the
+    /// instead of the standard `ringStrokeWidth`. Off by default — the
     /// popover's dimmed member is a CONFIGURATION divergence (a checked
     /// device outside the active Main Out target, still fully reachable), and
     /// doesn't need the extra weight. `MembershipRowView` (the Groups editor)
@@ -270,7 +270,7 @@ public final class MembershipBusView: NSView {
                 NSBezierPath(ovalIn: rect).fill()
                 strokeNodeRim(in: rect, color: rim, dashed: false)
             } else {
-                // Hollow node: connecting = gold dashed, failed = heavier
+                // Hollow node: connecting = ember dashed, failed =
                 // failure-red ring, non-member/blocked = plain ember rim.
                 // `dimmed` has nothing to reach here — there is no fill.
                 strokeNodeRim(in: rect, color: rimColor(for: node),
@@ -281,14 +281,9 @@ public final class MembershipBusView: NSView {
 
     /// Stroke a node's rim (hollow node border, or the filled node's edge).
     private func strokeNodeRim(in rect: NSRect, color: NSColor, dashed: Bool) {
-        let width: CGFloat
-        if node == .failed {
-            width = PopoverColumnGrid.haloRingFailedStroke
-        } else if node == .member, dimmed, emphasizesDimmedMemberRim {
-            width = PopoverColumnGrid.busNodeDimmedRimWidth
-        } else {
-            width = PopoverColumnGrid.busNodeRimWidth
-        }
+        let width = node == .member && dimmed && emphasizesDimmedMemberRim
+            ? PopoverColumnGrid.busNodeDimmedRimWidth
+            : PopoverColumnGrid.ringStrokeWidth
         let rim = NSBezierPath(ovalIn: rect.insetBy(dx: width / 2, dy: width / 2))
         rim.lineWidth = width
         if dashed {
@@ -301,12 +296,7 @@ public final class MembershipBusView: NSView {
 
     /// The rim colour for a hollow node. Never dimmed: the rim is the rail's.
     private func rimColor(for node: Node) -> NSColor {
-        switch node {
-        case .connecting:              return Tokens.Color.gold
-        case .failed:                  return Tokens.Color.failure
-        case .nonMember, .member,
-             .origin:                  return Tokens.Color.ember
-        }
+        node == .failed ? Tokens.Color.failure : Tokens.Color.ember
     }
 
     /// Whether a node's rim is dashed (the "incomplete" connecting form).

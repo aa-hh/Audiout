@@ -22,6 +22,7 @@ colors:
   emberText: "#A98341"
   inkOnFill: "#171104"
   ring: "#7FB4C4"
+  ringConnected: "#7FB4C4"
   failure: "#D9564A"
   muted: "#8E93F0"
   equalizer: "#41B07A"
@@ -725,6 +726,32 @@ clipped mid-word — to about "Unava". The owner chose the consistent version on
 draws the same bare glyph. This knowingly retires the Bluetooth-UI rule that
 "Connected elsewhere" and "Not paired" must read distinctly ON THE ROW; they
 still read apart, on the tooltip and in the spoken value.
+
+### Connection Ring and Status Dot (Mixer rows)
+Owner's rulings, 2026-10-03. Every ring on a Mixer row strokes at one width,
+`PopoverColumnGrid.ringStrokeWidth` (1.6 pt): the glyph ring in every form,
+Main Audio's ring, and the rail's node circles. Weight never carries state;
+colour and dash do. Connecting is dashed `ember` on both the glyph ring and
+the rail node, so one row never shows connecting in two colours. The
+connecting pulse only grows the ring outward from its resting radius
+(`haloRingBreathGrowth`), so it never crosses the glyph.
+
+The status dot shows only for a speaker that is connected and in the mix.
+Playing is a `gold` disc with a 1 pt `ember` edge; connected but muted is a
+hollow ring in `ringConnected`. Every other state has no dot.
+
+`ringConnected` is the connected glyph ring's own colour token, read by that
+ring and by the hollow dot, so changing it is one line in `Tokens.swift`. Its
+hexes start equal to `ring`'s steel blue but it is a separate token, so `ring`
+stays fenced to the wizard's reference light and the system banner. Main
+Audio's connected ring keeps the rail's spine tone instead.
+
+Row glyphs are sized and optically centred per symbol by one table,
+`DeviceIcon.rowGlyphFits`, drawn by `DeviceIcon.rowGlyph` (derivation in
+`dev/notes/ring-glyph-optical-table-2026-10-03.md`). The dot sits on a 10.5 pt cut-out in the popover ground (`panel`,
+plus the row's 12 % gold wash when the row paints one), so it reads as a
+badge over the glyph. Main Audio's ring now strokes at 1.6 pt against the
+rail's 2 pt `busLineWidth` where the two meet.
 
 ### Group Row and Membership Rail (Groups, signature component)
 `GroupIdentityGlowView` sits behind every group seat, active or not, drawn

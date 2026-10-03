@@ -188,9 +188,14 @@ public final class DeviceRowView: NSView {
     /// The **gold route-armed corner dot** (Warm Signal v3 §3.3, S2) at the
     /// icon's bottom-right — the position the retired connection dot vacated.
     /// PURE MODEL STATE, never RMS: lit iff the §3.3 predicate holds (see
-    /// `routeArmed(...)` in ``apply``); dark/empty socket otherwise. Paused
+    /// `routeArmed(...)` in ``apply``); a hollow ring when connected and in
+    /// the mix but not armed; hidden otherwise. Paused
     /// and playing render identically here (R3 — only the meter differs).
-    let armedDotView = RouteArmedDotView()
+    let armedDotView: RouteArmedDotView = {
+        let dot = RouteArmedDotView()
+        dot.armedRowWashes = true   // `draw(_:)` paints the gold wash while armed
+        return dot
+    }()
     /// Whether the MASTER (Main Out) mute is currently engaged — folded into
     /// the route-armed predicate (spec §3.3: master mute drains EVERY device
     /// dot) and into the meter's mute-coerce gate. Host-supplied via `apply`.
@@ -590,13 +595,7 @@ public final class DeviceRowView: NSView {
         // `DeviceIcon.resolve` short-circuits on a `nil` override — so behavior
         // is unchanged unless a caller passes an explicit override name.
         let resolvedSymbolName = DeviceIcon.resolve(iconSymbolName, default: device.kind.symbolName)
-        iconView.image = NSImage(
-            systemSymbolName: resolvedSymbolName,
-            accessibilityDescription: device.name
-        )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
-                                        weight: .regular)
-        )
+        iconView.image = DeviceIcon.rowGlyph(resolvedSymbolName)
         // The icon is ALWAYS neutral: identity only, no
         // accent-when-selected fill. Selection reads from the switch state; the
         // on-icon corner dot carries the connection status instead. (This also
@@ -637,7 +636,11 @@ public final class DeviceRowView: NSView {
         let mainMixArmed = activeMember && isConnected && !device.isMuted && !masterMuted
         isMainMixArmed = mainMixArmed
         isRouteArmed = mainMixArmed || hasLiveFeeds
-        armedDotView.apply(armed: isRouteArmed)
+        // The dot shows only for a connected speaker carrying the mix (the
+        // main mix or a per-app feed): gold while armed, a hollow
+        // `ringConnected` ring while muted. Anything else has no dot.
+        armedDotView.apply(armed: isRouteArmed,
+                           shown: isConnected && (activeMember || hasLiveFeeds))
         nameLabel.textColor = rowTextColor
 
         // FEED column (v4.1 item 3): main-mix segment wording — "System" for a
@@ -856,7 +859,7 @@ public final class DeviceRowView: NSView {
             node = .connecting
         } else if selected {
             // Selected members key their node off the CONNECTION state (v4
-            // §Call-1 node vocabulary): connecting/reconnecting → gold dashed;
+            // §Call-1 node vocabulary): connecting/reconnecting → ember dashed;
             // failed → failure-red ring; connected/idle → filled gold.
             switch device.connectionState {
             case .connecting, .reconnecting: node = .connecting

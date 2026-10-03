@@ -312,9 +312,7 @@ public final class MembershipRowView: NSView {
         // view property. The row's own a11y label (below) already speaks the
         // device name, so the glyph carries no description of its own.
         let symbolName = DeviceIcon.resolve(iconSymbolName, default: device.kind.symbolName)
-        iconView.image = DeviceIcon.image(symbolName,
-                                          pointSize: PopoverColumnGrid.iconGlyphPointSize,
-                                          weight: .regular)
+        iconView.image = DeviceIcon.rowGlyph(symbolName)
 
         nameLabel.stringValue = device.name
         applyInk()

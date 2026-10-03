@@ -156,13 +156,6 @@ public enum Tokens {
         /// (`Tokens.Material.windowBackground`/`popover`) while Reduce
         /// Transparency is on.
         public static var windowBackground: NSColor { .windowBackgroundColor }
-        /// The color a decorative punch-out border is drawn in so a corner badge
-        /// reads as separate from what's behind it. Alias of
-        /// `NSColor.underPageBackgroundColor`. (Its former consumer, the corner
-        /// connection dot `StatusDotView`, was retired for the halo ring in S1;
-        /// the gold route-armed corner dot in a later task, spec §3.3, re-adopts
-        /// this punch-out border.)
-        public static var underPageBackground: NSColor { .underPageBackgroundColor }
         /// Hover/selection wash background for list rows (`AppRowView`,
         /// `DeviceRowView`). Alias of
         /// `NSColor.selectedContentBackgroundColor`.
@@ -318,6 +311,22 @@ public enum Tokens {
         public static var rim: NSColor {
             warmDynamic(name: "rim", dark: 0x6B767D, darkHighContrast: 0x818B90,
                        light: 0x66717A, lightHighContrast: 0x586269)
+        }
+
+        /// The connected glyph ring's colour on a device row, and the
+        /// not-playing status dot's hollow ring, which must always match it.
+        /// Both read this one token, so changing the connected-ring colour is
+        /// this one line. Its own token, not an alias: the hexes start equal
+        /// to ``ring``'s steel blue (owner's ruling, 2026-10-03) and are
+        /// expected to move apart from it without moving the wizard or the
+        /// system banner.
+        ///
+        /// CONTRAST RATIONALE (measured; floor 3:1): light `#2C6E86` = 5.47:1
+        /// on the flat ground, IC `#265E73` = 6.87:1; dark `#7FB4C4` = 7.89:1
+        /// on `panel`, IC `#9FC7D3` = 8.70:1 on `raised`.
+        public static var ringConnected: NSColor {
+            warmDynamic(name: "ringConnected", dark: 0x7FB4C4, darkHighContrast: 0x9FC7D3,
+                       light: 0x2C6E86, lightHighContrast: 0x265E73)
         }
 
         /// The under-name level meter's EMPTY-track fill (`LevelMeterView`'s
@@ -783,11 +792,11 @@ public enum Tokens {
                        light: 0x171104, lightHighContrast: 0xFFFFFF)
         }
 
-        /// The **dark/empty socket** an unlit instrument rests in. Two
-        /// consumers, same meaning: the route-armed dot when nothing is armed
-        /// (spec §3.3), and the membership node's disc when the row is dimmed
-        /// (`MembershipBusView`'s `dimmed`) — in both, the seat stays and the
-        /// gold is lifted out of it. Because it is always ringed, it is
+        /// The **dark/empty socket** an unlit instrument rests in: the
+        /// membership node's disc when the row is dimmed (`MembershipBusView`'s
+        /// `dimmed`) — the seat stays and the gold is lifted out of it. (The
+        /// route-armed dot stopped using it on 2026-10-03: a not-playing dot is
+        /// now a hollow `ringConnected` ring.) Because it is always ringed, it is
         /// measured against the tone that rings it rather than the ground
         /// behind it.
         ///

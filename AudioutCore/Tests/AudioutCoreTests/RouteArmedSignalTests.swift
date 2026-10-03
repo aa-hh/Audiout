@@ -9,7 +9,7 @@ import AudioutCore
 /// S2+S3 coverage (Warm Signal v3 §3.3 / §3.5): the **route-armed corner
 /// dot**'s normative predicate — walked as a truth table over
 /// member × connected × rowMute × masterMute × liveApps — plus the paused
-/// test (R3: the dot is pure model state, never RMS), the dot's gold/socket
+/// test (R3: the dot is pure model state, never RMS), the dot's gold/hollow
 /// hues and static glow, the arm bloom's gating, the Main Out row's dot, the
 /// **mute channel** (engaged pill, ballistic meter drain, MUTED sublabel
 /// token with no reflow), the warm meter gradient (ember → gold,
@@ -140,7 +140,7 @@ import AudioutCore
         #expect(!(dark.test_routeArmed), "RMS can never light a dot the model didn't arm")
     }
 
-    // MARK: Dot rendering — flat gold armed, dark socket at rest
+    // MARK: Dot rendering — gold armed, hollow when muted, hidden otherwise
 
     @Test func armedDotIsGoldWithNoHalo() {
         let row = DeviceRowView(device: makeDevice())
@@ -149,11 +149,23 @@ import AudioutCore
         #expect(!(row.test_dotIsBlooming), "no transient on a first render — steady states render settled (spec §6)")
     }
 
-    @Test func unarmedDotIsTheSocket() {
-        let row = DeviceRowView(device: makeDevice())
-        row.apply(makeDevice(), selected: false)
-        assertSameHue(row.test_dotFillColor, Tokens.Color.socket,
-                      "not armed renders the dark/empty socket, not an absence")
+    @Test func dotIsHiddenUnlessConnectedAndInTheMix() {
+        let outOfMix = DeviceRowView(device: makeDevice())
+        outOfMix.apply(makeDevice(), selected: false)
+        #expect(!outOfMix.test_dotIsShown, "a speaker outside the mix has no dot")
+
+        let connecting = DeviceRowView(device: makeDevice(connectionState: .connecting))
+        connecting.apply(makeDevice(connectionState: .connecting), selected: true)
+        #expect(!connecting.test_dotIsShown, "a connecting speaker has no dot")
+    }
+
+    @Test func mutedConnectedDotIsAHollowRingInTheConnectedRingColour() {
+        let row = DeviceRowView(device: makeDevice(isMuted: true))
+        row.apply(makeDevice(isMuted: true), selected: true)
+        #expect(row.test_dotIsShown, "connected and in the mix keeps the dot")
+        #expect(row.test_dotFillColor == nil, "not playing is hollow")
+        assertSameHue(row.test_dotStrokeColor, Tokens.Color.ringConnected,
+                      "the hollow dot follows the connected ring's colour token")
     }
 
     // MARK: Arm bloom — only on a transition INTO armed while visible

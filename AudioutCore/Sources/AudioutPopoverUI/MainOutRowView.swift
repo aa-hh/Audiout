@@ -88,16 +88,15 @@ public final class MainOutRowView: NSView {
     /// §3.2 Main Out note): reflects the AGGREGATE connection lifecycle of the
     /// active Audio Out target's members — **pending** (dashed breathing) during
     /// a destination-switch handshake so the multi-second gap never reads as
-    /// dead/broken (spec §6), **connected** (solid `ringConnected`) once ≥1
+    /// dead/broken (spec §6), **connected** (solid, the rail's spine tone) once ≥1
     /// member is live, no ring when idle. The host computes the aggregate and
     /// passes it to ``apply(options:current:master:isMuted:connectionState:)``.
     private let haloRingView: HaloRingView = {
         let ring = HaloRingView()
-        // Bespoke terminus sizing (Warm Signal nitpicks — Main Audio's ring is
-        // the rail's terminus, not a peer of the device rows' rings): matches
-        // the rail's own stroke weight so the join reads as one line.
+        // Bespoke terminus size (Warm Signal nitpicks — Main Audio's ring is
+        // the rail's terminus, not a peer of the device rows' rings). Its
+        // stroke is the shared `ringStrokeWidth`, like every other ring.
         ring.diameterOverride = PopoverColumnGrid.mainAudioRingDiameter
-        ring.connectedStrokeWidthOverride = PopoverColumnGrid.mainAudioRingConnectedStroke
         return ring
     }()
     /// The **gold route-armed corner dot** on the Main Out icon (Warm Signal
@@ -237,7 +236,9 @@ public final class MainOutRowView: NSView {
         // uses, at stamp time, so the two cannot drift and the accent dial
         // moves both.
         haloRingView.connectedSpineArmed = isSpineLive
-        armedDotView.apply(armed: armed)
+        // Shown only while a member is connected: gold while the master
+        // plays, a hollow `ringConnected` ring while it is muted.
+        armedDotView.apply(armed: armed, shown: isConnected)
         // The master fader's engaged (gold) fill reuses the EXACT same armed
         // predicate the dot renders — one armed truth, two instruments.
         faderCell.isRouteArmed = armed
@@ -369,16 +370,9 @@ public final class MainOutRowView: NSView {
         // screen's Main Audio page: `DeviceIcon.mainAudioSymbolName` owns the
         // owner's `hifispeaker.arrow.forward.fill` and its below-macOS-15
         // fallback, so the two surfaces can never draw different speakers.
-        // Match the device rows' glyph sizing (2026-07-17): size the symbol to
-        // fill the shared 26pt icon box so the Main Out icon reads at the same
-        // scale as the device icons below it (without a config it renders at the
-        // small default size and floats in a big box).
-        let iconConfig = NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
-                                                     weight: .regular)
+        // Sized and centred by the same table as the device rows' glyphs.
         iconView.imageScaling = .scaleProportionallyDown
-        iconView.image = NSImage(systemSymbolName: DeviceIcon.mainAudioSymbolName,
-                                 accessibilityDescription: "Main Audio")?
-            .withSymbolConfiguration(iconConfig)
+        iconView.image = DeviceIcon.rowGlyph(DeviceIcon.mainAudioSymbolName)
         // The icon is the visible door to this row's menu. Main Audio always
         // has an Equalizer, so unlike a device row it is armed once, here, and
         // never disarmed.
@@ -795,7 +789,7 @@ public final class MainOutRowView: NSView {
 
     /// Whether the master slider is wearing the Warm fader skin (structural).
     public var test_hasWarmFaderSkin: Bool { slider.cell is WarmFaderCell }
-    /// The dot's current fill color (resolved) — gold armed / socket dark.
+    /// The dot's current fill color (resolved) — gold armed, `nil` (hollow) otherwise.
     public var test_dotFillColor: NSColor? { armedDotView.test_fillColor }
     /// Whether the master-mute button is drawing its ENGAGED symbol — a
     /// raster comparison against the same symbol built from the same ink,

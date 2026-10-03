@@ -17,25 +17,25 @@ import AudioutCore
 ///   the caller passes `restingArmed: true` (Main Audio only — see
 ///   `apply(_:restingArmed:)`), in which case it renders the **resting**
 ///   form instead.
-/// - `.connecting` / `.reconnecting` → **dashed ring, breathing** (opacity +
-///   scale pulse). Under Reduce Motion the dashed FORM survives, STATIC (no
-///   animation) — "incomplete", legible frozen. The steel-blue `ring` token:
-///   the connecting form carries colour as well as dash.
-/// - `.connected` → **solid quiet ring**, the shared cool `rim` token,
-///   stroke ~1.6 pt. Tested ≥3:1 vs the panel at `haloRingDiameter`
-///   (26 px, Warm Signal v4.1 item 2), both themes.
-/// - `.failed` → **red solid ring**, `failure` token, stroke ~1.8 pt (heavier so
-///   the failed row wins the scan beside flickering meters).
+/// - `.connecting` / `.reconnecting` → **dashed `ember` ring, breathing**
+///   (opacity + radius pulse that only ever GROWS the ring outward from its
+///   resting radius, so it can never touch the glyph). Under Reduce Motion
+///   the dashed FORM survives, STATIC (no animation) — "incomplete", legible
+///   frozen. `ember` is the same colour the rail's connecting node wears, so
+///   one row never shows connecting in two colours.
+/// - `.connected` → **solid quiet ring**, `Tokens.Color.ringConnected`.
+///   Tested ≥3:1 vs the panel at `haloRingDiameter`, both themes.
+/// - `.failed` → **red solid ring**, `failure` token.
 /// - **`.resting`** (Main Audio only) — a rail exists (speakers are selected
 ///   and not failed) but no member has connected, so `connectionState` is
 ///   `.off` (the `mainOutConnectionState` fallthrough is correct and
 ///   untouched). Without this form the rail's curve into the ring
 ///   (`BusRailOverlayView`) lands on a hidden ring and reads as unfinished.
 ///   Wears the rail's own ink through `connectedSpineArmed`, exactly as
-///   `.connected` does, at the SHARED `haloRingConnectedStroke` (1.6 pt) —
-///   thinner than Main Audio's bespoke `mainAudioRingConnectedStroke` (2 pt,
-///   matched to the rail's `busLineWidth`), so the STROKE is what separates it
-///   from a real remote `.connected` ring, never the colour.
+///   `.connected` does; the rail's own tone is what tells the two apart.
+///
+/// Every form strokes at the one shared `PopoverColumnGrid.ringStrokeWidth`
+/// (owner's ruling, 2026-10-03): weight never carries state.
 ///
 /// Geometry comes from `PopoverColumnGrid` NAMED CONSTANTS (`haloRingDiameter`,
 /// stroke widths, dash lengths, breathing timing) so a future density setting
@@ -73,14 +73,12 @@ public final class HaloRingView: NSView {
         /// `.connecting` / `.reconnecting` — dashed, breathing (static under
         /// Reduce Motion).
         case connecting
-        /// `.connected` — solid quiet ring, `rim`.
+        /// `.connected` — solid quiet ring, `ringConnected`.
         case connected
-        /// `.failed` — solid red ring, `failure`, heavier stroke.
+        /// `.failed` — solid red ring, `failure`.
         case failed
         /// Main Audio only: the rail exists but nothing has connected
-        /// (`state == .off && restingArmed == true`) — the rail's own ink at
-        /// the shared (thinner) `haloRingConnectedStroke`, so the stroke is
-        /// what distinguishes it from a real `.connected` ring.
+        /// (`state == .off && restingArmed == true`) — the rail's own ink.
         case resting
     }
 
@@ -113,21 +111,13 @@ public final class HaloRingView: NSView {
     public var diameterOverride: CGFloat? {
         didSet { needsLayout = true }
     }
-    /// Bespoke stroke-width override for the **connected** form only (Warm
-    /// Signal nitpicks — the Main Audio ring's stroke is set to match the
-    /// rail's own `busLineWidth` so the two read as one continuous line where
-    /// they meet). `nil` keeps the shared per-form widths
-    /// (`haloRingConnectedStroke`/`haloRingConnectingStroke`/`haloRingFailedStroke`).
-    public var connectedStrokeWidthOverride: CGFloat? {
-        didSet { updateLayerAppearance() }
-    }
     /// Makes the **connected** form wear the rail's SPINE TONE instead of the
-    /// shared `rim` token (Warm Signal nitpicks): the Main Audio ring
+    /// shared `ringConnected` token (Warm Signal nitpicks): the Main Audio ring
     /// is the rail's terminus, so its connected color must match whatever tone
     /// the rail's curve is drawn in for the join to read as one continuous line
     /// rather than two different colors touching. `true`/`false` = the spine is
     /// armed / not; `nil` (every device row) keeps the shared
-    /// `Tokens.Color.rim`, untouched by the accent dial.
+    /// `Tokens.Color.ringConnected`, untouched by the accent dial.
     ///
     /// It carries the armed STATE, never a resolved color: the tone itself
     /// comes from `Tokens.Color.spineTone(armed:)` at stamp time — the same
@@ -232,46 +222,30 @@ public final class HaloRingView: NSView {
         updateLayerAppearance()
     }
 
-    /// Resolve the stroke color + width + dash pattern for the current form and
-    /// stamp them on the layer against the current effective appearance. `CALayer`
+    /// Resolve the stroke color + dash pattern for the current form and stamp
+    /// them on the layer against the current effective appearance. `CALayer`
     /// colors are static `CGColor`s, so this must re-run on every appearance
     /// change, not just at build time.
     private func updateLayerAppearance() {
         let strokeToken: NSColor
-        let width: CGFloat
-        let dashed: Bool
         switch form {
         case .none:
             // Hidden anyway; nothing meaningful to stamp.
             strokeToken = .clear
-            width = 0
-            dashed = false
         case .connecting:
-            strokeToken = Tokens.Color.ring
-            width = PopoverColumnGrid.haloRingConnectingStroke
-            dashed = true
-        case .connected:
+            strokeToken = Tokens.Color.ember
+        case .connected, .resting:
+            // The resting ring appears exactly when the rail does, so it wears
+            // the rail's own ink, as Main Audio's connected ring does. A grey
+            // rim there while the wire curving into it was gold read as two
+            // unrelated things touching.
             strokeToken = connectedSpineArmed.map(Tokens.Color.spineTone(armed:))
-                ?? Tokens.Color.rim
-            width = connectedStrokeWidthOverride ?? PopoverColumnGrid.haloRingConnectedStroke
-            dashed = false
+                ?? Tokens.Color.ringConnected
         case .failed:
             strokeToken = Tokens.Color.failure
-            width = PopoverColumnGrid.haloRingFailedStroke
-            dashed = false
-        case .resting:
-            // The resting ring appears exactly when the rail does, so it wears
-            // the rail's own ink — the same resolution the `.connected` branch
-            // above uses. A grey rim here while the wire curving into it was
-            // gold read as two unrelated things touching. The THINNER stroke is
-            // what still separates resting from connected; only the colour is
-            // shared.
-            strokeToken = connectedSpineArmed.map(Tokens.Color.spineTone(armed:))
-                ?? Tokens.Color.rim
-            width = PopoverColumnGrid.haloRingConnectedStroke
-            dashed = false
         }
-        ringLayer.lineWidth = width
+        let dashed = form == .connecting
+        ringLayer.lineWidth = form == .none ? 0 : PopoverColumnGrid.ringStrokeWidth
         ringLayer.lineDashPattern = dashed
             ? [NSNumber(value: Double(PopoverColumnGrid.haloRingDashLength)),
                NSNumber(value: Double(PopoverColumnGrid.haloRingDashGap))]
@@ -306,9 +280,9 @@ public final class HaloRingView: NSView {
     /// opposite of the visual sense `clockwise` carries in a flipped
     /// (y-down) view. Proven by `HaloRingGapTests`, which asserts the LONG
     /// (290°) side is what actually gets stroked.
-    private func ringPath(in rect: NSRect) -> CGPath {
+    private func ringPath(in rect: NSRect, growth: CGFloat = 0) -> CGPath {
         let center = CGPoint(x: rect.midX, y: rect.midY)
-        let radius = rect.width / 2
+        let radius = rect.width / 2 + growth
         let halfGap = PopoverColumnGrid.haloRingGapWidth / 2
         let startAngle = PopoverColumnGrid.haloRingGapCenterAngle + halfGap
         let endAngle = startAngle + (2 * .pi - PopoverColumnGrid.haloRingGapWidth)
@@ -326,10 +300,17 @@ public final class HaloRingView: NSView {
         // inscribed circle, open across the permanent gap.
         ringLayer.frame = bounds
         ringLayer.path = ringPath(in: ringRect)
-        // Scale animation pulses about the ring's own center.
-        ringLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-        ringLayer.frame = bounds
+        // The breathing pulse animates between paths built from the ring's
+        // box; only a box that actually moved rebuilds it, so an unrelated
+        // layout pass never restarts a breath.
+        if ringRect != breathRect {
+            ringLayer.removeAnimation(forKey: Self.breathKey)
+            reconcileBreathing()
+        }
     }
+
+    /// The ring box the installed breathing pulse was built from.
+    private var breathRect: NSRect = .zero
 
     // MARK: Breathing pulse (connecting / reconnecting)
 
@@ -357,12 +338,19 @@ public final class HaloRingView: NSView {
         opacity.fromValue = PopoverColumnGrid.statusDotBreathMinOpacity
         opacity.toValue = 1.0
 
-        let scale = CABasicAnimation(keyPath: "transform.scale")
-        scale.fromValue = PopoverColumnGrid.statusDotBreathMinScale
-        scale.toValue = 1.0
+        // The radius breathes OUT from the resting circle and back, never in:
+        // a ring that shrank toward the glyph would cut through it. Animating
+        // the path (not `transform.scale`) keeps the stroke at
+        // `ringStrokeWidth` and the dashes at their own length through the
+        // whole breath.
+        let radius = CABasicAnimation(keyPath: "path")
+        radius.fromValue = ringPath(in: ringRect, growth: PopoverColumnGrid.haloRingBreathGrowth)
+        radius.toValue = ringPath(in: ringRect)
+
+        breathRect = ringRect
 
         let group = CAAnimationGroup()
-        group.animations = [opacity, scale]
+        group.animations = [opacity, radius]
         group.duration = PopoverColumnGrid.statusDotBreathDuration
         group.autoreverses = true
         group.repeatCount = .infinity
@@ -473,9 +461,24 @@ public final class HaloRingView: NSView {
         return NSColor(cgColor: cg)
     }
 
-    /// The ring's current stroke width — lets tests assert the failed ring's
-    /// heavier weight vs the connected ring.
+    /// The ring's current stroke width.
     public var test_lineWidth: CGFloat { ringLayer.lineWidth }
+
+    /// The radii the breathing pulse's path animation moves between (empty
+    /// when not breathing) — read off the installed animation itself.
+    public var test_breathRadii: [CGFloat] {
+        guard let group = ringLayer.animation(forKey: Self.breathKey) as? CAAnimationGroup,
+              let path = group.animations?.first(where: { ($0 as? CABasicAnimation)?.keyPath == "path" })
+                as? CABasicAnimation
+        else { return [] }
+        return [path.fromValue, path.toValue].compactMap { value in
+            guard let value, CFGetTypeID(value as CFTypeRef) == CGPath.typeID else { return nil }
+            return (value as! CGPath).boundingBoxOfPath.width / 2
+        }
+    }
+
+    /// The resting ring's radius (stroke centreline).
+    public var test_restingRadius: CGFloat { ringRect.width / 2 }
 
     /// Whether the rail-arrival bloom is currently mounted on the ring
     /// (present the instant ``receiveRailPulse()`` returns — no run loop needed).

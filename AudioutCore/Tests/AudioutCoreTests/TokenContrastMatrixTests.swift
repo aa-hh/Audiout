@@ -209,6 +209,10 @@ extension SerializedSharedState {
                          groundsFor: sameGrounds([("panel", panel), ("raised", raised), ("well", well)])),
             ContrastEntry(name: "ring", token: Tokens.Color.ring, floor: 3.0,
                          groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
+            // The connected glyph ring and the not-playing status dot; its
+            // light value is due to change, and must still clear 3:1.
+            ContrastEntry(name: "ringConnected", token: Tokens.Color.ringConnected, floor: 3.0,
+                         groundsFor: sameGrounds([("canvas", canvas), ("panel", panel), ("raised", raised)])),
             // The mute pill is OPAQUE, so it is measured on every ground a
             // device row can put behind it — at rest, live-washed, hovered.
             ContrastEntry(name: "muted", token: Tokens.Color.muted, floor: 3.0,
@@ -327,9 +331,8 @@ extension SerializedSharedState {
 
     // MARK: - Test D: the unlit seat vs the ring around it
 
-    /// `socket` fills two instruments that are always RINGED — the
-    /// route-armed dot on its icon corner, and a dimmed membership node inside
-    /// the rail's own rim — so the pairing that decides whether it reads is
+    /// `socket` fills an instrument that is always RINGED — a dimmed
+    /// membership node inside the rail's own rim — so the pairing that decides whether it reads is
     /// seat-vs-ring, not seat-vs-ground. It carries no ground floor by design
     /// (Tokens.swift), so nothing else in this matrix measures it at all.
     ///

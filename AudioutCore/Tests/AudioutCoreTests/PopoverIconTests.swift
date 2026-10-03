@@ -99,9 +99,7 @@ import AppKit
     /// Reconstructs the exact `NSImage` `DeviceRowView.apply` renders for
     /// `symbolName`, so a row's actual icon can be compared against it.
     private func expectedDeviceIcon(symbolName: String, deviceName: String) -> NSImage? {
-        NSImage(systemSymbolName: symbolName, accessibilityDescription: deviceName)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
-                                                                  weight: .regular))
+        DeviceIcon.rowGlyph(symbolName)
     }
 
     // MARK: Device row — override injected

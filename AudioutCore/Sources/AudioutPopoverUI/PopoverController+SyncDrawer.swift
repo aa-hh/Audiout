@@ -159,8 +159,8 @@ extension PopoverController {
         return btTrimRangeProvider?(id) ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
     }
 
-    /// Apply one trim edit from the drawer. `persist == false` is a live ruler
-    /// scrub (D6): the audio path takes it, the JSON store does not. The
+    /// Apply one trim edit from the drawer. `persist == false` is one tick of
+    /// a held stepper or arrow key: the audio path takes it, the JSON store does not. The
     /// session cache updates either way, so the row's chip tracks the scrub
     /// digit by digit.
     private func applyBTTrim(_ ms: Double, deviceID id: String, persist: Bool) {
@@ -172,9 +172,9 @@ extension PopoverController {
         // 0.0 must read "0.0 ms", never flip the chip back to "Not set".
         btTunedDeviceIDs.insert(id)
         if devicesByID[id]?.isLocalDevice == true {
-            // No `persist` distinction locally: the drawer emits only committed
-            // gestures, and the one closure both stores the value and triggers
-            // the live apply.
+            // No `persist` distinction locally: the one closure both stores the
+            // value and triggers the live apply, so a held stepper's live ticks
+            // store too. Only the analytics below wait for the commit.
             onSetLocalTrim?(value)
         } else if isCast {
             // Same posture as the local closure, and for the same reason.

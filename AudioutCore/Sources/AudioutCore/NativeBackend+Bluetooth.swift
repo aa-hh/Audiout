@@ -1842,14 +1842,14 @@ extension NativeBackend: BTOutputControlling {
                 return
             }
             let preparationSeconds = self.companionAuditionPreparationSeconds
-            DispatchQueue.main.asyncAfter(deadline: .now() + preparationSeconds) { [weak self] in
+            self.delayClock(preparationSeconds, .main, DispatchWorkItem { [weak self] in
                 self?.failCompanionAuditionPreparation(id: id,
                     reason: "Starting the speaker clicks took too long. Try again.")
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + self.companionAuditionLeaseSeconds) {
+            })
+            self.delayClock(self.companionAuditionLeaseSeconds, .main, DispatchWorkItem {
                 [weak self] in self?.beginCompanionAuditionCleanup(id: id,
                     reason: "The speaker click session ended.")
-            }
+            })
             self.stateQueue.async {
                 self.companionTickParticipants = [targetID, referenceID]
                 let btUIDs = Array(self.btSelectedUIDs)
@@ -2097,9 +2097,9 @@ extension NativeBackend: BTOutputControlling {
         setBTWizardTickActive(false, btTargetDeviceID: nil, btReferenceDeviceID: nil)
         endBTWizardRun()
         btTrimLock.withLock { companionProgramSuppressed = false }
-        DispatchQueue.main.asyncAfter(deadline: .now() + companionAuditionStopSeconds) { [weak self] in
+        delayClock(companionAuditionStopSeconds, .main, DispatchWorkItem { [weak self] in
             self?.timeoutCompanionAuditionStop(id: id)
-        }
+        })
         stateQueue.async {
             self.companionTickParticipants = nil
             for uid in self.btSelectedUIDs { self.pushBTSinkGainLocked(uid) }

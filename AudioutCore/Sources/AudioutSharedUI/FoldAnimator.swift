@@ -77,6 +77,19 @@ public final class FoldAnimator: NSObject {
     /// Test seam for Reduce Motion (`nil` = the live system setting).
     public var test_reduceMotionOverride: Bool?
 
+    /// Where a hand-driven fold reads its time, or `nil` for the shipping
+    /// driver: `CACurrentMediaTime` and its own display-link clock. A test
+    /// passes its own time and calls ``test_tick()``, so no fold waits on a
+    /// display that may be asleep (the link stops ticking while it is).
+    private let handClock: (() -> CFTimeInterval)?
+
+    private var now: CFTimeInterval { handClock?() ?? CACurrentMediaTime() }
+
+    init(handClock: (() -> CFTimeInterval)? = nil) {
+        self.handClock = handClock
+        super.init()
+    }
+
     private var reduceMotion: Bool {
         test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
@@ -104,7 +117,7 @@ public final class FoldAnimator: NSObject {
         tweens.append(Tween(constraint: constraint,
                             start: constraint.constant,
                             target: target,
-                            startTime: CACurrentMediaTime(),
+                            startTime: now,
                             follower: follower,
                             completion: completion))
         // Sample tick 0 in the caller's own turn: the surface has to be sized
@@ -117,7 +130,7 @@ public final class FoldAnimator: NSObject {
         // vanishingly small. Upgrade path: observe
         // `accessibilityDisplayOptionsDidChangeNotification` and settle the
         // in-flight tweens from it.
-        advance(to: reduceMotion ? .greatestFiniteMagnitude : CACurrentMediaTime())
+        advance(to: reduceMotion ? .greatestFiniteMagnitude : now)
         startClockIfNeeded()
     }
 
@@ -125,8 +138,11 @@ public final class FoldAnimator: NSObject {
     /// runloop time a headless test cannot spend. Same tick order as the clock.
     public func test_settleNow() { advance(to: .greatestFiniteMagnitude) }
 
+    /// Test hook for a hand-driven fold: one tick at the hand clock's time.
+    func test_tick() { advance(to: now) }
+
     private func startClockIfNeeded() {
-        guard link == nil, timer == nil, !tweens.isEmpty else { return }
+        guard handClock == nil, link == nil, timer == nil, !tweens.isEmpty else { return }
         // `.common` mode: a fold started by a mouse-down that is still held (a
         // header-row click) has to keep ticking inside event tracking.
         //
@@ -140,7 +156,7 @@ public final class FoldAnimator: NSObject {
             link = l
         } else {
             let ticker = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.advance(to: CACurrentMediaTime()) }
+                MainActor.assumeIsolated { guard let self else { return }; self.advance(to: self.now) }
             }
             // Let the runloop coalesce these ticks: the fallback clock has no
             // vsync to align to, so exact 120 Hz buys nothing and costs wakeups.
@@ -151,7 +167,7 @@ public final class FoldAnimator: NSObject {
     }
 
     /// Marked `@objc` for the selector-based `NSScreen.displayLink` callback.
-    @objc private func clockDidTick() { advance(to: CACurrentMediaTime()) }
+    @objc private func clockDidTick() { advance(to: now) }
 
     private func stopClock() {
         link?.invalidate()

@@ -345,7 +345,8 @@ extension SerializedSharedState {
         storeDirectory: URL? = nil,
         engine: RecordingEngine? = nil,
         discovery: FakeDiscovery? = nil,
-        perAppCapture: PerAppCaptureCoordinator? = nil
+        perAppCapture: PerAppCaptureCoordinator? = nil,
+        delayClock: @escaping NativeBackend.DelayClock = NativeBackend.dispatchDelayClock
     ) -> (NativeBackend, FakeBTEnumerator, SpyBTSink, EventCollector) {
         let bt = FakeBTEnumerator()
         let backend = NativeBackend(
@@ -357,6 +358,7 @@ extension SerializedSharedState {
             systemVolume: NoOpSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             injectedPerAppCapture: perAppCapture,
+            delayClock: delayClock,
             systemDefaultOutputIsAirPlayClass: { false },
             aggregateControl: NoOpAggregateControl(),
             handoffWatcherFactory: { onBlockedAttempt in
@@ -1006,7 +1008,12 @@ extension SerializedSharedState {
     @Test @MainActor func aFailedUserEditDuringCleanupIsNotBlamedOnTheRestoration() async {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
-        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery)
+        // The audition's deadlines fire only when the test says. This test is
+        // about whose failure the stop reports, and on the wall clock a loaded
+        // run let the 4 s stop deadline expire while the restoration was held.
+        let deadlines = ManualDelayClock()
+        let (backend, bt, _, _) = makeBackend(engine: engine, discovery: discovery,
+                                              delayClock: deadlines.clock)
         defer { engine.releaseWrites(); backend.stop() }
         backend.captureCoordinator = ProbeStagingCapture()
         backend.start()
@@ -1518,6 +1525,10 @@ extension SerializedSharedState {
         #expect(report()?.staleReason == nil)
         #expect(report()?.clockState == .unknown, "a new link, and no verdict on its clock yet")
         #expect(report()?.settleRemainingSeconds == nil)
+        // `BTSpeakerTiming.noteConnected` writes the report under its lock and
+        // fires the change after releasing it, so the report can read
+        // `.fromLastTime` before the callback has run.
+        waitFor { changes.value == base + 2 }
         #expect(changes.value == base + 2)
 
         backend.endBTWizardLatencyPreview(forDevice: uid, keepMs: 300)

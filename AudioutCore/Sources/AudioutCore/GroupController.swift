@@ -211,6 +211,17 @@ public final class GroupController {
     /// deliberate selection that was later cleared to empty.
     private var loadedPersistedRouting = false
 
+    /// How long a restored Bluetooth id may wait to appear in the device snapshot
+    /// before it is dropped from the selection. Bounded so a speaker that is off
+    /// or out of range leaves the selection instead of lingering in it; 30 s
+    /// covers a slow Bluetooth enumeration after the permission grant lands.
+    public var bluetoothRestoreWindow: TimeInterval = 30
+
+    /// Restored Bluetooth ids not yet in the device snapshot, and when they stop
+    /// waiting. See ``settleBluetoothRestore()``.
+    private var pendingBluetoothRestoreIDs: Set<String> = []
+    private var bluetoothRestoreDeadline: Date?
+
     /// Establish the out-of-the-box default once the fleet is known (SPEC §9b):
     /// **Current Device toggled ON**, Main Out = Selected Devices ⇒ passthrough.
     /// No-op once established or if a selection already exists. The app calls
@@ -224,7 +235,12 @@ public final class GroupController {
     /// volume, so the gain is pushed with `mirrorToSystemVolume: false` and no
     /// hardware write happens at launch. (`init` deliberately reads nothing back;
     /// see the decision note there.)
+    ///
+    /// A restored Bluetooth id that is not yet discovered waits up to
+    /// ``bluetoothRestoreWindow`` to appear, is applied and connected when it
+    /// does, and is dropped from the selection if it never does.
     public func ensureDefaultSelection() {
+        settleBluetoothRestore()
         guard !loadedPersistedRouting, selectedDeviceIDs.isEmpty else { return }
         guard let local = devices.first(where: \.isLocalDevice) else { return }
         // Opt-in resume (Settings › General "Reconnect last speakers when
@@ -237,6 +253,15 @@ public final class GroupController {
            let stored = try? routingStore.load(),
            !stored.selectedDeviceIDs.isEmpty {
             selectedDeviceIDs = Set(stored.selectedDeviceIDs)
+            pendingBluetoothRestoreIDs = selectedDeviceIDs.filter {
+                device($0) == nil && BTConnectionManager.macAddress(fromUID: $0) != nil
+            }
+            if !pendingBluetoothRestoreIDs.isEmpty {
+                bluetoothRestoreDeadline = Date().addingTimeInterval(bluetoothRestoreWindow)
+                DispatchQueue.main.asyncAfter(deadline: .now() + bluetoothRestoreWindow) { [weak self] in
+                    self?.settleBluetoothRestore()
+                }
+            }
             if case .group(let id) = stored.mainOut, !groups.contains(where: { $0.id == id }) {
                 mainOut = .selectedDevices
             } else {
@@ -252,6 +277,37 @@ public final class GroupController {
         applyRouting()
         persistRouting()
         onStateDidChange?()
+    }
+
+    /// Finish the launch restore for Bluetooth ids that were not yet discovered.
+    ///
+    /// Only Bluetooth ids wait: a paired speaker loses its link when the app
+    /// quits, reaches the snapshot only after the Bluetooth enumeration lands
+    /// (after the first update), and the app must open the link itself. AirPlay
+    /// ids stay one-shot on purpose (the 2026-07-17 decision note in `init`).
+    /// An id that appears gets the output set first, so the backend already
+    /// expects it, then `retryOutput`, the same connect a click on a greyed row
+    /// sends; `setOutputSet` alone never opens a Bluetooth link
+    /// (`NativeBackend.retryBTOutput`).
+    private func settleBluetoothRestore() {
+        guard !pendingBluetoothRestoreIDs.isEmpty else { return }
+        let appeared = pendingBluetoothRestoreIDs.filter { device($0) != nil }
+        pendingBluetoothRestoreIDs.subtract(appeared)
+        if !appeared.isEmpty {
+            applyRouting()
+            for id in appeared.sorted() { backend.retryOutput(id) }
+            onStateDidChange?()
+        }
+        if pendingBluetoothRestoreIDs.isEmpty {
+            bluetoothRestoreDeadline = nil
+        } else if let deadline = bluetoothRestoreDeadline, Date() >= deadline {
+            selectedDeviceIDs.subtract(pendingBluetoothRestoreIDs)
+            pendingBluetoothRestoreIDs = []
+            bluetoothRestoreDeadline = nil
+            applyRouting()
+            persistRouting()
+            onStateDidChange?()
+        }
     }
 
     // MARK: Routing persistence

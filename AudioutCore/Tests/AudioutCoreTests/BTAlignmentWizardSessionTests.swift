@@ -931,14 +931,21 @@ extension SerializedSharedState {
         }
 
         /// Collects the `Analytics.capture` calls a run makes.
+        ///
+        /// The sink is process-global, and suites outside the serialized
+        /// parent (the parallel half of this file, the popover wizard tests)
+        /// fire the very same `bt_sync:` events while it is installed.
+        /// `capture` calls the sink on the caller's thread and these tests
+        /// are synchronous, so only events from the thread that made this
+        /// capture are this test's own.
         private final class AnalyticsCapture: @unchecked Sendable {
             private let lock = NSLock()
+            private let thread = Thread.current
             private var items: [(String, [String: String])] = []
             func append(_ name: String, _ props: [String: String]) {
+                guard Thread.current == thread else { return }
                 lock.withLock { items.append((name, props)) }
             }
-            /// Filtered to `bt_sync:` because the sink is process-global and
-            /// other suites capture events of their own.
             func btSyncEvents() -> [(String, [String: String])] {
                 lock.withLock { items.filter { $0.0.hasPrefix("bt_sync:") } }
             }

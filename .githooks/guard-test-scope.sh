@@ -106,7 +106,7 @@ dependents_of() {
 
 # Library targets rule 2 knows about. A target missing from this list (the
 # executables: AudioutApp, the harnesses, the snapshot tools) maps to nothing.
-library_targets=" AudioutCore AudioutSharedUI AudioutPopoverUI AudioutWindowUI AudioutSettingsUI AudioutOnboardingUI CastSender CastFakeReceiver ObjCExceptionShim "
+library_targets=" AudioutCore AudioutSharedUI AudioutPopoverUI AudioutWindowUI AudioutSettingsUI AudioutOnboardingUI CastSender CastFakeReceiver ObjCExceptionShim TestKeySilencer "
 
 # Prints the test files rule 2 selects for a source file, or nothing.
 tests_by_target() {

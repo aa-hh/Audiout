@@ -1713,6 +1713,44 @@ extension SerializedSharedState {
         #expect(sink.buffers.last == 740)
     }
 
+    /// DEFECT (customer log, 1.2.0): deselecting one of two measured speakers
+    /// moved the reference, and the move rebuilt EVERY sink the manager still
+    /// held, the departing one included, before `setDevices` dropped it. So a
+    /// speaker the user had just turned off restarted its engine once, and on
+    /// that night the restart failed with -10851 into the log.
+    @Test func aDeselectedSpeakerIsDroppedBeforeTheReferenceMoves() throws {
+        let dir = scratchDir
+        try BTTrimStore(directory: dir).saveLatencies([btMove.id: 583, btFlip.id: 527])
+        let (backend, bt, _, _) = makeBackend(storeDirectory: dir)
+        defer { backend.stop() }
+        let real = BTSyncedSink(renderSampleRate: 48_000, channelCount: 1, presentationDelayMs: { 100 })
+        backend.btSyncedSinkFactory = { real }
+        backend.btDeviceIDForUID = { _ in AudioObjectID(0) }
+        backend.start()
+        bt.fire([btMove, btFlip])
+        waitFor { self.device(backend, self.btMove.id) != nil
+            && self.device(backend, self.btFlip.id) != nil }
+        backend.setOutputSet([btMove.id, btFlip.id])
+        waitFor { real.sinkForTesting(uid: self.btMove.id) != nil
+            && real.sinkForTesting(uid: self.btFlip.id) != nil }
+        real.sinkForTesting(uid: btMove.id)?.test_waitForPendingRebuild()
+        real.sinkForTesting(uid: btFlip.id)?.test_waitForPendingRebuild()
+
+        let capture = LineCapture()
+        Telemetry._installTestSink { capture.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        backend.setOutputSet([btFlip.id])   // reference 683 → 627 ms
+        waitFor { real.sinkForTesting(uid: self.btMove.id) == nil
+            && capture.lines(evt: "bt_sink_rebuild").contains { $0.contains(self.btFlip.id) } }
+        Telemetry._installTestSink(nil)     // flush barrier
+
+        let rebuilds = capture.lines(evt: "bt_sink_rebuild")
+        #expect(!rebuilds.contains { $0.contains(btMove.id) },
+                "the deselected speaker must not be rebuilt on its way out: \(rebuilds)")
+        #expect(rebuilds.contains { $0.contains(btFlip.id) },
+                "positive control: the reference moved, so the remaining speaker re-anchors")
+    }
+
     /// Selecting a device whose measured latency is past the floor moves the
     /// reference for the BT sinks AND for the Mac's own, which rides it.
     @Test func aStoredLatencyRaisesTheReferenceOnSelect() throws {

@@ -185,8 +185,14 @@ extension NativeBackend {
     /// manager and re-anchor the Mac's own sink (which rides the same reference
     /// in this composition). Returns the value now in force, so the caller can
     /// hand it straight to ``applyBTSinkTransition(...)``. On `stateQueue`.
+    ///
+    /// `pushToSink: false` is for a caller that hands the returned value to
+    /// ``applyBTSinkTransition(enable:uids:composition:gains:eqs:referenceBufferMs:)``,
+    /// which pushes it after dropping any departing speaker. Pushing here as
+    /// well would land first on `captureControlQueue` and rebuild the departing
+    /// speaker's sink too.
     @discardableResult
-    func updateBTReferenceBufferLocked() -> Int {   // on stateQueue
+    func updateBTReferenceBufferLocked(pushToSink: Bool = true) -> Int {   // on stateQueue
         let latencies = btTrimLock.withLock { btLatencyMsByUID }
         let desired = btWizardReferenceRaised
             ? Self.btWizardReferenceBufferMs
@@ -197,7 +203,7 @@ extension NativeBackend {
             btSinkEnabled && !btComposition.usesPresentationReference && syncedLocalSinkApplied
         captureControlQueue.async { [weak self] in
             guard let self else { return }
-            self.btSink?.setBTOnlyBufferMs(desired)
+            if pushToSink { self.btSink?.setBTOnlyBufferMs(desired) }
             // Wave-4 delay agreement: with no AirPlay in the group the Mac's
             // own sink schedules against this same buffer, so a move of the
             // reference is a move for it too.
@@ -232,7 +238,7 @@ extension NativeBackend {
         guard armed else { return }
         let composition = btComposition
         let gains = btSinkGains(forUIDs: uids)
-        let referenceMs = updateBTReferenceBufferLocked()
+        let referenceMs = updateBTReferenceBufferLocked(pushToSink: false)
         let eqs = btSinkEQs(forUIDs: uids)
         captureControlQueue.async { [weak self] in
             self?.applyBTSinkTransition(
@@ -414,6 +420,19 @@ extension NativeBackend {
             } else {
                 return   // no factory wired (tests / UI-only smoke) — inert
             }
+            // UID → live AudioObjectID, resolved fresh per apply. A uid that no
+            // longer resolves (the speaker dropped between selection and apply)
+            // contributes no sink; it re-resolves on the next selection change
+            // (reconnect-driven re-application is BT-RECONNECT's, Wave 4).
+            let specs = uids.compactMap { uid in
+                let deviceID = btDeviceIDForUID?(uid) ?? aggregateControl.resolveDeviceID(forUID: uid)
+                return deviceID.map { BTSyncedSink.DeviceSpec(deviceID: $0, uid: uid) }
+            }
+            // Departing speakers leave BEFORE the reference moves: a composition
+            // or buffer change rebuilds every sink still held, and a deselected
+            // one restarting on its way out is wasted at best (customer log
+            // 2026-09-25: that restart failed with -10851).
+            sink.removeDevices(notIn: Set(specs.map(\.uid)))
             sink.setComposition(composition)
             // The BT-only reference this selection needs (roadmap 056 Part A):
             // pushed with the composition, BEFORE `setDevices` builds any sink,
@@ -452,14 +471,7 @@ extension NativeBackend {
             for uid in uids {
                 sink.setEQ(eqs[uid] ?? .flat, forDeviceUID: uid)
             }
-            // UID → live AudioObjectID, resolved fresh per apply. A uid that no
-            // longer resolves (the speaker dropped between selection and apply)
-            // contributes no sink; it re-resolves on the next selection change
-            // (reconnect-driven re-application is BT-RECONNECT's, Wave 4).
-            sink.setDevices(uids.compactMap { uid in
-                let deviceID = btDeviceIDForUID?(uid) ?? aggregateControl.resolveDeviceID(forUID: uid)
-                return deviceID.map { BTSyncedSink.DeviceSpec(deviceID: $0, uid: uid) }
-            })
+            sink.setDevices(specs)
             attachBTSink(sink)
             sink.start()
         } else {

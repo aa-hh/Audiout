@@ -2140,6 +2140,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // when coreaudiod is busy (device switches, sleep/wake). An unchanged name
             // is harmless: `applyLocal` suppresses the no-op emit anyway.
             let name = Self.currentOutputDeviceName()
+            // Same reason: the default output's UID is a HAL read, so take it here
+            // too, and only when the default device actually changed.
+            let changedDefaultUID: String? = defaultDeviceChanged ? self.currentDefaultOutputUIDProvider() : nil
             // Fires on the helper's OWN private serial queue, never main — hop to the
             // queue that owns `known` before touching the model.
             self.stateQueue.async {
@@ -2214,7 +2217,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     //     off-switch. Any other change is a real user action → classify
                     //     it against the aggregate and (re)emit the routing-blocked
                     //     warning for the new steady state.
-                    let newDefaultUID = self.currentDefaultOutputUIDProvider()
+                    let newDefaultUID = changedDefaultUID
 
                     // Volume ownership turns on exactly this UID, so republish it
                     // BEFORE the echo test below. Our own switch to the aggregate
@@ -2229,6 +2232,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // left to correct after the fact.
                     if self.expectedDefaultWriteUID == newDefaultUID, newDefaultUID != nil {
                         self.expectedDefaultWriteUID = nil
+                        // Our takeover's echo can land before its own commit, which
+                        // then defers to this branch, so reflect the takeover here.
+                        if newDefaultUID == AggregateOutputDevice.productUID {
+                            self.setRoutingBlocked(false)
+                        }
                     } else {
                         // A genuine change that does NOT match the pending write
                         // proves our echo is no longer the newest state — the HAL
@@ -2239,7 +2247,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // echo", silently skipping the D1 resume — permanent silence
                         // in exactly the scenario D1 exists for. Disarm it.
                         self.expectedDefaultWriteUID = nil
-                        self.evaluateRoutingBlocked()
+                        self.evaluateRoutingBlocked(currentDefaultUID: newDefaultUID)
 
                         // Seamless handoff T3.4: the user picked a DIFFERENT default
                         // output in Sound settings while we were routing — that IS
@@ -4519,14 +4527,32 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the end of `reconcileCaptureGate()` (streaming started/stopped) and the
     /// `systemVolume.onExternalChange` handler's `defaultDeviceChanged` branch
     /// (the system default output itself switched). On `stateQueue`.
+    ///
+    /// The AirPlay-class read is a Core Audio call, so it runs on
+    /// `captureControlQueue` and the result is committed back on `stateQueue`,
+    /// where `captureRunning` is checked again because capture may have stopped
+    /// while the read was in flight. With capture stopped there is nothing to read.
     private func reconcileSystemAirPlayGuard() {   // on stateQueue
-        let active = captureRunning && systemDefaultOutputIsAirPlayClassProvider()
-        if active {
-            guard !systemAirPlayGuardActive else { return }
-            systemAirPlayGuardActive = true
-            emit(.systemDefaultIsAirPlayActive(true))
-        } else {
+        guard captureRunning else {
             clearSystemAirPlayGuard()
+            return
+        }
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            let isAirPlay = self.systemDefaultOutputIsAirPlayClassProvider()
+            self.stateQueue.async {
+                guard self.captureRunning else {
+                    self.clearSystemAirPlayGuard()
+                    return
+                }
+                if isAirPlay {
+                    guard !self.systemAirPlayGuardActive else { return }
+                    self.systemAirPlayGuardActive = true
+                    self.emit(.systemDefaultIsAirPlayActive(true))
+                } else {
+                    self.clearSystemAirPlayGuard()
+                }
+            }
         }
     }
 

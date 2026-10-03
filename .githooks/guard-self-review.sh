@@ -1,25 +1,15 @@
 #!/bin/sh
-# GUARD 7 helper: staged-Swift readability screen + self-review receipt.
+# GUARD 7 helper: staged-Swift readability screen.
 # Called by pre-commit; runnable standalone while iterating on it:
 #   sh .githooks/guard-self-review.sh    (exit 0 = would pass)
 #
-# Two parts, cheap first:
-#   A. A deterministic screen over the ADDED comment lines of the staged
-#      Swift diff (same -U0 technique as Guards 3/5). It hard-blocks only
-#      near-certain slop — the three patterns the 2026-08-06 audit
-#      (dev/notes/verbosity-audit-2026-08-06.md) found with ~zero false
-#      positives — and prints softer past-tense patterns as a warning for
-#      the self-review to weigh. A rare legitimate hit takes a trailing
-#      `slop-ok` comment (sibling of Guard 3's `isolation-ok`).
-#   B. A review receipt: scripts/self-review.sh hashes the staged Swift
-#      diff after showing the rubric checklist; this guard refuses the
-#      commit until that receipt matches the exact staged bytes. The
-#      review itself happens in the committer's own context — deliberately
-#      no LLM call here (razor: latency/cost in a pre-commit hook trains
-#      everyone to --no-verify past it; the upgrade path is an async
-#      second-model review at PR time, not a synchronous hook call).
-
-git_dir=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+# A deterministic screen over the ADDED comment lines of the staged
+#   Swift diff (same -U0 technique as Guards 3/5). It hard-blocks only
+#   near-certain slop — the three patterns the 2026-08-06 audit
+#   (dev/notes/verbosity-audit-2026-08-06.md) found with ~zero false
+#   positives — and prints softer past-tense patterns as a warning for
+#   a reader to weigh. A rare legitimate hit takes a trailing
+#   `slop-ok` comment (sibling of Guard 3's `isolation-ok`).
 
 staged_swift=$(git diff --cached --name-only -- '*.swift' 2>/dev/null)
 [ -z "$staged_swift" ] && exit 0
@@ -45,7 +35,7 @@ if [ -n "$block_hits" ]; then
     exit 1
 fi
 
-# --- Part A': softer patterns (WARN-ONLY; the self-review weighs them) ---
+# --- Part A': softer patterns (WARN-ONLY) ---
 warn_hits=$(printf '%s\n' "$added_comments" | grep -E \
     -e '[Pp]reviously' \
     -e 'used to (be|stand|call|have|do)' \
@@ -56,28 +46,9 @@ if [ -n "$warn_hits" ]; then
     echo "" >&2
     echo "  NOTE (non-blocking, Guard 7): past-tense comment lines staged —" >&2
     echo "  fine when they document WHY a guard exists, slop when they narrate" >&2
-    echo "  an edit. Weigh them in the self-review:" >&2
+    echo "  an edit. Weigh them before merging:" >&2
     printf '%s\n' "$warn_hits" | sed 's/^+/    /' >&2
     echo "" >&2
 fi
 
-# --- Part B: the self-review receipt (BLOCKING) --------------------------
-# A merge's staged diff only exists inside `git merge`, so no receipt can match it; the branch commits were reviewed.
-[ -n "${AUDIOUT_IN_MERGE:-}" ] && exit 0
-expected=$(git diff --cached -- '*.swift' 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
-receipt=$(cat "$git_dir/audiout-review-receipt" 2>/dev/null || echo none)
-if [ "$receipt" != "$expected" ]; then
-    echo "" >&2
-    echo "  REFUSED (Guard 7): staged Swift has no matching self-review receipt." >&2
-    echo "" >&2
-    echo "  Run scripts/self-review.sh, actually read your staged diff against" >&2
-    echo "  docs/REVIEW-RUBRIC.md (change-log narration, stale claims, naming," >&2
-    echo "  reviewer-speak), fix what you find, restage, run it again, commit." >&2
-    echo "" >&2
-    echo "  ('git commit --no-verify' for a real emergency, as ever.)" >&2
-    echo "" >&2
-    exit 1
-fi
-
-echo "  Guard 7: self-review receipt verified." >&2
 exit 0

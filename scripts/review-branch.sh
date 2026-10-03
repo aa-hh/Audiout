@@ -1,0 +1,299 @@
+#!/bin/bash
+# Code review for one branch before it merges to main (Guard 10 checks the
+# receipt this writes; the hook itself never calls a model).
+#
+# Picks a level from the committed diff against main: skip (no model), cheap
+# (one sonnet pass, no tools) or full (four parallel reviewers, then one haiku
+# confidence score per finding, findings under 80 dropped). Prints the
+# findings, appends one line to <git-common-dir>/audiout-branch-reviews.log,
+# and writes a receipt keyed to the branch's own committed changes, so a later
+# commit that changes them needs a new review (merging main in does not).
+# Instruction files: docs/review/<pass>.md.
+#
+# Usage: bash scripts/review-branch.sh [--already-reviewed]
+#   --already-reviewed  record work a /scope-and-run reviewer already approved;
+#                       writes the receipt without calling a model.
+# Exit: 0 reviewed + receipt; 1 a HIGH finding survived, no receipt;
+#       2 the review did not run, no receipt.
+
+set -uo pipefail
+
+# ---------------------------------------------------------------------------
+# The one place to edit: thresholds, risk paths, per-pass model/tools/budget.
+SKIP_UNDER_LINES=50
+FULL_OVER_LINES=300
+SCORE_KEEP_AT=80
+
+CHEAP_MODEL=sonnet;    CHEAP_TOOLS="";                    CHEAP_BUDGET=2
+DEEP_MODEL=opus;       DEEP_TOOLS="Read,Grep,Glob";       DEEP_BUDGET=8
+RULES_MODEL=sonnet;    RULES_TOOLS="Read,Grep,Glob";      RULES_BUDGET=3
+HISTORY_MODEL=sonnet;  HISTORY_TOOLS="Read,Grep,Glob,Bash"; HISTORY_BUDGET=3
+COMMENTS_MODEL=sonnet; COMMENTS_TOOLS="Read,Grep,Glob";   COMMENTS_BUDGET=3
+SCORE_MODEL=haiku;     SCORE_TOOLS="";                    SCORE_BUDGET=0.30
+# Any other Bash command the history pass tries would prompt, and
+# --permission-prompts none denies it.
+HISTORY_ALLOWED=("Bash(git log:*)" "Bash(git blame:*)")
+
+# Any touched path here makes the review full, whatever its size.
+is_risk_path() {
+  case "$1" in
+    AirPlayEngine/Sources/*) return 0 ;;
+    AudioutCore/Sources/AudioutCore/BT*.swift \
+    | AudioutCore/Sources/AudioutCore/Sync*.swift \
+    | AudioutCore/Sources/AudioutCore/SyncedLocalSink.swift \
+    | AudioutCore/Sources/AudioutCore/DriftCorrection*.swift \
+    | AudioutCore/Sources/AudioutCore/PassiveDriftSampler.swift \
+    | AudioutCore/Sources/AudioutCore/AlignmentTickInjector.swift \
+    | AudioutCore/Sources/AudioutCore/PTPHelperService.swift \
+    | AudioutCore/Sources/AudioutCore/NativeBackend*.swift \
+    | AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift \
+    | AudioutCore/Sources/AudioutCore/PerAppCaptureCoordinator.swift \
+    | AudioutCore/Sources/AudioutCore/AppRouteMixer.swift \
+    | AudioutCore/Sources/AudioutCore/AggregateOutputDevice.swift \
+    | AudioutCore/Sources/AudioutCore/TapRebuildLifecycle.swift \
+    | AudioutCore/Sources/AudioutCore/License*.swift \
+    | AudioutCore/Sources/AudioutCore/Trial*.swift \
+    | AudioutCore/Sources/AudioutCore/CompanionLicenseActivation.swift \
+    | AudioutCore/Sources/AudioutCore/*Store.swift \
+    | AudioutCore/Sources/AudioutCore/StoreRecovery.swift \
+    | AudioutCore/Sources/AudioutCore/AppSettings.swift) return 0 ;;
+  esac
+  return 1
+}
+
+# Lines in these paths count toward the size thresholds; tests and docs do not.
+is_product_path() {
+  case "$1" in *Tests/*|*.md) return 1 ;; esac
+  case "${1##*/}" in *Test*) return 1 ;; esac
+  case "$1" in .githooks/*|*.swift|*.c|*.h|*.m|*.sh|*.py) return 0 ;; esac
+  return 1
+}
+
+OUTPUT_FORMAT=$(cat <<'EOF'
+Output format (a script parses this; follow it exactly):
+- One line per finding: SEVERITY | path:line | one sentence naming the defect and the smallest fix.
+- SEVERITY is exactly HIGH, MEDIUM, or LOW.
+  HIGH = a defect with a concrete failing scenario, a data-loss or lockout path, or a breach of a quoted AGENTS.md rule.
+  MEDIUM = a likely defect without a confirmed scenario, or changed behaviour with no test.
+  LOW = readability or naming.
+- If there are no findings, output the single line: NO FINDINGS
+- Lines starting with anything else are shown to a human and never counted; add them only when your instructions above ask for them.
+EOF
+)
+# ---------------------------------------------------------------------------
+
+already_reviewed=""
+case "${1:-}" in
+  "") ;;
+  --already-reviewed) already_reviewed=1 ;;
+  *) echo "usage: bash scripts/review-branch.sh [--already-reviewed]" >&2; exit 2 ;;
+esac
+
+branch=$(git symbolic-ref --short HEAD 2>/dev/null) || branch=detached
+if [ "$branch" = "main" ]; then
+  echo "Refusing to review main: run this in the branch's worktree." >&2
+  exit 2
+fi
+top=$(git rev-parse --show-toplevel) || exit 2
+cd "$top" || exit 2
+common=$(cd "$(git rev-parse --git-common-dir)" && pwd) || exit 2
+
+tip=$(git rev-parse --verify HEAD) || exit 2
+base=$(git merge-base main "$tip") || { echo "No merge base with main." >&2; exit 2; }
+# Same changes keep the same key after main is merged into the branch; a conflict resolution that changes the branch's own lines changes it.
+hash=$(git diff -U0 --no-renames "$base" "$tip" | git patch-id --stable | cut -d' ' -f1)
+[ -n "$hash" ] || hash=empty
+git merge-base --is-ancestor main "$tip" \
+  || echo "Note: this branch does not contain the latest main. The review still counts; merge main in before landing."
+
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "Warning: uncommitted changes are not part of this review; the receipt covers committed work only." >&2
+fi
+
+# --no-renames so a renamed file shows its real new path to the risk check.
+lines=0; files=0; risk=(); changed=()
+while IFS=$'\t' read -r added deleted path; do
+  [ "$added" = "-" ] && added=0
+  [ "$deleted" = "-" ] && deleted=0
+  files=$((files + 1)); changed+=("$path")
+  is_product_path "$path" && lines=$((lines + added + deleted))
+  is_risk_path "$path" && risk+=("$path")
+done < <(git diff --numstat --no-renames "$base" "$tip")
+
+if [ -n "$already_reviewed" ]; then level=external
+elif [ ${#risk[@]} -gt 0 ]; then level=full
+elif [ "$lines" -lt "$SKIP_UNDER_LINES" ]; then level=skip
+elif [ "$lines" -gt "$FULL_OVER_LINES" ]; then level=full
+else level=cheap
+fi
+
+summary="$lines product lines"
+if [ ${#risk[@]} -gt 0 ]; then
+  joined=$(printf ', %s' "${risk[@]}")
+  summary="$summary, risk: ${joined:2}"
+fi
+echo "Review level: $level ($summary)"
+
+reviews_dir="$common/audiout-branch-reviews"
+review_log="$common/audiout-branch-reviews.log"
+
+# log_line <high> <medium> <low> <dropped>
+log_line() {
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$branch" "$level" "$1" "$2" "$3" "$4" "$files" >> "$review_log"
+}
+write_receipt() {
+  mkdir -p "$reviews_dir" || exit 2
+  echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ) branch=$branch level=$level tip=$tip" \
+    > "$reviews_dir/$hash" || exit 2
+  echo "Receipt written: ${hash:0:12}"
+}
+
+if [ "$level" = skip ] || [ "$level" = external ]; then
+  log_line 0 0 0 0
+  write_receipt
+  exit 0
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/review-branch.XXXXXX") || exit 2
+trap 'rm -rf "$work"' EXIT
+
+# Shared prompt tail: root AGENTS.md plus the nearest AGENTS.md above each
+# changed file (read at the tip), then the diff.
+tail_file="$work/tail"
+agents=("AGENTS.md")
+for path in ${changed[@]+"${changed[@]}"}; do
+  dir=$(dirname "$path")
+  while [ "$dir" != "." ]; do
+    if git cat-file -e "$tip:$dir/AGENTS.md" 2>/dev/null; then
+      case " ${agents[*]} " in *" $dir/AGENTS.md "*) ;; *) agents+=("$dir/AGENTS.md") ;; esac
+      break
+    fi
+    dir=$(dirname "$dir")
+  done
+done
+{
+  echo "## Repo rules"
+  for a in "${agents[@]}"; do
+    printf '\n### %s\n\n' "$a"
+    git show "$tip:$a" 2>/dev/null
+  done
+  printf '\n## Diff\n\nbase: %s tip: %s\n\n' "$base" "$tip"
+  git diff "$base" "$tip"
+} > "$tail_file" || exit 2
+
+pass_flags() {
+  case "$1" in
+    cheap)    flags=(--model "$CHEAP_MODEL" --tools "$CHEAP_TOOLS" --max-budget-usd "$CHEAP_BUDGET") ;;
+    deep)     flags=(--model "$DEEP_MODEL" --tools "$DEEP_TOOLS" --max-budget-usd "$DEEP_BUDGET") ;;
+    rules)    flags=(--model "$RULES_MODEL" --tools "$RULES_TOOLS" --max-budget-usd "$RULES_BUDGET") ;;
+    history)  flags=(--model "$HISTORY_MODEL" --tools "$HISTORY_TOOLS" --allowedTools "${HISTORY_ALLOWED[@]}" --max-budget-usd "$HISTORY_BUDGET") ;;
+    comments) flags=(--model "$COMMENTS_MODEL" --tools "$COMMENTS_TOOLS" --max-budget-usd "$COMMENTS_BUDGET") ;;
+    score)    flags=(--model "$SCORE_MODEL" --tools "$SCORE_TOOLS" --max-budget-usd "$SCORE_BUDGET") ;;
+  esac
+}
+
+# run_pass <name> <outfile> [finding]: one claude call, prompt on stdin.
+# Non-zero when claude is missing or fails, or a reviewer's output is not in
+# the expected format. The score pass gets the finding instead of the format.
+run_pass() {
+  local name="$1" out="$2" finding="${3:-}" prompt="$2.prompt" flags
+  command -v claude >/dev/null 2>&1 || { echo "claude CLI not found on PATH" > "$out"; return 1; }
+  [ -f "docs/review/$name.md" ] || { echo "missing docs/review/$name.md" > "$out"; return 1; }
+  {
+    printf '# Review pass: %s\n\n' "$name"
+    cat "docs/review/$name.md"
+    if [ "$name" = score ]; then printf '\n## Finding\n\n%s\n\n' "$finding"
+    else printf '\n%s\n\n' "$OUTPUT_FORMAT"
+    fi
+    cat "$tail_file"
+  } > "$prompt"
+  pass_flags "$name"
+  claude -p --permission-prompts none --no-session-persistence --output-format text \
+    "${flags[@]}" < "$prompt" > "$out" 2>&1 || return 1
+  [ "$name" = score ] && return 0
+  grep -Eq '^(HIGH|MEDIUM|LOW) \|' "$out" && return 0
+  grep -qx 'NO FINDINGS' "$out" && return 0
+  [ "$name" = cheap ] && grep -q '^ESCALATE:' "$out" && return 0
+  return 1
+}
+
+pass_failed() {
+  cat "$work/$1" 2>/dev/null
+  echo "Review did not run ($1 pass failed)."
+  exit 2
+}
+
+high=0; medium=0; low=0; dropped=0
+count() {
+  case "$1" in
+    HIGH*) high=$((high + 1)) ;;
+    MEDIUM*) medium=$((medium + 1)) ;;
+    LOW*) low=$((low + 1)) ;;
+  esac
+}
+
+if [ "$level" = cheap ]; then
+  run_pass cheap "$work/cheap" || pass_failed cheap
+  if grep -q '^ESCALATE:' "$work/cheap"; then
+    grep '^ESCALATE:' "$work/cheap"
+    level=full-escalated
+  else
+    while IFS= read -r line; do
+      echo "  [cheap] $line"; count "$line"
+    done < <(grep -E '^(HIGH|MEDIUM|LOW) \|' "$work/cheap")
+  fi
+fi
+
+if [ "$level" = full ] || [ "$level" = full-escalated ]; then
+  reviewers=(deep rules history comments)
+  pids=()
+  for p in "${reviewers[@]}"; do
+    run_pass "$p" "$work/$p" & pids+=($!)
+  done
+  failed=""
+  for i in 0 1 2 3; do
+    wait "${pids[$i]}" || { [ -z "$failed" ] && failed="${reviewers[$i]}"; }
+  done
+  [ -n "$failed" ] && pass_failed "$failed"
+
+  # razor: no cross-reviewer dedupe; two passes reporting the same defect show
+  # twice. Upgrade path: merge findings on their path:line key before scoring.
+  tags=(); found=()
+  for p in "${reviewers[@]}"; do
+    while IFS= read -r line; do tags+=("$p"); found+=("$line"); done \
+      < <(grep -E '^(HIGH|MEDIUM|LOW) \|' "$work/$p")
+  done
+  spids=()
+  for i in ${found[@]+"${!found[@]}"}; do
+    run_pass score "$work/score.$i" "${found[$i]}" & spids+=($!)
+  done
+  for pid in ${spids[@]+"${spids[@]}"}; do wait "$pid"; done
+
+  kept=(); gone=()
+  for i in ${found[@]+"${!found[@]}"}; do
+    s=$(grep -Eo '^SCORE: [0-9]+' "$work/score.$i" 2>/dev/null | head -1 | grep -Eo '[0-9]+')
+    if [ -z "$s" ]; then
+      kept+=("  [${tags[$i]}] (unscored) ${found[$i]}"); count "${found[$i]}"
+    elif [ "$s" -lt "$SCORE_KEEP_AT" ]; then
+      gone+=("  [${tags[$i]}] ($s) ${found[$i]}"); dropped=$((dropped + 1))
+    else
+      kept+=("  [${tags[$i]}] ($s) ${found[$i]}"); count "${found[$i]}"
+    fi
+  done
+  for l in ${kept[@]+"${kept[@]}"}; do echo "$l"; done
+  if [ ${#gone[@]} -gt 0 ]; then
+    echo "Dropped by scorer:"
+    for l in "${gone[@]}"; do echo "$l"; done
+  fi
+  grep -E '^(COMPAT|LIVE TEST|DECLINED) \|' "$work/deep"
+fi
+
+echo "Findings: $high high, $medium medium, $low low ($dropped dropped)"
+log_line "$high" "$medium" "$low" "$dropped"
+if [ "$high" -gt 0 ]; then
+  echo "Blocked: fix the HIGH findings, commit, run this again."
+  exit 1
+fi
+write_receipt
+exit 0

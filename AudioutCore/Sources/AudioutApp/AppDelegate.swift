@@ -2749,8 +2749,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // that only just turned up has to be re-resolved for the app to
             // start playing on it. Reachability of an ALREADY-known member is
             // the backend's own business (it re-drives itself), hence new
-            // arrivals only — and only while some app is group-routed.
-            if isNew, hasGroupRoute { pushAppRoutesToBackend() }
+            // arrivals only. Every new arrival re-pushes, not just while some
+            // app is group-routed: the backend's saved-group membership
+            // (`lastGroupTargets`) has to include a device plugged in after
+            // launch, or its unplug later reads "not in a group" and the row
+            // is dropped instead of kept greyed. The cost is one
+            // `updateAppRoutes` call per arrival — the same call every route
+            // edit and reachability flip already makes.
+            if isNew { pushAppRoutesToBackend() }
             logEvent(event)
         case .deviceRemoved(let id):
             devicesByID.removeValue(forKey: id)

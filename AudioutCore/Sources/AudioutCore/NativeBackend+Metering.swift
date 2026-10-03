@@ -142,7 +142,7 @@ extension NativeBackend {
     /// engine for the same structural reason (`setOutputSet`'s converge loop guards
     /// on `!device.isBluetooth`/`!device.isCast`), so `isSelected` is never true for
     /// either — asking it would leave both bars permanently dark. Each has
-    /// its own "rendering now" fact: a BT row's `.connected`, which means that
+    /// its own "rendering now" fact: a BT (and wired) row's `.connected`, which means that
     /// device's delay gate has opened (`BTDeviceSink.hasStartedRendering`) and is the
     /// same state that arms its dot — NOT `btSelectedUIDs`, which is intent and would
     /// light the bar on a selected-but-silent speaker; and `castPlaying` for a
@@ -155,7 +155,7 @@ extension NativeBackend {
     /// one system RMS feeds every device's bar and no per-device delay can reach it.
     /// Must run on `stateQueue`, like every caller.
     func isMeterable(_ device: Device) -> Bool {
-        if device.isBluetooth { return device.connectionState == .connected }
+        if device.isBluetooth || device.isWired { return device.connectionState == .connected }
         if device.isCast { return castPlaying.contains(device.id) }
         return device.isLocalDevice ? syncedLocalSinkApplied : device.isSelected
     }

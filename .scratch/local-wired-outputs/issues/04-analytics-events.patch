@@ -1,0 +1,24 @@
+--- /tmp/wired04work/analytics-events.orig.md	2026-09-26 12:12:18
++++ /tmp/wired04work/analytics-events.new.md	2026-09-26 12:12:32
+@@ -54,7 +54,7 @@
+ | `mixer:bt_pairing_settings_opened` | mac | — | — | "Pair a Bluetooth speaker" opens macOS's own Bluetooth settings pane. |
+ | `mixer:volume_adjusted` | mac | `control` | `device`, `master`, `app` | A volume slider (a speaker, Main Audio's master, or a per-app fader) is moved, once per control per mixer session. |
+ | `mixer:device_mute_toggled` | mac | `muted` | `true`, `false` | A speaker's mute button is toggled. |
+-| `mixer:device_selected` / `mixer:device_deselected` | mac | `kind`, `refusal_reason` (only when refused) | `kind`: the speaker's connection kind; `refusal_reason`: why the toggle was refused | A speaker is added to or removed from Main Audio (the fired name depends on the direction). |
++| `mixer:device_selected` / `mixer:device_deselected` | mac | `kind`, `refusal_reason` (only when refused), `transport` (only when `kind` is `wired`) | `kind`: the speaker's connection kind; `refusal_reason`: why the toggle was refused; `transport`: `builtInSpeakers`, `headphoneJack`, `usb`, `hdmi`, `other` | A speaker is added to or removed from Main Audio (the fired name depends on the direction). |
+ | `mixer:membership_hint_dismissed` | mac | — | — | The first-run "tap a speaker to add it" hint is dismissed by the first real membership edit. |
+ | `mixer:reconnect_requested` | mac | — | — | A speaker row's reconnect control is clicked. |
+ | `mixer:speaker_hidden` / `mixer:speaker_shown` | mac | `kind` | the speaker's connection kind | A speaker is hidden from the Output Speakers list via the footer "−" menu, or shown again via the "+" menu's "Hidden speakers" section (the fired name depends on the direction). |
+@@ -85,10 +85,10 @@
+ | `eq:reset` | mac | `target` | `main_out`, `device` | An equalizer is reset to flat, for Main Audio or for one speaker. |
+ | `main_out:target_selected` | mac | `target` | the new Main Audio target (a speaker, a scene, or similar) | Main Audio's target is changed. |
+ | `main_out:mute_toggled` | mac | `muted` | `true`, `false` | Main Audio's master mute is toggled. |
+-| `bt_sync:trim_committed` / `cast_sync:offset_committed` | mac | — | — | A drag on a speaker's sync offset control is released and the value is committed (Bluetooth or Chromecast, depending on which name fires). |
++| `bt_sync:trim_committed` / `cast_sync:offset_committed` | mac | `target` (only on `bt_sync:trim_committed`) | `target`: `local`, `bluetooth`, `wired` | A drag on a speaker's sync offset control is released and the value is committed (Bluetooth or Chromecast, depending on which name fires). |
+ | `cast_sync:offset_reset` | mac | — | — | A Chromecast speaker's sync offset is reset. |
+ | `bt_sync:note_hidden` | mac | — | — | The "this speaker plays a little behind" first-join note is dismissed without starting the wizard. |
+-| `bt_sync:wizard_started` | mac | `target`, `door` | `target`: `local` or `bluetooth`; `door`: which of the four entry points opened it | The by-ear alignment wizard starts for a speaker. |
++| `bt_sync:wizard_started` | mac | `target`, `door` | `target`: `local`, `bluetooth`, or `wired`; `door`: which of the four entry points opened it | The by-ear alignment wizard starts for a speaker. |
+ | `bt_sync:wizard_finished` | mac | — | — | The by-ear alignment wizard is completed (a result is kept). |
+ | `bt_sync:wizard_abandoned` | mac | `target_lost` | `true`, `false` | The by-ear alignment wizard is closed without finishing; `target_lost` is true if the speaker disappeared mid-run. |
+ | `bt_sync:mic_permission_answered` | mac | `granted` | `true`, `false` | The alignment wizard asked for the microphone on Start and got its answer (the system prompt, or macOS's stored decision). Once per run; not sent when the wizard cannot listen at all (no probe, or both speakers make the same sound). |

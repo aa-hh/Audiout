@@ -234,10 +234,11 @@ extension NativeBackend {
         let gains = btSinkGains(forUIDs: uids)
         let referenceMs = updateBTReferenceBufferLocked()
         let eqs = btSinkEQs(forUIDs: uids)
+        let reportedLatencyUIDs = wiredSinkUIDs(forUIDs: uids)
         captureControlQueue.async { [weak self] in
             self?.applyBTSinkTransition(
                 enable: true, uids: uids, composition: composition, gains: gains,
-                eqs: eqs, referenceBufferMs: referenceMs)
+                eqs: eqs, reportedLatencyUIDs: reportedLatencyUIDs, referenceBufferMs: referenceMs)
         }
     }
 
@@ -402,6 +403,7 @@ extension NativeBackend {
     func applyBTSinkTransition(
         enable: Bool, uids: [String], composition: BTGroupComposition,
         gains: [String: Float] = [:], eqs: [String: DeviceEQ] = [:],
+        reportedLatencyUIDs: Set<String> = [],
         referenceBufferMs: Int? = nil
     ) {
         if enable {
@@ -456,10 +458,28 @@ extension NativeBackend {
             // longer resolves (the speaker dropped between selection and apply)
             // contributes no sink; it re-resolves on the next selection change
             // (reconnect-driven re-application is BT-RECONNECT's, Wave 4).
-            sink.setDevices(uids.compactMap { uid in
+            let specs = uids.compactMap { uid in
                 let deviceID = btDeviceIDForUID?(uid) ?? aggregateControl.resolveDeviceID(forUID: uid)
                 return deviceID.map { BTSyncedSink.DeviceSpec(deviceID: $0, uid: uid) }
-            })
+            }
+            // A wired output's offset: the measured latency pushed above wins,
+            // and its reported Core Audio latency is the default, so a measured
+            // chain is never double-subtracted. Seeded before `setDevices` so a
+            // fresh sink starts at it.
+            // razor: read once per arm, not on a rate-change rebuild (a few ms,
+            // below what the ear resolves); the upgrade is to re-read it in
+            // `BTDeviceSink.startLocked`.
+            for spec in specs where reportedLatencyUIDs.contains(spec.uid) && latencies[spec.uid] == nil {
+                let reported: Int?
+                if let seam = wiredReportedLatencyMs {
+                    reported = seam(spec.deviceID)
+                } else {
+                    reported = (try? LocalOutputLatency.measure(deviceID: spec.deviceID))
+                        .map { Int($0.totalMilliseconds.rounded()) }
+                }
+                if let reported { sink.setOffsetMs(reported, forDeviceUID: spec.uid) }
+            }
+            sink.setDevices(specs)
             attachBTSink(sink)
             sink.start()
         } else {
@@ -523,7 +543,8 @@ extension NativeBackend {
     /// a just-succeeded baseband connect arms regardless of whether the
     /// enumerator snapshot has caught up yet. On `stateQueue`.
     func beginBTConnectingLocked(_ id: String) {   // on stateQueue
-        guard expectedSelected.contains(id), known[id]?.isBluetooth == true else { return }
+        guard expectedSelected.contains(id),
+              known[id]?.isBluetooth == true || known[id]?.isWired == true else { return }
         setConnectionState(.connecting, for: id)
         btConnectingDeadlines[id] = Date().addingTimeInterval(btRenderStartTimeout)
         scheduleBTRenderPollLocked()
@@ -1066,7 +1087,9 @@ extension NativeBackend {
         let applier = DriftCorrectionApplier(
             isBluetooth: { [weak self] uid in
                 guard let self else { return false }
-                return self.stateQueue.sync { self.known[uid]?.isBluetooth == true }
+                return self.stateQueue.sync {
+                    self.known[uid]?.isBluetooth == true || self.known[uid]?.isWired == true
+                }
             },
             currentLatencyMs: { [weak self] uid in self?.btMeasuredLatencyMs(forDevice: uid) ?? 0 },
             writeLatencyMs: { [weak self] ms, uid, persist in
@@ -1187,7 +1210,7 @@ extension NativeBackend {
         // residue the user's own offset stands in for, which would read as
         // microphone movement.
         for id in expectedSelected.sorted() {
-            guard let device = known[id], !device.isBluetooth, !device.isCast,
+            guard let device = known[id], !device.isBluetooth, !device.isWired, !device.isCast,
                   !device.isLocalDevice else { continue }
             baselines.append(PassiveDriftSampler.Baseline(
                 deviceUID: id, kind: device.kind, expectedDelayMs: room))
@@ -1338,6 +1361,9 @@ extension NativeBackend: BTOutputControlling {
                 self?.btSink?.setOffsetMs(0, forDeviceUID: id)
                 self?.btSink?.setTrimMs(0, forDeviceUID: id)
             }
+            // A wired row's offset returns to its reported-latency seed; this
+            // re-arm is enqueued after the zeroing hop, so the seed lands last.
+            if self.known[id]?.isWired == true { self.reapplyBTSinkLocked() }
         }
     }
 
@@ -1396,7 +1422,12 @@ extension NativeBackend: BTOutputControlling {
             }
         }
         // The arm gate: bed only until every participating sink is playing.
-        let expected = stateQueue.sync { self.btSinkEnabled ? Set(self.btSelectedUIDs) : [] }
+        // Only available uids: an unplugged-but-selected wired row is an
+        // ordinary state and must not cost every run the ceiling's worth of bed.
+        let expected = stateQueue.sync {
+            self.btSinkEnabled
+                ? Set(self.btSelectedUIDs.filter { self.known[$0]?.isAvailable == true }) : []
+        }
         captureControlQueue.async { [weak self] in
             guard let self else { return }
             if active {
@@ -1536,7 +1567,7 @@ extension NativeBackend: BTOutputControlling {
         let (targetIsLive, otherBTAudible, referenceIsBluetooth, targetName) = stateQueue.sync {
             (self.btSinkEnabled && self.btSelectedUIDs.contains(targetID),
              self.btSelectedUIDs.contains { $0 != targetID },
-             self.known[referenceID]?.isBluetooth == true,
+             self.known[referenceID]?.isBluetooth == true || self.known[referenceID]?.isWired == true,
              self.known[targetID]?.name)
         }
         guard targetIsLive else {
@@ -1961,7 +1992,7 @@ extension NativeBackend: BTOutputControlling {
             func live(_ id: String) -> Bool {
                 guard let device = known[id], device.isAvailable else { return false }
                 if id == Self.localDeviceID { return selectedDevicesQuery?(id) ?? false }
-                if device.isBluetooth { return btSelectedUIDs.contains(id) }
+                if device.isBluetooth || device.isWired { return btSelectedUIDs.contains(id) }
                 if device.isCast { return castSelectedIDs.contains(id) }
                 return expectedSelected.contains(id) && added.contains(id)
             }
@@ -2601,6 +2632,11 @@ extension NativeBackend: BTOutputControlling {
             let stored = Int((btMeasuredLatencyMs(forDevice: id) ?? 0).rounded())
             captureControlQueue.async { [weak self] in
                 self?.btSink?.setOffsetMs(stored, forDeviceUID: id)
+            }
+            // A wired row with no measurement returns to its reported-latency
+            // seed, not 0; enqueued after the hop above, so the seed lands last.
+            stateQueue.async {
+                if self.known[id]?.isWired == true { self.reapplyBTSinkLocked() }
             }
         }
     }

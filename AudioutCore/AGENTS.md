@@ -19,7 +19,7 @@ the model, never the reverse.
 - Bundle-ID resolution must reach every Core Audio process, never a single pid.
 - `AppRouteDestination` is four cases; `isDeviceRoute` is `.device` only, `isRoutedAway` adds `.group`.
 - A device meter counts every app whose route reaches it: a `.device` route or membership of a routed `.group`; both meter sites ask `meterTargetsLocked`.
-- A per-app Bluetooth destination is fed by UID and reads the room's timing, never sets it.
+- A per-app Bluetooth or wired destination is fed by UID and reads the room's timing, never sets it.
 - Every real (re)connect reseeds the engine volume, or the stream is inaudible.
 - Never touch IOBluetooth outside the authorization gates in `BTDeviceEnumerator` and `BTAbsoluteVolumeSDP`; an ungated call kills the process.
 - `TCCAccessPreflight` is cached for the process lifetime; read grants through `TCCProbeRunner`.

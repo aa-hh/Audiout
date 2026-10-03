@@ -1912,6 +1912,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// fan-out get it tick-only. `nil` — every other caller — means one feed for
     /// everybody, which is the rule the align tick depends on.
     ///
+    /// razor: wired outputs render in the same sink manager, so during a
+    /// wizard run they hear the bed and the bright tick too; the upgrade is a
+    /// bed-free UID set handed through `fanOutSplitToBT`.
+    ///
     /// `btSweepFreePCM`/`btSweepOwnerUID` narrow that divergence one step
     /// further, for a phone-driven sync-calibration run whose sweeps are
     /// sequenced across two Bluetooth speakers: the named device's delay line

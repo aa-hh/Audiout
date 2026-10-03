@@ -30,6 +30,13 @@ public struct Device: Identifiable, Equatable, Sendable {
         /// `supportsAirPlay2` is always `false`, and a Cast id is never
         /// engine-driven (it is the third routing partition, like `.bluetooth`).
         case cast
+        /// A wired Core Audio output (built-in speakers, headphone jack, USB,
+        /// HDMI/DisplayPort, Thunderbolt) enumerated by `WiredOutputEnumerator`.
+        /// `id` is the Core Audio `kAudioDevicePropertyDeviceUID`;
+        /// `supportsAirPlay2` is always `false`, and a wired id is never
+        /// engine-driven (the fourth routing partition). The one matching the
+        /// system default output is never surfaced: "This Mac" already is it.
+        case wired
 
         /// Whether a device of this kind can ONLY have been found by browsing
         /// the local network over Bonjour — which makes its presence proof that
@@ -41,15 +48,15 @@ public struct Device: Identifiable, Equatable, Sendable {
         /// prompt (see `AppSettings.localNetworkWasGranted`). A speaker already
         /// on screen answers the question for free.
         ///
-        /// `localMac` is this machine's own hardware and `bluetooth` comes from
-        /// Core Audio plus the paired list — neither touches the network, so
-        /// neither proves anything. Exhaustive on purpose: a new kind has to
-        /// state which side it is on.
+        /// `localMac` and `wired` are this machine's own hardware and `bluetooth`
+        /// comes from Core Audio plus the paired list — none touches the
+        /// network, so none proves anything. Exhaustive on purpose: a new kind
+        /// has to state which side it is on.
         public var isDiscoveredOverLocalNetwork: Bool {
             switch self {
             case .homePod, .appleTV, .airportExpress, .sonos, .generic, .cast:
                 return true
-            case .localMac, .bluetooth:
+            case .localMac, .bluetooth, .wired:
                 return false
             }
         }
@@ -79,8 +86,20 @@ public struct Device: Identifiable, Equatable, Sendable {
             // glyph reads as "receiver attached to a screen", which is what a
             // Chromecast/Nest/Android TV target is, and collides with nothing.
             case .cast:           return "tv.and.hifispeaker.fill"
+            // The fallback for wired transports with no glyph of their own
+            // (Thunderbolt and the like); the rest are picked in ``Device/symbolName``.
+            case .wired:          return "hifispeaker"
             }
         }
+    }
+
+    /// Which kind of wired connection a `.wired` output uses, from its HAL
+    /// `kAudioDevicePropertyTransportType`: `builtInSpeakers` and
+    /// `headphoneJack` are both `BuiltIn` (told apart by UID), `usb` is `USB`,
+    /// `hdmi` covers `HDMI` and `DisplayPort`, and `other` is everything else
+    /// kept (Thunderbolt, PCI, FireWire, AVB).
+    public enum WiredTransport: String, Sendable, CaseIterable {
+        case builtInSpeakers, headphoneJack, usb, hdmi, other
     }
 
     /// Why a stored EQ is not reaching the audio right now. Both cases keep the
@@ -96,7 +115,7 @@ public struct Device: Identifiable, Equatable, Sendable {
 
     /// Stable identity — the Bonjour service name / device id for AirPlay
     /// receivers; the Core Audio `kAudioDevicePropertyDeviceUID` for
-    /// `.bluetooth` devices. Survives a device dropping off (the network or
+    /// `.bluetooth` and `.wired` devices. Survives a device dropping off (the network or
     /// the BT link) and coming back (that's what lets auto-reconnect rejoin
     /// the *same* device to a saved group).
     public let id: String
@@ -130,6 +149,11 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// paths must exclude them by this, never by `supportsAirPlay2` (AP1
     /// receivers share that flag yet ARE engine-driven).
     public var isCast: Bool { kind == .cast }
+
+    /// A wired Core Audio output. Like Bluetooth and Cast, wired devices are
+    /// non-local but never engine-driven, so AirPlay-only paths must exclude
+    /// them by this, never by `supportsAirPlay2`.
+    public var isWired: Bool { kind == .wired }
 
     // MARK: Control state (0–100 volume model, matching the UI sliders)
 
@@ -184,6 +208,10 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// promise something that cannot happen.
     public var btHardwareVolumeCapable: Bool?
 
+    /// The connection a `.wired` output uses; `nil` for every non-wired kind.
+    /// Its only job is picking the row glyph — see ``symbolName``.
+    public var wiredTransport: WiredTransport?
+
     /// Product phrases that make a Bluetooth device's model unambiguous, and
     /// the SF Symbol each one earns. MOST SPECIFIC FIRST: the first phrase
     /// found anywhere in the name wins, so "AirPods Pro" and "AirPods Max" can
@@ -224,8 +252,9 @@ public struct Device: Identifiable, Equatable, Sendable {
         return bluetoothProductGlyphs.first { folded.contains($0.phrase) }?.symbol
     }
 
-    /// The SF Symbol for this device's row icon. Everything but Bluetooth is
-    /// decided by ``Kind/symbolName`` alone; a Bluetooth pairing also states
+    /// The SF Symbol for this device's row icon. A wired output's glyph follows
+    /// its ``wiredTransport``; everything else but Bluetooth is decided by
+    /// ``Kind/symbolName`` alone. A Bluetooth pairing also states
     /// what it IS, and headphones drawn as a speaker cabinet was the defect
     /// this exists to fix (owner's call, 2026-09-04).
     ///
@@ -252,6 +281,15 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// availability check against the 14.2 floor, and every product glyph
     /// resolves on this AppKit (`DeviceBluetoothKindTests`).
     public var symbolName: String {
+        if kind == .wired {
+            switch wiredTransport {
+            case .builtInSpeakers: return "laptopcomputer"
+            case .headphoneJack:   return "headphones"
+            case .usb:             return "cable.connector"
+            case .hdmi:            return "display"
+            case .other, nil:      return kind.symbolName
+            }
+        }
         guard kind == .bluetooth else { return kind.symbolName }
         if let product = Self.bluetoothProductSymbol(forName: name) { return product }
         guard let minor = bluetoothDeviceClassMinor else { return kind.symbolName }
@@ -277,7 +315,8 @@ public struct Device: Identifiable, Equatable, Sendable {
         eqBypassReason: EQBypassReason? = nil,
         castVolumeLagSeconds: Int? = nil,
         bluetoothDeviceClassMinor: UInt32? = nil,
-        btHardwareVolumeCapable: Bool? = nil
+        btHardwareVolumeCapable: Bool? = nil,
+        wiredTransport: WiredTransport? = nil
     ) {
         self.id = id
         self.name = name
@@ -294,6 +333,7 @@ public struct Device: Identifiable, Equatable, Sendable {
         self.castVolumeLagSeconds = castVolumeLagSeconds
         self.bluetoothDeviceClassMinor = bluetoothDeviceClassMinor
         self.btHardwareVolumeCapable = btHardwareVolumeCapable
+        self.wiredTransport = wiredTransport
     }
 }
 

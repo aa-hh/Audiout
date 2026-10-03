@@ -1961,11 +1961,11 @@ public final class DeviceRowView: NSView {
         "This speaker plays a little behind the others until it’s aligned. Click to align it."
 
     /// Whether this row's chip is the wizard's door instead of a sync readout.
-    /// Bluetooth speakers only: a Cast receiver has no run to give and this
-    /// Mac's own trim is a setting, not a measurement — both keep "Not set"
-    /// and their drawer.
+    /// Bluetooth and wired speakers only: a Cast receiver has no run to give
+    /// and this Mac's own trim is a setting, not a measurement — both keep
+    /// "Not set" and their drawer.
     private var chipOffersWizard: Bool {
-        device.isBluetooth && !device.isCast && !device.isLocalDevice
+        (device.isBluetooth || device.isWired) && !device.isCast && !device.isLocalDevice
             && !(syncTrimIsSet || syncMeasuredLatencyMs != nil)
     }
 

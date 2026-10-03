@@ -51,6 +51,16 @@ import Testing
         #expect(device.canBePerAppRouteTarget() == true)
     }
 
+    @Test func wiredDeviceQualifies() {
+        // Matches production (`NativeBackend+PerAppRouting.swift`): a wired
+        // row always carries `supportsAirPlay2: false`. It qualifies on its
+        // own delivery path — fed by UID through the sink manager, same as
+        // Bluetooth, never the engine.
+        let device = Device(id: "wired-1", name: "External Headphones", kind: .wired,
+                             supportsAirPlay2: false)
+        #expect(device.canBePerAppRouteTarget() == true)
+    }
+
     @Test func castStaysExcluded() {
         // `supportsAirPlay2: true` here is deliberately unrealistic (Cast
         // rows always carry `false` in production) — it isolates that the

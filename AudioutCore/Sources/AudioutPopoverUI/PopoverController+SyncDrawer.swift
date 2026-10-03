@@ -183,7 +183,13 @@ extension PopoverController {
             onSetBTTrim?(value, id, persist)
         }
         if persist {
-            Analytics.capture(isCast ? "cast_sync:offset_committed" : "bt_sync:trim_committed")
+            if isCast {
+                Analytics.capture("cast_sync:offset_committed")
+            } else {
+                let target = devicesByID[id]?.isLocalDevice == true ? "local"
+                    : (devicesByID[id]?.isWired == true ? "wired" : "bluetooth")
+                Analytics.capture("bt_sync:trim_committed", ["target": target])
+            }
         }
         // Repaint just this one row's chip. A scrub arrives dozens of times a
         // second and `refreshDeviceRows()` would drag the rail extents and
@@ -315,10 +321,11 @@ extension PopoverController: BTSyncDrawerViewDelegate {
         btTrimsByID.removeValue(forKey: id)
         btLatenciesByID.removeValue(forKey: id)
         btTunedDeviceIDs.remove(id)
-        // A cleared BLUETOOTH row's chip becomes the wizard's door, so it can
-        // no longer close the drawer it opened — leaving one open with no way
-        // to dismiss it. Collapse it here instead.
-        if devicesByID[id]?.isBluetooth == true, devicesByID[id]?.isCast == false {
+        // A cleared BLUETOOTH or wired row's chip becomes the wizard's door, so
+        // it can no longer close the drawer it opened — leaving one open with
+        // no way to dismiss it. Collapse it here instead.
+        if (devicesByID[id]?.isBluetooth == true || devicesByID[id]?.isWired == true),
+           devicesByID[id]?.isCast == false {
             closeSyncDrawerIntent()
             reconcileSyncDrawer(animated: true)
         }

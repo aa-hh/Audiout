@@ -919,7 +919,9 @@ public final class PopoverController: NSObject {
         // Edge-only on purpose: a selection made ON an already-greyed row
         // ("play when up") has no edge and survives, so it still auto-starts
         // on connect; and a `.failed` story alone never deselects (R12) — only
-        // the availability fact does.
+        // the availability fact does. Bluetooth-only, deliberately: a wired
+        // row keeps its selection through unplug, because the backend keeps
+        // the greyed row and re-arms it on replug.
         if let controller = groupController {
             for device in devices where device.isBluetooth && !device.isAvailable {
                 guard previousDevices[device.id]?.isAvailable == true,
@@ -2122,7 +2124,8 @@ public final class PopoverController: NSObject {
     /// The four subsections in RENDER order — the one place the order and the
     /// BT-LIST connected-only filter are expressed, so the rail's render order
     /// can never drift from the rows' (the terminus would land on the wrong
-    /// row).
+    /// row). A wired output lists under the Mac's own pinned row, name-sorted
+    /// after it, rather than under AirPlay.
     /// Whether `device` is dropped from the list by the user's hidden set.
     /// The Mac's own row is never hideable, and a SELECTED device always
     /// renders regardless (a saved scene can select a hidden speaker — the
@@ -2140,9 +2143,9 @@ public final class PopoverController: NSObject {
         }
         return [
             DeviceSection(title: Self.thisMacSubsectionTitle,
-                          devices: visible.filter(\.isLocalDevice)),
+                          devices: visible.filter(\.isLocalDevice) + visible.filter(\.isWired)),
             DeviceSection(title: Self.airPlaySubsectionTitle,
-                          devices: visible.filter { !$0.isLocalDevice && !$0.isBluetooth && !$0.isCast }),
+                          devices: visible.filter { !$0.isLocalDevice && !$0.isBluetooth && !$0.isCast && !$0.isWired }),
             DeviceSection(title: Self.castSubsectionTitle,
                           devices: visible.filter(\.isCast)),
             DeviceSection(title: Self.bluetoothSubsectionTitle,
@@ -2971,7 +2974,7 @@ public final class PopoverController: NSObject {
                       iconSymbolName: deviceIconController?.symbolName(for: device),
                       syncTrimMs: btSyncTrim(for: device),
                       syncTrimIsSet: btSyncTrimIsSet(for: device),
-                      syncMeasuredLatencyMs: device.isBluetooth ? btMeasuredLatency(for: device.id) : nil,
+                      syncMeasuredLatencyMs: (device.isBluetooth || device.isWired) ? btMeasuredLatency(for: device.id) : nil,
                       alignmentSource: btOffsetSourceProvider?(device.id),
                       movedSinceLastTimeMs: btMovedNoticeMsByID[device.id],
                       syncDrawerExpanded: expandedSyncDeviceID == device.id,
@@ -3030,7 +3033,7 @@ public final class PopoverController: NSObject {
                   iconSymbolName: deviceIconController?.symbolName(for: device),
                   syncTrimMs: btSyncTrim(for: device),
                   syncTrimIsSet: btSyncTrimIsSet(for: device),
-                  syncMeasuredLatencyMs: device.isBluetooth ? btMeasuredLatency(for: device.id) : nil,
+                  syncMeasuredLatencyMs: (device.isBluetooth || device.isWired) ? btMeasuredLatency(for: device.id) : nil,
                   alignmentSource: btOffsetSourceProvider?(device.id),
                   movedSinceLastTimeMs: btMovedNoticeMsByID[device.id],
                   syncDrawerExpanded: expandedSyncDeviceID == device.id,
@@ -3076,11 +3079,12 @@ public final class PopoverController: NSObject {
     }
 
     /// Which rows carry the SYNC chip and drawer: every Bluetooth speaker, the
-    /// Mac's own output (roadmap 056), and every Cast receiver (CAST-SYNC).
-    /// AirPlay rows still carry none, by locked Decision 1 — their timing is
-    /// the reference everything else is aligned to.
+    /// Mac's own output (roadmap 056), every wired output, and every Cast
+    /// receiver (CAST-SYNC). AirPlay rows still carry none, by locked
+    /// Decision 1 — their timing is the reference everything else is aligned
+    /// to.
     func isTrimmable(_ device: Device) -> Bool {
-        device.isBluetooth || device.isLocalDevice || device.isCast
+        device.isBluetooth || device.isLocalDevice || device.isCast || device.isWired
     }
 
     /// A Bluetooth row's MEASURED latency (roadmap 056 Part A): the session
@@ -3607,6 +3611,7 @@ extension PopoverController: DeviceRowView.Delegate {
         let result = groupController?.setDeviceSelected(id, on) ?? .ok
         var props: [String: String] = [:]
         if let kind = devicesByID[id]?.kind { props["kind"] = kind.rawValue }
+        if let transport = devicesByID[id]?.wiredTransport { props["transport"] = transport.rawValue }
         if let reason = result.refusalReason { props["refusal_reason"] = reason }
         Analytics.capture(on ? "mixer:device_selected" : "mixer:device_deselected", props)
         // The first membership toggle made in the Mixer retires the first-run

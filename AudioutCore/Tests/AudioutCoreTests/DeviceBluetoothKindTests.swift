@@ -143,6 +143,26 @@ import Testing
         }
     }
 
+    /// Defect: a wrong or misspelled transport glyph draws headphones as a
+    /// laptop or ships a blank icon.
+    @Test func wiredGlyphFollowsTheTransportAndResolves() {
+        let expected: [Device.WiredTransport: String] = [
+            .builtInSpeakers: "laptopcomputer",
+            .headphoneJack: "headphones",
+            .usb: "cable.connector",
+            .hdmi: "display",
+            .other: Device.Kind.wired.symbolName,
+        ]
+        for transport in Device.WiredTransport.allCases {
+            let symbol = Device(id: "x", name: "X", kind: .wired, wiredTransport: transport).symbolName
+            #expect(symbol == expected[transport], "\(transport)")
+            #expect(NSImage(systemSymbolName: symbol, accessibilityDescription: nil) != nil,
+                    "'\(symbol)' (\(transport)) must resolve on this AppKit")
+        }
+        #expect(Device(id: "x", name: "X", kind: .wired, wiredTransport: nil).symbolName
+                == Device.Kind.wired.symbolName)
+    }
+
     @Test func isBluetoothIsTrueForExactlyTheBluetoothKind() {
         for kind in Device.Kind.allCases {
             let device = Device(id: "x", name: "X", kind: kind)

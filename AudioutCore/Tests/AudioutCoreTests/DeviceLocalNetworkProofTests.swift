@@ -22,13 +22,15 @@ import Testing
         }
     }
 
-    /// The two that reach us without touching the network must never stand in
-    /// for the grant: this Mac is local hardware, and Bluetooth comes from Core
-    /// Audio plus the paired list. Treating either as proof would mark the
-    /// permission granted on a machine that had never been allowed it.
+    /// The three that reach us without touching the network must never stand
+    /// in for the grant: this Mac and its wired outputs are local hardware, and
+    /// Bluetooth comes from Core Audio plus the paired list. Treating any as
+    /// proof would mark the permission granted on a machine that had never been
+    /// allowed it.
     @Test func localKindsProveNothing() {
         #expect(!Device.Kind.localMac.isDiscoveredOverLocalNetwork)
         #expect(!Device.Kind.bluetooth.isDiscoveredOverLocalNetwork)
+        #expect(!Device.Kind.wired.isDiscoveredOverLocalNetwork)
     }
 
     /// Every kind is classified. `allCases` split cleanly in two means a kind
@@ -38,6 +40,6 @@ import Testing
         let proving = Device.Kind.allCases.filter(\.isDiscoveredOverLocalNetwork)
         let notProving = Device.Kind.allCases.filter { !$0.isDiscoveredOverLocalNetwork }
         #expect(proving.count + notProving.count == Device.Kind.allCases.count)
-        #expect(notProving.count == 2, "only localMac and bluetooth reach us off-network")
+        #expect(notProving.count == 3, "only localMac, bluetooth and wired reach us off-network")
     }
 }

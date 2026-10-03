@@ -231,15 +231,17 @@ public enum CompanionSnapshotBuilder {
     }
 
     /// The wire alignment struct for one device: the caller's timing report
-    /// plus the reference this builder computes. `nil` for every non-Bluetooth
-    /// device, and for a Bluetooth one the caller has no report for.
+    /// plus the reference this builder computes. `nil` for every device that
+    /// is neither Bluetooth nor wired, and for one the caller has no report
+    /// for.
     private static func alignmentState(
         for device: Device,
         among devices: [Device],
         groupController: GroupController,
         alignmentFor: (Device) -> BTSpeakerTimingReport?
     ) -> DeviceState.AlignmentState? {
-        guard device.kind == .bluetooth, let report = alignmentFor(device) else { return nil }
+        guard device.kind == .bluetooth || device.kind == .wired,
+              let report = alignmentFor(device) else { return nil }
         return DeviceState.AlignmentState(
             status: report.status.rawValue,
             staleReason: report.staleReason,

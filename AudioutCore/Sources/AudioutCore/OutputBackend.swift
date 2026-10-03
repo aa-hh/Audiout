@@ -677,6 +677,12 @@ public func makeBackend(
             fleet.append(Device(id: "bt-headphones", name: "AirPods Pro", kind: .bluetooth,
                                 supportsAirPlay2: false, volume: 50))
         }
+        // Two wired outputs, so wired rows show offline. Appended here rather
+        // than in `demoFleet`, whose length existing tests assert.
+        fleet.append(Device(id: "usb-dac", name: "USB Audio DAC", kind: .wired,
+                            supportsAirPlay2: false, volume: 50, wiredTransport: .usb))
+        fleet.append(Device(id: "ext-headphones", name: "External Headphones", kind: .wired,
+                            supportsAirPlay2: false, volume: 50, wiredTransport: .headphoneJack))
         return MockBackend(fleet: fleet,
                            connectScripts: MockBackend.resolveScenarioScripts(),
                            outputObserver: DefaultOutputObserver())

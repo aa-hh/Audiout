@@ -59,6 +59,12 @@ import AppKit
         Device(id: id, name: name, kind: .cast, supportsAirPlay2: false)
     }
 
+    private func wired(_ id: String, name: String, transport: Device.WiredTransport,
+                       available: Bool = true) -> Device {
+        Device(id: id, name: name, kind: .wired, isAvailable: available,
+               supportsAirPlay2: false, wiredTransport: transport)
+    }
+
     private let airPlayTitle = PopoverController.airPlaySubsectionTitle
     private let bluetoothTitle = PopoverController.bluetoothSubsectionTitle
     private let castTitle = PopoverController.castSubsectionTitle
@@ -685,6 +691,36 @@ import AppKit
         let plus = popover.test_outputDevicesPlusMenu()
         #expect(plus.item(withTitle: "Connect 'Zed Box'") == nil)
         #expect(plus.item(withTitle: "Show 'Zed Box'") != nil)
+    }
+
+    // MARK: Wired rows sit under "This Mac"
+
+    @Test func wiredRowsSitUnderTheMacAndFollowTheSnapshot() {
+        // Defect: a wired row rendered in the AirPlay subsection, where it
+        // draws as an AirPlay speaker with no sync chip.
+        let (popover, _) = makePopover()
+        popover.update(devices: [
+            local(),
+            airplay(),
+            bt("bt-a:output", name: "Speaker A"),
+            wired("ext-headphones", name: "External Headphones", transport: .headphoneJack)
+        ])
+
+        #expect(popover.test_renderedDeviceIDs() == ["mac", "ext-headphones", "office", "bt-a:output"])
+        #expect(popover.test_subsectionTitles() == [airPlayTitle, bluetoothTitle])
+        #expect(popover.test_deviceRow(for: "ext-headphones")?.test_showsSyncControls == true)
+
+        // The headphones are replaced by a different wired default; the
+        // unused row is removed (02b), and the new one sorts by name.
+        popover.update(devices: [
+            local(),
+            airplay(),
+            bt("bt-a:output", name: "Speaker A"),
+            wired("builtin-speakers", name: "MacBook Pro Speakers", transport: .builtInSpeakers)
+        ])
+
+        #expect(popover.test_renderedDeviceIDs() == ["mac", "builtin-speakers", "office", "bt-a:output"])
+        #expect(popover.test_deviceRow(for: "ext-headphones") == nil)
     }
 }
 

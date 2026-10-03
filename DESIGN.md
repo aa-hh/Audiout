@@ -764,6 +764,13 @@ names and glyphs, `label` on the live one, pinned by
 ring and an unarmed fader fill read as one tone — a Mac-only instrument with
 no iOS equivalent (the phone has no membership rail).
 
+The Mixer rail is one colour from Main Audio's ring to its terminus (owner's
+ruling, 2026-10-03): the spine tone, `gold` while armed and `ember` while
+idle, or `railDormant` along its whole length when the rail is dormant. A
+segment feeding a connecting or failed speaker keeps that colour; the
+speaker's state shows in its node (dashed `ember` while connecting, `failure`
+red when failed) and its glyph ring, never in the line.
+
 ### QR Tile (invitations to Audiout Remote, Mac-only)
 `RemoteInviteView` (`AudioutSharedUI`) is one view hosted three times: the
 alignment wizard sheet's first page at 96 pt, Settings › General under the

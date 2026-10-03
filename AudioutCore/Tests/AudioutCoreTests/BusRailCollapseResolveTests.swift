@@ -315,18 +315,15 @@ import Testing
         #expect(runs.allSatisfy { sameInk($0.color, spine) }, "every run wears the idle spine tone")
     }
 
-    /// The one segment that IS allowed to step is the connecting one — the
-    /// energize sweep's ember, brightening to gold once the node connects.
-    @Test func onlyTheConnectingSegmentWearsEmber() {
-        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.connecting, .member]))
+    /// A speaker's state lives in its node and glyph ring, never in the line:
+    /// segments feeding a connecting node and a failed node wear the same
+    /// spine tone as the rest of the wire (owner's ruling, 2026-10-03).
+    @Test func connectingAndFailedMembersLeaveTheWireOneColour() {
+        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.connecting, .failed, .member]))
         let runs = BusRailOverlayView().wireRuns(for: plan)
+        #expect(runs.count == 4, "hook + three on-spine runs")
         let spine = Tokens.Color.spineTone(armed: true)
-        let ember = Tokens.Color.ember
-        // Path order: hook, run above the connecting node, run above the member.
-        #expect(runs.count == 3, "hook + two on-spine runs")
-        #expect(sameInk(runs[0].color, spine), "the hook is the spine tone")
-        #expect(sameInk(runs[1].color, ember), "the connecting segment is ember")
-        #expect(sameInk(runs[2].color, spine), "the member segment is the spine tone")
+        #expect(runs.allSatisfy { sameInk($0.color, spine) }, "every run wears the armed spine tone")
     }
 
     // MARK: A collapsed SUBSECTION low in the list must not erase the rows above it

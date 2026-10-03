@@ -891,6 +891,209 @@ import AVFoundation
         #expect(Self.firstNonSilence(of: sinkA, startNanos: Self.anchorNanos) == nil,
                 "an unknown UID must be a no-op: no crash, and no fall-through to an unrelated sink")
     }
+
+    // MARK: - Stale or dead Core Audio device
+
+    /// Which object ids the fake HAL still reports alive, flipped mid-test.
+    private final class AliveSwitch: @unchecked Sendable {
+        private let lock = NSLock()
+        private var dead: Set<AudioObjectID> = []
+        func kill(_ id: AudioObjectID) { lock.withLock { _ = dead.insert(id) } }
+        func isAlive(_ id: AudioObjectID) -> Bool { lock.withLock { !dead.contains(id) } }
+    }
+
+    /// Every uid the manager reported dead, in order.
+    private final class DeathLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _uids: [String] = []
+        func append(_ uid: String) { lock.withLock { _uids.append(uid) } }
+        var uids: [String] { lock.withLock { _uids } }
+    }
+
+    private static func livenessManager(
+        alive: AliveSwitch, deaths: DeathLog
+    ) -> BTSyncedSink {
+        BTSyncedSink(
+            renderSampleRate: sampleRate, channelCount: 1, presentationDelayMs: { 100 },
+            deviceIsAlive: { alive.isAlive($0) },
+            sinkDeathObserver: { deaths.append($0) })
+    }
+
+    /// Red if `setDevices` keeps a sink whose UID is already in the table: a speaker
+    /// that dropped and returned inside one coalesced refresh renders into its dead object id forever.
+    @Test func setDevicesWithNewDeviceIDForSameUID_replacesTheSink() throws {
+        let manager = Self.livenessManager(alive: AliveSwitch(), deaths: DeathLog())
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let old = try #require(manager.sinkForTesting(uid: "dev-a"))
+
+        manager.setDevices([.init(deviceID: 7, uid: "dev-a")])
+
+        let new = try #require(manager.sinkForTesting(uid: "dev-a"))
+        #expect(new !== old, "a new object id for the same UID must build a new sink")
+        #expect(new.deviceID == 7)
+    }
+
+    /// Red if the liveness check stops consulting the device's alive flag: a sink
+    /// pinned to a vanished object id would keep its anchor and gate green while silent.
+    @Test func deadDeviceAtLivenessCheck_reportsDeadAndDropsSink() throws {
+        let alive = AliveSwitch(), deaths = DeathLog()
+        let manager = Self.livenessManager(alive: alive, deaths: deaths)
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        sink.test_forceRunning()
+
+        alive.kill(0)
+        sink.test_checkLiveness(nowNanos: Self.anchorNanos)
+
+        #expect(deaths.uids == ["dev-a"])
+        #expect(manager.sinkForTesting(uid: "dev-a") == nil)
+        #expect(!sink.test_isRunning)
+    }
+
+    /// Red if a released, fed sink whose render callback has stopped running is not
+    /// reported dead: the speaker goes silent with nothing in the app able to say so.
+    @Test func renderStalledWhileFedAndReleased_reportsDead() throws {
+        let deaths = DeathLog()
+        let manager = Self.livenessManager(alive: AliveSwitch(), deaths: deaths)
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        let now = Self.anchorNanos
+        sink.test_forceRunning()
+        sink.test_markReleased()
+        sink.test_noteEnqueue(nowNanos: now)
+        sink.test_noteRenderCycle(nowNanos: now - 3_000_000_000)
+
+        sink.test_checkLiveness(nowNanos: now)
+
+        #expect(deaths.uids == ["dev-a"])
+        #expect(manager.sinkForTesting(uid: "dev-a") == nil)
+    }
+
+    /// Red if the fed sink's stall is measured from its last render cycle alone,
+    /// ignoring start: a sink pinned to a twin object that still answers alive
+    /// would never render, never be torn down, and stay silent with nothing reported.
+    @Test func fedSinkWhoseCallbackNeverRan_reportsDeadAfterStall() throws {
+        let deaths = DeathLog()
+        let manager = Self.livenessManager(alive: AliveSwitch(), deaths: deaths)
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        let now = Self.anchorNanos
+        sink.test_forceRunning()
+        sink.test_noteStarted(nowNanos: now - 3_000_000_000)
+        sink.test_noteEnqueue(nowNanos: now)
+
+        sink.test_checkLiveness(nowNanos: now)
+
+        #expect(deaths.uids == ["dev-a"])
+        #expect(manager.sinkForTesting(uid: "dev-a") == nil)
+    }
+
+    /// Red if the stall rule stops counting from start or drops its fed guard: a
+    /// sink still waiting on its first cycle, or a paused Mac, would tear down a healthy speaker.
+    @Test func justStartedRenderingOrIdleSink_neverReportsDead() throws {
+        let now = Self.anchorNanos
+        let cases: [(name: String, released: Bool, startedAt: Int64, lastEnqueue: Int64, lastRender: Int64)] = [
+            ("fed, started 1 s ago, no render cycle yet", false, now - 1_000_000_000, now, 0),
+            ("released and fed, rendered 1 s ago", true, 0, now, now - 1_000_000_000),
+            ("released but idle for 5 s", true, 0, now - 5_000_000_000, now - 10_000_000_000),
+        ]
+        for c in cases {
+            let deaths = DeathLog()
+            let manager = Self.livenessManager(alive: AliveSwitch(), deaths: deaths)
+            manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+            let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+            sink.test_forceRunning()
+            sink.test_noteStarted(nowNanos: c.startedAt)
+            if c.released { sink.test_markReleased() }
+            sink.test_noteEnqueue(nowNanos: c.lastEnqueue)
+            sink.test_noteRenderCycle(nowNanos: c.lastRender)
+
+            sink.test_checkLiveness(nowNanos: now)
+
+            #expect(deaths.uids.isEmpty, "\(c.name): must not be reported dead")
+            #expect(manager.sinkForTesting(uid: "dev-a") === sink, "\(c.name): sink must stay")
+            #expect(sink.test_isRunning, "\(c.name): sink must keep running")
+        }
+    }
+
+    /// Red if the health peak is not taken from the rendered buffer: a silent speaker's
+    /// `bt_sink_health` line could not say whether real audio reached its engine.
+    @Test func renderedPeakReachesHealthCounters() throws {
+        let (manager, sink, ramp) = try Self.anchoredSink()
+        defer { manager.stop() }
+        _ = try #require(Self.drainUntilDry(sink, from: Self.anchorNanos), "the ramp never drained")
+
+        let health = sink.test_healthSnapshot()
+        let expected = 20 * log10(Double(ramp.map { abs($0) }.max() ?? 0))
+        #expect(health.cycles > 0)
+        #expect(abs(health.peakDBFS - expected) <= 0.5, "peak \(health.peakDBFS) dBFS, expected \(expected)")
+    }
+
+    /// Red if silence is reported as anything but the -120 dBFS floor: an idle
+    /// sink would read as playing in its health line.
+    @Test func silentSinkReportsFloorPeak() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1, presentationDelayMs: { 100 })
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        for cycle in 0..<3 {
+            _ = Self.renderCycle(sink, at: Self.anchorNanos + Int64(cycle) * 10_000_000)
+        }
+
+        let health = sink.test_healthSnapshot()
+        #expect(health.cycles > 0)
+        #expect(health.peakDBFS == -120)
+    }
+
+    /// Red if a first start that finds the device dead only logs a start failure:
+    /// the stopped sink would sit in the table with nobody told.
+    @Test func deadDeviceAtFirstStart_reportsDeadAndDropsSink() {
+        let alive = AliveSwitch(), deaths = DeathLog()
+        let manager = Self.livenessManager(alive: alive, deaths: deaths)
+        manager.start()
+        defer { manager.stop() }
+        alive.kill(0)
+
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+
+        #expect(deaths.uids == ["dev-a"])
+        #expect(manager.sinkForTesting(uid: "dev-a") == nil)
+    }
+
+    /// Red if a rebuild that finds the device dead stops the sink without reporting it:
+    /// the config-change rebuild can win the race against the alive listener.
+    @Test func deadDeviceAtRebuild_reportsDeadAndDropsSink() throws {
+        let alive = AliveSwitch(), deaths = DeathLog()
+        let manager = Self.livenessManager(alive: alive, deaths: deaths)
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        sink.test_forceRunning()
+
+        alive.kill(0)
+        sink.requestRebuild(cause: "config_change")
+        sink.test_waitForPendingRebuild()
+
+        #expect(deaths.uids == ["dev-a"])
+        #expect(manager.sinkForTesting(uid: "dev-a") == nil)
+    }
+
+    /// Red if the manager drops a dead sink by UID instead of by instance: the
+    /// replaced sink's late death would remove the live replacement for the same speaker.
+    @Test func replacementSinkSurvivesOldSinkDeathCallback() throws {
+        let alive = AliveSwitch()
+        let manager = Self.livenessManager(alive: alive, deaths: DeathLog())
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let old = try #require(manager.sinkForTesting(uid: "dev-a"))
+        manager.setDevices([.init(deviceID: 7, uid: "dev-a")])
+        let new = try #require(manager.sinkForTesting(uid: "dev-a"))
+        try #require(new !== old, "precondition: the new id replaced the sink")
+
+        old.test_forceRunning()
+        alive.kill(0)
+        old.test_checkLiveness(nowNanos: Self.anchorNanos)
+
+        #expect(manager.sinkForTesting(uid: "dev-a") === new)
+    }
 }
 
 /// The one BT-SINK case that touches `Telemetry`'s process-global test sink, so

@@ -97,6 +97,10 @@ public final class MainOutRowView: NSView {
         // the rail's terminus, not a peer of the device rows' rings). Its
         // stroke is the shared `ringStrokeWidth`, like every other ring.
         ring.diameterOverride = PopoverColumnGrid.mainAudioRingDiameter
+        // The ring's CONNECTED stroke wears the rail's own SPINE TONE (Warm
+        // Signal nitpicks, "rail into the ring"), so the join reads as one
+        // continuous line, not a gold line touching a hue-neutral ring.
+        ring.joinsSpine = true
         return ring
     }()
     /// The **gold route-armed corner dot** on the Main Out icon (Warm Signal
@@ -228,15 +232,7 @@ public final class MainOutRowView: NSView {
         if case .connected = connectionState { isConnected = true } else { isConnected = false }
         let armed = isConnected && !isMuted
         isSpineLive = armed || localOnlyArmed
-        // The ring's CONNECTED stroke wears the rail's own SPINE TONE (Warm
-        // Signal nitpicks, "rail into the ring"), so the join reads as one
-        // continuous line, not a gold line touching a hue-neutral ring. The
-        // row hands over the armed STATE only — `HaloRingView` resolves the
-        // tone through the same `Tokens.Color.spineTone` the rail overlay
-        // uses, at stamp time, so the two cannot drift and the accent dial
-        // moves both.
-        haloRingView.connectedSpineArmed = isSpineLive
-        // Gold whenever the spine is gold (a connected member playing, or
+        // Gold whenever the spine is live (a connected member playing, or
         // the Mac playing on its own); otherwise a hollow ring in the ring's
         // own colour, pushed by `haloRingView.cutoutDot`. Shown whenever the
         // ring is.
@@ -937,10 +933,11 @@ extension MainOutRowView: RailHookProviding {
     /// The Main Audio ring's own geometry (Warm Signal nitpicks — "rail into
     /// the ring"): the icon's centre, converted into `view`'s coordinates,
     /// plus the ring's radius (a distance, unaffected by the sibling-view
-    /// coordinate conversion) and whether the spine is armed (gold vs ember).
+    /// coordinate conversion) and whether the spine is armed (gates the connect
+    /// pulse; the line is always gold).
     /// The overlay curves the rail up to meet this ring's left edge directly,
     /// replacing the old bare gutter-dot terminus.
-    public func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
+    public func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, armed: Bool)? {
         layoutSubtreeIfNeeded()
         let iconRectInSelf = iconView.convert(iconView.bounds, to: self)
         let iconCenter = convert(NSPoint(x: iconRectInSelf.midX, y: iconRectInSelf.midY), to: view)

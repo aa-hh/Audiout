@@ -28,7 +28,7 @@ import Testing
     // node.
     private func expandedInput() -> RailPlan.Input {
         RailPlan.Input(
-            gold: true,
+            armed: true,
             ringCenterY: 500, ringCenterX: 20, ringRadius: 15, landingDrop: 16,
             originSectionCollapsed: false,
             originClipBand: 460...540,      // ring (500) sits inside → ring visible
@@ -97,7 +97,7 @@ import Testing
     /// are what state the failure — a line running down to it said the signal
     /// arrives there, which is the one thing that is not happening.
     @Test func theWireStopsAboveAFailedRoom() {
-        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.member, .failed]))
+        let plan = RailPlan.resolve(toneInput(armed: true, nodes: [.member, .failed]))
         #expect(plan.signalTerminusIndex == 0, "the lowest room the wire REACHES is the member")
         let runs = BusRailOverlayView().wireRuns(for: plan)
         #expect(runs.count == 2, "hook + the one segment into the member; nothing below it")
@@ -115,7 +115,7 @@ import Testing
     /// A band whose ONLY on-spine room has failed has no rail at all — the
     /// failed node keeps its own red rim, and nothing curves out of Main Audio.
     @Test func aBandOfNothingButAFailedRoomHasNoRail() {
-        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.nonMember, .failed]))
+        let plan = RailPlan.resolve(toneInput(armed: true, nodes: [.nonMember, .failed]))
         #expect(plan.signalTerminusIndex == nil, "a failed room is never the wire's terminus")
         #expect(BusRailOverlayView().wireRuns(for: plan).isEmpty, "nothing reached ⇒ no rail")
     }
@@ -278,9 +278,9 @@ import Testing
             && abs(a.blueComponent - b.blueComponent) <= 0.005
     }
 
-    private func toneInput(gold: Bool, nodes: [MembershipBusView.Node]) -> RailPlan.Input {
+    private func toneInput(armed: Bool, nodes: [MembershipBusView.Node]) -> RailPlan.Input {
         var input = expandedInput()
-        input.gold = gold
+        input.armed = armed
         input.stops = zip([420, 380, 340, 300], nodes).map { .init(y: $0, node: $1) }
         return input
     }
@@ -288,31 +288,26 @@ import Testing
     /// A segment that detours PAST a non-member keeps the spine's tone: the
     /// line carries the same signal past that node as it does into the member
     /// below, so nothing on the wire changes colour between hook and terminus.
-    @Test func detourPastNonMembersKeepsTheArmedSpineTone() {
-        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.nonMember, .nonMember, .member]))
-        let runs = BusRailOverlayView().wireRuns(for: plan)
-        #expect(runs.count > 1, "hook plus at least one segment")
-        let spine = Tokens.Color.spineTone(armed: true)
-        #expect(runs.allSatisfy { sameInk($0.color, spine) }, "every run wears the armed spine tone")
-    }
-
-    @Test func detourPastNonMembersKeepsTheIdleSpineTone() {
-        let plan = RailPlan.resolve(toneInput(gold: false, nodes: [.nonMember, .nonMember, .member]))
-        let runs = BusRailOverlayView().wireRuns(for: plan)
-        #expect(runs.count > 1, "hook plus at least one segment")
-        let spine = Tokens.Color.spineTone(armed: false)
-        #expect(runs.allSatisfy { sameInk($0.color, spine) }, "every run wears the idle spine tone")
+    /// Armed or not, that tone is gold (owner's ruling, 2026-10-04: there is
+    /// no idle line).
+    @Test func detourPastNonMembersKeepsTheWireGoldArmedOrNot() {
+        for armed in [true, false] {
+            let plan = RailPlan.resolve(toneInput(armed: armed, nodes: [.nonMember, .nonMember, .member]))
+            let runs = BusRailOverlayView().wireRuns(for: plan)
+            #expect(runs.count > 1, "hook plus at least one segment")
+            #expect(runs.allSatisfy { sameInk($0.color, Tokens.Color.gold) },
+                    "every run is gold (armed=\(armed))")
+        }
     }
 
     /// A speaker's state lives in its node and glyph ring, never in the line:
     /// segments feeding a connecting node and a failed node wear the same
     /// spine tone as the rest of the wire (owner's ruling, 2026-10-03).
     @Test func connectingAndFailedMembersLeaveTheWireOneColour() {
-        let plan = RailPlan.resolve(toneInput(gold: true, nodes: [.connecting, .failed, .member]))
+        let plan = RailPlan.resolve(toneInput(armed: true, nodes: [.connecting, .failed, .member]))
         let runs = BusRailOverlayView().wireRuns(for: plan)
         #expect(runs.count == 4, "hook + three on-spine runs")
-        let spine = Tokens.Color.spineTone(armed: true)
-        #expect(runs.allSatisfy { sameInk($0.color, spine) }, "every run wears the armed spine tone")
+        #expect(runs.allSatisfy { sameInk($0.color, Tokens.Color.spineTone) }, "every run wears the spine tone")
     }
 
     // MARK: Folded subsections (owner's ruling, 2026-10-04)
@@ -384,7 +379,7 @@ import Testing
     }
 
     private final class FakeHook: NSView, RailHookProviding {
-        func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
+        func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, armed: Bool)? {
             let f = view.convert(bounds, from: self)
             return (f.midY, 20, 8, true)
         }

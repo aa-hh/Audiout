@@ -651,10 +651,11 @@ public enum Tokens {
                           // Pinning both inks just over the 3:1 non-text floor
                           // on the same ground leaves them ~1.03:1 apart — a 3%
                           // luminance difference on a 2 pt line, which no one
-                          // reads. ``spineTone(armed:)`` would then resolve to
-                          // one visible colour in light and the rail could not
-                          // report liveness at all, which is the one thing gold
-                          // exists to say. Dark's own pair sits at 2.72:1; light
+                          // reads. The Groups editor's member discs (gold when
+                          // routed, ember when only saved) would then resolve
+                          // to one visible colour in light and could not report
+                          // liveness at all, which is the one thing gold exists
+                          // to say. Dark's own pair sits at 2.72:1; light
                           // has to buy a comparable gap, and depth is the only
                           // axis available once both are floor-bound.
                           //
@@ -703,18 +704,20 @@ public enum Tokens {
                                                light: 0x71613B, lightHighContrast: 0x584C2E))
         }
 
-        /// **The membership rail's SPINE TONE** — `gold` while the spine is
-        /// armed, its `ember` companion otherwise (Warm Signal v4 §Call-1
-        /// rail-segment tone).
+        /// **The membership rail's SPINE TONE** — always `gold` (owner's
+        /// ruling, 2026-10-04). The system is always connected to at least Main
+        /// Audio, so an idle rail never occurs, and the old `ember` idle line
+        /// read as a connecting state that wasn't one. A DORMANT rail still
+        /// takes `railDormant`; that choice lives in `BusRailOverlayView`.
         ///
         /// It exists so the rail's line/hook/terminus (`BusRailOverlayView`)
         /// and the Main Audio ring the hook LANDS ON (`HaloRingView`'s
         /// connected stroke) resolve their tone from ONE place: the two are
         /// required to read as a single continuous line, and while each picked
-        /// `gold`/`ember` for itself that agreement was pure convention — the
-        /// accent dial moved one and not the other. Nothing else may consume
-        /// this; a non-rail instrument wanting gold asks for ``gold``.
-        public static func spineTone(armed: Bool) -> NSColor { armed ? gold : ember }
+        /// its own token that agreement was pure convention — the accent dial
+        /// moved one and not the other. Nothing else may consume this; a
+        /// non-rail instrument wanting gold asks for ``gold``.
+        public static var spineTone: NSColor { gold }
 
         // MARK: Glow + socket (accent halo and the routed dot's seat)
 

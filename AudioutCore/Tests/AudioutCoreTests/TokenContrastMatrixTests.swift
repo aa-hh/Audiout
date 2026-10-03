@@ -291,8 +291,8 @@ extension SerializedSharedState {
             }
         }
 
-        // Dark Subtle `ember` is the idle rail and the hollow connecting dot's
-        // ring, so it holds the non-text floor on the two grounds the Mixer
+        // Dark Subtle `ember` is the hollow connecting dot's ring and the
+        // connecting rail node, so it holds the non-text floor on the two grounds the Mixer
         // puts behind them (2026-10-04: `#7D6B44`, 3.47:1 panel / 3.05:1
         // raised; the old `#6D5B34` sat at 2.73:1 / 2.40:1).
         for (groundName, ground) in [("panel", panel), ("raised", Tokens.Color.raised)] {

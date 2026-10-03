@@ -356,16 +356,26 @@ import AppKit
         #expect(ys[0] < plan.railTopY, "every stop hangs below the origin hook")
     }
 
-    @Test func activeGroupDrivesTheOriginHookTone() throws {
+    /// The line is gold whether or not the group is active (owner's ruling,
+    /// 2026-10-04: no idle `ember` line). Activity still shows on the icon
+    /// well's ring and the member discs, never on the wire.
+    @Test func theOriginHookIsGoldActiveOrNot() throws {
         let (editor, controller, devices) = try makeEditor()
-        #expect(editor.test_railPlan()?.gold == false, "an inactive group's hook is ember")
+        func expectGoldWire(_ label: String) throws {
+            let plan = try #require(editor.test_railPlan())
+            let runs = BusRailOverlayView().wireRuns(for: plan)
+            let gold = Tokens.Color.gold.usingColorSpace(.sRGB)
+            #expect(!runs.isEmpty, "\(label): the rail draws")
+            #expect(runs.allSatisfy { $0.color.usingColorSpace(.sRGB) == gold },
+                    "\(label): every run is gold")
+        }
+        try expectGoldWire("inactive group")
 
         let group = try #require(controller.groups.first)
         controller.activateGroup(id: group.id)
         editor.show(groupID: group.id, devices: devices)
         editor.view.layoutSubtreeIfNeeded()
-        #expect(editor.test_railPlan()?.gold == true,
-                "the ACTIVE group's hook goes gold, like its icon well's ring")
+        try expectGoldWire("active group")
     }
 
     /// Mark `ids` as being in the backend's current output set — the echo that

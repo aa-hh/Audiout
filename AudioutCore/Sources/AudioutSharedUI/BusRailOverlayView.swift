@@ -14,8 +14,8 @@ import AppKit
 /// non-interactive (`hitTest` returns `nil`).
 ///
 /// **One wire, one tone.** The rail is a single stroked line — no channel, no
-/// pad, nothing under it: gold while the spine is armed, ember while it idles,
-/// one quiet tone end to end while it is dormant. It runs from the origin hook
+/// pad, nothing under it: gold (owner's ruling, 2026-10-04 — there is no idle
+/// line), or one quiet tone end to end while it is dormant. It runs from the origin hook
 /// to its end, detouring around every off-spine node it passes on the way. Rows
 /// below the end draw their node disc and no line — a FAILED room is one of
 /// them, never reached. With nothing to reach there is no wire and no hook at
@@ -56,7 +56,7 @@ import AppKit
 public final class BusRailOverlayView: NSView {
 
     /// The Main Audio row supplying the origin-hook anchor (the meter's leading
-    /// edge / centre-y) and whether the spine is armed (gold vs ember).
+    /// edge / centre-y) and whether the spine is armed (gates the connect pulse).
     public weak var mainOutRow: RailHookProviding?
     /// The device rows contributing nodes, in top-to-bottom display order. The
     /// overlay reads each one's live frame + rail state every draw.
@@ -248,7 +248,7 @@ public final class BusRailOverlayView: NSView {
         stops.sort { $0.y > $1.y }   // non-flipped: top = higher y
 
         let input = RailPlan.Input(
-            gold: anchor.gold,
+            armed: anchor.armed,
             ringCenterY: anchor.centerY,
             ringCenterX: anchor.ringCenterX,
             ringRadius: anchor.ringRadius,
@@ -351,7 +351,7 @@ public final class BusRailOverlayView: NSView {
     /// rather than the gold/grey patchwork per-stop tones drew on a wire that is
     /// feeding nothing.
     private static func originColor(for plan: RailPlan) -> NSColor {
-        plan.dormant ? Tokens.Color.railDormant : Tokens.Color.spineTone(armed: plan.gold)
+        plan.dormant ? Tokens.Color.railDormant : Tokens.Color.spineTone
     }
 
     /// The wire's stroked runs in path order, origin → terminus. Warm Signal
@@ -400,8 +400,8 @@ public final class BusRailOverlayView: NSView {
             let stopR = MembershipBusView.nodeRadius(for: stop.node)
             // Segment tone (owner's ruling, 2026-10-03): the wire is ONE line
             // from the hook to the terminus, so every segment wears
-            // `originColor` — the spine tone (gold on an armed spine, ember on
-            // an idle one), or `railDormant` when the whole rail is dormant.
+            // `originColor` — the spine tone (always gold), or `railDormant`
+            // when the whole rail is dormant.
             // A segment feeding a connecting or failed node does NOT step: the
             // speaker's state lives in its node and its glyph ring, never in
             // the line. Reusing the hook's own resolution rather than naming a
@@ -514,8 +514,9 @@ public final class BusRailOverlayView: NSView {
                   self.windowIsVisible,
                   !self.reduceMotion,
                   let plan = self.resolvePlan(),
-                  // A dormant or idle wire carries nothing — no pulse.
-                  plan.gold, !plan.dormant else { return }
+                  // A dormant wire, or one whose Main Audio is not armed
+                  // (muted, or no member connected), carries nothing — no pulse.
+                  plan.armed, !plan.dormant else { return }
             let joined = NSBezierPath()
             for run in self.wireRuns(for: plan) { joined.append(run.path) }
             guard !joined.isEmpty else { return }
@@ -942,7 +943,9 @@ public struct RailPlan: Equatable {
     /// The dormant-divergent condition (spec §4.7), resolved ONCE for the whole
     /// rail so the wire takes one tone end to end instead of a per-stop patchwork.
     public var dormant: Bool
-    public var gold: Bool
+    /// Whether the Main Audio spine is armed. Not a colour: the line is always
+    /// gold. It gates only the connect pulse (`playConnectPulse`).
+    public var armed: Bool
 
     /// The rail's end when it lands on a dotted header; `nil` when it ends on a
     /// node or at the list's edge.
@@ -965,7 +968,7 @@ public struct RailPlan: Equatable {
     /// so an input equal to the last drawn one resolves to the same figure and
     /// the overlay can skip the redraw entirely (`needsDisplay`'s setter).
     public struct Input: Equatable {
-        public var gold: Bool
+        public var armed: Bool
         public var ringCenterY: CGFloat
         public var ringCenterX: CGFloat
         public var ringRadius: CGFloat
@@ -993,13 +996,13 @@ public struct RailPlan: Equatable {
         /// Every device stop, unclipped, sorted top-to-bottom (highest y first).
         public var stops: [Stop]
 
-        public init(gold: Bool, ringCenterY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat,
+        public init(armed: Bool, ringCenterY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat,
                     landingDrop: CGFloat, originSectionCollapsed: Bool,
                     originClipBand: ClosedRange<CGFloat>?, originHeaderY: CGFloat?,
                     deviceSectionCollapsed: Bool, listBand: ClosedRange<CGFloat>?,
                     listHeaderDotY: CGFloat? = nil, folds: [Fold] = [],
                     dormant: Bool = false, stops: [Stop]) {
-            self.gold = gold
+            self.armed = armed
             self.ringCenterY = ringCenterY
             self.ringCenterX = ringCenterX
             self.ringRadius = ringRadius
@@ -1129,7 +1132,7 @@ public struct RailPlan: Equatable {
         return RailPlan(origin: origin, railTopY: railTopY, stops: stops,
                         signalTerminusIndex: signalTerminusIndex, lineEndY: lineEndY,
                         headerDotYs: dots.map { min($0, railTopY) },
-                        dormant: input.dormant, gold: input.gold)
+                        dormant: input.dormant, armed: input.armed)
     }
 }
 
@@ -1156,11 +1159,11 @@ public protocol RailNodeProviding: AnyObject {
 /// ring's own geometry (centre + radius) rather than a single leading point.
 public protocol RailHookProviding: AnyObject {
     /// The ring's centre-Y and centre-X (both converted into `view`'s
-    /// coordinates) plus its radius, and whether the spine is armed (gold vs
-    /// ember). `nil` if the anchor can't be resolved (no window / not laid
-    /// out). The overlay curves the rail from the gutter column up to this
+    /// coordinates) plus its radius, and whether the spine is armed (gates the
+    /// connect pulse; the line itself is always gold). `nil` if the anchor
+    /// can't be resolved (no window / not laid out). The overlay curves the rail from the gutter column up to this
     /// ring's left edge (`ringCenterX - ringRadius`, `centerY`).
-    func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)?
+    func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, armed: Bool)?
 
     /// The connect pulse's bead has landed on this hook: bloom the RING ITSELF
     /// (`HaloRingView.receiveRailPulse`), so the acknowledgment visibly belongs

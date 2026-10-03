@@ -98,9 +98,10 @@ public final class MembershipBusView: NSView {
     /// it. Gold is the LIVE color everywhere in Audiout, so an idle context
     /// (the Groups editor showing a group that is NOT the active Main Out — pure
     /// configuration, no audio moving) renders its `.member` discs in the quiet
-    /// `ember` idle tone instead, matching the wire's own armed/idle split
-    /// (`Tokens.Color.spineTone`). Defaults to true: the popover's rows ARE the
-    /// live signal path and keep their gold unchanged.
+    /// `ember` idle tone instead. This is the NODE's tone only: the wire is
+    /// always gold (`Tokens.Color.spineTone`, owner's ruling 2026-10-04).
+    /// Defaults to true: the popover's rows ARE the live signal path and keep
+    /// their gold unchanged.
     private var armed = true
     /// Whether a dimmed `.member`'s rim draws at `busNodeDimmedRimWidth`
     /// instead of the standard `ringStrokeWidth`. Off by default — the
@@ -260,11 +261,10 @@ public final class MembershipBusView: NSView {
             let cy = bounds.midY
             let rect = NSRect(x: cx - r, y: cy - r, width: 2 * r, height: 2 * r)
             if node == .member {
-                // Rim in the spine's own tone: gold on an armed rail, ember on
-                // an idle one (same split the wire draws with). The fill is the
-                // same tone, or the unlit `socket` seat when dimmed — see
-                // `dimmed`.
-                let rim = Tokens.Color.spineTone(armed: armed)
+                // Rim gold while armed, ember while idle (a node state; the
+                // wire itself is always gold). The fill is the same tone, or
+                // the unlit `socket` seat when dimmed — see `dimmed`.
+                let rim = armed ? Tokens.Color.gold : Tokens.Color.ember
                 let fill = dimmed ? Tokens.Color.socket : rim
                 fill.setFill()
                 NSBezierPath(ovalIn: rect).fill()

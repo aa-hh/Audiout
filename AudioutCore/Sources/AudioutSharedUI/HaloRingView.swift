@@ -31,8 +31,10 @@ import AudioutCore
 ///   `.off` (the `mainOutConnectionState` fallthrough is correct and
 ///   untouched). Without this form the rail's curve into the ring
 ///   (`BusRailOverlayView`) lands on a hidden ring and reads as unfinished.
-///   Wears the rail's own ink through `connectedSpineArmed`, exactly as
-///   `.connected` does; the rail's own tone is what tells the two apart.
+///   Wears the rail's own ink through `joinsSpine`, exactly as `.connected`
+///   does. Since the line went always-gold (owner's ruling, 2026-10-04) the
+///   ring alone no longer tells the two apart; the status dot in its gap
+///   still follows whether the spine is live.
 ///
 /// Every form strokes at the one shared `PopoverColumnGrid.ringStrokeWidth`
 /// (owner's ruling, 2026-10-03): weight never carries state.
@@ -114,17 +116,16 @@ public final class HaloRingView: NSView {
     }
     /// Makes the **connected** form wear the rail's SPINE TONE instead of the
     /// shared `rim` token (Warm Signal nitpicks): the Main Audio ring
-    /// is the rail's terminus, so its connected color must match whatever tone
-    /// the rail's curve is drawn in for the join to read as one continuous line
-    /// rather than two different colors touching. `true`/`false` = the spine is
-    /// armed / not; `nil` (every device row) keeps the shared
-    /// `Tokens.Color.rim`, untouched by the accent dial.
+    /// is the rail's terminus, so its connected color must match the tone the
+    /// rail's curve is drawn in for the join to read as one continuous line
+    /// rather than two different colors touching. `false` (every device row)
+    /// keeps the shared `Tokens.Color.rim`, untouched by the accent dial.
     ///
-    /// It carries the armed STATE, never a resolved color: the tone itself
-    /// comes from `Tokens.Color.spineTone(armed:)` at stamp time — the same
-    /// call `BusRailOverlayView` makes for the hook — so the ring and the rail
+    /// It is a flag, never a resolved color: the tone itself comes from
+    /// `Tokens.Color.spineTone` at stamp time — the same token
+    /// `BusRailOverlayView` reads for the hook — so the ring and the rail
     /// cannot pick different tokens, and a dial change re-resolves both.
-    public var connectedSpineArmed: Bool? {
+    public var joinsSpine = false {
         didSet { updateLayerAppearance() }
     }
     /// The status dot sitting in this ring's gap. Every stamp hands it the
@@ -245,8 +246,7 @@ public final class HaloRingView: NSView {
             // the rail's own ink, as Main Audio's connected ring does. A grey
             // rim there while the wire curving into it was gold read as two
             // unrelated things touching.
-            strokeToken = connectedSpineArmed.map(Tokens.Color.spineTone(armed:))
-                ?? Tokens.Color.rim
+            strokeToken = joinsSpine ? Tokens.Color.spineTone : Tokens.Color.rim
         case .failed:
             strokeToken = Tokens.Color.failure
         }

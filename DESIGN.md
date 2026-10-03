@@ -769,11 +769,16 @@ ring and an unarmed fader fill read as one tone — a Mac-only instrument with
 no iOS equivalent (the phone has no membership rail).
 
 The Mixer rail is one colour from Main Audio's ring to its terminus (owner's
-ruling, 2026-10-03): the spine tone, `gold` while armed and `ember` while
-idle, or `railDormant` along its whole length when the rail is dormant. A
-segment feeding a connecting or failed speaker keeps that colour; the
-speaker's state shows in its node (dashed `ember` while connecting, `failure`
-red when failed) and its glyph ring, never in the line.
+ruling, 2026-10-03): `gold`, or `railDormant` along its whole length when the
+rail is dormant. The line has no idle tone (owner's ruling, 2026-10-04): the
+system is always connected to at least Main Audio, so an idle rail never
+occurs, and an `ember` line read as a connecting state that wasn't one. Hook,
+segments, end dots, collapsed-header dots and Main Audio's ring where the line
+joins it all resolve through `Tokens.Color.spineTone`. A segment feeding a
+connecting or failed speaker keeps that colour; the speaker's state shows in
+its node (dashed `ember` while connecting, `failure` red when failed) and its
+glyph ring, never in the line. Main Audio's status dot still turns gold only
+while the spine is live.
 
 #### Membership rail extent (owner's ruling, 2026-10-04)
 Where the Mixer rail starts and stops. No rule existed before this; the
@@ -798,8 +803,8 @@ connecting, visible or folded away.
    bottom. When the member or dotted header that would end the rail is
    scrolled below the visible edge, the rail ends on the lowest fully visible
    row on the spine: its own circle is the end, with no extra dot.
-8. Armed, idle and dormant change only the colour, never where the rail
-   starts or stops.
+8. Dormant changes only the colour (gold to `railDormant`), never where the
+   rail starts or stops. The line is gold in every other state.
 
 `RailPlan.resolve` (`BusRailOverlayView.swift`) is the one implementation;
 `BusRailCollapseResolveTests` and `PopoverDeviceVisibilityTests` pin it. The

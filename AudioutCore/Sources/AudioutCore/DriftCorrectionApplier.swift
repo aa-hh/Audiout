@@ -93,6 +93,9 @@ final class DriftCorrectionApplier: @unchecked Sendable {
     private var slewAppliedMs: [String: Double] = [:]
     private var cancelSlewClock: (@Sendable () -> Void)?
     private var surfacedMs: [String: Double] = [:]
+    /// `queue` only. Each started correction's `bt_sync:drift_corrected`
+    /// properties, waiting for its move to land.
+    private var correctedEvent: [String: [String: String]] = [:]
     /// `queue` only. Verify batches whose own corrections are still moving,
     /// with the devices each is still waiting on.
     private var verifyWaitingOn: [(deviceUIDs: [String], landing: Set<String>)] = []
@@ -179,6 +182,17 @@ final class DriftCorrectionApplier: @unchecked Sendable {
             return
         }
         if correction.notify { surfacedMs[uid] = correction.ms }
+        // Sent by `move` once the correction lands, never before. A slew's
+        // in-gap remainder records no event of its own, so the slew's is the
+        // one that goes out when that remainder lands.
+        if recordEvent {
+            correctedEvent[uid] = [
+                "action": kind,
+                "placement": correction.placement == .inGap ? "gap" : "slew",
+                "magnitude_ms_bucket": BTSpeakerTiming.offsetBucket(correction.ms),
+                "surfaced": correction.notify ? "true" : "false",
+            ]
+        }
         Telemetry.log(.localPlayback, "drift_correction_started", [
             "device": uid, "kind": kind,
             "ms": String(format: "%+.1f", correction.ms),
@@ -197,13 +211,6 @@ final class DriftCorrectionApplier: @unchecked Sendable {
             startTimerIfNeeded()
             stepSlews()
         }
-        guard recordEvent else { return }
-        Analytics.capture("bt_sync:drift_corrected", [
-            "action": kind,
-            "placement": correction.placement == .inGap ? "gap" : "slew",
-            "magnitude_ms_bucket": BTSpeakerTiming.offsetBucket(correction.ms),
-            "surfaced": correction.notify ? "true" : "false",
-        ])
     }
 
     /// `queue` only. The measured latency the wizard's Keep writes, moved by
@@ -228,6 +235,9 @@ final class DriftCorrectionApplier: @unchecked Sendable {
             markCalibrationStale(uid)
             Telemetry.log(.localPlayback, "drift_correction_landed",
                           ["device": uid, "latencyAfterMs": String(format: "%.1f", target)])
+            if let event = correctedEvent.removeValue(forKey: uid) {
+                Analytics.capture("bt_sync:drift_corrected", event)
+            }
             noteLanded(uid)
         }
     }
@@ -337,6 +347,9 @@ final class DriftCorrectionApplier: @unchecked Sendable {
         for action in policy.programBecameSilent(appliedSoFarMs: applied) {
             apply(action, recordEvent: false)
         }
+        // A slew the gap had nothing left to land for never lands at all;
+        // its event must not ride out on that speaker's next correction.
+        for uid in applied.keys { correctedEvent[uid] = nil }
     }
 
     /// `queue` only.

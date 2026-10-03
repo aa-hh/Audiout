@@ -582,7 +582,12 @@ import AVFoundation
         manager.setComposition(BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
         manager.setDevices([.init(deviceID: 0, uid: uid)])
         let ramp = enqueueRamp(into: manager)
-        return (manager, try #require(manager.sinkForTesting(uid: uid)), ramp)
+        let sink = try #require(manager.sinkForTesting(uid: uid))
+        // The enqueue's re-anchor posts lock-holding work to `graphQueue`, and
+        // render takes the state lock with `try()`: a cycle rendered while that
+        // work runs is silence. Under load a caller's first cycle landed there.
+        sink.test_waitForPendingRebuild()
+        return (manager, sink, ramp)
     }
 
     /// The render block rebases `mHostTime` with a fresh two-clock sample
@@ -733,10 +738,6 @@ import AVFoundation
         let (manager, sink, ramp) = try Self.anchoredSink()
         defer { manager.stop() }
 
-        // The enqueue's re-anchor posts lock-holding work to `graphQueue`; render
-        // takes the state lock with `try()` and would produce silence while that
-        // runs, so the on-time cycle below could flake.
-        sink.test_waitForPendingRebuild()
         let early = Self.renderCycle(sink, at: Self.anchorNanos + 50_000_000)
         #expect(!early.produced, "half way to the target is still silence")
         #expect(early.samples.allSatisfy { $0 == 0 })

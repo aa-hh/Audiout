@@ -3,12 +3,18 @@
 import AppKit
 import AudioutCore
 
-/// Reports a committed edit from a ``SyncValueFieldEditor``.
+/// Reports edits from a ``SyncValueFieldEditor``.
 public protocol SyncValueFieldEditorDelegate: AnyObject {
-    /// Fired on every commit — Return, focus loss, ↑/↓, or ⌥↑/↓ — never on a
-    /// keystroke alone. Already rounded to whole ms via `BTSyncTrim.snap`;
-    /// the host is responsible for its own range clamp (see `clamp` below).
+    /// Fired on every commit — Return, focus loss, or the key-up that ends a
+    /// run of ↑/↓ nudges — never on a keystroke alone. Already rounded to
+    /// whole ms via `BTSyncTrim.snap`; the host is responsible for its own
+    /// range clamp (see `clamp` below).
     func syncValueFieldEditor(_ editor: SyncValueFieldEditor, didCommit ms: Double)
+    /// One ↑/↓ nudge, key repeats included, while the key is still down:
+    /// apply it, do not persist it. The key-up that follows reports the final
+    /// value once through `didCommit` — a held arrow used to commit every
+    /// repeat, and each commit rewrote the store and sent an analytics event.
+    func syncValueFieldEditor(_ editor: SyncValueFieldEditor, didNudgeLive ms: Double)
 }
 
 /// Shared decimal-millisecond text-field editing behaviour, lifted out of
@@ -211,13 +217,58 @@ public final class SyncValueFieldEditor: NSObject, NSTextFieldDelegate {
     }
 
     private func nudge(by deltaMs: Double) {
-        apply(clamp(BTSyncTrim.snap(committedMs + deltaMs)))
+        let ms = clamp(BTSyncTrim.snap(committedMs + deltaMs))
+        committedMs = ms
+        field.stringValue = Self.signedText(ms)
+        armNudgeCommit()
+        delegate?.syncValueFieldEditor(self, didNudgeLive: ms)
     }
 
     private func apply(_ ms: Double) {
+        // Return or focus loss in the middle of a nudge run commits the value
+        // itself, so the pending key-up commit would only repeat it.
+        disarmNudgeCommit()
         committedMs = ms
         field.stringValue = Self.signedText(ms)
         delegate?.syncValueFieldEditor(self, didCommit: ms)
+    }
+
+    // MARK: Nudge commit on key-up
+
+    /// True from the first live nudge until the commit that ends the run.
+    /// Kept apart from the monitor, which `addLocalMonitorForEvents` may not
+    /// hand back (no `NSApp` in a narrowly filtered test run).
+    private var nudgeCommitPending = false
+    private var nudgeKeyUpMonitor: Any?
+
+    /// A local monitor, not a `keyUp` override: the field editor is AppKit's
+    /// shared `NSTextView`, and this type is its delegate, not a responder.
+    /// Any key-up ends the run; ⇧ alone sends `flagsChanged`, not a key-up.
+    private func armNudgeCommit() {
+        nudgeCommitPending = true
+        guard nudgeKeyUpMonitor == nil else { return }
+        nudgeKeyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
+            self?.commitNudge()
+            return event
+        }
+    }
+
+    private func commitNudge() {
+        guard nudgeCommitPending else { return }
+        disarmNudgeCommit()
+        delegate?.syncValueFieldEditor(self, didCommit: committedMs)
+    }
+
+    private func disarmNudgeCommit() {
+        nudgeCommitPending = false
+        if let monitor = nudgeKeyUpMonitor {
+            NSEvent.removeMonitor(monitor)
+            nudgeKeyUpMonitor = nil
+        }
+    }
+
+    deinit {
+        if let monitor = nudgeKeyUpMonitor { NSEvent.removeMonitor(monitor) }
     }
 
     private func revert() {
@@ -262,6 +313,12 @@ public final class SyncValueFieldEditor: NSObject, NSTextFieldDelegate {
     public func test_performCommand(_ commandSelector: Selector) -> Bool {
         control(field, textView: NSTextView(), doCommandBy: commandSelector)
     }
+
+    /// The key-up that ends a nudge run — the monitor's own handler. A key-up
+    /// sent through `NSWindow.sendEvent(_:)` never reaches a local monitor
+    /// (those run in `NSApplication.sendEvent(_:)`), so a headless test calls
+    /// the handler directly.
+    public func test_keyUp() { commitNudge() }
 
     /// Drives `controlTextDidEndEditing` with the real field (focus loss).
     public func test_endEditing() {

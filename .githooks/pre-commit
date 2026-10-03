@@ -152,19 +152,28 @@ if [ -f "$g9" ] && command -v python3 >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# GUARD 7 (BLOCKING): staged Swift must pass the readability self-review.
+# GUARD 7 (BLOCKING): staged Swift must pass the readability screen.
 #
 # Numbered by arrival like every guard, but positioned HERE — before the
-# test-suite guards — so a review bounce costs seconds, not a full suite run.
-# Logic lives in guard-self-review.sh (same split as Guard 2's checker):
-# a deterministic screen over added comment lines, then a receipt proving
-# scripts/self-review.sh ran against these exact staged bytes. Rubric and
-# rationale: docs/REVIEW-RUBRIC.md. Missing helper => silently skip, same
-# principle as Guard 2 — a hook that errors on an unrelated machine is worse
-# than a hook that isn't there.
+# test-suite guards — so a bounce costs seconds, not a full suite run.
+# Logic lives in guard-self-review.sh (same split as Guard 2's checker): a
+# deterministic screen over added comment lines (rubric:
+# docs/REVIEW-RUBRIC.md). The code review happens at merge time (Guard 10).
+# Missing helper => silently skip, same principle as Guard 2 — a hook that
+# errors on an unrelated machine is worse than a hook that isn't there.
 g7="$hook_dir/guard-self-review.sh"
 if [ -f "$g7" ]; then
     sh "$g7" || exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# GUARD 10 (BLOCKING): a merge onto main needs a code-review receipt.
+# A conflict-resolution merge commit runs this hook instead of pre-merge-commit,
+# so the receipt check runs here too. A clean merge gets it from pre-merge-commit.
+# Before Guard 4, so a refused merge never pays for a suite run.
+g10="$hook_dir/guard-merge-review.sh"
+if [ "$branch" = "main" ] && [ -f "$git_dir/MERGE_HEAD" ] && [ -f "$g10" ]; then
+    sh "$g10" || exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -176,10 +185,12 @@ fi
 #   - a branch commit runs only the suites that plausibly cover its staged
 #     Swift, derived by guard-test-scope.sh (which fails closed to the full
 #     suite whenever it cannot map a file)
-#   - a merge landing on main runs the FULL suite with the pass cache off
+#   - a merge landing on main runs the FULL suite with the pass cache off,
+#     unless a full-suite pass is stamped on the identical merged tree
+#   - merging main into a branch runs the FULL suite, which stamps that pass
 # The full run on every commit was the main cost of committing, and the risk it
-# absorbed lands one step later instead: nothing reaches main without a full,
-# uncached run, so a too-narrow branch filter costs at most one fix cycle at
+# absorbed lands one step later instead: nothing reaches main without a full
+# run on its exact sources, so a too-narrow branch filter costs at most one fix cycle at
 # merge time.
 #
 # Scope: only runs when staged files include AudioutCore Swift source/test
@@ -202,22 +213,6 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     g4scope="$hook_dir/guard-test-scope.sh"
     if [ -f "$g4scope" ]; then
         scope=$(sh "$g4scope")
-    fi
-    # A merge onto main is the last gate before main, so it never runs filtered
-    # and never accepts the runner's "these sources already passed" cache.
-    merge_env=""
-    if [ "$branch" = "main" ] && [ -n "${AUDIOUT_IN_MERGE:-}" ]; then
-        scope=FULL
-        merge_env="AUDIOUT_TEST_NO_CACHE=1"
-    fi
-    echo "" >&2
-    if [ "$scope" = "FULL" ]; then
-        echo "  Guard 4: AudioutCore Swift changed — running full suite" >&2
-        echo "  (scripts/run-tests.sh) before commit. ~70s warm; --no-verify to skip." >&2
-    else
-        echo "  Guard 4: AudioutCore Swift changed — running the suites covering it:" >&2
-        echo "    $scope" >&2
-        echo "  (AUDIOUT_FULL_SUITE=1 to force the full run; --no-verify to skip.)" >&2
     fi
     # Via the shared runner, NOT a bare `swift test`: the runner takes a
     # machine-wide lock so concurrent agents queue instead of thrashing 8 cores
@@ -247,6 +242,36 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
         echo "  (no scripts/run-tests.sh found — running unserialised)" >&2
         run_suite=""
     fi
+    # A merge onto main is the last gate before main, so it never runs filtered
+    # and never accepts the runner's "these sources already passed" cache. The
+    # one exception: a FULL-suite pass stamped on the exact tree this merge
+    # commits (hashed from the index, not the working tree). Merging main into
+    # a branch already ran that full suite, and landing the branch then commits
+    # byte-identical sources. Filtered passes never count, whatever they named.
+    merge_env=""
+    merge_stamp=""
+    if [ "$branch" = "main" ] && [ -n "${AUDIOUT_IN_MERGE:-}" ]; then
+        scope=FULL
+        merge_env="AUDIOUT_TEST_NO_CACHE=1"
+        cache_lib="$(dirname "$run_suite")/lib/suite-cache.sh"
+        if [ -n "$run_suite" ] && [ -f "$cache_lib" ] && [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ]; then
+            . "$cache_lib"
+            merge_key=$(suite_cache_staged_hash "$repo_root" AudioutCore)
+            [ -n "$merge_key" ] && [ -f "$suite_cache_dir/$merge_key.full" ] \
+                && merge_stamp="$suite_cache_dir/$merge_key.full"
+        fi
+    fi
+    echo "" >&2
+    if [ -n "$merge_stamp" ]; then
+        echo "  Guard 4: skipped — full suite already passed on this exact merged tree (stamp $(printf '%.12s' "$merge_key"), passed $(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$merge_stamp")); AUDIOUT_TEST_NO_CACHE=1 forces a run." >&2
+    elif [ "$scope" = "FULL" ]; then
+        echo "  Guard 4: AudioutCore Swift changed — running full suite" >&2
+        echo "  (scripts/run-tests.sh) before commit. ~70s warm; --no-verify to skip." >&2
+    else
+        echo "  Guard 4: AudioutCore Swift changed — running the suites covering it:" >&2
+        echo "    $scope" >&2
+        echo "  (AUDIOUT_FULL_SUITE=1 to force the full run; --no-verify to skip.)" >&2
+    fi
     # No engine flag: the SwiftPM default matches scripts/run-tests.sh and
     # scripts/make-app.sh — see the note above run-tests.sh's `swift test` call.
     # The engines keep separate cache trees, so a guard that disagreed with the
@@ -267,7 +292,9 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     # No runner found (a branch older than run-tests.sh) => full suite inline,
     # unchanged from before.
     run_guard4() {
-        if [ -z "$run_suite" ]; then
+        if [ -n "$merge_stamp" ]; then
+            return 0
+        elif [ -z "$run_suite" ]; then
             ( cd "$repo_root/AudioutCore" \
                 && $nogit swift test --parallel >&2 )
         elif [ "$scope" = "FULL" ]; then
@@ -283,7 +310,9 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
         echo "" >&2
         exit 1
     fi
-    if [ "$scope" = "FULL" ]; then
+    if [ -n "$merge_stamp" ]; then
+        :
+    elif [ "$scope" = "FULL" ]; then
         echo "  Guard 4: full suite passed." >&2
     else
         echo "  Guard 4: the suites covering this change passed." >&2

@@ -420,6 +420,24 @@ final class PassiveDriftTracker: @unchecked Sendable {
     /// inside the capture once a speaker's delay has shifted it.
     static let searchMarginMs = 50.0
 
+    /// Starts the periodic window timer: the first fire after
+    /// `firstSeconds`, then every `intervalSeconds`, each on `queue`. Hands
+    /// back the function that stops it.
+    typealias PeriodicClock = @Sendable (_ firstSeconds: Double,
+                                         _ intervalSeconds: Double,
+                                         _ queue: DispatchQueue,
+                                         _ fire: @escaping @Sendable () -> Void)
+        -> @Sendable () -> Void
+
+    /// The shipping clock: a repeating timer on the tracker's own queue.
+    static let dispatchPeriodicClock: PeriodicClock = { firstSeconds, intervalSeconds, queue, fire in
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + firstSeconds, repeating: intervalSeconds)
+        timer.setEventHandler(handler: fire)
+        timer.resume()
+        return { timer.cancel() }
+    }
+
     private let ring: ReferenceAudioRing
     private let makeRecorder: @Sendable () -> MicProbeRecording
     private let permissionIsGranted: @Sendable () -> Bool
@@ -436,11 +454,16 @@ final class PassiveDriftTracker: @unchecked Sendable {
     private let pollIntervalSeconds: Double
     private let clockStepWindowSpacingSeconds: Double
     private let clockStepStormCount: Int
+    /// Only the tests pass anything but ``dispatchPeriodicClock``: a real
+    /// timer fires again on its own while a busy suite keeps the test from
+    /// looking, so they step time by hand instead.
+    private let periodicClock: PeriodicClock
     private let queue = DispatchQueue(label: "com.audiout.passive-drift")
 
     /// `queue` only.
     private var sampler = PassiveDriftSampler()
-    private var timer: DispatchSourceTimer?
+    /// Stops the periodic timer; `nil` while it is not running.
+    private var cancelPeriodicTimer: (@Sendable () -> Void)?
     private var silenceTimer: DispatchSourceTimer?
     private var windowInFlight = false
     /// Whether periodic sampling is meant to be running — true between
@@ -486,8 +509,10 @@ final class PassiveDriftTracker: @unchecked Sendable {
          programIsSilent: @escaping @Sendable () -> Bool = { false },
          now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          isNearMiss: @escaping @Sendable ([DriftPeak], PassiveDriftCorrelator) -> Bool = PassiveDriftSampler.isNearMiss,
+         periodicClock: @escaping PeriodicClock = PassiveDriftTracker.dispatchPeriodicClock,
          onObservations: @escaping @Sendable ([DriftCorrectionPolicy.Observation]) -> Void) {
         self.ring = ring
+        self.periodicClock = periodicClock
         self.windowSeconds = windowSeconds
         self.intervalSeconds = intervalSeconds
         self.firstWindowSeconds = firstWindowSeconds
@@ -506,7 +531,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
     }
 
     deinit {
-        timer?.cancel()
+        cancelPeriodicTimer?()
         silenceTimer?.cancel()
     }
 
@@ -518,7 +543,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
             // A blind spell cancelled the periodic timer; re-arming the sampler
             // without rescheduling it would leave only event triggers sampling,
             // for good.
-            if isRunning, timer == nil { scheduleTimer() }
+            if isRunning, cancelPeriodicTimer == nil { scheduleTimer() }
         }
     }
 
@@ -537,7 +562,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
     func start() {
         queue.async { [self] in
             isRunning = true
-            if timer == nil { scheduleTimer() }
+            if cancelPeriodicTimer == nil { scheduleTimer() }
             if silenceTimer == nil { scheduleSilencePoll() }
         }
     }
@@ -545,8 +570,8 @@ final class PassiveDriftTracker: @unchecked Sendable {
     func stop() {
         queue.async {
             self.isRunning = false
-            self.timer?.cancel()
-            self.timer = nil
+            self.cancelPeriodicTimer?()
+            self.cancelPeriodicTimer = nil
             self.silenceTimer?.cancel()
             self.silenceTimer = nil
             // Silence measured before the stop says nothing about the sink the
@@ -560,11 +585,9 @@ final class PassiveDriftTracker: @unchecked Sendable {
 
     /// `queue` only.
     private func scheduleTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + firstWindowSeconds, repeating: intervalSeconds)
-        timer.setEventHandler { [weak self] in self?.takeWindow() }
-        self.timer = timer
-        timer.resume()
+        cancelPeriodicTimer = periodicClock(firstWindowSeconds, intervalSeconds, queue) { [weak self] in
+            self?.takeWindow()
+        }
     }
 
     /// `queue` only.
@@ -666,6 +689,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
             clockStepState[uid] = state
             Telemetry.log(.localPlayback, "drift_clock_step_storm",
                           ["uid": uid, "steps": String(state.stepTimes.count)])
+            Self.captureSkip("clock_step_storm")
             return
         }
 
@@ -701,6 +725,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
             : !permissionIsGranted() ? "no_mic_permission" : nil
         if let skip {
             Telemetry.log(.localPlayback, "drift_window_skipped", logFields(reason, ["reason": skip]))
+            Self.captureSkip(skip)
             return false
         }
         let recorder = makeRecorder()
@@ -709,6 +734,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
             ring.setArmed(false)
             Telemetry.log(.localPlayback, "drift_window_skipped",
                           logFields(reason, ["reason": "mic_start_failed"]))
+            Self.captureSkip("mic_start_failed")
             return false
         }
         Telemetry.log(.localPlayback, "drift_window_started",
@@ -730,8 +756,9 @@ final class PassiveDriftTracker: @unchecked Sendable {
         // at — and that is a setup fault, not a deaf mic, so it does not count
         // toward the quiet disable.
         guard let startNanos = recorder.firstSampleHostNanos, !capture.isEmpty else {
-            Telemetry.log(.localPlayback, "drift_window_dropped",
-                          ["reason": capture.isEmpty ? "empty_capture" : "no_mic_timestamp"])
+            let drop = capture.isEmpty ? "empty_capture" : "no_mic_timestamp"
+            Telemetry.log(.localPlayback, "drift_window_dropped", ["reason": drop])
+            Self.captureSkip(drop)
             return
         }
 
@@ -751,6 +778,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
         else {
             Telemetry.log(.localPlayback, "drift_window_dropped",
                           ["reason": "reference_not_aligned"])
+            Self.captureSkip("reference_not_aligned")
             return
         }
 
@@ -763,7 +791,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
             capture: capture, captureRate: captureRate, hostNanos: startNanos,
             countsTowardBlind: reason != .retry)
         Self.logWindow(outcome, peaks: sampler.lastPeaks, candidates: sampler.lastCandidates,
-                       baselines: sampler.baselines, hostNanos: startNanos)
+                       baselines: sampler.baselines, hostNanos: startNanos, reason: reason)
         if case .observations(let observations) = outcome, !observations.isEmpty {
             onObservations(observations)
         }
@@ -775,7 +803,7 @@ final class PassiveDriftTracker: @unchecked Sendable {
                 self?.takeWindow(reason: .retry)
             }
         }
-        if sampler.isBlind { timer?.cancel(); timer = nil }
+        if sampler.isBlind { cancelPeriodicTimer?(); cancelPeriodicTimer = nil }
     }
 
     /// Diagnostic only: with `defaults write <bundle id> audiout.driftDumpWindows
@@ -815,10 +843,12 @@ final class PassiveDriftTracker: @unchecked Sendable {
     /// takes.
     /// One local line per measured window: what the correlator heard, what the
     /// sampler made of it. Local only — `Telemetry.log` never leaves the Mac,
-    /// so device ids are allowed here.
+    /// so device ids are allowed here. The window's `bt_sync:drift_window_ended`
+    /// goes out beside it with enums, one bucket and counts only.
     static func logWindow(_ outcome: PassiveDriftSampler.Outcome, peaks: [DriftPeak],
                           candidates: [DriftPeak],
-                          baselines: [PassiveDriftSampler.Baseline], hostNanos: Int64) {
+                          baselines: [PassiveDriftSampler.Baseline], hostNanos: Int64,
+                          reason: Trigger) {
         // delay@score/local/margin: the whole-tape score, then the two numbers
         // that decide whether the peak is an arrival or the music's own next
         // repeat. Reading a refused window means reading all three, so all
@@ -827,6 +857,11 @@ final class PassiveDriftTracker: @unchecked Sendable {
             String(format: "%.1fms@%.1f/%.1f/%.1f",
                    p.delayMs, p.confidence, p.localConfidence, p.margin)
         }
+        var event: [String: String] = [
+            "trigger": snakeCased(reason.label),
+            "speaker_count": String(baselines.filter { !$0.isAnchor }.count),
+            "has_reference": baselines.contains(where: \.isAnchor) ? "true" : "false",
+        ]
         var fields: [String: String] = [
             "peaks": peaks.map(format).joined(separator: ","),
             "candidates": candidates.map(format).joined(separator: ","),
@@ -841,6 +876,11 @@ final class PassiveDriftTracker: @unchecked Sendable {
             fields["errors"] = observations.map {
                 "\($0.deviceUID)=\(String(format: "%+.1f", $0.errorMs))\($0.isBestGuess ? "(guess)" : "")"
             }.joined(separator: ",")
+            // An empty list ("aligned") matched no Bluetooth speaker, so it has
+            // no error to bucket.
+            if let worst = observations.map({ abs($0.errorMs) }).max() {
+                event["error_ms_bucket"] = BTSpeakerTiming.offsetBucket(worst)
+            }
         case .rebaselined(let shiftMs):
             fields["result"] = "rebaselined"
             fields["shiftMs"] = String(format: "%+.1f", shiftMs)
@@ -851,10 +891,27 @@ final class PassiveDriftTracker: @unchecked Sendable {
         case .unusable(let rejection):
             fields["result"] = "unusable"
             fields["rejection"] = rejection.rawValue
+            event["refusal"] = snakeCased(rejection.rawValue)
         case .blind:
             fields["result"] = "blind"
         }
         Telemetry.log(.localPlayback, "drift_window_result", fields)
+        event["result"] = fields["result"]
+        Analytics.capture("bt_sync:drift_window_ended", event)
+    }
+
+    /// A window that could not run, or was thrown away before analysis.
+    /// `reason` is the local line's own reason, already snake_case.
+    static func captureSkip(_ reason: String) {
+        Analytics.capture("bt_sync:drift_window_skipped", ["reason": reason])
+    }
+
+    /// `clockJump` → `clock_jump`: the local log's camelCase names in the
+    /// event vocabulary's snake_case.
+    static func snakeCased(_ name: String) -> String {
+        name.reduce(into: "") { out, c in
+            if c.isUppercase { out += "_" + c.lowercased() } else { out.append(c) }
+        }
     }
 
     static func mono(_ pcm: Data, channels: Int = PCMFormat.airplay.channels) -> [Float] {

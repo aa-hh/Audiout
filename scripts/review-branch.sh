@@ -272,7 +272,12 @@ fi
 
 # --continue: every pass handed over must have a reply, and a reviewer's reply
 # must be in the expected format.
-read -r -a passes < "$state/passes" || passes=()
+passes=()
+read -r -a passes < "$state/passes" 2>/dev/null
+if [ "${#passes[@]}" -eq 0 ]; then
+  echo "Review did not run: no reviewer passes were handed over. Run again with no flag."
+  exit 2
+fi
 for p in ${passes[@]+"${passes[@]}"}; do
   out="$state/$p.out"
   if [ ! -f "$out" ]; then

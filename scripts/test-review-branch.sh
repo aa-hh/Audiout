@@ -425,6 +425,16 @@ review
 [ "$rc" = 2 ] && grep -q 'no reply saved for the rules pass' "$out" && [ ! -f "$(receipt_path)" ] \
   && ok "w: missing reply → exit 2 naming the pass" || { fail "w: exit $rc"; show; }
 
+# (x) A handover that broke before listing its passes means no review.
+# Catches: an empty pass list counting zero findings and writing a receipt.
+reset_answers
+make_branch half-planned "$analytics" 120
+start_review
+rm -f "$(pending_path)/passes"
+bash scripts/review-branch.sh --continue > "$out" 2>&1; rc=$?
+[ "$rc" = 2 ] && grep -q 'no reviewer passes were handed over' "$out" && [ ! -f "$(receipt_path)" ] \
+  && ok "x: no pass list → exit 2, no receipt" || { fail "x: exit $rc"; show; }
+
 # (o) The script refuses to review main.
 git checkout -q main
 before=$(ls "$RECEIPTS" | wc -l | tr -d ' ')

@@ -10,15 +10,18 @@ import AppKit
 /// — house rule R3). The ROW computes the armed predicate (spec §3.3) and
 /// pushes the boolean; this view only draws it:
 ///
+/// Whenever a glyph ring is drawn, a dot is drawn in its gap (owner's ruling,
+/// 2026-10-03). The ring decides that: `HaloRingView.cutoutDot` pushes the
+/// ring's own stroke token into ``ringColor`` on every stamp, `nil` while no
+/// ring is drawn.
+///
 /// - **armed** (playing) → a flat `gold` disc with a 1 pt `ember` edge, no
 ///   halo. The edge keeps the dot ≥3:1 against the ground where light gold
 ///   alone is 1.77:1.
-/// - **shown, not armed** (connected and in the mix, but muted) → a hollow
-///   ring in `Tokens.Color.rim`, the connected glyph ring's own
-///   colour, so a later change to that colour moves both.
-/// - **not shown** (not connected, not in the mix, connecting, failed) → no
-///   dot at all (owner's ruling, 2026-10-03; it retires spec §3.3's
-///   always-present "dark/empty socket").
+/// - **ring drawn, not armed** → a hollow ring in the ring's own colour:
+///   `ember` while connecting, `failure` red when failed, `rim` when
+///   connected but not playing (Main Audio: its spine tone).
+/// - **no ring** → no dot and no cut-out (the whole view hides).
 ///
 /// A shown dot sits on a `routeArmedDotCutoutDiameter` disc in the popover
 /// ground (`Tokens.Color.panel`, what `ControlPanelBackingView` fills the
@@ -61,6 +64,7 @@ public final class RouteArmedDotView: NSView {
     public init() {
         super.init(frame: .zero)
         wantsLayer = true
+        isHidden = true             // no ring has handed over a colour yet
         layer?.addSublayer(cutoutLayer)
         layer?.addSublayer(cutoutWashLayer)
         layer?.addSublayer(dotLayer)
@@ -111,21 +115,28 @@ public final class RouteArmedDotView: NSView {
         didSet { updateLayerAppearance() }
     }
 
+    /// The stroke token of the glyph ring this dot sits in, pushed by
+    /// `HaloRingView` on every stamp; `nil` means no ring is drawn, so no dot.
+    public var ringColor: NSColor? {
+        didSet {
+            isHidden = ringColor == nil
+            updateLayerAppearance()
+        }
+    }
+
     /// Non-interactive: never intercept clicks/hover meant for the row.
     public override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     /// Point the dot at an armed state. Idempotent; a repeated same-state
     /// apply re-stamps colors (cheap) and never re-triggers the bloom. The
     /// bloom fires only on a false→true transition after the first apply,
-    /// while in a window, with Reduce Motion off.
-    /// - Parameter shown: whether the speaker is connected and in the mix;
-    ///   `false` hides the dot whatever `armed` says.
-    public func apply(armed: Bool, shown: Bool = true) {
+    /// while in a window, with Reduce Motion off. Visibility is the ring's
+    /// call (``ringColor``), not this one's.
+    public func apply(armed: Bool) {
         let wasArmed = isArmed
         let firstApply = !hasApplied
         isArmed = armed
         hasApplied = true
-        isHidden = !shown
         updateLayerAppearance()
         needsLayout = true
         if armed && !wasArmed && !firstApply && window != nil && !reduceMotion {
@@ -161,7 +172,7 @@ public final class RouteArmedDotView: NSView {
                 dotLayer.strokeColor = Tokens.Color.ember.cgColor
             } else {
                 dotLayer.fillColor = nil
-                dotLayer.strokeColor = Tokens.Color.rim.cgColor
+                dotLayer.strokeColor = ringColor?.cgColor
             }
         }
         dotLayer.lineWidth = strokeWidth

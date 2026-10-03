@@ -140,7 +140,7 @@ import AudioutCore
         #expect(!(dark.test_routeArmed), "RMS can never light a dot the model didn't arm")
     }
 
-    // MARK: Dot rendering — gold armed, hollow when muted, hidden otherwise
+    // MARK: Dot rendering — gold armed, hollow in the ring colour, hidden with no ring
 
     @Test func armedDotIsGoldWithNoHalo() {
         let row = DeviceRowView(device: makeDevice())
@@ -149,14 +149,23 @@ import AudioutCore
         #expect(!(row.test_dotIsBlooming), "no transient on a first render — steady states render settled (spec §6)")
     }
 
-    @Test func dotIsHiddenUnlessConnectedAndInTheMix() {
-        let outOfMix = DeviceRowView(device: makeDevice())
-        outOfMix.apply(makeDevice(), selected: false)
-        #expect(!outOfMix.test_dotIsShown, "a speaker outside the mix has no dot")
+    /// Whenever a glyph ring is drawn its gap holds a dot, hollow in the
+    /// ring's own colour; no ring, no dot (owner's ruling, 2026-10-03).
+    @Test func everyDrawnRingHoldsAHollowDotInItsOwnColour() {
+        for (state, token) in [(ConnectionState.connecting, Tokens.Color.ember),
+                               (.failed(.init(cause: .notResponding)), Tokens.Color.failure)] {
+            let row = DeviceRowView(device: makeDevice(connectionState: state))
+            // A per-app feed arms the row, but only a connected speaker goes gold.
+            row.apply(makeDevice(connectionState: state), selected: true, liveAppNames: ["Spotify"])
+            #expect(row.test_dotIsShown, "\(state): the ring's gap holds a dot")
+            #expect(row.test_dotFillColor == nil, "\(state): the dot is hollow")
+            assertSameHue(row.test_dotStrokeColor, token, "\(state): the dot wears the ring's token")
+            assertSameHue(row.test_dotStrokeColor, row.test_ringStrokeColor, "\(state): dot and ring match")
+        }
 
-        let connecting = DeviceRowView(device: makeDevice(connectionState: .connecting))
-        connecting.apply(makeDevice(connectionState: .connecting), selected: true)
-        #expect(!connecting.test_dotIsShown, "a connecting speaker has no dot")
+        let off = DeviceRowView(device: makeDevice(connectionState: .off))
+        off.apply(makeDevice(connectionState: .off), selected: true)
+        #expect(!off.test_dotIsShown, "no ring, no dot")
     }
 
     @Test func mutedConnectedDotIsAHollowRingInTheConnectedRingColour() {

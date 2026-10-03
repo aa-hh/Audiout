@@ -735,9 +735,13 @@ the rail node, so one row never shows connecting in two colours. The
 connecting pulse only grows the ring outward from its resting radius
 (`haloRingBreathGrowth`), so it never crosses the glyph.
 
-The status dot shows only for a speaker that is connected and in the mix.
-Playing is a `gold` disc with a 1 pt `ember` edge; connected but muted is a
-hollow ring in `rim`. Every other state has no dot.
+Whenever a glyph ring is drawn, a status dot sits in its gap: a hollow ring
+in the glyph ring's own colour, except playing, which is a `gold` disc with a
+1 pt `ember` edge. So connecting is hollow `ember`, failed is hollow
+`failure`, connected but not playing is hollow `rim`, and a speaker with no
+ring has no dot and no cut-out. The ring hands the dot its stroke colour
+(`HaloRingView.cutoutDot`), so a ring colour change moves both. Main Audio
+follows the same rule, its hollow dot wearing the ring's spine tone.
 
 The connected glyph ring and the hollow dot are `rim`, the same grey as an
 unarmed volume slider's fill. That match is deliberate: the iPhone app draws

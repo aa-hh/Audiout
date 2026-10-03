@@ -188,8 +188,9 @@ public final class DeviceRowView: NSView {
     /// The **gold route-armed corner dot** (Warm Signal v3 §3.3, S2) at the
     /// icon's bottom-right — the position the retired connection dot vacated.
     /// PURE MODEL STATE, never RMS: lit iff the §3.3 predicate holds (see
-    /// `routeArmed(...)` in ``apply``); a hollow ring when connected and in
-    /// the mix but not armed; hidden otherwise. Paused
+    /// `routeArmed(...)` in ``apply``) on a connected speaker; otherwise a
+    /// hollow ring in the glyph ring's own colour while that ring is drawn,
+    /// and hidden when it is not. Paused
     /// and playing render identically here (R3 — only the meter differs).
     let armedDotView: RouteArmedDotView = {
         let dot = RouteArmedDotView()
@@ -636,11 +637,11 @@ public final class DeviceRowView: NSView {
         let mainMixArmed = activeMember && isConnected && !device.isMuted && !masterMuted
         isMainMixArmed = mainMixArmed
         isRouteArmed = mainMixArmed || hasLiveFeeds
-        // The dot shows only for a connected speaker carrying the mix (the
-        // main mix or a per-app feed): gold while armed, a hollow
-        // `rim` ring while muted. Anything else has no dot.
-        armedDotView.apply(armed: isRouteArmed,
-                           shown: isConnected && (activeMember || hasLiveFeeds))
+        // The ring decides whether the dot shows and its hollow colour
+        // (`haloRingView.cutoutDot`). Gold needs a connected speaker: a
+        // per-app feed arms the row while it is still connecting, and that
+        // speaker's dot stays the connecting ring's hollow ember.
+        armedDotView.apply(armed: isRouteArmed && isConnected)
         nameLabel.textColor = rowTextColor
 
         // FEED column (v4.1 item 3): main-mix segment wording — "System" for a
@@ -1683,6 +1684,7 @@ public final class DeviceRowView: NSView {
         addSubview(iconView)
         addSubview(haloRingView)           // ring around the icon glyph
         addSubview(armedDotView)           // gold route-armed dot on its corner
+        haloRingView.cutoutDot = armedDotView
         addSubview(identityStack)
         addSubview(slider)
         addSubview(readoutLabel)

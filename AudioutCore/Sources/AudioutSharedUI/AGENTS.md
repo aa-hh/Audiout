@@ -25,7 +25,7 @@ or `GroupController`.
 - The rail overlay paints ABOVE every row, so the gutter is the spine's alone: anything that opens under a device row (sync drawer, alignment note, connection diagnosis) starts its content at `PopoverColumnGrid.firstElementLeading`, never inside the gutter.
 - The rail line is one colour end to end: `originColor` (spine tone, or `railDormant` when the rail is dormant). A connecting or failed speaker shows in its node and glyph ring, never in the segment feeding it.
 - A node can fill with the checkbox off: `localFallbackOutput` draws the Mac as a rail member while the engine plays on it, and edits no selection.
-- Every Mixer ring (glyph ring, Main Audio ring, rail node) strokes at `ringStrokeWidth`; weight never carries state. The status dot shows only when connected and in the mix.
+- Every Mixer ring (glyph ring, Main Audio ring, rail node) strokes at `ringStrokeWidth`; weight never carries state. A drawn glyph ring always holds the status dot in its gap, hollow in the ring's colour unless playing; `HaloRingView.cutoutDot` is the only thing that shows or tints it.
 - Warm ink and gold wash mean `isRouteArmed`; cool means silent. Instruments are flat, no `CALayer` blooms.
 - `Tokens.Color.muted` is fenced to the device row's engaged mute button; a second consumer fails a test.
 - `setContent`'s `defaultSize:` seeds only the first mount of a content controller.

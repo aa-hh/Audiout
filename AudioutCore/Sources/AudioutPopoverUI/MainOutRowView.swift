@@ -236,9 +236,11 @@ public final class MainOutRowView: NSView {
         // uses, at stamp time, so the two cannot drift and the accent dial
         // moves both.
         haloRingView.connectedSpineArmed = isSpineLive
-        // Shown only while a member is connected: gold while the master
-        // plays, a hollow `rim` ring while it is muted.
-        armedDotView.apply(armed: armed, shown: isConnected)
+        // Gold whenever the spine is gold (a connected member playing, or
+        // the Mac playing on its own); otherwise a hollow ring in the ring's
+        // own colour, pushed by `haloRingView.cutoutDot`. Shown whenever the
+        // ring is.
+        armedDotView.apply(armed: isSpineLive)
         // The master fader's engaged (gold) fill reuses the EXACT same armed
         // predicate the dot renders — one armed truth, two instruments.
         faderCell.isRouteArmed = armed
@@ -479,6 +481,7 @@ public final class MainOutRowView: NSView {
         addSubview(iconView)
         addSubview(haloRingView)
         addSubview(armedDotView)
+        haloRingView.cutoutDot = armedDotView
         addSubview(identityStack)
         addSubview(muteButton)
         addSubview(slider)
@@ -705,7 +708,7 @@ public final class MainOutRowView: NSView {
         // dot — the spoken equivalents shipped with the drawing.
         var valueParts: [String] = []
         if isMasterMuted { valueParts.append("muted") }
-        if armedDotView.test_isLit { valueParts.append("armed") }
+        if faderCell.isRouteArmed { valueParts.append("armed") }
         setAccessibilityValue(valueParts.joined(separator: ", "))
         slider.setAccessibilityRole(.slider)
         slider.setAccessibilityLabel("Main Audio master volume")
@@ -778,9 +781,9 @@ public final class MainOutRowView: NSView {
     public var test_ringStrokeColor: NSColor? { haloRingView.test_strokeColor }
 
     /// Whether the Main Out route-armed corner dot is LIT (spec §3.3: active
-    /// target has a connected member ∧ master unmuted) — reads the dot view's
-    /// rendered state, so it can't drift from the pixels.
-    public var test_routeArmed: Bool { armedDotView.test_isLit }
+    /// target has a connected member ∧ master unmuted) — the same flag the
+    /// master fader's gold fill reads.
+    public var test_routeArmed: Bool { faderCell.isRouteArmed }
 
     /// Whether the master fader would render its ENGAGED (gold-gradient) fill
     /// — the cell's own gate, so the test can't drift from the pixels. Must

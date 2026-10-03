@@ -62,7 +62,8 @@ import AudioutCore
 /// (`haloRingGapWidth`) dead zone centered on the gold route-armed dot's
 /// corner seat (`haloRingGapCenterAngle`) so the dot sits IN the ring's gap
 /// rather than nearly touching the stroke, separated only by its own
-/// punch-out border. The gap's geometry never varies by state or form.
+/// punch-out border. The gap's geometry never varies by state or form, and
+/// whenever a ring is drawn its gap holds the dot (`cutoutDot`).
 public final class HaloRingView: NSView {
 
     /// Which ring form is currently rendered — mirrors the four connection
@@ -126,6 +127,11 @@ public final class HaloRingView: NSView {
     public var connectedSpineArmed: Bool? {
         didSet { updateLayerAppearance() }
     }
+    /// The status dot sitting in this ring's gap. Every stamp hands it the
+    /// ring's own stroke token (or `nil` while no ring is drawn), so the dot's
+    /// hollow ring reads from the same resolution as the ring and a ring with
+    /// no dot, or a dot with no ring, cannot happen.
+    public weak var cutoutDot: RouteArmedDotView?
 
     public init() {
         super.init(frame: .zero)
@@ -253,6 +259,7 @@ public final class HaloRingView: NSView {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             ringLayer.strokeColor = strokeToken.cgColor
         }
+        cutoutDot?.ringColor = form == .none ? nil : strokeToken
     }
 
     public override func viewDidChangeEffectiveAppearance() {

@@ -25,7 +25,8 @@
 #   --continue          read the saved replies and go on to the next step.
 #   --already-reviewed  record work a /scope-and-run reviewer already approved;
 #                       writes the receipt without any model.
-# Exit: 0 reviewed + receipt; 1 a HIGH finding survived, no receipt;
+# Exit: 0 reviewed + receipt; 1 findings to fix (any severity), no receipt,
+#       fix groups printed;
 #       2 the review did not run, no receipt; 3 reviewer subagents needed
 #       (run the printed passes, then --continue).
 
@@ -294,8 +295,9 @@ for p in ${passes[@]+"${passes[@]}"}; do
   exit 2
 done
 
-high=0; medium=0; low=0; dropped=0
+high=0; medium=0; low=0; dropped=0; survivors=()
 count() {
+  survivors+=("$1")
   case "$1" in
     HIGH*) high=$((high + 1)) ;;
     MEDIUM*) medium=$((medium + 1)) ;;
@@ -351,9 +353,38 @@ fi
 echo "Findings: $high high, $medium medium, $low low ($dropped dropped)"
 log_line "$high" "$medium" "$low" "$dropped"
 rm -rf "$state"
-if [ "$high" -gt 0 ]; then
-  echo "Blocked: fix the HIGH findings, commit, run this again."
-  exit 1
+if [ ${#survivors[@]} -eq 0 ]; then
+  write_receipt
+  exit 0
 fi
-write_receipt
-exit 0
+
+# Every surviving finding is fixed before the branch merges: group them by the
+# file in their path:line field, one builder subagent per group.
+# razor: one group per file; upgrade path is merging groups whose files the
+# findings name together.
+file_of() {
+  local f
+  f=$(printf '%s\n' "$1" | sed -n 's/^[A-Z]* | \([^|:]*[^|: ]\):[0-9][^|]* | .*/\1/p')
+  [ -n "$f" ] && echo "$f" || echo "$1"
+}
+keys=(); groups=()
+for l in "${survivors[@]}"; do
+  k=$(file_of "$l"); keys+=("$k")
+  seen=0
+  for g in ${groups[@]+"${groups[@]}"}; do [ "$g" = "$k" ] && seen=1; done
+  [ "$seen" = 1 ] || groups+=("$k")
+done
+echo
+n=0
+for g in "${groups[@]}"; do
+  n=$((n + 1))
+  echo "fix-$n  file=$g"
+  i=0
+  for l in "${survivors[@]}"; do
+    [ "${keys[$i]}" = "$g" ] && echo "    $l"
+    i=$((i + 1))
+  done
+done
+echo
+echo "Fix every finding above. Launch one builder subagent (work-order-executor, model opus) per fix group, all in parallel in this worktree; give each its group's finding lines verbatim plus: edit only the named file and its own test file, read the nearest AGENTS.md first, do not commit. Two groups never share a file. When all return, run the tests covering the changed files, commit, then start a fresh review: bash scripts/review-branch.sh"
+exit 1

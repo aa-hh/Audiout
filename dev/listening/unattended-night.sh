@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Unattended listening night for the Bluetooth sync fixes. See README.md here.
 #
-#   ./unattended-night.sh [--dry-run] [--with-airplay] [--move1 ID] [--move2 ID] [--airplay-id ID]
+#   ./unattended-night.sh [--dry-run | --smoke] [--with-airplay] [--move1 ID] [--move2 ID] [--airplay-id ID]
 #   ./unattended-night.sh --list-devices      # ids this Mac has seen, in the form the driver takes
 #   ./unattended-night.sh --check [flags]     # tools, ids and build only, then exit (launch-tonight.sh runs it)
 #
@@ -16,6 +16,12 @@
 # not touched. Exercises QuickTime, recording, conversion, analysis and the
 # summary on any Mac. If the mic or QuickTime cannot be used it falls back to a
 # synthetic recording and says so in the summary.
+#
+# --smoke: the real run, shortened for a rehearsal with the owner in the room:
+# Block A 2 min (disconnect at minute 1), Block B 20 s / 30 s / 20 s, Block C 2 min.
+#
+# A watchdog checks the recording, the mic level, the clicks, the clock lines and
+# the load every WATCH_EVERY_S during each block and writes results/<date>/status.log.
 set -euo pipefail
 zmodload zsh/datetime
 
@@ -56,12 +62,21 @@ B_PAUSE_S=90
 C_S=3600
 JUMP_MS=5            # an offset change bigger than this between 3 s rows is a jump
 OSA_TIMEOUT_S=30     # an osascript call longer than this is waiting on a permission prompt
+LOAD_EVERY_S=60      # load.csv sample interval
+LOAD_WARN=4          # summary.md warns, and the watchdog alerts, above this 1-minute load average
+WATCH_EVERY_S=60     # watchdog interval during a block
+RMS_FLOOR_DB=-80     # mic level over the last 10 s must be above this (digital silence is -inf)
+CLICKS_MIN=8         # 3 s periods with a click found in the last 30 s
+CLOCK_WINDOW_S=90    # every selected Bluetooth speaker must log bt_clock_deviation within this
+ALERTS_TO_ABORT=3    # consecutive alerts on one check that end a block early
+PROBE_S=20           # pre-flight probe recording before Block A
 
 # ---- Flags ------------------------------------------------------------------
-MODE=night; DRY=0; WITH_AIRPLAY=0
+MODE=night; DRY=0; SMOKE=0; WITH_AIRPLAY=0
 while (( $# )); do
   case $1 in
     --dry-run) DRY=1 ;;
+    --smoke) SMOKE=1 ;;
     --with-airplay) WITH_AIRPLAY=1 ;;
     --list-devices) MODE=list ;;
     --check) MODE=check ;;
@@ -72,8 +87,12 @@ while (( $# )); do
   esac
   shift
 done
+(( DRY && SMOKE )) && { print -u2 "--dry-run and --smoke cannot be combined"; exit 2 }
 if (( DRY )); then
-  SETTLE_S=0; A_FIRST_S=10; A_OFF_S=10; A_REST_S=10; B_PLAY_S=10; B_PAUSE_S=10; C_S=10
+  SETTLE_S=0; A_FIRST_S=10; A_OFF_S=10; A_REST_S=10; B_PLAY_S=10; B_PAUSE_S=10; C_S=10; LOAD_EVERY_S=5; WATCH_EVERY_S=5; PROBE_S=10
+fi
+if (( SMOKE )); then
+  A_FIRST_S=60; A_OFF_S=10; A_REST_S=50; B_PLAY_S=20; B_PAUSE_S=30; C_S=120
 fi
 
 OUT=""
@@ -200,9 +219,26 @@ if [[ $MODE == check ]]; then
   exit 0
 fi
 
-OUT="$RESULTS_ROOT/$(date +%Y-%m-%d_%H%M)$( (( DRY )) && print -n -- -dry-run)"
+SUFFIX=""; (( DRY )) && SUFFIX=-dry-run; (( SMOKE )) && SUFFIX=-smoke
+OUT="$RESULTS_ROOT/$(date +%Y-%m-%d_%H%M)$SUFFIX"
 mkdir -p "$OUT"
-log "results: $OUT; recorder: $RECORDER; dry run: $DRY"
+log "results: $OUT; recorder: $RECORDER; dry run: $DRY; smoke: $SMOKE"
+log "watch it: tail -F '$OUT/status.log'"
+
+# Once a minute for the whole run: the 1-minute load average and the busiest
+# process, so a block disturbed by a test run or anything else shows in the summary.
+print "timestamp,block,load1,top_process" > "$OUT/load.csv"
+print -n -- - > "$OUT/.block"
+(
+  while true; do
+    load1=$(uptime | sed -E 's/.*load averages?: ([0-9.]+).*/\1/') || true
+    top=$(ps -Ao pcpu=,comm= -r | head -1 | sed -E 's/^ *[0-9.]+ +//') || true
+    print -r -- "$(date +%Y-%m-%dT%H:%M:%S),$(<"$OUT/.block"),$load1,${${top:t}//,/ }" >> "$OUT/load.csv"
+    sleep $LOAD_EVERY_S
+  done
+) &
+LOAD_PID=$!
+trap 'kill $LOAD_PID 2>/dev/null' EXIT
 [[ -n $BLUE_PROBLEM ]] && note "$BLUE_PROBLEM: Block A's disconnect and the connection checks are skipped"
 if (( DRY )); then
   [[ -n $KEY_PROBLEM ]] && note "a real run would stop here: $KEY_PROBLEM"
@@ -374,13 +410,134 @@ select_speakers() {  # ids...
   return 0
 }
 
+# ---- Watchdog ---------------------------------------------------------------
+# One python pass over the growing recording, the telemetry tail and the load.
+# Prints the status fields on line 1, then one "<check> <value>" line per failure.
+watch_probe() {  # raw_wav prev_bytes click_window_s paused ids...
+  "$PYTHON" - "$1" "$2" "$3" "$4" "$TELEMETRY" "$ANALYSER" "$RMS_FLOOR_DB" "$CLICKS_MIN" \
+    "$CLOCK_WINDOW_S" "$LOAD_WARN" "$DRY" "${@:5}" <<'EOF'
+import sys, os, re, json, math, struct, wave, tempfile, subprocess, datetime
+raw, prev, win, paused, tel, analyser = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), sys.argv[4] == "1", sys.argv[5], sys.argv[6]
+floor_db, clicks_min, clock_win, load_warn, dry = float(sys.argv[7]), int(sys.argv[8]), float(sys.argv[9]), float(sys.argv[10]), sys.argv[11] == "1"
+ids = sys.argv[12:]
+f, fails = [], []
+if raw and os.path.exists(raw):
+    size = os.path.getsize(raw); f.append(f"rec={size}")
+    if size <= prev: fails.append(f"rec {size}")
+    with open(raw, "rb") as fh: head = fh.read(4096)
+    i = head.find(b"fmt "); ch, rate = struct.unpack("<HI", head[i + 10:i + 16]); bits = struct.unpack("<H", head[i + 22:i + 24])[0]
+    data = head.find(b"data") + 8; frame = ch * bits // 8
+    def tail(sec):
+        n = int(sec * rate) * frame; start = max(data, size - n); start -= (start - data) % frame
+        with open(raw, "rb") as fh: fh.seek(start); return fh.read(size - start)
+    import numpy as np
+    x = np.frombuffer(tail(10), dtype=np.int16).astype(np.float64)
+    rms = 20 * math.log10(math.sqrt((x ** 2).mean()) / 32768) if x.size and x.any() else float("-inf")
+    f.append(f"rms={rms:.1f}")
+    if paused: f.append("clicks=paused")
+    else:
+        if rms <= floor_db: fails.append(f"rms {rms:.1f}")
+        with tempfile.NamedTemporaryFile(suffix=".wav") as t:
+            w = wave.open(t.name, "wb"); w.setnchannels(ch); w.setsampwidth(bits // 8); w.setframerate(rate); w.writeframes(tail(win)); w.close()
+            out = subprocess.run([sys.executable, analyser, t.name], capture_output=True, text=True).stdout
+        n = sum(1 for l in out.splitlines() if l.strip() and not l.startswith("#"))
+        have = min(win, (size - data) / (rate * frame))  # less than the window early in a block
+        need = int(clicks_min * have / 30); f.append(f"clicks={n}")
+        if n < need: fails.append(f"clicks {n}<{need}")
+elif raw:
+    f.append("rec=missing"); fails.append("rec missing")
+else: f.append("rec=n/a rms=n/a clicks=n/a")
+bt = [i for i in ids if re.match(r"^[0-9A-F]{2}(-[0-9A-F]{2}){5}:output$", i)]
+if dry: f.append("clock_lines=skipped(dry-run)")
+else:
+    now = datetime.datetime.now(datetime.timezone.utc); counts = {i: 0 for i in bt}
+    with open(tel, "rb") as fh:
+        fh.seek(max(0, os.path.getsize(tel) - 400_000)); lines = fh.read().decode("utf-8", "replace").splitlines()
+    for l in lines:
+        if '"bt_clock_deviation"' not in l: continue
+        try: r = json.loads(l); ts = datetime.datetime.fromisoformat(r["ts"].replace("Z", "+00:00"))
+        except (ValueError, KeyError): continue
+        if r.get("uid") in counts and (now - ts).total_seconds() <= clock_win: counts[r["uid"]] += 1
+    f.append("clock_lines=" + (",".join(f"{k}:{v}" for k, v in counts.items()) or "none-needed"))
+    fails += [f"clock {k}:0" for k, v in counts.items() if v == 0]
+load = os.getloadavg()[0]; f.append(f"load={load:.2f}")
+if load >= load_warn:
+    top = subprocess.run(["ps", "-Ao", "pcpu=,comm=", "-r"], capture_output=True, text=True).stdout.splitlines()
+    fails.append(f"load {load:.2f} (busiest: {os.path.basename(top[0].split(None, 1)[1]) if top else '?'})")
+print(" ".join(f)); print("\n".join(fails))
+EOF
+}
+
+status() { print -r -- "$*" | tee -a "$OUT/status.log" }
+typeset -A ALERT_RUN       # consecutive alerts per check in the current block
+B_ABORT=0; B_PAUSED=0; B_REC_PREV=0; B_NEXT=0
+live_raw() {  # the growing recording the watchdog can read, or empty when there is none
+  (( FAKE_AUDIO )) || [[ $RECORDER != ffmpeg ]] && return 0
+  print -n -- "$OUT/block$B_NAME-raw.wav"
+}
+watch_check() {
+  local out=$(watch_probe "$(live_raw)" $B_REC_PREV 30 $B_PAUSED ${=B_IDS}) t=$(date +%H:%M:%S)
+  local -a lines=("${(@f)out}"); local fields=$lines[1] l c
+  [[ $fields == rec=<->* ]] && B_REC_PREV=${${fields#rec=}%% *}
+  local -a fails=(${(@)lines[2,-1]:#})
+  local -A failed
+  if (( ! $#fails )); then status "OK $B_NAME $t $fields"; ALERT_RUN=(); return 0; fi
+  for l in $fails; do
+    c=${l%% *}; failed[$c]=1; ALERT_RUN[$c]=$(( ${ALERT_RUN[$c]:-0} + 1 ))
+    status "ALERT $B_NAME $t $c ${l#* }"
+    if (( ALERT_RUN[$c] >= ALERTS_TO_ABORT )); then
+      status "ABORT $B_NAME $t $c ${l#* }"; B_ABORT=1; mark "abort_$c"; note "block $B_NAME ended early: $ALERTS_TO_ABORT alerts in a row on $c (${l#* })"
+    fi
+  done
+  for c in ${(k)ALERT_RUN}; do (( ${+failed[$c]} )) || unset "ALERT_RUN[$c]"; done
+}
+watch_sleep() {  # seconds; sleeps, checking every WATCH_EVERY_S; returns at once after an abort
+  local end=$(( SECONDS + $1 )) next
+  while (( ! B_ABORT && SECONDS < end )); do
+    (( SECONDS >= B_NEXT )) && { watch_check; B_NEXT=$(( SECONDS + WATCH_EVERY_S )); }
+    next=$(( B_NEXT < end ? B_NEXT : end )); (( next > SECONDS )) && sleep $(( next - SECONDS ))
+  done
+  return 0
+}
+
+# Before Block A: the same checks once on a short probe recording; a real run
+# refuses to start on any alert and says what to fix.
+probe_check() {  # ids...
+  local raw="$OUT/probe-raw" t=$(date +%H:%M:%S)
+  play_start; rec_start "$raw"; sleep $PROBE_S
+  local p=""; (( FAKE_AUDIO )) || [[ $RECORDER != ffmpeg ]] || p="$raw.wav"
+  local out=$(watch_probe "$p" 0 $PROBE_S 0 "$@")
+  rec_stop "$raw" || true; play_stop || true
+  local -a lines=("${(@f)out}"); local -a fails=(${(@)lines[2,-1]:#}); local l fix=""
+  log "pre-flight probe: $lines[1]"
+  if (( ! $#fails )); then status "OK PREFLIGHT $t $lines[1]"; return 0; fi
+  for l in $fails; do
+    status "ALERT PREFLIGHT $t ${l%% *} ${l#* }"
+    case ${l%% *} in
+      rec) fix+="The recording did not grow: check ffmpeg.log and Terminal's Microphone access. " ;;
+      rms) fix+="The mic hears nothing (${l#* } dBFS): check Terminal's Microphone access and the input level in Sound settings. " ;;
+      clicks) fix+="Too few clicks heard (${l#* }): check the speakers are on, selected in Audiout Dev, loud enough and 1 to 2 m away. " ;;
+      clock) fix+="No bt_clock_deviation line from ${${l#* }%:0} in $CLOCK_WINDOW_S s: that Move is not playing through Audiout Dev; check it is connected and selected. " ;;
+      load) fix+="The Mac is busy (load ${l#* }): stop that work, including test runs routed to this Mac, and start again. " ;;
+    esac
+  done
+  (( DRY )) && { note "a real run would stop here: $fix"; return 0; }
+  die "pre-flight probe failed. $fix"
+}
+
 # Block bookkeeping: blocks.tsv feeds the summary writer.
 print -r -- $'block\tstatus\tbytes_from\tbytes_to\trec_start\tevents\tids' > "$OUT/blocks.tsv"
 B_NAME=""; B_FROM=0; B_T0=0; B_EVENTS=""; B_IDS=""
 block_begin() {  # $1 = A/B/C, then the selected ids
-  B_NAME=$1; B_IDS=${(j: :)@[2,-1]}; B_FROM=$(tel_size); B_EVENTS=""
+  B_NAME=$1; B_IDS=${(j: :)@[2,-1]}; B_FROM=$(tel_size); B_EVENTS=""; print -n -- $1 > "$OUT/.block"
+  B_ABORT=0; B_PAUSED=0; B_REC_PREV=0; ALERT_RUN=(); B_NEXT=$(( SECONDS + WATCH_EVERY_S ))
+  status "BLOCK-START $1 $(date +%H:%M:%S)"
   rec_start "$OUT/block$1-raw"; B_T0=$(now)
   log "block $1: recording, telemetry offset $B_FROM"
+  case $1 in  # this Mac is also the remote test Mac; the owner changes its permit count by these lines
+    A) log "Block A started at $(date +%H:%M); set remoteSlots to 0 on the dev Mac now (git config audiout.remoteSlots 0)" ;;
+    C) log "Block C started at $(date +%H:%M); raise remoteSlots to 1 on the dev Mac now only if tests must keep flowing" ;;
+  esac
 }
 mark() { B_EVENTS+="$1@$(( $(now) - B_T0 ));"; log "block $B_NAME: $1" }
 block_end() {
@@ -391,6 +548,8 @@ block_end() {
   else afconvert -f WAVE -d LEI16 "$(raw_file "$OUT/block$B_NAME-raw")" "$OUT/block$B_NAME.wav" || log "block $B_NAME: conversion failed"; fi
   "$PYTHON" "$ANALYSER" "$OUT/block$B_NAME.wav" > "$OUT/block$B_NAME.txt" || log "block $B_NAME: analysis failed"
   print -r -- "$B_NAME"$'\tok\t'"$B_FROM"$'\t'"$bytes_to"$'\t'"$B_T0"$'\t'"$B_EVENTS"$'\t'"$B_IDS" >> "$OUT/blocks.tsv"
+  print -n -- - > "$OUT/.block"
+  status "BLOCK-END $B_NAME $(date +%H:%M:%S)"
   log "block $B_NAME: done, telemetry offset $bytes_to"
 }
 block_skip() { print -r -- "$1"$'\tskipped: '"$2"$'\t0\t0\t0\t\t' >> "$OUT/blocks.tsv"; note "block $1 skipped: $2" }
@@ -400,16 +559,18 @@ preflight
 
 # Block A: both Moves.
 if ensure_connected $IDS_A && select_speakers $IDS_A; then
+  probe_check $IDS_A
   play_start; block_begin A $IDS_A
-  sleep $A_FIRST_S
-  if (( DRY )); then mark toggle_skipped_dry_run; sleep $A_OFF_S
+  watch_sleep $A_FIRST_S
+  if (( B_ABORT )); then :
+  elif (( DRY )); then mark toggle_skipped_dry_run; watch_sleep $A_OFF_S
   elif (( HAVE_BLUEUTIL )); then
     mark disconnect; to 30 blueutil --disconnect $(bt_addr $MOVE2_ID) || log "disconnect failed"
-    sleep $A_OFF_S
+    watch_sleep $A_OFF_S
     mark reconnect; to 30 blueutil --connect $(bt_addr $MOVE2_ID) || log "reconnect failed"
-    sleep 5; bt_connected $(bt_addr $MOVE2_ID) || note "block A: second Move did not reconnect"
-  else mark toggle_skipped_no_blueutil; sleep $A_OFF_S; fi
-  sleep $A_REST_S
+    watch_sleep 5; bt_connected $(bt_addr $MOVE2_ID) || note "block A: second Move did not reconnect"
+  else mark toggle_skipped_no_blueutil; watch_sleep $A_OFF_S; fi
+  watch_sleep $A_REST_S
   block_end
 else block_skip A "both Moves could not be connected or selected (see driver.log)"; fi
 
@@ -417,9 +578,13 @@ else block_skip A "both Moves could not be connected or selected (see driver.log
 (( ! DRY && HAVE_BLUEUTIL )) && { to 30 blueutil --disconnect $(bt_addr $MOVE2_ID) || true; }
 if ensure_connected $MOVE1_ID && select_speakers $IDS_B; then
   play_start; block_begin B $IDS_B
-  sleep $B_PLAY_S; mark pause; play_pause || log "pause failed"
-  sleep $B_PAUSE_S; mark resume; play_resume || log "resume failed"
-  sleep $B_PLAY_S
+  watch_sleep $B_PLAY_S
+  if (( ! B_ABORT )); then
+    mark pause; play_pause || log "pause failed"; B_PAUSED=1  # the mic and click checks expect silence now
+    watch_sleep $B_PAUSE_S
+    mark resume; play_resume || log "resume failed"; B_PAUSED=0
+    watch_sleep $B_PLAY_S
+  fi
   block_end
 else block_skip B "Move 1 could not be connected or selected with This Mac (see driver.log)"; fi
 
@@ -427,7 +592,7 @@ else block_skip B "Move 1 could not be connected or selected with This Mac (see 
 if (( WITH_AIRPLAY )); then
   if ensure_connected $MOVE1_ID && select_speakers $IDS_C; then
     play_start; block_begin C $IDS_C
-    sleep $C_S
+    watch_sleep $C_S
     block_end
   else block_skip C "Move 1 or the AirPlay speaker could not be selected (see driver.log)"; fi
 fi
@@ -435,9 +600,15 @@ fi
 (( DRY )) || defaults delete $BUNDLE_ID $SELECT_KEY 2>/dev/null || true
 
 # ---- Summary ----------------------------------------------------------------
-"$PYTHON" - "$OUT" "$TELEMETRY" "$JUMP_MS" "$DRY" "$AIRPLAY_NAME" <<'EOF'
+"$PYTHON" - "$OUT" "$TELEMETRY" "$JUMP_MS" "$DRY" "$AIRPLAY_NAME" "$LOAD_WARN" "$SMOKE" <<'EOF'
 import sys, os, re, json
 out, tel, jump_ms, dry, airplay = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4] == "1", sys.argv[5]
+load_warn = float(sys.argv[6]); smoke = sys.argv[7] == "1"
+loads = {}
+for l in list(open(f"{out}/load.csv"))[1:]:
+    ts, blk, load1, top = (l.rstrip("\n").split(",", 3) + [""] * 4)[:4]
+    try: loads.setdefault(blk, []).append((ts, float(load1), top))
+    except ValueError: pass
 EVTS = ["bt_clock_jump", "bt_sink_anchored", "bt_sink_release_overshoot", "bt_sink_seek_clamped",
         "tap_feed_gap", "bt_clock_deviation", "drift_window_result", "drift_window_dropped",
         "drift_correction", "bt_room_term_changed", "room_delay_changed"]
@@ -483,7 +654,12 @@ def deviation_slopes(lines):
                    f"jumps {sum(p[2] for p in pts)}, first {ys[0]:+.1f} last {ys[-1]:+.1f} ms")
     return res
 
-md = [f"# Listening night {os.path.basename(out)}", ""]
+md = [f"# {'SMOKE: ' if smoke else ''}Listening night {os.path.basename(out)}", ""]
+if smoke: md += ["SMOKE run: Block A 2 min (disconnect at minute 1), Block B 20 s / 30 s / 20 s, Block C 2 min. A rehearsal; the block titles below give the full-run lengths.", ""]
+if os.path.exists(f"{out}/status.log"):
+    st = [l.strip() for l in open(f"{out}/status.log")]
+    bad = [l for l in st if l.startswith(("ALERT", "ABORT"))]
+    md += [f"Watchdog (`status.log`): {sum(l.startswith('OK') for l in st)} OK, {sum(l.startswith('ALERT') for l in st)} ALERT, {sum(l.startswith('ABORT') for l in st)} ABORT."] + [f"- `{l}`" for l in bad[:20]] + [""]
 if dry: md += ["Dry run: 10 s phases, no Audiout relaunch, no Bluetooth changes. The numbers check the tooling, not the speakers.", ""]
 if os.path.exists(f"{out}/notes.txt"): md += ["## Notes", ""] + [f"- {l.strip()}" for l in open(f"{out}/notes.txt")] + [""]
 
@@ -521,6 +697,13 @@ for line in list(open(f"{out}/blocks.tsv"))[1:]:
     md += ["", "| telemetry line | count |", "|---|---|"] + [f"| `{e}` | {c} |" for e, c in counts.items()]
     slopes = deviation_slopes(lines)
     if slopes: md += ["", "`bt_clock_deviation` per speaker:", ""] + [f"- {s}" for s in slopes]
+    ld = loads.get(name, [])
+    if ld:
+        peak = max(ld, key=lambda r: r[1])
+        md += ["", f"Load (1-minute average, {len(ld)} samples in load.csv): max {peak[1]:.2f}, mean {sum(r[1] for r in ld)/len(ld):.2f}."]
+        if peak[1] > load_warn:
+            md += [f"**Warning:** load went above {load_warn:g} (peak {peak[1]:.2f} at {peak[0]}, busiest process {peak[2]}); something else was working on this Mac, so treat this block's timing with suspicion."]
+    else: md += ["", "Load: no sample fell inside this block."]
     keep = [l for l in text if re.search(r'"evt":"(' + "|".join(EVTS) + ')', l)]
     with open(f"{out}/block{name}-telemetry.jsonl", "w") as f: f.write("\n".join(keep) + ("\n" if keep else ""))
     md += [""]
@@ -537,4 +720,5 @@ md += ["## Reading Blocks A and C (table from runbook 2)", "",
 open(f"{out}/summary.md", "w").write("\n".join(md))
 print(f"{out}/summary.md")
 EOF
-log "done"
+status "DONE $(date +%H:%M:%S)"
+log "done; set remoteSlots back to 2 on the dev Mac (git config audiout.remoteSlots 2)"

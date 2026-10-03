@@ -26,6 +26,10 @@ private final class FakeAggregateControl: AggregateDeviceControlling, @unchecked
     private var resolvable: [String: AudioObjectID]
     private var enumerated: [String]
     private var builtInUID: String?
+    /// Resolvable UIDs that `isWrappableOutput` still refuses (an AirPlay or virtual device).
+    private var unwrappable: Set<String>
+    /// `false` scripts a HAL that accepts the sub-device write and changes nothing.
+    private var setSubDeviceTakes: Bool
     private var createResult: AudioObjectID?
     private var destroySucceeds: Bool
     private var setDefaultSucceeds: Bool
@@ -34,15 +38,27 @@ private final class FakeAggregateControl: AggregateDeviceControlling, @unchecked
     private var createCallLog: [(uid: String, name: String, subDeviceUID: String)] = []
     private var destroyCallLog: [AudioObjectID] = []
     private var setDefaultCallLog: [AudioObjectID] = []
+    /// Each aggregate's main sub-device; unset reads as unreadable (`nil`).
+    private var mainSubDevice: [AudioObjectID: String]
+    private var setSubDeviceCallLog: [(subDeviceUID: String, deviceID: AudioObjectID)] = []
+    /// `setSubDevice` and `setDefaultOutputDevice` calls in the order they happened.
+    private var orderedCallLog: [String] = []
+    private var deviceListObserver: (@Sendable () -> Void)?
 
     init(
         resolvable: [String: AudioObjectID] = [:],
         enumerated: [String] = [],
         builtInUID: String? = "com.apple.builtin",
+        unwrappable: Set<String> = [],
         createResult: AudioObjectID? = nil,
         destroySucceeds: Bool = true,
-        setDefaultSucceeds: Bool = true
+        setDefaultSucceeds: Bool = true,
+        mainSubDevice: [AudioObjectID: String] = [:],
+        setSubDeviceTakes: Bool = true
     ) {
+        self.mainSubDevice = mainSubDevice
+        self.unwrappable = unwrappable
+        self.setSubDeviceTakes = setSubDeviceTakes
         self.resolvable = resolvable
         self.enumerated = enumerated
         self.builtInUID = builtInUID
@@ -56,6 +72,9 @@ private final class FakeAggregateControl: AggregateDeviceControlling, @unchecked
     /// resolves (spike-measured instability), so a test can prove a caller
     /// never caches the id.
     func rescriptResolvable(_ new: [String: AudioObjectID]) { locked { resolvable = new } }
+    /// A device appearing (`id`) or vanishing (`nil`), as a plug or unplug would.
+    func setResolvable(_ uid: String, _ id: AudioObjectID?) { locked { resolvable[uid] = id } }
+    func fireDeviceListChanged() { locked { deviceListObserver }?() }
 
     func resolveDeviceID(forUID uid: String) -> AudioObjectID? {
         locked { resolveCallLog.append(uid); return resolvable[uid] }
@@ -65,6 +84,7 @@ private final class FakeAggregateControl: AggregateDeviceControlling, @unchecked
             createCallLog.append((uid, name, subDeviceUID))
             guard let result = createResult else { return nil }
             resolvable[uid] = result
+            mainSubDevice[result] = subDeviceUID
             if !enumerated.contains(uid) { enumerated.append(uid) }
             return result
         }
@@ -86,7 +106,25 @@ private final class FakeAggregateControl: AggregateDeviceControlling, @unchecked
     }
     func builtInOutputDeviceUID() -> String? { locked { builtInUID } }
     func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool {
-        locked { setDefaultCallLog.append(deviceID); return setDefaultSucceeds }
+        locked {
+            setDefaultCallLog.append(deviceID)
+            orderedCallLog.append("setDefault:\(deviceID)")
+            return setDefaultSucceeds
+        }
+    }
+    func isWrappableOutput(uid: String) -> Bool {
+        locked { resolvable[uid] != nil && !unwrappable.contains(uid) }
+    }
+    func observeDeviceList(_ onChange: @escaping @Sendable () -> Void) { locked { deviceListObserver = onChange } }
+    func stopObservingDeviceList() { locked { deviceListObserver = nil } }
+    func mainSubDeviceUID(ofAggregate deviceID: AudioObjectID) -> String? { locked { mainSubDevice[deviceID] } }
+    func setSubDevice(_ subDeviceUID: String, ofAggregate deviceID: AudioObjectID) -> Bool {
+        locked {
+            setSubDeviceCallLog.append((subDeviceUID, deviceID))
+            orderedCallLog.append("setSubDevice:\(subDeviceUID)")
+            if setSubDeviceTakes { mainSubDevice[deviceID] = subDeviceUID }
+            return true
+        }
     }
 
     // Thread-safe snapshots for assertions.
@@ -94,6 +132,8 @@ private final class FakeAggregateControl: AggregateDeviceControlling, @unchecked
     var createCalls: [(uid: String, name: String, subDeviceUID: String)] { locked { createCallLog } }
     var destroyCalls: [AudioObjectID] { locked { destroyCallLog } }
     var setDefaultCalls: [AudioObjectID] { locked { setDefaultCallLog } }
+    var setSubDeviceCalls: [(subDeviceUID: String, deviceID: AudioObjectID)] { locked { setSubDeviceCallLog } }
+    var orderedCalls: [String] { locked { orderedCallLog } }
 }
 
 /// A minimal thread-safe box, so a test can script what `NativeBackend`'s
@@ -197,7 +237,7 @@ private final class LockedBox<T>: @unchecked Sendable {
         let control = FakeAggregateControl(resolvable: [AggregateOutputDevice.productUID: 501])
         let device = AggregateOutputDevice(control: control)
 
-        #expect(device.adoptOrCreate() == 501)
+        #expect(device.adoptOrCreate(candidateUID: nil) == 501)
         #expect(control.createCalls.isEmpty)
         #expect(control.resolveCalls.contains(AggregateOutputDevice.productUID))
     }
@@ -208,7 +248,7 @@ private final class LockedBox<T>: @unchecked Sendable {
         let control = FakeAggregateControl(resolvable: [:], builtInUID: "com.apple.builtin", createResult: 909)
         let device = AggregateOutputDevice(control: control)
 
-        #expect(device.adoptOrCreate() == 909)
+        #expect(device.adoptOrCreate(candidateUID: nil) == 909)
         #expect(control.createCalls.count == 1)
         #expect(control.createCalls.first?.uid == AggregateOutputDevice.productUID)
         #expect(control.createCalls.first?.name == AggregateOutputDevice.productName)
@@ -221,7 +261,7 @@ private final class LockedBox<T>: @unchecked Sendable {
         let control = FakeAggregateControl(resolvable: [:], builtInUID: nil)
         let device = AggregateOutputDevice(control: control)
 
-        #expect(device.adoptOrCreate() == nil)
+        #expect(device.adoptOrCreate(candidateUID: nil) == nil)
         #expect(control.createCalls.isEmpty)
     }
 
@@ -233,14 +273,51 @@ private final class LockedBox<T>: @unchecked Sendable {
         let control = FakeAggregateControl(resolvable: [:], builtInUID: "com.apple.builtin", createResult: 101)
         let device = AggregateOutputDevice(control: control)
 
-        #expect(device.adoptOrCreate() == 101, "first call: miss then create")
+        #expect(device.adoptOrCreate(candidateUID: nil) == 101, "first call: miss then create")
 
         // Simulate the aggregate having been torn down and recreated by
         // something else under a NEW AudioObjectID.
         control.rescriptResolvable([AggregateOutputDevice.productUID: 202])
 
-        #expect(device.adoptOrCreate() == 202, "second call must resolve fresh, not reuse the first id")
+        #expect(device.adoptOrCreate(candidateUID: nil) == 202, "second call must resolve fresh, not reuse the first id")
         #expect(control.createCalls.count == 1, "the second call was a HIT — no second create")
+    }
+
+    // MARK: sub-device choice
+
+    /// Ticket 06: the Mac's copy lands on the laptop speakers while a DAC is the
+    /// default. Creating with the first built-in output instead of the candidate turns this red.
+    @Test func adoptOrCreateWrapsTheCurrentDefaultWhenItIsWrappable() {
+        let control = FakeAggregateControl(resolvable: ["com.usb.dac": 603], createResult: 909)
+        let device = AggregateOutputDevice(control: control)
+
+        #expect(device.adoptOrCreate(candidateUID: "com.usb.dac") == 909)
+        #expect(control.createCalls.first?.subDeviceUID == "com.usb.dac")
+    }
+
+    /// Wrapping an AirPlay or virtual default would feed it twice or loop; skipping
+    /// the wrappable check turns this red.
+    @Test func adoptOrCreateFallsBackToBuiltInWhenTheDefaultIsNotWrappable() {
+        let control = FakeAggregateControl(
+            resolvable: ["com.airplay.receiver": 604], unwrappable: ["com.airplay.receiver"], createResult: 909)
+        let device = AggregateOutputDevice(control: control)
+
+        #expect(device.adoptOrCreate(candidateUID: "com.airplay.receiver") == 909)
+        #expect(control.createCalls.first?.subDeviceUID == "com.apple.builtin")
+    }
+
+    /// An aggregate adopted from an earlier launch still wraps the speakers while the
+    /// user now listens through a DAC. Adopting it as is turns this red.
+    @Test func adoptRepairsAnAdoptedAggregateOntoTheWantedDevice() {
+        let control = FakeAggregateControl(
+            resolvable: [AggregateOutputDevice.productUID: 501, "com.usb.dac": 603],
+            mainSubDevice: [501: "BuiltInSpeakerDevice"])
+        let device = AggregateOutputDevice(control: control)
+
+        #expect(device.adoptOrCreate(candidateUID: "com.usb.dac") == 501, "repaired in place, so the id is unchanged")
+        #expect(control.setSubDeviceCalls.map(\.subDeviceUID) == ["com.usb.dac"])
+        #expect(control.createCalls.isEmpty)
+        #expect(control.destroyCalls.isEmpty)
     }
 
     // MARK: EffectiveCaptureDevice.resolve (pure; NativeCaptureCoordinator.swift)
@@ -1139,6 +1216,129 @@ extension SerializedSharedState {
     }
 
     private static let builtInSpeakers = "com.builtin.speakers"
+    private static let headphoneJack = "BuiltInHeadphoneOutputDevice"
+    private static let usbDAC = "com.usb.dac"
+
+    /// A HAL that accepts the sub-device write and changes nothing would leave
+    /// the adopted aggregate on the headphone jack with nothing recorded.
+    /// Trusting `setSubDevice`'s return without re-reading turns this red.
+    @Test func anAdoptRepairThatDoesNotTakeIsLogged() {
+        let control = FakeAggregateControl(
+            resolvable: [AggregateOutputDevice.productUID: 501, Self.builtInSpeakers: 601],
+            mainSubDevice: [501: Self.headphoneJack],
+            setSubDeviceTakes: false)
+        let sink = LinesBox()
+        Telemetry._installTestSink { sink.append($0) }
+
+        _ = AggregateOutputDevice(control: control).adoptOrCreate(candidateUID: Self.builtInSpeakers)
+        Telemetry._installTestSink(nil)   // flush barrier
+
+        let lines = sink.snapshot().filter { $0.contains(#""evt":"aggregate_subdevice""#) }
+        #expect(lines.count == 1)
+        #expect(lines.first?.contains(#""outcome":"failed""#) == true)
+    }
+
+    /// The aggregate must wrap what the user was listening through BEFORE it takes
+    /// the default, or the Mac's copy starts on the wrong device. Launch finds the
+    /// built-in already wrapped; macOS then moves the default to a just-plugged DAC,
+    /// so only the takeover reconcile can wrap the DAC. Dropping it turns this red.
+    @Test func takeoverWrapsThePriorDefaultBeforeTakingTheDefault() async {
+        let control = FakeAggregateControl(
+            resolvable: [AggregateOutputDevice.productUID: 501, Self.usbDAC: 603],
+            mainSubDevice: [501: "com.apple.builtin"])
+        let box = LockedBox<String?>("com.apple.builtin")
+        let (backend, _) = makeBackend(aggregateControl: control, currentDefaultOutputUIDBox: box)
+        defer { backend.stop() }
+        backend.start()
+        backend.stateQueue.sync {}   // launch's adopt runs on `stateQueue`; let it read the built-in first
+        box.set(Self.usbDAC)
+        _ = await collectQuiescent(from: backend) { backend.setOutputSet(["some-airplay-device"]) }
+        box.set(AggregateOutputDevice.productUID)
+
+        #expect(control.setSubDeviceCalls.map(\.subDeviceUID) == [Self.usbDAC])
+        let order = control.orderedCalls
+        let wrap = order.firstIndex(of: "setSubDevice:\(Self.usbDAC)")
+        let takeDefault = order.firstIndex(of: "setDefault:501")
+        #expect(wrap != nil && takeDefault != nil && wrap! < takeDefault!,
+                "the aggregate wraps the DAC before it becomes the default: \(order)")
+    }
+
+    /// Silence after unplug: the aggregate keeps wrapping a device that is gone.
+    /// Dropping the device-list observer turns this red.
+    @Test func losingTheWrappedDeviceRepointsOntoBuiltIn() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501, Self.usbDAC: 603])
+        let box = LockedBox<String?>(Self.usbDAC)
+        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        defer { backend.stop() }
+
+        control.setResolvable(Self.usbDAC, nil)
+        control.fireDeviceListChanged()
+        await pollUntil { control.setSubDeviceCalls.last?.subDeviceUID == "com.apple.builtin" }
+
+        #expect(control.setSubDeviceCalls.last?.subDeviceUID == "com.apple.builtin")
+    }
+
+    /// Replugging the DAC must move the aggregate back onto it, or the Mac's copy
+    /// stays on the speakers while the user wears headphones on the DAC.
+    /// Candidate = anything but `priorDefaultUID` while we hold the default turns this red.
+    @Test func theWrappedDeviceReturningMovesTheAggregateBack() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501, Self.usbDAC: 603])
+        let box = LockedBox<String?>(Self.usbDAC)
+        let (backend, _) = await makeRestoreBackend(control: control, box: box)
+        defer { backend.stop() }
+
+        control.setResolvable(Self.usbDAC, nil)
+        control.fireDeviceListChanged()
+        await pollUntil { control.setSubDeviceCalls.last?.subDeviceUID == "com.apple.builtin" }
+
+        control.setResolvable(Self.usbDAC, 603)
+        control.fireDeviceListChanged()
+        await pollUntil { control.setSubDeviceCalls.last?.subDeviceUID == Self.usbDAC }
+
+        #expect(control.setSubDeviceCalls.map(\.subDeviceUID) == [Self.usbDAC, "com.apple.builtin", Self.usbDAC])
+    }
+
+    /// Records only what the re-point test needs from the delayed "This Mac" copy.
+    private final class ReanchorSpySink: SyncedLocalSinkControlling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _started = false
+        private var _reanchors: [String] = []
+        func start() throws { lock.withLock { _started = true } }
+        func stop() {}
+        func startObservingLifecycleEvents() {}
+        func stopObservingLifecycleEvents() {}
+        func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {}
+        func requestReanchor(cause: String) { lock.withLock { _reanchors.append(cause) } }
+        var started: Bool { lock.withLock { _started } }
+        var reanchorCauses: [String] { lock.withLock { _reanchors } }
+    }
+
+    /// The delayed "This Mac" copy rebuilds only when the default-output device
+    /// changes, and a re-point leaves the default on the aggregate: after a rate
+    /// change its engine stays stopped (silence), and at equal rates it keeps the
+    /// old device's latency. Dropping the re-anchor from the re-point turns this red.
+    @Test func aRepointWhileTheAggregateIsDefaultReanchorsTheMacCopy() async {
+        let control = FakeAggregateControl(resolvable: [
+            AggregateOutputDevice.productUID: 501, Self.usbDAC: 603])
+        let box = LockedBox<String?>(Self.usbDAC)
+        let (backend, _) = makeBackend(aggregateControl: control, currentDefaultOutputUIDBox: box)
+        defer { backend.stop() }
+        let sink = ReanchorSpySink()
+        backend.syncedLocalSinkFactory = { sink }
+        backend.selectedDevicesQuery = { $0 == NativeBackend.localDeviceID }
+        backend.start()
+        _ = await collectQuiescent(from: backend) { backend.setOutputSet(["some-airplay-device"]) }
+        box.set(AggregateOutputDevice.productUID)
+        await pollUntil { sink.started }
+
+        control.setResolvable(Self.usbDAC, nil)
+        control.fireDeviceListChanged()
+        await pollUntil { !sink.reanchorCauses.isEmpty }
+
+        #expect(sink.reanchorCauses == ["wrapped_device_changed"])
+    }
 
     /// Quit must REPORT the outcome of the restore write that hands the Mac's
     /// default output back. The result was discarded and the aggregate destroyed
@@ -1196,22 +1396,25 @@ extension SerializedSharedState {
     }
 
     /// The pre-takeover device can be gone by the time we hand the default back
-    /// (headphones unplugged mid-session), and a never-captured prior reads the
-    /// same way. Both fall back on the Mac's built-in output — the very
-    /// sub-device the aggregate wraps, so it is always there.
+    /// (a USB DAC unplugged mid-session), and a never-captured prior reads the
+    /// same way. Both fall back on the Mac's FIRST built-in output, which is the
+    /// headphone jack while headphones are in — not the speakers the aggregate
+    /// wraps. Falling back on the aggregate's own sub-device turns this red:
+    /// the Mac would play out loud through its speakers.
     @Test func deselectFallsBackToBuiltInWhenPriorIsUnresolvable() async {
-        let control = FakeAggregateControl(resolvable: [
-            AggregateOutputDevice.productUID: 501,
-            "com.apple.builtin": 601])   // `FakeAggregateControl`'s default built-in UID
+        let control = FakeAggregateControl(
+            resolvable: [AggregateOutputDevice.productUID: 501,
+                         Self.builtInSpeakers: 601, Self.headphoneJack: 602],
+            builtInUID: Self.headphoneJack)
         let box = LockedBox<String?>("com.usb.dac.unplugged-later")
         let (backend, _) = await makeRestoreBackend(control: control, box: box)
         defer { backend.stop() }
 
         backend.setOutputSet([])
         await pollUntil { control.setDefaultCalls.count == 2 }
-        box.set("com.apple.builtin")   // the HAL switch lands, so no retry is due
+        box.set(Self.headphoneJack)   // the HAL switch lands, so no retry is due
 
-        #expect(control.setDefaultCalls == [501, 601], "an unresolvable prior falls back on the built-in output")
+        #expect(control.setDefaultCalls == [501, 602], "an unresolvable prior falls back on the headphones, not the speakers")
         #expect(backend.test_aggregateDefaultActive == false)
     }
 
@@ -1289,11 +1492,15 @@ extension SerializedSharedState {
     /// is currently default" lands on the aggregate — which accepts every volume
     /// write and applies none, leaving the real speakers' hardware knob stale and
     /// the user hearing the jump on deselect. The Main mirror therefore NAMES the
-    /// built-in output (the aggregate's sole sub-device) as its target.
+    /// aggregate's sole sub-device as its target. Aiming it at the first
+    /// built-in output instead turns this red: with headphones in, that is the
+    /// jack, while the aggregate plays through the speakers.
     @Test func mainMirrorWritesTheBuiltInOutputWhileTheAggregateIsDefault() async {
         let control = FakeAggregateControl(
-            resolvable: [AggregateOutputDevice.productUID: 501, Self.builtInSpeakers: 601],
-            builtInUID: Self.builtInSpeakers)
+            resolvable: [AggregateOutputDevice.productUID: 501,
+                         Self.builtInSpeakers: 601, Self.headphoneJack: 602],
+            builtInUID: Self.headphoneJack,
+            mainSubDevice: [501: Self.builtInSpeakers])
         let box = LockedBox<String?>(Self.builtInSpeakers)
         let (backend, systemVolume) = await makeRestoreBackend(control: control, box: box)
         defer { backend.stop() }
@@ -1303,7 +1510,7 @@ extension SerializedSharedState {
 
         #expect(systemVolume.setVolumeToDeviceCalls.map(\.level) == [42])
         #expect(systemVolume.setVolumeToDeviceCalls.map(\.deviceID) == [601],
-                "aimed at the built-in output, not at the aggregate")
+                "aimed at the speakers the aggregate wraps, not at the aggregate or the headphones")
         #expect(systemVolume.setVolumeCalls.isEmpty,
                 "never the resolve-the-current-default write")
     }

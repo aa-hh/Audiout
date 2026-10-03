@@ -78,12 +78,17 @@ public protocol LocalPlaybackControlling: AnyObject, Sendable {
     /// so a conformer that doesn't meter compiles unchanged; the concrete
     /// ``LocalPlaybackEngine`` provides the real one.
     func setMeteringActive(_ active: Bool)
+
+    /// Re-resolve the output device now: the public aggregate (the default) was
+    /// re-pointed at another device, which raises no default-output change.
+    func refreshOutputDevice()
 }
 
 extension LocalPlaybackControlling {
     /// Default no-op (T3) so a conformer that doesn't meter compiles unchanged;
     /// the concrete ``LocalPlaybackEngine`` overrides it with the real gate.
     public func setMeteringActive(_ active: Bool) {}
+    public func refreshOutputDevice() {}
     public func setOutputSuppressed(_ suppressed: Bool,
                                     completion: @escaping @Sendable () -> Void) { completion() }
 }
@@ -866,8 +871,12 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     /// ``outputResolver`` and does no graph work — so tests assert the
     /// follow-with-guard decision directly. Internal for that reason.
     func resolveTargetDeviceID() -> UInt32? {
-        if let def = outputResolver.defaultOutputDevice(), !outputResolver.isLoopRisk(def) {
-            return def
+        guard let def = outputResolver.defaultOutputDevice() else { return outputResolver.builtInOutputDevice() }
+        if !outputResolver.isLoopRisk(def) { return def }
+        // Our public aggregate as the default: play where it plays, on the device
+        // it wraps, so this path and the whole-system copy land together.
+        if let wrapped = outputResolver.wrappedOutputDevice(of: def), !outputResolver.isLoopRisk(wrapped) {
+            return wrapped
         }
         return outputResolver.builtInOutputDevice()
     }
@@ -900,6 +909,8 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         }
         #endif
     }
+
+    public func refreshOutputDevice() { handleDefaultOutputChange() }
 
     /// React to a default-output-device change (BT connects/disconnects, the user
     /// picks a different output) — delivered via the shared
@@ -1156,6 +1167,9 @@ protocol LocalOutputResolving: Sendable {
     /// `true` if `device` is unsafe to follow (AirPlay-class or one of our own
     /// aggregates) — the loop guard.
     func isLoopRisk(_ device: UInt32) -> Bool
+    /// The device our public aggregate wraps when `device` is that aggregate,
+    /// else `nil`.
+    func wrappedOutputDevice(of device: UInt32) -> UInt32?
 }
 
 /// Production ``LocalOutputResolving``: reads the live HAL through
@@ -1180,6 +1194,16 @@ struct SystemLocalOutputResolver: LocalOutputResolving {
         return LocalPlaybackEngine.isLoopRiskDevice(AudioObjectID(device))
         #else
         return false
+        #endif
+    }
+    func wrappedOutputDevice(of device: UInt32) -> UInt32? {
+        #if canImport(AudioToolbox)
+        let control = CoreAudioAggregateDeviceControl()
+        guard control.deviceUID(AudioObjectID(device)) == AggregateOutputDevice.productUID,
+              let wrappedUID = control.mainSubDeviceUID(ofAggregate: AudioObjectID(device)) else { return nil }
+        return control.resolveDeviceID(forUID: wrappedUID).map { UInt32($0) }
+        #else
+        return nil
         #endif
     }
 }

@@ -76,10 +76,43 @@ extension NativeBackend {
             }
             aggregateDefaultActive = true
         }
+        reconcileAggregateSubDeviceLocked(reason: "takeover")
         guard current != AggregateOutputDevice.productUID else { return false }   // already ours
         guard aggregateControl.setDefaultOutputDevice(aggregateID) else { return false }
         expectedDefaultWriteUID = AggregateOutputDevice.productUID
         return true
+    }
+
+    /// Point the public aggregate at the output the user was listening through:
+    /// the prior default while we hold the default, else the current one — unless
+    /// a Bluetooth row already feeds it, or it is not a wrappable local output, in
+    /// which case the Mac's first built-in output. Runs at takeover, on every
+    /// device-list change and on every Bluetooth selection change.
+    ///
+    /// A re-point while the aggregate is the default rebuilds the whole-system tap,
+    /// re-resolves the local playback device and re-anchors the delayed "This Mac"
+    /// copy: each of them rebuilds only on a default-output change, never on a
+    /// sub-device swap, so the tap and the local device would stay pinned to the
+    /// old (possibly vanished) device, and the copy would stay stopped after a rate
+    /// change or keep the old device's latency. On `stateQueue`.
+    func reconcileAggregateSubDeviceLocked(reason: String) {   // on stateQueue
+        guard let aggregateID = aggregateControl.resolveDeviceID(forUID: AggregateOutputDevice.productUID) else { return }
+        let candidate = aggregateDefaultActive ? priorDefaultUID : currentDefaultOutputUIDProvider()
+        let excluding = Set(btSelectedUIDs + btPerAppClaimedUIDs)
+        guard let wanted = publicAggregate.wantedSubDeviceUID(candidate: candidate, excluding: excluding) else {
+            Telemetry.log(.airplay, "aggregate_subdevice", ["reason": reason, "outcome": "no_target"])
+            return
+        }
+        guard publicAggregate.ensureSubDevice(wanted, ofAggregate: aggregateID, reason: reason),
+              currentDefaultOutputUIDProvider() == AggregateOutputDevice.productUID else { return }
+        captureCoordinator?.recreateTapForWrappedDeviceChange()
+        localPlaybackEngine?.refreshOutputDevice()
+        if syncedLocalSinkApplied {
+            // `captureControlQueue` owns `syncedLocalSink`, as at every other re-anchor.
+            captureControlQueue.async { [weak self] in
+                self?.syncedLocalSink?.requestReanchor(cause: "wrapped_device_changed")
+            }
+        }
     }
 
     /// First UID in `uids` (nils dropped, order preserved) that `control` can
@@ -122,9 +155,8 @@ extension NativeBackend {
     /// the only good prior left. On `stateQueue`.
     private func restoreDefaultFromAggregate(attempt: Int = 1) {   // on stateQueue
         guard currentDefaultOutputUIDProvider() == AggregateOutputDevice.productUID else { return }
-        // What the user had, else the Mac's built-in output — the same sub-device
-        // the aggregate itself wraps, so it is the one target that is still there
-        // when the prior device was unplugged mid-session.
+        // What the user had, else the Mac's first built-in output — the one
+        // target still there when the prior device was unplugged mid-session.
         let prior = priorDefaultUID.flatMap { $0 == AggregateOutputDevice.productUID ? nil : $0 }
         guard let target = Self.firstResolvableDevice(
             uids: [prior, aggregateControl.builtInOutputDeviceUID()], using: aggregateControl) else {
@@ -141,10 +173,11 @@ extension NativeBackend {
     /// VOLUME CONTINUITY: bring the device we just handed the default back to up
     /// to Main, or the Mac jumps to whatever level that hardware was left at.
     ///
-    /// The Main mirror (``builtInOutputTargetResolver()``) keeps only the BUILT-IN
-    /// output in step during a session, so a prior default that was anything else
-    /// — AirPods, a USB DAC, external speakers — has been sitting untouched at its
-    /// pre-session level the whole time. Addressed by the device id already
+    /// The Main mirror (``builtInOutputTargetResolver()``) keeps only the device the
+    /// aggregate wraps in step during a session. That is normally the prior default,
+    /// but not when the aggregate could not wrap it — a Bluetooth device a Bluetooth
+    /// row already feeds, an AirPlay or virtual output — so that device has sat
+    /// untouched at its pre-session level the whole time. Addressed by the device id already
     /// resolved here rather than by "whatever is default", because the HAL's switch
     /// lands asynchronously and a resolve-the-default write would still hit the
     /// aggregate, which takes every volume write and applies none. On `stateQueue`.

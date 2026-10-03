@@ -287,6 +287,11 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// Stop capturing. Idempotent. MAY BLOCK on Core Audio teardown, so callers
     /// must keep it off `NativeBackend.stateQueue`.
     func stop()
+    /// The public aggregate (the default output) now wraps a different device:
+    /// rebuild the tap, which is pinned to the old one and would otherwise stay
+    /// there, because the default-output monitor never sees a sub-device swap.
+    /// Returns at once; safe to call on `NativeBackend.stateQueue`.
+    func recreateTapForWrappedDeviceChange()
     /// Gate RMS computation/emission on or off (T-GATE) — independent of
     /// `start()`/`stop()`. See ``NativeCaptureCoordinator/setMeteringActive(_:)``.
     func setMeteringActive(_ active: Bool)
@@ -396,6 +401,7 @@ extension CaptureControlling {
     /// Default no-op (T-GATE) so a fake that doesn't exercise the metering gate
     /// compiles unchanged; ``NativeCaptureCoordinator`` provides the real one.
     func setMeteringActive(_ active: Bool) {}
+    func recreateTapForWrappedDeviceChange() {}
     func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>) {}
     func refreshExcludedProcessSet(forRelaunchedBundleID bundleID: String) {}
     /// Default no-op (T-FANOUT) so a fake that doesn't exercise the synced-local

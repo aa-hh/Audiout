@@ -2073,6 +2073,15 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         recreateTap(cause: .deviceOrRateChange)
     }
 
+    /// See ``CaptureControlling/recreateTapForWrappedDeviceChange()``. The rebuild
+    /// blocks on Core Audio, so it runs on a global queue, never the caller's.
+    public func recreateTapForWrappedDeviceChange() {
+        Telemetry.log(.captureWS, "device_change", ["trigger": "wrapped_device_changed"])
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.recreateTap(cause: .deviceOrRateChange)
+        }
+    }
+
     /// Why ``recreateTap(cause:)`` is rebuilding — decides whether the rebuild
     /// needs a whole-system AirPlay session reset (``onDeviceRateRebuild``). A
     /// device/nominal-rate change (``handleDeviceChange()``) moves the tapped

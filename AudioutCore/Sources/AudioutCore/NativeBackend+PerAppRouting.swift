@@ -1748,6 +1748,7 @@ extension NativeBackend {
                 .sorted()
             if perAppBTUIDs != self.btPerAppClaimedUIDs {
                 self.btPerAppClaimedUIDs = perAppBTUIDs
+                self.reconcileAggregateSubDeviceLocked(reason: "bt_selection")
                 let (armed, armedUIDs) = self.btArmingLocked()
                 let composition = self.btComposition
                 let gains = self.btSinkGains(forUIDs: armedUIDs)

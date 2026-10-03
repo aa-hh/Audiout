@@ -3,36 +3,45 @@
 # receipt this writes; the hook itself never calls a model).
 #
 # Picks a level from the committed diff against main: skip (no model), cheap
-# (one sonnet pass, no tools) or full (four parallel reviewers, then one haiku
+# (one sonnet pass) or full (four parallel reviewers, then one haiku
 # confidence score per finding, findings under 80 dropped). Prints the
 # findings, appends one line to <git-common-dir>/audiout-branch-reviews.log,
 # and writes a receipt keyed to the branch's own committed changes, so a later
 # commit that changes them needs a new review (merging main in does not).
 # Instruction files: docs/review/<pass>.md.
 #
-# Usage: bash scripts/review-branch.sh [--already-reviewed]
+# The reviewers run as subagents of the Claude session merging the branch,
+# because headless Claude CLI runs are refused on this account. The script hands
+# work over through <git-common-dir>/audiout-branch-reviews/pending/<key>/:
+# a run writes one <pass>.prompt per pass and prints, per pass, its model,
+# the prompt path and the .out path the session saves the reply to; the
+# session runs those subagents, then runs --continue, which reads the replies
+# and either prints the next set of passes (escalation, scoring) or records
+# the result and deletes the pending directory.
+#
+# Usage: bash scripts/review-branch.sh [--continue | --already-reviewed]
+#   (no flag)           start the review; re-running starts it over.
+#   --continue          read the saved replies and go on to the next step.
 #   --already-reviewed  record work a /scope-and-run reviewer already approved;
-#                       writes the receipt without calling a model.
+#                       writes the receipt without any model.
 # Exit: 0 reviewed + receipt; 1 a HIGH finding survived, no receipt;
-#       2 the review did not run, no receipt.
+#       2 the review did not run, no receipt; 3 reviewer subagents needed
+#       (run the printed passes, then --continue).
 
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
-# The one place to edit: thresholds, risk paths, per-pass model/tools/budget.
+# The one place to edit: thresholds, risk paths, the model each pass runs on.
 SKIP_UNDER_LINES=50
 FULL_OVER_LINES=300
 SCORE_KEEP_AT=80
 
-CHEAP_MODEL=sonnet;    CHEAP_TOOLS="";                    CHEAP_BUDGET=2
-DEEP_MODEL=opus;       DEEP_TOOLS="Read,Grep,Glob";       DEEP_BUDGET=8
-RULES_MODEL=sonnet;    RULES_TOOLS="Read,Grep,Glob";      RULES_BUDGET=3
-HISTORY_MODEL=sonnet;  HISTORY_TOOLS="Read,Grep,Glob,Bash"; HISTORY_BUDGET=3
-COMMENTS_MODEL=sonnet; COMMENTS_TOOLS="Read,Grep,Glob";   COMMENTS_BUDGET=3
-SCORE_MODEL=haiku;     SCORE_TOOLS="";                    SCORE_BUDGET=0.30
-# Any other Bash command the history pass tries would prompt, and
-# --permission-prompts none denies it.
-HISTORY_ALLOWED=("Bash(git log:*)" "Bash(git blame:*)")
+CHEAP_MODEL=sonnet
+DEEP_MODEL=opus
+RULES_MODEL=sonnet
+HISTORY_MODEL=sonnet
+COMMENTS_MODEL=sonnet
+SCORE_MODEL=haiku
 
 # Any touched path here makes the review full, whatever its size.
 is_risk_path() {
@@ -82,11 +91,12 @@ EOF
 )
 # ---------------------------------------------------------------------------
 
-already_reviewed=""
+
+mode=""
 case "${1:-}" in
   "") ;;
-  --already-reviewed) already_reviewed=1 ;;
-  *) echo "usage: bash scripts/review-branch.sh [--already-reviewed]" >&2; exit 2 ;;
+  --already-reviewed|--continue) mode="$1" ;;
+  *) echo "usage: bash scripts/review-branch.sh [--continue | --already-reviewed]" >&2; exit 2 ;;
 esac
 
 branch=$(git symbolic-ref --short HEAD 2>/dev/null) || branch=detached
@@ -120,11 +130,30 @@ while IFS=$'\t' read -r added deleted path; do
   is_risk_path "$path" && risk+=("$path")
 done < <(git diff --numstat --no-renames "$base" "$tip")
 
-if [ -n "$already_reviewed" ]; then level=external
+if [ "$mode" = --already-reviewed ]; then level=external
 elif [ ${#risk[@]} -gt 0 ]; then level=full
 elif [ "$lines" -lt "$SKIP_UNDER_LINES" ]; then level=skip
 elif [ "$lines" -gt "$FULL_OVER_LINES" ]; then level=full
 else level=cheap
+fi
+
+reviews_dir="$common/audiout-branch-reviews"
+review_log="$common/audiout-branch-reviews.log"
+pending_root="$reviews_dir/pending"
+state="$pending_root/$hash"
+
+if [ "$mode" = --continue ]; then
+  if [ ! -f "$state/level" ]; then
+    for b in "$pending_root"/*/branch; do
+      if [ -f "$b" ] && [ "$(cat "$b")" = "$branch" ]; then
+        echo "The branch's committed changes differ from when this review started. Run again with no flag: bash scripts/review-branch.sh" >&2
+        exit 2
+      fi
+    done
+    echo "No review in progress for this branch. Start one: bash scripts/review-branch.sh" >&2
+    exit 2
+  fi
+  level=$(cat "$state/level")
 fi
 
 summary="$lines product lines"
@@ -133,9 +162,6 @@ if [ ${#risk[@]} -gt 0 ]; then
   summary="$summary, risk: ${joined:2}"
 fi
 echo "Review level: $level ($summary)"
-
-reviews_dir="$common/audiout-branch-reviews"
-review_log="$common/audiout-branch-reviews.log"
 
 # log_line <high> <medium> <low> <dropped>
 log_line() {
@@ -155,74 +181,117 @@ if [ "$level" = skip ] || [ "$level" = external ]; then
   exit 0
 fi
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/review-branch.XXXXXX") || exit 2
-trap 'rm -rf "$work"' EXIT
-
-# Shared prompt tail: root AGENTS.md plus the nearest AGENTS.md above each
-# changed file (read at the tip), then the diff.
-tail_file="$work/tail"
-agents=("AGENTS.md")
-for path in ${changed[@]+"${changed[@]}"}; do
-  dir=$(dirname "$path")
-  while [ "$dir" != "." ]; do
-    if git cat-file -e "$tip:$dir/AGENTS.md" 2>/dev/null; then
-      case " ${agents[*]} " in *" $dir/AGENTS.md "*) ;; *) agents+=("$dir/AGENTS.md") ;; esac
-      break
-    fi
-    dir=$(dirname "$dir")
-  done
-done
-{
-  echo "## Repo rules"
-  for a in "${agents[@]}"; do
-    printf '\n### %s\n\n' "$a"
-    git show "$tip:$a" 2>/dev/null
-  done
-  printf '\n## Diff\n\nbase: %s tip: %s\n\n' "$base" "$tip"
-  git diff "$base" "$tip"
-} > "$tail_file" || exit 2
-
-pass_flags() {
+pass_model() {
   case "$1" in
-    cheap)    flags=(--model "$CHEAP_MODEL" --tools "$CHEAP_TOOLS" --max-budget-usd "$CHEAP_BUDGET") ;;
-    deep)     flags=(--model "$DEEP_MODEL" --tools "$DEEP_TOOLS" --max-budget-usd "$DEEP_BUDGET") ;;
-    rules)    flags=(--model "$RULES_MODEL" --tools "$RULES_TOOLS" --max-budget-usd "$RULES_BUDGET") ;;
-    history)  flags=(--model "$HISTORY_MODEL" --tools "$HISTORY_TOOLS" --allowedTools "${HISTORY_ALLOWED[@]}" --max-budget-usd "$HISTORY_BUDGET") ;;
-    comments) flags=(--model "$COMMENTS_MODEL" --tools "$COMMENTS_TOOLS" --max-budget-usd "$COMMENTS_BUDGET") ;;
-    score)    flags=(--model "$SCORE_MODEL" --tools "$SCORE_TOOLS" --max-budget-usd "$SCORE_BUDGET") ;;
+    cheap)    echo "$CHEAP_MODEL" ;;
+    deep)     echo "$DEEP_MODEL" ;;
+    rules)    echo "$RULES_MODEL" ;;
+    history)  echo "$HISTORY_MODEL" ;;
+    comments) echo "$COMMENTS_MODEL" ;;
+    score*)   echo "$SCORE_MODEL" ;;
   esac
 }
 
-# run_pass <name> <outfile> [finding]: one claude call, prompt on stdin.
-# Non-zero when claude is missing or fails, or a reviewer's output is not in
-# the expected format. The score pass gets the finding instead of the format.
-run_pass() {
-  local name="$1" out="$2" finding="${3:-}" prompt="$2.prompt" flags
-  command -v claude >/dev/null 2>&1 || { echo "claude CLI not found on PATH" > "$out"; return 1; }
-  [ -f "docs/review/$name.md" ] || { echo "missing docs/review/$name.md" > "$out"; return 1; }
+# write_prompt <pass> <instruction file> [finding]: the pass's prompt file.
+# The score pass gets the finding instead of the output format.
+write_prompt() {
+  local name="$1" doc="docs/review/$2.md" finding="${3:-}"
+  [ -f "$doc" ] || { echo "Review did not run: missing $doc"; exit 2; }
   {
-    printf '# Review pass: %s\n\n' "$name"
-    cat "docs/review/$name.md"
-    if [ "$name" = score ]; then printf '\n## Finding\n\n%s\n\n' "$finding"
+    printf '# Review pass: %s\n\n' "$2"
+    cat "$doc"
+    if [ "$2" = score ]; then printf '\n## Finding\n\n%s\n\n' "$finding"
     else printf '\n%s\n\n' "$OUTPUT_FORMAT"
     fi
-    cat "$tail_file"
-  } > "$prompt"
-  pass_flags "$name"
-  claude -p --permission-prompts none --no-session-persistence --output-format text \
-    "${flags[@]}" < "$prompt" > "$out" 2>&1 || return 1
-  [ "$name" = score ] && return 0
-  grep -Eq '^(HIGH|MEDIUM|LOW) \|' "$out" && return 0
-  grep -qx 'NO FINDINGS' "$out" && return 0
-  [ "$name" = cheap ] && grep -q '^ESCALATE:' "$out" && return 0
-  return 1
+    cat "$state/tail"
+  } > "$state/$name.prompt" || exit 2
 }
 
-pass_failed() {
-  cat "$work/$1" 2>/dev/null
-  echo "Review did not run ($1 pass failed)."
-  exit 2
+# hand_over <instruction> <pass>...: record the passes, print one line each and
+# the instruction, exit 3 for the session to run them.
+hand_over() {
+  local instruction="$1"; shift
+  echo "$*" > "$state/passes" || exit 2
+  echo
+  for p in "$@"; do
+    echo "$p  model=$(pass_model "$p")  prompt=$state/$p.prompt  save reply to=$state/$p.out"
+  done
+  echo
+  echo "$instruction"
+  exit 3
 }
+
+REVIEW_STEPS="Run every pass above as a subagent of this Claude session, in parallel, read-only, with the model shown. Give it the prompt file's full contents as its task. Save its reply verbatim to the .out path. The history pass may only run git log and git blame. Then run: bash scripts/review-branch.sh --continue"
+SCORE_STEPS="Run each as a haiku subagent in parallel, save reply verbatim, then run: bash scripts/review-branch.sh --continue"
+REVIEWERS=(deep rules history comments)
+
+# plan_reviewers <level> <pass>...: prompts for the reviewer passes, then hand over.
+plan_reviewers() {
+  echo "$1" > "$state/level" || exit 2
+  shift
+  for p in "$@"; do rm -f "$state/$p.out"; write_prompt "$p" "$p"; done
+  hand_over "$REVIEW_STEPS" "$@"
+}
+
+if [ "$mode" != --continue ]; then
+  # Start over: drop this branch's earlier pending reviews, whatever their key.
+  for b in "$pending_root"/*/branch; do
+    [ -f "$b" ] && [ "$(cat "$b")" = "$branch" ] && rm -rf "$(dirname "$b")"
+  done
+  rm -rf "$state"
+  mkdir -p "$state" || exit 2
+  echo "$branch" > "$state/branch" || exit 2
+
+  # Shared prompt tail: root AGENTS.md plus the nearest AGENTS.md above each
+  # changed file (read at the tip), then the diff.
+  agents=("AGENTS.md")
+  for path in ${changed[@]+"${changed[@]}"}; do
+    dir=$(dirname "$path")
+    while [ "$dir" != "." ]; do
+      if git cat-file -e "$tip:$dir/AGENTS.md" 2>/dev/null; then
+        case " ${agents[*]} " in *" $dir/AGENTS.md "*) ;; *) agents+=("$dir/AGENTS.md") ;; esac
+        break
+      fi
+      dir=$(dirname "$dir")
+    done
+  done
+  {
+    echo "## Repo rules"
+    for a in "${agents[@]}"; do
+      printf '\n### %s\n\n' "$a"
+      git show "$tip:$a" 2>/dev/null
+    done
+    printf '\n## Diff\n\nbase: %s tip: %s\n\n' "$base" "$tip"
+    git diff "$base" "$tip"
+  } > "$state/tail" || exit 2
+
+  if [ "$level" = cheap ]; then plan_reviewers cheap cheap
+  else plan_reviewers full "${REVIEWERS[@]}"
+  fi
+fi
+
+# --continue: every pass handed over must have a reply, and a reviewer's reply
+# must be in the expected format.
+passes=()
+read -r -a passes < "$state/passes" 2>/dev/null
+if [ "${#passes[@]}" -eq 0 ]; then
+  echo "Review did not run: no reviewer passes were handed over. Run again with no flag."
+  exit 2
+fi
+for p in ${passes[@]+"${passes[@]}"}; do
+  out="$state/$p.out"
+  if [ ! -f "$out" ]; then
+    echo "Review did not run: no reply saved for the $p pass ($out)."
+    exit 2
+  fi
+  case "$p" in score*) continue ;; esac
+  grep -Eq '^(HIGH|MEDIUM|LOW) \|' "$out" && continue
+  grep -qx 'NO FINDINGS' "$out" && continue
+  [ "$p" = cheap ] && grep -q '^ESCALATE:' "$out" && continue
+  cat "$out"
+  echo "Review did not run ($p reply is not in the expected format)."
+  exit 2
+done
 
 high=0; medium=0; low=0; dropped=0
 count() {
@@ -234,63 +303,53 @@ count() {
 }
 
 if [ "$level" = cheap ]; then
-  run_pass cheap "$work/cheap" || pass_failed cheap
-  if grep -q '^ESCALATE:' "$work/cheap"; then
-    grep '^ESCALATE:' "$work/cheap"
-    level=full-escalated
-  else
-    while IFS= read -r line; do
-      echo "  [cheap] $line"; count "$line"
-    done < <(grep -E '^(HIGH|MEDIUM|LOW) \|' "$work/cheap")
+  if grep -q '^ESCALATE:' "$state/cheap.out"; then
+    grep '^ESCALATE:' "$state/cheap.out"
+    plan_reviewers full-escalated "${REVIEWERS[@]}"
   fi
-fi
-
-if [ "$level" = full ] || [ "$level" = full-escalated ]; then
-  reviewers=(deep rules history comments)
-  pids=()
-  for p in "${reviewers[@]}"; do
-    run_pass "$p" "$work/$p" & pids+=($!)
-  done
-  failed=""
-  for i in 0 1 2 3; do
-    wait "${pids[$i]}" || { [ -z "$failed" ] && failed="${reviewers[$i]}"; }
-  done
-  [ -n "$failed" ] && pass_failed "$failed"
-
+  while IFS= read -r line; do
+    echo "  [cheap] $line"; count "$line"
+  done < <(grep -E '^(HIGH|MEDIUM|LOW) \|' "$state/cheap.out")
+else
   # razor: no cross-reviewer dedupe; two passes reporting the same defect show
   # twice. Upgrade path: merge findings on their path:line key before scoring.
-  tags=(); found=()
-  for p in "${reviewers[@]}"; do
-    while IFS= read -r line; do tags+=("$p"); found+=("$line"); done \
-      < <(grep -E '^(HIGH|MEDIUM|LOW) \|' "$work/$p")
-  done
-  spids=()
-  for i in ${found[@]+"${!found[@]}"}; do
-    run_pass score "$work/score.$i" "${found[$i]}" & spids+=($!)
-  done
-  for pid in ${spids[@]+"${spids[@]}"}; do wait "$pid"; done
-
-  kept=(); gone=()
-  for i in ${found[@]+"${!found[@]}"}; do
-    s=$(grep -Eo '^SCORE: [0-9]+' "$work/score.$i" 2>/dev/null | head -1 | grep -Eo '[0-9]+')
-    if [ -z "$s" ]; then
-      kept+=("  [${tags[$i]}] (unscored) ${found[$i]}"); count "${found[$i]}"
-    elif [ "$s" -lt "$SCORE_KEEP_AT" ]; then
-      gone+=("  [${tags[$i]}] ($s) ${found[$i]}"); dropped=$((dropped + 1))
-    else
-      kept+=("  [${tags[$i]}] ($s) ${found[$i]}"); count "${found[$i]}"
+  if [ ! -f "$state/findings" ]; then
+    : > "$state/findings" || exit 2
+    for p in "${REVIEWERS[@]}"; do
+      grep -E '^(HIGH|MEDIUM|LOW) \|' "$state/$p.out" | sed "s/^/$p	/" >> "$state/findings"
+    done
+    if [ -s "$state/findings" ]; then
+      scores=(); n=0
+      while IFS=$'\t' read -r tag line; do
+        n=$((n + 1)); write_prompt "score-$n" score "$line"; scores+=("score-$n")
+      done < "$state/findings"
+      hand_over "$SCORE_STEPS" "${scores[@]}"
     fi
-  done
+  fi
+
+  kept=(); gone=(); n=0
+  while IFS=$'\t' read -r tag line; do
+    n=$((n + 1))
+    s=$(grep -Eo '^SCORE: [0-9]+' "$state/score-$n.out" 2>/dev/null | head -1 | grep -Eo '[0-9]+')
+    if [ -z "$s" ]; then
+      kept+=("  [$tag] (unscored) $line"); count "$line"
+    elif [ "$s" -lt "$SCORE_KEEP_AT" ]; then
+      gone+=("  [$tag] ($s) $line"); dropped=$((dropped + 1))
+    else
+      kept+=("  [$tag] ($s) $line"); count "$line"
+    fi
+  done < "$state/findings"
   for l in ${kept[@]+"${kept[@]}"}; do echo "$l"; done
   if [ ${#gone[@]} -gt 0 ]; then
     echo "Dropped by scorer:"
     for l in "${gone[@]}"; do echo "$l"; done
   fi
-  grep -E '^(COMPAT|LIVE TEST|DECLINED) \|' "$work/deep"
+  grep -E '^(COMPAT|LIVE TEST|DECLINED) \|' "$state/deep.out"
 fi
 
 echo "Findings: $high high, $medium medium, $low low ($dropped dropped)"
 log_line "$high" "$medium" "$low" "$dropped"
+rm -rf "$state"
 if [ "$high" -gt 0 ]; then
   echo "Blocked: fix the HIGH findings, commit, run this again."
   exit 1

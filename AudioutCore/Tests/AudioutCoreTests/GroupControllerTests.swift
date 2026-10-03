@@ -405,6 +405,33 @@ import Testing
         #expect(Set(try routing.load()?.selectedDeviceIDs ?? []) == ["office", airPlay])
     }
 
+    /// Fails if a restored Bluetooth id already in the first snapshot but
+    /// unavailable gets the output set and no `retryOutput`, or is dropped at the
+    /// end of `bluetoothRestoreWindow` like an id that never appeared.
+    @MainActor
+    @Test func reconnectAtLaunchRetriesBluetoothIdListedButUnavailable() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: [bt, "office"], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.bluetoothRestoreWindow = 0
+        controller.updateDevices(.demoFleet + [Device(id: bt, name: "Move", kind: .bluetooth, isAvailable: false)])
+        controller.ensureDefaultSelection()
+        #expect(backend.outputSetWrites.last == ["office", bt])
+        #expect(backend.retryWrites == [bt])
+        let lastSet = try #require(backend.callOrder.lastIndex(of: "outputSet"))
+        let retry = try #require(backend.callOrder.lastIndex(of: "retry"))
+        #expect(retry > lastSet, "the output set must name the id before the connect kick")
+
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == [bt, "office"])
+        #expect(backend.retryWrites == [bt])
+    }
+
     /// Fails if a restored Bluetooth id the user deselected during the restore
     /// window still gets the connect kick once it appears.
     @MainActor

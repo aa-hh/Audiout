@@ -601,9 +601,13 @@ final class BTDeviceSink: @unchecked Sendable {
     /// Same cadence as `bt_clock_deviation`.
     static let healthIntervalNanos: Int64 = 30_000_000_000
     private var lastHealthNanos: Int64 = 0   // graphQueue
-    /// A released, fed sink whose render callback has been quiet this long is
-    /// dead: the device clock can keep answering while nothing renders.
+    /// A fed sink whose render callback has been quiet this long, counted from
+    /// the later of its last cycle and its start, is dead: the device clock can
+    /// keep answering while nothing renders.
     static let renderStallNanos: Int64 = 2_000_000_000
+    /// Monotonic instant `engine.start()` last succeeded, so a sink whose render
+    /// callback never runs at all still trips the stall rule.
+    private var startedAtNanos: Int64 = 0   // graphQueue
     private let deviceIsAlive: @Sendable (AudioObjectID) -> Bool
     private let onDead: (@Sendable (BTDeviceSink) -> Void)?
     private var livenessTimer: DispatchSourceTimer?   // graphQueue
@@ -855,6 +859,7 @@ final class BTDeviceSink: @unchecked Sendable {
         try engine.start()
         running = engine.isRunning
         guard running else { throw BTDeviceSinkError.engineNotRunning }
+        startedAtNanos = Self.monotonicNowNanos()
         installEventListenersLocked()
         clockWatcher?.start(nominalRate: nominalRate)
         let timer = DispatchSource.makeTimerSource(queue: listenerQueue)
@@ -932,8 +937,8 @@ final class BTDeviceSink: @unchecked Sendable {
     }
 
     /// Tear the sink down and report it when its device is gone or its render
-    /// callback stalled while fed. An idle sink (nothing fed) or one whose gate
-    /// has not opened never trips: a paused Mac is not a dead speaker.
+    /// callback stalled while fed, including one that never ran after start. An
+    /// idle sink (nothing fed) never trips: a paused Mac is not a dead speaker.
     ///
     /// A live sink also writes `bt_sink_health` every `healthIntervalNanos`:
     /// render cycles and peak since the last line, so a silent speaker shows
@@ -946,7 +951,7 @@ final class BTDeviceSink: @unchecked Sendable {
         var reason: String?
         if !alive {
             reason = "device_gone"
-        } else if isReleased, fed, now &- lastRenderCycleNanosPtr.pointee > Self.renderStallNanos {
+        } else if fed, now &- max(lastRenderCycleNanosPtr.pointee, startedAtNanos) > Self.renderStallNanos {
             reason = "render_stalled"
         }
         if let reason {
@@ -1020,6 +1025,7 @@ final class BTDeviceSink: @unchecked Sendable {
     func test_markReleased() { stateLock.withLock { released = true } }
     func test_noteRenderCycle(nowNanos: Int64) { lastRenderCycleNanosPtr.pointee = nowNanos }
     func test_noteEnqueue(nowNanos: Int64) { lastEnqueueNanosPtr.pointee = nowNanos }
+    func test_noteStarted(nowNanos: Int64) { graphQueue.sync { startedAtNanos = nowNanos } }
     var test_isRunning: Bool { graphQueue.sync { running } }
     func test_healthSnapshot() -> (cycles: Int64, peakDBFS: Double) { graphQueue.sync { healthSnapshotLocked() } }
     /// Marks the sink running without starting the engine, so liveness runs with no HAL.

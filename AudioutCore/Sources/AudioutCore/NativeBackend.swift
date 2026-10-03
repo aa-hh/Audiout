@@ -614,9 +614,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     static let wholeSystemStreamIDBase: UInt32 = 0x8000_0000
 
     /// Test seam: a BT `Device.id` (its Core Audio UID) → the live
-    /// `AudioObjectID` a per-device sink pins its engine to. When set it is
+    /// `AudioObjectID` a per-device sink pins its engine to, also used by the
+    /// hardware-volume path and `handleBTSinkDead`. When set it is
     /// authoritative, nil included: Core Audio is never consulted. Unset
-    /// (production), the sink uses `BTDeviceEnumerator.liveDeviceID(forUID:)`.
+    /// (production), the sink and `handleBTSinkDead` use
+    /// `BTDeviceEnumerator.liveDeviceID(forUID:)`; the hardware-volume path keeps
+    /// the HAL's single UID translation.
     /// Resolved fresh at each apply, never cached: object ids go stale across a
     /// disconnect/rejoin while UIDs don't.
     var btDeviceIDForUID: (@Sendable (String) -> AudioObjectID?)?

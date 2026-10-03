@@ -253,10 +253,14 @@ public final class GroupController {
            let stored = try? routingStore.load(),
            !stored.selectedDeviceIDs.isEmpty {
             selectedDeviceIDs = Set(stored.selectedDeviceIDs)
+            // A Bluetooth id already listed but unavailable here used to get the
+            // output set and never `retryOutput`, so the reconnect hung on whether
+            // the enumeration landed before or after this first call
+            // (`reconnectAtLaunchRetriesBluetoothIdListedButUnavailable`).
             pendingBluetoothRestoreIDs = selectedDeviceIDs.filter {
-                device($0) == nil && BTDeviceEnumerator.derivedUID(fromAddress: $0) == $0
+                device($0)?.isAvailable != true && BTDeviceEnumerator.derivedUID(fromAddress: $0) == $0
             }
-            if !pendingBluetoothRestoreIDs.isEmpty {
+            if pendingBluetoothRestoreIDs.contains(where: { device($0) == nil }) {
                 bluetoothRestoreDeadline = Date().addingTimeInterval(bluetoothRestoreWindow)
                 DispatchQueue.main.asyncAfter(deadline: .now() + bluetoothRestoreWindow) { [weak self] in
                     self?.settleBluetoothRestore()
@@ -275,6 +279,9 @@ public final class GroupController {
         mainOutMasterVolume = (backend.systemOutputVolume ?? settings.mainOutVolume).clampedToVolume
         pushMasterGain(mirrorToSystemVolume: false)
         applyRouting()
+        let listedUnavailable = pendingBluetoothRestoreIDs.filter { device($0) != nil }
+        pendingBluetoothRestoreIDs.subtract(listedUnavailable)
+        for id in listedUnavailable.sorted() { backend.retryOutput(id) }
         persistRouting()
         onStateDidChange?()
     }

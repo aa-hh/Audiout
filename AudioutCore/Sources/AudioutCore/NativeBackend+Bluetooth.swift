@@ -9,8 +9,12 @@ extension NativeBackend {
     /// UID → live `AudioObjectID` at USE time, never cached: BT object ids go
     /// stale across a disconnect/rejoin while UIDs don't (see
     /// ``btDeviceIDForUID``). On `stateQueue`.
+    /// The hardware-volume path keeps the HAL's single UID translation: it runs
+    /// on `stateQueue` (the exception AGENTS.md records), where a walk of every
+    /// device would lengthen the stall a slow coreaudiod already causes.
     private func liveBTDeviceIDLocked(_ uid: String) -> AudioObjectID? {
-        btDeviceIDForUID?(uid) ?? aggregateControl.resolveDeviceID(forUID: uid)
+        if let seam = btDeviceIDForUID { return seam(uid) }
+        return aggregateControl.resolveDeviceID(forUID: uid)
     }
 
     /// (Re)decide whether `uid`'s slider writes hardware volume, on any input
@@ -642,29 +646,36 @@ extension NativeBackend {
     /// speaker gets an enumerator restart after `btSinkDeathRecoverySeconds`:
     /// the enumerator emits only on a list change, so the full re-emit is what
     /// returns a speaker macOS still lists. Callable from any queue.
+    /// The device lookup and enumerator refresh are Core Audio calls, so they
+    /// run on `captureControlQueue` and only the decision runs on `stateQueue`.
     func handleBTSinkDead(uid: String) {
-        stateQueue.async { [weak self] in
+        captureControlQueue.async { [weak self] in
             guard let self else { return }
-            self.btEnumerator?.refresh()
-            let now = Date()
             let resolves = self.resolveBTDeviceID(forUID: uid) != nil
-            let diedRecently = self.btSinkDeathAt[uid].map { now.timeIntervalSince($0) < 10 } ?? false
-            if resolves && !diedRecently {
-                self.btSinkDeathAt[uid] = now
+            self.btEnumerator?.refresh()
+            self.stateQueue.async { [weak self] in
+                guard let self else { return }
+                let now = Date()
+                let diedRecently = self.btSinkDeathAt[uid].map { now.timeIntervalSince($0) < 10 } ?? false
+                if resolves && !diedRecently {
+                    self.btSinkDeathAt[uid] = now
+                    self.reapplyBTSinkLocked()
+                    return
+                }
+                self.markBTDeviceLostLocked(uid)
+                self.stateQueue.asyncAfter(deadline: .now() + self.btSinkDeathRecoverySeconds) { [weak self] in
+                    self?.captureControlQueue.async { [weak self] in
+                        self?.btEnumerator?.stop()
+                        self?.btEnumerator?.start()
+                    }
+                }
+                self.reconcileSilenceWatchdog()
                 self.reapplyBTSinkLocked()
-                return
             }
-            self.markBTDeviceLostLocked(uid)
-            self.stateQueue.asyncAfter(deadline: .now() + self.btSinkDeathRecoverySeconds) { [weak self] in
-                self?.btEnumerator?.stop()
-                self?.btEnumerator?.start()
-            }
-            self.reconcileSilenceWatchdog()
-            self.reapplyBTSinkLocked()
         }
     }
 
-    /// UID → the object id a per-device sink pins to. A set ``btDeviceIDForUID``
+    /// UID → the live object id for a Bluetooth speaker. A set ``btDeviceIDForUID``
     /// owns the answer, nil included, so a test never reaches Core Audio.
     private func resolveBTDeviceID(forUID uid: String) -> AudioObjectID? {
         if let seam = btDeviceIDForUID { return seam(uid) }
@@ -693,7 +704,7 @@ extension NativeBackend {
 
     /// Local-only: without it a speaker dropping while selected leaves no
     /// trace of the edge in the log. On `stateQueue`.
-    private func logBTAvailabilityLocked(_ id: String) {
+    func logBTAvailabilityLocked(_ id: String) {
         Telemetry.log(.localPlayback, "bt_device_availability", [
             "uid": id,
             "available": known[id]?.isAvailable == true ? "true" : "false",

@@ -891,13 +891,33 @@ import AVFoundation
         #expect(manager.sinkForTesting(uid: "dev-a") == nil)
     }
 
-    /// Red if the stall rule drops either of its guards: a paused Mac (nothing fed)
-    /// or a gate still holding its delay would tear down a healthy speaker.
-    @Test func idleOrUnreleasedSink_neverReportsDead() throws {
+    /// Red if the fed sink's stall is measured from its last render cycle alone,
+    /// ignoring start: a sink pinned to a twin object that still answers alive
+    /// would never render, never be torn down, and stay silent with nothing reported.
+    @Test func fedSinkWhoseCallbackNeverRan_reportsDeadAfterStall() throws {
+        let deaths = DeathLog()
+        let manager = Self.livenessManager(alive: AliveSwitch(), deaths: deaths)
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
         let now = Self.anchorNanos
-        let cases: [(name: String, released: Bool, lastEnqueue: Int64)] = [
-            ("fed but not yet released", false, now),
-            ("released but idle for 5 s", true, now - 5_000_000_000),
+        sink.test_forceRunning()
+        sink.test_noteStarted(nowNanos: now - 3_000_000_000)
+        sink.test_noteEnqueue(nowNanos: now)
+
+        sink.test_checkLiveness(nowNanos: now)
+
+        #expect(deaths.uids == ["dev-a"])
+        #expect(manager.sinkForTesting(uid: "dev-a") == nil)
+    }
+
+    /// Red if the stall rule stops counting from start or drops its fed guard: a
+    /// sink still waiting on its first cycle, or a paused Mac, would tear down a healthy speaker.
+    @Test func justStartedRenderingOrIdleSink_neverReportsDead() throws {
+        let now = Self.anchorNanos
+        let cases: [(name: String, released: Bool, startedAt: Int64, lastEnqueue: Int64, lastRender: Int64)] = [
+            ("fed, started 1 s ago, no render cycle yet", false, now - 1_000_000_000, now, 0),
+            ("released and fed, rendered 1 s ago", true, 0, now, now - 1_000_000_000),
+            ("released but idle for 5 s", true, 0, now - 5_000_000_000, now - 10_000_000_000),
         ]
         for c in cases {
             let deaths = DeathLog()
@@ -905,9 +925,10 @@ import AVFoundation
             manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
             let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
             sink.test_forceRunning()
+            sink.test_noteStarted(nowNanos: c.startedAt)
             if c.released { sink.test_markReleased() }
             sink.test_noteEnqueue(nowNanos: c.lastEnqueue)
-            sink.test_noteRenderCycle(nowNanos: now - 10_000_000_000)
+            sink.test_noteRenderCycle(nowNanos: c.lastRender)
 
             sink.test_checkLiveness(nowNanos: now)
 

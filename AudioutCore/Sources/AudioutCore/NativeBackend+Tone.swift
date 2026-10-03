@@ -1044,6 +1044,10 @@ extension NativeBackend {
                 if var device = self.known[id], !device.isAvailable {
                     device.isAvailable = true
                     self.commitKnownDevice(id, device)
+                    // The loss unwatched the speaker's hardware volume, and
+                    // the enumerator sees no availability edge to re-arm it.
+                    self.reevaluateBTHardwareControlLocked(id)
+                    self.logBTAvailabilityLocked(id)
                 }
                 self.reapplyBTSinkLocked()
                 // Each reconnect lands 20–90 ms from last time

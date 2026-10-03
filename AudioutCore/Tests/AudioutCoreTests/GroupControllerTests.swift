@@ -405,6 +405,28 @@ import Testing
         #expect(Set(try routing.load()?.selectedDeviceIDs ?? []) == ["office", airPlay])
     }
 
+    /// Fails if dropping a restored selection made only of a Bluetooth id that
+    /// never appears leaves zero devices selected (and persists that) instead of
+    /// falling back to the local Mac, the floor `setDeviceSelected` keeps.
+    @MainActor
+    @Test func reconnectAtLaunchFallsBackToMacWhenOnlyBluetoothIdNeverAppears() async throws {
+        let bt = "54-2A-1B-79-08-9E:output"
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: [bt], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = RecordingBackend(try await makeBackend())
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.bluetoothRestoreWindow = 0
+        controller.updateDevices(.demoFleet)
+        controller.ensureDefaultSelection()
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == ["local-mac"])
+        controller.flushPendingRoutingSave()
+        #expect(try routing.load()?.selectedDeviceIDs == ["local-mac"])
+    }
+
     /// Fails if a restored Bluetooth id already in the first snapshot but
     /// unavailable gets the output set and no `retryOutput`, or is dropped at the
     /// end of `bluetoothRestoreWindow` like an id that never appeared.

@@ -736,7 +736,8 @@ final class BTDeviceSink: @unchecked Sendable {
     // MARK: Lifecycle
 
     /// Pin to the device and start the engine (idempotent). Throws on an
-    /// aggregate/virtual device (silent no-op trap) or a failed start.
+    /// aggregate/virtual device (silent no-op trap), a dead device object, or
+    /// a failed start.
     func start() throws {
         try graphQueue.sync { try startLocked() }
     }

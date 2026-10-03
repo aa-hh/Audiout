@@ -311,6 +311,11 @@ public final class GroupController {
             bluetoothRestoreDeadline = nil
         } else if let deadline = bluetoothRestoreDeadline, Date() >= deadline {
             selectedDeviceIDs.subtract(pendingBluetoothRestoreIDs)
+            // A selection of only never-appearing Bluetooth ids emptied here, breaking the
+            // never-zero-selected floor `setDeviceSelected` keeps, so fall back to the Mac.
+            if selectedDeviceIDs.isEmpty, let local = localDeviceID {
+                selectedDeviceIDs.insert(local)
+            }
             pendingBluetoothRestoreIDs = []
             bluetoothRestoreDeadline = nil
             applyRouting()

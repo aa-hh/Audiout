@@ -32,9 +32,12 @@ BUNDLE_ID=com.audiout.Audiout.dev
 SUPPORT="$HOME/Library/Application Support/$BUNDLE_ID"
 TRIMS="$SUPPORT/bt-sync-trims.json"
 ROUTING="$SUPPORT/routing.json"
-# Dev-only defaults key: a string array of device ids to select after launch.
-# Deleted from main on 2026-09-20 (commit e75068b5); see README.md.
-SELECT_KEY=audiout.devSelectOnLaunch
+# Selection changes: with Settings > General "Reconnect last speakers when Audiout
+# starts" on, launch restores routing.json's selectedDeviceIDs
+# (GroupController.ensureDefaultSelection). The setting is off by default.
+RECONNECT_KEY=general.reconnectAtLaunch
+LIVE_CHECK_S=90      # after a relaunch, telemetry must show exactly the wanted speakers within this
+RELAUNCH_TRIES=2     # a speaker discovered after the restore is dropped, so one more relaunch
 # Device ids exactly as `--list-devices` prints them ON THE MAC THAT RUNS THIS.
 # Bluetooth: the speaker's address with dashes plus ":output"; AirPlay: colon hex.
 MOVE1_ID=""
@@ -197,9 +200,9 @@ elif ! to 15 blueutil --power >/dev/null 2>&1; then BLUE_PROBLEM="blueutil canno
 HAVE_BLUEUTIL=$([[ -z $BLUE_PROBLEM ]] && print 1 || print 0)
 
 KEY_PROBLEM=""
-if [[ ! -d $APP ]]; then KEY_PROBLEM="Audiout Dev not found at $APP"
-elif ! grep -qaF "$SELECT_KEY" "$APP/Contents/MacOS/"*; then
-  KEY_PROBLEM="Audiout Dev at $APP does not read the defaults key $SELECT_KEY, so the driver cannot change the speaker selection unattended. The key was deleted from main on 2026-09-20 (commit e75068b5). Restore it in a build so that the listed ids REPLACE the selection (every launch selects This Mac, and the old key only added to that), rebuild, and run again."
+if [[ ! -d $APP ]]; then KEY_PROBLEM="Audiout Dev not found at $APP. Install it there (README step 2)."
+elif ! grep -rqaF "$RECONNECT_KEY" "$APP/Contents/MacOS" "$APP/Contents/Frameworks" 2>/dev/null; then
+  KEY_PROBLEM="Audiout Dev at $APP has no \"Reconnect last speakers when Audiout starts\" setting ($RECONNECT_KEY), so the driver cannot change the speaker selection unattended. Install a build from main after roadmap 050."
 fi
 
 # Ids per block; a real run refuses an empty or unknown id before anything plays.
@@ -215,7 +218,7 @@ if (( ! DRY )); then
   [[ -z $KEY_PROBLEM$ids_problem ]] || die "$ids_problem$KEY_PROBLEM"
 fi
 if [[ $MODE == check ]]; then
-  log "check passed: tools present, ids known, build reads $SELECT_KEY; recorder $RECORDER; ${BLUE_PROBLEM:-blueutil works}"
+  log "check passed: tools present, ids known, build has $RECONNECT_KEY; recorder $RECORDER; ${BLUE_PROBLEM:-blueutil works}"
   exit 0
 fi
 
@@ -377,9 +380,19 @@ ensure_connected() {  # Bluetooth ids...
   done
 }
 
-# Prints nothing when routing.json holds exactly these ids, else what it holds.
-selection_mismatch() {  # ids...
-  "$PYTHON" - "$ROUTING" "$@" <<'EOF'
+# routing.json as RoutingStore.save writes it: schema 1, Main Out = Selected Speakers.
+write_routing() {  # file ids...
+  "$PYTHON" - "$@" <<'EOF'
+import sys, json, os
+state = {"mainOutKind": "selected", "selectedDeviceIDs": sorted(set(sys.argv[2:]))}
+os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)
+json.dump({"schemaVersion": 1, "state": state}, open(sys.argv[1], "w"), indent=2, sort_keys=True)
+EOF
+}
+
+# Prints nothing when the routing file holds exactly these ids, else what it holds.
+selection_mismatch() {  # file ids...
+  "$PYTHON" - "$@" <<'EOF'
 import sys, json
 try: got = set(json.load(open(sys.argv[1]))["state"]["selectedDeviceIDs"])
 except (OSError, ValueError, KeyError): got = None
@@ -387,27 +400,76 @@ print("" if got == set(sys.argv[2:]) else "unreadable" if got is None else " ".j
 EOF
 }
 
+# The live selection after a relaunch, from telemetry written since byte offset
+# $1. set_output_set carries speaker NAMES (NativeBackend.telemetryDeviceList),
+# so it gives the count of non-local speakers handed to the backend; the ids come
+# from bt_sink_rebuild / bt_sink_anchored / bt_clock_deviation (uid) for
+# Bluetooth and connect_requested (device) for AirPlay. Prints nothing when they
+# match exactly, else what is wrong. This Mac never reaches the backend; the
+# routing.json check covers it.
+live_mismatch() {  # from_byte ids...
+  "$PYTHON" - "$TELEMETRY" "$@" <<'EOF'
+import sys, json, re
+tel, start, want = sys.argv[1], int(sys.argv[2]), set(sys.argv[3:])
+BT = re.compile(r"^[0-9A-F]{2}(-[0-9A-F]{2}){5}:output$"); AP = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
+f = open(tel, "rb"); f.seek(start)
+names, seen_bt, seen_ap, got_set = set(), set(), set(), False
+for l in f.read().decode("utf-8", "replace").splitlines():
+    try: r = json.loads(l)
+    except ValueError: continue
+    e = r.get("evt", "")
+    lst = lambda k: {n for n in str(r.get(k, "")).strip("[]").split(",") if n}
+    if e == "set_output_set": got_set = True; names = (names | lst("added")) - lst("removed")
+    elif e in ("bt_sink_rebuild", "bt_sink_anchored", "bt_clock_deviation") and BT.match(r.get("uid", "")): seen_bt.add(r["uid"])
+    elif e == "connect_requested" and AP.match(r.get("device", "")): seen_ap.add(r["device"])
+want_bt = {i for i in want if BT.match(i)}; want_ap = {i for i in want if AP.match(i)}
+bad = []
+if not got_set: bad.append("no set_output_set line")
+elif len(names) != len(want_bt | want_ap): bad.append(f"set_output_set selects {len(names)} speakers [{', '.join(sorted(names))}], wanted {len(want_bt | want_ap)}")
+if want_bt - seen_bt: bad.append("no sink line for " + " ".join(sorted(want_bt - seen_bt)))
+if seen_bt - want_bt: bad.append("unwanted Bluetooth sink " + " ".join(sorted(seen_bt - want_bt)))
+if want_ap - seen_ap: bad.append("no connect_requested for " + " ".join(sorted(want_ap - seen_ap)))
+if seen_ap - want_ap: bad.append("unwanted AirPlay connect " + " ".join(sorted(seen_ap - want_ap)))
+print("; ".join(bad) if bad else "")
+EOF
+}
+
+RECONNECT_WAS=""
 select_speakers() {  # ids...
-  if (( DRY )); then log "dry run: would select $*"; return 0; fi
-  to 20 osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
-  local i; for i in {1..20}; do pgrep -f "$APP/Contents/MacOS/" >/dev/null || break; sleep 1; done
-  pgrep -f "$APP/Contents/MacOS/" >/dev/null && { log "Audiout Dev did not quit, sending TERM"; pkill -f "$APP/Contents/MacOS/"; sleep 3; }
-  osascript -e "set volume output volume $MAC_VOLUME"
-  defaults write $BUNDLE_ID $SELECT_KEY -array "$@"
-  local from=$(tel_size) t0=$SECONDS line=""
-  open "$APP"
-  while (( SECONDS - t0 < 100 )); do
-    line=$(tail -c +$((from + 1)) "$TELEMETRY" | grep -m1 '"evt":"dev_select_on_launch"' || true)
-    [[ -n $line ]] && break; sleep 2
+  if (( DRY )); then  # write and check a copy; the app's own file is left alone
+    write_routing "$OUT/routing-dry-run.json" "$@"
+    local got=$(selection_mismatch "$OUT/routing-dry-run.json" "$@")
+    [[ -z $got ]] && log "dry run: routing file check passed for [$*] (wrote $OUT/routing-dry-run.json; no relaunch, so no live check)" \
+                  || { log "dry run: routing file check FAILED: holds [$got], wanted [$*]"; return 1; }
+    return 0
+  fi
+  if [[ -z $RECONNECT_WAS ]]; then
+    RECONNECT_WAS=$(defaults read $BUNDLE_ID $RECONNECT_KEY 2>/dev/null || print -n off)
+    defaults write $BUNDLE_ID $RECONNECT_KEY -bool true
+    note "turned on \"Reconnect last speakers when Audiout starts\" ($RECONNECT_KEY, was $RECONNECT_WAS) so launch restores routing.json; set back at the end"
+  fi
+  local try from t0 got live
+  for try in {1..$RELAUNCH_TRIES}; do
+    to 20 osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
+    local i; for i in {1..20}; do pgrep -f "$APP/Contents/MacOS/" >/dev/null || break; sleep 1; done
+    pgrep -f "$APP/Contents/MacOS/" >/dev/null && { log "Audiout Dev did not quit, sending TERM"; pkill -f "$APP/Contents/MacOS/"; sleep 3; }
+    osascript -e "set volume output volume $MAC_VOLUME"
+    write_routing "$ROUTING" "$@"
+    from=$(tel_size); t0=$SECONDS
+    open "$APP"
+    play_start || log "playback did not start"   # sinks only build with audio flowing
+    sleep $LIVE_CHECK_S
+    got=$(selection_mismatch "$ROUTING" "$@")
+    live=$(live_mismatch $from "$@")
+    if [[ -z $got && -z $live ]]; then
+      log "selection check passed for [$*]: routing.json and telemetry agree (try $try)"
+      local left=$(( SETTLE_S - (SECONDS - t0) )); (( left > 0 )) && sleep $left
+      return 0
+    fi
+    [[ -n $got ]] && log "try $try: routing.json holds [$got], wanted [$*]"
+    [[ -n $live ]] && log "try $try: live selection differs: $live"
   done
-  [[ -n $line ]] || { log "no dev_select_on_launch line within 100 s"; return 1; }
-  log "selection: $line"
-  [[ $line == *'"missing":"0"'* ]] || return 1
-  sleep 5
-  local got=$(selection_mismatch "$@")
-  [[ -z $got ]] || { log "routing.json holds [$got], wanted [$*]"; return 1; }
-  local left=$(( SETTLE_S - (SECONDS - t0) )); (( left > 0 )) && sleep $left
-  return 0
+  return 1
 }
 
 # ---- Watchdog ---------------------------------------------------------------
@@ -597,7 +659,9 @@ if (( WITH_AIRPLAY )); then
   else block_skip C "Move 1 or the AirPlay speaker could not be selected (see driver.log)"; fi
 fi
 (( ! DRY && HAVE_BLUEUTIL )) && { to 30 blueutil --connect $(bt_addr $MOVE2_ID) || true; }
-(( DRY )) || defaults delete $BUNDLE_ID $SELECT_KEY 2>/dev/null || true
+if [[ $RECONNECT_WAS == off || $RECONNECT_WAS == 0 ]]; then
+  defaults write $BUNDLE_ID $RECONNECT_KEY -bool false; log "set $RECONNECT_KEY back to off"
+fi
 
 # ---- Summary ----------------------------------------------------------------
 "$PYTHON" - "$OUT" "$TELEMETRY" "$JUMP_MS" "$DRY" "$AIRPLAY_NAME" "$LOAD_WARN" "$SMOKE" <<'EOF'

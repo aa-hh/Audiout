@@ -12,14 +12,16 @@ loops the click track, records the built-in mic during each block, and writes
 | B | Move 1 + This Mac | play 60 s, pause 90 s, play 60 s | runbook 1 Run B (M1 Part 2) |
 | C (`--with-airplay`) | the AirPlay speaker + Move 1 | 60 min | runbook 2 Part A, AirPlay variant (M1 Part 4) |
 
-Before each block the driver quits Audiout Dev, writes the selection into the
-dev-only defaults key `audiout.devSelectOnLaunch`, sets the output volume to 50,
-relaunches, waits 60 s for the Bluetooth clocks, and checks `routing.json`.
-
-**The key is gone from main** (commit e75068b5, 2026-09-20) and from the
-integration build, so a real run stops with that message until a build carries
-it again. A restored key must replace the selection: every launch selects This
-Mac, and the old key only added to it.
+Before each block the driver quits Audiout Dev, writes the speakers into
+`~/Library/Application Support/com.audiout.Audiout.dev/routing.json`
+(`{"schemaVersion":1,"state":{"mainOutKind":"selected","selectedDeviceIDs":[...]}}`),
+sets the output volume to 50 and relaunches. Launch restores that file only with
+"Reconnect last speakers when Audiout starts" on (`general.reconnectAtLaunch`,
+off by default); the driver turns it on, notes it, and turns it off at the end.
+90 s after launch the file and telemetry must both show exactly those speakers
+(`set_output_set` count, Bluetooth sink lines and AirPlay `connect_requested` by
+id). A speaker discovered after the restore is dropped, so a mismatch gets one
+more relaunch, then the block is skipped.
 
 ## One-time setup on the second Mac
 
@@ -74,10 +76,9 @@ that opens Terminal, which holds the grants from step 5, to run the driver.
 
 ## Rehearsal: `--smoke`
 
-While you are in the room, run `./unattended-night.sh --smoke` (same flags as the
-night). It is the real run, Audiout relaunches and selection changes included,
-with Block A 2 min (disconnect at minute 1), Block B 20 s / 30 s / 20 s and
-Block C 2 min. Its folder ends in `-smoke` and its summary starts with "SMOKE".
+In the room, run `./unattended-night.sh --smoke` (same flags as the night): the
+real run, relaunches included, with Block A 2 min (disconnect at minute 1), Block
+B 20 s / 30 s / 20 s, Block C 2 min. Its summary starts with "SMOKE".
 
 ## The watchdog
 
@@ -111,7 +112,7 @@ In Terminal on the second Mac (Screen Sharing is fine), from `dev/listening`:
 ```
 
 It runs `--check` first (missing tool, empty or unknown id, build without the
-key), loads `~/Library/LaunchAgents/com.audiout.listening-night.plist` with
+reconnect setting), loads `~/Library/LaunchAgents/com.audiout.listening-night.plist` with
 `launchctl bootstrap`, and keeps the Mac awake with `caffeinate -dims` until the
 agent fires, removes itself and runs the driver. It prints how to cancel.
 

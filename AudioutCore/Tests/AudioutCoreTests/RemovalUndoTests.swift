@@ -87,6 +87,34 @@ import Testing
         #expect(spy.switchRequests == 1, "the real NSButton click reaches the delegate")
     }
 
+    /// Red if "Undo" or "Play here instead" went back to the `gold` fill
+    /// token: in light mode that is `#E8B84B` on the `#FAFAFB` ground, under
+    /// 2:1, where body-size words need 4.5:1.
+    @Test func bothRowOffersAreLegibleOnTheLightGround() {
+        Tokens.test_increaseContrastOverride = false
+        defer { Tokens.test_increaseContrastOverride = nil }
+        func luminance(_ color: NSColor) -> CGFloat {
+            func channel(_ c: CGFloat) -> CGFloat { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+            let c = color.usingColorSpace(.sRGB)!
+            return 0.2126 * channel(c.redComponent) + 0.7152 * channel(c.greenComponent)
+                + 0.0722 * channel(c.blueComponent)
+        }
+        let row = makeBusRow(makeDevice())
+        for (name, button) in [("Undo", row.removalUndoButton), ("Play here instead", row.switchOfferButton)] {
+            guard let ink = button.attributedTitle.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+            else {
+                Issue.record("\(name) has no title colour")
+                continue
+            }
+            var ratio: CGFloat = 0
+            NSAppearance(named: .aqua)!.performAsCurrentDrawingAppearance {
+                let (a, b) = (luminance(ink), luminance(Tokens.Color.canvas))
+                ratio = (max(a, b) + 0.05) / (min(a, b) + 0.05)
+            }
+            #expect(ratio >= 4.5, "\(name) measures \(ratio):1 on the light ground")
+        }
+    }
+
     // MARK: Controller level
 
     private func waitFleet(_ backend: MockBackend, count: Int,

@@ -201,6 +201,15 @@ final class SystemAirPlayNoteBannerView: NSView {
     @objc private func actionButtonTapped() { actionHandler?() }
     @objc private func textActionButtonTapped() { textActionHandler?() }
 
+    /// The underlined text action reads as a link, so it takes a link's cursor;
+    /// a borderless `NSButton` keeps the arrow on its own.
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if let textActionButton {
+            addCursorRect(textActionButton.frame, cursor: .pointingHand)
+        }
+    }
+
     // MARK: Test-support hooks
 
     /// Whether this instance was built with an action button.

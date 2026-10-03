@@ -1604,9 +1604,10 @@ public final class DeviceRowView: NSView {
         feedStack.layer?.masksToBounds = true
 
         // Live-removal undo: "Removed:" beside a link-style Undo button, in
-        // the trailing slot. Stock `NSButton`, borderless, gold title — the
-        // actionable half of the sentence carries the app's action tone while
-        // the "Removed:" half stays secondary text.
+        // the trailing slot. Stock `NSButton`, borderless, `goldText` title —
+        // the actionable half of the sentence carries the app's action tone
+        // while the "Removed:" half stays secondary text. `goldText`, not
+        // `gold`: these are words, and light `gold` is a fill under 2:1 on paper.
         removalUndoLabel.translatesAutoresizingMaskIntoConstraints = false
         removalUndoLabel.font = Tokens.Font.caption
         removalUndoLabel.textColor = Tokens.Color.label2
@@ -1615,7 +1616,7 @@ public final class DeviceRowView: NSView {
         removalUndoButton.isBordered = false
         removalUndoButton.attributedTitle = NSAttributedString(
             string: "Undo",
-            attributes: [.font: Tokens.Font.caption, .foregroundColor: Tokens.Color.gold])
+            attributes: [.font: Tokens.Font.caption, .foregroundColor: Tokens.Color.goldText])
         removalUndoButton.target = self
         removalUndoButton.action = #selector(undoRemovalClicked(_:))
         removalUndoStack.translatesAutoresizingMaskIntoConstraints = false
@@ -1630,7 +1631,7 @@ public final class DeviceRowView: NSView {
         switchOfferButton.isBordered = false
         switchOfferButton.attributedTitle = NSAttributedString(
             string: "Play here instead",
-            attributes: [.font: Tokens.Font.caption, .foregroundColor: Tokens.Color.gold])
+            attributes: [.font: Tokens.Font.caption, .foregroundColor: Tokens.Color.goldText])
         switchOfferButton.target = self
         switchOfferButton.action = #selector(switchHereClicked(_:))
         switchOfferButton.isHidden = true

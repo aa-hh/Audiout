@@ -775,6 +775,36 @@ segment feeding a connecting or failed speaker keeps that colour; the
 speaker's state shows in its node (dashed `ember` while connecting, `failure`
 red when failed) and its glyph ring, never in the line.
 
+#### Membership rail extent (owner's ruling, 2026-10-04)
+Where the Mixer rail starts and stops. No rule existed before this; the
+situations behind it are in `dev/notes/rail-extent-variants-2026-10-04.md`.
+"Reached" means a listed speaker that is selected AND connected or
+connecting, visible or folded away.
+
+1. The rail starts at the Main Audio ring. When the System Audio card is
+   collapsed it starts at a dot centred on that header's line.
+2. The rail exists only while some listed speaker is reached. Failed and
+   unselected speakers never count.
+3. Every collapsed header (a section, or the whole Output Speakers card)
+   that hides a reached speaker gets a dot centred on the header's own text
+   line, the vertical centre of the header row, never its bottom edge.
+4. The rail ends at the lowest visible reached node or the lowest dotted
+   header, whichever is lower, passing straight through any dotted header
+   above that.
+5. A collapsed header hiding no reached speaker gets nothing on the rail.
+6. Above the end, unselected speakers keep the detour arc. Below the end,
+   rows show their own circle and no line.
+7. The rail never draws outside the scrolling list's visible bounds, top or
+   bottom. When the member or dotted header that would end the rail is
+   scrolled below the visible edge, the rail ends on the lowest fully visible
+   row on the spine: its own circle is the end, with no extra dot.
+8. Armed, idle and dormant change only the colour, never where the rail
+   starts or stops.
+
+`RailPlan.resolve` (`BusRailOverlayView.swift`) is the one implementation;
+`BusRailCollapseResolveTests` and `PopoverDeviceVisibilityTests` pin it. The
+Groups editor's rail passes no sections, so only rules 2, 6 and 8 reach it.
+
 ### QR Tile (invitations to Audiout Remote, Mac-only)
 `RemoteInviteView` (`AudioutSharedUI`) is one view hosted three times: the
 alignment wizard sheet's first page at 96 pt, Settings › General under the

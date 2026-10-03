@@ -504,10 +504,9 @@ public enum PopoverColumnGrid {
     /// run), so a box derived to land EXACTLY on the icon's leading edge lands
     /// under it half the time — this pulls it clear.
     public static let busHitTargetIconGap: CGFloat = 1
-    /// Diameter of the small filled dot the rail draws where it is CUT SHORT by a
-    /// collapsed (or mid-collapse clipping) section — the terminus marker that
-    /// says "the rail stops HERE, at this section's header, nothing below it is
-    /// currently visible" (collapse-reactive rail, 2026-07-22). Matches the old
+    /// Diameter of the small filled dot the rail draws on a collapsed header
+    /// that hides a reached speaker, centred on the header's text line, and on
+    /// a collapsed origin header (owner's ruling, 2026-10-04). Matches the old
     /// `busOriginDotDiameter` weight so the collapsed terminus reads as the same
     /// family of gutter dot the rail used before the ring-hook terminus landed.
     public static let railCollapsedTerminusDotDiameter: CGFloat = 5

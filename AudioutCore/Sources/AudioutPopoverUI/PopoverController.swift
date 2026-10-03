@@ -2153,8 +2153,8 @@ public final class PopoverController: NSObject {
     /// The devices `rebuild()` would mount rows for right now: visible, and
     /// inside an EXPANDED subsection. Compared against `deviceRowsByID` to
     /// decide whether `update(devices:)` needs a structural rebuild. The rail
-    /// deliberately does NOT read this — its cut follows the lowest reached device
-    /// in the FULL order (`updateRailRows`).
+    /// deliberately does NOT read this — it judges folded subsections in the
+    /// FULL order (`updateRailRows`).
     func renderedDeviceOrder() -> [Device] {
         deviceSections().filter { !isSubsectionCollapsed($0.title) }.flatMap(\.devices)
     }

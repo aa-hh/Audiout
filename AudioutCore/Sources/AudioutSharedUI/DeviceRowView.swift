@@ -821,7 +821,7 @@ public final class DeviceRowView: NSView {
     /// The rail node a bus row shows for `device`, from the values `apply(...)`
     /// pushes. The one derivation: the row calls it, and the popover calls it
     /// for a device whose row is not mounted (hidden inside a collapsed
-    /// subsection) to decide where the rail is cut.
+    /// subsection) to decide whether that subsection's header gets a rail dot.
     public static func busNode(device: Device, selected: Bool, energizePending: Bool,
                                reduceMotion: Bool, localFallbackOutput: Bool) -> MembershipBusView.Node {
         let node: MembershipBusView.Node

@@ -22,6 +22,7 @@ or `GroupController`.
 - The identity stack yields the Equalizer slot on EVERY row, so names truncate alike.
 - Instruments reconcile accessibility-display changes live; the accent dial is a third trigger.
 - No rail, no ring: `BusRailOverlayView.railReaches` decides both, and a failed room is never reached.
+- Where the rail starts and stops is the owner's ruling of 2026-10-04: eight rules in DESIGN.md "Membership rail extent", implemented only in `RailPlan.resolve`. Header dots sit on the header's vertical centre; the list's band clamps both edges.
 - The rail overlay paints ABOVE every row, so the gutter is the spine's alone: anything that opens under a device row (sync drawer, alignment note, connection diagnosis) starts its content at `PopoverColumnGrid.firstElementLeading`, never inside the gutter.
 - The rail line is one colour end to end: `originColor` (spine tone, or `railDormant` when the rail is dormant). A connecting or failed speaker shows in its node and glyph ring, never in the segment feeding it.
 - A node can fill with the checkbox off: `localFallbackOutput` draws the Mac as a rail member while the engine plays on it, and edits no selection.

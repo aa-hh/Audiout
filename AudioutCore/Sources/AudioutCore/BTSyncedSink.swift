@@ -466,9 +466,10 @@ enum BTDeviceSinkError: Error, CustomStringConvertible {
 /// the reference timeline reaches `capture_pts + delay`, then drains the ring
 /// through the shared `FractionalResampler` at unity rate.
 ///
-/// There is no drift correction: A2DP sinks servo to the host delivery rate, and
-/// measured inter-speaker drift was −0.02 ppm (≈ 0 over 30 minutes) on
-/// 2026-08-12, so a fixed trim holds for a whole session.
+/// There is no drift correction: A2DP sinks servo to the host delivery rate.
+/// One 120-second run on 2026-08-12 (Sonos Move vs Sony WH-1000XM3) measured
+/// inter-speaker drift of −0.02 ppm. A fixed trim holding for a whole session
+/// is that rate extrapolated, not a session-length measurement.
 ///
 /// NEVER install a tap on `engine.outputNode` — that raises an uncatchable
 /// AVFAudio exception at install time (spike gotcha, live-verified); if a tap
@@ -1173,9 +1174,9 @@ final class BTDeviceSink: @unchecked Sendable {
         base.update(repeating: 0, count: frameCount * channelCount)
 
         var plan = SyncTiming.RenderPlan(silentFrames: frameCount, releasesThisCycle: false)
-        // A2DP sinks servo to the host delivery rate — measured inter-speaker
-        // drift is ~0 over 30 minutes (2026-08-12), so there is no rate
-        // correction to apply and the resampler runs at unity.
+        // A2DP sinks servo to the host delivery rate — one 120-second run
+        // (2026-08-12) measured −0.02 ppm between speakers,
+        // so there is no rate correction to apply and the resampler runs at unity.
         let ratio = 1.0
         var processor: EQProcessor?
         guard stateLock.try() else { return false }   // no snapshot → silent cycle

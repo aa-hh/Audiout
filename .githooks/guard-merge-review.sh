@@ -67,8 +67,11 @@ cat >&2 <<'EOF'
   REFUSED (Guard 10): no code review receipt for the commits being merged.
 
   In the branch's worktree run:   bash scripts/review-branch.sh
-  It picks the review depth from the diff, prints the findings, and records
-  the receipt this merge needs. Work already reviewed by /scope-and-run's
+  It picks the review depth from the diff and prints reviewer passes for the
+  Claude session merging the branch to run as its own subagents (headless
+  claude -p is refused on this account). Follow its printed steps, then run
+  bash scripts/review-branch.sh --continue, which prints the findings and
+  records the receipt this merge needs. Work already reviewed by /scope-and-run's
   reviewer:   bash scripts/review-branch.sh --already-reviewed
   Then run this merge again. A receipt covers the branch's own changes when
   it was written; a later commit that changes them needs a new one (merging

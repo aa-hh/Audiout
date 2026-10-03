@@ -660,6 +660,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     var wizardArmPollInterval: TimeInterval = 0.1
     /// A floor of bed-only time before the first tick, however fast the sinks
     /// release — the Sonos Move's amplifier needs it (live finding 2026-08-07).
+    /// Counted from the moment every participant released, when the bed first
+    /// becomes audible, never from the gate opening.
     var wizardArmMinimumBedSeconds: TimeInterval = 1.5
     /// The ceiling: a speaker that never reports rendering must not stall the
     /// run, so past this the ticks arm regardless.

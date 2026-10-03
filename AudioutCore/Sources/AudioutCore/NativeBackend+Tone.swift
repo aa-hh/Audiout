@@ -690,9 +690,11 @@ extension NativeBackend {
         // (Q1): the app takes the Mac's default output only when the user actually
         // routes (whole-system selection becomes non-empty), never at launch. It
         // also (re)evaluates the routing-blocked warning for the new steady state.
-        // Scheduled `async` (not inside the critical section above) so the HAL
-        // default-output write never extends the main-thread `sync` block; still
-        // serial on `stateQueue`, so it observes the just-written `expectedSelected`.
+        // Scheduled `async` (not inside the critical section above). The reconcile
+        // decides on `stateQueue`, so it observes the just-written
+        // `expectedSelected`, and does its default-output reads and the
+        // set-default write on `captureControlQueue`, so a slow coreaudiod never
+        // holds `stateQueue` and the main-thread `sync` above.
         stateQueue.async { self.reconcileAggregateDefault() }
 
         // The synced-local transition is no longer enqueued here — it fires from

@@ -400,7 +400,8 @@ extension SerializedSharedState {
 
     private func makeBackend(
         aggregateControl: FakeAggregateControl,
-        currentDefaultOutputUIDBox: LockedBox<String?>
+        currentDefaultOutputUIDBox: LockedBox<String?>,
+        currentDefaultOutputUID: (@Sendable () -> String?)? = nil
     ) -> (NativeBackend, FakeSystemVolume) {
         let systemVolume = FakeSystemVolume()
         let backend = NativeBackend(
@@ -410,7 +411,7 @@ extension SerializedSharedState {
             systemVolume: systemVolume,
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             aggregateControl: aggregateControl,
-            currentDefaultOutputUID: { currentDefaultOutputUIDBox.get() },
+            currentDefaultOutputUID: currentDefaultOutputUID ?? { currentDefaultOutputUIDBox.get() },
             // D7 (adversarial review, Seamless handoff T3): this suite drives
             // `expectedSelected` non-empty, which arms the handoff watcher
             // (`reconcileHandoffWatcherLocked`, tail of `reconcileAggregateDefault`)
@@ -509,6 +510,44 @@ extension SerializedSharedState {
     }
 
     // MARK: Tests
+
+    /// A default-output read that coreaudiod never answers must not hold
+    /// `stateQueue`: the main thread's `setOutputSet` and `setMeteringActive`
+    /// both take `stateQueue.sync`, and the live freeze (2026-10-03) was the main
+    /// thread parked there behind the aggregate's default-output read. The
+    /// provider below blocks until released; every call must return while it is
+    /// still blocked.
+    @MainActor
+    @Test func theMainThreadReturnsWhileTheDefaultOutputReadIsStuck() async {
+        let control = FakeAggregateControl(resolvable: [AggregateOutputDevice.productUID: 501])
+        let armed = LockedBox<Bool>(false)
+        let finished = LockedBox<Bool>(false)
+        let release = DispatchSemaphore(value: 0)
+        let provider: @Sendable () -> String? = {
+            guard armed.get() else { return "com.other.speakers" }
+            // Hang-stop only, not a speed assert: the test releases it below.
+            _ = release.wait(timeout: .now() + 5)
+            finished.set(true)
+            return "com.other.speakers"
+        }
+        let (backend, _) = makeBackend(
+            aggregateControl: control, currentDefaultOutputUIDBox: LockedBox<String?>(nil),
+            currentDefaultOutputUID: provider)
+        backend.start(); defer { backend.stop() }
+        // start() queues a default-output read on stateQueue; wait for it so the stuck read belongs to the click, not to startup.
+        _ = backend.test_expectedSelected
+        armed.set(true)
+
+        backend.setOutputSet(["some-airplay-device"])
+        #expect(finished.get() == false)
+        backend.setMeteringActive(false)
+        #expect(finished.get() == false)
+        #expect(backend.test_expectedSelected == ["some-airplay-device"])
+
+        release.signal()
+        await pollUntil { finished.get() }
+        armed.set(false)
+    }
 
     /// ACTIVATION SEAM: the moment routing goes non-empty (`setOutputSet` with a
     /// non-empty set — "actively routing" per the AMBIGUITY note on

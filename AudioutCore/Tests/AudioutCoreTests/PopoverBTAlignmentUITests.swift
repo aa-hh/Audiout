@@ -1353,7 +1353,8 @@ import AppKit
     }
 
     /// Defect this would catch: a probe that finds nothing leaving the user
-    /// stranded on the listening screen.
+    /// stranded on the listening screen. The first empty listen replays the
+    /// sweeps once (the tick's off→on edge); the second hands to the questions.
     @Test func aFailedListenFallsToTheQuestions() async {
         let (popover, recorder) = makePopover()
         armListening(popover, granted: true)
@@ -1374,7 +1375,7 @@ import AppKit
             if case .question? = wizard?.test_screen { return true }
             return false
         }
-        #expect(recorder.ticks == [true])
+        #expect(recorder.ticks == [true, false, true])
     }
 
     /// Defect this would catch: "Try again" re-entered listening but the host
@@ -1384,8 +1385,11 @@ import AppKit
     @Test func aMeasuredProposalsRejectReRunsTheProbeThenHandsToTheQuestions() async {
         let (popover, recorder) = makePopover()
         popover.ensureMicPermission = { $0(true) }
+        // Probes that never finish: the proposals below are offered by hand,
+        // and a silent probe completing first would spend the run's second
+        // listen on its own retry before the reject could.
         popover.makeMicProbe = {
-            MicProbeSession(recorder: SilentRecorder(), timeout: 1, pipelineTail: 0.05)
+            MicProbeSession(recorder: SilentRecorder(), timeout: 60, pipelineTail: 0.05)
         }
         // `MicProbeSession.start` hops onto its own queue before calling the
         // stage closure, so each count lands off this thread and AFTER the
@@ -1394,10 +1398,9 @@ import AppKit
         // whether that queue was scheduled before the next line — asserting it
         // synchronously lost that race under a loaded full-suite run.
         let stages = StageCounter()
-        popover.onStageBTMicProbe = { started, finished in
+        popover.onStageBTMicProbe = { started, _ in
             stages.increment()
             started()
-            finished()
         }
         showNote(popover)
         popover.startBTAlignmentWizard(deviceID: "bt-a:output", door: .drawer)

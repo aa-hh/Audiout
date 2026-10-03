@@ -246,6 +246,10 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// a regression test for the animated case would pass vacuously.
     var test_reduceMotionOverride: Bool?
 
+    /// The clock this panel's row and subsection folds run on. Always
+    /// `FoldAnimator.shared` in the app; a test swaps in a hand-driven one.
+    var foldAnimator: FoldAnimator = .shared
+
     /// Whether motion should be flattened — System Settings › Accessibility ›
     /// Display › Reduce Motion, through the seam above.
     private var reduceMotion: Bool {
@@ -1117,8 +1121,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         clip.heightConstraint.constant = clip.frame.height
         clip.heightConstraint.isActive = true
         _ = fittingSizeSettled()
-        FoldAnimator.shared.animate(clip.heightConstraint, to: 0,
-                                    follower: self, completion: teardown)
+        foldAnimator.animate(clip.heightConstraint, to: 0,
+                             follower: self, completion: teardown)
     }
 
     /// Unfold a subsection: build its rows so the clip has a natural height,
@@ -1151,8 +1155,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         clip.heightConstraint.constant = 0
         clip.heightConstraint.isActive = true
         _ = fittingSizeSettled()   // commit the START state; the reveal needs the distance
-        FoldAnimator.shared.animate(clip.heightConstraint, to: revealHeight,
-                                    follower: self) {
+        foldAnimator.animate(clip.heightConstraint, to: revealHeight,
+                             follower: self) {
             // Let the rows flex with their own content again once they have
             // arrived — unless a collapse has since begun on this clip, whose
             // height constraint deactivating here would pop the section back open.
@@ -1270,8 +1274,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // this panel and publishes that size every tick, so the window is never
         // shorter than its content — the unsatisfiable direction of the surplus
         // shield, and the one that deforms the rows.
-        FoldAnimator.shared.animate(clip.heightConstraint, to: revealHeight,
-                                    follower: self) {
+        foldAnimator.animate(clip.heightConstraint, to: revealHeight,
+                             follower: self) {
             // Let the row flex with its own content again once it has arrived
             // (a mounted drawer/panel can re-lay itself out while open) —
             // unless a close has since begun on this clip: deactivating the
@@ -1329,8 +1333,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         stackView.layoutSubtreeIfNeeded()
         // The surface follows the shrinking clip per tick; `detach` publishes
         // the settled height once the row is actually gone.
-        FoldAnimator.shared.animate(clip.heightConstraint, to: 0,
-                                    follower: self, completion: detach)
+        foldAnimator.animate(clip.heightConstraint, to: 0,
+                             follower: self, completion: detach)
     }
 
     /// The **legend voice**: one small caption shared by the card's section

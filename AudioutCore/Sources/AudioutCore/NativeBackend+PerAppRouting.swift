@@ -819,7 +819,19 @@ extension NativeBackend {
                 // bow out: that loop owns the engine ops right now and will
                 // settle the device into whatever state is currently desired —
                 // the next topology change re-binds/re-syncs it idempotently.
-                guard !self.converging.contains(deviceID) else {
+                //
+                // Our OWN recovery chain waiting out a backoff is the exception:
+                // it has no engine op in flight, so this reset supersedes it
+                // (cancels its timer, bumps the generation) and keeps its slot.
+                // Bowing out here made the earlier chain's delayed retry the
+                // only thing that could rebind the device, on that chain's
+                // clock and attempt budget. Not a verify-first settle, though:
+                // this chain's flush would succeed on the per-app stream that
+                // settle exists to move the session off.
+                let supersedesBackoff = self.rebindConverging.contains(deviceID)
+                    && self.pendingRebindRecoveries[deviceID] != nil
+                    && self.pendingRebindIsVerifyFirst[deviceID] != true
+                guard !self.converging.contains(deviceID) || supersedesBackoff else {
                     Telemetry.log(.airplay, "whole_system_rebind_skipped", [
                         "device": deviceID, "reason": "already_converging",
                     ])
@@ -1068,6 +1080,9 @@ extension NativeBackend {
                             }
                             return .none
                         }
+                        // The backoff is over: an entry here now means only
+                        // "waiting out a delay", which a newer recapture may supersede.
+                        self.pendingRebindRecoveries.removeValue(forKey: deviceID)
                         self.enqueueRebindRecovery(
                             deviceID: deviceID, outputID: out, scope: scope,
                             gen: gen, attempt: attempt + 1, verifyFirst: verifyFirst)
@@ -1082,7 +1097,8 @@ extension NativeBackend {
                 }
                 self.pendingRebindRecoveries.removeValue(forKey: deviceID)?.cancel()
                 self.pendingRebindRecoveries[deviceID] = work
-                DispatchQueue.global().asyncAfter(deadline: .now() + delay, execute: work)
+                self.pendingRebindIsVerifyFirst[deviceID] = verifyFirst
+                self.delayClock(delay, .global(), work)
                 return .none // still in progress — keep the `converging` slot held
             }
             if action.redrivePerApp { self.replayPendingPerAppBindings(trigger: "ws_release") }
@@ -1265,8 +1281,7 @@ extension NativeBackend {
             self.pendingRetries.removeValue(forKey: bundleID)?.cancel()
             self.pendingRetries[bundleID] = work
         }
-        DispatchQueue.global().asyncAfter(
-            deadline: .now() + delay, execute: work)
+        delayClock(delay, .global(), work)
     }
 
     /// React to the WHOLE-SYSTEM tap's state transition (T16, E10). Before this,
@@ -1391,8 +1406,7 @@ extension NativeBackend {
             self.pendingCaptureRetry?.cancel()
             self.pendingCaptureRetry = work
         }
-        DispatchQueue.global().asyncAfter(
-            deadline: .now() + delay, execute: work)
+        delayClock(delay, .global(), work)
     }
 
     /// Forward an app-quit notification from the AppKit boundary (T8, edge case 1:

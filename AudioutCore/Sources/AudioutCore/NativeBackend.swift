@@ -660,6 +660,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     var wizardArmPollInterval: TimeInterval = 0.1
     /// A floor of bed-only time before the first tick, however fast the sinks
     /// release — the Sonos Move's amplifier needs it (live finding 2026-08-07).
+    /// Counted from the moment every participant released, when the bed first
+    /// becomes audible, never from the gate opening.
     var wizardArmMinimumBedSeconds: TimeInterval = 1.5
     /// The ceiling: a speaker that never reports rendering must not stall the
     /// run, so past this the ticks arm regardless.
@@ -1145,6 +1147,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// lets the running loop pick up the new target when its current op completes.
     var converging: Set<String> = []
 
+    /// Device ids deselected while a converge op held their slot, with no
+    /// session to tear down. `setOutputSet` cannot release such a device's
+    /// whole-system stream (the op may have read it), so the slot's release
+    /// does, if the op ended with no session. Without it, a deselect landing
+    /// between a refused connect's failure and its slot release was dropped,
+    /// and the reselect reused the refused stream. On `stateQueue`.
+    var streamReleaseOnSettle: Set<String> = []
+
     /// Device ids parked in a terminal-failure state (the engine NACKed / the add
     /// threw). While parked, converge does NOT keep issuing new sessions for the id
     /// (root cause 5: "converge kept issuing sessions post-failure"). The park is
@@ -1447,6 +1457,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// thrash a receiver. Best-effort (a work item already running when cancelled
     /// still no-ops via its own guards), same D4 tolerance as `pendingRetries`.
     var pendingRebindRecoveries: [String: DispatchWorkItem] = [:]
+    /// Whether the chain behind each `pendingRebindRecoveries` entry is a
+    /// verify-first settle (written with that entry; read only while one exists).
+    /// A recapture must not supersede one: its plain flush would succeed on the
+    /// per-app stream the settle exists to move the session off.
+    var pendingRebindIsVerifyFirst: [String: Bool] = [:]
 
     /// How many whole-system-tap `.failed` retries have already fired in a row
     /// (T16, E10) — kept ONLY to grow the capped-exponential backoff delay, not
@@ -1512,6 +1527,25 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Doubled per attempt (`delay × 2^(attempt-1)`). Injectable so tests don't
     /// pay real wall-clock seconds; production never needs to tune it.
     let rebindRecoveryRetryDelay: TimeInterval
+
+    /// How a one-shot delayed job is scheduled: run `work` on `queue` once
+    /// `delaySeconds` have passed. Cancelling `work` stops it.
+    typealias DelayClock = @Sendable (_ delaySeconds: Double,
+                                      _ queue: DispatchQueue,
+                                      _ work: DispatchWorkItem) -> Void
+
+    /// The shipping clock: `asyncAfter` on the wall clock.
+    static let dispatchDelayClock: DelayClock = { delaySeconds, queue, work in
+        queue.asyncAfter(deadline: .now() + delaySeconds, execute: work)
+    }
+
+    /// Runs the backed-off retries (`.processNotYetAudible`, rebind recovery,
+    /// whole-system capture) and the companion audition's preparation, lease and
+    /// stop deadlines. Only the tests pass anything but ``dispatchDelayClock``:
+    /// on the wall clock, a loaded test run let a 0.05 s backoff burn every
+    /// rebind attempt before the test's next step, and a 4 s stop deadline
+    /// expire mid-restoration.
+    let delayClock: DelayClock
 
     // MARK: Metering (T3 — three real level sources through the event channel)
     //
@@ -1659,6 +1693,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         syncedLocalTransitionHorizon: TimeInterval = 2.0,
         captureRetryDelay: TimeInterval = 2.0,
         captureRetryMaxBackoff: TimeInterval = 10.0,
+        delayClock: @escaping DelayClock = NativeBackend.dispatchDelayClock,
         takeoverStripDelay: TimeInterval = 3.0,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
@@ -1757,6 +1792,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.syncedLocalTransitionHorizon = syncedLocalTransitionHorizon
         self.captureRetryDelay = captureRetryDelay
         self.captureRetryMaxBackoff = captureRetryMaxBackoff
+        self.delayClock = delayClock
         self.takeoverStripDelay = takeoverStripDelay
 
         // Wire the per-app routing callback graph (T6/T8). All four are set once
@@ -2104,6 +2140,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // when coreaudiod is busy (device switches, sleep/wake). An unchanged name
             // is harmless: `applyLocal` suppresses the no-op emit anyway.
             let name = Self.currentOutputDeviceName()
+            // Same reason: the default output's UID is a HAL read, so take it here
+            // too, and only when the default device actually changed.
+            let changedDefaultUID: String? = defaultDeviceChanged ? self.currentDefaultOutputUIDProvider() : nil
             // Fires on the helper's OWN private serial queue, never main — hop to the
             // queue that owns `known` before touching the model.
             self.stateQueue.async {
@@ -2178,7 +2217,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     //     off-switch. Any other change is a real user action → classify
                     //     it against the aggregate and (re)emit the routing-blocked
                     //     warning for the new steady state.
-                    let newDefaultUID = self.currentDefaultOutputUIDProvider()
+                    let newDefaultUID = changedDefaultUID
 
                     // Volume ownership turns on exactly this UID, so republish it
                     // BEFORE the echo test below. Our own switch to the aggregate
@@ -2193,6 +2232,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // left to correct after the fact.
                     if self.expectedDefaultWriteUID == newDefaultUID, newDefaultUID != nil {
                         self.expectedDefaultWriteUID = nil
+                        // Our takeover's echo can land before its own commit, which
+                        // then defers to this branch, so reflect the takeover here.
+                        if newDefaultUID == AggregateOutputDevice.productUID {
+                            self.setRoutingBlocked(false)
+                        }
                     } else {
                         // A genuine change that does NOT match the pending write
                         // proves our echo is no longer the newest state — the HAL
@@ -2203,7 +2247,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // echo", silently skipping the D1 resume — permanent silence
                         // in exactly the scenario D1 exists for. Disarm it.
                         self.expectedDefaultWriteUID = nil
-                        self.evaluateRoutingBlocked()
+                        self.evaluateRoutingBlocked(currentDefaultUID: newDefaultUID)
 
                         // Seamless handoff T3.4: the user picked a DIFFERENT default
                         // output in Sound settings while we were routing — that IS
@@ -2628,6 +2672,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.expectedSelected.removeAll()
             self.desiredOn.removeAll()
             self.converging.removeAll()
+            self.streamReleaseOnSettle.removeAll()
             self.failedGate.removeAll()
             self.fedDescriptors.removeAll()
             self.muted.removeAll()
@@ -3266,6 +3311,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     func releaseConvergingAndRequeueIfNeeded(id: String) -> ConvergeReleaseAction {
         self.converging.remove(id)
+        if self.streamReleaseOnSettle.remove(id) != nil, !self.added.contains(id) {
+            self.wholeSystemStreamByDevice.removeValue(forKey: id)
+        }
         // Never requeue into a suspension. `convergeDevice` has no `suspended` guard
         // of its own, so a slot released mid-sleep would otherwise kick a loop that
         // issues addOutput at engine sessions sleep has already torn down. The slot
@@ -4077,6 +4125,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.pendingRebindRecoveries.removeAll()
         for deviceID in self.rebindConverging {
             self.converging.remove(deviceID)
+            // The slot's own release is skipped here, so do its stream release
+            // too: a deselect that waited on this slot gives the stream back.
+            if self.streamReleaseOnSettle.remove(deviceID) != nil, !self.added.contains(deviceID) {
+                self.wholeSystemStreamByDevice.removeValue(forKey: deviceID)
+            }
             self.emit(.streamHealth(id: deviceID, recovering: false))
         }
         self.rebindConverging.removeAll()
@@ -4474,14 +4527,32 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// the end of `reconcileCaptureGate()` (streaming started/stopped) and the
     /// `systemVolume.onExternalChange` handler's `defaultDeviceChanged` branch
     /// (the system default output itself switched). On `stateQueue`.
+    ///
+    /// The AirPlay-class read is a Core Audio call, so it runs on
+    /// `captureControlQueue` and the result is committed back on `stateQueue`,
+    /// where `captureRunning` is checked again because capture may have stopped
+    /// while the read was in flight. With capture stopped there is nothing to read.
     private func reconcileSystemAirPlayGuard() {   // on stateQueue
-        let active = captureRunning && systemDefaultOutputIsAirPlayClassProvider()
-        if active {
-            guard !systemAirPlayGuardActive else { return }
-            systemAirPlayGuardActive = true
-            emit(.systemDefaultIsAirPlayActive(true))
-        } else {
+        guard captureRunning else {
             clearSystemAirPlayGuard()
+            return
+        }
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            let isAirPlay = self.systemDefaultOutputIsAirPlayClassProvider()
+            self.stateQueue.async {
+                guard self.captureRunning else {
+                    self.clearSystemAirPlayGuard()
+                    return
+                }
+                if isAirPlay {
+                    guard !self.systemAirPlayGuardActive else { return }
+                    self.systemAirPlayGuardActive = true
+                    self.emit(.systemDefaultIsAirPlayActive(true))
+                } else {
+                    self.clearSystemAirPlayGuard()
+                }
+            }
         }
     }
 

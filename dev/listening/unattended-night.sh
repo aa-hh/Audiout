@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Unattended listening night for the Bluetooth sync fixes. See README.md here.
 #
-#   ./unattended-night.sh [--dry-run | --smoke] [--relaunch] [--with-airplay] [--move1 ID] [--move2 ID] [--airplay-id ID] [--c-move ID]
+#   ./unattended-night.sh [--dry-run | --smoke] [--relaunch] [--with-airplay | --only-c] [--move1 ID] [--move2 ID] [--airplay-id ID] [--c-move ID]
 #   ./unattended-night.sh --list-devices      # ids this Mac has seen, in the form the driver takes
 #   ./unattended-night.sh --check [flags]     # tools, ids and build only, then exit (launch-tonight.sh runs it)
 #
@@ -104,7 +104,7 @@ ALERTS_TO_ABORT=3    # consecutive alerts on one check that end a block early
 PROBE_S=20           # pre-flight probe recording before Block A
 
 # ---- Flags ------------------------------------------------------------------
-MODE=night; DRY=0; SMOKE=0; WITH_AIRPLAY=0; MANUAL=1
+MODE=night; DRY=0; SMOKE=0; WITH_AIRPLAY=0; MANUAL=1; ONLY_C=0
 while (( $# )); do
   case $1 in
     --dry-run) DRY=1 ;;
@@ -112,6 +112,7 @@ while (( $# )); do
     --manual-selection) MANUAL=1 ;;
     --relaunch) MANUAL=0 ;;
     --with-airplay) WITH_AIRPLAY=1 ;;
+    --only-c) WITH_AIRPLAY=1; ONLY_C=1 ;;   # Blocks A and B already ran: skip straight to Block C
     --list-devices) MODE=list ;;
     --check) MODE=check ;;
     --move1) MOVE1_ID=${2:?--move1 needs an id}; shift ;;
@@ -851,6 +852,7 @@ block_skip() { print -r -- "$1"$'\tskipped: '"$2"$'\t0\t0\t0\t\t' >> "$OUT/block
 # ---- The night --------------------------------------------------------------
 preflight
 
+if (( ! ONLY_C )); then
 # Block A: both Moves; the c-move's partner is disconnected for A_OFF_S near the
 # end (after the 2026-10-03 smoke run's reconnect it stayed silent all night).
 if ! choose_speakers A $IDS_A; then block_skip A "both Moves could not be selected (see driver.log and status.log)"
@@ -892,6 +894,7 @@ else
   fi
   block_end
 fi
+fi  # ONLY_C
 
 # Block C: one Move on Bluetooth plus the other Move in Wi-Fi mode. Someone has
 # to press the Move's button, so wait for Enter or the go file.
